@@ -10,7 +10,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^12.8.0",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
