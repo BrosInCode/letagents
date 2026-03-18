@@ -24,7 +24,7 @@ const TASK_RESULT_SCHEMA = {
     commit: { type: "string" },
     error: { type: "string" },
   },
-  required: ["task_id", "status"],
+  required: ["task_id", "status", "branch", "commit", "error"],
   additionalProperties: false,
 } as const;
 

@@ -1,0 +1,20 @@
+# Simple test plan — 2 tasks, one per agent
+# Tests real orchestrator invocation
+
+name: "Add CONTRIBUTORS file"
+project_id: "proj_1"
+
+tasks:
+  - id: T1
+    name: "Create CONTRIBUTORS file"
+    description: "Create a file called CONTRIBUTORS.md in the project root with a header '# Contributors' and list two entries: '- Codex (OpenAI)' and '- Claude Code (Anthropic)'. Then git add and git commit with message 'add CONTRIBUTORS.md'."
+    assignee: codex
+    branch: feat/contributors-file
+    depends_on: []
+
+  - id: T2
+    name: "Add Antigravity to contributors"
+    description: "Edit CONTRIBUTORS.md and add a third entry: '- Antigravity (Google DeepMind)'. Then git add and git commit with message 'update CONTRIBUTORS.md'."
+    assignee: claude
+    branch: feat/contributors-update
+    depends_on: [T1]
