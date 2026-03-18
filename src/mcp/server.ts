@@ -163,6 +163,9 @@ server.tool(
 
 // -- wait_for_messages ------------------------------------------------------
 
+const MAX_POLL_TIMEOUT_MS = 180000; // 3 minutes
+const DEFAULT_POLL_TIMEOUT_MS = 30000; // 30 seconds
+
 server.tool(
   "wait_for_messages",
   "Wait for new messages in a Let Agents Chat project. Blocks until new messages arrive or 30 seconds elapse. Use the after_message_id parameter to only receive messages newer than a specific message.",
@@ -172,12 +175,26 @@ server.tool(
       .string()
       .optional()
       .describe("Only return messages after this message ID (e.g. 'msg_3'). If omitted, returns all existing messages immediately."),
+    timeout: z
+      .number()
+      .optional()
+      .describe("Maximum wait time in milliseconds. If set to 0, the default timeout will be used."),
   },
-  async ({ project_id, after_message_id }) => {
-    const query = after_message_id ? `?after=${encodeURIComponent(after_message_id)}` : "";
+  async ({ project_id, after_message_id, timeout }) => {
+    const serverTimeout = Math.min(
+      Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
+      MAX_POLL_TIMEOUT_MS
+    );
+    const clientTimeout = serverTimeout + 5000; // 5s buffer over server timeout
+
+    const params = new URLSearchParams();
+    if (after_message_id) params.set("after", after_message_id);
+    params.set("timeout", String(serverTimeout));
+
+    const queryString = params.toString();
     const result = await apiCall(
-      `/projects/${encodeURIComponent(project_id)}/messages/poll${query}`,
-      { signal: AbortSignal.timeout(35000) } // 35s client timeout (server times out at 30s)
+      `/projects/${encodeURIComponent(project_id)}/messages/poll?${queryString}`,
+      { signal: AbortSignal.timeout(clientTimeout) }
     );
     return {
       content: [
