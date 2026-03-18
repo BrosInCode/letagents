@@ -1,22 +1,15 @@
 import { EventEmitter } from "events";
 import express from "express";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface Project {
-  id: string;
-  code: string;
-  created_at: string;
-}
-
-interface Message {
-  id: string;
-  sender: string;
-  text: string;
-  timestamp: string;
-}
+import {
+  addMessage,
+  createProject,
+  getMessages,
+  getMessagesAfter,
+  getProjectByCode,
+  getProjectById,
+  type Message,
+  type Project,
+} from "./db.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -24,45 +17,22 @@ interface MessageCreatedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory store
+// Realtime notifications
 // ---------------------------------------------------------------------------
 
-const projects = new Map<string, Project>();
-const projectsByCode = new Map<string, string>(); // code → project id
-const messages = new Map<string, Message[]>(); // project id → messages
 const messageEvents = new EventEmitter();
 
-let projectCounter = 0;
-let messageCounter = 0;
-
-function parseMessageId(messageId: string | undefined): number | null {
-  if (!messageId) {
-    return null;
+function parsePollTimeout(timeoutValue: string | undefined): number {
+  if (!timeoutValue) {
+    return 30000;
   }
 
-  const match = /^msg_(\d+)$/.exec(messageId);
-  return match ? Number(match[1]) : null;
-}
-
-function getMessagesAfter(projectId: string, afterMessageId: string | undefined): Message[] {
-  const projectMessages = messages.get(projectId) || [];
-  const afterNumericId = parseMessageId(afterMessageId);
-
-  if (afterNumericId === null) {
-    return projectMessages;
+  const parsed = Number.parseInt(timeoutValue, 10);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    return 30000;
   }
 
-  return projectMessages.filter((message) => {
-    const messageNumericId = parseMessageId(message.id);
-    return messageNumericId !== null && messageNumericId > afterNumericId;
-  });
-}
-
-function generateCode(): string {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  const seg1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  const seg2 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `${seg1}-${seg2}`;
+  return Math.min(parsed, 180000);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,39 +49,20 @@ app.get("/", (_req, res) => {
 
 // POST /projects — create a new project
 app.post("/projects", (_req, res) => {
-  projectCounter++;
-  const id = `proj_${projectCounter}`;
-  let code = generateCode();
-
-  // Ensure code uniqueness (very unlikely collision but just in case)
-  while (projectsByCode.has(code)) {
-    code = generateCode();
-  }
-
-  const project: Project = {
-    id,
-    code,
-    created_at: new Date().toISOString(),
-  };
-
-  projects.set(id, project);
-  projectsByCode.set(code, id);
-  messages.set(id, []);
-
+  const project = createProject();
   res.status(201).json(project);
 });
 
 // GET /projects/join/:code — look up project by join code
 app.get("/projects/join/:code", (req, res) => {
   const code = req.params.code.toUpperCase();
-  const projectId = projectsByCode.get(code);
+  const project = getProjectByCode(code);
 
-  if (!projectId) {
+  if (!project) {
     res.status(404).json({ error: "Project not found for the given code" });
     return;
   }
 
-  const project = projects.get(projectId)!;
   res.json({ id: project.id, code: project.code });
 });
 
@@ -119,7 +70,7 @@ app.get("/projects/join/:code", (req, res) => {
 app.post("/projects/:id/messages", (req, res) => {
   const projectId = req.params.id;
 
-  if (!projects.has(projectId)) {
+  if (!getProjectById(projectId)) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -131,15 +82,7 @@ app.post("/projects/:id/messages", (req, res) => {
     return;
   }
 
-  messageCounter++;
-  const message: Message = {
-    id: `msg_${messageCounter}`,
-    sender,
-    text,
-    timestamp: new Date().toISOString(),
-  };
-
-  messages.get(projectId)!.push(message);
+  const message = addMessage(projectId, sender, text);
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   res.status(201).json(message);
 });
@@ -148,14 +91,14 @@ app.post("/projects/:id/messages", (req, res) => {
 app.get("/projects/:id/messages", (req, res) => {
   const projectId = req.params.id;
 
-  if (!projects.has(projectId)) {
+  if (!getProjectById(projectId)) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
   res.json({
     project_id: projectId,
-    messages: messages.get(projectId) || [],
+    messages: getMessages(projectId),
   });
 });
 
@@ -163,7 +106,7 @@ app.get("/projects/:id/messages", (req, res) => {
 app.get("/projects/:id/messages/stream", (req, res) => {
   const projectId = req.params.id;
 
-  if (!projects.has(projectId)) {
+  if (!getProjectById(projectId)) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -199,12 +142,13 @@ app.get("/projects/:id/messages/stream", (req, res) => {
 app.get("/projects/:id/messages/poll", (req, res) => {
   const projectId = req.params.id;
 
-  if (!projects.has(projectId)) {
+  if (!getProjectById(projectId)) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
   const existingMessages = getMessagesAfter(projectId, after);
 
   if (existingMessages.length > 0) {
@@ -252,7 +196,7 @@ app.get("/projects/:id/messages/poll", (req, res) => {
 
   const timeout = setTimeout(() => {
     resolveRequest([]);
-  }, 30000);
+  }, timeoutMs);
 
   messageEvents.on("message:created", onMessageCreated);
   req.on("close", onClientClose);
