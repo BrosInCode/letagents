@@ -139,6 +139,7 @@ async function runCodex(task: Task, worktreePath: string, worker: WorkerConfig):
 
   const args = [
     "exec",
+    "--full-auto",
     "--cd",
     worktreePath,
     "--output-schema",
