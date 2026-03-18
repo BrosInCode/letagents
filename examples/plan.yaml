@@ -4,6 +4,14 @@
 name: "Add agent identity feature"
 project_id: "proj_1"
 
+workers:
+  codex:
+    mode: cli
+    command: codex
+  claude:
+    mode: cli
+    command: claude
+
 tasks:
   - id: T1
     name: "Design agent identity schema"
@@ -22,13 +30,13 @@ tasks:
   - id: T3
     name: "Add agent identity MCP tools"
     description: "Add register_agent and get_agent MCP tools to src/mcp/server.ts that wrap the new /agents endpoints."
-    assignee: antigravity
+    assignee: claude
     branch: feat/agent-identity-mcp
     depends_on: [T2]
 
   - id: T4
     name: "Update README"
     description: "Update README.md with documentation for the new agent identity feature, including the new endpoints and MCP tools."
-    assignee: antigravity
+    assignee: claude
     branch: feat/agent-identity-docs
     depends_on: [T3]

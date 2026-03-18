@@ -1,5 +1,11 @@
 export type TaskStatus = "pending" | "ready" | "running" | "done" | "failed";
-export type Assignee = "antigravity" | "codex";
+export type Assignee = "codex" | "claude";
+
+export interface WorkerConfig {
+  mode?: "cli" | "chat";
+  command?: string;
+  args?: string[];
+}
 
 export interface Task {
   id: string;
@@ -14,6 +20,7 @@ export interface Task {
 export interface Plan {
   name: string;
   project_id: string;
+  workers?: Record<string, WorkerConfig>;
   tasks: Task[];
 }
 

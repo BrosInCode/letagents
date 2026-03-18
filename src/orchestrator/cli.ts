@@ -108,7 +108,12 @@ async function run(yamlPath: string): Promise<void> {
     // Dispatch all ready tasks
     for (const task of readyTasks) {
       task.status = "running";
-      await dispatchTask(plan.project_id, task);
+      const directResult = await dispatchTask(plan.project_id, plan, task);
+      if (directResult) {
+        task.status = directResult.status;
+        console.log(`${directResult.status === "done" ? "✅" : "❌"} ${task.id}: ${directResult.status}`);
+        if (directResult.commit) console.log(`   commit: ${directResult.commit}`);
+      }
     }
   }
 
