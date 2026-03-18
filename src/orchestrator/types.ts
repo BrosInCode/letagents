@@ -5,7 +5,7 @@ export interface Task {
   id: string;
   name: string;
   description: string;
-  assignee: Assignee;
+  assignee: Assignee | string;
   branch: string;
   depends_on: string[];
   status: TaskStatus;

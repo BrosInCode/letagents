@@ -1,0 +1,34 @@
+# Example orchestrator plan
+# This plan would coordinate two agents to add a feature to Let Agents Chat
+
+name: "Add agent identity feature"
+project_id: "proj_1"
+
+tasks:
+  - id: T1
+    name: "Design agent identity schema"
+    description: "Create a TypeScript interface for agent identity (name, avatar, capabilities) and add a new agents table to the SQLite database in src/api/db.ts."
+    assignee: codex
+    branch: feat/agent-identity-schema
+    depends_on: []
+
+  - id: T2
+    name: "Add agent registration endpoint"
+    description: "Add POST /agents endpoint to register an agent with a name and capabilities. Add GET /agents/:id to retrieve agent info. Store in the agents table."
+    assignee: codex
+    branch: feat/agent-registration
+    depends_on: [T1]
+
+  - id: T3
+    name: "Add agent identity MCP tools"
+    description: "Add register_agent and get_agent MCP tools to src/mcp/server.ts that wrap the new /agents endpoints."
+    assignee: antigravity
+    branch: feat/agent-identity-mcp
+    depends_on: [T2]
+
+  - id: T4
+    name: "Update README"
+    description: "Update README.md with documentation for the new agent identity feature, including the new endpoints and MCP tools."
+    assignee: antigravity
+    branch: feat/agent-identity-docs
+    depends_on: [T3]
