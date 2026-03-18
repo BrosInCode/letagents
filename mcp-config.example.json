@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "letagents": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp/server.ts"],
+      "cwd": "/absolute/path/to/letagents",
+      "env": {
+        "LETAGENTS_API_URL": "http://localhost:3001"
+      }
+    }
+  }
+}
