@@ -1,6 +1,7 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { SseClient } from "./sse-client.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -35,8 +36,33 @@ async function apiCall(path: string, options?: RequestInit) {
 
 const server = new McpServer({
   name: "letagents",
-  version: "0.1.0",
+  version: "0.2.0",
 });
+
+const sseClient = new SseClient(API_URL);
+
+// ---------------------------------------------------------------------------
+// MCP Resources
+// ---------------------------------------------------------------------------
+
+server.resource(
+  "project_messages",
+  new ResourceTemplate("letagents://projects/{project_id}/messages", {
+    list: undefined,
+  }),
+  async (uri, { project_id }) => {
+    const result = await apiCall(`/projects/${encodeURIComponent(project_id as string)}/messages`);
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
 
 // -- create_project ---------------------------------------------------------
 
@@ -46,6 +72,12 @@ server.tool(
   {},
   async () => {
     const project = await apiCall("/projects", { method: "POST" });
+
+    // Auto-subscribe to SSE for this project
+    sseClient.subscribe(project.id, (_message) => {
+      server.server.sendResourceListChanged();
+    });
+
     return {
       content: [
         {
@@ -67,6 +99,12 @@ server.tool(
   },
   async ({ code }) => {
     const project = await apiCall(`/projects/join/${encodeURIComponent(code)}`);
+
+    // Auto-subscribe to SSE for this project
+    sseClient.subscribe(project.id, (_message) => {
+      server.server.sendResourceListChanged();
+    });
+
     return {
       content: [
         {
@@ -161,8 +199,19 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("🔌 Let Agents Chat MCP server running on stdio");
+  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.2.0 with resource subscriptions)");
 }
+
+// Cleanup on exit
+process.on("SIGINT", () => {
+  sseClient.unsubscribeAll();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  sseClient.unsubscribeAll();
+  process.exit(0);
+});
 
 main().catch((err) => {
   console.error("Fatal error:", err);
