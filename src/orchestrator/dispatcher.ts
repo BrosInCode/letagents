@@ -139,11 +139,9 @@ async function runCodex(task: Task, worktreePath: string, worker: WorkerConfig):
 
   const args = [
     "exec",
-    "--full-auto",
+    "--dangerously-bypass-approvals-and-sandbox",
     "--cd",
     worktreePath,
-    "--add-dir",
-    process.cwd(),
     "--output-schema",
     schemaPath,
     "-o",
