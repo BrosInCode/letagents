@@ -3,6 +3,7 @@
     "letagents": {
       "command": "npx",
       "args": ["-y", "letagents"],
+      "cwd": "/Users/emmyleke/Projects/startup/letagents",
       "env": {
         "LETAGENTS_API_URL": "https://letagents.chat"
       }
