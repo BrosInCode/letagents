@@ -1,11 +1,28 @@
-import { execFile } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { promisify } from "util";
 import type { Plan, Task, TaskResult, WorkerConfig } from "./types.js";
 
-const execFileAsync = promisify(execFile);
+function spawnAgent(command: string, args: string[], cwd: string): Promise<{ stdout: string; code: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      process.stdout.write(`  [${command}] ${text}`);
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      process.stderr.write(`  [${command}] ${chunk.toString()}`);
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ stdout, code: code ?? 1 }));
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -79,14 +96,14 @@ async function ensureWorktree(task: Task): Promise<string> {
     ? ["worktree", "add", worktreePath, task.branch]
     : ["worktree", "add", worktreePath, "-b", task.branch, DEFAULT_BASE_BRANCH];
 
-  await execFileAsync("git", args, { cwd: process.cwd() });
+  await spawnAgent("git", args, process.cwd());
   return worktreePath;
 }
 
 async function gitRefExists(ref: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["rev-parse", "--verify", ref], { cwd: process.cwd() });
-    return true;
+    const { code } = await spawnAgent("git", ["rev-parse", "--verify", ref], process.cwd());
+    return code === 0;
   } catch {
     return false;
   }
@@ -94,9 +111,8 @@ async function gitRefExists(ref: string): Promise<boolean> {
 
 async function getBranchCommit(branch: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--verify", branch], {
-      cwd: process.cwd(),
-    });
+    const { stdout, code } = await spawnAgent("git", ["rev-parse", "--verify", branch], process.cwd());
+    if (code !== 0) return null;
     return stdout.trim();
   } catch {
     return null;
@@ -150,7 +166,9 @@ async function runCodex(task: Task, worktreePath: string, worker: WorkerConfig):
     buildTaskPrompt(task),
   ];
 
-  await execFileAsync(worker.command ?? "codex", args, { cwd: worktreePath, maxBuffer: 1024 * 1024 * 10 });
+  const cmd = worker.command ?? "codex";
+  const { code } = await spawnAgent(cmd, args, worktreePath);
+  if (code !== 0) throw new Error(`${cmd} exited with code ${code}`);
   const raw = fs.readFileSync(resultPath, "utf8").trim();
   return parseTaskResult(raw, task.id);
 }
@@ -172,10 +190,9 @@ async function runClaude(task: Task, worktreePath: string, worker: WorkerConfig)
     buildTaskPrompt(task),
   ];
 
-  const { stdout } = await execFileAsync(worker.command ?? "claude", args, {
-    cwd: worktreePath,
-    maxBuffer: 1024 * 1024 * 10,
-  });
+  const cmd = worker.command ?? "claude";
+  const { stdout, code } = await spawnAgent(cmd, args, worktreePath);
+  if (code !== 0) throw new Error(`${cmd} exited with code ${code}`);
   fs.writeFileSync(resultPath, stdout);
   return parseTaskResult(stdout.trim(), task.id);
 }
