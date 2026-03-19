@@ -114,6 +114,14 @@ server.tool(
   async ({ code }) => {
     const project = await apiCall(`/projects/join/${encodeURIComponent(code)}`);
 
+    // Track room state
+    currentRoom = {
+      room: project.name || code,
+      project_id: project.id,
+      code: project.code || code,
+      joined_via: "join_code",
+    };
+
     // Auto-subscribe to SSE for this project
     sseClient.subscribe(project.id, (_message: Message) => {
       server.server.sendResourceListChanged();
@@ -122,7 +130,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(project, null, 2),
+          text: JSON.stringify({ ...project, joined_via: "join_code" }, null, 2),
         },
       ],
     };
