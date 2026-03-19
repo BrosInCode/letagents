@@ -2,6 +2,21 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { SseClient, type Message } from "./sse-client.js";
+import { getRoomFromConfig } from "./config-reader.js";
+import { getGitRemoteIdentity } from "./git-remote.js";
+
+// ---------------------------------------------------------------------------
+// Room State
+// ---------------------------------------------------------------------------
+
+interface RoomState {
+  room: string;
+  project_id: string;
+  code: string;
+  joined_via: "config" | "git-remote" | "join_code" | "join_room";
+}
+
+let currentRoom: RoomState | null = null;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -114,6 +129,70 @@ server.tool(
   }
 );
 
+// -- join_room --------------------------------------------------------------
+
+server.tool(
+  "join_room",
+  "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. Use this for repo-based room joining.",
+  {
+    name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
+  },
+  async ({ name }) => {
+    const project = await apiCall(`/projects/room/${encodeURIComponent(name)}`, { method: "POST" });
+
+    // Track room state
+    currentRoom = {
+      room: name,
+      project_id: project.id,
+      code: project.code,
+      joined_via: "join_room",
+    };
+
+    // Auto-subscribe to SSE
+    sseClient.subscribe(project.id, (_message: Message) => {
+      server.server.sendResourceListChanged();
+    });
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ ...project, joined_via: "join_room" }, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// -- get_current_room -------------------------------------------------------
+
+server.tool(
+  "get_current_room",
+  "Get information about the currently joined room, including how it was joined.",
+  {},
+  async () => {
+    if (!currentRoom) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ connected: false, message: "Not currently in any room" }, null, 2),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({ connected: true, ...currentRoom }, null, 2),
+        },
+      ],
+    };
+  }
+);
+
 // -- send_message -----------------------------------------------------------
 
 server.tool(
@@ -214,7 +293,36 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.2.0 with resource subscriptions)");
+  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.3.0 with repo rooms)");
+
+  // --- Auto-join from repo context ---
+  try {
+    // 1. Try .letagents.json config
+    const configRoom = getRoomFromConfig();
+    if (configRoom) {
+      const project = await apiCall(`/projects/room/${encodeURIComponent(configRoom)}`, { method: "POST" });
+      currentRoom = { room: configRoom, project_id: project.id, code: project.code, joined_via: "config" };
+      sseClient.subscribe(project.id, (_message: Message) => { server.server.sendResourceListChanged(); });
+      console.error(`🏠 Auto-joined room '${configRoom}' (from .letagents.json)`);
+      return;
+    }
+
+    // 2. Try git remote URL
+    const gitRoom = getGitRemoteIdentity();
+    if (gitRoom) {
+      const project = await apiCall(`/projects/room/${encodeURIComponent(gitRoom)}`, { method: "POST" });
+      currentRoom = { room: gitRoom, project_id: project.id, code: project.code, joined_via: "git-remote" };
+      sseClient.subscribe(project.id, (_message: Message) => { server.server.sendResourceListChanged(); });
+      console.error(`🏠 Auto-joined room '${gitRoom}' (inferred from git remote — consider adding a .letagents.json)`);
+      return;
+    }
+
+    // 3. No context found
+    console.error("ℹ️ No .letagents.json or git remote found — use join_project or join_room to connect.");
+  } catch (err) {
+    // Auto-join failure should never block the MCP server
+    console.error("⚠️ Auto-join failed (server still running):", err instanceof Error ? err.message : err);
+  }
 }
 
 // Cleanup on exit
