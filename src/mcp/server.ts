@@ -2,9 +2,11 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { writeFileSync, existsSync } from "fs";
+import { join } from "path";
 import { SseClient, type Message } from "./sse-client.js";
 import { getRoomFromConfig } from "./config-reader.js";
-import { getGitRemoteIdentity } from "./git-remote.js";
+import { getGitRemoteIdentity, normalizeGitRemote } from "./git-remote.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -199,6 +201,164 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+// -- send_message -----------------------------------------------------------
+
+// -- initialize_repo --------------------------------------------------------
+
+server.tool(
+  "initialize_repo",
+  "Initialize the current repo for Let Agents Chat by creating a .letagents.json config file. " +
+    "This explicitly sets up repo-based room auto-join. Reads git remote to derive the room name, " +
+    "or accepts a custom room name. Will NOT overwrite an existing .letagents.json.",
+  {
+    room: z
+      .string()
+      .optional()
+      .describe(
+        "Custom room name. If omitted, auto-derived from git remote (e.g. 'github.com/owner/repo')"
+      ),
+    cwd: z
+      .string()
+      .optional()
+      .describe(
+        "Working directory to initialize. Defaults to the current process directory."
+      ),
+  },
+  async ({ room, cwd: targetDir }) => {
+    const dir = targetDir || process.cwd();
+    const configPath = join(dir, ".letagents.json");
+
+    // Don't overwrite existing config
+    if (existsSync(configPath)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: ".letagents.json already exists",
+                path: configPath,
+                hint: "Delete the existing file first if you want to reinitialize.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    // Determine room name
+    let roomName = room;
+    if (!roomName) {
+      const gitRoom = getGitRemoteIdentity(dir);
+      if (!gitRoom) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error:
+                    "Cannot derive room name: no git remote found and no custom room name provided",
+                  hint: "Pass a 'room' parameter or run from inside a git repo with a remote configured.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+      roomName = gitRoom;
+    }
+
+    // Write the config file
+    const config = { room: roomName };
+    try {
+      writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: `Failed to write config: ${err instanceof Error ? err.message : err}`,
+                path: configPath,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    // Auto-join the room after creating config
+    try {
+      const project = await apiCall(
+        `/projects/room/${encodeURIComponent(roomName)}`,
+        { method: "POST" }
+      );
+      currentRoom = {
+        room: roomName,
+        project_id: project.id,
+        code: project.code,
+        joined_via: "config",
+      };
+      sseClient.subscribe(project.id, (_message: Message) => {
+        server.server.sendResourceListChanged();
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                created: configPath,
+                room: roomName,
+                project_id: project.id,
+                code: project.code,
+                joined: true,
+                hint: "Consider adding .letagents.json to git so other contributors auto-join the same room.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      // Config was created but auto-join failed
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                created: configPath,
+                room: roomName,
+                joined: false,
+                error: `Config created but auto-join failed: ${err instanceof Error ? err.message : err}`,
+                hint: "The .letagents.json was created. Use join_room to manually connect.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
   }
 );
 
