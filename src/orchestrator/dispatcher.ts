@@ -164,6 +164,10 @@ async function runClaude(task: Task, worktreePath: string, worker: WorkerConfig)
     "--json-schema",
     JSON.stringify(TASK_RESULT_SCHEMA),
     "--dangerously-skip-permissions",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{}",
+    "--verbose",
     ...(worker.args ?? []),
     buildTaskPrompt(task),
   ];
