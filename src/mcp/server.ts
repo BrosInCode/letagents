@@ -237,7 +237,66 @@ server.tool(
   }
 );
 
-// -- initialize_repo --------------------------------------------------------
+// -- check_repo -------------------------------------------------------------
+
+server.tool(
+  "check_repo",
+  "Inspect the current repository context for Let Agents Chat. " +
+    "Shows the git repo root, detected .letagents.json path, auto-derived room name from git remote, " +
+    "and current room state. Useful for troubleshooting auto-join issues.",
+  {
+    cwd: z
+      .string()
+      .optional()
+      .describe("Directory to inspect. Defaults to the current process directory."),
+  },
+  async ({ cwd: targetDir }) => {
+    const startDir = targetDir || process.cwd();
+
+    const repoRoot = resolveGitRoot(startDir);
+    const configDir = repoRoot ? findExistingConfig(repoRoot) : null;
+    const configPath = configDir ? join(configDir, ".letagents.json") : null;
+
+    let configContents: unknown = null;
+    if (configPath && existsSync(configPath)) {
+      try {
+        const { readFileSync } = await import("fs");
+        configContents = JSON.parse(readFileSync(configPath, "utf-8"));
+      } catch {
+        configContents = "<parse error>";
+      }
+    }
+
+    const derivedRoom = repoRoot ? getGitRemoteIdentity(repoRoot) : null;
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              cwd: startDir,
+              git_repo_root: repoRoot ?? null,
+              config_file: configPath ?? null,
+              config_contents: configContents,
+              derived_room_from_git: derivedRoom ?? null,
+              current_room: currentRoom ?? null,
+              join_hint: !currentRoom
+                ? repoRoot
+                  ? "Run initialize_repo to set up .letagents.json, or join_room/join_project to connect."
+                  : "Not inside a git repo. Use join_project or join_room to connect manually."
+                : null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+
 
 server.tool(
   "initialize_repo",
