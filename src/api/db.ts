@@ -51,6 +51,13 @@ db.exec(`
   );
 `);
 
+// Migration: add 'name' column if it doesn't exist (for existing databases)
+try {
+  db.exec(`ALTER TABLE projects ADD COLUMN name TEXT UNIQUE`);
+} catch {
+  // Column already exists — ignore
+}
+
 const nextSequenceTx = db.transaction((name: string) => {
   const current = db
     .prepare<[string], { value: number }>("SELECT value FROM id_sequences WHERE name = ?")
@@ -132,8 +139,25 @@ export function createProjectWithName(name: string): Project {
       if (!isUniqueConstraintError(error)) {
         throw error;
       }
+      // If the UNIQUE violation is on 'name' (race condition — another request
+      // created the same room), return the existing project instead of retrying
+      const existing = getProjectByName(name);
+      if (existing) {
+        return existing;
+      }
+      // Otherwise it was a code collision — retry with a new code
     }
   }
+}
+
+/**
+ * Atomic create-or-return by name. Returns existing project if name is taken,
+ * otherwise creates a new one.
+ */
+export function getOrCreateProjectByName(name: string): Project {
+  const existing = getProjectByName(name);
+  if (existing) return existing;
+  return createProjectWithName(name);
 }
 
 export function getProjectByName(name: string): Project | undefined {

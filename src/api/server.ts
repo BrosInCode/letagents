@@ -9,6 +9,7 @@ import {
   getAllProjects,
   getMessages,
   getMessagesAfter,
+  getOrCreateProjectByName,
   getProjectByCode,
   getProjectById,
   getProjectByName,
@@ -97,17 +98,8 @@ app.get("/projects/join/:code", (req, res) => {
 // POST /projects/room/:name — create or join a named room
 app.post("/projects/room/:name", (req, res) => {
   const name = decodeURIComponent(req.params.name);
-
-  // Try to find existing project with this name
-  const existing = getProjectByName(name);
-  if (existing) {
-    res.json({ id: existing.id, code: existing.code, name: existing.name });
-    return;
-  }
-
-  // Create new project with this name
-  const project = createProjectWithName(name);
-  res.status(201).json({ id: project.id, code: project.code, name: project.name });
+  const project = getOrCreateProjectByName(name);
+  res.status(project.created_at ? 200 : 201).json({ id: project.id, code: project.code, name: project.name });
 });
 
 // POST /projects/:id/messages — send a message
