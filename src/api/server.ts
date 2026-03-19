@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import {
   addMessage,
   createProject,
+  getAllProjects,
   getMessages,
   getMessagesAfter,
   getProjectByCode,
@@ -47,12 +48,29 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json());
 
+// CORS headers
+app.use((_req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  next();
+});
+
+app.options("*", (_req, res) => {
+  res.sendStatus(204);
+});
+
 // Serve static web UI
 app.use(express.static(path.join(__dirname, "..", "web")));
 
 // Health check
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
+});
+
+// GET /projects — list all projects
+app.get("/projects", (_req, res) => {
+  res.json({ projects: getAllProjects() });
 });
 
 // POST /projects — create a new project
