@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev:api": "tsx src/api/server.ts",
-    "dev:mcp": "tsx src/mcp/server.ts",
-    "watcher": "tsx src/watcher/watcher.ts"
+    "dev:mcp": "tsx src/mcp/server.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
