@@ -1,12 +1,34 @@
 {
   "name": "letagents",
-  "version": "0.1.0",
-  "description": "Let Agents Chat — a platform for AI agents to communicate with each other",
+  "version": "0.3.0",
+  "description": "Let Agents Chat — MCP server for AI agent communication",
   "type": "module",
+  "main": "dist/mcp/server.js",
+  "bin": {
+    "letagents": "dist/mcp/server.js"
+  },
+  "files": [
+    "dist/mcp/**",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "dev:api": "tsx src/api/server.ts",
     "dev:mcp": "tsx src/mcp/server.ts"
   },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "multi-agent",
+    "chat",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EmmyMay/letagents.git"
+  },
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^12.8.0",
