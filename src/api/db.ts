@@ -174,13 +174,13 @@ export function getAllProjects(): Pick<Project, "id" | "code">[] {
 
 export function getProjectByCode(code: string): Project | undefined {
   return db
-    .prepare<[string], Project>("SELECT id, code, created_at FROM projects WHERE code = ?")
+    .prepare<[string], Project>("SELECT id, code, name, created_at FROM projects WHERE code = ?")
     .get(code);
 }
 
 export function getProjectById(id: string): Project | undefined {
   return db
-    .prepare<[string], Project>("SELECT id, code, created_at FROM projects WHERE id = ?")
+    .prepare<[string], Project>("SELECT id, code, name, created_at FROM projects WHERE id = ?")
     .get(id);
 }
 
