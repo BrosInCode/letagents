@@ -1,5 +1,7 @@
 // ---------------------------------------------------------------------------
-// Task 4: .letagents.json Config Reader
+// .letagents.json Config Reader
+// @module config-reader
+// @author Kingdavid Ehindero <kdof64squares@gmail.com>
 // ---------------------------------------------------------------------------
 // Searches for `.letagents.json` in CWD and parent directories (up to root).
 // Parses the config and returns the room name if found.
