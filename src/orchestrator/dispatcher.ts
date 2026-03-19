@@ -198,7 +198,7 @@ async function verifyTaskResult(task: Task, beforeCommit: string | null, result:
     throw new Error(`Task ${task.id} did not create a new commit on ${task.branch}`);
   }
 
-  if (result.commit && result.commit !== branchCommit) {
+  if (result.commit && !branchCommit.startsWith(result.commit) && !result.commit.startsWith(branchCommit)) {
     throw new Error(`Task ${task.id} reported commit ${result.commit} but branch head is ${branchCommit}`);
   }
 
