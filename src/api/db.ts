@@ -5,6 +5,7 @@ import path from "path";
 export interface Project {
   id: string;
   code: string;
+  name?: string;
   created_at: string;
 }
 
@@ -36,6 +37,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     code TEXT NOT NULL UNIQUE,
+    name TEXT UNIQUE,
     created_at TEXT NOT NULL
   );
 
@@ -105,6 +107,39 @@ export function createProject(): Project {
       }
     }
   }
+}
+
+export function createProjectWithName(name: string): Project {
+  const created_at = new Date().toISOString();
+
+  while (true) {
+    const project: Project = {
+      id: nextPrefixedId("projects", "proj"),
+      code: generateCode(),
+      name,
+      created_at,
+    };
+
+    try {
+      db.prepare("INSERT INTO projects (id, code, name, created_at) VALUES (?, ?, ?, ?)").run(
+        project.id,
+        project.code,
+        project.name,
+        project.created_at
+      );
+      return project;
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
+export function getProjectByName(name: string): Project | undefined {
+  return db
+    .prepare<[string], Project>("SELECT id, code, name, created_at FROM projects WHERE name = ?")
+    .get(name);
 }
 
 export function getAllProjects(): Pick<Project, "id" | "code">[] {
