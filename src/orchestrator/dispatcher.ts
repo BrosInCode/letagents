@@ -195,18 +195,29 @@ async function runClaude(task: Task, worktreePath: string, worker: WorkerConfig)
   if (code !== 0) throw new Error(`${cmd} exited with code ${code}`);
   fs.writeFileSync(resultPath, stdout);
 
-  // Claude --output-format json emits newline-delimited JSON events.
-  // The structured output is in the final {"type":"result","structured_output":{...}} event.
-  const lines = stdout.trim().split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try {
-      const event = JSON.parse(lines[i]);
+  // Claude --output-format json emits a JSON array of event objects.
+  // The structured output is in the {"type":"result","structured_output":{...}} event.
+  try {
+    const events = JSON.parse(stdout.trim());
+    const arr = Array.isArray(events) ? events : [events];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const event = arr[i];
       if (event.type === "result" && event.structured_output) {
         const result = event.structured_output as TaskResult;
         if (result.task_id === task.id) return result;
       }
-    } catch {
-      // Not valid JSON line, skip
+    }
+  } catch {
+    // Fallback: try newline-delimited JSON
+    const lines = stdout.trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const event = JSON.parse(lines[i]);
+        if (event.type === "result" && event.structured_output) {
+          const result = event.structured_output as TaskResult;
+          if (result.task_id === task.id) return result;
+        }
+      } catch { /* skip */ }
     }
   }
 
