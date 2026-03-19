@@ -1,0 +1,95 @@
+# Let Agents Chat — Web UI & Infrastructure Plan
+# Orchestrated build: Codex + Claude Code working in parallel
+
+name: "Build Web Chat UI & Infrastructure"
+project_id: "proj_1"
+
+tasks:
+  # ─── Phase 1: Parallel (no dependencies) ──────────────────────────────
+  - id: T1
+    name: "Build web chat UI"
+    description: |
+      Create a stunning, modern single-page web UI at src/web/index.html.
+      The API server already serves static files from src/web/ and the API runs on the same origin.
+      
+      REQUIRED FEATURES:
+      1. Show all chat messages with sender names, timestamps, and styled message bubbles
+      2. Different colors for different senders (orchestrator=purple, codex=green, claude=blue, human=orange, etc)
+      3. A prominent "Join Code" display that can be copied with ONE CLICK
+      4. Real-time message updates using SSE at GET /projects/:id/messages/stream (data: JSON message objects)
+      5. Dark mode with glassmorphism, smooth animations, and micro-interactions
+      6. Mobile responsive
+      7. Input field to send messages (POST /projects/:id/messages with body {sender, text})
+      8. Project selector/creator (POST /projects creates a new project, returns {id, code})
+      9. The page should look like a premium Slack/Discord-style chat
+      
+      API ENDPOINTS (same origin, no CORS needed):
+      - GET /projects/:id/messages — returns {project_id, messages: [{id, sender, text, timestamp}]}
+      - POST /projects/:id/messages — body: {sender, text}
+      - POST /projects — creates project, returns {id, code}
+      - GET /projects/join/:code — returns {id, code}
+      - GET /projects/:id/messages/stream — SSE stream of new messages
+      
+      TECH: Pure HTML + CSS + vanilla JS. No frameworks. Use Google Fonts (Inter).
+      Create: src/web/index.html (single file with embedded CSS and JS)
+      
+      Git: commit to feat/web-ui branch with message "feat: add web chat UI"
+    assignee: codex
+    branch: feat/web-ui
+    depends_on: []
+
+  - id: T2
+    name: "Add CORS and list projects endpoint"
+    description: |
+      Update src/api/server.ts to add:
+      1. CORS headers (Access-Control-Allow-Origin: *) so the UI works from any origin when deployed
+      2. GET /projects endpoint that lists all projects (returns {projects: [{id, code}]})
+      3. Make sure the existing SSE endpoint at /projects/:id/messages/stream works correctly
+      
+      The db.ts file has functions: createProject(), getProjectById(), getProjectByCode(), getMessages(), etc.
+      You may need to add a getAllProjects() function to db.ts.
+      
+      IMPORTANT: Do NOT break existing endpoints. Only ADD new ones.
+      Do NOT modify the static file serving or health check that already exists.
+      
+      Git: commit to feat/api-improvements branch with message "feat: add CORS and list projects endpoint"
+    assignee: claude
+    branch: feat/api-improvements
+    depends_on: []
+
+  # ─── Phase 2: GitHub setup (after phase 1) ────────────────────────────
+  - id: T3
+    name: "Set up GitHub repo and publish"
+    description: |
+      Set up the GitHub repository for the letagents project:
+      1. Check if a git remote named "origin" already exists. If so, skip creating a new repo.
+      2. If no remote, create a private GitHub repo using: gh repo create emmyleke/letagents --private --source=. --push
+      3. Push the current dev branch to origin
+      4. Create .github/workflows/ci.yml with:
+         - Trigger on push to dev, staging, main
+         - Steps: checkout, setup node 22, npm ci, npx tsc --noEmit
+      5. Commit and push
+      
+      Git: commit to feat/github-setup branch with message "ci: add GitHub Actions workflow"
+    assignee: claude
+    branch: feat/github-setup
+    depends_on: [T1, T2]
+
+  # ─── Phase 3: Final merge (after everything) ─────────────────────────
+  - id: T4
+    name: "Merge all branches to staging"
+    description: |
+      Create and merge all feature branches into a staging branch:
+      1. If branch "staging" doesn't exist, create it from dev: git checkout -b staging dev
+      2. If it exists, checkout staging and merge dev first: git merge dev
+      3. Merge feat/web-ui into staging: git merge feat/web-ui --no-edit
+      4. Merge feat/api-improvements into staging: git merge feat/api-improvements --no-edit
+      5. Merge feat/github-setup into staging: git merge feat/github-setup --no-edit
+      6. Resolve any merge conflicts (prefer incoming changes for new files)
+      7. Run npx tsc --noEmit to verify everything compiles
+      8. Push staging to origin: git push origin staging
+      
+      Git: work directly on the staging branch
+    assignee: claude
+    branch: staging
+    depends_on: [T3]

@@ -105,16 +105,19 @@ async function run(yamlPath: string): Promise<void> {
       continue;
     }
 
-    // Dispatch all ready tasks
-    for (const task of readyTasks) {
+    // Dispatch all ready tasks in parallel
+    const dispatches = readyTasks.map(async (task) => {
       task.status = "running";
+      console.log(`🚀 Dispatching ${task.id} (${task.name}) to ${task.assignee}...`);
       const directResult = await dispatchTask(plan.project_id, plan, task);
       if (directResult) {
         task.status = directResult.status;
         console.log(`${directResult.status === "done" ? "✅" : "❌"} ${task.id}: ${directResult.status}`);
         if (directResult.commit) console.log(`   commit: ${directResult.commit}`);
       }
-    }
+    });
+
+    await Promise.all(dispatches);
   }
 
   // Summary

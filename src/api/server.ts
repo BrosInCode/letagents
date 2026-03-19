@@ -1,5 +1,7 @@
 import { EventEmitter } from "events";
 import express from "express";
+import path from "path";
+import { fileURLToPath } from "url";
 import {
   addMessage,
   createProject,
@@ -39,11 +41,17 @@ function parsePollTimeout(timeoutValue: string | undefined): number {
 // Server
 // ---------------------------------------------------------------------------
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 app.use(express.json());
 
+// Serve static web UI
+app.use(express.static(path.join(__dirname, "..", "web")));
+
 // Health check
-app.get("/", (_req, res) => {
+app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
 });
 
