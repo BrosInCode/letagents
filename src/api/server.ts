@@ -92,14 +92,14 @@ app.get("/projects/join/:code", (req, res) => {
     return;
   }
 
-  res.json({ id: project.id, code: project.code });
+  res.json({ id: project.id, code: project.code, name: project.name });
 });
 
 // POST /projects/room/:name — create or join a named room
 app.post("/projects/room/:name", (req, res) => {
   const name = decodeURIComponent(req.params.name);
-  const project = getOrCreateProjectByName(name);
-  res.status(project.created_at ? 200 : 201).json({ id: project.id, code: project.code, name: project.name });
+  const { project, created } = getOrCreateProjectByName(name);
+  res.status(created ? 201 : 200).json({ id: project.id, code: project.code, name: project.name });
 });
 
 // POST /projects/:id/messages — send a message

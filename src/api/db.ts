@@ -154,10 +154,10 @@ export function createProjectWithName(name: string): Project {
  * Atomic create-or-return by name. Returns existing project if name is taken,
  * otherwise creates a new one.
  */
-export function getOrCreateProjectByName(name: string): Project {
+export function getOrCreateProjectByName(name: string): { project: Project; created: boolean } {
   const existing = getProjectByName(name);
-  if (existing) return existing;
-  return createProjectWithName(name);
+  if (existing) return { project: existing, created: false };
+  return { project: createProjectWithName(name), created: true };
 }
 
 export function getProjectByName(name: string): Project | undefined {
