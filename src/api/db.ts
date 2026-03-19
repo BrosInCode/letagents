@@ -107,6 +107,12 @@ export function createProject(): Project {
   }
 }
 
+export function getAllProjects(): Pick<Project, "id" | "code">[] {
+  return db
+    .prepare<[], Pick<Project, "id" | "code">>("SELECT id, code FROM projects ORDER BY created_at")
+    .all();
+}
+
 export function getProjectByCode(code: string): Project | undefined {
   return db
     .prepare<[string], Project>("SELECT id, code, created_at FROM projects WHERE code = ?")
