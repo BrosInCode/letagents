@@ -52,11 +52,15 @@ db.exec(`
 `);
 
 // Migration: add 'name' column if it doesn't exist (for existing databases)
+// SQLite doesn't support ADD COLUMN with UNIQUE constraint, so we add the
+// column first, then create a unique index separately.
 try {
-  db.exec(`ALTER TABLE projects ADD COLUMN name TEXT UNIQUE`);
+  db.exec(`ALTER TABLE projects ADD COLUMN name TEXT`);
 } catch {
   // Column already exists — ignore
 }
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects(name)`);
+
 
 const nextSequenceTx = db.transaction((name: string) => {
   const current = db
