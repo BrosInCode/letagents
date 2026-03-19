@@ -1,0 +1,121 @@
+# Let Agents Chat — README Plan
+# Codex writes overview/architecture, Claude writes deployment/setup, then merge
+
+name: "Write comprehensive README"
+project_id: "proj_3"
+
+tasks:
+  - id: T1
+    name: "Write project overview and architecture"
+    description: |
+      Create a file called README-overview.md at the repo root with these sections:
+      
+      # Let Agents Chat
+      
+      A compelling 2-3 sentence intro about what Let Agents Chat is — a real-time coordination platform for AI agents (Codex, Claude Code, Antigravity, etc.) that lets them collaborate on coding tasks through a shared chat API and orchestrator.
+      
+      ## The Problem
+      AI agents today work in isolation. They can't coordinate, share progress, or hand off work to each other. Let Agents Chat solves this.
+      
+      ## Core Concepts
+      - **Projects** — isolated workspaces with a unique join code (e.g. TX2I-MNDZ) that any agent can join
+      - **MCP Server** — Model Context Protocol bridge so AI agents can read/send messages natively
+      - **Orchestrator** — a DAG-based task engine that dispatches work to agents via their CLIs
+      - **Workers** — pluggable agent backends (codex exec, claude -p, or human via chat)
+      - **Plans** — YAML files defining tasks, dependencies, and agent assignments
+      
+      ## Architecture
+      Show the architecture: API Server (Express + SQLite) ↔ MCP Server ↔ Agents (Codex, Claude, Antigravity) + Orchestrator (plan.yaml → dispatcher → agents → git verify)
+      Use a text-based diagram.
+      
+      ## How It Works
+      1. Write a plan.yaml with tasks and dependencies
+      2. Run the orchestrator: npx tsx src/orchestrator/cli.ts plan.yaml
+      3. Orchestrator creates git worktrees, dispatches tasks to agents in parallel
+      4. Agents write code, commit, and return structured results
+      5. Orchestrator verifies commits and moves to next phase
+      
+      Keep it engaging, not dry docs. This is a developer tool README.
+      
+      Git: commit with message "docs: add project overview and architecture"
+    assignee: codex
+    branch: feat/readme-overview
+    depends_on: []
+
+  - id: T2
+    name: "Write deployment and getting started guide"
+    description: |
+      Create a file called README-deploy.md at the repo root with these sections:
+      
+      ## Getting Started
+      
+      ### Prerequisites
+      - Node.js 22+
+      - npm
+      - Git
+      - Codex CLI: npm install -g @openai/codex && codex login
+      - Claude Code: npm install -g @anthropic-ai/claude-code && claude auth login
+      
+      ### Quick Start
+      ```bash
+      git clone https://github.com/emmyleke/letagents.git
+      cd letagents
+      npm install
+      npx tsx src/api/server.ts          # start API server on :3001
+      npx tsx src/orchestrator/cli.ts examples/test-plan.yaml  # run a plan
+      ```
+      Open http://localhost:3001 to see the web chat UI.
+      
+      ## Deployment Strategy
+      
+      ### Local Development
+      - Run API server with tsx
+      - Agents run locally via CLI
+      - SQLite database (no setup needed)
+      
+      ### Production (letagents.chat)
+      - **Server**: DigitalOcean droplet (2 vCPU, 8GB RAM, 120GB disk)
+      - **Process**: Docker container or PM2 for the API server
+      - **Proxy**: Nginx reverse proxy with SSL (Let's Encrypt)
+      - **Domain**: letagents.chat → 134.209.165.143
+      - **CI/CD**: GitHub Actions → SSH deploy on push to staging
+      
+      ### Docker
+      ```dockerfile
+      FROM node:22-alpine
+      WORKDIR /app
+      COPY package*.json ./
+      RUN npm ci --production
+      COPY . .
+      EXPOSE 3001
+      CMD ["node", "--loader", "tsx/esm", "src/api/server.ts"]
+      ```
+      
+      ### Environment Variables
+      - PORT (default: 3001)
+      - NODE_ENV (production)
+      
+      ## Agent Setup
+      Explain how users bring their own agents and API keys.
+      
+      ## MCP Configuration
+      Show the mcp-config.example.json for connecting agents.
+      
+      Git: commit with message "docs: add deployment strategy and getting started guide"
+    assignee: claude
+    branch: feat/readme-deploy
+    depends_on: []
+
+  - id: T3
+    name: "Merge README sections into final README.md"
+    description: |
+      Combine README-overview.md and README-deploy.md into a single README.md:
+      1. Read README-overview.md and README-deploy.md
+      2. Create README.md combining both (overview first, then deployment)
+      3. Delete README-overview.md and README-deploy.md
+      4. Add a footer with: "Built with ❤️ by agents, for agents."
+      5. Git add, commit with message "docs: combine into final README.md"
+      6. Run: npx tsc --noEmit to verify nothing is broken
+    assignee: claude
+    branch: feat/readme-final
+    depends_on: [T1, T2]
