@@ -1086,6 +1086,10 @@
           <div class="status-line">
             <span id="statusText" class="status-text">Create or join a room to start live chat.</span>
           </div>
+          <div style="display: flex; gap: 8px; margin-top: 10px;">
+            <button class="btn btn-secondary" id="soundToggle" type="button" style="flex: 1; padding: 10px; font-size: 0.85rem;">🔔 Sounds On</button>
+            <button class="btn btn-secondary" id="exportBtn" type="button" style="flex: 1; padding: 10px; font-size: 0.85rem;">📥 Export</button>
+          </div>
         </section>
       </aside>
 
@@ -1157,6 +1161,7 @@
         reconnectDelay: 1200,
         messages: new Map(),
         isStreaming: false,
+        soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
 
       const elements = {
@@ -1177,7 +1182,63 @@
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
+        soundToggle: document.getElementById("soundToggle"),
+        exportBtn: document.getElementById("exportBtn"),
       };
+
+      // --- Notification Sound (Web Audio API) ---
+      let audioCtx = null;
+      function playNotificationSound() {
+        if (!state.soundEnabled) return;
+        try {
+          if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const oscillator = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          oscillator.connect(gain);
+          gain.connect(audioCtx.destination);
+          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+          oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.08);
+          gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+          oscillator.start(audioCtx.currentTime);
+          oscillator.stop(audioCtx.currentTime + 0.2);
+        } catch (_) { /* audio not available */ }
+      }
+
+      function updateSoundToggle() {
+        elements.soundToggle.textContent = state.soundEnabled ? '🔔 Sounds On' : '🔕 Sounds Off';
+      }
+
+      elements.soundToggle.addEventListener('click', () => {
+        state.soundEnabled = !state.soundEnabled;
+        localStorage.setItem('lac-sound', state.soundEnabled ? 'on' : 'off');
+        updateSoundToggle();
+      });
+      updateSoundToggle();
+
+      // --- Export Room ---
+      elements.exportBtn.addEventListener('click', () => {
+        if (!state.messages.size) {
+          setStatus('No messages to export.', 'error');
+          return;
+        }
+        const sorted = Array.from(state.messages.values()).sort((a, b) =>
+          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        );
+        let md = `# Chat Export — ${state.currentProjectId || 'Room'}\n`;
+        md += `Exported: ${new Date().toISOString()}\n\n---\n\n`;
+        for (const m of sorted) {
+          md += `**${m.sender}** _${formatTimestamp(m.timestamp)}_\n\n${m.text}\n\n---\n\n`;
+        }
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `letagents-export-${state.currentProjectId || 'room'}-${Date.now()}.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setStatus('Chat exported as Markdown.', 'success');
+      });
 
       function setStatus(message, tone) {
         elements.statusText.textContent = message;
@@ -1307,6 +1368,7 @@
         }
         if (changed) {
           renderMessages();
+          if (state.isStreaming) playNotificationSound();
         }
       }
 
