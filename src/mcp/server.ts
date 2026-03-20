@@ -254,7 +254,7 @@ server.tool(
     const startDir = targetDir || process.cwd();
 
     const repoRoot = resolveGitRoot(startDir);
-    const configDir = repoRoot ? findExistingConfig(repoRoot) : null;
+    const configDir = repoRoot ? findExistingConfig(startDir) : null;
     const configPath = configDir ? join(configDir, ".letagents.json") : null;
 
     let configContents: unknown = null;
@@ -342,8 +342,8 @@ server.tool(
       };
     }
 
-    // Walk parent dirs for any existing .letagents.json (prevents shadowed configs)
-    const existingConfigDir = findExistingConfig(repoRoot);
+    // Walk parent dirs from startDir (not repoRoot) to catch configs in subtrees below caller
+    const existingConfigDir = findExistingConfig(startDir);
     if (existingConfigDir) {
       const existingPath = join(existingConfigDir, ".letagents.json");
       return {
