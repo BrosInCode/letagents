@@ -17,7 +17,6 @@ Last updated: 2026-03-20
 - [x] `check_repo` diagnostic tool — repo context inspector
 - [x] Git-remote fallback for zero-config room join
 - [x] SQLite persistence (messages survive server restarts)
-- [x] Mailbox watcher + wakeup trigger for agent notification
 
 ---
 
@@ -90,6 +89,7 @@ Last updated: 2026-03-20
 - [ ] **Health metrics** — watcher connected, last SSE event, retry count, inbox age
 - [ ] **Better startup messaging** — log exact room joined, how, and what to do if outside a repo
 - [ ] **Self-host Docker image** — one-command self-hosting for teams
+- [ ] **Mailbox watcher + wakeup trigger** — agent auto-wakeup on new mail (was implemented then reverted at `22df255`; re-implement with proper tests)
 
 ---
 
