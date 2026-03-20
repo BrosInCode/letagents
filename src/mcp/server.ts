@@ -376,9 +376,10 @@ const TASK_STATUSES = [
 
 server.tool(
   "add_task",
-  "Add a new task to the project board. Tasks start as 'proposed' and must be " +
-    "accepted before an agent can claim them. Use this when a human or agent " +
-    "identifies work that needs to be done.",
+  "Add a new task to the project board. Tasks normally start as 'proposed' and must be " +
+    "accepted before an agent can claim them, but tasks created by trusted agents already " +
+    "active in the room may be auto-accepted. Use this when a human or agent identifies " +
+    "work that needs to be done.",
   {
     title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
     description: z.string().optional().describe("Longer description of what needs to be done"),

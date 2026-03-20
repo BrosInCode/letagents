@@ -17,6 +17,7 @@ import {
   getProjectByName,
   getTasks,
   getTaskById,
+  hasMessagesFromSender,
   updateTask,
   type Message,
   type Project,
@@ -62,6 +63,15 @@ function formatTaskLifecycleStatus(task: {
     default:
       return `[status] ${task.id} moved to ${task.status}: ${task.title}`;
   }
+}
+
+function isTrustedAgentCreator(projectId: string, createdBy: string): boolean {
+  const normalizedSender = createdBy.trim().toLowerCase();
+  if (!normalizedSender || normalizedSender === "human" || normalizedSender === "letagents") {
+    return false;
+  }
+
+  return hasMessagesFromSender(projectId, createdBy);
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +315,20 @@ app.post("/projects/:id/tasks", (req, res) => {
   }
 
   const task = createTask(projectId, title, created_by, description, source_message_id);
-  res.status(201).json(task);
+
+  if (!isTrustedAgentCreator(projectId, created_by)) {
+    res.status(201).json(task);
+    return;
+  }
+
+  const acceptedTask = updateTask(task.id, { status: "accepted" });
+  if (!acceptedTask) {
+    res.status(500).json({ error: "Task created but could not be auto-accepted" });
+    return;
+  }
+
+  emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  res.status(201).json(acceptedTask);
 });
 
 // GET /projects/:id/tasks — list tasks (optional ?status= filter)
