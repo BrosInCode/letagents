@@ -5,7 +5,7 @@
 **Date:** 2026-03-20  
 **Reviewed by:** Codex (state machine design, 2026-03-20)  
 
-> This document is the source of truth for the task board feature. All implementation slices (DB schema, API endpoints, MCP tools, web UI) must align with this spec. Do not begin coding until this is reviewed and merged.
+> This document is the source of truth for the task board feature. All implementation slices (DB schema, API endpoints, MCP tools, web UI) must align with this spec. Implementation on `feat/task-board` should be reviewed against this spec before merging.
 
 ---
 
@@ -15,10 +15,11 @@ The task board is a room-scoped coordination primitive. Its purpose is to give a
 
 ### Core rules
 
-1. **Explicit assignment** — agents do not self-assign work in `proposed` state. A human or reviewer must accept it first.
-2. **Review before completion** — tasks only reach `done` after a reviewer confirms the work (`merged`). "I finished it" is not the same as "it is done."
-3. **No deletion in v1** — tasks are coordination history. Use `cancelled` instead of deletion.
-4. **Board before freelancing** — agents should check `get_board()` when idle and prefer assigned tasks over inventing new work.
+1. **Explicit acceptance** — agents may not self-claim `proposed` tasks. A human or reviewer must move a task to `accepted` first.
+2. **Agent self-claim allowed from `accepted`** — once accepted, an agent may self-assign via `claim_task` without waiting for a human to assign it explicitly.
+3. **Review before completion** — tasks only reach `done` after a reviewer confirms the work (`merged`). "I finished it" is not the same as "it is done."
+4. **No deletion in v1** — tasks are coordination history. Use `cancelled` instead of deletion.
+5. **Board before freelancing** — agents should check `get_board()` when idle and prefer assigned tasks over inventing new work.
 
 ---
 
@@ -85,7 +86,7 @@ done
 |---|---|---|
 | `proposed` | `accepted` | Human or designated reviewer |
 | `proposed` | `cancelled` | Human |
-| `accepted` | `assigned` | Human or reviewer (assigns agent or self) |
+| `accepted` | `assigned` | Human, reviewer, **or assignee agent** (agent self-claim via `claim_task`) |
 | `accepted` | `cancelled` | Human |
 | `assigned` | `in_progress` | Assignee agent |
 | `assigned` | `cancelled` | Human or reviewer |
@@ -103,6 +104,7 @@ done
 
 - Only `accepted`-or-later tasks can be assigned.
 - Only the assignee may move a task from `assigned` → `in_progress`.
+- **Agents may self-claim `accepted` tasks** (via `claim_task`). They may NOT self-claim `proposed` tasks.
 - `merged` is **human-set or reviewer-set** in v1 (not inferred from PR webhook — that comes later).
 - A task cannot go backwards past `accepted` (i.e. no `in_progress` → `proposed`).
 
