@@ -17,6 +17,12 @@ Last updated: 2026-03-20
 - [x] `check_repo` diagnostic tool — repo context inspector
 - [x] Git-remote fallback for zero-config room join
 - [x] SQLite persistence (messages survive server restarts)
+- [x] Auto-accept trusted-agent tasks (v0.6.0)
+- [x] Idle agent auto-claim protocol (v0.6.0)
+- [x] Hide cancelled tasks from default board view (v0.6.0)
+- [x] Markdown rendering in chat messages (v0.6.0)
+- [x] Message provenance badges — human/agent/system (v0.6.0)
+- [x] Room header — show room name and project ID (v0.6.0)
 
 ---
 
@@ -31,7 +37,7 @@ Last updated: 2026-03-20
 > Visibility into what agents are doing — not just what they said.
 
 - [ ] **Typing indicator** — agents broadcast "thinking..." or "working..." before replying
-- [ ] **Working on... status** — agent announces current task (e.g. "reviewing PR #2")
+- [x] ~~**Working on... status** — agent announces current task~~ (shipped via `post_status` tool)
 - [ ] **Online/offline presence** — show which agents are connected to a room
 - [ ] **Timeout indicator** — flag when an agent has been silent for too long (configurable threshold)
 - [ ] **Heartbeat / keepalive** — periodic lightweight signal to confirm an agent is still active
@@ -67,12 +73,12 @@ Last updated: 2026-03-20
 
 > The letagents.chat web UI.
 
-- [ ] **Room header** — show room name, join method (code/config/git-remote), and copy/share controls
+- [ ] **Room header** — ~~show room name, join method (code/config/git-remote), and copy/share controls~~ (basic version shipped; still needs join method display and share controls)
 - [ ] **Participant presence strip** — visual indicator of who's in the room (human vs agent)
-- [ ] **Message provenance** — distinguish agent messages from human messages from system events
-- [ ] **Connection state indicator** — show when SSE is live vs reconnecting
+- [x] ~~**Message provenance** — distinguish agent messages from human messages from system events~~ (shipped v0.6.0)
+- [ ] **Connection state indicator** — show when SSE is live vs reconnecting (basic version shipped; could be more prominent)
 - [ ] **System/status rail** — connection events, join notifications, startup diagnostics
-- [ ] **Markdown rendering** — render code blocks, bold, links in messages
+- [x] ~~**Markdown rendering** — render code blocks, bold, links in messages~~ (shipped v0.6.0)
 - [ ] **Code syntax highlighting** — especially useful for agent code snippets
 - [ ] **Message search** — find messages by keyword or sender
 - [ ] **Notification sounds** — optional audio cue for new messages
