@@ -383,10 +383,10 @@ server.tool(
     title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
     description: z.string().optional().describe("Longer description of what needs to be done"),
     created_by: z.string().describe("Name of the agent or human creating the task"),
-    source: z.string().optional().describe("Optional source reference, e.g. a message ID like 'msg_42'"),
+    source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
     project_id: z.string().optional().describe("Project ID. Defaults to current room."),
   },
-  async ({ title, description, created_by, source, project_id }) => {
+  async ({ title, description, created_by, source_message_id, project_id }) => {
     const targetProjectId = project_id || currentRoom?.project_id;
     if (!targetProjectId) {
       return {
@@ -398,7 +398,7 @@ server.tool(
       `/projects/${encodeURIComponent(targetProjectId)}/tasks`,
       {
         method: "POST",
-        body: JSON.stringify({ title, description, created_by, source }),
+        body: JSON.stringify({ title, description, created_by, source_message_id }),
       }
     );
 
@@ -499,9 +499,10 @@ server.tool(
     task_id: z.string().describe("The task ID to update"),
     status: z.enum(TASK_STATUSES).optional().describe("New status for the task"),
     assignee: z.string().optional().describe("New assignee for the task"),
+    pr_url: z.string().optional().describe("PR URL to link to the task"),
     project_id: z.string().optional().describe("Project ID. Defaults to current room."),
   },
-  async ({ task_id, status, assignee, project_id }) => {
+  async ({ task_id, status, assignee, pr_url, project_id }) => {
     const targetProjectId = project_id || currentRoom?.project_id;
     if (!targetProjectId) {
       return {
@@ -514,7 +515,7 @@ server.tool(
         `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         {
           method: "PATCH",
-          body: JSON.stringify({ status, assignee }),
+          body: JSON.stringify({ status, assignee, pr_url }),
         }
       );
 
@@ -531,14 +532,15 @@ server.tool(
 
 server.tool(
   "complete_task",
-  "Mark a task as done. The task must be in 'merged' status first. " +
-    "This is the final step — only call this after the work has been " +
-    "reviewed, approved, and merged.",
+  "Submit a task for review. Moves the task to 'in_review' status. " +
+    "Optionally attach a PR URL. After this, a reviewer must confirm " +
+    "the work is merged before it can be marked done.",
   {
-    task_id: z.string().describe("The task ID to complete"),
+    task_id: z.string().describe("The task ID to submit for review"),
+    pr_url: z.string().optional().describe("GitHub PR URL for the work"),
     project_id: z.string().optional().describe("Project ID. Defaults to current room."),
   },
-  async ({ task_id, project_id }) => {
+  async ({ task_id, pr_url, project_id }) => {
     const targetProjectId = project_id || currentRoom?.project_id;
     if (!targetProjectId) {
       return {
@@ -551,7 +553,7 @@ server.tool(
         `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         {
           method: "PATCH",
-          body: JSON.stringify({ status: "done" }),
+          body: JSON.stringify({ status: "in_review", pr_url }),
         }
       );
 

@@ -35,7 +35,8 @@ export interface Task {
   status: TaskStatus;
   assignee: string | null;
   created_by: string;
-  source: string | null;
+  source_message_id: string | null;
+  pr_url: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -82,7 +83,8 @@ db.exec(`
     status TEXT NOT NULL DEFAULT 'proposed',
     assignee TEXT,
     created_by TEXT NOT NULL,
-    source TEXT,
+    source_message_id TEXT,
+    pr_url TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id)
@@ -289,10 +291,10 @@ export function getMessagesAfter(projectId: string, afterMessageId: string | und
 
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   proposed: ["accepted", "cancelled"],
-  accepted: ["assigned", "blocked", "cancelled"],
-  assigned: ["in_progress", "blocked", "cancelled"],
-  in_progress: ["in_review", "blocked", "cancelled"],
-  blocked: ["accepted", "assigned", "in_progress", "cancelled"],
+  accepted: ["assigned", "cancelled"],
+  assigned: ["in_progress", "cancelled"],
+  in_progress: ["blocked", "in_review", "cancelled"],
+  blocked: ["in_progress", "cancelled"],
   in_review: ["merged", "in_progress", "cancelled"],
   merged: ["done"],
   done: [],
@@ -308,7 +310,7 @@ export function createTask(
   title: string,
   createdBy: string,
   description?: string,
-  source?: string
+  sourceMessageId?: string
 ): Task {
   const now = new Date().toISOString();
   const task: Task = {
@@ -319,14 +321,15 @@ export function createTask(
     status: "proposed",
     assignee: null,
     created_by: createdBy,
-    source: source ?? null,
+    source_message_id: sourceMessageId ?? null,
+    pr_url: null,
     created_at: now,
     updated_at: now,
   };
 
   db.prepare(
-    `INSERT INTO tasks (id, project_id, title, description, status, assignee, created_by, source, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO tasks (id, project_id, title, description, status, assignee, created_by, source_message_id, pr_url, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     task.id,
     task.project_id,
@@ -335,7 +338,8 @@ export function createTask(
     task.status,
     task.assignee,
     task.created_by,
-    task.source,
+    task.source_message_id,
+    task.pr_url,
     task.created_at,
     task.updated_at
   );
@@ -374,7 +378,7 @@ export function getTaskById(taskId: string): Task | undefined {
 
 export function updateTask(
   taskId: string,
-  updates: { status?: TaskStatus; assignee?: string }
+  updates: { status?: TaskStatus; assignee?: string; pr_url?: string }
 ): Task | null {
   const task = getTaskById(taskId);
   if (!task) return null;
@@ -388,11 +392,12 @@ export function updateTask(
 
   const newStatus = updates.status ?? task.status;
   const newAssignee = updates.assignee ?? task.assignee;
+  const newPrUrl = updates.pr_url ?? task.pr_url;
   const now = new Date().toISOString();
 
   db.prepare(
-    `UPDATE tasks SET status = ?, assignee = ?, updated_at = ? WHERE id = ?`
-  ).run(newStatus, newAssignee, now, taskId);
+    `UPDATE tasks SET status = ?, assignee = ?, pr_url = ?, updated_at = ? WHERE id = ?`
+  ).run(newStatus, newAssignee, newPrUrl, now, taskId);
 
-  return { ...task, status: newStatus, assignee: newAssignee, updated_at: now };
+  return { ...task, status: newStatus, assignee: newAssignee, pr_url: newPrUrl, updated_at: now };
 }

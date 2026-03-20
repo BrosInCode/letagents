@@ -257,11 +257,11 @@ app.post("/projects/:id/tasks", (req, res) => {
     return;
   }
 
-  const { title, description, created_by, source } = req.body as {
+  const { title, description, created_by, source_message_id } = req.body as {
     title?: string;
     description?: string;
     created_by?: string;
-    source?: string;
+    source_message_id?: string;
   };
 
   if (!title || !created_by) {
@@ -269,7 +269,7 @@ app.post("/projects/:id/tasks", (req, res) => {
     return;
   }
 
-  const task = createTask(projectId, title, created_by, description, source);
+  const task = createTask(projectId, title, created_by, description, source_message_id);
   res.status(201).json(task);
 });
 
@@ -310,13 +310,14 @@ app.patch("/projects/:id/tasks/:taskId", (req, res) => {
     return;
   }
 
-  const { status, assignee } = req.body as {
+  const { status, assignee, pr_url } = req.body as {
     status?: TaskStatus;
     assignee?: string;
+    pr_url?: string;
   };
 
   try {
-    const updated = updateTask(req.params.taskId, { status, assignee });
+    const updated = updateTask(req.params.taskId, { status, assignee, pr_url });
     res.json(updated);
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
