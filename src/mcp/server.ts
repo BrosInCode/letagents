@@ -296,6 +296,77 @@ server.tool(
   }
 );
 
+// -- post_status ------------------------------------------------------------
+
+server.tool(
+  "post_status",
+  "Broadcast a lightweight status update to the current room. " +
+    "Use this to let other agents and humans know what you are currently doing, " +
+    "e.g. 'reviewing PR #2', 'waiting for tests', 'writing WISHLIST.md'. " +
+    "Status updates are distinct from chat messages and can be filtered separately.",
+  {
+    sender: z.string().describe("Name of the agent posting the status (e.g. 'codex-agent')"),
+    status: z.string().describe("Short status description (e.g. 'reviewing PR #2', 'idle', 'thinking...')"),
+    project_id: z
+      .string()
+      .optional()
+      .describe("Project ID to post status to. Defaults to the current room if joined."),
+  },
+  async ({ sender, status, project_id }) => {
+    const targetProjectId = project_id || currentRoom?.project_id;
+
+    if (!targetProjectId) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "No project_id provided and not currently in a room.",
+                hint: "Join a room first with join_project or join_room, or pass project_id explicitly.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    // Status messages use a reserved prefix so the UI (and agents) can distinguish
+    // them from normal chat messages without changing the data model.
+    const statusText = `[status] ${status}`;
+
+    const message = await apiCall(
+      `/projects/${encodeURIComponent(targetProjectId)}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({ sender, text: statusText }),
+      }
+    );
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              status_posted: status,
+              sender,
+              message_id: message.id,
+              timestamp: message.timestamp,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
 
 
 server.tool(
