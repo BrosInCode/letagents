@@ -7,9 +7,8 @@ import {
   addMessage,
   assignProjectAdmin,
   consumeAuthState,
-  createProject,
-  createProjectWithName,
   createAuthState,
+  createProject,
   createSession,
   createTask,
   deleteSessionByToken,
@@ -21,10 +20,9 @@ import {
   getOrCreateProjectByName,
   getProjectByCode,
   getProjectById,
-  getProjectByName,
   getSessionAccountByToken,
-  getTasks,
   getTaskById,
+  getTasks,
   hasMessagesFromSender,
   isProjectAdmin,
   registerAgentIdentity,
@@ -43,6 +41,11 @@ import {
   isGitHubRepoAdmin,
   parseGitHubRepoName,
 } from "./github-auth.js";
+import {
+  isKnownProvider,
+  normalizeRoomName,
+  resolveRoomIdentifier,
+} from "./room-routing.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -53,8 +56,10 @@ interface AuthenticatedRequest extends express.Request {
   sessionAccount?: SessionAccount | null;
 }
 
-function emitProjectMessage(projectId: string, sender: string, text: string): Message {
-  const message = addMessage(projectId, sender, text);
+const messageEvents = new EventEmitter();
+
+async function emitProjectMessage(projectId: string, sender: string, text: string): Promise<Message> {
+  const message = await addMessage(projectId, sender, text);
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
 }
@@ -89,7 +94,7 @@ function formatTaskLifecycleStatus(task: {
   }
 }
 
-function isTrustedAgentCreator(projectId: string, createdBy: string): boolean {
+async function isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean> {
   const normalizedSender = createdBy.trim().toLowerCase();
   if (!normalizedSender || normalizedSender === "human" || normalizedSender === "letagents") {
     return false;
@@ -97,12 +102,6 @@ function isTrustedAgentCreator(projectId: string, createdBy: string): boolean {
 
   return hasMessagesFromSender(projectId, createdBy);
 }
-
-// ---------------------------------------------------------------------------
-// Realtime notifications
-// ---------------------------------------------------------------------------
-
-const messageEvents = new EventEmitter();
 
 function parsePollTimeout(timeoutValue: string | undefined): number {
   if (!timeoutValue) {
@@ -165,7 +164,7 @@ async function resolveProjectRole(
     return isRepoBackedProject(project) ? "anonymous" : "participant";
   }
 
-  if (isProjectAdmin(project.id, sessionAccount.account_id)) {
+  if (await isProjectAdmin(project.id, sessionAccount.account_id)) {
     return "admin";
   }
 
@@ -177,7 +176,7 @@ async function resolveProjectRole(
     });
 
     if (eligible) {
-      assignProjectAdmin(project.id, sessionAccount.account_id);
+      await assignProjectAdmin(project.id, sessionAccount.account_id);
       return "admin";
     }
   }
@@ -221,7 +220,7 @@ async function resolveRequestAccount(req: express.Request): Promise<SessionAccou
   const cookies = parseCookies(req.headers.cookie);
   const sessionToken = cookies.letagents_session;
   if (sessionToken) {
-    const sessionAccount = getSessionAccountByToken(sessionToken);
+    const sessionAccount = await getSessionAccountByToken(sessionToken);
     if (sessionAccount) {
       return sessionAccount;
     }
@@ -239,7 +238,7 @@ async function resolveRequestAccount(req: express.Request): Promise<SessionAccou
 
   try {
     const githubUser = await fetchGitHubUser(providerToken);
-    const account = upsertAccount({
+    const account = await upsertAccount({
       provider: "github",
       provider_user_id: String(githubUser.id),
       login: githubUser.login,
@@ -265,10 +264,6 @@ async function resolveRequestAccount(req: express.Request): Promise<SessionAccou
   }
 }
 
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -276,15 +271,18 @@ const app = express();
 app.use(express.json());
 
 app.use(async (req: AuthenticatedRequest, _res, next) => {
-  req.sessionAccount = await resolveRequestAccount(req);
-  next();
+  try {
+    req.sessionAccount = await resolveRequestAccount(req);
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
-// CORS headers
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   next();
 });
 
@@ -292,33 +290,19 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
-// Serve static web UI assets (CSS, JS, images)
 app.use(express.static(path.join(__dirname, "..", "web")));
 
-// ---------------------------------------------------------------------------
-// Room URL routing (architecture spec §5)
-// ---------------------------------------------------------------------------
-import {
-  isInviteCode,
-  isKnownProvider,
-  normalizeRoomName,
-  resolveRoomIdentifier,
-} from "./room-routing.js";
-
-// API endpoint to resolve room identifiers (used by the web client)
-app.get("/api/rooms/resolve/:identifier(*)", (req, res) => {
-  const identifier = decodeURIComponent(req.params["identifier(*)"] || "");
+app.get(/^\/api\/rooms\/resolve\/(.+)$/, (req, res) => {
+  const identifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(identifier);
   res.json(resolved);
 });
 
-// Convenience alias: /:provider/:owner/:repo → redirect to /in/:provider/:owner/:repo
-// This makes "letagents.chat/github.com/EmmyMay/letagents" work
 app.get("/:provider/:owner/:repo", (req, res, next) => {
   const provider = req.params.provider.toLowerCase();
 
   if (!isKnownProvider(provider)) {
-    return next(); // Not a known git provider, pass to next route
+    return next();
   }
 
   const roomKey = `${provider}/${req.params.owner}/${req.params.repo}`;
@@ -326,39 +310,30 @@ app.get("/:provider/:owner/:repo", (req, res, next) => {
   res.redirect(301, `/in/${normalized}`);
 });
 
-// Canonical room entry: /in/* — serves the web UI with room context
-// The web client reads the room identifier from the URL and connects to the room
-app.get("/in/:room(*)", (req, res) => {
-  const roomIdentifier = decodeURIComponent(req.params["room(*)"] || "");
+app.get(/^\/in\/(.+)$/, (req, res) => {
+  const roomIdentifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(roomIdentifier);
 
-  // Normalize the URL if the room name wasn't canonical
   if (resolved.type === "room" && resolved.name !== roomIdentifier) {
     res.redirect(301, `/in/${resolved.name}`);
     return;
   }
 
-  // Serve the web UI — the client-side JS will extract the room from the URL
   res.sendFile(path.join(__dirname, "..", "web", "index.html"));
 });
 
-// Health check
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
 });
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-app.post("/auth/github/login", (req, res) => {
+app.post("/auth/github/login", async (req, res) => {
   const redirectTo =
     typeof req.body?.redirect_to === "string" && req.body.redirect_to.trim()
       ? req.body.redirect_to.trim()
       : "/";
   const state = crypto.randomBytes(24).toString("hex");
 
-  createAuthState(state, redirectTo);
+  await createAuthState(state, redirectTo);
 
   try {
     const authUrl = buildGitHubAuthorizeUrl(state);
@@ -377,7 +352,7 @@ app.get("/auth/github/callback", async (req, res) => {
     return;
   }
 
-  const authState = consumeAuthState(state);
+  const authState = await consumeAuthState(state);
   if (!authState) {
     res.status(400).json({ error: "Invalid or expired auth state" });
     return;
@@ -386,7 +361,7 @@ app.get("/auth/github/callback", async (req, res) => {
   try {
     const accessToken = await exchangeGitHubCodeForAccessToken(code);
     const githubUser = await fetchGitHubUser(accessToken);
-    const account = upsertAccount({
+    const account = await upsertAccount({
       provider: "github",
       provider_user_id: String(githubUser.id),
       login: githubUser.login,
@@ -396,7 +371,7 @@ app.get("/auth/github/callback", async (req, res) => {
 
     const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
     const sessionToken = crypto.randomBytes(32).toString("hex");
-    createSession(account.id, sessionToken, expiresAt, accessToken);
+    await createSession(account.id, sessionToken, expiresAt, accessToken);
     setSessionCookie(res, sessionToken);
 
     if (authState.redirect_to) {
@@ -437,34 +412,30 @@ app.get("/auth/session", (req: AuthenticatedRequest, res) => {
   });
 });
 
-app.post("/auth/logout", (req: AuthenticatedRequest, res) => {
+app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
   const cookies = parseCookies(req.headers.cookie);
   if (cookies.letagents_session) {
-    deleteSessionByToken(cookies.letagents_session);
+    await deleteSessionByToken(cookies.letagents_session);
   }
   clearSessionCookie(res);
   res.json({ success: true });
 });
 
-// GET /projects — list all projects
-app.get("/projects", (_req, res) => {
-  res.json({ projects: getAllProjects() });
+app.get("/projects", async (_req, res) => {
+  res.json({ projects: await getAllProjects() });
 });
 
-// POST /projects — create a new project
-app.post("/projects", (_req, res) => {
-  const req = _req as AuthenticatedRequest;
-  const project = createProject();
+app.post("/projects", async (req: AuthenticatedRequest, res) => {
+  const project = await createProject();
   if (req.sessionAccount) {
-    assignProjectAdmin(project.id, req.sessionAccount.account_id);
+    await assignProjectAdmin(project.id, req.sessionAccount.account_id);
   }
   res.status(201).json(project);
 });
 
-// GET /projects/join/:code — look up project by join code
-app.get("/projects/join/:code", (req, res) => {
+app.get("/projects/join/:code", async (req, res) => {
   const code = req.params.code.toUpperCase();
-  const project = getProjectByCode(code);
+  const project = await getProjectByCode(code);
 
   if (!project) {
     res.status(404).json({ error: "Project not found for the given code" });
@@ -474,15 +445,15 @@ app.get("/projects/join/:code", (req, res) => {
   res.json({ id: project.id, code: project.code, name: project.name });
 });
 
-// POST /projects/room/:name — create or join a named room
 app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
   const name = decodeURIComponent(String(req.params.name));
-  const { project, created } = getOrCreateProjectByName(name);
+  const { project, created } = await getOrCreateProjectByName(name);
 
   if (req.sessionAccount && created) {
-    const role = await resolveProjectRole(project, req.sessionAccount);
-    if (role === "admin") {
-      assignProjectAdmin(project.id, req.sessionAccount.account_id);
+    if (isRepoBackedProject(project)) {
+      await resolveProjectRole(project, req.sessionAccount);
+    } else {
+      await assignProjectAdmin(project.id, req.sessionAccount.account_id);
     }
   }
 
@@ -491,7 +462,7 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
 
 app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
-  const project = getProjectById(projectId);
+  const project = await getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -515,7 +486,7 @@ app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
 
 app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
-  const project = getProjectById(projectId);
+  const project = await getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -525,7 +496,7 @@ app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => 
     return;
   }
 
-  const rotated = rotateProjectCode(project.id);
+  const rotated = await rotateProjectCode(project.id);
   if (!rotated) {
     res.status(500).json({ error: "Failed to rotate invite code" });
     return;
@@ -538,7 +509,7 @@ app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => 
   });
 });
 
-app.get("/agents/me", (req: AuthenticatedRequest, res) => {
+app.get("/agents/me", async (req: AuthenticatedRequest, res) => {
   if (!req.sessionAccount) {
     res.status(401).json({ error: "Authentication required" });
     return;
@@ -549,11 +520,11 @@ app.get("/agents/me", (req: AuthenticatedRequest, res) => {
       id: req.sessionAccount.account_id,
       login: req.sessionAccount.login,
     },
-    agents: getAgentIdentitiesForOwner(req.sessionAccount.account_id),
+    agents: await getAgentIdentitiesForOwner(req.sessionAccount.account_id),
   });
 });
 
-app.post("/agents", (req: AuthenticatedRequest, res) => {
+app.post("/agents", async (req: AuthenticatedRequest, res) => {
   if (!req.sessionAccount) {
     res.status(401).json({ error: "Authentication required" });
     return;
@@ -570,7 +541,7 @@ app.post("/agents", (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const identity = registerAgentIdentity({
+  const identity = await registerAgentIdentity({
     owner_account_id: req.sessionAccount.account_id,
     owner_login: req.sessionAccount.login,
     owner_label: owner_label?.trim() || req.sessionAccount.display_name || req.sessionAccount.login,
@@ -581,11 +552,10 @@ app.post("/agents", (req: AuthenticatedRequest, res) => {
   res.status(201).json(identity);
 });
 
-// POST /projects/:id/messages — send a message
 app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
+  const project = await getProjectById(projectId);
 
-  const project = getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -602,30 +572,28 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const message = emitProjectMessage(projectId, sender, text);
+  const message = await emitProjectMessage(projectId, sender, text);
   res.status(201).json(message);
 });
 
-// GET /projects/:id/messages — read all messages
-app.get("/projects/:id/messages", (req, res) => {
-  const projectId = req.params.id;
+app.get("/projects/:id/messages", async (req, res) => {
+  const projectId = String(req.params.id);
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
   res.json({
     project_id: projectId,
-    messages: getMessages(projectId),
+    messages: await getMessages(projectId),
   });
 });
 
-// GET /projects/:id/messages/stream — stream new messages over SSE
-app.get("/projects/:id/messages/stream", (req, res) => {
+app.get("/projects/:id/messages/stream", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -657,18 +625,17 @@ app.get("/projects/:id/messages/stream", (req, res) => {
   });
 });
 
-// GET /projects/:id/messages/poll?after=<msg_id> — wait for new messages
-app.get("/projects/:id/messages/poll", (req, res) => {
+app.get("/projects/:id/messages/poll", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
-  const existingMessages = getMessagesAfter(projectId, after);
+  const existingMessages = await getMessagesAfter(projectId, after);
 
   if (existingMessages.length > 0) {
     res.json({ project_id: projectId, messages: existingMessages });
@@ -693,12 +660,12 @@ app.get("/projects/:id/messages/poll", (req, res) => {
     res.json({ project_id: projectId, messages: nextMessages });
   };
 
-  const onMessageCreated = ({ projectId: eventProjectId }: MessageCreatedEvent) => {
+  const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) {
       return;
     }
 
-    const nextMessages = getMessagesAfter(projectId, after);
+    const nextMessages = await getMessagesAfter(projectId, after);
     if (nextMessages.length > 0) {
       resolveRequest(nextMessages);
     }
@@ -721,15 +688,10 @@ app.get("/projects/:id/messages/poll", (req, res) => {
   req.on("close", onClientClose);
 });
 
-// ---------------------------------------------------------------------------
-// Task Board Endpoints
-// ---------------------------------------------------------------------------
-
-// POST /projects/:id/tasks — create a task
 app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
+  const project = await getProjectById(projectId);
 
-  const project = getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -751,28 +713,27 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const task = createTask(projectId, title, created_by, description, source_message_id);
+  const task = await createTask(projectId, title, created_by, description, source_message_id);
 
-  if (!isTrustedAgentCreator(projectId, created_by)) {
+  if (!(await isTrustedAgentCreator(projectId, created_by))) {
     res.status(201).json(task);
     return;
   }
 
-  const acceptedTask = updateTask(task.id, { status: "accepted" });
+  const acceptedTask = await updateTask(task.id, { status: "accepted" });
   if (!acceptedTask) {
     res.status(500).json({ error: "Task created but could not be auto-accepted" });
     return;
   }
 
-  emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
   res.status(201).json(acceptedTask);
 });
 
-// GET /projects/:id/tasks — list tasks (optional ?status= filter)
-app.get("/projects/:id/tasks", (req, res) => {
+app.get("/projects/:id/tasks", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -780,13 +741,12 @@ app.get("/projects/:id/tasks", (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const open = req.query.open === "true";
 
-  const tasks = open ? getOpenTasks(projectId) : getTasks(projectId, status);
-  res.json({ project_id: projectId, tasks });
+  const taskList = open ? await getOpenTasks(projectId) : await getTasks(projectId, status);
+  res.json({ project_id: projectId, tasks: taskList });
 });
 
-// GET /projects/:id/tasks/:taskId — get single task
-app.get("/projects/:id/tasks/:taskId", (req, res) => {
-  const task = getTaskById(req.params.taskId);
+app.get("/projects/:id/tasks/:taskId", async (req, res) => {
+  const task = await getTaskById(req.params.taskId);
 
   if (!task || task.project_id !== req.params.id) {
     res.status(404).json({ error: "Task not found" });
@@ -796,18 +756,17 @@ app.get("/projects/:id/tasks/:taskId", (req, res) => {
   res.json(task);
 });
 
-// PATCH /projects/:id/tasks/:taskId — update status/assignee
 app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
   const taskId = String(req.params.taskId);
-  const task = getTaskById(taskId);
+  const task = await getTaskById(taskId);
 
   if (!task || task.project_id !== projectId) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
 
-  const project = getProjectById(projectId);
+  const project = await getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
     return;
@@ -831,19 +790,15 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       }
     }
 
-    const updated = updateTask(taskId, { status, assignee, pr_url });
+    const updated = await updateTask(taskId, { status, assignee, pr_url });
     if (updated && status && status !== task.status) {
-      emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
+      await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
     }
     res.json(updated);
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
 });
-
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 

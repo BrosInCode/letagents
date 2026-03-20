@@ -26,7 +26,7 @@ let currentRoom: RoomState | null = null;
 // Config
 // ---------------------------------------------------------------------------
 
-const API_URL = process.env.LETAGENTS_API_URL || "http://localhost:3001";
+const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.LETAGENTS_GITHUB_TOKEN || "";
 const AGENT_NAME = (process.env.LETAGENTS_AGENT_NAME || process.env.AGENT_NAME || "").trim();
 const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim();
