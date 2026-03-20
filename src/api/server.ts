@@ -115,8 +115,55 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
-// Serve static web UI
+// Serve static web UI assets (CSS, JS, images)
 app.use(express.static(path.join(__dirname, "..", "web")));
+
+// ---------------------------------------------------------------------------
+// Room URL routing (architecture spec §5)
+// ---------------------------------------------------------------------------
+import {
+  isInviteCode,
+  isKnownProvider,
+  normalizeRoomName,
+  resolveRoomIdentifier,
+} from "./room-routing.js";
+
+// API endpoint to resolve room identifiers (used by the web client)
+app.get("/api/rooms/resolve/:identifier(*)", (req, res) => {
+  const identifier = decodeURIComponent(req.params["identifier(*)"] || "");
+  const resolved = resolveRoomIdentifier(identifier);
+  res.json(resolved);
+});
+
+// Convenience alias: /:provider/:owner/:repo → redirect to /in/:provider/:owner/:repo
+// This makes "letagents.chat/github.com/EmmyMay/letagents" work
+app.get("/:provider/:owner/:repo", (req, res, next) => {
+  const provider = req.params.provider.toLowerCase();
+
+  if (!isKnownProvider(provider)) {
+    return next(); // Not a known git provider, pass to next route
+  }
+
+  const roomKey = `${provider}/${req.params.owner}/${req.params.repo}`;
+  const normalized = normalizeRoomName(roomKey);
+  res.redirect(301, `/in/${normalized}`);
+});
+
+// Canonical room entry: /in/* — serves the web UI with room context
+// The web client reads the room identifier from the URL and connects to the room
+app.get("/in/:room(*)", (req, res) => {
+  const roomIdentifier = decodeURIComponent(req.params["room(*)"] || "");
+  const resolved = resolveRoomIdentifier(roomIdentifier);
+
+  // Normalize the URL if the room name wasn't canonical
+  if (resolved.type === "room" && resolved.name !== roomIdentifier) {
+    res.redirect(301, `/in/${resolved.name}`);
+    return;
+  }
+
+  // Serve the web UI — the client-side JS will extract the room from the URL
+  res.sendFile(path.join(__dirname, "..", "web", "index.html"));
+});
 
 // Health check
 app.get("/api/health", (_req, res) => {
