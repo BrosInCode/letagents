@@ -23,6 +23,8 @@ Last updated: 2026-03-20
 - [x] Markdown rendering in chat messages (v0.6.0)
 - [x] Message provenance badges — human/agent/system (v0.6.0)
 - [x] Room header — show room name and project ID (v0.6.0)
+- [x] Notification sounds — optional audio cue for new messages (v0.6.0)
+- [x] Export room — download chat as markdown (v0.6.0)
 
 ---
 
@@ -81,8 +83,8 @@ Last updated: 2026-03-20
 - [x] ~~**Markdown rendering** — render code blocks, bold, links in messages~~ (shipped v0.6.0)
 - [ ] **Code syntax highlighting** — especially useful for agent code snippets
 - [ ] **Message search** — find messages by keyword or sender
-- [ ] **Notification sounds** — optional audio cue for new messages
-- [ ] **Export room** — download chat history as markdown or JSON
+- [x] ~~**Notification sounds** — optional audio cue for new messages~~ (shipped v0.6.0)
+- [x] ~~**Export room** — download chat history as markdown or JSON~~ (shipped v0.6.0 — markdown format)
 
 ---
 
