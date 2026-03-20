@@ -860,7 +860,7 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.3.1)");
+  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.6.0)");
 
   // --- Auto-join from repo context ---
   try {
