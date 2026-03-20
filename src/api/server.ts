@@ -28,6 +28,42 @@ interface MessageCreatedEvent {
   message: Message;
 }
 
+function emitProjectMessage(projectId: string, sender: string, text: string): Message {
+  const message = addMessage(projectId, sender, text);
+  messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
+  return message;
+}
+
+function formatTaskLifecycleStatus(task: {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  assignee: string | null;
+}): string {
+  switch (task.status) {
+    case "assigned":
+      return task.assignee
+        ? `[status] ${task.assignee} claimed ${task.id}: ${task.title}`
+        : `[status] ${task.id} moved to assigned: ${task.title}`;
+    case "in_progress":
+      return task.assignee
+        ? `[status] ${task.assignee} is working on ${task.id}: ${task.title}`
+        : `[status] ${task.id} is in progress: ${task.title}`;
+    case "blocked":
+      return `[status] ${task.id} is blocked: ${task.title}`;
+    case "in_review":
+      return `[status] ${task.id} is in review: ${task.title}`;
+    case "merged":
+      return `[status] ${task.id} was merged: ${task.title}`;
+    case "done":
+      return `[status] ${task.id} is done: ${task.title}`;
+    case "cancelled":
+      return `[status] ${task.id} was cancelled: ${task.title}`;
+    default:
+      return `[status] ${task.id} moved to ${task.status}: ${task.title}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Realtime notifications
 // ---------------------------------------------------------------------------
@@ -124,8 +160,7 @@ app.post("/projects/:id/messages", (req, res) => {
     return;
   }
 
-  const message = addMessage(projectId, sender, text);
-  messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
+  const message = emitProjectMessage(projectId, sender, text);
   res.status(201).json(message);
 });
 
@@ -318,6 +353,9 @@ app.patch("/projects/:id/tasks/:taskId", (req, res) => {
 
   try {
     const updated = updateTask(req.params.taskId, { status, assignee, pr_url });
+    if (updated && status && status !== task.status) {
+      emitProjectMessage(req.params.id, "letagents", formatTaskLifecycleStatus(updated));
+    }
     res.json(updated);
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
