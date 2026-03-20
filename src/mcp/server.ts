@@ -3,10 +3,11 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { writeFileSync, existsSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { execSync } from "child_process";
 import { SseClient, type Message } from "./sse-client.js";
 import { getRoomFromConfig } from "./config-reader.js";
-import { getGitRemoteIdentity, normalizeGitRemote } from "./git-remote.js";
+import { getGitRemoteIdentity } from "./git-remote.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -30,6 +31,38 @@ const API_URL = process.env.LETAGENTS_API_URL || "http://localhost:3001";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolve the root of the git repository containing `dir`.
+ * Returns null if `dir` is not inside a git repo.
+ */
+function resolveGitRoot(dir: string): string | null {
+  try {
+    const root = execSync("git rev-parse --show-toplevel", {
+      cwd: dir,
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    }).trim();
+    return root || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Walk from `startDir` up to the filesystem root, returning the first
+ * directory that contains `.letagents.json`, or null if none found.
+ */
+function findExistingConfig(startDir: string): string | null {
+  let current = startDir;
+  while (true) {
+    if (existsSync(join(current, ".letagents.json"))) return current;
+    const parent = dirname(current);
+    if (parent === current) break; // reached fs root
+    current = parent;
+  }
+  return null;
+}
 
 async function apiCall(path: string, options?: RequestInit) {
   const res = await fetch(`${API_URL}${path}`, {
@@ -204,15 +237,73 @@ server.tool(
   }
 );
 
-// -- send_message -----------------------------------------------------------
+// -- check_repo -------------------------------------------------------------
 
-// -- initialize_repo --------------------------------------------------------
+server.tool(
+  "check_repo",
+  "Inspect the current repository context for Let Agents Chat. " +
+    "Shows the git repo root, detected .letagents.json path, auto-derived room name from git remote, " +
+    "and current room state. Useful for troubleshooting auto-join issues.",
+  {
+    cwd: z
+      .string()
+      .optional()
+      .describe("Directory to inspect. Defaults to the current process directory."),
+  },
+  async ({ cwd: targetDir }) => {
+    const startDir = targetDir || process.cwd();
+
+    const repoRoot = resolveGitRoot(startDir);
+    const configDir = repoRoot ? findExistingConfig(startDir) : null;
+    const configPath = configDir ? join(configDir, ".letagents.json") : null;
+
+    let configContents: unknown = null;
+    if (configPath && existsSync(configPath)) {
+      try {
+        const { readFileSync } = await import("fs");
+        configContents = JSON.parse(readFileSync(configPath, "utf-8"));
+      } catch {
+        configContents = "<parse error>";
+      }
+    }
+
+    const derivedRoom = repoRoot ? getGitRemoteIdentity(repoRoot) : null;
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              cwd: startDir,
+              git_repo_root: repoRoot ?? null,
+              config_file: configPath ?? null,
+              config_contents: configContents,
+              derived_room_from_git: derivedRoom ?? null,
+              current_room: currentRoom ?? null,
+              join_hint: !currentRoom
+                ? repoRoot
+                  ? "Run initialize_repo to set up .letagents.json, or join_room/join_project to connect."
+                  : "Not inside a git repo. Use join_project or join_room to connect manually."
+                : null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+
 
 server.tool(
   "initialize_repo",
   "Initialize the current repo for Let Agents Chat by creating a .letagents.json config file. " +
     "This explicitly sets up repo-based room auto-join. Reads git remote to derive the room name, " +
-    "or accepts a custom room name. Will NOT overwrite an existing .letagents.json.",
+    "or accepts a custom room name. Will NOT overwrite an existing .letagents.json. " +
+    "Always writes to the repo root, not the current working directory.",
   {
     room: z
       .string()
@@ -224,14 +315,61 @@ server.tool(
       .string()
       .optional()
       .describe(
-        "Working directory to initialize. Defaults to the current process directory."
+        "Working directory hint for repo detection. Defaults to the current process directory."
       ),
   },
   async ({ room, cwd: targetDir }) => {
-    const dir = targetDir || process.cwd();
-    const configPath = join(dir, ".letagents.json");
+    const startDir = targetDir || process.cwd();
 
-    // Don't overwrite existing config
+    // Resolve true git repo root — never write to a subdirectory
+    const repoRoot = resolveGitRoot(startDir);
+    if (!repoRoot) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "Not inside a git repository",
+                hint: "Run this tool from inside a git repo, or pass a 'cwd' pointing to one.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    // Walk parent dirs from startDir (not repoRoot) to catch configs in subtrees below caller
+    const existingConfigDir = findExistingConfig(startDir);
+    if (existingConfigDir) {
+      const existingPath = join(existingConfigDir, ".letagents.json");
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: ".letagents.json already exists",
+                path: existingPath,
+                hint: existingConfigDir === repoRoot
+                  ? "Delete the existing file first if you want to reinitialize."
+                  : `Found a config in a parent directory (${existingConfigDir}). Delete it or move it to ${repoRoot} to reinitialize.`,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const configPath = join(repoRoot, ".letagents.json");
+
+    // Safety check (shouldn't be needed after findExistingConfig, but defensive)
     if (existsSync(configPath)) {
       return {
         content: [
@@ -255,7 +393,7 @@ server.tool(
     // Determine room name
     let roomName = room;
     if (!roomName) {
-      const gitRoom = getGitRemoteIdentity(dir);
+      const gitRoom = getGitRemoteIdentity(repoRoot);
       if (!gitRoom) {
         return {
           content: [
@@ -462,7 +600,7 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.3.0 with repo rooms)");
+  console.error("🔌 Let Agents Chat MCP server running on stdio (v0.3.1)");
 
   // --- Auto-join from repo context ---
   try {
