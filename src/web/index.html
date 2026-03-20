@@ -737,6 +737,176 @@
           grid-template-columns: 1fr;
         }
       }
+      /* Task Board styles */
+      .tab-bar {
+        display: flex;
+        gap: 4px;
+        padding: 4px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--line);
+      }
+
+      .tab-bar button {
+        padding: 8px 18px;
+        border-radius: 11px;
+        background: transparent;
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 0.88rem;
+        transition: all 180ms ease;
+      }
+
+      .tab-bar button[aria-selected="true"] {
+        background: linear-gradient(135deg, rgba(168, 85, 247, 0.3), rgba(59, 130, 246, 0.2));
+        color: var(--text);
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
+      }
+
+      .tab-bar button:hover:not([aria-selected="true"]) {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+      }
+
+      .board-panel {
+        height: 100%;
+        overflow-y: auto;
+        padding: 20px 24px;
+      }
+
+      .board-group {
+        margin-bottom: 24px;
+      }
+
+      .board-group-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 12px;
+        font-size: 0.88rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+
+      .board-group-count {
+        padding: 2px 8px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.08);
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+
+      .task-card {
+        padding: 14px 16px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+        margin-bottom: 10px;
+        transition: border-color 180ms ease, transform 180ms ease;
+      }
+
+      .task-card:hover {
+        border-color: var(--line-strong);
+        transform: translateY(-1px);
+      }
+
+      .task-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+      }
+
+      .task-card-title {
+        margin: 0;
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+
+      .task-status-badge {
+        flex-shrink: 0;
+        padding: 4px 10px;
+        border-radius: 8px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .task-status-badge[data-status="proposed"] { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
+      .task-status-badge[data-status="accepted"] { background: rgba(96, 165, 250, 0.2); color: #60a5fa; }
+      .task-status-badge[data-status="assigned"] { background: rgba(168, 85, 247, 0.2); color: #a855f7; }
+      .task-status-badge[data-status="in_progress"] { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
+      .task-status-badge[data-status="blocked"] { background: rgba(251, 113, 133, 0.2); color: #fb7185; }
+      .task-status-badge[data-status="in_review"] { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
+      .task-status-badge[data-status="merged"] { background: rgba(52, 211, 153, 0.2); color: #34d399; }
+      .task-status-badge[data-status="done"] { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
+      .task-status-badge[data-status="cancelled"] { background: rgba(100, 116, 139, 0.2); color: #64748b; }
+
+      .task-meta {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin-bottom: 10px;
+      }
+
+      .task-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .task-action-btn {
+        padding: 5px 12px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--line);
+        color: var(--text);
+        font-size: 0.8rem;
+        font-weight: 600;
+        transition: all 180ms ease;
+      }
+
+      .task-action-btn:hover {
+        background: rgba(255, 255, 255, 0.12);
+        transform: translateY(-1px);
+      }
+
+      .task-action-btn.accept { color: #60a5fa; border-color: rgba(96, 165, 250, 0.3); }
+      .task-action-btn.cancel { color: #fb7185; border-color: rgba(251, 113, 133, 0.3); }
+      .task-action-btn.merge { color: #34d399; border-color: rgba(52, 211, 153, 0.3); }
+
+      .add-task-form {
+        display: flex;
+        gap: 10px;
+        padding: 14px;
+        border-radius: 18px;
+        border: 1px dashed var(--line-strong);
+        background: rgba(255, 255, 255, 0.02);
+        margin-bottom: 20px;
+      }
+
+      .add-task-form input {
+        flex: 1;
+      }
+
+      .board-empty {
+        display: grid;
+        place-items: center;
+        text-align: center;
+        padding: 60px 20px;
+        color: var(--muted);
+      }
+
+      .board-empty h3 {
+        color: var(--text);
+        margin: 0 0 8px;
+      }
     </style>
   </head>
   <body>
@@ -822,7 +992,13 @@
             <h2 id="chatTitle">No active project</h2>
             <p id="chatSubtitle">Create a new room or join one with a code.</p>
           </div>
-          <div class="presence" id="presenceBadge" data-state="idle">Waiting for room</div>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div class="tab-bar" role="tablist">
+              <button role="tab" aria-selected="true" id="tabChat" type="button">Chat</button>
+              <button role="tab" aria-selected="false" id="tabBoard" type="button">Board</button>
+            </div>
+            <div class="presence" id="presenceBadge" data-state="idle">Waiting for room</div>
+          </div>
         </header>
 
         <div class="messages-wrap">
@@ -856,6 +1032,15 @@
           />
           <button class="btn btn-primary send-btn" id="sendMessageBtn" type="submit">Send Message</button>
         </form>
+
+        <!-- Task Board Panel -->
+        <div class="board-panel hidden" id="boardPanel">
+          <div class="add-task-form" id="addTaskForm">
+            <input class="input" id="taskTitleInput" type="text" placeholder="New task title..." autocomplete="off" style="min-height: 44px;" />
+            <button class="btn btn-primary" id="addTaskBtn" type="button" style="padding: 10px 20px; min-width: 100px;">Add Task</button>
+          </div>
+          <div id="boardContent"></div>
+        </div>
       </section>
     </main>
 
@@ -1341,6 +1526,160 @@
 
       updateProjectUi();
       restoreProjectIfPossible();
+
+      // ---- Task Board UI ----
+      const tabChat = document.getElementById("tabChat");
+      const tabBoard = document.getElementById("tabBoard");
+      const boardPanel = document.getElementById("boardPanel");
+      const boardContent = document.getElementById("boardContent");
+      const addTaskBtn = document.getElementById("addTaskBtn");
+      const taskTitleInput = document.getElementById("taskTitleInput");
+      const chatWrap = document.querySelector(".messages-wrap");
+      const composerForm2 = document.getElementById("composerForm");
+
+      let currentTab = "chat";
+      let boardTasks = [];
+      let boardPollTimer = null;
+
+      function switchTab(tab) {
+        currentTab = tab;
+        tabChat.setAttribute("aria-selected", tab === "chat" ? "true" : "false");
+        tabBoard.setAttribute("aria-selected", tab === "board" ? "true" : "false");
+        chatWrap.classList.toggle("hidden", tab !== "chat");
+        composerForm2.classList.toggle("hidden", tab !== "chat");
+        boardPanel.classList.toggle("hidden", tab !== "board");
+        if (tab === "board") refreshBoard();
+      }
+
+      tabChat.addEventListener("click", () => switchTab("chat"));
+      tabBoard.addEventListener("click", () => switchTab("board"));
+
+      const STATUS_ORDER = [
+        "in_progress", "blocked", "in_review", "accepted", "assigned",
+        "proposed", "merged", "done", "cancelled"
+      ];
+
+      const STATUS_LABELS = {
+        proposed: "Proposed", accepted: "Accepted", assigned: "Assigned",
+        in_progress: "In Progress", blocked: "Blocked", in_review: "In Review",
+        merged: "Merged", done: "Done", cancelled: "Cancelled"
+      };
+
+      function getTaskActions(task) {
+        const actions = [];
+        switch (task.status) {
+          case "proposed":
+            actions.push({ label: "Accept", cls: "accept", status: "accepted" });
+            actions.push({ label: "Cancel", cls: "cancel", status: "cancelled" });
+            break;
+          case "in_review":
+            actions.push({ label: "Mark Merged", cls: "merge", status: "merged" });
+            actions.push({ label: "Needs Work", cls: "cancel", status: "in_progress" });
+            break;
+          case "merged":
+            actions.push({ label: "Mark Done", cls: "merge", status: "done" });
+            break;
+          case "accepted":
+            actions.push({ label: "Cancel", cls: "cancel", status: "cancelled" });
+            break;
+        }
+        return actions;
+      }
+
+      function renderBoard() {
+        if (!boardTasks.length) {
+          boardContent.innerHTML = `<div class="board-empty"><div><h3>No tasks yet</h3><p>Add a task or use the <code>add_task</code> MCP tool.</p></div></div>`;
+          return;
+        }
+
+        const grouped = {};
+        for (const task of boardTasks) {
+          (grouped[task.status] ||= []).push(task);
+        }
+
+        let html = "";
+        for (const status of STATUS_ORDER) {
+          const tasks = grouped[status];
+          if (!tasks || !tasks.length) continue;
+          html += `<div class="board-group">`;
+          html += `<h3 class="board-group-title">${STATUS_LABELS[status] || status} <span class="board-group-count">${tasks.length}</span></h3>`;
+          for (const task of tasks) {
+            const actions = getTaskActions(task);
+            html += `<div class="task-card">`;
+            html += `<div class="task-card-header"><h4 class="task-card-title">${escapeHtml(task.title)}</h4><span class="task-status-badge" data-status="${task.status}">${STATUS_LABELS[task.status] || task.status}</span></div>`;
+            html += `<div class="task-meta">`;
+            if (task.assignee) html += `<span>👤 ${escapeHtml(task.assignee)}</span>`;
+            html += `<span>by ${escapeHtml(task.created_by)}</span>`;
+            html += `<span>${escapeHtml(formatTimestamp(task.created_at))}</span>`;
+            html += `</div>`;
+            if (task.description) html += `<p style="margin: 0 0 10px; color: var(--muted); font-size: 0.88rem;">${escapeHtml(task.description)}</p>`;
+            if (actions.length) {
+              html += `<div class="task-actions">`;
+              for (const action of actions) {
+                html += `<button class="task-action-btn ${action.cls}" data-task-id="${task.id}" data-new-status="${action.status}">${action.label}</button>`;
+              }
+              html += `</div>`;
+            }
+            html += `</div>`;
+          }
+          html += `</div>`;
+        }
+        boardContent.innerHTML = html;
+
+        boardContent.querySelectorAll(".task-action-btn").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const taskId = btn.dataset.taskId;
+            const newStatus = btn.dataset.newStatus;
+            btn.disabled = true;
+            try {
+              await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks/${encodeURIComponent(taskId)}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: newStatus }),
+              });
+              await refreshBoard();
+            } catch (e) {
+              setStatus(e.message || "Could not update task.", "error");
+            } finally {
+              btn.disabled = false;
+            }
+          });
+        });
+      }
+
+      async function refreshBoard() {
+        if (!state.currentProjectId) return;
+        try {
+          const data = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks`);
+          boardTasks = data.tasks || [];
+          renderBoard();
+        } catch (e) {
+          boardContent.innerHTML = `<div class="board-empty"><p>Could not load board: ${escapeHtml(e.message)}</p></div>`;
+        }
+      }
+
+      addTaskBtn.addEventListener("click", async () => {
+        const title = taskTitleInput.value.trim();
+        if (!title) return;
+        if (!state.currentProjectId) { setStatus("Join a room first.", "error"); return; }
+        addTaskBtn.disabled = true;
+        try {
+          await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks`, {
+            method: "POST",
+            body: JSON.stringify({ title, created_by: "human" }),
+          });
+          taskTitleInput.value = "";
+          await refreshBoard();
+          setStatus("Task added.", "success");
+        } catch (e) {
+          setStatus(e.message || "Could not add task.", "error");
+        } finally {
+          addTaskBtn.disabled = false;
+        }
+      });
+
+      taskTitleInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); addTaskBtn.click(); }
+      });
     </script>
   </body>
 </html>

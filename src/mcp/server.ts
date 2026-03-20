@@ -367,7 +367,195 @@ server.tool(
   }
 );
 
+// -- Task Board Tools -------------------------------------------------------
 
+const TASK_STATUSES = [
+  "proposed", "accepted", "assigned", "in_progress",
+  "blocked", "in_review", "merged", "done", "cancelled",
+] as const;
+
+server.tool(
+  "add_task",
+  "Add a new task to the project board. Tasks start as 'proposed' and must be " +
+    "accepted before an agent can claim them. Use this when a human or agent " +
+    "identifies work that needs to be done.",
+  {
+    title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
+    description: z.string().optional().describe("Longer description of what needs to be done"),
+    created_by: z.string().describe("Name of the agent or human creating the task"),
+    source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
+    project_id: z.string().optional().describe("Project ID. Defaults to current room."),
+  },
+  async ({ title, description, created_by, source_message_id, project_id }) => {
+    const targetProjectId = project_id || currentRoom?.project_id;
+    if (!targetProjectId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room. Join one first." }) }],
+      };
+    }
+
+    const task = await apiCall(
+      `/projects/${encodeURIComponent(targetProjectId)}/tasks`,
+      {
+        method: "POST",
+        body: JSON.stringify({ title, description, created_by, source_message_id }),
+      }
+    );
+
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ success: true, task }, null, 2) }],
+    };
+  }
+);
+
+server.tool(
+  "get_board",
+  "Get the current task board for the project. By default shows only open tasks " +
+    "(not done/cancelled). Agents should check this on startup and when idle to " +
+    "see if there is unassigned work to claim.",
+  {
+    status: z.enum(TASK_STATUSES).optional().describe("Filter by specific status"),
+    open_only: z.boolean().optional().describe("If true (default), only show tasks not done/cancelled"),
+    project_id: z.string().optional().describe("Project ID. Defaults to current room."),
+  },
+  async ({ status, open_only, project_id }) => {
+    const targetProjectId = project_id || currentRoom?.project_id;
+    if (!targetProjectId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room. Join one first." }) }],
+      };
+    }
+
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (open_only !== false) params.set("open", "true");
+
+    const qs = params.toString();
+    const result = await apiCall(
+      `/projects/${encodeURIComponent(targetProjectId)}/tasks${qs ? `?${qs}` : ""}`
+    );
+
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ success: true, ...result }, null, 2) }],
+    };
+  }
+);
+
+server.tool(
+  "claim_task",
+  "Claim an accepted task. The task must be in 'accepted' " +
+    "status. This sets the assignee to you and moves the status to 'assigned'. " +
+    "Do NOT claim proposed tasks — they need to be accepted first.",
+  {
+    task_id: z.string().describe("The task ID to claim, e.g. 'task_1'"),
+    assignee: z.string().describe("Your agent name, e.g. 'antigravity'"),
+    project_id: z.string().optional().describe("Project ID. Defaults to current room."),
+  },
+  async ({ task_id, assignee, project_id }) => {
+    const targetProjectId = project_id || currentRoom?.project_id;
+    if (!targetProjectId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room." }) }],
+      };
+    }
+
+    try {
+      const updated = await apiCall(
+        `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: "assigned", assignee }),
+        }
+      );
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, task: updated }, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "update_task",
+  "Update a task's status or assignee. Status transitions are validated — " +
+    "only valid transitions are allowed (e.g. in_progress → in_review, " +
+    "but NOT proposed → in_progress).",
+  {
+    task_id: z.string().describe("The task ID to update"),
+    status: z.enum(TASK_STATUSES).optional().describe("New status for the task"),
+    assignee: z.string().optional().describe("New assignee for the task"),
+    pr_url: z.string().optional().describe("PR URL to link to the task"),
+    project_id: z.string().optional().describe("Project ID. Defaults to current room."),
+  },
+  async ({ task_id, status, assignee, pr_url, project_id }) => {
+    const targetProjectId = project_id || currentRoom?.project_id;
+    if (!targetProjectId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room." }) }],
+      };
+    }
+
+    try {
+      const updated = await apiCall(
+        `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status, assignee, pr_url }),
+        }
+      );
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, task: updated }, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "complete_task",
+  "Submit a task for review. Moves the task to 'in_review' status. " +
+    "Optionally attach a PR URL. After this, a reviewer must confirm " +
+    "the work is merged before it can be marked done.",
+  {
+    task_id: z.string().describe("The task ID to submit for review"),
+    pr_url: z.string().optional().describe("GitHub PR URL for the work"),
+    project_id: z.string().optional().describe("Project ID. Defaults to current room."),
+  },
+  async ({ task_id, pr_url, project_id }) => {
+    const targetProjectId = project_id || currentRoom?.project_id;
+    if (!targetProjectId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room." }) }],
+      };
+    }
+
+    try {
+      const updated = await apiCall(
+        `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status: "in_review", pr_url }),
+        }
+      );
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, task: updated }, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
 
 server.tool(
   "initialize_repo",
