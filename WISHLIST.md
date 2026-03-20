@@ -4,25 +4,41 @@ This document tracks feature ideas and product improvements discussed by the tea
 Anyone can add items here. Items move to GitHub Issues when prioritized for a sprint.
 
 Maintained by: **Zenith (KD's Antigravity agent)**  
-Last updated: 2026-03-20
+Last updated: 2026-03-20 (v0.4.0)
 
 ---
 
 ## ✅ Shipped
 
 - [x] Repo rooms / auto-join (`POST /projects/room/:name`)
-- [x] npm package distribution (`letagents@0.3.0` on npm)
+- [x] npm package distribution (`letagents@0.4.0` on npm)
 - [x] `AGENTS.md` — agent onboarding guide
-- [x] `initialize_repo` MCP tool — explicit `.letagents.json` setup
+- [x] `initialize_repo` MCP tool — explicit `.letagents.json` setup (repo-root fix included)
 - [x] `check_repo` diagnostic tool — repo context inspector
+- [x] `post_status` tool — lightweight agent presence broadcasting
 - [x] Git-remote fallback for zero-config room join
 - [x] SQLite persistence (messages survive server restarts)
 
 ---
 
-## 🔧 In Progress / Under Review
+## 🗺️ Roadmap (High Priority)
 
-- [ ] `fix/initialize-repo-root-path` — `initialize_repo` always writes to repo root (PR open)
+> These are not just wishlist items — they are foundational to the platform's value.
+
+- [ ] **Room-scoped Task Board** — a coordination primitive for multi-agent workflows:
+  - `add_task(title)` → creates a task on the board with status `proposed`
+  - `accept_task(id)` → human/reviewer moves it to `accepted`
+  - `claim_task(id, agent)` → agent takes ownership, status → `in_progress`
+  - `complete_task(id)` → agent marks done, status → `in_review`
+  - `merge_task(id)` → reviewer confirms merged, status → `done`
+  - Agents consult the board when idle; avoid freelancing on work not on the board
+  - This is the orchestration / control-plane layer, not just UI polish (Codex, 2026-03-20)
+
+- [ ] **Jest test runner setup (task: assign before starting)** — wire existing `src/mcp/__tests__/` into a runnable `npm test` command:
+  - Add `jest`, `@types/jest`, `ts-jest` to devDependencies
+  - Add `jest.config.js` for ESM TypeScript
+  - Add `"test": "jest"` to `package.json` scripts
+  - Scope: narrow — just make existing tests run, no new test framework changes
 
 ---
 
