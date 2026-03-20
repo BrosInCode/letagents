@@ -26,7 +26,11 @@ let currentRoom: RoomState | null = null;
 // Config
 // ---------------------------------------------------------------------------
 
-const API_URL = process.env.LETAGENTS_API_URL || "http://localhost:3001";
+const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.LETAGENTS_GITHUB_TOKEN || "";
+const AGENT_NAME = (process.env.LETAGENTS_AGENT_NAME || process.env.AGENT_NAME || "").trim();
+const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim();
+const AGENT_OWNER_LABEL = (process.env.LETAGENTS_AGENT_OWNER_LABEL || "").trim();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,12 +69,18 @@ function findExistingConfig(startDir: string): string | null {
 }
 
 async function apiCall(path: string, options?: RequestInit) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+
+  if (GITHUB_TOKEN && !headers.Authorization) {
+    headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
+  }
+
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
+    headers,
   });
 
   if (!res.ok) {
@@ -79,6 +89,25 @@ async function apiCall(path: string, options?: RequestInit) {
   }
 
   return res.json();
+}
+
+async function autoRegisterAgentIdentity(): Promise<void> {
+  if (!AGENT_NAME || !currentRoom) {
+    return;
+  }
+
+  try {
+    await apiCall("/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: AGENT_NAME,
+        display_name: AGENT_DISPLAY_NAME || AGENT_NAME,
+        owner_label: AGENT_OWNER_LABEL || undefined,
+      }),
+    });
+  } catch (error) {
+    console.error("Agent identity registration failed:", error);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +191,7 @@ server.tool(
     sseClient.subscribe(project.id, (_message: Message) => {
       server.server.sendResourceListChanged();
     });
+    await autoRegisterAgentIdentity();
     return {
       content: [
         {
@@ -196,6 +226,7 @@ server.tool(
     sseClient.subscribe(project.id, (_message: Message) => {
       server.server.sendResourceListChanged();
     });
+    await autoRegisterAgentIdentity();
 
     return {
       content: [
