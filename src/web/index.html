@@ -14,6 +14,7 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -623,11 +624,113 @@
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
       }
 
-      .message-bubble p {
+      .message-bubble .md-content {
         margin: 0;
         line-height: 1.58;
-        white-space: pre-wrap;
         word-break: break-word;
+      }
+
+      .message-bubble .md-content p {
+        margin: 0 0 0.5em;
+      }
+
+      .message-bubble .md-content p:last-child {
+        margin-bottom: 0;
+      }
+
+      .message-bubble .md-content code {
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.08);
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        font-size: 0.88em;
+      }
+
+      [data-theme="light"] .message-bubble .md-content code {
+        background: rgba(0, 0, 0, 0.06);
+      }
+
+      .message-bubble .md-content pre {
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.3);
+        overflow-x: auto;
+        margin: 8px 0;
+      }
+
+      [data-theme="light"] .message-bubble .md-content pre {
+        background: rgba(0, 0, 0, 0.05);
+      }
+
+      .message-bubble .md-content pre code {
+        padding: 0;
+        background: transparent;
+        font-size: 0.85em;
+      }
+
+      .message-bubble .md-content ul,
+      .message-bubble .md-content ol {
+        margin: 4px 0;
+        padding-left: 1.5em;
+      }
+
+      .message-bubble .md-content strong {
+        font-weight: 700;
+      }
+
+      .message-bubble .md-content a {
+        color: #60a5fa;
+        text-decoration: none;
+      }
+
+      .message-bubble .md-content a:hover {
+        text-decoration: underline;
+      }
+
+      .message-bubble .md-content blockquote {
+        margin: 6px 0;
+        padding: 4px 12px;
+        border-left: 3px solid rgba(255,255,255,0.2);
+        color: var(--muted);
+      }
+
+      [data-theme="light"] .message-bubble .md-content blockquote {
+        border-left-color: rgba(0,0,0,0.15);
+      }
+
+      .provenance-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .provenance-badge.human {
+        background: rgba(251, 146, 60, 0.15);
+        color: #fb923c;
+      }
+
+      .provenance-badge.agent {
+        background: rgba(96, 165, 250, 0.15);
+        color: #60a5fa;
+      }
+
+      .provenance-badge.system {
+        background: rgba(148, 163, 184, 0.15);
+        color: #94a3b8;
+      }
+
+      .message.system-message .message-avatar {
+        opacity: 0.6;
+      }
+
+      .message.system-message .message-bubble {
+        border-style: dashed;
+        opacity: 0.8;
       }
 
       .composer {
@@ -1048,6 +1151,7 @@
       const state = {
         currentProjectId: "",
         currentProjectCode: "",
+        currentRoomName: "",
         eventSource: null,
         reconnectTimer: null,
         reconnectDelay: 1200,
@@ -1088,10 +1192,28 @@
       function getSenderColor(sender) {
         const normalized = String(sender || "").toLowerCase();
         if (normalized === "orchestrator") return "var(--sender-orchestrator)";
-        if (normalized === "codex") return "var(--sender-codex)";
-        if (normalized === "claude") return "var(--sender-claude)";
+        if (normalized === "codex" || normalized === "codex-agent") return "var(--sender-codex)";
+        if (normalized === "claude" || normalized === "antigravity") return "var(--sender-claude)";
         if (normalized === "human") return "var(--sender-human)";
         return "var(--sender-default)";
+      }
+
+      function getSenderProvenance(sender) {
+        const normalized = String(sender || "").toLowerCase();
+        if (normalized === "human") return "human";
+        if (normalized === "letagents" || normalized === "system") return "system";
+        return "agent";
+      }
+
+      function renderMarkdown(text) {
+        if (typeof marked !== "undefined" && marked.parse) {
+          try {
+            return marked.parse(text, { breaks: true, gfm: true });
+          } catch (_) {
+            return escapeHtml(text);
+          }
+        }
+        return escapeHtml(text);
       }
 
       function formatTimestamp(value) {
@@ -1150,18 +1272,20 @@
 
         for (const message of sortedMessages) {
           const senderColor = getSenderColor(message.sender);
+          const provenance = getSenderProvenance(message.sender);
           const wrapper = document.createElement("article");
-          wrapper.className = "message";
+          wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
               <div class="message-meta">
                 <strong>${escapeHtml(message.sender)}</strong>
+                <span class="provenance-badge ${provenance}">${provenance}</span>
                 <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
               </div>
               <div class="message-bubble">
-                <p>${escapeHtml(message.text)}</p>
+                <div class="md-content">${renderMarkdown(message.text)}</div>
               </div>
             </div>
           `;
@@ -1195,9 +1319,11 @@
         const hasProject = Boolean(state.currentProjectId);
         elements.joinCodeText.textContent = state.currentProjectCode || "----";
         elements.projectIdLabel.textContent = hasProject ? state.currentProjectId : "No active room";
-        elements.chatTitle.textContent = hasProject ? `Project ${state.currentProjectId}` : "No active project";
+        elements.chatTitle.textContent = hasProject
+          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Project ${state.currentProjectId}`)
+          : "No active project";
         elements.chatSubtitle.textContent = hasProject
-          ? "Realtime room stream with polished sender-aware threads."
+          ? `Room ${state.currentProjectId}${state.currentProjectCode ? ` · ${state.currentProjectCode}` : ''}`
           : "Create a new room or join one with a code.";
         elements.copyJoinCodeBtn.disabled = !state.currentProjectCode;
         elements.sendMessageBtn.disabled = !hasProject;
