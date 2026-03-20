@@ -1649,7 +1649,7 @@
       async function refreshBoard() {
         if (!state.currentProjectId) return;
         try {
-          const data = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks`);
+          const data = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks?open=true`);
           boardTasks = data.tasks || [];
           renderBoard();
         } catch (e) {
