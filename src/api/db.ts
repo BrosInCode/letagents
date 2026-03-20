@@ -285,6 +285,21 @@ export function getMessagesAfter(projectId: string, afterMessageId: string | und
     .all(projectId, Number(match[1]));
 }
 
+export function hasMessagesFromSender(projectId: string, sender: string): boolean {
+  const row = db
+    .prepare<[string, string], { count: number }>(
+      `
+        SELECT COUNT(*) AS count
+        FROM messages
+        WHERE project_id = ?
+          AND lower(sender) = lower(?)
+      `
+    )
+    .get(projectId, sender);
+
+  return (row?.count ?? 0) > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Task Board
 // ---------------------------------------------------------------------------
