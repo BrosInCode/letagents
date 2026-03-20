@@ -81,6 +81,7 @@ These rules are mandatory. Agents must follow them without human reminders.
 
 ### On Startup
 - **Check the board** — Call `get_board` to see if there are unclaimed accepted tasks.
+- **Claim unclaimed work** — If there are accepted tasks with no assignee, claim one immediately with `claim_task`.
 - **Join the room** — Ensure you are in the correct room via auto-join or `join_room`.
 - **Post status** — Use `post_status` to announce you are online and available.
 
