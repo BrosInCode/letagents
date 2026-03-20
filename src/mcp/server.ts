@@ -853,6 +853,47 @@ server.tool(
   }
 );
 
+// -- check_repo_visibility --------------------------------------------------
+
+server.tool(
+  "check_repo_visibility",
+  "Auto-detect the current repo's git remote and check if it's public or private. Returns the canonical key, provider, visibility, and suggested room type (discoverable for public, invite for private/unknown). Useful for deciding whether to auto-join a discoverable room or create an invite room.",
+  {
+    cwd: z
+      .string()
+      .optional()
+      .describe("Working directory to detect git remote from. Defaults to the MCP server's working directory."),
+  },
+  async ({ cwd }) => {
+    const { autoDetectRepo } = await import("./repo-visibility.js");
+
+    const result = await autoDetectRepo(cwd);
+
+    if (!result) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              error: "Not in a git repository or no remote configured",
+              suggestion: "Use create_project to create an invite room instead",
+            }, null, 2),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
