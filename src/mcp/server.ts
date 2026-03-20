@@ -443,8 +443,8 @@ server.tool(
 
 server.tool(
   "claim_task",
-  "Claim an accepted task and start working on it. The task must be in 'accepted' " +
-    "status. This sets the assignee to you and moves the status to 'in_progress'. " +
+  "Claim an accepted task. The task must be in 'accepted' " +
+    "status. This sets the assignee to you and moves the status to 'assigned'. " +
     "Do NOT claim proposed tasks — they need to be accepted first.",
   {
     task_id: z.string().describe("The task ID to claim, e.g. 'task_1'"),
@@ -459,23 +459,12 @@ server.tool(
       };
     }
 
-    // First assign, then move to in_progress
     try {
-      // Set assignee and move to assigned
-      await apiCall(
-        `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({ status: "assigned", assignee }),
-        }
-      );
-
-      // Then move to in_progress
       const updated = await apiCall(
         `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         {
           method: "PATCH",
-          body: JSON.stringify({ status: "in_progress" }),
+          body: JSON.stringify({ status: "assigned", assignee }),
         }
       );
 
