@@ -1,13 +1,70 @@
 import { and, asc, eq, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./db/client.js";
-import { id_sequences, messages, rooms, tasks } from "./db/schema.js";
+import {
+  accounts,
+  agents,
+  auth_sessions,
+  auth_states,
+  id_sequences,
+  messages,
+  project_admins,
+  rooms,
+  tasks,
+} from "./db/schema.js";
 
 export interface Project {
   id: string;
   code: string;
   name?: string;
   created_at: string;
+}
+
+export interface Account {
+  id: string;
+  provider: string;
+  provider_user_id: string;
+  login: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Session {
+  id: string;
+  account_id: string;
+  token: string;
+  provider_access_token: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface SessionAccount extends Session {
+  provider: string;
+  provider_user_id: string;
+  login: string;
+  display_name: string | null;
+  avatar_url: string | null;
+}
+
+export interface AuthState {
+  id: string;
+  state: string;
+  redirect_to: string | null;
+  created_at: string;
+}
+
+export interface AgentIdentity {
+  id: string;
+  canonical_key: string;
+  name: string;
+  display_name: string;
+  owner_account_id: string;
+  owner_login: string;
+  owner_label: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Message {
@@ -173,6 +230,24 @@ export async function getProjectById(id: string): Promise<Project | undefined> {
   return project ? toProject(project) : undefined;
 }
 
+export async function rotateProjectCode(projectId: string): Promise<Project | null> {
+  const project = await getProjectById(projectId);
+  if (!project) return null;
+
+  while (true) {
+    const nextCode = generateCode();
+
+    try {
+      await db.update(rooms).set({ code: nextCode }).where(eq(rooms.id, projectId));
+      return { ...project, code: nextCode };
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
 export async function addMessage(projectId: string, sender: string, text: string): Promise<Message> {
   const message: MessageRow = {
     id: await nextPrefixedId("messages", "msg"),
@@ -241,6 +316,223 @@ export async function hasMessagesFromSender(projectId: string, sender: string): 
     })
     .from(messages)
     .where(and(eq(messages.project_id, projectId), sql`LOWER(${messages.sender}) = LOWER(${sender})`));
+
+  return (row?.count ?? 0) > 0;
+}
+
+export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
+  const authState: AuthState = {
+    id: await nextPrefixedId("auth_states", "auth_state"),
+    state,
+    redirect_to: redirectTo ?? null,
+    created_at: new Date().toISOString(),
+  };
+
+  await db.insert(auth_states).values(authState);
+  return authState;
+}
+
+export async function consumeAuthState(state: string): Promise<AuthState | null> {
+  return db.transaction(async (tx) => {
+    const [authState] = await tx.select().from(auth_states).where(eq(auth_states.state, state)).limit(1);
+    if (!authState) {
+      return null;
+    }
+
+    await tx.delete(auth_states).where(eq(auth_states.state, state));
+    return authState;
+  });
+}
+
+export async function upsertAccount(input: {
+  provider: string;
+  provider_user_id: string;
+  login: string;
+  display_name?: string | null;
+  avatar_url?: string | null;
+}): Promise<Account> {
+  const [existing] = await db
+    .select()
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.provider, input.provider),
+        eq(accounts.provider_user_id, input.provider_user_id)
+      )
+    )
+    .limit(1);
+
+  const now = new Date().toISOString();
+
+  if (existing) {
+    await db
+      .update(accounts)
+      .set({
+        login: input.login,
+        display_name: input.display_name ?? null,
+        avatar_url: input.avatar_url ?? null,
+        updated_at: now,
+      })
+      .where(eq(accounts.id, existing.id));
+
+    return {
+      ...existing,
+      login: input.login,
+      display_name: input.display_name ?? null,
+      avatar_url: input.avatar_url ?? null,
+      updated_at: now,
+    };
+  }
+
+  const account: Account = {
+    id: await nextPrefixedId("accounts", "acct"),
+    provider: input.provider,
+    provider_user_id: input.provider_user_id,
+    login: input.login,
+    display_name: input.display_name ?? null,
+    avatar_url: input.avatar_url ?? null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.insert(accounts).values(account);
+  return account;
+}
+
+export async function createSession(
+  accountId: string,
+  token: string,
+  expiresAt: string,
+  providerAccessToken?: string | null
+): Promise<Session> {
+  const session: Session = {
+    id: await nextPrefixedId("auth_sessions", "sess"),
+    account_id: accountId,
+    token,
+    provider_access_token: providerAccessToken ?? null,
+    expires_at: expiresAt,
+    created_at: new Date().toISOString(),
+  };
+
+  await db.insert(auth_sessions).values(session);
+  return session;
+}
+
+export async function getSessionAccountByToken(token: string): Promise<SessionAccount | null> {
+  const [session] = await db
+    .select({
+      id: auth_sessions.id,
+      account_id: auth_sessions.account_id,
+      token: auth_sessions.token,
+      provider_access_token: auth_sessions.provider_access_token,
+      expires_at: auth_sessions.expires_at,
+      created_at: auth_sessions.created_at,
+      provider: accounts.provider,
+      provider_user_id: accounts.provider_user_id,
+      login: accounts.login,
+      display_name: accounts.display_name,
+      avatar_url: accounts.avatar_url,
+    })
+    .from(auth_sessions)
+    .innerJoin(accounts, eq(auth_sessions.account_id, accounts.id))
+    .where(eq(auth_sessions.token, token))
+    .limit(1);
+
+  if (!session) {
+    return null;
+  }
+
+  if (new Date(session.expires_at).getTime() <= Date.now()) {
+    await deleteSessionByToken(token);
+    return null;
+  }
+
+  return session;
+}
+
+export async function deleteSessionByToken(token: string): Promise<void> {
+  await db.delete(auth_sessions).where(eq(auth_sessions.token, token));
+}
+
+export async function registerAgentIdentity(input: {
+  owner_account_id: string;
+  owner_login: string;
+  owner_label: string;
+  name: string;
+  display_name?: string;
+}): Promise<AgentIdentity> {
+  const canonicalKey = `${input.owner_login}/${input.name}`;
+  const [existing] = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.canonical_key, canonicalKey))
+    .limit(1);
+
+  const now = new Date().toISOString();
+  const displayName = input.display_name?.trim() || input.name;
+
+  if (existing) {
+    await db
+      .update(agents)
+      .set({
+        display_name: displayName,
+        owner_label: input.owner_label,
+        updated_at: now,
+      })
+      .where(eq(agents.id, existing.id));
+
+    return {
+      ...existing,
+      display_name: displayName,
+      owner_label: input.owner_label,
+      updated_at: now,
+    };
+  }
+
+  const agent: AgentIdentity = {
+    id: await nextPrefixedId("agents", "agent"),
+    canonical_key: canonicalKey,
+    name: input.name,
+    display_name: displayName,
+    owner_account_id: input.owner_account_id,
+    owner_login: input.owner_login,
+    owner_label: input.owner_label,
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.insert(agents).values(agent);
+  return agent;
+}
+
+export async function getAgentIdentitiesForOwner(ownerAccountId: string): Promise<AgentIdentity[]> {
+  return db
+    .select()
+    .from(agents)
+    .where(eq(agents.owner_account_id, ownerAccountId))
+    .orderBy(asc(agents.name));
+}
+
+export async function assignProjectAdmin(projectId: string, accountId: string): Promise<void> {
+  await db
+    .insert(project_admins)
+    .values({
+      project_id: projectId,
+      account_id: accountId,
+      assigned_at: new Date().toISOString(),
+    })
+    .onConflictDoNothing();
+}
+
+export async function isProjectAdmin(projectId: string, accountId: string): Promise<boolean> {
+  const [row] = await db
+    .select({
+      count: sql<number>`COUNT(*)::int`,
+    })
+    .from(project_admins)
+    .where(
+      and(eq(project_admins.project_id, projectId), eq(project_admins.account_id, accountId))
+    );
 
   return (row?.count ?? 0) > 0;
 }

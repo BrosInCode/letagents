@@ -28,7 +28,7 @@ function spawnAgent(command: string, args: string[], cwd: string): Promise<{ std
 // Config
 // ---------------------------------------------------------------------------
 
-const API_URL = process.env.LETAGENTS_API_URL || "http://localhost:3001";
+const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 const POLL_TIMEOUT_MS = 60000; // 1 minute poll timeout
 const DEFAULT_BASE_BRANCH = "dev";
 
