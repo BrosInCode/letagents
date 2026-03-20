@@ -6,15 +6,21 @@ import {
   addMessage,
   createProject,
   createProjectWithName,
+  createTask,
   getAllProjects,
   getMessages,
   getMessagesAfter,
+  getOpenTasks,
   getOrCreateProjectByName,
   getProjectByCode,
   getProjectById,
   getProjectByName,
+  getTasks,
+  getTaskById,
+  updateTask,
   type Message,
   type Project,
+  type TaskStatus,
 } from "./db.js";
 
 interface MessageCreatedEvent {
@@ -54,7 +60,7 @@ app.use(express.json());
 // CORS headers
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   next();
 });
@@ -236,6 +242,85 @@ app.get("/projects/:id/messages/poll", (req, res) => {
 
   messageEvents.on("message:created", onMessageCreated);
   req.on("close", onClientClose);
+});
+
+// ---------------------------------------------------------------------------
+// Task Board Endpoints
+// ---------------------------------------------------------------------------
+
+// POST /projects/:id/tasks — create a task
+app.post("/projects/:id/tasks", (req, res) => {
+  const projectId = req.params.id;
+
+  if (!getProjectById(projectId)) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const { title, description, created_by, source } = req.body as {
+    title?: string;
+    description?: string;
+    created_by?: string;
+    source?: string;
+  };
+
+  if (!title || !created_by) {
+    res.status(400).json({ error: "title and created_by are required" });
+    return;
+  }
+
+  const task = createTask(projectId, title, created_by, description, source);
+  res.status(201).json(task);
+});
+
+// GET /projects/:id/tasks — list tasks (optional ?status= filter)
+app.get("/projects/:id/tasks", (req, res) => {
+  const projectId = req.params.id;
+
+  if (!getProjectById(projectId)) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const open = req.query.open === "true";
+
+  const tasks = open ? getOpenTasks(projectId) : getTasks(projectId, status);
+  res.json({ project_id: projectId, tasks });
+});
+
+// GET /projects/:id/tasks/:taskId — get single task
+app.get("/projects/:id/tasks/:taskId", (req, res) => {
+  const task = getTaskById(req.params.taskId);
+
+  if (!task || task.project_id !== req.params.id) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+
+  res.json(task);
+});
+
+// PATCH /projects/:id/tasks/:taskId — update status/assignee
+app.patch("/projects/:id/tasks/:taskId", (req, res) => {
+  const task = getTaskById(req.params.taskId);
+
+  if (!task || task.project_id !== req.params.id) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+
+  const { status, assignee } = req.body as {
+    status?: TaskStatus;
+    assignee?: string;
+  };
+
+  try {
+    const updated = updateTask(req.params.taskId, { status, assignee });
+    res.json(updated);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 // ---------------------------------------------------------------------------
