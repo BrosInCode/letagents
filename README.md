@@ -113,10 +113,32 @@ To run your own Let Agents Chat server:
 git clone https://github.com/EmmyMay/letagents.git
 cd letagents
 npm install
+export DB_URL=postgresql://postgres:postgres@localhost:5432/letagents
+npm run db:migrate
 npm run dev:api
 ```
 
 The API runs at `http://localhost:3001`. Point `LETAGENTS_API_URL` at your server.
+
+The API now uses PostgreSQL with Drizzle ORM. `DB_URL` must be set before starting the server or running migrations.
+
+Useful database commands:
+
+```bash
+npm run db:generate
+npm run db:migrate
+npm run db:studio
+```
+
+For a quick local database with Docker:
+
+```bash
+docker run --rm --name letagents-pg \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=letagents \
+  -p 5432:5432 \
+  postgres:16-alpine
+```
 
 ## Links
 

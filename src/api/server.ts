@@ -5,7 +5,6 @@ import { fileURLToPath } from "url";
 import {
   addMessage,
   createProject,
-  createProjectWithName,
   createTask,
   getAllProjects,
   getMessages,
@@ -14,13 +13,11 @@ import {
   getOrCreateProjectByName,
   getProjectByCode,
   getProjectById,
-  getProjectByName,
   getTasks,
   getTaskById,
   hasMessagesFromSender,
   updateTask,
   type Message,
-  type Project,
   type TaskStatus,
 } from "./db.js";
 
@@ -29,8 +26,8 @@ interface MessageCreatedEvent {
   message: Message;
 }
 
-function emitProjectMessage(projectId: string, sender: string, text: string): Message {
-  const message = addMessage(projectId, sender, text);
+async function emitProjectMessage(projectId: string, sender: string, text: string): Promise<Message> {
+  const message = await addMessage(projectId, sender, text);
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
 }
@@ -65,7 +62,7 @@ function formatTaskLifecycleStatus(task: {
   }
 }
 
-function isTrustedAgentCreator(projectId: string, createdBy: string): boolean {
+async function isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean> {
   const normalizedSender = createdBy.trim().toLowerCase();
   if (!normalizedSender || normalizedSender === "human" || normalizedSender === "letagents") {
     return false;
@@ -129,8 +126,8 @@ import {
 } from "./room-routing.js";
 
 // API endpoint to resolve room identifiers (used by the web client)
-app.get("/api/rooms/resolve/:identifier(*)", (req, res) => {
-  const identifier = decodeURIComponent(req.params["identifier(*)"] || "");
+app.get(/^\/api\/rooms\/resolve\/(.+)$/, (req, res) => {
+  const identifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(identifier);
   res.json(resolved);
 });
@@ -151,8 +148,8 @@ app.get("/:provider/:owner/:repo", (req, res, next) => {
 
 // Canonical room entry: /in/* — serves the web UI with room context
 // The web client reads the room identifier from the URL and connects to the room
-app.get("/in/:room(*)", (req, res) => {
-  const roomIdentifier = decodeURIComponent(req.params["room(*)"] || "");
+app.get(/^\/in\/(.+)$/, (req, res) => {
+  const roomIdentifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(roomIdentifier);
 
   // Normalize the URL if the room name wasn't canonical
@@ -171,20 +168,20 @@ app.get("/api/health", (_req, res) => {
 });
 
 // GET /projects — list all projects
-app.get("/projects", (_req, res) => {
-  res.json({ projects: getAllProjects() });
+app.get("/projects", async (_req, res) => {
+  res.json({ projects: await getAllProjects() });
 });
 
 // POST /projects — create a new project
-app.post("/projects", (_req, res) => {
-  const project = createProject();
+app.post("/projects", async (_req, res) => {
+  const project = await createProject();
   res.status(201).json(project);
 });
 
 // GET /projects/join/:code — look up project by join code
-app.get("/projects/join/:code", (req, res) => {
+app.get("/projects/join/:code", async (req, res) => {
   const code = req.params.code.toUpperCase();
-  const project = getProjectByCode(code);
+  const project = await getProjectByCode(code);
 
   if (!project) {
     res.status(404).json({ error: "Project not found for the given code" });
@@ -195,17 +192,17 @@ app.get("/projects/join/:code", (req, res) => {
 });
 
 // POST /projects/room/:name — create or join a named room
-app.post("/projects/room/:name", (req, res) => {
+app.post("/projects/room/:name", async (req, res) => {
   const name = decodeURIComponent(req.params.name);
-  const { project, created } = getOrCreateProjectByName(name);
+  const { project, created } = await getOrCreateProjectByName(name);
   res.status(created ? 201 : 200).json({ id: project.id, code: project.code, name: project.name });
 });
 
 // POST /projects/:id/messages — send a message
-app.post("/projects/:id/messages", (req, res) => {
+app.post("/projects/:id/messages", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -217,30 +214,30 @@ app.post("/projects/:id/messages", (req, res) => {
     return;
   }
 
-  const message = emitProjectMessage(projectId, sender, text);
+  const message = await emitProjectMessage(projectId, sender, text);
   res.status(201).json(message);
 });
 
 // GET /projects/:id/messages — read all messages
-app.get("/projects/:id/messages", (req, res) => {
+app.get("/projects/:id/messages", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
   res.json({
     project_id: projectId,
-    messages: getMessages(projectId),
+    messages: await getMessages(projectId),
   });
 });
 
 // GET /projects/:id/messages/stream — stream new messages over SSE
-app.get("/projects/:id/messages/stream", (req, res) => {
+app.get("/projects/:id/messages/stream", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -273,17 +270,17 @@ app.get("/projects/:id/messages/stream", (req, res) => {
 });
 
 // GET /projects/:id/messages/poll?after=<msg_id> — wait for new messages
-app.get("/projects/:id/messages/poll", (req, res) => {
+app.get("/projects/:id/messages/poll", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
-  const existingMessages = getMessagesAfter(projectId, after);
+  const existingMessages = await getMessagesAfter(projectId, after);
 
   if (existingMessages.length > 0) {
     res.json({ project_id: projectId, messages: existingMessages });
@@ -308,12 +305,12 @@ app.get("/projects/:id/messages/poll", (req, res) => {
     res.json({ project_id: projectId, messages: nextMessages });
   };
 
-  const onMessageCreated = ({ projectId: eventProjectId }: MessageCreatedEvent) => {
+  const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) {
       return;
     }
 
-    const nextMessages = getMessagesAfter(projectId, after);
+    const nextMessages = await getMessagesAfter(projectId, after);
     if (nextMessages.length > 0) {
       resolveRequest(nextMessages);
     }
@@ -341,10 +338,10 @@ app.get("/projects/:id/messages/poll", (req, res) => {
 // ---------------------------------------------------------------------------
 
 // POST /projects/:id/tasks — create a task
-app.post("/projects/:id/tasks", (req, res) => {
+app.post("/projects/:id/tasks", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -361,28 +358,28 @@ app.post("/projects/:id/tasks", (req, res) => {
     return;
   }
 
-  const task = createTask(projectId, title, created_by, description, source_message_id);
+  const task = await createTask(projectId, title, created_by, description, source_message_id);
 
-  if (!isTrustedAgentCreator(projectId, created_by)) {
+  if (!(await isTrustedAgentCreator(projectId, created_by))) {
     res.status(201).json(task);
     return;
   }
 
-  const acceptedTask = updateTask(task.id, { status: "accepted" });
+  const acceptedTask = await updateTask(task.id, { status: "accepted" });
   if (!acceptedTask) {
     res.status(500).json({ error: "Task created but could not be auto-accepted" });
     return;
   }
 
-  emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
   res.status(201).json(acceptedTask);
 });
 
 // GET /projects/:id/tasks — list tasks (optional ?status= filter)
-app.get("/projects/:id/tasks", (req, res) => {
+app.get("/projects/:id/tasks", async (req, res) => {
   const projectId = req.params.id;
 
-  if (!getProjectById(projectId)) {
+  if (!(await getProjectById(projectId))) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
@@ -390,13 +387,13 @@ app.get("/projects/:id/tasks", (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const open = req.query.open === "true";
 
-  const tasks = open ? getOpenTasks(projectId) : getTasks(projectId, status);
+  const tasks = open ? await getOpenTasks(projectId) : await getTasks(projectId, status);
   res.json({ project_id: projectId, tasks });
 });
 
 // GET /projects/:id/tasks/:taskId — get single task
-app.get("/projects/:id/tasks/:taskId", (req, res) => {
-  const task = getTaskById(req.params.taskId);
+app.get("/projects/:id/tasks/:taskId", async (req, res) => {
+  const task = await getTaskById(req.params.taskId);
 
   if (!task || task.project_id !== req.params.id) {
     res.status(404).json({ error: "Task not found" });
@@ -407,8 +404,8 @@ app.get("/projects/:id/tasks/:taskId", (req, res) => {
 });
 
 // PATCH /projects/:id/tasks/:taskId — update status/assignee
-app.patch("/projects/:id/tasks/:taskId", (req, res) => {
-  const task = getTaskById(req.params.taskId);
+app.patch("/projects/:id/tasks/:taskId", async (req, res) => {
+  const task = await getTaskById(req.params.taskId);
 
   if (!task || task.project_id !== req.params.id) {
     res.status(404).json({ error: "Task not found" });
@@ -422,9 +419,9 @@ app.patch("/projects/:id/tasks/:taskId", (req, res) => {
   };
 
   try {
-    const updated = updateTask(req.params.taskId, { status, assignee, pr_url });
+    const updated = await updateTask(req.params.taskId, { status, assignee, pr_url });
     if (updated && status && status !== task.status) {
-      emitProjectMessage(req.params.id, "letagents", formatTaskLifecycleStatus(updated));
+      await emitProjectMessage(req.params.id, "letagents", formatTaskLifecycleStatus(updated));
     }
     res.json(updated);
   } catch (error) {
