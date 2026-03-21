@@ -8,29 +8,27 @@ import {
   assignProjectAdmin,
   consumeAuthState,
   createAuthState,
-  createProject,
+  createAdHocRoom as createProject,
   createSession,
   createTask,
   deleteSessionByToken,
-  getAllProjects,
   getAgentIdentitiesForOwner,
   getMessages,
   getMessagesAfter,
   getOpenTasks,
-  getOrCreateProjectByName,
-  getProjectByCode,
-  getProjectById,
+  getOrCreateRoom as getOrCreateProjectByName,
+  getRoomById as getProjectByCode,
+  getRoomById as getProjectById,
   getSessionAccountByToken,
   getTaskById,
   getTasks,
   hasMessagesFromSender,
   isProjectAdmin,
   registerAgentIdentity,
-  rotateProjectCode,
   upsertAccount,
   updateTask,
   type Message,
-  type Project,
+  type Room as Project,
   type SessionAccount,
   type TaskStatus,
 } from "./db.js";
@@ -153,7 +151,7 @@ function clearSessionCookie(res: express.Response): void {
 }
 
 function isRepoBackedProject(project: Project): boolean {
-  return Boolean(project.name && /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(project.name));
+  return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(project.id);
 }
 
 async function resolveProjectRole(
@@ -168,9 +166,9 @@ async function resolveProjectRole(
     return "admin";
   }
 
-  if (project.name && parseGitHubRepoName(project.name) && sessionAccount.provider === "github") {
+  if (project.id && parseGitHubRepoName(project.id) && sessionAccount.provider === "github") {
     const eligible = await isGitHubRepoAdmin({
-      roomName: project.name,
+      roomName: project.id,
       login: sessionAccount.login,
       accessToken: sessionAccount.provider_access_token ?? "",
     });
@@ -422,7 +420,7 @@ app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects", async (_req, res) => {
-  res.json({ projects: await getAllProjects() });
+  res.json({ projects: [] });
 });
 
 app.post("/projects", async (req: AuthenticatedRequest, res) => {
@@ -442,12 +440,12 @@ app.get("/projects/join/:code", async (req, res) => {
     return;
   }
 
-  res.json({ id: project.id, code: project.code, name: project.name });
+  res.json({ id: project.id });
 });
 
 app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
   const name = decodeURIComponent(String(req.params.name));
-  const { project, created } = await getOrCreateProjectByName(name);
+  const { room: project, created } = await getOrCreateProjectByName(name);
 
   if (req.sessionAccount && created) {
     if (isRepoBackedProject(project)) {
@@ -457,7 +455,7 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  res.status(created ? 201 : 200).json({ id: project.id, code: project.code, name: project.name });
+  res.status(created ? 201 : 200).json({ id: project.id });
 });
 
 app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
@@ -485,28 +483,7 @@ app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
 });
 
 app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
-  const project = await getProjectById(projectId);
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  if (!(await requireAdmin(req, res, project))) {
-    return;
-  }
-
-  const rotated = await rotateProjectCode(project.id);
-  if (!rotated) {
-    res.status(500).json({ error: "Failed to rotate invite code" });
-    return;
-  }
-
-  res.json({
-    id: rotated.id,
-    code: rotated.code,
-    name: rotated.name,
-  });
+  res.status(400).json({ error: "Canonical IDs cannot be rotated" });
 });
 
 app.get("/agents/me", async (req: AuthenticatedRequest, res) => {
@@ -748,7 +725,7 @@ app.get("/projects/:id/tasks", async (req, res) => {
 app.get("/projects/:id/tasks/:taskId", async (req, res) => {
   const task = await getTaskById(req.params.taskId);
 
-  if (!task || task.project_id !== req.params.id) {
+  if (!task || task.room_id !== req.params.id) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -761,7 +738,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
   const taskId = String(req.params.taskId);
   const task = await getTaskById(taskId);
 
-  if (!task || task.project_id !== projectId) {
+  if (!task || task.room_id !== projectId) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
