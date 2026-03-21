@@ -574,6 +574,39 @@
         overflow: hidden;
       }
 
+      .new-messages-indicator {
+        position: absolute;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 20px;
+        padding: 8px 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+        transition: opacity 0.25s ease, transform 0.25s ease;
+        animation: indicator-pulse 2s ease-in-out infinite;
+      }
+
+      .new-messages-indicator:hover {
+        transform: translateX(-50%) translateY(-2px);
+        box-shadow: 0 6px 22px rgba(99,102,241,0.55);
+      }
+
+      .new-messages-indicator.hidden {
+        display: none;
+      }
+
+      @keyframes indicator-pulse {
+        0%, 100% { box-shadow: 0 4px 16px rgba(99,102,241,0.4); }
+        50% { box-shadow: 0 4px 22px rgba(99,102,241,0.65); }
+      }
+
       .messages {
         height: 100%;
         overflow-y: auto;
@@ -1168,6 +1201,7 @@
 
         <div class="messages-wrap">
           <div class="messages" id="messages"></div>
+          <button class="new-messages-indicator hidden" id="newMessagesIndicator" type="button">New messages ↓</button>
           <div class="empty-state" id="emptyState">
             <div class="empty-state-card">
               <h3>Open a project to begin</h3>
@@ -1243,9 +1277,14 @@
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
+        newMessagesIndicator: document.getElementById("newMessagesIndicator"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
       };
+
+      elements.newMessagesIndicator.addEventListener("click", () => {
+        scrollMessagesToBottom(true);
+      });
 
       // --- Notification Sound (Web Audio API) ---
       let audioCtx = null;
@@ -1368,15 +1407,20 @@
           .toUpperCase();
       }
 
+      function isNearBottom() {
+        const el = elements.messages;
+        return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+      }
+
       function scrollMessagesToBottom(force) {
-        const distanceFromBottom =
-          elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
-        if (force || distanceFromBottom < 140) {
+        if (force || isNearBottom()) {
           elements.messages.scrollTop = elements.messages.scrollHeight;
+          elements.newMessagesIndicator.classList.add("hidden");
         }
       }
 
-      function renderMessages() {
+      function renderMessages(isInitialLoad) {
+        const wasNearBottom = isInitialLoad || isNearBottom();
         const sortedMessages = Array.from(state.messages.values()).sort((a, b) => {
           return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
@@ -1426,7 +1470,9 @@
         }
 
         elements.messages.appendChild(fragment);
-        requestAnimationFrame(() => scrollMessagesToBottom(true));
+        if (wasNearBottom) {
+          requestAnimationFrame(() => scrollMessagesToBottom(true));
+        }
       }
 
       function upsertMessages(items) {
@@ -1439,14 +1485,21 @@
           changed = true;
         }
         if (changed) {
-          renderMessages();
-          if (state.isStreaming) playNotificationSound();
+          const nearBottom = isNearBottom();
+          renderMessages(false);
+          if (state.isStreaming) {
+            playNotificationSound();
+            if (!nearBottom) {
+              elements.newMessagesIndicator.classList.remove("hidden");
+            }
+          }
         }
       }
 
       function resetMessages() {
         state.messages.clear();
-        renderMessages();
+        elements.newMessagesIndicator.classList.add("hidden");
+        renderMessages(true);
       }
 
       function updateProjectUi() {
@@ -1638,7 +1691,7 @@
         for (const message of payload.messages || []) {
           state.messages.set(message.id, message);
         }
-        renderMessages();
+        renderMessages(true);
       }
 
       async function fetchParticipants() {
@@ -1657,7 +1710,7 @@
             state.participantsMap.set(p.name, p);
           }
           renderParticipants();
-          renderMessages();
+          renderMessages(false);
         } catch (error) {
           console.warn("Failed to fetch participants", error);
         }
