@@ -326,6 +326,14 @@
         letter-spacing: 0.16em;
       }
 
+      .join-code-copy[data-share-kind="url"] strong {
+        font-size: 0.98rem;
+        letter-spacing: 0;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
       .copy-pill {
         flex-shrink: 0;
         padding: 10px 14px;
@@ -852,6 +860,11 @@
           letter-spacing: 0.12em;
         }
 
+        .join-code-copy[data-share-kind="url"] strong {
+          font-size: 0.92rem;
+          letter-spacing: 0;
+        }
+
         .btn-row {
           grid-template-columns: 1fr;
         }
@@ -1046,13 +1059,13 @@
 
         <section class="section glass-block join-code-card">
           <div class="section-title">
-            <h2>Join Code</h2>
+            <h2 id="shareCardTitle">Invite Code</h2>
             <span id="projectIdLabel">No active room</span>
           </div>
           <div class="join-code-display">
-            <button class="join-code-copy" id="copyJoinCodeBtn" type="button">
+            <button class="join-code-copy" id="copyJoinCodeBtn" type="button" data-share-kind="code">
               <span>
-                <span class="copy-help">Share this room instantly</span>
+                <span class="copy-help" id="copyHelpText">Share this room instantly</span>
                 <strong id="joinCodeText">----</strong>
               </span>
               <span class="copy-pill" id="copyPillText">Copy</span>
@@ -1173,6 +1186,7 @@
         chatTitle: document.getElementById("chatTitle"),
         chatSubtitle: document.getElementById("chatSubtitle"),
         copyJoinCodeBtn: document.getElementById("copyJoinCodeBtn"),
+        copyHelpText: document.getElementById("copyHelpText"),
         copyPillText: document.getElementById("copyPillText"),
         emptyState: document.getElementById("emptyState"),
         joinCodeText: document.getElementById("joinCodeText"),
@@ -1182,6 +1196,7 @@
         presenceBadge: document.getElementById("presenceBadge"),
         projectIdLabel: document.getElementById("projectIdLabel"),
         senderLabel: document.getElementById("senderLabel"),
+        shareCardTitle: document.getElementById("shareCardTitle"),
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
@@ -1384,7 +1399,14 @@
         const hasRoom = Boolean(state.currentProjectId);
         const roomLocator = state.currentRoomName || state.currentProjectCode || state.currentProjectId;
         const roomDisplayName = state.currentRoomDisplayName || roomLocator;
-        elements.joinCodeText.textContent = state.currentProjectCode || "----";
+        const shareKind = getRoomShareKind();
+        const shareValue = getRoomShareValue();
+        elements.shareCardTitle.textContent = shareKind === "url" ? "Room URL" : "Invite Code";
+        elements.copyHelpText.textContent = shareKind === "url"
+          ? "Share this room URL instantly"
+          : "Share this room instantly";
+        elements.joinCodeText.textContent = shareValue || "----";
+        elements.copyJoinCodeBtn.dataset.shareKind = shareKind;
         elements.projectIdLabel.textContent = hasRoom
           ? roomDisplayName
           : "No active room";
@@ -1394,11 +1416,42 @@
         elements.chatSubtitle.textContent = hasRoom
           ? roomLocator
           : "Create a new room or join one with a code.";
-        elements.copyJoinCodeBtn.disabled = !state.currentProjectCode;
+        elements.copyJoinCodeBtn.disabled = !shareValue;
         elements.renameRoomBtn.hidden = !(hasRoom && state.currentRoomRole === "admin");
         elements.renameRoomBtn.disabled = !hasRoom;
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
+      }
+
+      function encodeRoomPathIdentifier(identifier) {
+        return String(identifier)
+          .split("/")
+          .map((segment) => encodeURIComponent(segment))
+          .join("/");
+      }
+
+      function getRoomShareKind() {
+        if (!state.currentProjectId || state.currentProjectCode) {
+          return "code";
+        }
+        return "url";
+      }
+
+      function getRoomShareValue() {
+        if (!state.currentProjectId) {
+          return "";
+        }
+
+        if (state.currentProjectCode) {
+          return state.currentProjectCode;
+        }
+
+        const identifier = state.currentRoomIdentifier || state.currentProjectId;
+        if (!identifier) {
+          return "";
+        }
+
+        return `${window.location.origin}/in/${encodeRoomPathIdentifier(identifier)}`;
       }
 
       function persistSession() {
@@ -1410,10 +1463,9 @@
         });
         localStorage.setItem("letagents:web:session", payload);
 
-        // Use clean /in/<code> URL — no query params
-        const code = state.currentProjectCode;
-        if (code) {
-          window.history.replaceState({}, "", `/in/${code}`);
+        const identifier = state.currentRoomIdentifier || state.currentProjectCode;
+        if (identifier) {
+          window.history.replaceState({}, "", `/in/${encodeRoomPathIdentifier(identifier)}`);
         }
       }
 
@@ -1624,15 +1676,21 @@
       }
 
       async function copyJoinCode() {
-        if (!state.currentProjectCode) {
-          setStatus("Create or join a room before copying its code.", "error");
+        const shareValue = getRoomShareValue();
+        const shareKind = getRoomShareKind();
+
+        if (!shareValue) {
+          setStatus("Create or join a room before copying its share value.", "error");
           return;
         }
 
         try {
-          await navigator.clipboard.writeText(state.currentProjectCode);
+          await navigator.clipboard.writeText(shareValue);
           elements.copyPillText.textContent = "Copied";
-          setStatus(`Copied join code ${state.currentProjectCode}.`, "success");
+          setStatus(
+            shareKind === "url" ? "Copied room URL." : `Copied invite code ${shareValue}.`,
+            "success"
+          );
           window.setTimeout(() => {
             elements.copyPillText.textContent = "Copy";
           }, 1600);
