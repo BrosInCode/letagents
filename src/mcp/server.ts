@@ -139,7 +139,9 @@ async function apiCall<T = unknown>(path: string, options?: RequestInit): Promis
 
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
+      // Only clear on 401 (invalid/expired credential), NOT on 403
+      // (valid credential but insufficient permissions, e.g., private repo access)
       clearStoredAuth();
     }
     throw new ApiError(res.status, body);
