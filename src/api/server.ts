@@ -180,7 +180,7 @@ function clearSessionCookie(res: express.Response): void {
 }
 
 function isRepoBackedProject(project: Project): boolean {
-  return Boolean(project.name && /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(project.name));
+  return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(project.id);
 }
 
 async function resolveProjectRole(
@@ -195,9 +195,9 @@ async function resolveProjectRole(
     return "admin";
   }
 
-  if (project.name && parseGitHubRepoName(project.name) && sessionAccount.provider === "github") {
+  if (parseGitHubRepoName(project.id) && sessionAccount.provider === "github") {
     const eligible = await isGitHubRepoAdmin({
-      roomName: project.name,
+      roomName: project.id,
       login: sessionAccount.login,
       accessToken: sessionAccount.provider_access_token ?? "",
     });
@@ -239,7 +239,7 @@ async function requireParticipant(
     return true;
   }
 
-  const roomName = project.name;
+  const roomName = project.id;
   if (!roomName || !parseGitHubRepoName(roomName)) {
     if (!req.sessionAccount) {
       res.status(401).json({ error: "Authentication required for repo-backed room actions" });
@@ -252,6 +252,10 @@ async function requireParticipant(
   const visibility = await getGitHubRepoVisibility(roomName, accessToken);
 
   if (visibility === "public") {
+    return true;
+  }
+
+  if (visibility === "unknown") {
     return true;
   }
 
