@@ -735,16 +735,32 @@
 
       .composer {
         display: grid;
-        grid-template-columns: 200px minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 12px;
         padding: 18px;
         border-top: 1px solid var(--line);
         background: linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0.06));
       }
 
-      .composer .select,
-      .composer .input {
+      .composer .message-textarea {
         min-height: 56px;
+        max-height: 160px;
+        resize: none;
+        overflow-y: auto;
+        font-family: inherit;
+        font-size: inherit;
+        line-height: 1.5;
+      }
+
+      .composer-sender-label {
+        font-size: 0.75rem;
+        color: var(--muted);
+        padding: 0 4px 4px;
+        grid-column: 1 / -1;
+      }
+
+      .composer-sender-label strong {
+        color: var(--accent);
       }
 
       .send-btn {
@@ -780,7 +796,7 @@
         }
 
         .composer {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr) auto;
         }
 
         .send-btn {
@@ -1106,22 +1122,15 @@
         </div>
 
         <form class="composer" id="composerForm">
-          <select class="select" id="senderInput" aria-label="Sender">
-            <option value="human">human</option>
-            <option value="orchestrator">orchestrator</option>
-            <option value="codex">codex</option>
-            <option value="claude">claude</option>
-            <option value="gpt">gpt</option>
-            <option value="agent">agent</option>
-          </select>
-          <input
-            class="input"
+          <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
+          <textarea
+            class="input message-textarea"
             id="messageInput"
-            type="text"
-            placeholder="Send a message to the room..."
+            placeholder="Send a message to the room... (Shift+Enter for new line)"
             autocomplete="off"
-          />
-          <button class="btn btn-primary send-btn" id="sendMessageBtn" type="submit">Send Message</button>
+            rows="1"
+          ></textarea>
+          <button class="btn btn-primary send-btn" id="sendMessageBtn" type="submit">Send</button>
         </form>
 
         <!-- Task Board Panel -->
@@ -1172,7 +1181,7 @@
         messageInput: document.getElementById("messageInput"),
         presenceBadge: document.getElementById("presenceBadge"),
         projectIdLabel: document.getElementById("projectIdLabel"),
-        senderInput: document.getElementById("senderInput"),
+        senderLabel: document.getElementById("senderLabel"),
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
@@ -1390,7 +1399,6 @@
         elements.renameRoomBtn.disabled = !hasRoom;
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
-        elements.senderInput.disabled = !hasRoom;
       }
 
       function persistSession() {
@@ -1589,11 +1597,11 @@
           return;
         }
 
-        const sender = elements.senderInput.value.trim();
+        const sender = state.senderName || "anonymous";
         const text = elements.messageInput.value.trim();
 
-        if (!sender || !text) {
-          setStatus("Both sender and message text are required.", "error");
+        if (!text) {
+          setStatus("Please enter a message.", "error");
           return;
         }
 
@@ -1605,6 +1613,7 @@
           });
           upsertMessages([message]);
           elements.messageInput.value = "";
+          elements.messageInput.style.height = "auto";
           scrollMessagesToBottom(true);
           setStatus(`Message sent as ${sender}.`, "success");
         } catch (error) {
@@ -1711,6 +1720,38 @@
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
       elements.composerForm.addEventListener("submit", sendMessage);
+
+      // --- Textarea: Enter sends, Shift+Enter for new line ---
+      elements.messageInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          elements.composerForm.dispatchEvent(new Event("submit", { cancelable: true }));
+        }
+      });
+
+      // --- Auto-resize textarea ---
+      elements.messageInput.addEventListener("input", () => {
+        elements.messageInput.style.height = "auto";
+        elements.messageInput.style.height = Math.min(elements.messageInput.scrollHeight, 160) + "px";
+      });
+
+      // --- Fetch session for sender name ---
+      (async function fetchSenderSession() {
+        try {
+          const res = await fetch("/auth/session", { credentials: "include" });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.authenticated && data.account) {
+              state.senderName = data.account.display_name || data.account.login || "human";
+              elements.senderLabel.innerHTML = `Sending as <strong>${escapeHtml(state.senderName)}</strong>`;
+            } else {
+              state.senderName = "anonymous";
+            }
+          }
+        } catch (_) {
+          state.senderName = "anonymous";
+        }
+      })();
 
       window.addEventListener("beforeunload", () => {
         disconnectStream();
