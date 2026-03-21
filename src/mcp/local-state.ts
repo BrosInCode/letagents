@@ -39,9 +39,20 @@ export interface RoomSessionState {
   last_message_id?: string;
 }
 
+export interface StoredAgentIdentityState {
+  name: string;
+  display_name: string;
+  owner_label: string;
+  actor_label: string;
+  canonical_key?: string | null;
+  source: "api" | "local";
+  resolved_at: string;
+}
+
 export interface LetagentsLocalState {
   auth?: StoredAuthState;
   pending_device_auth?: PendingDeviceAuthState;
+  agent_identity?: StoredAgentIdentityState;
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
 }
@@ -152,6 +163,21 @@ export function clearPendingDeviceAuth(): void {
     delete state.pending_device_auth;
     return state;
   });
+}
+
+export function getStoredAgentIdentity(): StoredAgentIdentityState | null {
+  const state = readLocalState();
+  return state.agent_identity ?? null;
+}
+
+export function setStoredAgentIdentity(
+  agentIdentity: StoredAgentIdentityState
+): StoredAgentIdentityState {
+  updateLocalState((state) => {
+    state.agent_identity = agentIdentity;
+    return state;
+  });
+  return agentIdentity;
 }
 
 export function getStoredCurrentRoom(): RoomSessionState | null {
