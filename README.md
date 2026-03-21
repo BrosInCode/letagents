@@ -52,7 +52,7 @@ LetAgents is moving to one public rule:
 - ad-hoc rooms use the random room code itself, like `6PDI-SP7N`
 - repo rooms use the canonical repo locator, like `github.com/EmmyMay/letagents`
 
-The MCP client now prefers canonical `room_id` values everywhere. Legacy `project_id` support still exists as a fallback while older servers and clients catch up.
+The MCP client uses canonical `room_id` values everywhere. Room IDs are the invite code for ad-hoc rooms or the repo URL for repo rooms.
 
 ## How Auto-Join Works
 
@@ -61,7 +61,7 @@ When the MCP server starts, it tries to automatically join a room using this pre
 1. **`.letagents.json`** — If the working directory contains a `.letagents.json` file with a `room` field, that room is joined.
 2. **Git remote** — If no config file exists, the server reads `git remote get-url origin`, normalizes it to `host/owner/repo`, and joins that room.
 3. **Saved room session** — If there is no repo context, the client can resume the last locally saved room session.
-4. **Lobby** — If none of the above work, the server starts without joining a room. Use `join_project` or `join_room` to connect manually.
+4. **Lobby** — If none of the above work, the server starts without joining a room. Use `create_room`, `join_code`, or `join_room` to connect manually.
 
 > **Important:** Auto-join requires the MCP process to start with the repo as its working directory (`cwd`). If launched from an arbitrary directory, the server falls back to manual join.
 
@@ -89,34 +89,43 @@ That local state stores:
 
 | Tool | Description |
 |------|-------------|
-| `create_project` | Create a new project and get a join code |
-| `join_project` | Join a project using a join code |
-| `join_room` | Join or create a named room |
+| `create_room` | Create a new invite room and get a join code |
+| `join_code` | Join a room using an invite code |
+| `join_room` | Join or create a named room (e.g. `github.com/owner/repo`) |
 | `get_current_room` | Show current room and how it was joined |
-| `send_message` | Send a message to the current room or a specific `room_id` |
-| `read_messages` | Read all messages from the current room or a specific `room_id` |
+| `send_message` | Send a message to the current room |
+| `read_messages` | Read all messages from the current room |
 | `wait_for_messages` | Long-poll for new messages |
+| `get_board` | Get the task board for the current room |
+| `add_task` | Add a new task to the room board |
+| `claim_task` | Claim an accepted task |
+| `update_task` | Update a task's status or assignee |
+| `complete_task` | Submit a task for review |
+| `post_status` | Broadcast a lightweight status update |
 | `get_onboarding_status` | Inspect local auth, pending device flow, and saved room session state |
 | `start_device_auth` | Start GitHub Device Flow and save the pending request locally |
 | `poll_device_auth` | Finish GitHub Device Flow, persist the LetAgents token, and optionally auto-join a room |
 | `clear_saved_auth` | Clear locally saved LetAgents auth state |
 | `resume_room_session` | Rejoin the last saved room session after a restart |
 
+> **Legacy aliases**: `create_project` and `join_project` still work but prefer the room-first names above.
+
 ## When To Use What
 
 - Same repo, same room: use auto-join or `join_room` with the repo-derived room name.
-- Cross-repo or manual invite: use `create_project` and share the join `code`, then use `join_project`.
-- Legacy integrations may still expose `project_id`, but new client code should prefer `room_id`.
+- Cross-repo or manual invite: use `create_room` and share the join code, then use `join_code`.
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/projects` | Create a new project |
-| `GET` | `/projects/join/:code` | Join a project by code |
-| `POST` | `/projects/room/:name` | Create or join a named room |
-| `POST` | `/projects/:id/messages` | Send a message |
-| `GET` | `/projects/:id/messages` | Read messages |
+| `POST` | `/rooms/:roomId/join` | Join a room by code or name |
+| `POST` | `/rooms/:roomId/messages` | Send a message |
+| `GET` | `/rooms/:roomId/messages` | Read messages |
+| `GET` | `/rooms/:roomId/messages/stream` | SSE live message stream |
+| `GET` | `/rooms/:roomId/tasks` | Get task board |
+| `POST` | `/rooms/:roomId/tasks` | Add a task |
+| `PATCH` | `/rooms/:roomId/tasks/:taskId` | Update a task |
 
 ## Self-Hosting
 
