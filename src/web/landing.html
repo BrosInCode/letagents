@@ -425,10 +425,40 @@
         githubSignInBtn: document.getElementById("githubSignInBtn"),
         statusText: document.getElementById("statusText"),
       };
+      const pageParams = new URLSearchParams(window.location.search);
 
       function setStatus(message, tone = "") {
         elements.statusText.textContent = message || "";
         elements.statusText.className = tone ? `status ${tone}` : "status";
+      }
+
+      function getRedirectTarget() {
+        const redirectTo = (pageParams.get("redirect_to") || "").trim();
+        if (!redirectTo || !redirectTo.startsWith("/") || redirectTo.startsWith("//")) {
+          return "/";
+        }
+        return redirectTo;
+      }
+
+      function applyEntryStatus() {
+        const reason = pageParams.get("reason");
+        const room = (pageParams.get("room") || "").trim();
+        const roomLabel = room ? ` ${room}` : "";
+
+        if (reason === "repo_signin_required") {
+          setStatus(
+            `Sign in with GitHub to enter repo room${roomLabel}. You will be sent back there after auth.`,
+            "warn"
+          );
+          return;
+        }
+
+        if (reason === "repo_access_denied") {
+          setStatus(
+            `This GitHub account does not have access to repo room${roomLabel}.`,
+            "error"
+          );
+        }
       }
 
       async function apiFetch(path, options) {
@@ -512,7 +542,7 @@
         try {
           const payload = await apiFetch("/auth/github/login", {
             method: "POST",
-            body: JSON.stringify({ redirect_to: "/" }),
+            body: JSON.stringify({ redirect_to: getRedirectTarget() }),
           });
           if (!payload || !payload.auth_url) {
             throw new Error("GitHub sign-in URL was not returned.");
@@ -526,6 +556,7 @@
 
 
 
+      applyEntryStatus();
       elements.createRoomBtn.addEventListener("click", createRoom);
       elements.joinCodeBtn.addEventListener("click", joinByCode);
       elements.githubSignInBtn.addEventListener("click", signInWithGitHub);

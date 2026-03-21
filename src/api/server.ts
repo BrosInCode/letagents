@@ -183,8 +183,43 @@ function clearSessionCookie(res: express.Response): void {
   );
 }
 
+function isRepoBackedRoomId(roomId: string): boolean {
+  return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(roomId);
+}
+
+function sanitizeRedirectPath(pathValue: string | null | undefined, fallback = "/"): string {
+  const trimmed = pathValue?.trim();
+  if (!trimmed || !trimmed.startsWith("/") || trimmed.startsWith("//")) {
+    return fallback;
+  }
+
+  try {
+    const parsed = new URL(trimmed, "http://localhost");
+    if (parsed.origin !== "http://localhost") {
+      return fallback;
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return fallback;
+  }
+}
+
+function buildLandingRedirect(input: {
+  reason: "repo_signin_required" | "repo_access_denied";
+  roomName: string;
+  redirectTo: string;
+}): string {
+  const params = new URLSearchParams({
+    reason: input.reason,
+    room: input.roomName,
+    redirect_to: sanitizeRedirectPath(input.redirectTo, "/"),
+  });
+  return `/?${params.toString()}`;
+}
+
 function isRepoBackedProject(project: Project): boolean {
-  return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(project.id);
+  return isRepoBackedRoomId(project.id);
 }
 
 async function resolveProjectRole(
@@ -285,6 +320,73 @@ async function requireParticipant(
   }
 
   return true;
+}
+
+async function resolveGitHubRoomEntryDecision(input: {
+  roomName: string;
+  sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined;
+  redirectTo: string;
+}): Promise<
+  | { kind: "allow" }
+  | { kind: "redirect"; location: string }
+> {
+  const githubRepo = parseGitHubRepoName(input.roomName);
+  if (!githubRepo) {
+    return { kind: "allow" };
+  }
+
+  if (!input.sessionAccount) {
+    return {
+      kind: "redirect",
+      location: buildLandingRedirect({
+        reason: "repo_signin_required",
+        roomName: input.roomName,
+        redirectTo: input.redirectTo,
+      }),
+    };
+  }
+
+  const visibility = await getGitHubRepoVisibility(
+    input.roomName,
+    input.sessionAccount.provider_access_token ?? undefined
+  );
+
+  if (visibility === "public") {
+    return { kind: "allow" };
+  }
+
+  if (
+    input.sessionAccount.provider !== "github" ||
+    !input.sessionAccount.provider_access_token
+  ) {
+    return {
+      kind: "redirect",
+      location: buildLandingRedirect({
+        reason: "repo_access_denied",
+        roomName: input.roomName,
+        redirectTo: input.redirectTo,
+      }),
+    };
+  }
+
+  const allowed = await isGitHubRepoCollaborator({
+    roomName: input.roomName,
+    login: input.sessionAccount.login,
+    accessToken: input.sessionAccount.provider_access_token,
+  });
+
+  if (!allowed) {
+    return {
+      kind: "redirect",
+      location: buildLandingRedirect({
+        reason: "repo_access_denied",
+        roomName: input.roomName,
+        redirectTo: input.redirectTo,
+      }),
+    };
+  }
+
+  return { kind: "allow" };
 }
 
 async function resolveRequestAccount(
@@ -398,13 +500,26 @@ app.get("/:provider/:owner/:repo", (req, res, next) => {
   res.redirect(301, `/in/${normalized}`);
 });
 
-app.get(/^\/in\/(.+)$/, (req, res) => {
+app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   const roomIdentifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(roomIdentifier);
 
   if (resolved.type === "room" && resolved.name !== roomIdentifier) {
     res.redirect(301, `/in/${resolved.name}`);
     return;
+  }
+
+  if (resolved.type === "room" && isRepoBackedRoomId(resolved.name)) {
+    const decision = await resolveGitHubRoomEntryDecision({
+      roomName: resolved.name,
+      sessionAccount: req.sessionAccount,
+      redirectTo: `/in/${resolved.name}`,
+    });
+
+    if (decision.kind === "redirect") {
+      res.redirect(302, decision.location);
+      return;
+    }
   }
 
   res.sendFile(path.join(WEB_DIR, "index.html"));
@@ -415,10 +530,10 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.post("/auth/github/login", async (req, res) => {
-  const redirectTo =
-    typeof req.body?.redirect_to === "string" && req.body.redirect_to.trim()
-      ? req.body.redirect_to.trim()
-      : "/";
+  const redirectTo = sanitizeRedirectPath(
+    typeof req.body?.redirect_to === "string" ? req.body.redirect_to : undefined,
+    "/"
+  );
   const state = crypto.randomBytes(24).toString("hex");
 
   await createAuthState(state, redirectTo);
