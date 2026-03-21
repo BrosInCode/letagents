@@ -455,14 +455,12 @@
       }
 
       function redirectToWorkspace(projectId, projectCode) {
-        const url = new URL("/app", window.location.origin);
-        if (projectId) {
-          url.searchParams.set("project", projectId);
+        const code = projectCode ? String(projectCode).toUpperCase() : "";
+        if (code) {
+          window.location.assign(`/in/${code}`);
+        } else {
+          window.location.assign("/app");
         }
-        if (projectCode) {
-          url.searchParams.set("code", String(projectCode).toUpperCase());
-        }
-        window.location.assign(url.toString());
       }
 
       function getPersistedSession() {
