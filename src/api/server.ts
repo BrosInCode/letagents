@@ -15,6 +15,7 @@ import {
   getAllProjects,
   getAgentIdentitiesForOwner,
   getOwnerTokenAccountByToken,
+  getProjectByName,
   getMessages,
   getMessagesAfter,
   getOpenTasks,
@@ -50,6 +51,7 @@ import {
 } from "./github-auth.js";
 import {
   isKnownProvider,
+  normalizeRoomId,
   normalizeRoomName,
   resolveRoomIdentifier,
 } from "./room-routing.js";
@@ -957,6 +959,348 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
     }
     res.json(updated);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// CANONICAL ROOM ROUTES  (/rooms/*room_id/)
+//
+// These are the primary public API endpoints. All consumers (MCP,
+// browser, CI agents) should use these instead of /projects/:id.
+//
+// Room ID can be:
+//   - Invite code:   ABCD-1234
+//   - Repo URL: github.com/owner/repo (also accepts https:// prefix,
+//               .git suffix, SSH remote format — all normalized)
+//
+// Error codes used in this section:
+//   NOT_AUTHENTICATED      — no credential at all
+//   TOKEN_INVALID          — credential present but not valid / revoked
+//   PRIVATE_REPO_NO_ACCESS — owner known, but no collaborator access
+//   ROOM_NOT_FOUND         — canonical ID does not map to any room
+// ═══════════════════════════════════════════════════════════════════
+
+/** Simple in-memory rate limiter for room join attempts. */
+const joinRateLimit = new Map<string, { count: number; resetAt: number }>();
+const JOIN_RATE_WINDOW_MS = 60_000;
+const JOIN_RATE_MAX = 10;
+
+function checkJoinRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = joinRateLimit.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    joinRateLimit.set(ip, { count: 1, resetAt: now + JOIN_RATE_WINDOW_MS });
+    return true;
+  }
+
+  entry.count += 1;
+  if (entry.count > JOIN_RATE_MAX) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Resolve a canonical room identifier to a project row.
+ *
+ * Returns null + sends response if the room cannot be found.
+ * For invite codes, looks up by `code`.
+ * For repo names, looks up (or creates) by `name`.
+ */
+async function resolveRoomOrReply(
+  roomId: string,
+  res: express.Response,
+  { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
+): Promise<Project | null> {
+  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(roomId)) {
+    const project = await getProjectByCode(roomId);
+    if (!project) {
+      res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+      return null;
+    }
+    return project;
+  }
+
+  if (allowCreate) {
+    const { project } = await getOrCreateProjectByName(roomId);
+    return project;
+  }
+
+  const found = await getProjectByName(roomId);
+  if (!found) {
+    res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+    return null;
+  }
+  return found;
+}
+
+app.get("/rooms/resolve/:identifier", (req, res) => {
+  const identifier = decodeURIComponent(req.params.identifier);
+  const normalized = normalizeRoomId(identifier);
+  const resolved = resolveRoomIdentifier(normalized);
+  res.json({ input: identifier, normalized, resolved });
+});
+
+app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const ip =
+    req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ??
+    req.socket.remoteAddress ??
+    "unknown";
+  if (!checkJoinRateLimit(ip)) {
+    res.status(429).json({
+      error: "Too many join attempts. Please slow down.",
+      code: "RATE_LIMITED",
+    });
+    return;
+  }
+
+  const project = await resolveRoomOrReply(roomId, res, { allowCreate: true });
+  if (!project) return;
+
+  if (req.sessionAccount) {
+    if (isRepoBackedProject(project)) {
+      await resolveProjectRole(project, req.sessionAccount);
+    } else {
+      await assignProjectAdmin(project.id, req.sessionAccount.account_id);
+    }
+  }
+
+  const role = await resolveProjectRole(project, req.sessionAccount);
+
+  res.status(200).json({
+    room_id: roomId,
+    name: project.name ?? null,
+    code: project.code,
+    created_at: project.created_at,
+    role,
+    authenticated: Boolean(req.sessionAccount),
+  });
+});
+
+app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const { sender, text } = req.body as { sender?: string; text?: string };
+  if (!sender || !text) {
+    res.status(400).json({ error: "sender and text are required" });
+    return;
+  }
+
+  const message = await emitProjectMessage(project.id, sender, text);
+  res.status(201).json({
+    ...message,
+    room_id: roomId,
+    project_id: undefined,
+  });
+});
+
+app.get(/^\/rooms\/(.+)\/messages$/, async (req, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  res.json({
+    room_id: roomId,
+    messages: await getMessages(project.id),
+  });
+});
+
+app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  const projectId = project.id;
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
+  const existingMessages = await getMessagesAfter(projectId, after);
+
+  if (existingMessages.length > 0) {
+    res.json({ room_id: roomId, messages: existingMessages });
+    return;
+  }
+
+  let settled = false;
+
+  const cleanup = () => {
+    clearTimeout(timeout);
+    messageEvents.off("message:created", onMessageCreated);
+    req.off("close", onClientClose);
+  };
+
+  const resolveRequest = (nextMessages: Message[]) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    res.json({ room_id: roomId, messages: nextMessages });
+  };
+
+  const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
+    if (eventProjectId !== projectId) return;
+    const nextMessages = await getMessagesAfter(projectId, after);
+    if (nextMessages.length > 0) resolveRequest(nextMessages);
+  };
+
+  const onClientClose = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+  };
+
+  const timeout = setTimeout(() => resolveRequest([]), timeoutMs);
+  messageEvents.on("message:created", onMessageCreated);
+  req.on("close", onClientClose);
+});
+
+app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  const projectId = project.id;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  res.write(": connected\n\n");
+
+  const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
+    if (eventProjectId !== projectId) return;
+    res.write(`data: ${JSON.stringify({ ...message, room_id: roomId })}\n\n`);
+  };
+
+  const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15000);
+  messageEvents.on("message:created", onMessageCreated);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    messageEvents.off("message:created", onMessageCreated);
+    res.end();
+  });
+});
+
+app.get(/^\/rooms\/(.+)\/tasks$/, async (req, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const open = req.query.open === "true";
+  const taskList = open ? await getOpenTasks(project.id) : await getTasks(project.id, status);
+
+  res.json({ room_id: roomId, tasks: taskList });
+});
+
+app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const { title, description, created_by, source_message_id } = req.body as {
+    title?: string;
+    description?: string;
+    created_by?: string;
+    source_message_id?: string;
+  };
+
+  if (!title || !created_by) {
+    res.status(400).json({ error: "title and created_by are required" });
+    return;
+  }
+
+  const task = await createTask(project.id, title, created_by, description, source_message_id);
+
+  if (!(await isTrustedAgentCreator(project.id, created_by))) {
+    res.status(201).json({ ...task, room_id: roomId, project_id: undefined });
+    return;
+  }
+
+  const acceptedTask = await updateTask(task.id, { status: "accepted" });
+  if (!acceptedTask) {
+    res.status(500).json({ error: "Task created but could not be auto-accepted" });
+    return;
+  }
+
+  await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  res.status(201).json({ ...acceptedTask, room_id: roomId, project_id: undefined });
+});
+
+app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+  const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  const task = await getTaskById(taskId);
+  if (!task || task.project_id !== project.id) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+
+  res.json({ ...task, room_id: roomId, project_id: undefined });
+});
+
+app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+  const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const task = await getTaskById(taskId);
+  if (!task || task.project_id !== project.id) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+
+  const { status, assignee, pr_url } = req.body as {
+    status?: TaskStatus;
+    assignee?: string;
+    pr_url?: string;
+  };
+
+  try {
+    const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
+    if (status && adminOnlyStatuses.has(status)) {
+      if (!(await requireAdmin(req, res, project))) return;
+    }
+
+    const updated = await updateTask(taskId, { status, assignee, pr_url });
+    if (updated && status && status !== task.status) {
+      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
+    }
+    res.json({ ...updated, room_id: roomId, project_id: undefined });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
