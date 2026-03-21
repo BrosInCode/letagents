@@ -39,6 +39,7 @@ interface RoomState {
   room_id: string;
   project_id?: string | null;
   code?: string | null;
+  display_name?: string | null;
   joined_via: JoinedVia;
 }
 
@@ -160,12 +161,14 @@ function toRoomState(input: {
   room_id: string;
   project_id?: string | null;
   code?: string | null;
+  display_name?: string | null;
   joined_via: JoinedVia;
 }): RoomState {
   return {
     room_id: input.room_id,
     project_id: input.project_id ?? null,
     code: input.code ?? null,
+    display_name: input.display_name ?? null,
     joined_via: input.joined_via,
   };
 }
@@ -178,6 +181,7 @@ function toPublicRoomState(state: RoomState | null): Record<string, unknown> | n
   return {
     room_id: state.room_id,
     code: state.code ?? null,
+    display_name: state.display_name ?? null,
     joined_via: state.joined_via,
   };
 }
@@ -190,6 +194,7 @@ function toPublicStoredRoomSession(session: RoomSessionState | null): Record<str
   return {
     room_id: session.room_id,
     code: session.code ?? null,
+    display_name: session.display_name ?? null,
     joined_via: session.joined_via,
     joined_at: session.joined_at,
     last_seen_at: session.last_seen_at,
@@ -219,6 +224,7 @@ function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
     room_id: state.room_id,
     project_id: state.project_id ?? null,
     code: state.code ?? null,
+    display_name: state.display_name ?? null,
     joined_via: state.joined_via,
     last_message_id: lastMessageId,
   });
@@ -317,6 +323,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
             : looksLikeInviteCode(joinedRoomId)
               ? joinedRoomId
               : null,
+        display_name: typeof response.display_name === "string" ? response.display_name : null,
         joined_via: joinedVia,
       })
     );
@@ -343,6 +350,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
         room_id: legacyRoomId,
         project_id: typeof project.id === "string" ? project.id : null,
         code: typeof project.code === "string" ? project.code : legacyRoomId,
+        display_name: typeof project.display_name === "string" ? project.display_name : null,
         joined_via: joinedVia,
       })
     );
@@ -376,6 +384,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
           : looksLikeInviteCode(legacyRoomId)
             ? legacyRoomId
             : null,
+      display_name: typeof project.display_name === "string" ? project.display_name : null,
       joined_via: joinedVia,
     })
   );
@@ -406,6 +415,7 @@ async function createInviteRoom(): Promise<{
       room_id: roomId,
       project_id: typeof project.id === "string" ? project.id : null,
       code: typeof project.code === "string" ? project.code : roomId,
+      display_name: typeof project.display_name === "string" ? project.display_name : null,
       joined_via: "join_code",
     })
   );

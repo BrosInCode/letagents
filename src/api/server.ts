@@ -32,6 +32,7 @@ import {
   rotateProjectCode,
   createOwnerToken,
   upsertAccount,
+  updateProjectDisplayName,
   updateTask,
   type Message,
   type OwnerTokenAccount,
@@ -758,7 +759,12 @@ app.get("/projects/join/:code", async (req, res) => {
     return;
   }
 
-  res.json({ id: project.id, code: project.code, name: project.name });
+  res.json({
+    id: project.id,
+    code: project.code,
+    name: project.name,
+    display_name: project.display_name,
+  });
 });
 
 app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
@@ -773,7 +779,12 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  res.status(created ? 201 : 200).json({ id: project.id, code: project.code, name: project.name });
+  res.status(created ? 201 : 200).json({
+    id: project.id,
+    code: project.code,
+    name: project.name,
+    display_name: project.display_name,
+  });
 });
 
 app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
@@ -827,6 +838,7 @@ app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => 
     id: rotated.id,
     code: rotated.code,
     name: rotated.name,
+    display_name: rotated.display_name,
   });
 });
 
@@ -1203,6 +1215,7 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
   res.status(200).json({
     room_id: roomId,
     name: project.name ?? null,
+    display_name: project.display_name,
     code: project.code,
     created_at: project.created_at,
     role,
@@ -1426,6 +1439,43 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }
     res.json({ ...updated, room_id: roomId });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
+});
+
+app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = normalizeRoomId(rawId);
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireAdmin(req, res, project))) return;
+
+  const { display_name } = req.body as { display_name?: string };
+  if (!display_name?.trim()) {
+    res.status(400).json({ error: "display_name is required" });
+    return;
+  }
+
+  try {
+    const updated = await updateProjectDisplayName(project.id, display_name);
+    if (!updated) {
+      res.status(404).json({ error: "Room not found" });
+      return;
+    }
+
+    const role = await resolveProjectRole(updated, req.sessionAccount);
+    res.json({
+      room_id: updated.id,
+      name: updated.name ?? null,
+      display_name: updated.display_name,
+      code: updated.code,
+      created_at: updated.created_at,
+      role,
+      authenticated: Boolean(req.sessionAccount),
+    });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
