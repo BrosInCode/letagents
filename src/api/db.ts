@@ -4,10 +4,13 @@ import { db } from "./db/client.js";
 import {
   accounts,
   agents,
+  agent_sessions,
   auth_sessions,
   auth_states,
   id_sequences,
   messages,
+  owner_tokens,
+  participants,
   project_admins,
   rooms,
   tasks,
@@ -590,4 +593,57 @@ export async function updateTask(
     pr_url: newPrUrl,
     updated_at: now,
   };
+}
+
+export interface RoomParticipant {
+  id: string;
+  type: "human" | "agent";
+  name: string;
+  owner_login?: string;
+  state: "active" | "away" | "offline";
+  last_seen_at?: string;
+}
+
+export async function getRoomParticipants(roomId: string): Promise<RoomParticipant[]> {
+  const activeAgents = await db
+    .select({
+      id: agent_sessions.session_id,
+      name: agent_sessions.sender_label,
+      owner_login: accounts.login,
+      state: agent_sessions.state,
+      last_seen_at: agent_sessions.last_seen_at,
+    })
+    .from(agent_sessions)
+    .innerJoin(owner_tokens, eq(agent_sessions.owner_token_id, owner_tokens.token_id))
+    .innerJoin(accounts, eq(owner_tokens.github_user_id, accounts.provider_user_id))
+    .where(eq(agent_sessions.room_id, roomId));
+
+  const activeHumans = await db
+    .select({
+      id: participants.id,
+      name: participants.display_name,
+      owner_login: participants.github_login,
+      last_seen_at: participants.created_at,
+    })
+    .from(participants)
+    .where(eq(participants.room_id, roomId));
+
+  return [
+    ...activeAgents.map(a => ({
+      id: a.id,
+      type: "agent" as const,
+      name: a.name,
+      owner_login: a.owner_login,
+      state: a.state as "active" | "away" | "offline",
+      last_seen_at: a.last_seen_at,
+    })),
+    ...activeHumans.map(h => ({
+      id: h.id,
+      type: "human" as const,
+      name: h.name,
+      owner_login: h.owner_login ?? undefined,
+      state: "active" as const,
+      last_seen_at: h.last_seen_at,
+    }))
+  ];
 }
