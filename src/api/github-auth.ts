@@ -95,7 +95,7 @@ export function getGitHubOAuthConfig() {
   const clientId = process.env.GITHUB_CLIENT_ID;
   const clientSecret = process.env.GITHUB_CLIENT_SECRET;
   const baseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL || "http://localhost:3001";
-  const scopes = process.env.GITHUB_OAUTH_SCOPES || "read:user";
+  const scopes = process.env.GITHUB_OAUTH_SCOPES || "read:user,repo";
 
   return {
     clientId,
