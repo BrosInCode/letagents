@@ -51,6 +51,7 @@ import {
   requestGitHubDeviceCode,
 } from "./github-auth.js";
 import {
+  isInviteCode,
   isKnownProvider,
   normalizeRoomId,
   normalizeRoomName,
@@ -321,8 +322,8 @@ async function resolveRoomOrReply(
   res: express.Response,
   { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
 ): Promise<Project | null> {
-  // Handle invite codes (e.g., JA0E-4NYO)
-  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(roomId)) {
+  // Handle invite codes (e.g., JA0E-4NYO or JA0E-4NYO-L2QP)
+  if (isInviteCode(roomId)) {
     const project = await getProjectByCode(roomId);
     if (!project) {
       res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
@@ -336,8 +337,7 @@ async function resolveRoomOrReply(
     return room;
   }
 
-  // Try by canonical ID first, then fall back to legacy name lookup
-  const found = await getProjectById(roomId) || await getProjectByName(roomId);
+  const found = await getProjectById(roomId);
   if (!found) {
     res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
     return null;
@@ -635,7 +635,7 @@ app.post("/projects", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects/join/:code", async (req, res) => {
-  const code = req.params.code.toUpperCase();
+  const code = normalizeRoomId(req.params.code);
   const project = await getProjectByCode(code);
 
   if (!project) {
@@ -694,6 +694,11 @@ app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => 
   }
 
   if (!(await requireAdmin(req, res, project))) {
+    return;
+  }
+
+  if (!project.code) {
+    res.status(400).json({ error: "Only invite rooms can rotate codes" });
     return;
   }
 
@@ -921,7 +926,7 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const acceptedTask = await updateTask(task.id, { status: "accepted" });
+  const acceptedTask = await updateTask(projectId, task.id, { status: "accepted" });
   if (!acceptedTask) {
     res.status(500).json({ error: "Task created but could not be auto-accepted" });
     return;
@@ -947,9 +952,10 @@ app.get("/projects/:id/tasks", async (req, res) => {
 });
 
 app.get("/projects/:id/tasks/:taskId", async (req, res) => {
-  const task = await getTaskById(req.params.taskId);
+  const projectId = String(req.params.id);
+  const task = await getTaskById(projectId, req.params.taskId);
 
-  if (!task || task.project_id !== req.params.id) {
+  if (!task) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -960,9 +966,9 @@ app.get("/projects/:id/tasks/:taskId", async (req, res) => {
 app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
   const taskId = String(req.params.taskId);
-  const task = await getTaskById(taskId);
+  const task = await getTaskById(projectId, taskId);
 
-  if (!task || task.project_id !== projectId) {
+  if (!task) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -991,7 +997,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       }
     }
 
-    const updated = await updateTask(taskId, { status, assignee, pr_url });
+    const updated = await updateTask(projectId, taskId, { status, assignee, pr_url });
     if (updated && status && status !== task.status) {
       await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
     }
@@ -1008,7 +1014,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
 // browser, CI agents) should use these instead of /projects/:id.
 //
 // Room ID can be:
-//   - Invite code:   ABCD-1234
+//   - Invite code:   ABCD-EFGH-IJKL (parsers also accept ABCD-EFGH during transition)
 //   - Repo URL: github.com/owner/repo (also accepts https:// prefix,
 //               .git suffix, SSH remote format — all normalized)
 //
@@ -1245,7 +1251,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const acceptedTask = await updateTask(task.id, { status: "accepted" });
+  const acceptedTask = await updateTask(project.id, task.id, { status: "accepted" });
   if (!acceptedTask) {
     res.status(500).json({ error: "Task created but could not be auto-accepted" });
     return;
@@ -1263,8 +1269,8 @@ app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req, res) => {
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
 
-  const task = await getTaskById(taskId);
-  if (!task || task.project_id !== project.id) {
+  const task = await getTaskById(project.id, taskId);
+  if (!task) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -1282,8 +1288,8 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const task = await getTaskById(taskId);
-  if (!task || task.project_id !== project.id) {
+  const task = await getTaskById(project.id, taskId);
+  if (!task) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -1300,7 +1306,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       if (!(await requireAdmin(req, res, project))) return;
     }
 
-    const updated = await updateTask(taskId, { status, assignee, pr_url });
+    const updated = await updateTask(project.id, taskId, { status, assignee, pr_url });
     if (updated && status && status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }
