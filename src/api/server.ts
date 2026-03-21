@@ -878,6 +878,7 @@ app.get("/agents/me", async (req: AuthenticatedRequest, res) => {
     account: {
       id: req.sessionAccount.account_id,
       login: req.sessionAccount.login,
+      display_name: req.sessionAccount.display_name ?? null,
     },
     agents: await getAgentIdentitiesForOwner(req.sessionAccount.account_id),
   });
