@@ -16,7 +16,6 @@ import { getGitRemoteIdentity } from "./git-remote.js";
 interface RoomState {
   room: string;
   project_id: string;
-  code: string;
   joined_via: "config" | "git-remote" | "join_code" | "join_room";
 }
 
@@ -181,9 +180,8 @@ server.tool(
 
     // Track room state
     currentRoom = {
-      room: project.name || code,
+      room: code,
       project_id: project.id,
-      code: project.code || code,
       joined_via: "join_code",
     };
 
@@ -218,7 +216,6 @@ server.tool(
     currentRoom = {
       room: name,
       project_id: project.id,
-      code: project.code,
       joined_via: "join_room",
     };
 
@@ -739,7 +736,6 @@ server.tool(
       currentRoom = {
         room: roomName,
         project_id: project.id,
-        code: project.code,
         joined_via: "config",
       };
       sseClient.subscribe(project.id, (_message: Message) => {
@@ -940,7 +936,7 @@ async function main() {
     const configRoom = getRoomFromConfig();
     if (configRoom) {
       const project = await apiCall(`/projects/room/${encodeURIComponent(configRoom)}`, { method: "POST" });
-      currentRoom = { room: configRoom, project_id: project.id, code: project.code, joined_via: "config" };
+      currentRoom = { room: configRoom, project_id: project.id, joined_via: "config" };
       sseClient.subscribe(project.id, (_message: Message) => { server.server.sendResourceListChanged(); });
       console.error(`🏠 Auto-joined room '${configRoom}' (from .letagents.json)`);
       return;
@@ -950,7 +946,7 @@ async function main() {
     const gitRoom = getGitRemoteIdentity();
     if (gitRoom) {
       const project = await apiCall(`/projects/room/${encodeURIComponent(gitRoom)}`, { method: "POST" });
-      currentRoom = { room: gitRoom, project_id: project.id, code: project.code, joined_via: "git-remote" };
+      currentRoom = { room: gitRoom, project_id: project.id, joined_via: "git-remote" };
       sseClient.subscribe(project.id, (_message: Message) => { server.server.sendResourceListChanged(); });
       console.error(`🏠 Auto-joined room '${gitRoom}' (inferred from git remote — consider adding a .letagents.json)`);
       return;

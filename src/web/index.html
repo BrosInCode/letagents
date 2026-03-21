@@ -439,6 +439,69 @@
         box-shadow: 0 0 14px color-mix(in srgb, var(--chip-color, var(--sender-default)) 68%, transparent);
       }
 
+      .participant-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--line);
+      }
+
+      .participant-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .participant-name {
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: var(--text);
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .participant-owner {
+        font-size: 0.75rem;
+        color: var(--muted);
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .presence-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .presence-dot[data-state="active"] { background: var(--success); box-shadow: 0 0 8px rgba(52,211,153,0.4); }
+      .presence-dot[data-state="away"] { background: var(--warning); box-shadow: 0 0 8px rgba(245,158,11,0.4); }
+      .presence-dot[data-state="offline"] { background: var(--muted); }
+
+      .verified-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.75rem;
+        color: var(--success);
+        background: rgba(52, 211, 153, 0.1);
+        padding: 2px 6px;
+        border-radius: 4px;
+        margin-left: 6px;
+      }
+
+      .verified-border {
+        border-color: rgba(52, 211, 153, 0.4) !important;
+      }
+
       .chat-panel {
         display: grid;
         grid-template-rows: auto minmax(0, 1fr) auto;
@@ -509,6 +572,39 @@
         position: relative;
         min-height: 0;
         overflow: hidden;
+      }
+
+      .new-messages-indicator {
+        position: absolute;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 20px;
+        padding: 8px 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+        transition: opacity 0.25s ease, transform 0.25s ease;
+        animation: indicator-pulse 2s ease-in-out infinite;
+      }
+
+      .new-messages-indicator:hover {
+        transform: translateX(-50%) translateY(-2px);
+        box-shadow: 0 6px 22px rgba(99,102,241,0.55);
+      }
+
+      .new-messages-indicator.hidden {
+        display: none;
+      }
+
+      @keyframes indicator-pulse {
+        0%, 100% { box-shadow: 0 4px 16px rgba(99,102,241,0.4); }
+        50% { box-shadow: 0 4px 22px rgba(99,102,241,0.65); }
       }
 
       .messages {
@@ -1064,17 +1160,12 @@
           </div>
         </section>
 
-        <section class="section glass-block">
+        <section class="section glass-block" id="participantsSection" style="display: none;">
           <div class="section-title">
-            <h2>Sender Palette</h2>
-            <span>message identity</span>
+            <h2>Participants</h2>
+            <span id="participantsCount">0</span>
           </div>
-          <div class="legend">
-            <span class="legend-chip" style="--chip-color: var(--sender-orchestrator)">orchestrator</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-codex)">codex</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-claude)">claude</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-human)">human</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-default)">other</span>
+          <div class="participants-list stack" id="participantsList">
           </div>
         </section>
 
@@ -1110,6 +1201,7 @@
 
         <div class="messages-wrap">
           <div class="messages" id="messages"></div>
+          <button class="new-messages-indicator hidden" id="newMessagesIndicator" type="button">New messages ↓</button>
           <div class="empty-state" id="emptyState">
             <div class="empty-state-card">
               <h3>Open a project to begin</h3>
@@ -1154,18 +1246,21 @@
     <script>
       const state = {
         currentProjectId: "",
-        currentProjectCode: "",
-        currentRoomName: "",
         eventSource: null,
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
+        participantsMap: new Map(),
+        participantsInterval: null,
         isStreaming: false,
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
 
       const elements = {
         chatTitle: document.getElementById("chatTitle"),
+        participantsSection: document.getElementById("participantsSection"),
+        participantsCount: document.getElementById("participantsCount"),
+        participantsList: document.getElementById("participantsList"),
         chatSubtitle: document.getElementById("chatSubtitle"),
         copyJoinCodeBtn: document.getElementById("copyJoinCodeBtn"),
         copyPillText: document.getElementById("copyPillText"),
@@ -1182,9 +1277,14 @@
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
+        newMessagesIndicator: document.getElementById("newMessagesIndicator"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
       };
+
+      elements.newMessagesIndicator.addEventListener("click", () => {
+        scrollMessagesToBottom(true);
+      });
 
       // --- Notification Sound (Web Audio API) ---
       let audioCtx = null;
@@ -1307,15 +1407,20 @@
           .toUpperCase();
       }
 
+      function isNearBottom() {
+        const el = elements.messages;
+        return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+      }
+
       function scrollMessagesToBottom(force) {
-        const distanceFromBottom =
-          elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
-        if (force || distanceFromBottom < 140) {
+        if (force || isNearBottom()) {
           elements.messages.scrollTop = elements.messages.scrollHeight;
+          elements.newMessagesIndicator.classList.add("hidden");
         }
       }
 
-      function renderMessages() {
+      function renderMessages(isInitialLoad) {
+        const wasNearBottom = isInitialLoad || isNearBottom();
         const sortedMessages = Array.from(state.messages.values()).sort((a, b) => {
           return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
@@ -1332,17 +1437,24 @@
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
+          const participant = state.participantsMap.get(message.sender);
+          // NOTE: We intentionally do NOT show verified badges on individual messages.
+          // The sender label is client-supplied and not cryptographically verified,
+          // so any agent could spoof a verified user's sender name.
+          // Verified status is only shown in the participant list sidebar.
           const senderColor = getSenderColor(message.sender);
           const provenance = getSenderProvenance(message.sender);
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
+          
+
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
               <div class="message-meta">
                 <strong>${escapeHtml(message.sender)}</strong>
-                <span class="provenance-badge ${provenance}">${provenance}</span>
+                <span class="provenance-badge ${provenance}" style="margin-left: 4px;">${provenance}</span>
                 <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
               </div>
               <div class="message-bubble">
@@ -1354,7 +1466,9 @@
         }
 
         elements.messages.appendChild(fragment);
-        requestAnimationFrame(() => scrollMessagesToBottom(true));
+        if (wasNearBottom) {
+          requestAnimationFrame(() => scrollMessagesToBottom(true));
+        }
       }
 
       function upsertMessages(items) {
@@ -1367,27 +1481,34 @@
           changed = true;
         }
         if (changed) {
-          renderMessages();
-          if (state.isStreaming) playNotificationSound();
+          const nearBottom = isNearBottom();
+          renderMessages(false);
+          if (state.isStreaming) {
+            playNotificationSound();
+            if (!nearBottom) {
+              elements.newMessagesIndicator.classList.remove("hidden");
+            }
+          }
         }
       }
 
       function resetMessages() {
         state.messages.clear();
-        renderMessages();
+        elements.newMessagesIndicator.classList.add("hidden");
+        renderMessages(true);
       }
 
       function updateProjectUi() {
         const hasProject = Boolean(state.currentProjectId);
-        elements.joinCodeText.textContent = state.currentProjectCode || "----";
+        elements.joinCodeText.textContent = state.currentProjectId || "----";
         elements.projectIdLabel.textContent = hasProject ? state.currentProjectId : "No active room";
         elements.chatTitle.textContent = hasProject
-          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Project ${state.currentProjectId}`)
+          ? `🏠 ${state.currentProjectId}`
           : "No active project";
         elements.chatSubtitle.textContent = hasProject
-          ? `Room ${state.currentProjectId}${state.currentProjectCode ? ` · ${state.currentProjectCode}` : ''}`
-          : "Create a new room or join one with a code.";
-        elements.copyJoinCodeBtn.disabled = !state.currentProjectCode;
+          ? `Room ${state.currentProjectId}`
+          : "Create a new room or join one with an ID.";
+        elements.copyJoinCodeBtn.disabled = !hasProject;
         elements.sendMessageBtn.disabled = !hasProject;
         elements.messageInput.disabled = !hasProject;
         elements.senderInput.disabled = !hasProject;
@@ -1396,7 +1517,6 @@
       function persistSession() {
         const payload = JSON.stringify({
           id: state.currentProjectId,
-          code: state.currentProjectCode,
         });
         localStorage.setItem("letagents:web:session", payload);
 
@@ -1407,11 +1527,7 @@
           url.searchParams.delete("project");
         }
 
-        if (state.currentProjectCode) {
-          url.searchParams.set("code", state.currentProjectCode);
-        } else {
-          url.searchParams.delete("code");
-        }
+        url.searchParams.delete("code");
 
         window.history.replaceState({}, "", url);
       }
@@ -1419,11 +1535,9 @@
       function loadPersistedSession() {
         const url = new URL(window.location.href);
         const projectFromUrl = url.searchParams.get("project") || "";
-        const codeFromUrl = (url.searchParams.get("code") || "").toUpperCase();
 
         if (projectFromUrl) {
           state.currentProjectId = projectFromUrl;
-          state.currentProjectCode = codeFromUrl;
           return true;
         }
 
@@ -1432,7 +1546,6 @@
           if (!raw) return false;
           const parsed = JSON.parse(raw);
           state.currentProjectId = parsed.id || "";
-          state.currentProjectCode = (parsed.code || "").toUpperCase();
           return Boolean(state.currentProjectId);
         } catch (_error) {
           return false;
@@ -1466,7 +1579,7 @@
         setStatus("Creating a fresh project room...", "");
         try {
           const project = await apiFetch("/projects", { method: "POST" });
-          await activateProject(project.id, project.code, true);
+          await activateProject(project.id, true);
           setStatus("Project created and live stream connected.", "success");
         } catch (error) {
           setStatus(error.message || "Could not create project.", "error");
@@ -1476,7 +1589,7 @@
       }
 
       async function joinProject() {
-        const code = elements.joinCodeInput.value.trim().toUpperCase();
+        const code = elements.joinCodeInput.value.trim();
         if (!code) {
           setStatus("Enter a join code before attempting to join.", "error");
           elements.joinCodeInput.focus();
@@ -1487,8 +1600,8 @@
         setStatus(`Joining ${code}...`, "");
         try {
           const project = await apiFetch(`/projects/join/${encodeURIComponent(code)}`, { method: "GET" });
-          await activateProject(project.id, project.code, true);
-          setStatus(`Joined ${project.code} and synced message history.`, "success");
+          await activateProject(project.id, true);
+          setStatus(`Joined ${project.id} and synced message history.`, "success");
         } catch (error) {
           setStatus(error.message || "Could not join that code.", "error");
         } finally {
@@ -1505,6 +1618,11 @@
         if (state.reconnectTimer) {
           window.clearTimeout(state.reconnectTimer);
           state.reconnectTimer = null;
+        }
+
+        if (state.participantsInterval) {
+          window.clearInterval(state.participantsInterval);
+          state.participantsInterval = null;
         }
 
         state.isStreaming = false;
@@ -1569,17 +1687,74 @@
         for (const message of payload.messages || []) {
           state.messages.set(message.id, message);
         }
-        renderMessages();
+        renderMessages(true);
       }
 
-      async function activateProject(projectId, projectCode, focusComposer) {
+      async function fetchParticipants() {
+        if (!state.currentProjectId) {
+          state.participantsMap.clear();
+          renderParticipants();
+          return;
+        }
+
+        try {
+          const payload = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/participants`, {
+            method: "GET",
+          });
+          state.participantsMap.clear();
+          for (const p of payload.participants || []) {
+            state.participantsMap.set(p.name, p);
+          }
+          renderParticipants();
+          renderMessages(false);
+        } catch (error) {
+          console.warn("Failed to fetch participants", error);
+        }
+      }
+
+      function renderParticipants() {
+        elements.participantsList.innerHTML = "";
+        
+        if (state.participantsMap.size === 0) {
+          elements.participantsSection.style.display = "none";
+          return;
+        }
+        
+        elements.participantsSection.style.display = "block";
+        elements.participantsCount.textContent = `${state.participantsMap.size} online`;
+
+        const fragment = document.createDocumentFragment();
+        for (const p of state.participantsMap.values()) {
+          const item = document.createElement("div");
+          item.className = "participant-item";
+          
+          const verifiedIcon = p.owner_login ? `<span style="color: var(--success); font-size: 0.8rem;" title="Verified">✓</span>` : "";
+          const ownerText = p.owner_login ? `by ${escapeHtml(p.owner_login)}` : (p.type === "human" ? "human account" : "unverified agent");
+
+          item.innerHTML = `
+            <div class="presence-dot" data-state="${escapeHtml(p.state)}"></div>
+            <div class="participant-info">
+              <span class="participant-name">${escapeHtml(p.name)} ${verifiedIcon}</span>
+              <span class="participant-owner">${ownerText}</span>
+            </div>
+          `;
+          fragment.appendChild(item);
+        }
+        elements.participantsList.appendChild(fragment);
+      }
+
+      async function activateProject(projectId, focusComposer) {
         state.currentProjectId = projectId;
-        state.currentProjectCode = String(projectCode || "").toUpperCase();
         updateProjectUi();
         persistSession();
         resetMessages();
         await fetchMessages();
+        fetchParticipants();
         connectStream();
+        
+        if (state.participantsInterval) clearInterval(state.participantsInterval);
+        state.participantsInterval = setInterval(fetchParticipants, 15000);
+
         if (focusComposer) {
           elements.messageInput.focus();
         }
@@ -1596,12 +1771,11 @@
 
         setStatus(`Restoring ${state.currentProjectId}...`, "");
         try {
-          await activateProject(state.currentProjectId, state.currentProjectCode, false);
+          await activateProject(state.currentProjectId, false);
           setStatus("Restored previous room and resumed live updates.", "success");
         } catch (error) {
           disconnectStream();
           state.currentProjectId = "";
-          state.currentProjectCode = "";
           updateProjectUi();
           persistSession();
           setPresence("error", "Room unavailable");
@@ -1643,15 +1817,15 @@
       }
 
       async function copyJoinCode() {
-        if (!state.currentProjectCode) {
+        if (!state.currentProjectId) {
           setStatus("Create or join a room before copying its code.", "error");
           return;
         }
 
         try {
-          await navigator.clipboard.writeText(state.currentProjectCode);
+          await navigator.clipboard.writeText(state.currentProjectId);
           elements.copyPillText.textContent = "Copied";
-          setStatus(`Copied join code ${state.currentProjectCode}.`, "success");
+          setStatus(`Copied join ID ${state.currentProjectId}.`, "success");
           window.setTimeout(() => {
             elements.copyPillText.textContent = "Copy";
           }, 1600);
