@@ -50,6 +50,7 @@ interface RoomState {
 
 let currentRoom: RoomState | null = null;
 let currentAgentIdentity: StoredAgentIdentityState | null = getStoredAgentIdentity();
+let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -64,6 +65,12 @@ interface ResolvedOwnerContext {
   slug: string;
   label: string;
   login: string | null;
+}
+
+interface AuthenticatedAccountLookup {
+  id?: string;
+  login: string;
+  display_name?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,10 +131,40 @@ function detectAgentBaseName(): string {
   return "agent";
 }
 
-function resolveOwnerContext(): ResolvedOwnerContext {
-  const storedAuth = getStoredAuth();
-  const authLogin = storedAuth?.account?.login?.trim() || null;
-  const authLabel = storedAuth?.account?.display_name?.trim() || authLogin;
+async function getAuthenticatedAccountProfile(): Promise<AuthenticatedAccountLookup | null> {
+  const storedAccount = getStoredAuth()?.account;
+  if (storedAccount?.login?.trim()) {
+    currentAuthenticatedAccount = storedAccount;
+    return storedAccount;
+  }
+
+  if (!getLetagentsToken()) {
+    currentAuthenticatedAccount = undefined;
+    return null;
+  }
+
+  if (currentAuthenticatedAccount && currentAuthenticatedAccount.login?.trim()) {
+    return currentAuthenticatedAccount;
+  }
+
+  try {
+    const result = await apiCall<{ account?: AuthenticatedAccountLookup }>("/agents/me");
+    const account = result?.account;
+    if (account?.login?.trim()) {
+      currentAuthenticatedAccount = account;
+      return account;
+    }
+  } catch {
+    // Fall through to local non-auth identity sources.
+  }
+
+  return null;
+}
+
+async function resolveOwnerContext(): Promise<ResolvedOwnerContext> {
+  const account = await getAuthenticatedAccountProfile();
+  const authLogin = account?.login?.trim() || null;
+  const authLabel = account?.display_name?.trim() || authLogin;
 
   if (authLogin || authLabel || AGENT_OWNER_LABEL) {
     const label = AGENT_OWNER_LABEL || authLabel || authLogin || "Owner";
@@ -217,7 +254,7 @@ function toPublicAgentIdentity(
 }
 
 async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
-  const owner = resolveOwnerContext();
+  const owner = await resolveOwnerContext();
   const name = buildAgentIdentityName(detectAgentBaseName(), owner.slug);
   const displayName = name;
   const actorLabel = buildActorLabel(displayName, owner.label);
@@ -422,6 +459,7 @@ async function apiCall<T = unknown>(path: string, options?: RequestInit): Promis
       // Only clear on 401 (invalid/expired credential), NOT on 403
       // (valid credential but insufficient permissions, e.g., private repo access)
       clearStoredAuth();
+      currentAuthenticatedAccount = undefined;
     }
     throw new ApiError(res.status, body);
   }
@@ -1943,6 +1981,7 @@ server.tool(
     if (result.status === "denied" || result.status === "expired") {
       clearPendingDeviceAuth();
       clearStoredAuth();
+      currentAuthenticatedAccount = undefined;
       return {
         content: [
           {
@@ -1965,6 +2004,7 @@ server.tool(
       stored_at: new Date().toISOString(),
       source: "device_flow",
     });
+    currentAuthenticatedAccount = storedAuth.account ?? undefined;
 
     let joinedRoom: RoomState | null = null;
     const roomToJoin =
@@ -2011,6 +2051,7 @@ server.tool(
   async () => {
     clearPendingDeviceAuth();
     clearStoredAuth();
+    currentAuthenticatedAccount = undefined;
     return {
       content: [
         {
