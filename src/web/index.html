@@ -1044,25 +1044,8 @@
           </div>
         </section>
 
-        <section class="section glass-block">
-          <div class="section-title">
-            <h2>Room Control</h2>
-            <span>create or join</span>
-          </div>
-          <div class="stack">
-            <input
-              class="input"
-              id="joinCodeInput"
-              type="text"
-              placeholder="Enter join code e.g. ABCD-1234"
-              autocomplete="off"
-            />
-            <div class="btn-row">
-              <button class="btn btn-primary" id="createProjectBtn" type="button">Create Room</button>
-              <button class="btn btn-secondary" id="joinProjectBtn" type="button">Join by Code</button>
-            </div>
-          </div>
-        </section>
+
+
 
         <section class="section glass-block">
           <div class="section-title">
@@ -1169,11 +1152,8 @@
         chatSubtitle: document.getElementById("chatSubtitle"),
         copyJoinCodeBtn: document.getElementById("copyJoinCodeBtn"),
         copyPillText: document.getElementById("copyPillText"),
-        createProjectBtn: document.getElementById("createProjectBtn"),
         emptyState: document.getElementById("emptyState"),
-        joinCodeInput: document.getElementById("joinCodeInput"),
         joinCodeText: document.getElementById("joinCodeText"),
-        joinProjectBtn: document.getElementById("joinProjectBtn"),
         messages: document.getElementById("messages"),
         messageInput: document.getElementById("messageInput"),
         presenceBadge: document.getElementById("presenceBadge"),
@@ -1456,40 +1436,7 @@
         return payload;
       }
 
-      async function createProject() {
-        toggleProjectButtons(true);
-        setStatus("Creating a fresh room...", "");
-        try {
-          const project = await apiFetch("/projects", { method: "POST" });
-          await activateProject(project.id, project.code, true);
-          setStatus("Room created and live stream connected.", "success");
-        } catch (error) {
-          setStatus(error.message || "Could not create room.", "error");
-        } finally {
-          toggleProjectButtons(false);
-        }
-      }
 
-      async function joinProject() {
-        const code = elements.joinCodeInput.value.trim().toUpperCase();
-        if (!code) {
-          setStatus("Enter a join code before attempting to join.", "error");
-          elements.joinCodeInput.focus();
-          return;
-        }
-
-        toggleProjectButtons(true);
-        setStatus(`Joining ${code}...`, "");
-        try {
-          const room = await apiFetch(`/rooms/${encodeURIComponent(code)}/join`, { method: "POST" });
-          await activateProject(room.room_id || code, room.code, true);
-          setStatus(`Joined ${room.code} and synced message history.`, "success");
-        } catch (error) {
-          setStatus(error.message || "Could not join that code.", "error");
-        } finally {
-          toggleProjectButtons(false);
-        }
-      }
 
       function disconnectStream() {
         if (state.eventSource) {
@@ -1657,10 +1604,7 @@
         }
       }
 
-      function toggleProjectButtons(disabled) {
-        elements.createProjectBtn.disabled = disabled;
-        elements.joinProjectBtn.disabled = disabled;
-      }
+
 
       // Theme toggle
       const themeToggleBtn = document.getElementById("themeToggle");
@@ -1694,16 +1638,8 @@
 
       initTheme();
 
-      elements.createProjectBtn.addEventListener("click", createProject);
-      elements.joinProjectBtn.addEventListener("click", joinProject);
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.composerForm.addEventListener("submit", sendMessage);
-      elements.joinCodeInput.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          joinProject();
-        }
-      });
 
       window.addEventListener("beforeunload", () => {
         disconnectStream();
