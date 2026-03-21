@@ -428,7 +428,7 @@ app.post("/projects", async (req: AuthenticatedRequest, res) => {
   if (req.sessionAccount) {
     await assignProjectAdmin(project.id, req.sessionAccount.account_id);
   }
-  res.status(201).json(project);
+  res.status(201).json({ id: project.id, code: project.id, name: project.id });
 });
 
 app.get("/projects/join/:code", async (req, res) => {
@@ -440,7 +440,7 @@ app.get("/projects/join/:code", async (req, res) => {
     return;
   }
 
-  res.json({ id: project.id });
+  res.json({ id: project.id, code: project.id, name: project.id });
 });
 
 app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
@@ -455,7 +455,7 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  res.status(created ? 201 : 200).json({ id: project.id });
+  res.status(created ? 201 : 200).json({ id: project.id, code: project.id, name: project.id });
 });
 
 app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
