@@ -13,7 +13,7 @@
  *   - .git suffix stripping
  *   - Trailing slash stripping
  *   - Provider-specific casing (GitHub: lowercase)
- *   - Invite codes (XXXX-XXXX) uppercased for consistency
+ *   - Invite codes (XXXX-XXXX or XXXX-XXXX-XXXX) uppercased for consistency
  */
 
 // Known git providers and their normalization rules
@@ -27,9 +27,9 @@ const KNOWN_PROVIDERS = new Set([
 const CASE_INSENSITIVE_PROVIDERS = new Set(["github.com"]);
 
 /**
- * Invite code pattern: XXXX-XXXX (4 uppercase alphanumeric chars, dash, 4 more)
+ * Invite code pattern: XXXX-XXXX or XXXX-XXXX-XXXX
  */
-const INVITE_CODE_PATTERN = /^[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+const INVITE_CODE_PATTERN = /^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){1,2}$/;
 
 /**
  * Check if a string looks like an invite code.
@@ -97,7 +97,7 @@ export function normalizeRoomName(name: string): string {
 
 /**
  * Normalize any room identifier:
- *   - Invite codes (XXXX-XXXX): returned uppercased
+ *   - Invite codes (XXXX-XXXX or XXXX-XXXX-XXXX): returned uppercased
  *   - Everything else: treated as a repo room name and normalized
  *
  * This is the safe, high-level entry point for API middleware.
