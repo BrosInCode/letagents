@@ -455,7 +455,7 @@
       }
 
       function isInviteCode(str) {
-        return /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(str);
+        return /^[A-Z0-9]{4}(-[A-Z0-9]{4}){1,2}$/.test(str);
       }
 
       function redirectToRoom(roomCode) {
