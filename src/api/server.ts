@@ -14,6 +14,7 @@ import {
   deleteSessionByToken,
   getAllProjects,
   getAgentIdentitiesForOwner,
+  getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
   getOpenTasks,
@@ -27,9 +28,11 @@ import {
   isProjectAdmin,
   registerAgentIdentity,
   rotateProjectCode,
+  upsertOwnerToken,
   upsertAccount,
   updateTask,
   type Message,
+  type OwnerTokenAccount,
   type Project,
   type SessionAccount,
   type TaskStatus,
@@ -55,7 +58,7 @@ interface MessageCreatedEvent {
 }
 
 interface AuthenticatedRequest extends express.Request {
-  sessionAccount?: SessionAccount | null;
+  sessionAccount?: SessionAccount | OwnerTokenAccount | null;
 }
 
 const messageEvents = new EventEmitter();
@@ -180,7 +183,7 @@ function isRepoBackedProject(project: Project): boolean {
 
 async function resolveProjectRole(
   project: Project,
-  sessionAccount: SessionAccount | null | undefined
+  sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined
 ): Promise<"admin" | "participant" | "anonymous"> {
   if (!sessionAccount) {
     return isRepoBackedProject(project) ? "anonymous" : "participant";
@@ -238,7 +241,9 @@ async function requireParticipant(
   return true;
 }
 
-async function resolveRequestAccount(req: express.Request): Promise<SessionAccount | null> {
+async function resolveRequestAccount(
+  req: express.Request
+): Promise<SessionAccount | OwnerTokenAccount | null> {
   const cookies = parseCookies(req.headers.cookie);
   const sessionToken = cookies.letagents_session;
   if (sessionToken) {
@@ -258,9 +263,9 @@ async function resolveRequestAccount(req: express.Request): Promise<SessionAccou
     return null;
   }
 
-  const letAgentsSession = await getSessionAccountByToken(providerToken);
-  if (letAgentsSession) {
-    return letAgentsSession;
+  const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
+  if (ownerTokenAccount) {
+    return ownerTokenAccount;
   }
 
   try {
@@ -274,12 +279,14 @@ async function resolveRequestAccount(req: express.Request): Promise<SessionAccou
     });
 
     return {
-      id: "token_session",
+      token_id: "github_token",
       account_id: account.id,
-      token: providerToken,
+      token_hash: "",
+      github_user_id: String(githubUser.id),
       provider_access_token: providerToken,
-      expires_at: new Date(Date.now() + 1000 * 60 * 15).toISOString(),
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      oauth_token_expires_at: null,
       provider: "github",
       provider_user_id: String(githubUser.id),
       login: githubUser.login,
@@ -454,15 +461,21 @@ app.get("/auth/device/poll/:requestId", async (req, res) => {
       avatar_url: githubUser.avatar_url,
     });
 
-    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
-    const sessionToken = crypto.randomBytes(32).toString("hex");
-    await createSession(account.id, sessionToken, expiresAt, result.accessToken);
+    const ownerToken = crypto.randomBytes(32).toString("hex");
+    const ownerCredential = await upsertOwnerToken({
+      accountId: account.id,
+      githubUserId: String(githubUser.id),
+      token: ownerToken,
+      providerAccessToken: result.accessToken,
+      oauthTokenExpiresAt: null,
+    });
     pendingDeviceAuths.delete(requestId);
 
     res.json({
       status: "authorized",
-      letagents_token: sessionToken,
-      expires_at: expiresAt,
+      letagents_token: ownerToken,
+      owner_token_id: ownerCredential.token_id,
+      oauth_token_expires_at: ownerCredential.oauth_token_expires_at,
       account: {
         id: account.id,
         login: account.login,
