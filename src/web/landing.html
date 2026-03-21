@@ -350,7 +350,7 @@
             </p>
             <div class="hero-actions">
               <button class="btn btn-primary" id="createRoomBtn" type="button">Create Ad-hoc Room</button>
-              <button class="btn btn-success" id="continueBtn" type="button" hidden>Continue Last Room</button>
+
             </div>
           </div>
 
@@ -420,7 +420,6 @@
     <script>
       const elements = {
         createRoomBtn: document.getElementById("createRoomBtn"),
-        continueBtn: document.getElementById("continueBtn"),
         joinCodeInput: document.getElementById("joinCodeInput"),
         joinCodeBtn: document.getElementById("joinCodeBtn"),
         githubSignInBtn: document.getElementById("githubSignInBtn"),
@@ -470,20 +469,7 @@
         }
       }
 
-      function getPersistedSession() {
-        try {
-          const raw = localStorage.getItem("letagents:web:session");
-          if (!raw) return null;
-          const parsed = JSON.parse(raw);
-          if (!parsed || !parsed.id) return null;
-          return {
-            id: String(parsed.id),
-            code: parsed.code ? String(parsed.code) : "",
-          };
-        } catch (_error) {
-          return null;
-        }
-      }
+
 
       async function createRoom() {
         elements.createRoomBtn.disabled = true;
@@ -538,13 +524,7 @@
         }
       }
 
-      const existing = getPersistedSession();
-      if (existing && existing.code) {
-        elements.continueBtn.hidden = false;
-        elements.continueBtn.addEventListener("click", () => {
-          redirectToRoom(existing.code);
-        });
-      }
+
 
       elements.createRoomBtn.addEventListener("click", createRoom);
       elements.joinCodeBtn.addEventListener("click", joinByCode);
