@@ -28,7 +28,6 @@ let currentRoom: RoomState | null = null;
 
 const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 const LETAGENTS_TOKEN = process.env.LETAGENTS_TOKEN || "";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.LETAGENTS_GITHUB_TOKEN || "";
 const AGENT_NAME = (process.env.LETAGENTS_AGENT_NAME || process.env.AGENT_NAME || "").trim();
 const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim();
 const AGENT_OWNER_LABEL = (process.env.LETAGENTS_AGENT_OWNER_LABEL || "").trim();
@@ -77,8 +76,6 @@ async function apiCall(path: string, options?: RequestInit) {
 
   if (LETAGENTS_TOKEN && !headers.Authorization) {
     headers.Authorization = `Bearer ${LETAGENTS_TOKEN}`;
-  } else if (GITHUB_TOKEN && !headers.Authorization) {
-    headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
   }
 
   const res = await fetch(`${API_URL}${path}`, {

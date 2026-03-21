@@ -28,7 +28,7 @@ import {
   isProjectAdmin,
   registerAgentIdentity,
   rotateProjectCode,
-  upsertOwnerToken,
+  createOwnerToken,
   upsertAccount,
   updateTask,
   type Message,
@@ -268,34 +268,7 @@ async function resolveRequestAccount(
     return ownerTokenAccount;
   }
 
-  try {
-    const githubUser = await fetchGitHubUser(providerToken);
-    const account = await upsertAccount({
-      provider: "github",
-      provider_user_id: String(githubUser.id),
-      login: githubUser.login,
-      display_name: githubUser.name,
-      avatar_url: githubUser.avatar_url,
-    });
-
-    return {
-      token_id: "github_token",
-      account_id: account.id,
-      token_hash: "",
-      github_user_id: String(githubUser.id),
-      provider_access_token: providerToken,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      oauth_token_expires_at: null,
-      provider: "github",
-      provider_user_id: String(githubUser.id),
-      login: githubUser.login,
-      display_name: githubUser.name,
-      avatar_url: githubUser.avatar_url,
-    };
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -462,7 +435,7 @@ app.get("/auth/device/poll/:requestId", async (req, res) => {
     });
 
     const ownerToken = crypto.randomBytes(32).toString("hex");
-    const ownerCredential = await upsertOwnerToken({
+    const ownerCredential = await createOwnerToken({
       accountId: account.id,
       githubUserId: String(githubUser.id),
       token: ownerToken,
