@@ -36,10 +36,12 @@ import {
 } from "./db.js";
 import {
   buildGitHubAuthorizeUrl,
+  exchangeGitHubDeviceCodeForAccessToken,
   exchangeGitHubCodeForAccessToken,
   fetchGitHubUser,
   isGitHubRepoAdmin,
   parseGitHubRepoName,
+  requestGitHubDeviceCode,
 } from "./github-auth.js";
 import {
   isKnownProvider,
@@ -57,6 +59,26 @@ interface AuthenticatedRequest extends express.Request {
 }
 
 const messageEvents = new EventEmitter();
+
+interface PendingDeviceAuth {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  intervalSeconds: number;
+  expiresAt: number;
+  lastPollAt: number | null;
+}
+
+const pendingDeviceAuths = new Map<string, PendingDeviceAuth>();
+
+function cleanupExpiredDeviceAuths(): void {
+  const now = Date.now();
+  for (const [requestId, auth] of pendingDeviceAuths.entries()) {
+    if (auth.expiresAt <= now) {
+      pendingDeviceAuths.delete(requestId);
+    }
+  }
+}
 
 async function emitProjectMessage(projectId: string, sender: string, text: string): Promise<Message> {
   const message = await addMessage(projectId, sender, text);
@@ -236,6 +258,11 @@ async function resolveRequestAccount(req: express.Request): Promise<SessionAccou
     return null;
   }
 
+  const letAgentsSession = await getSessionAccountByToken(providerToken);
+  if (letAgentsSession) {
+    return letAgentsSession;
+  }
+
   try {
     const githubUser = await fetchGitHubUser(providerToken);
     const account = await upsertAccount({
@@ -338,6 +365,113 @@ app.post("/auth/github/login", async (req, res) => {
   try {
     const authUrl = buildGitHubAuthorizeUrl(state);
     res.json({ auth_url: authUrl, state, redirect_to: redirectTo });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+app.post("/auth/device/start", async (_req, res) => {
+  cleanupExpiredDeviceAuths();
+
+  try {
+    const device = await requestGitHubDeviceCode();
+    const requestId = crypto.randomBytes(16).toString("hex");
+    pendingDeviceAuths.set(requestId, {
+      deviceCode: device.device_code,
+      userCode: device.user_code,
+      verificationUri: device.verification_uri,
+      intervalSeconds: device.interval,
+      expiresAt: Date.now() + device.expires_in * 1000,
+      lastPollAt: null,
+    });
+
+    res.status(201).json({
+      request_id: requestId,
+      user_code: device.user_code,
+      verification_uri: device.verification_uri,
+      expires_in: device.expires_in,
+      interval: device.interval,
+    });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+app.get("/auth/device/poll/:requestId", async (req, res) => {
+  cleanupExpiredDeviceAuths();
+
+  const requestId = String(req.params.requestId);
+  const pending = pendingDeviceAuths.get(requestId);
+  if (!pending) {
+    res.status(404).json({ error: "Unknown or expired device authorization request" });
+    return;
+  }
+
+  const now = Date.now();
+  if (pending.lastPollAt && now - pending.lastPollAt < pending.intervalSeconds * 1000) {
+    res.status(429).json({
+      error: "Polling too quickly",
+      interval: pending.intervalSeconds,
+    });
+    return;
+  }
+
+  pending.lastPollAt = now;
+
+  try {
+    const result = await exchangeGitHubDeviceCodeForAccessToken({
+      deviceCode: pending.deviceCode,
+    });
+
+    if (result.status === "pending" || result.status === "slow_down") {
+      if (result.status === "slow_down") {
+        pending.intervalSeconds = Math.max(
+          pending.intervalSeconds + 5,
+          result.interval ?? pending.intervalSeconds + 5
+        );
+      }
+
+      res.json({
+        status: result.status,
+        interval: pending.intervalSeconds,
+        expires_in: Math.max(0, Math.ceil((pending.expiresAt - now) / 1000)),
+      });
+      return;
+    }
+
+    if (result.status === "denied" || result.status === "expired") {
+      pendingDeviceAuths.delete(requestId);
+      res.status(result.status === "denied" ? 403 : 410).json({ status: result.status });
+      return;
+    }
+
+    const githubUser = await fetchGitHubUser(result.accessToken);
+    const account = await upsertAccount({
+      provider: "github",
+      provider_user_id: String(githubUser.id),
+      login: githubUser.login,
+      display_name: githubUser.name,
+      avatar_url: githubUser.avatar_url,
+    });
+
+    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
+    const sessionToken = crypto.randomBytes(32).toString("hex");
+    await createSession(account.id, sessionToken, expiresAt, result.accessToken);
+    pendingDeviceAuths.delete(requestId);
+
+    res.json({
+      status: "authorized",
+      letagents_token: sessionToken,
+      expires_at: expiresAt,
+      account: {
+        id: account.id,
+        login: account.login,
+        display_name: account.display_name,
+        avatar_url: account.avatar_url,
+        provider: account.provider,
+        provider_user_id: account.provider_user_id,
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
   }
