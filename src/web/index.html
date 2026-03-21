@@ -1430,18 +1430,8 @@
           }
         }
 
-        // Fallback: restore from localStorage
-        try {
-          const raw = localStorage.getItem("letagents:web:session");
-          if (!raw) return false;
-          const parsed = JSON.parse(raw);
-          state.currentProjectId = parsed.id || "";
-          state.currentProjectCode = (parsed.code || "").toUpperCase();
-          state.currentRoomName = parsed.roomName || "";
-          return Boolean(state.currentProjectId);
-        } catch (_error) {
-          return false;
-        }
+        // No /in/ path and no localStorage fallback — URL is the source of truth
+        return false;
       }
 
       async function apiFetch(path, options) {
