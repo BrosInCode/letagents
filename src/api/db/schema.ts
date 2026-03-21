@@ -67,6 +67,30 @@ export const auth_sessions = pgTable(
   })
 );
 
+export const owner_tokens = pgTable(
+  "owner_tokens",
+  {
+    token_id: text("token_id").primaryKey(),
+    account_id: text("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    github_user_id: text("github_user_id").notNull(),
+    token_hash: text("token_hash").notNull().unique(),
+    provider_access_token: text("provider_access_token"),
+    oauth_token_expires_at: timestamp("oauth_token_expires_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    account_idx: index("owner_tokens_account_id_idx").on(table.account_id),
+    github_user_idx: index("owner_tokens_github_user_id_idx").on(table.github_user_id),
+    token_hash_idx: uniqueIndex("owner_tokens_token_hash_idx").on(table.token_hash),
+  })
+);
+
 export const participants = pgTable(
   "participants",
   {

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { and, asc, eq, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./db/client.js";
@@ -8,6 +9,7 @@ import {
   auth_states,
   id_sequences,
   messages,
+  owner_tokens,
   project_admins,
   rooms,
   tasks,
@@ -41,6 +43,25 @@ export interface Session {
 }
 
 export interface SessionAccount extends Session {
+  provider: string;
+  provider_user_id: string;
+  login: string;
+  display_name: string | null;
+  avatar_url: string | null;
+}
+
+export interface OwnerToken {
+  token_id: string;
+  account_id: string;
+  github_user_id: string;
+  token_hash: string;
+  provider_access_token: string | null;
+  oauth_token_expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OwnerTokenAccount extends OwnerToken {
   provider: string;
   provider_user_id: string;
   login: string;
@@ -131,6 +152,10 @@ function toProject(row: typeof rooms.$inferSelect): Project {
     ...row,
     name: row.name ?? undefined,
   };
+}
+
+function hashToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
 }
 
 async function nextPrefixedId(sequenceName: string, prefix: string): Promise<string> {
@@ -452,6 +477,58 @@ export async function getSessionAccountByToken(token: string): Promise<SessionAc
 
 export async function deleteSessionByToken(token: string): Promise<void> {
   await db.delete(auth_sessions).where(eq(auth_sessions.token, token));
+}
+
+export async function createOwnerToken(input: {
+  accountId: string;
+  githubUserId: string;
+  token: string;
+  providerAccessToken?: string | null;
+  oauthTokenExpiresAt?: string | null;
+}): Promise<OwnerToken> {
+  const now = new Date().toISOString();
+  const tokenHash = hashToken(input.token);
+
+  const ownerToken: OwnerToken = {
+    token_id: await nextPrefixedId("owner_tokens", "owner_token"),
+    account_id: input.accountId,
+    github_user_id: input.githubUserId,
+    token_hash: tokenHash,
+    provider_access_token: input.providerAccessToken ?? null,
+    oauth_token_expires_at: input.oauthTokenExpiresAt ?? null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.insert(owner_tokens).values(ownerToken);
+  return ownerToken;
+}
+
+export async function getOwnerTokenAccountByToken(token: string): Promise<OwnerTokenAccount | null> {
+  const tokenHash = hashToken(token);
+
+  const [ownerToken] = await db
+    .select({
+      token_id: owner_tokens.token_id,
+      account_id: owner_tokens.account_id,
+      github_user_id: owner_tokens.github_user_id,
+      token_hash: owner_tokens.token_hash,
+      provider_access_token: owner_tokens.provider_access_token,
+      oauth_token_expires_at: owner_tokens.oauth_token_expires_at,
+      created_at: owner_tokens.created_at,
+      updated_at: owner_tokens.updated_at,
+      provider: accounts.provider,
+      provider_user_id: accounts.provider_user_id,
+      login: accounts.login,
+      display_name: accounts.display_name,
+      avatar_url: accounts.avatar_url,
+    })
+    .from(owner_tokens)
+    .innerJoin(accounts, eq(owner_tokens.account_id, accounts.id))
+    .where(eq(owner_tokens.token_hash, tokenHash))
+    .limit(1);
+
+  return ownerToken ?? null;
 }
 
 export async function registerAgentIdentity(input: {
