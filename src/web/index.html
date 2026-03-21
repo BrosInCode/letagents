@@ -1268,26 +1268,25 @@
         elements.presenceBadge.textContent = label;
       }
 
-      function isHumanSender(sender) {
+      function isHumanSender(sender, source) {
+        if (source === "browser") return true;
         const normalized = String(sender || "").toLowerCase();
         if (normalized === "human" || normalized === "anonymous") return true;
-        // If the sender matches the current session user, it's a human
-        if (state.senderName && normalized === state.senderName.toLowerCase()) return true;
         return false;
       }
 
-      function getSenderColor(sender) {
+      function getSenderColor(sender, source) {
         const normalized = String(sender || "").toLowerCase();
         if (normalized === "orchestrator") return "var(--sender-orchestrator)";
         if (normalized === "codex" || normalized === "codex-agent") return "var(--sender-codex)";
         if (normalized === "claude" || normalized === "antigravity") return "var(--sender-claude)";
-        if (isHumanSender(sender)) return "var(--sender-human)";
+        if (isHumanSender(sender, source)) return "var(--sender-human)";
         return "var(--sender-default)";
       }
 
-      function getSenderProvenance(sender) {
+      function getSenderProvenance(sender, source) {
+        if (isHumanSender(sender, source)) return "human";
         const normalized = String(sender || "").toLowerCase();
-        if (isHumanSender(sender)) return "human";
         if (normalized === "letagents" || normalized === "system") return "system";
         return "agent";
       }
@@ -1358,8 +1357,8 @@
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
-          const senderColor = getSenderColor(message.sender);
-          const provenance = getSenderProvenance(message.sender);
+          const senderColor = getSenderColor(message.sender, message.source);
+          const provenance = getSenderProvenance(message.sender, message.source);
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
@@ -1669,7 +1668,7 @@
         try {
           const message = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
             method: "POST",
-            body: JSON.stringify({ sender, text }),
+            body: JSON.stringify({ sender, text, source: "browser" }),
           });
           upsertMessages([message]);
           elements.messageInput.value = "";

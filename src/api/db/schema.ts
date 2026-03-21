@@ -152,6 +152,7 @@ export const messages = pgTable(
     number: integer("number").notNull(),
     sender: text("sender").notNull(),
     text: text("text").notNull(),
+    source: text("source"),
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
