@@ -17,6 +17,6 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist/ dist/
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
-COPY src/web/ dist/web/
+COPY src/web/ src/web/
 EXPOSE 3001
 CMD ["node", "dist/api/server.js"]
