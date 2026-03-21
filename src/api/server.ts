@@ -15,7 +15,6 @@ import {
   getAllProjects,
   getAgentIdentitiesForOwner,
   getOwnerTokenAccountByToken,
-  getProjectByName,
   getMessages,
   getMessagesAfter,
   getOpenTasks,
@@ -320,8 +319,18 @@ async function resolveRequestAccount(
 async function resolveRoomOrReply(
   roomId: string,
   res: express.Response,
-  allowCreate = false
+  { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
 ): Promise<Project | null> {
+  // Handle invite codes (e.g., JA0E-4NYO)
+  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(roomId)) {
+    const project = await getProjectByCode(roomId);
+    if (!project) {
+      res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+      return null;
+    }
+    return project;
+  }
+
   if (allowCreate) {
     const { room } = await getOrCreateCanonicalRoom(roomId);
     return room;
@@ -1025,39 +1034,7 @@ function checkJoinRateLimit(ip: string): boolean {
   return true;
 }
 
-/**
- * Resolve a canonical room identifier to a project row.
- *
- * Returns null + sends response if the room cannot be found.
- * For invite codes, looks up by `code`.
- * For repo names, looks up (or creates) by `name`.
- */
-async function resolveRoomOrReply(
-  roomId: string,
-  res: express.Response,
-  { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
-): Promise<Project | null> {
-  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(roomId)) {
-    const project = await getProjectByCode(roomId);
-    if (!project) {
-      res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
-      return null;
-    }
-    return project;
-  }
 
-  if (allowCreate) {
-    const { project } = await getOrCreateProjectByName(roomId);
-    return project;
-  }
-
-  const found = await getProjectByName(roomId);
-  if (!found) {
-    res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
-    return null;
-  }
-  return found;
-}
 
 app.get("/rooms/resolve/:identifier", (req, res) => {
   const identifier = decodeURIComponent(req.params.identifier);
