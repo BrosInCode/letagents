@@ -1108,7 +1108,6 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
   res.status(201).json({
     ...message,
     room_id: roomId,
-    project_id: undefined,
   });
 });
 
@@ -1242,7 +1241,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const task = await createTask(project.id, title, created_by, description, source_message_id);
 
   if (!(await isTrustedAgentCreator(project.id, created_by))) {
-    res.status(201).json({ ...task, room_id: roomId, project_id: undefined });
+    res.status(201).json({ ...task, room_id: roomId });
     return;
   }
 
@@ -1253,7 +1252,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   }
 
   await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
-  res.status(201).json({ ...acceptedTask, room_id: roomId, project_id: undefined });
+  res.status(201).json({ ...acceptedTask, room_id: roomId });
 });
 
 app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req, res) => {
@@ -1270,7 +1269,7 @@ app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req, res) => {
     return;
   }
 
-  res.json({ ...task, room_id: roomId, project_id: undefined });
+  res.json({ ...task, room_id: roomId });
 });
 
 app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
@@ -1305,7 +1304,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     if (updated && status && status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }
-    res.json({ ...updated, room_id: roomId, project_id: undefined });
+    res.json({ ...updated, room_id: roomId });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
