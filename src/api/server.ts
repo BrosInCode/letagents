@@ -19,9 +19,11 @@ import {
   getMessages,
   getMessagesAfter,
   getOpenTasks,
+  getOrCreateCanonicalRoom,
   getOrCreateProjectByName,
   getProjectByCode,
   getProjectById,
+  getProjectByName,
   getSessionAccountByToken,
   getTaskById,
   getTasks,
@@ -313,6 +315,25 @@ async function resolveRequestAccount(
   }
 
   return null;
+}
+
+async function resolveRoomOrReply(
+  roomId: string,
+  res: express.Response,
+  allowCreate = false
+): Promise<Project | null> {
+  if (allowCreate) {
+    const { room } = await getOrCreateCanonicalRoom(roomId);
+    return room;
+  }
+
+  // Try by canonical ID first, then fall back to legacy name lookup
+  const found = await getProjectById(roomId) || await getProjectByName(roomId);
+  if (!found) {
+    res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+    return null;
+  }
+  return found;
 }
 
 const __filename = fileURLToPath(import.meta.url);
