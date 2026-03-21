@@ -21,6 +21,7 @@ import {
   setPendingDeviceAuth,
   setStoredAuth,
   touchRoomSession,
+  type RoomSessionState,
   type StoredAccount,
 } from "./local-state.js";
 import {
@@ -169,6 +170,49 @@ function toRoomState(input: {
   };
 }
 
+function toPublicRoomState(state: RoomState | null): Record<string, unknown> | null {
+  if (!state) {
+    return null;
+  }
+
+  return {
+    room_id: state.room_id,
+    code: state.code ?? null,
+    joined_via: state.joined_via,
+  };
+}
+
+function toPublicStoredRoomSession(session: RoomSessionState | null): Record<string, unknown> | null {
+  if (!session) {
+    return null;
+  }
+
+  return {
+    room_id: session.room_id,
+    code: session.code ?? null,
+    joined_via: session.joined_via,
+    joined_at: session.joined_at,
+    last_seen_at: session.last_seen_at,
+    last_message_id: session.last_message_id ?? null,
+  };
+}
+
+function toPublicRoomResponse(
+  response: Record<string, unknown>,
+  fallbackRoomId: string
+): Record<string, unknown> {
+  const {
+    id: _legacyId,
+    project_id: _legacyProjectId,
+    ...rest
+  } = response;
+
+  return {
+    ...rest,
+    room_id: typeof rest.room_id === "string" ? rest.room_id : fallbackRoomId,
+  };
+}
+
 function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
   currentRoom = state;
   saveRoomSession({
@@ -204,8 +248,8 @@ function getTargetRoomId(roomId?: string): string | null {
   return roomId || currentRoom?.room_id || null;
 }
 
-function getTargetProjectId(projectId?: string): string | null {
-  return projectId || currentRoom?.project_id || null;
+function getFallbackProjectId(): string | null {
+  return currentRoom?.project_id ?? null;
 }
 
 function getLastMessageId(payload: unknown): string | undefined {
@@ -238,7 +282,7 @@ async function roomScopedApiCall<T>(input: {
   }
 
   if (!input.project_id) {
-    throw new Error("No room_id or project_id is available for this request.");
+    throw new Error("No room is available for this request.");
   }
 
   const result = await apiCall<T>(input.project_path(input.project_id), input.options);
@@ -345,6 +389,55 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
   };
 }
 
+async function createInviteRoom(): Promise<{
+  room: RoomState;
+  response: Record<string, unknown>;
+}> {
+  const project = await apiCall<Record<string, unknown>>("/projects", { method: "POST" });
+  const roomId =
+    typeof project.code === "string"
+      ? project.code
+      : typeof project.id === "string"
+        ? project.id
+        : "unknown-room";
+
+  const room = rememberRoom(
+    toRoomState({
+      room_id: roomId,
+      project_id: typeof project.id === "string" ? project.id : null,
+      code: typeof project.code === "string" ? project.code : roomId,
+      joined_via: "join_code",
+    })
+  );
+
+  await autoRegisterAgentIdentity();
+
+  return {
+    room,
+    response: toPublicRoomResponse(project, roomId),
+  };
+}
+
+async function joinInviteCode(code: string): Promise<Record<string, unknown>> {
+  const joined = await joinRoomIdentifier(code, "join_code");
+  await autoRegisterAgentIdentity();
+
+  return {
+    ...toPublicRoomResponse(joined.response, joined.room.room_id),
+    joined_via: "join_code",
+  };
+}
+
+async function joinNamedRoom(name: string): Promise<Record<string, unknown>> {
+  const joined = await joinRoomIdentifier(name, "join_room");
+  await autoRegisterAgentIdentity();
+
+  return {
+    ...toPublicRoomResponse(joined.response, joined.room.room_id),
+    joined_via: "join_room",
+  };
+}
+
 async function autoRegisterAgentIdentity(): Promise<void> {
   if (!AGENT_NAME || !currentRoom) {
     return;
@@ -407,19 +500,19 @@ server.resource(
   }
 );
 
-server.resource(
-  "project_messages",
-  new ResourceTemplate("letagents://projects/{project_id}/messages", {
-    list: undefined,
-  }),
-  async (uri, { project_id }) => {
-    const result = await apiCall(`/projects/${encodeURIComponent(project_id as string)}/messages`);
+// -- create_room ------------------------------------------------------------
+
+server.tool(
+  "create_room",
+  "Create a new invite room on Let Agents Chat. Returns the room ID and join code.",
+  {},
+  async () => {
+    const created = await createInviteRoom();
     return {
-      contents: [
+      content: [
         {
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(result, null, 2),
+          type: "text" as const,
+          text: JSON.stringify(created.response, null, 2),
         },
       ],
     };
@@ -430,30 +523,35 @@ server.resource(
 
 server.tool(
   "create_project",
-  "Create a new project on Let Agents Chat. Returns a project ID and a join code that other agents can use to join.",
+  "Legacy alias for create_room. Creates a new invite room and returns its join code.",
   {},
   async () => {
-    const project = await apiCall<Record<string, unknown>>("/projects", { method: "POST" });
-    const roomId =
-      typeof project.code === "string"
-        ? project.code
-        : typeof project.id === "string"
-          ? project.id
-          : "unknown-room";
-    rememberRoom(
-      toRoomState({
-        room_id: roomId,
-        project_id: typeof project.id === "string" ? project.id : null,
-        code: typeof project.code === "string" ? project.code : roomId,
-        joined_via: "join_code",
-      })
-    );
-    await autoRegisterAgentIdentity();
+    const created = await createInviteRoom();
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ ...project, room_id: roomId }, null, 2),
+          text: JSON.stringify(created.response, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// -- join_code --------------------------------------------------------------
+
+server.tool(
+  "join_code",
+  "Join an existing room using an invite code.",
+  {
+    code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
+  },
+  async ({ code }) => {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(await joinInviteCode(code), null, 2),
         },
       ],
     };
@@ -464,18 +562,16 @@ server.tool(
 
 server.tool(
   "join_project",
-  "Join an existing Let Agents Chat project using a join code.",
+  "Legacy alias for join_code. Join an existing room using an invite code.",
   {
-    code: z.string().describe("The join code shared by the project creator (e.g. 'ABCX-7291')"),
+    code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
   },
   async ({ code }) => {
-    const joined = await joinRoomIdentifier(code, "join_code");
-    await autoRegisterAgentIdentity();
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ ...joined.response, joined_via: "join_code" }, null, 2),
+          text: JSON.stringify(await joinInviteCode(code), null, 2),
         },
       ],
     };
@@ -491,14 +587,11 @@ server.tool(
     name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
   },
   async ({ name }) => {
-    const joined = await joinRoomIdentifier(name, "join_room");
-    await autoRegisterAgentIdentity();
-
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ ...joined.response, joined_via: "join_room" }, null, 2),
+          text: JSON.stringify(await joinNamedRoom(name), null, 2),
         },
       ],
     };
@@ -530,7 +623,7 @@ server.tool(
           text: JSON.stringify(
             {
               connected: true,
-              ...currentRoom,
+              ...toPublicRoomState(currentRoom),
               auth: getStoredAuth()
                 ? {
                     source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
@@ -591,11 +684,11 @@ server.tool(
               config_file: configPath ?? null,
               config_contents: configContents,
               derived_room_from_git: derivedRoom ?? null,
-              current_room: currentRoom ?? null,
+              current_room: toPublicRoomState(currentRoom),
               join_hint: !currentRoom
                 ? repoRoot
-                  ? "Run initialize_repo to set up .letagents.json, or join_room/join_project to connect."
-                  : "Not inside a git repo. Use join_project or join_room to connect manually."
+                  ? "Run initialize_repo to set up .letagents.json, or use join_room/join_code to connect."
+                  : "Not inside a git repo. Use create_room, join_code, or join_room to connect manually."
                 : null,
             },
             null,
@@ -622,14 +715,10 @@ server.tool(
       .string()
       .optional()
       .describe("Canonical room ID. Defaults to the current room."),
-    project_id: z
-      .string()
-      .optional()
-      .describe("Legacy project ID. Defaults to the current room if joined."),
   },
-  async ({ sender, status, room_id, project_id }) => {
+  async ({ sender, status, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
 
     if (!targetRoomId && !targetProjectId) {
       return {
@@ -639,8 +728,8 @@ server.tool(
             text: JSON.stringify(
               {
                 success: false,
-                error: "No room_id or project_id provided and not currently in a room.",
-                hint: "Join a room first with join_project or join_room, or pass room_id explicitly.",
+                error: "No room_id provided and not currently in a room.",
+                hint: "Join or create a room first, or pass room_id explicitly.",
               },
               null,
               2
@@ -696,7 +785,7 @@ const TASK_STATUSES = [
 
 server.tool(
   "add_task",
-  "Add a new task to the project board. Tasks normally start as 'proposed' and must be " +
+  "Add a new task to the room board. Tasks normally start as 'proposed' and must be " +
     "accepted before an agent can claim them, but tasks created by trusted agents already " +
     "active in the room may be auto-accepted. Use this when a human or agent identifies " +
     "work that needs to be done.",
@@ -706,11 +795,10 @@ server.tool(
     created_by: z.string().describe("Name of the agent or human creating the task"),
     source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to current room."),
   },
-  async ({ title, description, created_by, source_message_id, room_id, project_id }) => {
+  async ({ title, description, created_by, source_message_id, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room. Join one first." }) }],
@@ -736,18 +824,17 @@ server.tool(
 
 server.tool(
   "get_board",
-  "Get the current task board for the project. By default shows only open tasks " +
+  "Get the current task board for the room. By default shows only open tasks " +
     "(not done/cancelled). Agents should check this on startup and when idle to " +
     "see if there is unassigned work to claim.",
   {
     status: z.enum(TASK_STATUSES).optional().describe("Filter by specific status"),
     open_only: z.boolean().optional().describe("If true (default), only show tasks not done/cancelled"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to current room."),
   },
-  async ({ status, open_only, room_id, project_id }) => {
+  async ({ status, open_only, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room. Join one first." }) }],
@@ -781,11 +868,10 @@ server.tool(
     task_id: z.string().describe("The task ID to claim, e.g. 'task_1'"),
     assignee: z.string().describe("Your agent name, e.g. 'antigravity'"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to current room."),
   },
-  async ({ task_id, assignee, room_id, project_id }) => {
+  async ({ task_id, assignee, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room." }) }],
@@ -826,11 +912,10 @@ server.tool(
     assignee: z.string().optional().describe("New assignee for the task"),
     pr_url: z.string().optional().describe("PR URL to link to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to current room."),
   },
-  async ({ task_id, status, assignee, pr_url, room_id, project_id }) => {
+  async ({ task_id, status, assignee, pr_url, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room." }) }],
@@ -869,11 +954,10 @@ server.tool(
     task_id: z.string().describe("The task ID to submit for review"),
     pr_url: z.string().optional().describe("GitHub PR URL for the work"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to current room."),
   },
-  async ({ task_id, pr_url, room_id, project_id }) => {
+  async ({ task_id, pr_url, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room." }) }],
@@ -1057,7 +1141,6 @@ server.tool(
                 success: true,
                 created: configPath,
                 room_id: joined.room.room_id,
-                project_id: joined.room.project_id ?? null,
                 code: joined.room.code ?? null,
                 joined: true,
                 hint: "Consider adding .letagents.json to git so other contributors auto-join the same room.",
@@ -1100,13 +1183,12 @@ server.tool(
   "Send a message to a Let Agents Chat room.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to the current room."),
     sender: z.string().describe("Name identifying the sending agent (e.g. 'antigravity-agent')"),
     text: z.string().describe("The message text to send"),
   },
-  async ({ room_id, project_id, sender, text }) => {
+  async ({ room_id, sender, text }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       throw new Error("No room is currently selected. Join a room first or pass room_id.");
     }
@@ -1140,11 +1222,10 @@ server.tool(
   "Read all messages from a Let Agents Chat room.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to the current room."),
   },
-  async ({ room_id, project_id }) => {
+  async ({ room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     const result = await roomScopedApiCall({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -1172,7 +1253,6 @@ server.tool(
   "Wait for new messages in a Let Agents Chat room. Blocks until new messages arrive or 30 seconds elapse. Use the after_message_id parameter to only receive messages newer than a specific message.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
-    project_id: z.string().optional().describe("Legacy project ID. Defaults to the current room."),
     after_message_id: z
       .string()
       .optional()
@@ -1182,9 +1262,9 @@ server.tool(
       .optional()
       .describe("Maximum wait time in milliseconds. If set to 0, the default timeout will be used."),
   },
-  async ({ room_id, project_id, after_message_id, timeout }) => {
+  async ({ room_id, after_message_id, timeout }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getTargetProjectId(project_id);
+    const targetProjectId = getFallbackProjectId();
     const serverTimeout = Math.min(
       Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
       MAX_POLL_TIMEOUT_MS
@@ -1262,8 +1342,8 @@ server.tool(
               account: storedAuth?.account ?? null,
               token_expires_at: storedAuth?.expires_at ?? null,
               pending_device_auth: pendingAuth,
-              current_room: currentRoom,
-              saved_current_room: savedCurrentRoom,
+              current_room: toPublicRoomState(currentRoom),
+              saved_current_room: toPublicStoredRoomSession(savedCurrentRoom),
               detected_room_from_context: detectedRoom,
               repo_root: repoRoot,
               next_step: nextStep,
@@ -1598,7 +1678,7 @@ server.tool(
             type: "text" as const,
             text: JSON.stringify({
               error: "Not in a git repository or no remote configured",
-              suggestion: "Use create_project to create an invite room instead",
+              suggestion: "Use create_room to create an invite room instead",
             }, null, 2),
           },
         ],
@@ -1652,7 +1732,7 @@ async function main() {
     }
 
     // 4. No context found
-    console.error("ℹ️ No .letagents.json, git remote, or saved room found — use join_project or join_room to connect.");
+    console.error("ℹ️ No .letagents.json, git remote, or saved room found — use create_room, join_code, or join_room to connect.");
   } catch (err) {
     // Auto-join failure should never block the MCP server
     console.error("⚠️ Auto-join failed (server still running):", err instanceof Error ? err.message : err);
