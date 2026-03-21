@@ -95,6 +95,7 @@ export interface Message {
   id: string;
   sender: string;
   text: string;
+  source: string | null;
   timestamp: string;
 }
 
@@ -128,6 +129,7 @@ interface MessageRow {
   number: number;
   sender: string;
   text: string;
+  source: string | null;
   timestamp: string;
 }
 
@@ -203,6 +205,7 @@ function toMessage(row: MessageRow): Message {
     id: formatMessageId(row.number),
     sender: row.sender,
     text: row.text,
+    source: row.source ?? null,
     timestamp: row.timestamp,
   };
 }
@@ -409,12 +412,13 @@ export async function updateProjectDisplayName(
   return updated ? toProject(updated) : null;
 }
 
-export async function addMessage(roomId: string, sender: string, text: string): Promise<Message> {
+export async function addMessage(roomId: string, sender: string, text: string, source?: string): Promise<Message> {
   const message: MessageRow = {
     room_id: roomId,
     number: await nextRoomScopedNumber("messages", roomId),
     sender,
     text,
+    source: source ?? null,
     timestamp: new Date().toISOString(),
   };
 
@@ -430,6 +434,7 @@ export async function getMessages(roomId: string): Promise<Message[]> {
       number: messages.number,
       sender: messages.sender,
       text: messages.text,
+      source: messages.source,
       timestamp: messages.timestamp,
     })
     .from(messages)
@@ -454,6 +459,7 @@ export async function getMessagesAfter(
       number: messages.number,
       sender: messages.sender,
       text: messages.text,
+      source: messages.source,
       timestamp: messages.timestamp,
     })
     .from(messages)

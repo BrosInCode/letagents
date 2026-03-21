@@ -90,8 +90,8 @@ function cleanupExpiredDeviceAuths(): void {
   }
 }
 
-async function emitProjectMessage(projectId: string, sender: string, text: string): Promise<Message> {
-  const message = await addMessage(projectId, sender, text);
+async function emitProjectMessage(projectId: string, sender: string, text: string, source?: string): Promise<Message> {
+  const message = await addMessage(projectId, sender, text, source);
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
 }
@@ -931,7 +931,9 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const message = await emitProjectMessage(projectId, sender, text);
+  // Server-determined: browser sessions (cookie auth) → "browser", otherwise null
+  const source = req.sessionAccount ? "browser" : undefined;
+  const message = await emitProjectMessage(projectId, sender, text, source);
   res.status(201).json(message);
 });
 
@@ -1306,7 +1308,9 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
     return;
   }
 
-  const message = await emitProjectMessage(project.id, sender, text);
+  // Server-determined: browser sessions (cookie auth) → "browser", otherwise null
+  const source = req.sessionAccount ? "browser" : undefined;
+  const message = await emitProjectMessage(project.id, sender, text, source);
   res.status(201).json({
     ...message,
     room_id: roomId,
