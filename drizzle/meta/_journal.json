@@ -19,15 +19,8 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1774083810619,
-      "tag": "0002_lyrical_lifeguard",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1774084692367,
-      "tag": "0003_fair_landau",
+      "when": 1774085474872,
+      "tag": "0002_confused_squadron_sinister",
       "breakpoints": true
     }
   ]
