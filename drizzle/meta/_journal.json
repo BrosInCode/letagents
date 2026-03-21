@@ -15,6 +15,13 @@
       "when": 1774041401480,
       "tag": "0001_married_wither",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1774083810619,
+      "tag": "0002_lyrical_lifeguard",
+      "breakpoints": true
     }
   ]
 }
