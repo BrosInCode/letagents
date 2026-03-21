@@ -1,5 +1,5 @@
 {
-  "id": "d75536fd-1595-4c68-b605-53be38144431",
+  "id": "36b16642-b054-42e7-bd32-ec26c15b67dd",
   "prevId": "245f4486-9867-4ab8-8bed-50280064c489",
   "version": "7",
   "dialect": "postgresql",
@@ -624,7 +624,22 @@
               "nulls": "last"
             }
           ],
-          "isUnique": true,
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "owner_tokens_github_user_id_idx": {
+          "name": "owner_tokens_github_user_id_idx",
+          "columns": [
+            {
+              "expression": "github_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -662,13 +677,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "owner_tokens_github_user_id_unique": {
-          "name": "owner_tokens_github_user_id_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "github_user_id"
-          ]
-        },
         "owner_tokens_token_hash_unique": {
           "name": "owner_tokens_token_hash_unique",
           "nullsNotDistinct": false,
