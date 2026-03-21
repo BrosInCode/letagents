@@ -14,10 +14,11 @@ import {
   rooms,
   tasks,
 } from "./db/schema.js";
+import { isInviteCode, normalizeRoomName } from "./room-routing.js";
 
 export interface Project {
   id: string;
-  code: string;
+  code: string | null;
   name?: string;
   created_at: string;
 }
@@ -120,8 +121,26 @@ export interface Task {
   updated_at: string;
 }
 
-interface MessageRow extends Message {
+interface MessageRow {
   project_id: string;
+  number: number;
+  sender: string;
+  text: string;
+  timestamp: string;
+}
+
+interface TaskRow {
+  project_id: string;
+  number: number;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  assignee: string | null;
+  created_by: string;
+  source_message_id: string | null;
+  pr_url: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -140,7 +159,8 @@ function generateCode(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   const seg1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
   const seg2 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  return `${seg1}-${seg2}`;
+  const seg3 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  return `${seg1}-${seg2}-${seg3}`;
 }
 
 function isUniqueConstraintError(error: unknown): error is { code?: string } {
@@ -148,9 +168,55 @@ function isUniqueConstraintError(error: unknown): error is { code?: string } {
 }
 
 function toProject(row: typeof rooms.$inferSelect): Project {
+  const inviteRoom = isInviteCode(row.id);
   return {
-    ...row,
-    name: row.name ?? undefined,
+    id: row.id,
+    code: inviteRoom ? row.id : null,
+    name: inviteRoom ? undefined : row.id,
+    created_at: row.created_at,
+  };
+}
+
+function formatMessageId(number: number): string {
+  return `msg_${number}`;
+}
+
+function formatTaskId(number: number): string {
+  return `task_${number}`;
+}
+
+function parseScopedId(id: string, prefix: string): number | null {
+  const match = new RegExp(`^${prefix}_(\\d+)$`).exec(id);
+  if (!match) {
+    return null;
+  }
+
+  const number = Number(match[1]);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function toMessage(row: MessageRow): Message {
+  return {
+    id: formatMessageId(row.number),
+    sender: row.sender,
+    text: row.text,
+    timestamp: row.timestamp,
+  };
+}
+
+function toTask(row: TaskRow): Task {
+  return {
+    id: formatTaskId(row.number),
+    project_id: row.project_id,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    assignee: row.assignee,
+    created_by: row.created_by,
+    source_message_id: row.source_message_id,
+    pr_url: row.pr_url,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -173,6 +239,21 @@ async function nextPrefixedId(sequenceName: string, prefix: string): Promise<str
   return `${prefix}_${next.value}`;
 }
 
+async function nextRoomScopedNumber(sequenceName: string, roomId: string): Promise<number> {
+  const [next] = await db
+    .insert(id_sequences)
+    .values({ name: `${sequenceName}:${roomId}`, value: 1 })
+    .onConflictDoUpdate({
+      target: id_sequences.name,
+      set: {
+        value: sql`${id_sequences.value} + 1`,
+      },
+    })
+    .returning({ value: id_sequences.value });
+
+  return next.value;
+}
+
 export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
@@ -181,15 +262,15 @@ export async function createProject(): Promise<Project> {
   const created_at = new Date().toISOString();
 
   while (true) {
-    const project: Project = {
-      id: await nextPrefixedId("projects", "proj"),
-      code: generateCode(),
-      created_at,
-    };
+    const roomId = generateCode();
 
     try {
-      await db.insert(rooms).values(project);
-      return project;
+      await db.insert(rooms).values({ id: roomId, created_at });
+      return {
+        id: roomId,
+        code: roomId,
+        created_at,
+      };
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;
@@ -199,41 +280,15 @@ export async function createProject(): Promise<Project> {
 }
 
 export async function createProjectWithName(name: string): Promise<Project> {
-  const created_at = new Date().toISOString();
-
-  while (true) {
-    const project: Project = {
-      id: await nextPrefixedId("projects", "proj"),
-      code: generateCode(),
-      name,
-      created_at,
-    };
-
-    try {
-      await db.insert(rooms).values(project);
-      return project;
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) {
-        throw error;
-      }
-
-      const existing = await getProjectByName(name);
-      if (existing) {
-        return existing;
-      }
-    }
-  }
+  return (await getOrCreateCanonicalRoom(normalizeRoomName(name))).room;
 }
 
 export async function getOrCreateProjectByName(
   name: string
 ): Promise<{ project: Project; created: boolean }> {
-  const existing = await getProjectByName(name);
-  if (existing) {
-    return { project: existing, created: false };
-  }
-
-  return { project: await createProjectWithName(name), created: true };
+  const canonicalName = normalizeRoomName(name);
+  const { room, created } = await getOrCreateCanonicalRoom(canonicalName);
+  return { project: room, created };
 }
 
 /**
@@ -251,13 +306,16 @@ export async function getOrCreateCanonicalRoom(
 
   const created_at = new Date().toISOString();
   try {
-    const project: Project = {
-      id: canonicalId,
-      code: canonicalId,
-      created_at,
+    await db.insert(rooms).values({ id: canonicalId, created_at });
+    return {
+      room: {
+        id: canonicalId,
+        code: null,
+        name: canonicalId,
+        created_at,
+      },
+      created: true,
     };
-    await db.insert(rooms).values(project);
-    return { room: project, created: true };
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       const retried = await getProjectById(canonicalId);
@@ -270,17 +328,24 @@ export async function getOrCreateCanonicalRoom(
 }
 
 export async function getProjectByName(name: string): Promise<Project | undefined> {
-  const [project] = await db.select().from(rooms).where(eq(rooms.name, name)).limit(1);
-  return project ? toProject(project) : undefined;
+  return getProjectById(normalizeRoomName(name));
 }
 
 export async function getAllProjects(): Promise<Pick<Project, "id" | "code">[]> {
-  return db.select({ id: rooms.id, code: rooms.code }).from(rooms).orderBy(asc(rooms.created_at));
+  const rows = await db.select().from(rooms).orderBy(asc(rooms.created_at));
+  return rows.map((row) => {
+    const project = toProject(row);
+    return { id: project.id, code: project.code };
+  });
 }
 
 export async function getProjectByCode(code: string): Promise<Project | undefined> {
-  const [project] = await db.select().from(rooms).where(eq(rooms.code, code)).limit(1);
-  return project ? toProject(project) : undefined;
+  const normalizedCode = code.toUpperCase();
+  if (!isInviteCode(normalizedCode)) {
+    return undefined;
+  }
+
+  return getProjectById(normalizedCode);
 }
 
 export async function getProjectById(id: string): Promise<Project | undefined> {
@@ -290,14 +355,29 @@ export async function getProjectById(id: string): Promise<Project | undefined> {
 
 export async function rotateProjectCode(projectId: string): Promise<Project | null> {
   const project = await getProjectById(projectId);
-  if (!project) return null;
+  if (!project || !project.code) return null;
 
   while (true) {
     const nextCode = generateCode();
 
     try {
-      await db.update(rooms).set({ code: nextCode }).where(eq(rooms.id, projectId));
-      return { ...project, code: nextCode };
+      await db.transaction(async (tx) => {
+        await tx.update(rooms).set({ id: nextCode }).where(eq(rooms.id, projectId));
+        await tx
+          .update(id_sequences)
+          .set({ name: `messages:${nextCode}` })
+          .where(eq(id_sequences.name, `messages:${projectId}`));
+        await tx
+          .update(id_sequences)
+          .set({ name: `tasks:${nextCode}` })
+          .where(eq(id_sequences.name, `tasks:${projectId}`));
+      });
+
+      return {
+        id: nextCode,
+        code: nextCode,
+        created_at: project.created_at,
+      };
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;
@@ -308,8 +388,8 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
 
 export async function addMessage(projectId: string, sender: string, text: string): Promise<Message> {
   const message: MessageRow = {
-    id: await nextPrefixedId("messages", "msg"),
     project_id: projectId,
+    number: await nextRoomScopedNumber("messages", projectId),
     sender,
     text,
     timestamp: new Date().toISOString(),
@@ -317,54 +397,47 @@ export async function addMessage(projectId: string, sender: string, text: string
 
   await db.insert(messages).values(message);
 
-  return {
-    id: message.id,
-    sender: message.sender,
-    text: message.text,
-    timestamp: message.timestamp,
-  };
+  return toMessage(message);
 }
 
-const messageOrderSql = sql<number>`CAST(SUBSTRING(${messages.id} FROM 5) AS integer)`;
-
 export async function getMessages(projectId: string): Promise<Message[]> {
-  return db
+  const rows = await db
     .select({
-      id: messages.id,
+      project_id: messages.project_id,
+      number: messages.number,
       sender: messages.sender,
       text: messages.text,
       timestamp: messages.timestamp,
     })
     .from(messages)
     .where(eq(messages.project_id, projectId))
-    .orderBy(messageOrderSql);
+    .orderBy(asc(messages.number));
+
+  return rows.map(toMessage);
 }
 
 export async function getMessagesAfter(
   projectId: string,
   afterMessageId: string | undefined
 ): Promise<Message[]> {
-  if (!afterMessageId) {
+  const afterNumber = afterMessageId ? parseScopedId(afterMessageId, "msg") : null;
+  if (!afterNumber) {
     return getMessages(projectId);
   }
 
-  const match = /^msg_(\d+)$/.exec(afterMessageId);
-  if (!match) {
-    return getMessages(projectId);
-  }
-
-  const afterNumber = Number(match[1]);
-
-  return db
+  const rows = await db
     .select({
-      id: messages.id,
+      project_id: messages.project_id,
+      number: messages.number,
       sender: messages.sender,
       text: messages.text,
       timestamp: messages.timestamp,
     })
     .from(messages)
-    .where(and(eq(messages.project_id, projectId), sql`${messageOrderSql} > ${afterNumber}`))
-    .orderBy(messageOrderSql);
+    .where(and(eq(messages.project_id, projectId), sql`${messages.number} > ${afterNumber}`))
+    .orderBy(asc(messages.number));
+
+  return rows.map(toMessage);
 }
 
 export async function hasMessagesFromSender(projectId: string, sender: string): Promise<boolean> {
@@ -655,9 +728,9 @@ export async function createTask(
   sourceMessageId?: string
 ): Promise<Task> {
   const now = new Date().toISOString();
-  const task: Task = {
-    id: await nextPrefixedId("tasks", "task"),
+  const task: TaskRow = {
     project_id: projectId,
+    number: await nextRoomScopedNumber("tasks", projectId),
     title,
     description: description ?? null,
     status: "proposed",
@@ -671,39 +744,55 @@ export async function createTask(
 
   await db.insert(tasks).values(task);
 
-  return task;
+  return toTask(task);
 }
 
 export async function getTasks(projectId: string, statusFilter?: string): Promise<Task[]> {
-  if (statusFilter) {
-    return db
-      .select()
-      .from(tasks)
-      .where(and(eq(tasks.project_id, projectId), eq(tasks.status, statusFilter as TaskStatus)))
-      .orderBy(asc(tasks.created_at));
-  }
+  const query = db
+    .select()
+    .from(tasks)
+    .where(
+      statusFilter
+        ? and(eq(tasks.project_id, projectId), eq(tasks.status, statusFilter as TaskStatus))
+        : eq(tasks.project_id, projectId)
+    )
+    .orderBy(asc(tasks.number));
 
-  return db.select().from(tasks).where(eq(tasks.project_id, projectId)).orderBy(asc(tasks.created_at));
+  const rows = (await query) as TaskRow[];
+  return rows.map(toTask);
 }
 
 export async function getOpenTasks(projectId: string): Promise<Task[]> {
-  return db
+  const rows = (await db
     .select()
     .from(tasks)
     .where(and(eq(tasks.project_id, projectId), notInArray(tasks.status, ["done", "cancelled"])))
-    .orderBy(asc(tasks.created_at));
+    .orderBy(asc(tasks.number))) as TaskRow[];
+
+  return rows.map(toTask);
 }
 
-export async function getTaskById(taskId: string): Promise<Task | undefined> {
-  const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
-  return task;
+export async function getTaskById(projectId: string, taskId: string): Promise<Task | undefined> {
+  const taskNumber = parseScopedId(taskId, "task");
+  if (!taskNumber) {
+    return undefined;
+  }
+
+  const [task] = await db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.project_id, projectId), eq(tasks.number, taskNumber)))
+    .limit(1);
+
+  return task ? toTask(task as TaskRow) : undefined;
 }
 
 export async function updateTask(
+  projectId: string,
   taskId: string,
   updates: { status?: TaskStatus; assignee?: string; pr_url?: string }
 ): Promise<Task | null> {
-  const task = await getTaskById(taskId);
+  const task = await getTaskById(projectId, taskId);
   if (!task) return null;
 
   if (updates.status && !isValidTransition(task.status, updates.status)) {
@@ -711,6 +800,11 @@ export async function updateTask(
       `Invalid transition: ${task.status} → ${updates.status}. ` +
         `Allowed: ${VALID_TRANSITIONS[task.status].join(", ") || "none"}`
     );
+  }
+
+  const taskNumber = parseScopedId(taskId, "task");
+  if (!taskNumber) {
+    return null;
   }
 
   const newStatus = updates.status ?? task.status;
@@ -726,7 +820,7 @@ export async function updateTask(
       pr_url: newPrUrl,
       updated_at: now,
     })
-    .where(eq(tasks.id, taskId));
+    .where(and(eq(tasks.project_id, projectId), eq(tasks.number, taskNumber)));
 
   return {
     ...task,
