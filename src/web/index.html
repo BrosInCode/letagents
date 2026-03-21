@@ -1275,11 +1275,18 @@
         return false;
       }
 
+      function getSenderIdentityKey(sender) {
+        return String(sender || "")
+          .split("(")[0]
+          .trim()
+          .toLowerCase();
+      }
+
       function getSenderColor(sender, source) {
-        const normalized = String(sender || "").toLowerCase();
-        if (normalized === "orchestrator") return "var(--sender-orchestrator)";
-        if (normalized === "codex" || normalized === "codex-agent") return "var(--sender-codex)";
-        if (normalized === "claude" || normalized === "antigravity") return "var(--sender-claude)";
+        const normalized = getSenderIdentityKey(sender);
+        if (normalized === "orchestrator" || normalized.startsWith("orchestrator-")) return "var(--sender-orchestrator)";
+        if (normalized === "codex" || normalized === "codex-agent" || normalized.startsWith("codex-")) return "var(--sender-codex)";
+        if (normalized === "claude" || normalized === "antigravity" || normalized.startsWith("antigravity-")) return "var(--sender-claude)";
         if (isHumanSender(sender, source)) return "var(--sender-human)";
         return "var(--sender-default)";
       }

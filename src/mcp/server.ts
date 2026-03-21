@@ -3,6 +3,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { writeFileSync, existsSync } from "fs";
+import { userInfo } from "os";
 import { join, dirname } from "path";
 import { execSync } from "child_process";
 import { SseClient, type Message } from "./sse-client.js";
@@ -13,16 +14,19 @@ import {
   clearStoredAuth,
   getLocalStatePath,
   getPendingDeviceAuth,
+  getStoredAgentIdentity,
   getStoredAuth,
   getStoredCurrentRoom,
   getStoredRoomSession,
   readLocalState,
   saveRoomSession,
+  setStoredAgentIdentity,
   setPendingDeviceAuth,
   setStoredAuth,
   touchRoomSession,
   type PendingDeviceAuthState,
   type RoomSessionState,
+  type StoredAgentIdentityState,
   type StoredAccount,
 } from "./local-state.js";
 import {
@@ -45,6 +49,7 @@ interface RoomState {
 }
 
 let currentRoom: RoomState | null = null;
+let currentAgentIdentity: StoredAgentIdentityState | null = getStoredAgentIdentity();
 
 // ---------------------------------------------------------------------------
 // Config
@@ -55,9 +60,235 @@ const AGENT_NAME = (process.env.LETAGENTS_AGENT_NAME || process.env.AGENT_NAME |
 const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim();
 const AGENT_OWNER_LABEL = (process.env.LETAGENTS_AGENT_OWNER_LABEL || "").trim();
 
+interface ResolvedOwnerContext {
+  slug: string;
+  label: string;
+  login: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function readCommandOutput(command: string, cwd = process.cwd()): string | null {
+  try {
+    const output = execSync(command, {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    }).trim();
+    return output || null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSlugSegment(input: string, fallback: string): string {
+  const normalized = input
+    .normalize("NFKD")
+    .replace(/[^\x00-\x7F]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+
+  return normalized || fallback;
+}
+
+function normalizeAgentBaseName(input: string): string {
+  return normalizeSlugSegment(input, "agent").replace(/-agent$/, "") || "agent";
+}
+
+function isCodexRuntime(): boolean {
+  return Boolean(
+    process.env.CODEX_THREAD_ID ||
+      process.env.CODEX_SHELL ||
+      process.env.CODEX_CI ||
+      process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE
+  );
+}
+
+function detectAgentBaseName(): string {
+  if (AGENT_NAME) {
+    return normalizeAgentBaseName(AGENT_NAME);
+  }
+
+  if (AGENT_DISPLAY_NAME) {
+    return normalizeAgentBaseName(AGENT_DISPLAY_NAME);
+  }
+
+  if (isCodexRuntime()) {
+    return "codex";
+  }
+
+  return "agent";
+}
+
+function resolveOwnerContext(): ResolvedOwnerContext {
+  const storedAuth = getStoredAuth();
+  const authLogin = storedAuth?.account?.login?.trim() || null;
+  const authLabel = storedAuth?.account?.display_name?.trim() || authLogin;
+
+  if (authLogin || authLabel || AGENT_OWNER_LABEL) {
+    const label = AGENT_OWNER_LABEL || authLabel || authLogin || "Owner";
+    const slug = normalizeSlugSegment(authLogin || label, "owner");
+    return { slug, label, login: authLogin };
+  }
+
+  const gitUserName = readCommandOutput("git config --get user.name");
+  const gitUserEmail = readCommandOutput("git config --get user.email");
+  const gitIdentity = gitUserName || gitUserEmail?.split("@")[0] || null;
+  if (gitIdentity) {
+    return {
+      slug: normalizeSlugSegment(gitIdentity, "owner"),
+      label: gitIdentity,
+      login: null,
+    };
+  }
+
+  const osIdentity =
+    process.env.USER ||
+    process.env.LOGNAME ||
+    process.env.USERNAME ||
+    (() => {
+      try {
+        return userInfo().username;
+      } catch {
+        return null;
+      }
+    })() ||
+    "owner";
+
+  return {
+    slug: normalizeSlugSegment(osIdentity, "owner"),
+    label: osIdentity,
+    login: null,
+  };
+}
+
+function buildAgentIdentityName(baseName: string, ownerSlug: string): string {
+  const normalizedBase = normalizeAgentBaseName(baseName);
+  if (!ownerSlug || normalizedBase.endsWith(`-${ownerSlug}`)) {
+    return normalizedBase;
+  }
+
+  return `${normalizedBase}-${ownerSlug}`;
+}
+
+function formatOwnerAttribution(ownerLabel: string): string {
+  const trimmed = ownerLabel.trim() || "Owner";
+  return /s$/i.test(trimmed) ? `${trimmed}' agent` : `${trimmed}'s agent`;
+}
+
+function buildActorLabel(name: string, ownerLabel: string): string {
+  return `${name} (${formatOwnerAttribution(ownerLabel)})`;
+}
+
+function sameAgentIdentity(
+  left: StoredAgentIdentityState | null,
+  right: StoredAgentIdentityState
+): boolean {
+  return Boolean(
+    left &&
+      left.name === right.name &&
+      left.display_name === right.display_name &&
+      left.owner_label === right.owner_label &&
+      left.actor_label === right.actor_label &&
+      left.canonical_key === right.canonical_key &&
+      left.source === right.source
+  );
+}
+
+function toPublicAgentIdentity(
+  identity: StoredAgentIdentityState | null
+): Record<string, unknown> | null {
+  if (!identity) {
+    return null;
+  }
+
+  return {
+    name: identity.name,
+    display_name: identity.display_name,
+    owner_label: identity.owner_label,
+    actor_label: identity.actor_label,
+    canonical_key: identity.canonical_key ?? null,
+    source: identity.source,
+  };
+}
+
+async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
+  const owner = resolveOwnerContext();
+  const name = buildAgentIdentityName(detectAgentBaseName(), owner.slug);
+  const displayName = name;
+  const actorLabel = buildActorLabel(displayName, owner.label);
+  const authAvailable = Boolean(getLetagentsToken());
+
+  let resolved: StoredAgentIdentityState = {
+    name,
+    display_name: displayName,
+    owner_label: owner.label,
+    actor_label: actorLabel,
+    canonical_key: owner.login ? `${owner.login}/${name}` : null,
+    source: "local",
+    resolved_at: new Date().toISOString(),
+  };
+
+  if (
+    currentAgentIdentity &&
+    currentAgentIdentity.name === resolved.name &&
+    currentAgentIdentity.display_name === resolved.display_name &&
+    currentAgentIdentity.owner_label === resolved.owner_label &&
+    currentAgentIdentity.actor_label === resolved.actor_label &&
+    (!authAvailable || currentAgentIdentity.source === "api")
+  ) {
+    return currentAgentIdentity;
+  }
+
+  if (authAvailable) {
+    try {
+      const registered = await apiCall<Record<string, unknown>>("/agents", {
+        method: "POST",
+        body: JSON.stringify({
+          name: resolved.name,
+          display_name: resolved.display_name,
+          owner_label: resolved.owner_label,
+        }),
+      });
+
+      resolved = {
+        ...resolved,
+        canonical_key:
+          typeof registered.canonical_key === "string"
+            ? registered.canonical_key
+            : resolved.canonical_key,
+        display_name:
+          typeof registered.display_name === "string"
+            ? registered.display_name
+            : resolved.display_name,
+        owner_label:
+          typeof registered.owner_label === "string"
+            ? registered.owner_label
+            : resolved.owner_label,
+        source: "api",
+      };
+      resolved.actor_label = buildActorLabel(resolved.display_name, resolved.owner_label);
+    } catch (error) {
+      console.error(
+        "Agent identity registration failed:",
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
+  if (!sameAgentIdentity(currentAgentIdentity, resolved)) {
+    currentAgentIdentity = setStoredAgentIdentity({
+      ...resolved,
+      resolved_at: new Date().toISOString(),
+    });
+  }
+
+  return currentAgentIdentity ?? resolved;
+}
 
 /**
  * Resolve the root of the git repository containing `dir`.
@@ -319,6 +550,15 @@ function toPublicRoomResponse(
   };
 }
 
+async function withAgentIdentity(
+  payload: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  return {
+    ...payload,
+    agent_identity: toPublicAgentIdentity(await ensureAgentIdentity()),
+  };
+}
+
 function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
   currentRoom = state;
   saveRoomSession({
@@ -429,9 +669,14 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
         joined_via: joinedVia,
       })
     );
+    const agentIdentity = await ensureAgentIdentity();
     return {
       room,
-      response: { ...response, room_id: joinedRoomId },
+      response: {
+        ...response,
+        room_id: joinedRoomId,
+        agent_identity: toPublicAgentIdentity(agentIdentity),
+      },
     };
   } catch (error) {
     await maybeHandleRepoRoomAuthRequired(error, roomId);
@@ -457,12 +702,14 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
         joined_via: joinedVia,
       })
     );
+    const agentIdentity = await ensureAgentIdentity();
     return {
       room,
       response: {
         ...project,
         room_id: legacyRoomId,
         project_id: typeof project.id === "string" ? project.id : null,
+        agent_identity: toPublicAgentIdentity(agentIdentity),
       },
     };
   }
@@ -491,12 +738,14 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       joined_via: joinedVia,
     })
   );
+  const agentIdentity = await ensureAgentIdentity();
   return {
     room,
     response: {
       ...project,
       room_id: legacyRoomId,
       project_id: typeof project.id === "string" ? project.id : null,
+      agent_identity: toPublicAgentIdentity(agentIdentity),
     },
   };
 }
@@ -522,52 +771,31 @@ async function createInviteRoom(): Promise<{
       joined_via: "join_code",
     })
   );
-
-  await autoRegisterAgentIdentity();
+  const agentIdentity = await ensureAgentIdentity();
 
   return {
     room,
-    response: toPublicRoomResponse(project, roomId),
+    response: {
+      ...toPublicRoomResponse(project, roomId),
+      agent_identity: toPublicAgentIdentity(agentIdentity),
+    },
   };
 }
 
 async function joinInviteCode(code: string): Promise<Record<string, unknown>> {
   const joined = await joinRoomIdentifier(code, "join_code");
-  await autoRegisterAgentIdentity();
-
-  return {
+  return withAgentIdentity({
     ...toPublicRoomResponse(joined.response, joined.room.room_id),
     joined_via: "join_code",
-  };
+  });
 }
 
 async function joinNamedRoom(name: string): Promise<Record<string, unknown>> {
   const joined = await joinRoomIdentifier(name, "join_room");
-  await autoRegisterAgentIdentity();
-
-  return {
+  return withAgentIdentity({
     ...toPublicRoomResponse(joined.response, joined.room.room_id),
     joined_via: "join_room",
-  };
-}
-
-async function autoRegisterAgentIdentity(): Promise<void> {
-  if (!AGENT_NAME || !currentRoom) {
-    return;
-  }
-
-  try {
-    await apiCall("/agents", {
-      method: "POST",
-      body: JSON.stringify({
-        name: AGENT_NAME,
-        display_name: AGENT_DISPLAY_NAME || AGENT_NAME,
-        owner_label: AGENT_OWNER_LABEL || undefined,
-      }),
-    });
-  } catch (error) {
-    console.error("Agent identity registration failed:", error);
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +970,9 @@ server.tool(
               ? {
                   connected: true,
                   ...toPublicRoomState(currentRoom),
+                  agent_identity: toPublicAgentIdentity(
+                    currentAgentIdentity ?? getStoredAgentIdentity()
+                  ),
                   auth: getStoredAuth()
                     ? {
                         source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
@@ -828,14 +1059,17 @@ server.tool(
     "e.g. 'reviewing PR #2', 'waiting for tests', 'writing WISHLIST.md'. " +
     "Status updates are distinct from chat messages and can be filtered separately.",
   {
-    sender: z.string().describe("Name of the agent posting the status (e.g. 'codex-agent')"),
+    sender: z
+      .string()
+      .optional()
+      .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     status: z.string().describe("Short status description (e.g. 'reviewing PR #2', 'idle', 'thinking...')"),
     room_id: z
       .string()
       .optional()
       .describe("Canonical room ID. Defaults to the current room."),
   },
-  async ({ sender, status, room_id }) => {
+  async ({ sender: _sender, status, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
 
@@ -860,6 +1094,8 @@ server.tool(
 
     // Status messages use a reserved prefix so the UI (and agents) can distinguish
     // them from normal chat messages without changing the data model.
+    const identity = await ensureAgentIdentity();
+    const sender = identity.actor_label;
     const statusText = `[status] ${status}`;
 
     const message = await roomScopedApiCall<Record<string, unknown>>({
@@ -883,6 +1119,7 @@ server.tool(
               success: true,
               status_posted: status,
               sender,
+              agent_identity: toPublicAgentIdentity(identity),
               message_id: typeof message.id === "string" ? message.id : null,
               timestamp: typeof message.timestamp === "string" ? message.timestamp : null,
             },
@@ -911,11 +1148,14 @@ server.tool(
   {
     title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
     description: z.string().optional().describe("Longer description of what needs to be done"),
-    created_by: z.string().describe("Name of the agent or human creating the task"),
+    created_by: z
+      .string()
+      .optional()
+      .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
   },
-  async ({ title, description, created_by, source_message_id, room_id }) => {
+  async ({ title, description, created_by: _createdBy, source_message_id, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -924,6 +1164,7 @@ server.tool(
       };
     }
 
+    const identity = await ensureAgentIdentity();
     const task = await roomScopedApiCall({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -931,12 +1172,26 @@ server.tool(
       project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks`,
       options: {
         method: "POST",
-        body: JSON.stringify({ title, description, created_by, source_message_id }),
+        body: JSON.stringify({
+          title,
+          description,
+          created_by: identity.actor_label,
+          source_message_id,
+        }),
       },
     });
 
     return {
-      content: [{ type: "text" as const, text: JSON.stringify({ success: true, task }, null, 2) }],
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            { success: true, task, agent_identity: toPublicAgentIdentity(identity) },
+            null,
+            2
+          ),
+        },
+      ],
     };
   }
 );
@@ -985,10 +1240,13 @@ server.tool(
     "Do NOT claim proposed tasks — they need to be accepted first.",
   {
     task_id: z.string().describe("The task ID to claim, e.g. 'task_1'"),
-    assignee: z.string().describe("Your agent name, e.g. 'antigravity'"),
+    assignee: z
+      .string()
+      .optional()
+      .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
   },
-  async ({ task_id, assignee, room_id }) => {
+  async ({ task_id, assignee: _assignee, room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -998,6 +1256,7 @@ server.tool(
     }
 
     try {
+      const identity = await ensureAgentIdentity();
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -1005,12 +1264,21 @@ server.tool(
         project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         options: {
           method: "PATCH",
-          body: JSON.stringify({ status: "assigned", assignee }),
+          body: JSON.stringify({ status: "assigned", assignee: identity.actor_label }),
         },
       });
 
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ success: true, task: updated }, null, 2) }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { success: true, task: updated, agent_identity: toPublicAgentIdentity(identity) },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return {
@@ -1028,7 +1296,10 @@ server.tool(
   {
     task_id: z.string().describe("The task ID to update"),
     status: z.enum(TASK_STATUSES).optional().describe("New status for the task"),
-    assignee: z.string().optional().describe("New assignee for the task"),
+    assignee: z
+      .string()
+      .optional()
+      .describe("New assignee for the task. Defaults to the current agent when status=assigned."),
     pr_url: z.string().optional().describe("PR URL to link to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
   },
@@ -1042,6 +1313,10 @@ server.tool(
     }
 
     try {
+      const identity =
+        status === "assigned" && !assignee
+          ? await ensureAgentIdentity()
+          : null;
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -1049,12 +1324,29 @@ server.tool(
         project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         options: {
           method: "PATCH",
-          body: JSON.stringify({ status, assignee, pr_url }),
+          body: JSON.stringify({
+            status,
+            assignee: assignee ?? identity?.actor_label,
+            pr_url,
+          }),
         },
       });
 
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ success: true, task: updated }, null, 2) }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                task: updated,
+                agent_identity: identity ? toPublicAgentIdentity(identity) : null,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (error) {
       return {
@@ -1302,24 +1594,28 @@ server.tool(
   "Send a message to a Let Agents Chat room.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
-    sender: z.string().describe("Name identifying the sending agent (e.g. 'antigravity-agent')"),
+    sender: z
+      .string()
+      .optional()
+      .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     text: z.string().describe("The message text to send"),
   },
-  async ({ room_id, sender, text }) => {
+  async ({ room_id, sender: _sender, text }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       throw new Error("No room is currently selected. Join a room first or pass room_id.");
     }
 
-    const message = await roomScopedApiCall({
+    const identity = await ensureAgentIdentity();
+    const message = await roomScopedApiCall<Record<string, unknown>>({
       room_id: targetRoomId,
       project_id: targetProjectId,
       room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages`,
       project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
       options: {
         method: "POST",
-        body: JSON.stringify({ sender, text }),
+        body: JSON.stringify({ sender: identity.actor_label, text }),
       },
     });
     touchCurrentRoom(typeof (message as { id?: string }).id === "string" ? (message as { id: string }).id : undefined);
@@ -1327,7 +1623,14 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(message, null, 2),
+          text: JSON.stringify(
+            {
+              ...message,
+              agent_identity: toPublicAgentIdentity(identity),
+            },
+            null,
+            2
+          ),
         },
       ],
     };
@@ -1461,6 +1764,9 @@ server.tool(
               account: storedAuth?.account ?? null,
               token_expires_at: storedAuth?.expires_at ?? null,
               pending_device_auth: pendingAuth,
+              agent_identity: toPublicAgentIdentity(
+                currentAgentIdentity ?? getStoredAgentIdentity()
+              ),
               current_room: toPublicRoomState(currentRoom),
               saved_current_room: toPublicStoredRoomSession(savedCurrentRoom),
               detected_room_from_context: detectedRoom,
@@ -1672,8 +1978,9 @@ server.tool(
       const joinedVia: JoinedVia = looksLikeInviteCode(roomToJoin) ? "join_code" : "join_room";
       const joined = await joinRoomIdentifier(roomToJoin, joinedVia);
       joinedRoom = joined.room;
-      await autoRegisterAgentIdentity();
     }
+
+    const agentIdentity = await ensureAgentIdentity();
 
     return {
       content: [
@@ -1686,6 +1993,7 @@ server.tool(
               account: storedAuth.account ?? null,
               expires_at: storedAuth.expires_at ?? null,
               auto_joined_room: joinedRoom,
+              agent_identity: toPublicAgentIdentity(agentIdentity),
             },
             null,
             2
@@ -1752,7 +2060,7 @@ server.tool(
 
     try {
       const joined = await joinRoomIdentifier(savedRoom.room_id, savedRoom.joined_via);
-      await autoRegisterAgentIdentity();
+      const agentIdentity = await ensureAgentIdentity();
 
       return {
         content: [
@@ -1765,6 +2073,7 @@ server.tool(
                 server_session_resumed: false,
                 last_message_id_before_restart: savedRoom.last_message_id ?? null,
                 room: joined.room,
+                agent_identity: toPublicAgentIdentity(agentIdentity),
               },
               null,
               2
@@ -1845,6 +2154,7 @@ async function main() {
     const configRoom = getRoomFromConfig();
     if (configRoom) {
       await joinRoomIdentifier(configRoom, "config");
+      await ensureAgentIdentity();
       console.error(`🏠 Auto-joined room '${configRoom}' (from .letagents.json)`);
       return;
     }
@@ -1853,6 +2163,7 @@ async function main() {
     const gitRoom = getGitRemoteIdentity();
     if (gitRoom) {
       await joinRoomIdentifier(gitRoom, "git-remote");
+      await ensureAgentIdentity();
       console.error(`🏠 Auto-joined room '${gitRoom}' (inferred from git remote — consider adding a .letagents.json)`);
       return;
     }
@@ -1861,6 +2172,7 @@ async function main() {
     const savedCurrentRoom = getStoredCurrentRoom();
     if (savedCurrentRoom) {
       await joinRoomIdentifier(savedCurrentRoom.room_id, savedCurrentRoom.joined_via);
+      await ensureAgentIdentity();
       console.error(`🏠 Rejoined saved room '${savedCurrentRoom.room_id}' (from local state)`);
       return;
     }
