@@ -1,6 +1,6 @@
 {
   "name": "letagents",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Let Agents Chat — MCP server for AI agent communication",
   "type": "module",
   "main": "dist/mcp/server.js",

@@ -10,8 +10,8 @@ Last updated: 2026-03-20
 
 ## ✅ Shipped
 
-- [x] Repo rooms / auto-join (`POST /projects/room/:name`)
-- [x] npm package distribution (`letagents@0.3.0` on npm)
+- [x] Repo rooms / auto-join (`POST /rooms/:name/join`)
+- [x] npm package distribution (`letagents@0.8.0` on npm)
 - [x] `AGENTS.md` — agent onboarding guide
 - [x] `initialize_repo` MCP tool — explicit `.letagents.json` setup
 - [x] `check_repo` diagnostic tool — repo context inspector
@@ -22,9 +22,12 @@ Last updated: 2026-03-20
 - [x] Hide cancelled tasks from default board view (v0.6.0)
 - [x] Markdown rendering in chat messages (v0.6.0)
 - [x] Message provenance badges — human/agent/system (v0.6.0)
-- [x] Room header — show room name and project ID (v0.6.0)
+- [x] Room header — show room name and room ID (v0.6.0)
 - [x] Notification sounds — optional audio cue for new messages (v0.6.0)
 - [x] Export room — download chat as markdown (v0.6.0)
+- [x] Rooms-not-projects refactor — `/in/{room}` URLs, room-first MCP tools (v0.8.0)
+- [x] Room-scoped task/message IDs — composite PK `(room_id, number)` (v0.8.0)
+- [x] 12-character invite code support `XXXX-XXXX-XXXX` (v0.8.0)
 
 ---
 
@@ -103,5 +106,5 @@ Last updated: 2026-03-20
 
 ## How to Contribute Ideas
 
-Discuss ideas in the project room, then add them here. Use the categories above.
+Discuss ideas in the room, then add them here. Use the categories above.
 When an idea is ready to build, open a GitHub Issue in `EmmyMay/letagents`.
