@@ -51,6 +51,8 @@ interface RoomState {
 let currentRoom: RoomState | null = null;
 let currentAgentIdentity: StoredAgentIdentityState | null = getStoredAgentIdentity();
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
+let currentAuthenticatedAccountSource: "env" | "stored" | null = null;
+let currentAuthenticatedEnvToken: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -132,18 +134,52 @@ function detectAgentBaseName(): string {
 }
 
 async function getAuthenticatedAccountProfile(): Promise<AuthenticatedAccountLookup | null> {
+  const envToken = (process.env.LETAGENTS_TOKEN || "").trim();
+  if (envToken) {
+    if (
+      currentAuthenticatedAccountSource === "env" &&
+      currentAuthenticatedEnvToken === envToken &&
+      currentAuthenticatedAccount?.login?.trim()
+    ) {
+      return currentAuthenticatedAccount;
+    }
+
+    try {
+      const result = await apiCall<{ account?: AuthenticatedAccountLookup }>("/agents/me");
+      const account = result?.account;
+      if (account?.login?.trim()) {
+        currentAuthenticatedAccount = account;
+        currentAuthenticatedAccountSource = "env";
+        currentAuthenticatedEnvToken = envToken;
+        return account;
+      }
+    } catch {
+      // Fall through to non-auth identity sources when the active env token
+      // cannot resolve to an account profile.
+    }
+
+    return null;
+  }
+
   const storedAccount = getStoredAuth()?.account;
   if (storedAccount?.login?.trim()) {
     currentAuthenticatedAccount = storedAccount;
+    currentAuthenticatedAccountSource = "stored";
+    currentAuthenticatedEnvToken = null;
     return storedAccount;
   }
 
   if (!getLetagentsToken()) {
     currentAuthenticatedAccount = undefined;
+    currentAuthenticatedAccountSource = null;
+    currentAuthenticatedEnvToken = null;
     return null;
   }
 
-  if (currentAuthenticatedAccount && currentAuthenticatedAccount.login?.trim()) {
+  if (
+    currentAuthenticatedAccountSource === "stored" &&
+    currentAuthenticatedAccount?.login?.trim()
+  ) {
     return currentAuthenticatedAccount;
   }
 
@@ -152,6 +188,8 @@ async function getAuthenticatedAccountProfile(): Promise<AuthenticatedAccountLoo
     const account = result?.account;
     if (account?.login?.trim()) {
       currentAuthenticatedAccount = account;
+      currentAuthenticatedAccountSource = "stored";
+      currentAuthenticatedEnvToken = null;
       return account;
     }
   } catch {
@@ -460,6 +498,8 @@ async function apiCall<T = unknown>(path: string, options?: RequestInit): Promis
       // (valid credential but insufficient permissions, e.g., private repo access)
       clearStoredAuth();
       currentAuthenticatedAccount = undefined;
+      currentAuthenticatedAccountSource = null;
+      currentAuthenticatedEnvToken = null;
     }
     throw new ApiError(res.status, body);
   }
@@ -1982,6 +2022,8 @@ server.tool(
       clearPendingDeviceAuth();
       clearStoredAuth();
       currentAuthenticatedAccount = undefined;
+      currentAuthenticatedAccountSource = null;
+      currentAuthenticatedEnvToken = null;
       return {
         content: [
           {
@@ -2005,6 +2047,8 @@ server.tool(
       source: "device_flow",
     });
     currentAuthenticatedAccount = storedAuth.account ?? undefined;
+    currentAuthenticatedAccountSource = storedAuth.account ? "stored" : null;
+    currentAuthenticatedEnvToken = null;
 
     let joinedRoom: RoomState | null = null;
     const roomToJoin =
@@ -2052,6 +2096,8 @@ server.tool(
     clearPendingDeviceAuth();
     clearStoredAuth();
     currentAuthenticatedAccount = undefined;
+    currentAuthenticatedAccountSource = null;
+    currentAuthenticatedEnvToken = null;
     return {
       content: [
         {
