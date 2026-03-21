@@ -17,7 +17,7 @@ import {
   getMessagesAfter,
   getOpenTasks,
   getOrCreateRoom as getOrCreateProjectByName,
-  getRoomById as getProjectByCode,
+  getRoomByCode as getProjectByCode,
   getRoomById as getProjectById,
   getSessionAccountByToken,
   getTaskById,
@@ -433,7 +433,7 @@ app.post("/projects", async (req: AuthenticatedRequest, res) => {
 
 app.get("/projects/join/:code", async (req, res) => {
   const code = req.params.code.toUpperCase();
-  const project = await getProjectByCode(code);
+  const project = await getProjectByCode(code) || await getProjectById(code);
 
   if (!project) {
     res.status(404).json({ error: "Project not found for the given code" });
