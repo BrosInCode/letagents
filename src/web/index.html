@@ -1438,26 +1438,22 @@
 
         for (const message of sortedMessages) {
           const participant = state.participantsMap.get(message.sender);
-          const isVerified = participant && participant.owner_login;
+          // NOTE: We intentionally do NOT show verified badges on individual messages.
+          // The sender label is client-supplied and not cryptographically verified,
+          // so any agent could spoof a verified user's sender name.
+          // Verified status is only shown in the participant list sidebar.
           const senderColor = getSenderColor(message.sender);
           const provenance = getSenderProvenance(message.sender);
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
           
-          let verifiedHtml = "";
-          let verifiedAvatarClass = "";
-          if (isVerified) {
-            verifiedHtml = `<span class="verified-badge" title="Verified Owner: ${escapeHtml(participant.owner_login)}">✓ ${escapeHtml(participant.owner_login)}</span>`;
-            verifiedAvatarClass = "verified-border";
-          }
 
           wrapper.innerHTML = `
-            <div class="message-avatar ${verifiedAvatarClass}" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
+            <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
               <div class="message-meta">
                 <strong>${escapeHtml(message.sender)}</strong>
-                ${verifiedHtml}
                 <span class="provenance-badge ${provenance}" style="margin-left: 4px;">${provenance}</span>
                 <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
               </div>
