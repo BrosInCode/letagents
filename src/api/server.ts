@@ -90,8 +90,8 @@ function cleanupExpiredDeviceAuths(): void {
   }
 }
 
-async function emitProjectMessage(projectId: string, sender: string, text: string): Promise<Message> {
-  const message = await addMessage(projectId, sender, text);
+async function emitProjectMessage(projectId: string, sender: string, text: string, source?: string): Promise<Message> {
+  const message = await addMessage(projectId, sender, text, source);
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
 }
@@ -924,14 +924,14 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { sender, text } = req.body as { sender?: string; text?: string };
+  const { sender, text, source } = req.body as { sender?: string; text?: string; source?: string };
 
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text are required" });
     return;
   }
 
-  const message = await emitProjectMessage(projectId, sender, text);
+  const message = await emitProjectMessage(projectId, sender, text, source);
   res.status(201).json(message);
 });
 
@@ -1300,13 +1300,13 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { sender, text } = req.body as { sender?: string; text?: string };
+  const { sender, text, source } = req.body as { sender?: string; text?: string; source?: string };
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text are required" });
     return;
   }
 
-  const message = await emitProjectMessage(project.id, sender, text);
+  const message = await emitProjectMessage(project.id, sender, text, source);
   res.status(201).json({
     ...message,
     room_id: roomId,
