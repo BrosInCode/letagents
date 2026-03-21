@@ -1046,7 +1046,7 @@
 
         <section class="section glass-block">
           <div class="section-title">
-            <h2>Project Control</h2>
+            <h2>Room Control</h2>
             <span>create or join</span>
           </div>
           <div class="stack">
@@ -1058,7 +1058,7 @@
               autocomplete="off"
             />
             <div class="btn-row">
-              <button class="btn btn-primary" id="createProjectBtn" type="button">Create Project</button>
+              <button class="btn btn-primary" id="createProjectBtn" type="button">Create Room</button>
               <button class="btn btn-secondary" id="joinProjectBtn" type="button">Join by Code</button>
             </div>
           </div>
@@ -1096,7 +1096,7 @@
       <section class="chat-panel card">
         <header class="chat-header">
           <div class="chat-title">
-            <h2 id="chatTitle">No active project</h2>
+            <h2 id="chatTitle">No active room</h2>
             <p id="chatSubtitle">Create a new room or join one with a code.</p>
           </div>
           <div style="display: flex; align-items: center; gap: 12px;">
@@ -1112,7 +1112,7 @@
           <div class="messages" id="messages"></div>
           <div class="empty-state" id="emptyState">
             <div class="empty-state-card">
-              <h3>Open a project to begin</h3>
+              <h3>Open a room to begin</h3>
               <p>
                 Create a room for your agents, copy the join code with one click, and watch new
                 messages appear in real time.
@@ -1378,61 +1378,66 @@
       }
 
       function updateProjectUi() {
-        const hasProject = Boolean(state.currentProjectId);
+        const hasRoom = Boolean(state.currentProjectId);
         elements.joinCodeText.textContent = state.currentProjectCode || "----";
-        elements.projectIdLabel.textContent = hasProject ? state.currentProjectId : "No active room";
-        elements.chatTitle.textContent = hasProject
-          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Project ${state.currentProjectId}`)
-          : "No active project";
-        elements.chatSubtitle.textContent = hasProject
-          ? `Room ${state.currentProjectId}${state.currentProjectCode ? ` · ${state.currentProjectCode}` : ''}`
+        elements.projectIdLabel.textContent = hasRoom
+          ? (state.currentRoomName || state.currentProjectCode || state.currentProjectId)
+          : "No active room";
+        elements.chatTitle.textContent = hasRoom
+          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Room ${state.currentProjectCode || state.currentProjectId}`)
+          : "No active room";
+        elements.chatSubtitle.textContent = hasRoom
+          ? (state.currentProjectCode || '')
           : "Create a new room or join one with a code.";
         elements.copyJoinCodeBtn.disabled = !state.currentProjectCode;
-        elements.sendMessageBtn.disabled = !hasProject;
-        elements.messageInput.disabled = !hasProject;
-        elements.senderInput.disabled = !hasProject;
+        elements.sendMessageBtn.disabled = !hasRoom;
+        elements.messageInput.disabled = !hasRoom;
+        elements.senderInput.disabled = !hasRoom;
       }
 
       function persistSession() {
         const payload = JSON.stringify({
           id: state.currentProjectId,
           code: state.currentProjectCode,
+          roomName: state.currentRoomName || "",
         });
         localStorage.setItem("letagents:web:session", payload);
 
-        const url = new URL(window.location.href);
-        if (state.currentProjectId) {
-          url.searchParams.set("project", state.currentProjectId);
-        } else {
-          url.searchParams.delete("project");
+        // Use clean /in/<code> URL — no query params
+        const code = state.currentProjectCode;
+        if (code) {
+          window.history.replaceState({}, "", `/in/${code}`);
         }
-
-        if (state.currentProjectCode) {
-          url.searchParams.set("code", state.currentProjectCode);
-        } else {
-          url.searchParams.delete("code");
-        }
-
-        window.history.replaceState({}, "", url);
       }
 
-      function loadPersistedSession() {
-        const url = new URL(window.location.href);
-        const projectFromUrl = url.searchParams.get("project") || "";
-        const codeFromUrl = (url.searchParams.get("code") || "").toUpperCase();
+      async function loadPersistedSession() {
+        // Check if we're on /in/<identifier>
+        const pathname = window.location.pathname;
+        const inMatch = pathname.match(/^\/in\/(.+)$/);
 
-        if (projectFromUrl) {
-          state.currentProjectId = projectFromUrl;
-          state.currentProjectCode = codeFromUrl;
-          return true;
+        if (inMatch) {
+          const identifier = decodeURIComponent(inMatch[1]);
+          try {
+            // Resolve via join endpoint — works for both invite codes and room names
+            const project = await apiFetch(`/projects/join/${encodeURIComponent(identifier)}`);
+            state.currentProjectId = project.id;
+            state.currentProjectCode = (project.code || "").toUpperCase();
+            state.currentRoomName = project.name || "";
+            return true;
+          } catch (_error) {
+            // Identifier didn't resolve
+            return false;
+          }
         }
 
+        // Fallback: restore from localStorage
         try {
           const raw = localStorage.getItem("letagents:web:session");
           if (!raw) return false;
           const parsed = JSON.parse(raw);
           state.currentProjectId = parsed.id || "";
           state.currentProjectCode = (parsed.code || "").toUpperCase();
+          state.currentRoomName = parsed.roomName || "";
           return Boolean(state.currentProjectId);
         } catch (_error) {
           return false;
@@ -1463,13 +1468,13 @@
 
       async function createProject() {
         toggleProjectButtons(true);
-        setStatus("Creating a fresh project room...", "");
+        setStatus("Creating a fresh room...", "");
         try {
           const project = await apiFetch("/projects", { method: "POST" });
           await activateProject(project.id, project.code, true);
-          setStatus("Project created and live stream connected.", "success");
+          setStatus("Room created and live stream connected.", "success");
         } catch (error) {
-          setStatus(error.message || "Could not create project.", "error");
+          setStatus(error.message || "Could not create room.", "error");
         } finally {
           toggleProjectButtons(false);
         }
@@ -1572,9 +1577,10 @@
         renderMessages();
       }
 
-      async function activateProject(projectId, projectCode, focusComposer) {
+      async function activateProject(projectId, projectCode, focusComposer, roomName) {
         state.currentProjectId = projectId;
         state.currentProjectCode = String(projectCode || "").toUpperCase();
+        state.currentRoomName = roomName || state.currentRoomName || "";
         updateProjectUi();
         persistSession();
         resetMessages();
@@ -1586,7 +1592,7 @@
       }
 
       async function restoreProjectIfPossible() {
-        const foundSession = loadPersistedSession();
+        const foundSession = await loadPersistedSession();
         updateProjectUi();
 
         if (!foundSession || !state.currentProjectId) {
@@ -1594,14 +1600,15 @@
           return;
         }
 
-        setStatus(`Restoring ${state.currentProjectId}...`, "");
+        setStatus(`Restoring room...`, "");
         try {
-          await activateProject(state.currentProjectId, state.currentProjectCode, false);
+          await activateProject(state.currentProjectId, state.currentProjectCode, false, state.currentRoomName);
           setStatus("Restored previous room and resumed live updates.", "success");
         } catch (error) {
           disconnectStream();
           state.currentProjectId = "";
           state.currentProjectCode = "";
+          state.currentRoomName = "";
           updateProjectUi();
           persistSession();
           setPresence("error", "Room unavailable");
