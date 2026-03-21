@@ -336,7 +336,7 @@
               <p>Coordinate humans and agents without dropping new users into a stale room.</p>
             </div>
           </div>
-          <a class="btn btn-secondary btn-link" href="/app">Open Room</a>
+          <a class="btn btn-secondary btn-link" href="/">Home</a>
         </div>
 
         <div class="hero-grid">
@@ -392,7 +392,7 @@
           </p>
           <div class="row stacked">
             <button class="btn btn-success" id="githubSignInBtn" type="button">Sign In with GitHub</button>
-            <a class="btn btn-secondary btn-link" href="/app">Open Room Without Sign-in</a>
+
           </div>
         </article>
 
@@ -454,12 +454,19 @@
         return payload;
       }
 
-      function redirectToWorkspace(projectId, projectCode) {
-        const code = projectCode ? String(projectCode).toUpperCase() : "";
-        if (code) {
-          window.location.assign(`/in/${code}`);
+      function isInviteCode(str) {
+        return /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(str);
+      }
+
+      function redirectToRoom(roomCode) {
+        if (roomCode) {
+          // Only uppercase invite codes, leave repo names as-is
+          const identifier = isInviteCode(String(roomCode).toUpperCase())
+            ? String(roomCode).toUpperCase()
+            : String(roomCode);
+          window.location.assign(`/in/${identifier}`);
         } else {
-          window.location.assign("/app");
+          window.location.assign("/");
         }
       }
 
@@ -471,7 +478,7 @@
           if (!parsed || !parsed.id) return null;
           return {
             id: String(parsed.id),
-            code: parsed.code ? String(parsed.code).toUpperCase() : "",
+            code: parsed.code ? String(parsed.code) : "",
           };
         } catch (_error) {
           return null;
@@ -483,7 +490,7 @@
         setStatus("Creating a fresh ad-hoc room...");
         try {
           const project = await apiFetch("/projects", { method: "POST" });
-          redirectToWorkspace(project.id, project.code);
+          redirectToRoom(project.code);
         } catch (error) {
           setStatus(error.message || "Could not create room.", "error");
         } finally {
@@ -502,10 +509,10 @@
         elements.joinCodeBtn.disabled = true;
         setStatus(`Joining ${code}...`);
         try {
-          const project = await apiFetch(`/projects/join/${encodeURIComponent(code)}`, {
-            method: "GET",
+          const room = await apiFetch(`/rooms/${encodeURIComponent(code)}/join`, {
+            method: "POST",
           });
-          redirectToWorkspace(project.id, project.code);
+          redirectToRoom(room.code || code);
         } catch (error) {
           setStatus(error.message || "Could not join that room.", "error");
         } finally {
@@ -519,7 +526,7 @@
         try {
           const payload = await apiFetch("/auth/github/login", {
             method: "POST",
-            body: JSON.stringify({ redirect_to: "/app" }),
+            body: JSON.stringify({ redirect_to: "/" }),
           });
           if (!payload || !payload.auth_url) {
             throw new Error("GitHub sign-in URL was not returned.");
@@ -532,10 +539,10 @@
       }
 
       const existing = getPersistedSession();
-      if (existing) {
+      if (existing && existing.code) {
         elements.continueBtn.hidden = false;
         elements.continueBtn.addEventListener("click", () => {
-          redirectToWorkspace(existing.id, existing.code);
+          redirectToRoom(existing.code);
         });
       }
 
