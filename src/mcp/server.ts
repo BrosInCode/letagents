@@ -21,6 +21,7 @@ import {
   setPendingDeviceAuth,
   setStoredAuth,
   touchRoomSession,
+  type PendingDeviceAuthState,
   type RoomSessionState,
   type StoredAccount,
 } from "./local-state.js";
@@ -102,6 +103,20 @@ class ApiError extends Error {
   }
 }
 
+class RepoRoomAuthRequiredError extends Error {
+  readonly roomId: string;
+  readonly pendingAuth: PendingDeviceAuthState;
+
+  constructor(roomId: string, pendingAuth: PendingDeviceAuthState) {
+    super(
+      `Repo room '${roomId}' requires authentication. Device flow started: open ${pendingAuth.verification_uri} and enter code ${pendingAuth.user_code}, then run poll_device_auth.`
+    );
+    this.name = "RepoRoomAuthRequiredError";
+    this.roomId = roomId;
+    this.pendingAuth = pendingAuth;
+  }
+}
+
 function getLetagentsToken(): string {
   return process.env.LETAGENTS_TOKEN || getStoredAuth()?.token || "";
 }
@@ -121,6 +136,37 @@ function isMissingRouteError(error: unknown): boolean {
     (error.status === 404 || error.status === 405) &&
     /Cannot (GET|POST|PATCH)|Not Found|Cannot GET \/rooms|Cannot POST \/rooms/i.test(error.body)
   );
+}
+
+function parseApiErrorPayload(error: unknown): Record<string, unknown> | null {
+  if (!(error instanceof ApiError)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(error.body) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveApiPath(urlOrPath: string | undefined): string {
+  if (!urlOrPath) {
+    return "/auth/device/start";
+  }
+
+  try {
+    const parsed = new URL(urlOrPath, `${API_URL}/`);
+    const apiBase = new URL(`${API_URL}/`);
+    if (parsed.origin !== apiBase.origin) {
+      return "/auth/device/start";
+    }
+
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return "/auth/device/start";
+  }
 }
 
 async function apiCall<T = unknown>(path: string, options?: RequestInit): Promise<T> {
@@ -155,6 +201,61 @@ async function apiCall<T = unknown>(path: string, options?: RequestInit): Promis
   }
 
   return JSON.parse(body) as T;
+}
+
+async function startPendingDeviceAuth(
+  roomId: string,
+  deviceFlowUrl?: string
+): Promise<PendingDeviceAuthState> {
+  const existing = getPendingDeviceAuth();
+  if (existing?.suggested_room_id === roomId) {
+    return existing;
+  }
+
+  const response = await apiCall<{
+    request_id: string;
+    user_code: string;
+    verification_uri: string;
+    expires_in: number;
+    interval: number;
+  }>(resolveApiPath(deviceFlowUrl), {
+    method: "POST",
+  });
+
+  return setPendingDeviceAuth({
+    request_id: response.request_id,
+    user_code: response.user_code,
+    verification_uri: response.verification_uri,
+    interval_seconds: response.interval,
+    expires_at: new Date(Date.now() + response.expires_in * 1000).toISOString(),
+    started_at: new Date().toISOString(),
+    suggested_room_id: roomId,
+  });
+}
+
+async function maybeHandleRepoRoomAuthRequired(error: unknown, roomId: string): Promise<void> {
+  const payload = parseApiErrorPayload(error);
+  if (!(error instanceof ApiError) || error.status !== 401 || payload?.error !== "auth_required") {
+    return;
+  }
+
+  const pendingAuth = await startPendingDeviceAuth(
+    roomId,
+    typeof payload.device_flow_url === "string" ? payload.device_flow_url : undefined
+  );
+
+  throw new RepoRoomAuthRequiredError(roomId, pendingAuth);
+}
+
+function toRepoRoomAuthRequiredResult(error: RepoRoomAuthRequiredError): Record<string, unknown> {
+  return {
+    success: false,
+    error: "auth_required",
+    room_id: error.roomId,
+    next_step: "poll_device_auth",
+    pending_device_auth: error.pendingAuth,
+    message: error.message,
+  };
 }
 
 function toRoomState(input: {
@@ -281,6 +382,7 @@ async function roomScopedApiCall<T>(input: {
       touchRoomSession(input.room_id, getLastMessageId(result));
       return result;
     } catch (error) {
+      await maybeHandleRepoRoomAuthRequired(error, input.room_id);
       if (!input.project_id || !isMissingRouteError(error)) {
         throw error;
       }
@@ -332,6 +434,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       response: { ...response, room_id: joinedRoomId },
     };
   } catch (error) {
+    await maybeHandleRepoRoomAuthRequired(error, roomId);
     if (!isMissingRouteError(error)) {
       throw error;
     }
@@ -597,14 +700,29 @@ server.tool(
     name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
   },
   async ({ name }) => {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(await joinNamedRoom(name), null, 2),
-        },
-      ],
-    };
+    try {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(await joinNamedRoom(name), null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      if (error instanceof RepoRoomAuthRequiredError) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(toRepoRoomAuthRequiredResult(error), null, 2),
+            },
+          ],
+        };
+      }
+
+      throw error;
+    }
   }
 );
 
@@ -615,33 +733,24 @@ server.tool(
   "Get information about the currently joined room, including how it was joined.",
   {},
   async () => {
-    if (!currentRoom) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ connected: false, message: "Not currently in any room" }, null, 2),
-          },
-        ],
-      };
-    }
-
     return {
       content: [
         {
           type: "text" as const,
           text: JSON.stringify(
-            {
-              connected: true,
-              ...toPublicRoomState(currentRoom),
-              auth: getStoredAuth()
-                ? {
-                    source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
-                    expires_at: getStoredAuth()?.expires_at ?? null,
-                    account: getStoredAuth()?.account ?? null,
-                  }
-                : null,
-            },
+            currentRoom
+              ? {
+                  connected: true,
+                  ...toPublicRoomState(currentRoom),
+                  auth: getStoredAuth()
+                    ? {
+                        source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
+                        expires_at: getStoredAuth()?.expires_at ?? null,
+                        account: getStoredAuth()?.account ?? null,
+                      }
+                    : null,
+                }
+              : { connected: false, message: "Not currently in any room" },
             null,
             2
           ),
@@ -1641,27 +1750,42 @@ server.tool(
       };
     }
 
-    const joined = await joinRoomIdentifier(savedRoom.room_id, savedRoom.joined_via);
-    await autoRegisterAgentIdentity();
+    try {
+      const joined = await joinRoomIdentifier(savedRoom.room_id, savedRoom.joined_via);
+      await autoRegisterAgentIdentity();
 
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                rejoined_from_local_state: true,
+                server_session_resumed: false,
+                last_message_id_before_restart: savedRoom.last_message_id ?? null,
+                room: joined.room,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      if (error instanceof RepoRoomAuthRequiredError) {
+        return {
+          content: [
             {
-              success: true,
-              rejoined_from_local_state: true,
-              server_session_resumed: false,
-              last_message_id_before_restart: savedRoom.last_message_id ?? null,
-              room: joined.room,
+              type: "text" as const,
+              text: JSON.stringify(toRepoRoomAuthRequiredResult(error), null, 2),
             },
-            null,
-            2
-          ),
-        },
-      ],
-    };
+          ],
+        };
+      }
+
+      throw error;
+    }
   }
 );
 
@@ -1744,6 +1868,13 @@ async function main() {
     // 4. No context found
     console.error("ℹ️ No .letagents.json, git remote, or saved room found — use create_room, join_code, or join_room to connect.");
   } catch (err) {
+    if (err instanceof RepoRoomAuthRequiredError) {
+      console.error(
+        `🔐 Repo room auth required for '${err.roomId}'. Open ${err.pendingAuth.verification_uri} and enter code ${err.pendingAuth.user_code}, then run poll_device_auth.`
+      );
+      return;
+    }
+
     // Auto-join failure should never block the MCP server
     console.error("⚠️ Auto-join failed (server still running):", err instanceof Error ? err.message : err);
   }

@@ -223,6 +223,91 @@ function isRepoBackedProject(project: Project): boolean {
   return isRepoBackedRoomId(project.id);
 }
 
+function getPublicBaseUrl(): string {
+  const configuredBaseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
+  if (configuredBaseUrl?.trim()) {
+    return configuredBaseUrl.replace(/\/+$/, "");
+  }
+
+  return `http://localhost:${process.env.PORT || "3001"}`;
+}
+
+function buildDeviceFlowUrl(roomName: string): string {
+  const url = new URL("/auth/device/start", `${getPublicBaseUrl()}/`);
+  url.searchParams.set("room_id", roomName);
+  return url.toString();
+}
+
+type RepoRoomAccessDecision =
+  | { kind: "allow" }
+  | { kind: "auth_required" }
+  | { kind: "private_repo_no_access" };
+
+function replyRepoRoomAccessDecision(
+  res: express.Response,
+  roomName: string,
+  decision: Exclude<RepoRoomAccessDecision, { kind: "allow" }>
+): false {
+  if (decision.kind === "auth_required") {
+    res.status(401).json({
+      error: "auth_required",
+      code: "NOT_AUTHENTICATED",
+      message: "Authentication is required for repo-backed rooms",
+      room_id: roomName,
+      device_flow_url: buildDeviceFlowUrl(roomName),
+    });
+    return false;
+  }
+
+  res.status(403).json({
+    error: "private_repo_no_access",
+    code: "PRIVATE_REPO_NO_ACCESS",
+    message: "Authenticated account does not have access to this private repo room",
+    room_id: roomName,
+  });
+  return false;
+}
+
+async function resolveRepoRoomAccessDecision(input: {
+  roomName: string;
+  sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined;
+}): Promise<RepoRoomAccessDecision> {
+  if (!isRepoBackedRoomId(input.roomName)) {
+    return { kind: "allow" };
+  }
+
+  if (!input.sessionAccount) {
+    return { kind: "auth_required" };
+  }
+
+  const githubRepo = parseGitHubRepoName(input.roomName);
+  if (!githubRepo) {
+    return { kind: "allow" };
+  }
+
+  const accessToken = input.sessionAccount.provider_access_token ?? undefined;
+  const visibility = await getGitHubRepoVisibility(input.roomName, accessToken);
+
+  if (visibility === "public") {
+    return { kind: "allow" };
+  }
+
+  if (
+    input.sessionAccount.provider !== "github" ||
+    !input.sessionAccount.provider_access_token
+  ) {
+    return { kind: "private_repo_no_access" };
+  }
+
+  const allowed = await isGitHubRepoCollaborator({
+    roomName: input.roomName,
+    login: input.sessionAccount.login,
+    accessToken: input.sessionAccount.provider_access_token,
+  });
+
+  return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };
+}
+
 async function resolveProjectRole(
   project: Project,
   sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined
@@ -279,48 +364,16 @@ async function requireParticipant(
     return true;
   }
 
-  const roomName = project.id;
-  if (!roomName || !parseGitHubRepoName(roomName)) {
-    if (!req.sessionAccount) {
-      res.status(401).json({ error: "Authentication required for repo-backed room actions" });
-      return false;
-    }
-    return true;
-  }
-
-  const accessToken = req.sessionAccount?.provider_access_token ?? undefined;
-  const visibility = await getGitHubRepoVisibility(roomName, accessToken);
-
-  if (visibility === "public") {
-    return true;
-  }
-
-  if (visibility === "unknown") {
-    return true;
-  }
-
-  if (!req.sessionAccount) {
-    res.status(401).json({ error: "Authentication required for private repo room actions" });
-    return false;
-  }
-
-  if (req.sessionAccount.provider !== "github" || !req.sessionAccount.provider_access_token) {
-    res.status(403).json({ error: "GitHub-linked owner verification required for private repo room actions" });
-    return false;
-  }
-
-  const allowed = await isGitHubRepoCollaborator({
-    roomName,
-    login: req.sessionAccount.login,
-    accessToken: req.sessionAccount.provider_access_token,
+  const decision = await resolveRepoRoomAccessDecision({
+    roomName: project.id,
+    sessionAccount: req.sessionAccount,
   });
 
-  if (!allowed) {
-    res.status(403).json({ error: "Owner is not a collaborator on this private repo" });
-    return false;
+  if (decision.kind === "allow") {
+    return true;
   }
 
-  return true;
+  return replyRepoRoomAccessDecision(res, project.id, decision);
 }
 
 async function resolveGitHubRoomEntryDecision(input: {
@@ -331,63 +384,23 @@ async function resolveGitHubRoomEntryDecision(input: {
   | { kind: "allow" }
   | { kind: "redirect"; location: string }
 > {
-  const githubRepo = parseGitHubRepoName(input.roomName);
-  if (!githubRepo) {
-    return { kind: "allow" };
-  }
-
-  if (!input.sessionAccount) {
-    return {
-      kind: "redirect",
-      location: buildLandingRedirect({
-        reason: "repo_signin_required",
-        roomName: input.roomName,
-        redirectTo: input.redirectTo,
-      }),
-    };
-  }
-
-  const visibility = await getGitHubRepoVisibility(
-    input.roomName,
-    input.sessionAccount.provider_access_token ?? undefined
-  );
-
-  if (visibility === "public") {
-    return { kind: "allow" };
-  }
-
-  if (
-    input.sessionAccount.provider !== "github" ||
-    !input.sessionAccount.provider_access_token
-  ) {
-    return {
-      kind: "redirect",
-      location: buildLandingRedirect({
-        reason: "repo_access_denied",
-        roomName: input.roomName,
-        redirectTo: input.redirectTo,
-      }),
-    };
-  }
-
-  const allowed = await isGitHubRepoCollaborator({
+  const decision = await resolveRepoRoomAccessDecision({
     roomName: input.roomName,
-    login: input.sessionAccount.login,
-    accessToken: input.sessionAccount.provider_access_token,
+    sessionAccount: input.sessionAccount,
   });
 
-  if (!allowed) {
-    return {
-      kind: "redirect",
-      location: buildLandingRedirect({
-        reason: "repo_access_denied",
-        roomName: input.roomName,
-        redirectTo: input.redirectTo,
-      }),
-    };
+  if (decision.kind === "allow") {
+    return { kind: "allow" };
   }
 
-  return { kind: "allow" };
+  return {
+    kind: "redirect",
+    location: buildLandingRedirect({
+      reason: decision.kind === "auth_required" ? "repo_signin_required" : "repo_access_denied",
+      roomName: input.roomName,
+      redirectTo: input.redirectTo,
+    }),
+  };
 }
 
 async function resolveRequestAccount(
@@ -769,6 +782,19 @@ app.get("/projects/join/:code", async (req, res) => {
 
 app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
   const name = decodeURIComponent(String(req.params.name));
+  const roomId = normalizeRoomId(name);
+
+  if (isRepoBackedRoomId(roomId)) {
+    const decision = await resolveRepoRoomAccessDecision({
+      roomName: roomId,
+      sessionAccount: req.sessionAccount,
+    });
+    if (decision.kind !== "allow") {
+      replyRepoRoomAccessDecision(res, roomId, decision);
+      return;
+    }
+  }
+
   const { project, created } = await getOrCreateProjectByName(name);
 
   if (req.sessionAccount && created) {
@@ -909,11 +935,16 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
   res.status(201).json(message);
 });
 
-app.get("/projects/:id/messages", async (req, res) => {
+app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
+  const project = await getProjectById(projectId);
 
-  if (!(await getProjectById(projectId))) {
+  if (!project) {
     res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  if (!(await requireParticipant(req, res, project))) {
     return;
   }
 
@@ -923,11 +954,16 @@ app.get("/projects/:id/messages", async (req, res) => {
   });
 });
 
-app.get("/projects/:id/messages/stream", async (req, res) => {
-  const projectId = req.params.id;
+app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) => {
+  const projectId = String(req.params.id);
+  const project = await getProjectById(projectId);
 
-  if (!(await getProjectById(projectId))) {
+  if (!project) {
     res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  if (!(await requireParticipant(req, res, project))) {
     return;
   }
 
@@ -958,11 +994,16 @@ app.get("/projects/:id/messages/stream", async (req, res) => {
   });
 });
 
-app.get("/projects/:id/messages/poll", async (req, res) => {
-  const projectId = req.params.id;
+app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) => {
+  const projectId = String(req.params.id);
+  const project = await getProjectById(projectId);
 
-  if (!(await getProjectById(projectId))) {
+  if (!project) {
     res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  if (!(await requireParticipant(req, res, project))) {
     return;
   }
 
@@ -1063,11 +1104,16 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
   res.status(201).json(acceptedTask);
 });
 
-app.get("/projects/:id/tasks", async (req, res) => {
-  const projectId = req.params.id;
+app.get("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
+  const projectId = String(req.params.id);
+  const project = await getProjectById(projectId);
 
-  if (!(await getProjectById(projectId))) {
+  if (!project) {
     res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  if (!(await requireParticipant(req, res, project))) {
     return;
   }
 
@@ -1078,9 +1124,20 @@ app.get("/projects/:id/tasks", async (req, res) => {
   res.json({ project_id: projectId, tasks: taskList });
 });
 
-app.get("/projects/:id/tasks/:taskId", async (req, res) => {
+app.get("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
   const projectId = String(req.params.id);
-  const task = await getTaskById(projectId, req.params.taskId);
+  const project = await getProjectById(projectId);
+  const taskId = String(req.params.taskId);
+  const task = await getTaskById(projectId, taskId);
+
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  if (!(await requireParticipant(req, res, project))) {
+    return;
+  }
 
   if (!task) {
     res.status(404).json({ error: "Task not found" });
@@ -1199,6 +1256,17 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
     return;
   }
 
+  if (isRepoBackedRoomId(roomId)) {
+    const decision = await resolveRepoRoomAccessDecision({
+      roomName: roomId,
+      sessionAccount: req.sessionAccount,
+    });
+    if (decision.kind !== "allow") {
+      replyRepoRoomAccessDecision(res, roomId, decision);
+      return;
+    }
+  }
+
   const project = await resolveRoomOrReply(roomId, res, { allowCreate: true });
   if (!project) return;
 
@@ -1245,12 +1313,14 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
   });
 });
 
-app.get(/^\/rooms\/(.+)\/messages$/, async (req, res) => {
+app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = normalizeRoomId(rawId);
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
 
   res.json({
     room_id: roomId,
@@ -1258,12 +1328,14 @@ app.get(/^\/rooms\/(.+)\/messages$/, async (req, res) => {
   });
 });
 
-app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req, res) => {
+app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = normalizeRoomId(rawId);
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
 
   const projectId = project.id;
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
@@ -1307,12 +1379,14 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req, res) => {
   req.on("close", onClientClose);
 });
 
-app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req, res) => {
+app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = normalizeRoomId(rawId);
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
 
   const projectId = project.id;
 
@@ -1337,12 +1411,14 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req, res) => {
   });
 });
 
-app.get(/^\/rooms\/(.+)\/tasks$/, async (req, res) => {
+app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = normalizeRoomId(rawId);
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
 
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const open = req.query.open === "true";
@@ -1389,13 +1465,15 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   res.status(201).json({ ...acceptedTask, room_id: roomId });
 });
 
-app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req, res) => {
+app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = normalizeRoomId(rawId);
   const taskId = (req.params as Record<string, string>)[1] ?? "";
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
 
   const task = await getTaskById(project.id, taskId);
   if (!task) {
