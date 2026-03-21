@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import crypto from "crypto";
 import express from "express";
 import path from "path";
-import { fileURLToPath } from "url";
+
 import {
   addMessage,
   assignProjectAdmin,
@@ -345,8 +345,7 @@ async function resolveRoomOrReply(
   return found;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const WEB_DIR = path.resolve(process.cwd(), "src", "web");
 
 const app = express();
 app.use(express.json());
@@ -372,14 +371,14 @@ app.options("{*path}", (_req, res) => {
 });
 
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "..", "web", "landing.html"));
+  res.sendFile(path.join(WEB_DIR, "landing.html"));
 });
 
 app.get("/app", (_req, res) => {
-  res.sendFile(path.join(__dirname, "..", "web", "index.html"));
+  res.sendFile(path.join(WEB_DIR, "index.html"));
 });
 
-app.use(express.static(path.join(__dirname, "..", "web"), { index: false }));
+app.use(express.static(WEB_DIR, { index: false }));
 
 app.get(/^\/api\/rooms\/resolve\/(.+)$/, (req, res) => {
   const identifier = decodeURIComponent(req.params[0] || "");
@@ -408,7 +407,7 @@ app.get(/^\/in\/(.+)$/, (req, res) => {
     return;
   }
 
-  res.sendFile(path.join(__dirname, "..", "web", "index.html"));
+  res.sendFile(path.join(WEB_DIR, "index.html"));
 });
 
 app.get("/api/health", (_req, res) => {
