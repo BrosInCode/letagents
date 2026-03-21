@@ -27,8 +27,10 @@ ALTER TABLE "agent_sessions" ADD CONSTRAINT "agent_sessions_owner_token_id_owner
 CREATE INDEX "agent_sessions_room_id_idx" ON "agent_sessions" USING btree ("room_id");--> statement-breakpoint
 CREATE INDEX "agent_sessions_owner_token_id_idx" ON "agent_sessions" USING btree ("owner_token_id");--> statement-breakpoint
 ALTER TABLE "project_admins" ADD CONSTRAINT "project_admins_room_id_rooms_id_fk" FOREIGN KEY ("room_id") REFERENCES "public"."rooms"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "rooms" DROP COLUMN "code";--> statement-breakpoint
-ALTER TABLE "rooms" DROP COLUMN "name";--> statement-breakpoint
+-- NOTE: rooms.code and rooms.name columns are intentionally preserved for backward
+-- compatibility with existing data. They will be deprecated in a future migration
+-- once all clients have migrated to canonical room IDs.
+--> statement-breakpoint
 ALTER TABLE "project_admins" DROP CONSTRAINT "project_admins_pk";
 --> statement-breakpoint
 ALTER TABLE "project_admins" ADD CONSTRAINT "project_admins_pk" PRIMARY KEY("room_id","account_id");
