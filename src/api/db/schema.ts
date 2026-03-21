@@ -74,7 +74,7 @@ export const owner_tokens = pgTable(
     account_id: text("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
-    github_user_id: text("github_user_id").notNull().unique(),
+    github_user_id: text("github_user_id").notNull(),
     token_hash: text("token_hash").notNull().unique(),
     provider_access_token: text("provider_access_token"),
     oauth_token_expires_at: timestamp("oauth_token_expires_at", {
@@ -85,7 +85,8 @@ export const owner_tokens = pgTable(
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    account_idx: uniqueIndex("owner_tokens_account_id_idx").on(table.account_id),
+    account_idx: index("owner_tokens_account_id_idx").on(table.account_id),
+    github_user_idx: index("owner_tokens_github_user_id_idx").on(table.github_user_id),
     token_hash_idx: uniqueIndex("owner_tokens_token_hash_idx").on(table.token_hash),
   })
 );

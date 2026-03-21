@@ -479,7 +479,7 @@ export async function deleteSessionByToken(token: string): Promise<void> {
   await db.delete(auth_sessions).where(eq(auth_sessions.token, token));
 }
 
-export async function upsertOwnerToken(input: {
+export async function createOwnerToken(input: {
   accountId: string;
   githubUserId: string;
   token: string;
@@ -488,34 +488,6 @@ export async function upsertOwnerToken(input: {
 }): Promise<OwnerToken> {
   const now = new Date().toISOString();
   const tokenHash = hashToken(input.token);
-
-  const [existing] = await db
-    .select()
-    .from(owner_tokens)
-    .where(eq(owner_tokens.github_user_id, input.githubUserId))
-    .limit(1);
-
-  if (existing) {
-    await db
-      .update(owner_tokens)
-      .set({
-        account_id: input.accountId,
-        token_hash: tokenHash,
-        provider_access_token: input.providerAccessToken ?? null,
-        oauth_token_expires_at: input.oauthTokenExpiresAt ?? null,
-        updated_at: now,
-      })
-      .where(eq(owner_tokens.token_id, existing.token_id));
-
-    return {
-      ...existing,
-      account_id: input.accountId,
-      token_hash: tokenHash,
-      provider_access_token: input.providerAccessToken ?? null,
-      oauth_token_expires_at: input.oauthTokenExpiresAt ?? null,
-      updated_at: now,
-    };
-  }
 
   const ownerToken: OwnerToken = {
     token_id: await nextPrefixedId("owner_tokens", "owner_token"),
