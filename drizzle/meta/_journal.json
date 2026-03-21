@@ -29,6 +29,13 @@
       "when": 1774122417752,
       "tag": "0003_blue_human_fly",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1774129039507,
+      "tag": "0004_smooth_vulcan",
+      "breakpoints": true
     }
   ]
 }

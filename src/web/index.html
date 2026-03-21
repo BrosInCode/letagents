@@ -1083,6 +1083,7 @@
             <p id="chatSubtitle">Create a new room or join one with a code.</p>
           </div>
           <div style="display: flex; align-items: center; gap: 12px;">
+            <button class="btn btn-secondary" id="renameRoomBtn" type="button" hidden>Rename Room</button>
             <div class="tab-bar" role="tablist">
               <button role="tab" aria-selected="true" id="tabChat" type="button">Chat</button>
               <button role="tab" aria-selected="false" id="tabBoard" type="button">Board</button>
@@ -1140,6 +1141,9 @@
         currentProjectCode: "",
         currentRoomIdentifier: "",
         currentRoomName: "",
+        currentRoomDisplayName: "",
+        currentRoomRole: "",
+        currentRoomAuthenticated: false,
         eventSource: null,
         reconnectTimer: null,
         reconnectDelay: 1200,
@@ -1163,6 +1167,7 @@
         copyPillText: document.getElementById("copyPillText"),
         emptyState: document.getElementById("emptyState"),
         joinCodeText: document.getElementById("joinCodeText"),
+        renameRoomBtn: document.getElementById("renameRoomBtn"),
         messages: document.getElementById("messages"),
         messageInput: document.getElementById("messageInput"),
         presenceBadge: document.getElementById("presenceBadge"),
@@ -1368,17 +1373,21 @@
 
       function updateProjectUi() {
         const hasRoom = Boolean(state.currentProjectId);
+        const roomLocator = state.currentRoomName || state.currentProjectCode || state.currentProjectId;
+        const roomDisplayName = state.currentRoomDisplayName || roomLocator;
         elements.joinCodeText.textContent = state.currentProjectCode || "----";
         elements.projectIdLabel.textContent = hasRoom
-          ? (state.currentRoomName || state.currentProjectCode || state.currentProjectId)
+          ? roomDisplayName
           : "No active room";
         elements.chatTitle.textContent = hasRoom
-          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Room ${state.currentProjectCode || state.currentProjectId}`)
+          ? `🏠 ${roomDisplayName}`
           : "No active room";
         elements.chatSubtitle.textContent = hasRoom
-          ? (state.currentProjectCode || '')
+          ? roomLocator
           : "Create a new room or join one with a code.";
         elements.copyJoinCodeBtn.disabled = !state.currentProjectCode;
+        elements.renameRoomBtn.hidden = !(hasRoom && state.currentRoomRole === "admin");
+        elements.renameRoomBtn.disabled = !hasRoom;
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
         elements.senderInput.disabled = !hasRoom;
@@ -1389,6 +1398,7 @@
           id: state.currentProjectId,
           code: state.currentProjectCode,
           roomName: state.currentRoomName || "",
+          displayName: state.currentRoomDisplayName || "",
         });
         localStorage.setItem("letagents:web:session", payload);
 
@@ -1409,10 +1419,13 @@
           try {
             // Resolve via rooms join endpoint — works for codes and room names
             const project = await apiFetch(`/rooms/${encodeURIComponent(identifier)}/join`, { method: "POST" });
-             state.currentProjectId = project.room_id || identifier;
+            state.currentProjectId = project.room_id || identifier;
             state.currentProjectCode = normalizeRoomCode(project.code || "");
             state.currentRoomIdentifier = project.room_id || state.currentProjectCode || identifier;
             state.currentRoomName = project.name || "";
+            state.currentRoomDisplayName = project.display_name || project.name || state.currentProjectCode || identifier;
+            state.currentRoomRole = project.role || "";
+            state.currentRoomAuthenticated = Boolean(project.authenticated);
             return true;
           } catch (_error) {
             // Identifier didn't resolve
@@ -1558,6 +1571,9 @@
           state.currentProjectCode = "";
           state.currentRoomIdentifier = "";
           state.currentRoomName = "";
+          state.currentRoomDisplayName = "";
+          state.currentRoomRole = "";
+          state.currentRoomAuthenticated = false;
           updateProjectUi();
           persistSession();
           setPresence("error", "Room unavailable");
@@ -1616,6 +1632,48 @@
         }
       }
 
+      async function renameRoom() {
+        if (!state.currentRoomIdentifier) {
+          setStatus("Join a room before renaming it.", "error");
+          return;
+        }
+
+        const nextDisplayName = window.prompt(
+          "Choose a room display name.",
+          state.currentRoomDisplayName || state.currentRoomName || state.currentProjectCode || state.currentProjectId
+        );
+
+        if (nextDisplayName === null) {
+          return;
+        }
+
+        const trimmedDisplayName = nextDisplayName.trim();
+        if (!trimmedDisplayName) {
+          setStatus("Room display name cannot be empty.", "error");
+          return;
+        }
+
+        elements.renameRoomBtn.disabled = true;
+        try {
+          const room = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ display_name: trimmedDisplayName }),
+          });
+          state.currentRoomDisplayName = room.display_name || trimmedDisplayName;
+          state.currentRoomRole = room.role || state.currentRoomRole;
+          state.currentRoomAuthenticated = Boolean(
+            room.authenticated ?? state.currentRoomAuthenticated
+          );
+          updateProjectUi();
+          persistSession();
+          setStatus(`Renamed room to ${state.currentRoomDisplayName}.`, "success");
+        } catch (error) {
+          setStatus(error.message || "Could not rename room.", "error");
+        } finally {
+          elements.renameRoomBtn.disabled = false;
+        }
+      }
+
 
 
       // Theme toggle
@@ -1651,6 +1709,7 @@
       initTheme();
 
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
+      elements.renameRoomBtn.addEventListener("click", renameRoom);
       elements.composerForm.addEventListener("submit", sendMessage);
 
       window.addEventListener("beforeunload", () => {

@@ -14,11 +14,13 @@ import {
   rooms,
   tasks,
 } from "./db/schema.js";
+import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomName } from "./room-routing.js";
 
 export interface Project {
   id: string;
   code: string | null;
+  display_name: string;
   name?: string;
   created_at: string;
 }
@@ -172,6 +174,7 @@ function toProject(row: typeof rooms.$inferSelect): Project {
   return {
     id: row.id,
     code: inviteRoom ? row.id : null,
+    display_name: row.display_name,
     name: inviteRoom ? undefined : row.id,
     created_at: row.created_at,
   };
@@ -263,12 +266,14 @@ export async function createProject(): Promise<Project> {
 
   while (true) {
     const roomId = generateCode();
+    const display_name = generateRoomDisplayName(roomId);
 
     try {
-      await db.insert(rooms).values({ id: roomId, created_at });
+      await db.insert(rooms).values({ id: roomId, display_name, created_at });
       return {
         id: roomId,
         code: roomId,
+        display_name,
         created_at,
       };
     } catch (error) {
@@ -305,12 +310,14 @@ export async function getOrCreateCanonicalRoom(
   }
 
   const created_at = new Date().toISOString();
+  const display_name = generateRoomDisplayName(canonicalId);
   try {
-    await db.insert(rooms).values({ id: canonicalId, created_at });
+    await db.insert(rooms).values({ id: canonicalId, display_name, created_at });
     return {
       room: {
         id: canonicalId,
         code: null,
+        display_name,
         name: canonicalId,
         created_at,
       },
@@ -331,11 +338,11 @@ export async function getProjectByName(name: string): Promise<Project | undefine
   return getProjectById(normalizeRoomName(name));
 }
 
-export async function getAllProjects(): Promise<Pick<Project, "id" | "code">[]> {
+export async function getAllProjects(): Promise<Pick<Project, "id" | "code" | "display_name">[]> {
   const rows = await db.select().from(rooms).orderBy(asc(rooms.created_at));
   return rows.map((row) => {
     const project = toProject(row);
-    return { id: project.id, code: project.code };
+    return { id: project.id, code: project.code, display_name: project.display_name };
   });
 }
 
@@ -376,6 +383,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
       return {
         id: nextCode,
         code: nextCode,
+        display_name: project.display_name,
         created_at: project.created_at,
       };
     } catch (error) {
@@ -384,6 +392,21 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
       }
     }
   }
+}
+
+export async function updateProjectDisplayName(
+  projectId: string,
+  displayName: string
+): Promise<Project | null> {
+  const normalizedDisplayName = normalizeRoomDisplayName(displayName);
+
+  const [updated] = await db
+    .update(rooms)
+    .set({ display_name: normalizedDisplayName })
+    .where(eq(rooms.id, projectId))
+    .returning();
+
+  return updated ? toProject(updated) : null;
 }
 
 export async function addMessage(roomId: string, sender: string, text: string): Promise<Message> {
