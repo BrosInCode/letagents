@@ -20,6 +20,7 @@ export const id_sequences = pgTable("id_sequences", {
 
 export const rooms = pgTable("rooms", {
   id: text("id").primaryKey(),
+  display_name: text("display_name").notNull(),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });
 

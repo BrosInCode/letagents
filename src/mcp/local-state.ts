@@ -32,6 +32,7 @@ export interface RoomSessionState {
   room_id: string;
   project_id?: string | null;
   code?: string | null;
+  display_name?: string | null;
   joined_via: JoinedVia;
   joined_at: string;
   last_seen_at: string;
@@ -167,6 +168,7 @@ export function saveRoomSession(input: {
   room_id: string;
   project_id?: string | null;
   code?: string | null;
+  display_name?: string | null;
   joined_via: JoinedVia;
   last_message_id?: string;
 }): RoomSessionState {
@@ -176,6 +178,7 @@ export function saveRoomSession(input: {
     room_id: input.room_id,
     project_id: input.project_id ?? existing?.project_id ?? null,
     code: input.code ?? existing?.code ?? null,
+    display_name: input.display_name ?? existing?.display_name ?? null,
     joined_via: input.joined_via,
     joined_at: existing?.joined_at ?? now,
     last_seen_at: now,
