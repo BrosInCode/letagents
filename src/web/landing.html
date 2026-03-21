@@ -258,6 +258,96 @@
         text-decoration: none;
       }
 
+      .auth-session {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 14px;
+        border-radius: 18px;
+        border: 1px solid rgba(134, 239, 172, 0.2);
+        background: linear-gradient(180deg, rgba(34, 197, 94, 0.12), rgba(255, 255, 255, 0.04));
+      }
+
+      .auth-session[hidden] {
+        display: none;
+      }
+
+      .auth-identity {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .auth-avatar,
+      .auth-avatar-fallback {
+        width: 48px;
+        height: 48px;
+        border-radius: 16px;
+        flex: 0 0 auto;
+      }
+
+      .auth-avatar {
+        object-fit: cover;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+      }
+
+      .auth-avatar-fallback {
+        display: grid;
+        place-items: center;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        font-weight: 800;
+      }
+
+      .auth-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 0;
+        flex: 1 1 180px;
+      }
+
+      .auth-kicker {
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #bbf7d0;
+      }
+
+      .auth-name,
+      .auth-login {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .auth-name {
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .auth-login {
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+
+      .auth-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: auto;
+        padding: 0 12px;
+        min-height: 34px;
+        border-radius: 999px;
+        background: rgba(134, 239, 172, 0.14);
+        color: #bbf7d0;
+        font-size: 0.82rem;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
       .status {
         min-height: 22px;
         margin-top: 16px;
@@ -392,7 +482,19 @@
           </p>
           <div class="row stacked">
             <button class="btn btn-success" id="githubSignInBtn" type="button">Sign In with GitHub</button>
-
+            <div class="auth-session" id="githubSessionCard" hidden>
+              <div class="auth-identity">
+                <img class="auth-avatar" id="githubAvatar" alt="" hidden />
+                <div class="auth-avatar-fallback" id="githubAvatarFallback" hidden>GH</div>
+                <div class="auth-copy">
+                  <div class="auth-kicker">Signed in with GitHub</div>
+                  <div class="auth-name" id="githubSessionName">Signed in as</div>
+                  <div class="auth-login" id="githubSessionLogin">@account</div>
+                </div>
+                <div class="auth-pill">Signed in ✓</div>
+              </div>
+              <button class="btn btn-secondary" id="githubSignOutBtn" type="button">Sign Out</button>
+            </div>
           </div>
         </article>
 
@@ -423,6 +525,12 @@
         joinCodeInput: document.getElementById("joinCodeInput"),
         joinCodeBtn: document.getElementById("joinCodeBtn"),
         githubSignInBtn: document.getElementById("githubSignInBtn"),
+        githubSessionCard: document.getElementById("githubSessionCard"),
+        githubSessionName: document.getElementById("githubSessionName"),
+        githubSessionLogin: document.getElementById("githubSessionLogin"),
+        githubAvatar: document.getElementById("githubAvatar"),
+        githubAvatarFallback: document.getElementById("githubAvatarFallback"),
+        githubSignOutBtn: document.getElementById("githubSignOutBtn"),
         statusText: document.getElementById("statusText"),
       };
       const pageParams = new URLSearchParams(window.location.search);
@@ -461,8 +569,65 @@
         }
       }
 
+      function getAccountDisplayName(account) {
+        const displayName = String(account?.display_name || "").trim();
+        const login = String(account?.login || "").trim();
+        return displayName || login || "GitHub user";
+      }
+
+      function getAccountLogin(account) {
+        const login = String(account?.login || "").trim();
+        return login ? `@${login}` : "GitHub account";
+      }
+
+      function getAccountInitials(account) {
+        const label = getAccountDisplayName(account);
+        return label
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((part) => part[0] || "")
+          .join("")
+          .toUpperCase() || "GH";
+      }
+
+      function setSignedOutState() {
+        elements.githubSignInBtn.hidden = false;
+        elements.githubSignInBtn.disabled = false;
+        elements.githubSessionCard.hidden = true;
+        elements.githubSignOutBtn.disabled = false;
+        elements.githubAvatar.hidden = true;
+        elements.githubAvatar.removeAttribute("src");
+        elements.githubAvatar.alt = "";
+        elements.githubAvatarFallback.hidden = true;
+      }
+
+      function setSignedInState(account) {
+        const displayName = getAccountDisplayName(account);
+        elements.githubSignInBtn.hidden = true;
+        elements.githubSignInBtn.disabled = false;
+        elements.githubSessionCard.hidden = false;
+        elements.githubSessionName.textContent = `Signed in as ${displayName}`;
+        elements.githubSessionLogin.textContent = getAccountLogin(account);
+
+        const avatarUrl = String(account?.avatar_url || "").trim();
+        if (avatarUrl) {
+          elements.githubAvatar.src = avatarUrl;
+          elements.githubAvatar.alt = `${displayName} avatar`;
+          elements.githubAvatar.hidden = false;
+          elements.githubAvatarFallback.hidden = true;
+        } else {
+          elements.githubAvatar.hidden = true;
+          elements.githubAvatar.removeAttribute("src");
+          elements.githubAvatar.alt = "";
+          elements.githubAvatarFallback.textContent = getAccountInitials(account);
+          elements.githubAvatarFallback.hidden = false;
+        }
+      }
+
       async function apiFetch(path, options) {
         const response = await fetch(path, {
+          credentials: "same-origin",
           headers: {
             "Content-Type": "application/json",
           },
@@ -497,6 +662,26 @@
         } else {
           window.location.assign("/");
         }
+      }
+
+      async function loadAuthSession() {
+        try {
+          const payload = await apiFetch("/auth/session", { method: "GET" });
+          if (payload?.authenticated && payload.account) {
+            setSignedInState(payload.account);
+            if (!pageParams.get("reason")) {
+              setStatus(
+                `Signed in as ${getAccountDisplayName(payload.account)}. You can enter repo rooms now.`,
+                "success"
+              );
+            }
+            return;
+          }
+        } catch (_error) {
+          // Leave the page in its signed-out state if the session check fails.
+        }
+
+        setSignedOutState();
       }
 
 
@@ -554,12 +739,27 @@
         }
       }
 
+      async function signOut() {
+        elements.githubSignOutBtn.disabled = true;
+        setStatus("Signing out...");
+        try {
+          await apiFetch("/auth/logout", { method: "POST" });
+          setSignedOutState();
+          setStatus("Signed out. GitHub sign-in is available again.", "success");
+        } catch (error) {
+          setStatus(error.message || "Could not sign out.", "error");
+          elements.githubSignOutBtn.disabled = false;
+        }
+      }
+
 
 
       applyEntryStatus();
+      loadAuthSession();
       elements.createRoomBtn.addEventListener("click", createRoom);
       elements.joinCodeBtn.addEventListener("click", joinByCode);
       elements.githubSignInBtn.addEventListener("click", signInWithGitHub);
+      elements.githubSignOutBtn.addEventListener("click", signOut);
       elements.joinCodeInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           event.preventDefault();
