@@ -109,7 +109,7 @@ export type TaskStatus =
 
 export interface Task {
   id: string;
-  project_id: string;
+  room_id: string;
   title: string;
   description: string | null;
   status: TaskStatus;
@@ -122,7 +122,7 @@ export interface Task {
 }
 
 interface MessageRow {
-  project_id: string;
+  room_id: string;
   number: number;
   sender: string;
   text: string;
@@ -130,7 +130,7 @@ interface MessageRow {
 }
 
 interface TaskRow {
-  project_id: string;
+  room_id: string;
   number: number;
   title: string;
   description: string | null;
@@ -207,7 +207,7 @@ function toMessage(row: MessageRow): Message {
 function toTask(row: TaskRow): Task {
   return {
     id: formatTaskId(row.number),
-    project_id: row.project_id,
+    room_id: row.room_id,
     title: row.title,
     description: row.description,
     status: row.status,
@@ -386,10 +386,10 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
   }
 }
 
-export async function addMessage(projectId: string, sender: string, text: string): Promise<Message> {
+export async function addMessage(roomId: string, sender: string, text: string): Promise<Message> {
   const message: MessageRow = {
-    project_id: projectId,
-    number: await nextRoomScopedNumber("messages", projectId),
+    room_id: roomId,
+    number: await nextRoomScopedNumber("messages", roomId),
     sender,
     text,
     timestamp: new Date().toISOString(),
@@ -400,53 +400,53 @@ export async function addMessage(projectId: string, sender: string, text: string
   return toMessage(message);
 }
 
-export async function getMessages(projectId: string): Promise<Message[]> {
+export async function getMessages(roomId: string): Promise<Message[]> {
   const rows = await db
     .select({
-      project_id: messages.project_id,
+      room_id: messages.room_id,
       number: messages.number,
       sender: messages.sender,
       text: messages.text,
       timestamp: messages.timestamp,
     })
     .from(messages)
-    .where(eq(messages.project_id, projectId))
+    .where(eq(messages.room_id, roomId))
     .orderBy(asc(messages.number));
 
   return rows.map(toMessage);
 }
 
 export async function getMessagesAfter(
-  projectId: string,
+  roomId: string,
   afterMessageId: string | undefined
 ): Promise<Message[]> {
   const afterNumber = afterMessageId ? parseScopedId(afterMessageId, "msg") : null;
   if (!afterNumber) {
-    return getMessages(projectId);
+    return getMessages(roomId);
   }
 
   const rows = await db
     .select({
-      project_id: messages.project_id,
+      room_id: messages.room_id,
       number: messages.number,
       sender: messages.sender,
       text: messages.text,
       timestamp: messages.timestamp,
     })
     .from(messages)
-    .where(and(eq(messages.project_id, projectId), sql`${messages.number} > ${afterNumber}`))
+    .where(and(eq(messages.room_id, roomId), sql`${messages.number} > ${afterNumber}`))
     .orderBy(asc(messages.number));
 
   return rows.map(toMessage);
 }
 
-export async function hasMessagesFromSender(projectId: string, sender: string): Promise<boolean> {
+export async function hasMessagesFromSender(roomId: string, sender: string): Promise<boolean> {
   const [row] = await db
     .select({
       count: sql<number>`COUNT(*)::int`,
     })
     .from(messages)
-    .where(and(eq(messages.project_id, projectId), sql`LOWER(${messages.sender}) = LOWER(${sender})`));
+    .where(and(eq(messages.room_id, roomId), sql`LOWER(${messages.sender}) = LOWER(${sender})`));
 
   return (row?.count ?? 0) > 0;
 }
@@ -721,7 +721,7 @@ export async function isProjectAdmin(projectId: string, accountId: string): Prom
 }
 
 export async function createTask(
-  projectId: string,
+  roomId: string,
   title: string,
   createdBy: string,
   description?: string,
@@ -729,8 +729,8 @@ export async function createTask(
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
-    project_id: projectId,
-    number: await nextRoomScopedNumber("tasks", projectId),
+    room_id: roomId,
+    number: await nextRoomScopedNumber("tasks", roomId),
     title,
     description: description ?? null,
     status: "proposed",
@@ -747,14 +747,14 @@ export async function createTask(
   return toTask(task);
 }
 
-export async function getTasks(projectId: string, statusFilter?: string): Promise<Task[]> {
+export async function getTasks(roomId: string, statusFilter?: string): Promise<Task[]> {
   const query = db
     .select()
     .from(tasks)
     .where(
       statusFilter
-        ? and(eq(tasks.project_id, projectId), eq(tasks.status, statusFilter as TaskStatus))
-        : eq(tasks.project_id, projectId)
+        ? and(eq(tasks.room_id, roomId), eq(tasks.status, statusFilter as TaskStatus))
+        : eq(tasks.room_id, roomId)
     )
     .orderBy(asc(tasks.number));
 
@@ -762,17 +762,17 @@ export async function getTasks(projectId: string, statusFilter?: string): Promis
   return rows.map(toTask);
 }
 
-export async function getOpenTasks(projectId: string): Promise<Task[]> {
+export async function getOpenTasks(roomId: string): Promise<Task[]> {
   const rows = (await db
     .select()
     .from(tasks)
-    .where(and(eq(tasks.project_id, projectId), notInArray(tasks.status, ["done", "cancelled"])))
+    .where(and(eq(tasks.room_id, roomId), notInArray(tasks.status, ["done", "cancelled"])))
     .orderBy(asc(tasks.number))) as TaskRow[];
 
   return rows.map(toTask);
 }
 
-export async function getTaskById(projectId: string, taskId: string): Promise<Task | undefined> {
+export async function getTaskById(roomId: string, taskId: string): Promise<Task | undefined> {
   const taskNumber = parseScopedId(taskId, "task");
   if (!taskNumber) {
     return undefined;
@@ -781,18 +781,18 @@ export async function getTaskById(projectId: string, taskId: string): Promise<Ta
   const [task] = await db
     .select()
     .from(tasks)
-    .where(and(eq(tasks.project_id, projectId), eq(tasks.number, taskNumber)))
+    .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
     .limit(1);
 
   return task ? toTask(task as TaskRow) : undefined;
 }
 
 export async function updateTask(
-  projectId: string,
+  roomId: string,
   taskId: string,
   updates: { status?: TaskStatus; assignee?: string; pr_url?: string }
 ): Promise<Task | null> {
-  const task = await getTaskById(projectId, taskId);
+  const task = await getTaskById(roomId, taskId);
   if (!task) return null;
 
   if (updates.status && !isValidTransition(task.status, updates.status)) {
@@ -820,7 +820,7 @@ export async function updateTask(
       pr_url: newPrUrl,
       updated_at: now,
     })
-    .where(and(eq(tasks.project_id, projectId), eq(tasks.number, taskNumber)));
+    .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
 
   return {
     ...task,

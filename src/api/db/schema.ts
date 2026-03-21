@@ -145,7 +145,7 @@ export const project_admins = pgTable(
 export const messages = pgTable(
   "messages",
   {
-    project_id: text("room_id")
+    room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     number: integer("number").notNull(),
@@ -154,15 +154,15 @@ export const messages = pgTable(
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ name: "messages_pk", columns: [table.project_id, table.number] }),
-    room_idx: index("messages_room_id_idx").on(table.project_id),
+    pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
+    room_idx: index("messages_room_id_idx").on(table.room_id),
   })
 );
 
 export const tasks = pgTable(
   "tasks",
   {
-    project_id: text("room_id")
+    room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     number: integer("number").notNull(),
@@ -177,8 +177,8 @@ export const tasks = pgTable(
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ name: "tasks_pk", columns: [table.project_id, table.number] }),
-    room_idx: index("tasks_room_id_idx").on(table.project_id),
+    pk: primaryKey({ name: "tasks_pk", columns: [table.room_id, table.number] }),
+    room_idx: index("tasks_room_id_idx").on(table.room_id),
     status_idx: index("tasks_status_idx").on(table.status),
   })
 );
