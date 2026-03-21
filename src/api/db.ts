@@ -13,10 +13,8 @@ import {
   tasks,
 } from "./db/schema.js";
 
-export interface Project {
+export interface Room {
   id: string;
-  code: string;
-  name?: string;
   created_at: string;
 }
 
@@ -87,7 +85,7 @@ export type TaskStatus =
 
 export interface Task {
   id: string;
-  project_id: string;
+  room_id: string;
   title: string;
   description: string | null;
   status: TaskStatus;
@@ -100,7 +98,7 @@ export interface Task {
 }
 
 interface MessageRow extends Message {
-  project_id: string;
+  room_id: string;
 }
 
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -126,10 +124,10 @@ function isUniqueConstraintError(error: unknown): error is { code?: string } {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
 }
 
-function toProject(row: typeof rooms.$inferSelect): Project {
+function toRoom(row: typeof rooms.$inferSelect): Room {
   return {
-    ...row,
-    name: row.name ?? undefined,
+    id: row.id,
+    created_at: row.created_at,
   };
 }
 
@@ -152,19 +150,18 @@ export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
-export async function createProject(): Promise<Project> {
+export async function createAdHocRoom(): Promise<Room> {
   const created_at = new Date().toISOString();
 
   while (true) {
-    const project: Project = {
-      id: await nextPrefixedId("projects", "proj"),
-      code: generateCode(),
+    const room: Room = {
+      id: generateCode(),
       created_at,
     };
 
     try {
-      await db.insert(rooms).values(project);
-      return project;
+      await db.insert(rooms).values(room);
+      return room;
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;
@@ -173,85 +170,31 @@ export async function createProject(): Promise<Project> {
   }
 }
 
-export async function createProjectWithName(name: string): Promise<Project> {
+export async function createRoom(id: string): Promise<Room> {
   const created_at = new Date().toISOString();
-
-  while (true) {
-    const project: Project = {
-      id: await nextPrefixedId("projects", "proj"),
-      code: generateCode(),
-      name,
-      created_at,
-    };
-
-    try {
-      await db.insert(rooms).values(project);
-      return project;
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) {
-        throw error;
-      }
-
-      const existing = await getProjectByName(name);
-      if (existing) {
-        return existing;
-      }
-    }
-  }
+  const room: Room = { id, created_at };
+  await db.insert(rooms).values(room);
+  return room;
 }
 
-export async function getOrCreateProjectByName(
-  name: string
-): Promise<{ project: Project; created: boolean }> {
-  const existing = await getProjectByName(name);
+export async function getRoomById(id: string): Promise<Room | undefined> {
+  const [room] = await db.select().from(rooms).where(eq(rooms.id, id)).limit(1);
+  return room ? toRoom(room) : undefined;
+}
+
+export async function getOrCreateRoom(id: string): Promise<{ room: Room; created: boolean }> {
+  const existing = await getRoomById(id);
   if (existing) {
-    return { project: existing, created: false };
+    return { room: existing, created: false };
   }
-
-  return { project: await createProjectWithName(name), created: true };
-}
-
-export async function getProjectByName(name: string): Promise<Project | undefined> {
-  const [project] = await db.select().from(rooms).where(eq(rooms.name, name)).limit(1);
-  return project ? toProject(project) : undefined;
-}
-
-export async function getAllProjects(): Promise<Pick<Project, "id" | "code">[]> {
-  return db.select({ id: rooms.id, code: rooms.code }).from(rooms).orderBy(asc(rooms.created_at));
-}
-
-export async function getProjectByCode(code: string): Promise<Project | undefined> {
-  const [project] = await db.select().from(rooms).where(eq(rooms.code, code)).limit(1);
-  return project ? toProject(project) : undefined;
-}
-
-export async function getProjectById(id: string): Promise<Project | undefined> {
-  const [project] = await db.select().from(rooms).where(eq(rooms.id, id)).limit(1);
-  return project ? toProject(project) : undefined;
-}
-
-export async function rotateProjectCode(projectId: string): Promise<Project | null> {
-  const project = await getProjectById(projectId);
-  if (!project) return null;
-
-  while (true) {
-    const nextCode = generateCode();
-
-    try {
-      await db.update(rooms).set({ code: nextCode }).where(eq(rooms.id, projectId));
-      return { ...project, code: nextCode };
-    } catch (error) {
-      if (!isUniqueConstraintError(error)) {
-        throw error;
-      }
-    }
-  }
+  const room = await createRoom(id);
+  return { room, created: true };
 }
 
 export async function addMessage(projectId: string, sender: string, text: string): Promise<Message> {
   const message: MessageRow = {
     id: await nextPrefixedId("messages", "msg"),
-    project_id: projectId,
+    room_id: projectId,
     sender,
     text,
     timestamp: new Date().toISOString(),
@@ -278,7 +221,7 @@ export async function getMessages(projectId: string): Promise<Message[]> {
       timestamp: messages.timestamp,
     })
     .from(messages)
-    .where(eq(messages.project_id, projectId))
+    .where(eq(messages.room_id, projectId))
     .orderBy(messageOrderSql);
 }
 
@@ -305,7 +248,7 @@ export async function getMessagesAfter(
       timestamp: messages.timestamp,
     })
     .from(messages)
-    .where(and(eq(messages.project_id, projectId), sql`${messageOrderSql} > ${afterNumber}`))
+    .where(and(eq(messages.room_id, projectId), sql`${messageOrderSql} > ${afterNumber}`))
     .orderBy(messageOrderSql);
 }
 
@@ -315,7 +258,7 @@ export async function hasMessagesFromSender(projectId: string, sender: string): 
       count: sql<number>`COUNT(*)::int`,
     })
     .from(messages)
-    .where(and(eq(messages.project_id, projectId), sql`LOWER(${messages.sender}) = LOWER(${sender})`));
+    .where(and(eq(messages.room_id, projectId), sql`LOWER(${messages.sender}) = LOWER(${sender})`));
 
   return (row?.count ?? 0) > 0;
 }
@@ -517,7 +460,7 @@ export async function assignProjectAdmin(projectId: string, accountId: string): 
   await db
     .insert(project_admins)
     .values({
-      project_id: projectId,
+      room_id: projectId,
       account_id: accountId,
       assigned_at: new Date().toISOString(),
     })
@@ -531,7 +474,7 @@ export async function isProjectAdmin(projectId: string, accountId: string): Prom
     })
     .from(project_admins)
     .where(
-      and(eq(project_admins.project_id, projectId), eq(project_admins.account_id, accountId))
+      and(eq(project_admins.room_id, projectId), eq(project_admins.account_id, accountId))
     );
 
   return (row?.count ?? 0) > 0;
@@ -547,7 +490,7 @@ export async function createTask(
   const now = new Date().toISOString();
   const task: Task = {
     id: await nextPrefixedId("tasks", "task"),
-    project_id: projectId,
+    room_id: projectId,
     title,
     description: description ?? null,
     status: "proposed",
@@ -569,18 +512,18 @@ export async function getTasks(projectId: string, statusFilter?: string): Promis
     return db
       .select()
       .from(tasks)
-      .where(and(eq(tasks.project_id, projectId), eq(tasks.status, statusFilter as TaskStatus)))
+      .where(and(eq(tasks.room_id, projectId), eq(tasks.status, statusFilter as TaskStatus)))
       .orderBy(asc(tasks.created_at));
   }
 
-  return db.select().from(tasks).where(eq(tasks.project_id, projectId)).orderBy(asc(tasks.created_at));
+  return db.select().from(tasks).where(eq(tasks.room_id, projectId)).orderBy(asc(tasks.created_at));
 }
 
 export async function getOpenTasks(projectId: string): Promise<Task[]> {
   return db
     .select()
     .from(tasks)
-    .where(and(eq(tasks.project_id, projectId), notInArray(tasks.status, ["done", "cancelled"])))
+    .where(and(eq(tasks.room_id, projectId), notInArray(tasks.status, ["done", "cancelled"])))
     .orderBy(asc(tasks.created_at));
 }
 

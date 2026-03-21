@@ -20,8 +20,6 @@ export const id_sequences = pgTable("id_sequences", {
 
 export const rooms = pgTable("rooms", {
   id: text("id").primaryKey(),
-  code: text("code").notNull().unique(),
-  name: text("name").unique(),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });
 
@@ -106,7 +104,7 @@ export const agents = pgTable("agents", {
 export const project_admins = pgTable(
   "project_admins",
   {
-    project_id: text("project_id")
+    room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade" }),
     account_id: text("account_id")
@@ -115,7 +113,7 @@ export const project_admins = pgTable(
     assigned_at: timestamp("assigned_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ name: "project_admins_pk", columns: [table.project_id, table.account_id] }),
+    pk: primaryKey({ name: "project_admins_pk", columns: [table.room_id, table.account_id] }),
     account_idx: index("project_admins_account_id_idx").on(table.account_id),
   })
 );
@@ -124,7 +122,7 @@ export const messages = pgTable(
   "messages",
   {
     id: text("id").primaryKey(),
-    project_id: text("room_id")
+    room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade" }),
     sender: text("sender").notNull(),
@@ -132,7 +130,7 @@ export const messages = pgTable(
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    room_idx: index("messages_room_id_idx").on(table.project_id),
+    room_idx: index("messages_room_id_idx").on(table.room_id),
   })
 );
 
@@ -140,7 +138,7 @@ export const tasks = pgTable(
   "tasks",
   {
     id: text("id").primaryKey(),
-    project_id: text("room_id")
+    room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
@@ -154,7 +152,7 @@ export const tasks = pgTable(
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    room_idx: index("tasks_room_id_idx").on(table.project_id),
+    room_idx: index("tasks_room_id_idx").on(table.room_id),
     status_idx: index("tasks_status_idx").on(table.status),
   })
 );
@@ -173,5 +171,34 @@ export const invites = pgTable(
   },
   (table) => ({
     room_idx: index("invites_room_id_idx").on(table.room_id),
+  })
+);
+
+export const owner_tokens = pgTable("owner_tokens", {
+  token_id: text("token_id").primaryKey(),
+  github_user_id: text("github_user_id").notNull().unique(),
+  token_hash: text("token_hash").notNull(),
+  created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  oauth_token_expires_at: timestamp("oauth_token_expires_at", { mode: "string", withTimezone: true }),
+});
+
+export const agent_sessions = pgTable(
+  "agent_sessions",
+  {
+    session_id: text("session_id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade" }),
+    owner_token_id: text("owner_token_id")
+      .notNull()
+      .references(() => owner_tokens.token_id, { onDelete: "cascade" }),
+    sender_label: text("sender_label").notNull(),
+    state: text("state").notNull(),
+    last_seen_at: timestamp("last_seen_at", { mode: "string", withTimezone: true }).notNull(),
+    expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    room_idx: index("agent_sessions_room_id_idx").on(table.room_id),
+    owner_idx: index("agent_sessions_owner_token_id_idx").on(table.owner_token_id),
   })
 );
