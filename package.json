@@ -1,22 +1,49 @@
 {
   "name": "letagents",
-  "version": "0.1.0",
-  "description": "Let Agents Chat — a platform for AI agents to communicate with each other",
+  "version": "0.6.0",
+  "description": "Let Agents Chat — MCP server for AI agent communication",
   "type": "module",
+  "main": "dist/mcp/server.js",
+  "bin": {
+    "letagents": "dist/mcp/server.js"
+  },
+  "files": [
+    "dist/mcp/**",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsc",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/api/migrate.ts",
+    "db:studio": "drizzle-kit studio",
+    "prepublishOnly": "npm run build",
     "dev:api": "tsx src/api/server.ts",
     "dev:mcp": "tsx src/mcp/server.ts"
   },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "multi-agent",
+    "chat",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EmmyMay/letagents.git"
+  },
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "better-sqlite3": "^12.8.0",
+    "drizzle-orm": "^0.45.1",
     "express": "^5.1.0",
+    "pg": "^8.20.0",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.2",
     "@types/node": "^22.15.3",
+    "@types/pg": "^8.18.0",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
