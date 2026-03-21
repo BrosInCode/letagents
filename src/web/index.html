@@ -1668,7 +1668,7 @@
         try {
           const message = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
             method: "POST",
-            body: JSON.stringify({ sender, text, source: "browser" }),
+            body: JSON.stringify({ sender, text }),
           });
           upsertMessages([message]);
           elements.messageInput.value = "";

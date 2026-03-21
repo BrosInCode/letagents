@@ -924,13 +924,15 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { sender, text, source } = req.body as { sender?: string; text?: string; source?: string };
+  const { sender, text } = req.body as { sender?: string; text?: string };
 
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text are required" });
     return;
   }
 
+  // Server-determined: browser sessions (cookie auth) → "browser", otherwise null
+  const source = req.sessionAccount ? "browser" : undefined;
   const message = await emitProjectMessage(projectId, sender, text, source);
   res.status(201).json(message);
 });
@@ -1300,12 +1302,14 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { sender, text, source } = req.body as { sender?: string; text?: string; source?: string };
+  const { sender, text } = req.body as { sender?: string; text?: string };
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text are required" });
     return;
   }
 
+  // Server-determined: browser sessions (cookie auth) → "browser", otherwise null
+  const source = req.sessionAccount ? "browser" : undefined;
   const message = await emitProjectMessage(project.id, sender, text, source);
   res.status(201).json({
     ...message,
