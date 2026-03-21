@@ -1147,6 +1147,14 @@
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
 
+      function isInviteCode(str) {
+        return /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(String(str).toUpperCase());
+      }
+
+      function normalizeRoomCode(code) {
+        return isInviteCode(code) ? String(code).toUpperCase() : String(code);
+      }
+
       const elements = {
         chatTitle: document.getElementById("chatTitle"),
         chatSubtitle: document.getElementById("chatSubtitle"),
@@ -1401,7 +1409,7 @@
             // Resolve via rooms join endpoint — works for codes and room names
             const project = await apiFetch(`/rooms/${encodeURIComponent(identifier)}/join`, { method: "POST" });
             state.currentProjectId = project.room_id || identifier;
-            state.currentProjectCode = (project.code || "").toUpperCase();
+            state.currentProjectCode = normalizeRoomCode(project.code || "");
             state.currentRoomName = project.name || "";
             return true;
           } catch (_error) {
@@ -1516,7 +1524,7 @@
 
       async function activateProject(projectId, projectCode, focusComposer, roomName) {
         state.currentProjectId = projectId;
-        state.currentProjectCode = String(projectCode || "").toUpperCase();
+        state.currentProjectCode = normalizeRoomCode(projectCode || "");
         state.currentRoomName = roomName || state.currentRoomName || "";
         updateProjectUi();
         persistSession();
