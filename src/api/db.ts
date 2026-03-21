@@ -187,8 +187,19 @@ export async function getOrCreateRoom(id: string): Promise<{ room: Room; created
   if (existing) {
     return { room: existing, created: false };
   }
-  const room = await createRoom(id);
-  return { room, created: true };
+  try {
+    const room = await createRoom(id);
+    return { room, created: true };
+  } catch (error) {
+    // Handle race condition: another concurrent join may have created the room
+    if (isUniqueConstraintError(error)) {
+      const retried = await getRoomById(id);
+      if (retried) {
+        return { room: retried, created: false };
+      }
+    }
+    throw error;
+  }
 }
 
 export async function addMessage(projectId: string, sender: string, text: string): Promise<Message> {
