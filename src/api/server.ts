@@ -375,7 +375,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/app", (_req, res) => {
-  res.sendFile(path.join(WEB_DIR, "index.html"));
+  res.redirect(301, "/");
 });
 
 app.use(express.static(WEB_DIR, { index: false }));
