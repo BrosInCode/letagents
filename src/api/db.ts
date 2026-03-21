@@ -236,6 +236,39 @@ export async function getOrCreateProjectByName(
   return { project: await createProjectWithName(name), created: true };
 }
 
+/**
+ * Create or retrieve a room using a canonical ID (e.g., "github.com/user/repo").
+ * Unlike createProjectWithName, the room's `id` IS the canonical identifier —
+ * no separate `name` column needed.
+ */
+export async function getOrCreateCanonicalRoom(
+  canonicalId: string
+): Promise<{ room: Project; created: boolean }> {
+  const existing = await getProjectById(canonicalId);
+  if (existing) {
+    return { room: existing, created: false };
+  }
+
+  const created_at = new Date().toISOString();
+  try {
+    const project: Project = {
+      id: canonicalId,
+      code: canonicalId,
+      created_at,
+    };
+    await db.insert(rooms).values(project);
+    return { room: project, created: true };
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const retried = await getProjectById(canonicalId);
+      if (retried) {
+        return { room: retried, created: false };
+      }
+    }
+    throw error;
+  }
+}
+
 export async function getProjectByName(name: string): Promise<Project | undefined> {
   const [project] = await db.select().from(rooms).where(eq(rooms.name, name)).limit(1);
   return project ? toProject(project) : undefined;
