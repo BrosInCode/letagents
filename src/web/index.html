@@ -439,6 +439,69 @@
         box-shadow: 0 0 14px color-mix(in srgb, var(--chip-color, var(--sender-default)) 68%, transparent);
       }
 
+      .participant-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--line);
+      }
+
+      .participant-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .participant-name {
+        font-weight: 600;
+        font-size: 0.9rem;
+        color: var(--text);
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .participant-owner {
+        font-size: 0.75rem;
+        color: var(--muted);
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .presence-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .presence-dot[data-state="active"] { background: var(--success); box-shadow: 0 0 8px rgba(52,211,153,0.4); }
+      .presence-dot[data-state="away"] { background: var(--warning); box-shadow: 0 0 8px rgba(245,158,11,0.4); }
+      .presence-dot[data-state="offline"] { background: var(--muted); }
+
+      .verified-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.75rem;
+        color: var(--success);
+        background: rgba(52, 211, 153, 0.1);
+        padding: 2px 6px;
+        border-radius: 4px;
+        margin-left: 6px;
+      }
+
+      .verified-border {
+        border-color: rgba(52, 211, 153, 0.4) !important;
+      }
+
       .chat-panel {
         display: grid;
         grid-template-rows: auto minmax(0, 1fr) auto;
@@ -1064,17 +1127,12 @@
           </div>
         </section>
 
-        <section class="section glass-block">
+        <section class="section glass-block" id="participantsSection" style="display: none;">
           <div class="section-title">
-            <h2>Sender Palette</h2>
-            <span>message identity</span>
+            <h2>Participants</h2>
+            <span id="participantsCount">0</span>
           </div>
-          <div class="legend">
-            <span class="legend-chip" style="--chip-color: var(--sender-orchestrator)">orchestrator</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-codex)">codex</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-claude)">claude</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-human)">human</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-default)">other</span>
+          <div class="participants-list stack" id="participantsList">
           </div>
         </section>
 
@@ -1158,12 +1216,17 @@
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
+        participantsMap: new Map(),
+        participantsInterval: null,
         isStreaming: false,
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
 
       const elements = {
         chatTitle: document.getElementById("chatTitle"),
+        participantsSection: document.getElementById("participantsSection"),
+        participantsCount: document.getElementById("participantsCount"),
+        participantsList: document.getElementById("participantsList"),
         chatSubtitle: document.getElementById("chatSubtitle"),
         copyJoinCodeBtn: document.getElementById("copyJoinCodeBtn"),
         copyPillText: document.getElementById("copyPillText"),
@@ -1330,17 +1393,28 @@
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
+          const participant = state.participantsMap.get(message.sender);
+          const isVerified = participant && participant.owner_login;
           const senderColor = getSenderColor(message.sender);
           const provenance = getSenderProvenance(message.sender);
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
+          
+          let verifiedHtml = "";
+          let verifiedAvatarClass = "";
+          if (isVerified) {
+            verifiedHtml = `<span class="verified-badge" title="Verified Owner: ${escapeHtml(participant.owner_login)}">✓ ${escapeHtml(participant.owner_login)}</span>`;
+            verifiedAvatarClass = "verified-border";
+          }
+
           wrapper.innerHTML = `
-            <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
+            <div class="message-avatar ${verifiedAvatarClass}" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
               <div class="message-meta">
                 <strong>${escapeHtml(message.sender)}</strong>
-                <span class="provenance-badge ${provenance}">${provenance}</span>
+                ${verifiedHtml}
+                <span class="provenance-badge ${provenance}" style="margin-left: 4px;">${provenance}</span>
                 <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
               </div>
               <div class="message-bubble">
@@ -1497,6 +1571,11 @@
           state.reconnectTimer = null;
         }
 
+        if (state.participantsInterval) {
+          window.clearInterval(state.participantsInterval);
+          state.participantsInterval = null;
+        }
+
         state.isStreaming = false;
       }
 
@@ -1562,13 +1641,71 @@
         renderMessages();
       }
 
+      async function fetchParticipants() {
+        if (!state.currentProjectId) {
+          state.participantsMap.clear();
+          renderParticipants();
+          return;
+        }
+
+        try {
+          const payload = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/participants`, {
+            method: "GET",
+          });
+          state.participantsMap.clear();
+          for (const p of payload.participants || []) {
+            state.participantsMap.set(p.name, p);
+          }
+          renderParticipants();
+          renderMessages();
+        } catch (error) {
+          console.warn("Failed to fetch participants", error);
+        }
+      }
+
+      function renderParticipants() {
+        elements.participantsList.innerHTML = "";
+        
+        if (state.participantsMap.size === 0) {
+          elements.participantsSection.style.display = "none";
+          return;
+        }
+        
+        elements.participantsSection.style.display = "block";
+        elements.participantsCount.textContent = `${state.participantsMap.size} online`;
+
+        const fragment = document.createDocumentFragment();
+        for (const p of state.participantsMap.values()) {
+          const item = document.createElement("div");
+          item.className = "participant-item";
+          
+          const verifiedIcon = p.owner_login ? `<span style="color: var(--success); font-size: 0.8rem;" title="Verified">✓</span>` : "";
+          const ownerText = p.owner_login ? `by ${escapeHtml(p.owner_login)}` : (p.type === "human" ? "human account" : "unverified agent");
+
+          item.innerHTML = `
+            <div class="presence-dot" data-state="${escapeHtml(p.state)}"></div>
+            <div class="participant-info">
+              <span class="participant-name">${escapeHtml(p.name)} ${verifiedIcon}</span>
+              <span class="participant-owner">${ownerText}</span>
+            </div>
+          `;
+          fragment.appendChild(item);
+        }
+        elements.participantsList.appendChild(fragment);
+      }
+
       async function activateProject(projectId, focusComposer) {
         state.currentProjectId = projectId;
         updateProjectUi();
         persistSession();
         resetMessages();
         await fetchMessages();
+        fetchParticipants();
         connectStream();
+        
+        if (state.participantsInterval) clearInterval(state.participantsInterval);
+        state.participantsInterval = setInterval(fetchParticipants, 15000);
+
         if (focusComposer) {
           elements.messageInput.focus();
         }

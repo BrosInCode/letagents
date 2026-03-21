@@ -20,6 +20,7 @@ import {
   getRoomByCode as getProjectByCode,
   getRoomById as getProjectById,
   getSessionAccountByToken,
+  getRoomParticipants,
   getTaskById,
   getTasks,
   hasMessagesFromSender,
@@ -564,6 +565,20 @@ app.get("/projects/:id/messages", async (req, res) => {
   res.json({
     project_id: projectId,
     messages: await getMessages(projectId),
+  });
+});
+
+app.get("/projects/:id/participants", async (req, res) => {
+  const projectId = String(req.params.id);
+
+  if (!(await getProjectById(projectId))) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  res.json({
+    project_id: projectId,
+    participants: await getRoomParticipants(projectId),
   });
 });
 
