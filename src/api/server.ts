@@ -42,7 +42,9 @@ import {
   exchangeGitHubDeviceCodeForAccessToken,
   exchangeGitHubCodeForAccessToken,
   fetchGitHubUser,
+  getGitHubRepoVisibility,
   isGitHubRepoAdmin,
+  isGitHubRepoCollaborator,
   parseGitHubRepoName,
   requestGitHubDeviceCode,
 } from "./github-auth.js";
@@ -233,8 +235,44 @@ async function requireParticipant(
   res: express.Response,
   project: Project
 ): Promise<boolean> {
-  if (isRepoBackedProject(project) && !req.sessionAccount) {
-    res.status(401).json({ error: "Authentication required for repo-backed room actions" });
+  if (!isRepoBackedProject(project)) {
+    return true;
+  }
+
+  const roomName = project.name;
+  if (!roomName || !parseGitHubRepoName(roomName)) {
+    if (!req.sessionAccount) {
+      res.status(401).json({ error: "Authentication required for repo-backed room actions" });
+      return false;
+    }
+    return true;
+  }
+
+  const accessToken = req.sessionAccount?.provider_access_token ?? undefined;
+  const visibility = await getGitHubRepoVisibility(roomName, accessToken);
+
+  if (visibility === "public") {
+    return true;
+  }
+
+  if (!req.sessionAccount) {
+    res.status(401).json({ error: "Authentication required for private repo room actions" });
+    return false;
+  }
+
+  if (req.sessionAccount.provider !== "github" || !req.sessionAccount.provider_access_token) {
+    res.status(403).json({ error: "GitHub-linked owner verification required for private repo room actions" });
+    return false;
+  }
+
+  const allowed = await isGitHubRepoCollaborator({
+    roomName,
+    login: req.sessionAccount.login,
+    accessToken: req.sessionAccount.provider_access_token,
+  });
+
+  if (!allowed) {
+    res.status(403).json({ error: "Owner is not a collaborator on this private repo" });
     return false;
   }
 
