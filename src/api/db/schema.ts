@@ -20,6 +20,9 @@ export const id_sequences = pgTable("id_sequences", {
 
 export const rooms = pgTable("rooms", {
   id: text("id").primaryKey(),
+  // Deprecated: kept for backward compat with existing data. New rooms use id directly.
+  code: text("code").unique(),
+  name: text("name").unique(),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });
 

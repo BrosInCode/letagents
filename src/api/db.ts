@@ -15,6 +15,8 @@ import {
 
 export interface Room {
   id: string;
+  code: string | null;
+  name: string | null;
   created_at: string;
 }
 
@@ -127,6 +129,8 @@ function isUniqueConstraintError(error: unknown): error is { code?: string } {
 function toRoom(row: typeof rooms.$inferSelect): Room {
   return {
     id: row.id,
+    code: row.code ?? null,
+    name: row.name ?? null,
     created_at: row.created_at,
   };
 }
@@ -156,6 +160,8 @@ export async function createAdHocRoom(): Promise<Room> {
   while (true) {
     const room: Room = {
       id: generateCode(),
+      code: null,
+      name: null,
       created_at,
     };
 
@@ -172,13 +178,18 @@ export async function createAdHocRoom(): Promise<Room> {
 
 export async function createRoom(id: string): Promise<Room> {
   const created_at = new Date().toISOString();
-  const room: Room = { id, created_at };
+  const room: Room = { id, code: null, name: null, created_at };
   await db.insert(rooms).values(room);
   return room;
 }
 
 export async function getRoomById(id: string): Promise<Room | undefined> {
   const [room] = await db.select().from(rooms).where(eq(rooms.id, id)).limit(1);
+  return room ? toRoom(room) : undefined;
+}
+
+export async function getRoomByCode(code: string): Promise<Room | undefined> {
+  const [room] = await db.select().from(rooms).where(eq(rooms.code, code)).limit(1);
   return room ? toRoom(room) : undefined;
 }
 
