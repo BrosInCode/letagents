@@ -371,8 +371,6 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
-app.use(express.static(path.join(__dirname, "..", "web"), { index: false }));
-
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "web", "landing.html"));
 });
@@ -380,6 +378,8 @@ app.get("/", (_req, res) => {
 app.get("/app", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "web", "index.html"));
 });
+
+app.use(express.static(path.join(__dirname, "..", "web"), { index: false }));
 
 app.get(/^\/api\/rooms\/resolve\/(.+)$/, (req, res) => {
   const identifier = decodeURIComponent(req.params[0] || "");
