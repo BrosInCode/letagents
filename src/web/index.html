@@ -1044,25 +1044,8 @@
           </div>
         </section>
 
-        <section class="section glass-block">
-          <div class="section-title">
-            <h2>Project Control</h2>
-            <span>create or join</span>
-          </div>
-          <div class="stack">
-            <input
-              class="input"
-              id="joinCodeInput"
-              type="text"
-              placeholder="Enter join code e.g. ABCD-1234"
-              autocomplete="off"
-            />
-            <div class="btn-row">
-              <button class="btn btn-primary" id="createProjectBtn" type="button">Create Project</button>
-              <button class="btn btn-secondary" id="joinProjectBtn" type="button">Join by Code</button>
-            </div>
-          </div>
-        </section>
+
+
 
         <section class="section glass-block">
           <div class="section-title">
@@ -1096,7 +1079,7 @@
       <section class="chat-panel card">
         <header class="chat-header">
           <div class="chat-title">
-            <h2 id="chatTitle">No active project</h2>
+            <h2 id="chatTitle">No active room</h2>
             <p id="chatSubtitle">Create a new room or join one with a code.</p>
           </div>
           <div style="display: flex; align-items: center; gap: 12px;">
@@ -1112,7 +1095,7 @@
           <div class="messages" id="messages"></div>
           <div class="empty-state" id="emptyState">
             <div class="empty-state-card">
-              <h3>Open a project to begin</h3>
+              <h3>Open a room to begin</h3>
               <p>
                 Create a room for your agents, copy the join code with one click, and watch new
                 messages appear in real time.
@@ -1155,6 +1138,7 @@
       const state = {
         currentProjectId: "",
         currentProjectCode: "",
+        currentRoomIdentifier: "",
         currentRoomName: "",
         eventSource: null,
         reconnectTimer: null,
@@ -1164,16 +1148,21 @@
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
 
+      function isInviteCode(str) {
+        return /^[A-Z0-9]{4}(-[A-Z0-9]{4}){1,2}$/.test(String(str).toUpperCase());
+      }
+
+      function normalizeRoomCode(code) {
+        return isInviteCode(code) ? String(code).toUpperCase() : String(code);
+      }
+
       const elements = {
         chatTitle: document.getElementById("chatTitle"),
         chatSubtitle: document.getElementById("chatSubtitle"),
         copyJoinCodeBtn: document.getElementById("copyJoinCodeBtn"),
         copyPillText: document.getElementById("copyPillText"),
-        createProjectBtn: document.getElementById("createProjectBtn"),
         emptyState: document.getElementById("emptyState"),
-        joinCodeInput: document.getElementById("joinCodeInput"),
         joinCodeText: document.getElementById("joinCodeText"),
-        joinProjectBtn: document.getElementById("joinProjectBtn"),
         messages: document.getElementById("messages"),
         messageInput: document.getElementById("messageInput"),
         presenceBadge: document.getElementById("presenceBadge"),
@@ -1378,65 +1367,61 @@
       }
 
       function updateProjectUi() {
-        const hasProject = Boolean(state.currentProjectId);
+        const hasRoom = Boolean(state.currentProjectId);
         elements.joinCodeText.textContent = state.currentProjectCode || "----";
-        elements.projectIdLabel.textContent = hasProject ? state.currentProjectId : "No active room";
-        elements.chatTitle.textContent = hasProject
-          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Project ${state.currentProjectId}`)
-          : "No active project";
-        elements.chatSubtitle.textContent = hasProject
-          ? `Room ${state.currentProjectId}${state.currentProjectCode ? ` · ${state.currentProjectCode}` : ''}`
+        elements.projectIdLabel.textContent = hasRoom
+          ? (state.currentRoomName || state.currentProjectCode || state.currentProjectId)
+          : "No active room";
+        elements.chatTitle.textContent = hasRoom
+          ? (state.currentRoomName ? `🏠 ${state.currentRoomName}` : `Room ${state.currentProjectCode || state.currentProjectId}`)
+          : "No active room";
+        elements.chatSubtitle.textContent = hasRoom
+          ? (state.currentProjectCode || '')
           : "Create a new room or join one with a code.";
         elements.copyJoinCodeBtn.disabled = !state.currentProjectCode;
-        elements.sendMessageBtn.disabled = !hasProject;
-        elements.messageInput.disabled = !hasProject;
-        elements.senderInput.disabled = !hasProject;
+        elements.sendMessageBtn.disabled = !hasRoom;
+        elements.messageInput.disabled = !hasRoom;
+        elements.senderInput.disabled = !hasRoom;
       }
 
       function persistSession() {
         const payload = JSON.stringify({
           id: state.currentProjectId,
           code: state.currentProjectCode,
+          roomName: state.currentRoomName || "",
         });
         localStorage.setItem("letagents:web:session", payload);
 
-        const url = new URL(window.location.href);
-        if (state.currentProjectId) {
-          url.searchParams.set("project", state.currentProjectId);
-        } else {
-          url.searchParams.delete("project");
+        // Use clean /in/<code> URL — no query params
+        const code = state.currentProjectCode;
+        if (code) {
+          window.history.replaceState({}, "", `/in/${code}`);
         }
-
-        if (state.currentProjectCode) {
-          url.searchParams.set("code", state.currentProjectCode);
-        } else {
-          url.searchParams.delete("code");
-        }
-
-        window.history.replaceState({}, "", url);
       }
 
-      function loadPersistedSession() {
-        const url = new URL(window.location.href);
-        const projectFromUrl = url.searchParams.get("project") || "";
-        const codeFromUrl = (url.searchParams.get("code") || "").toUpperCase();
+      async function loadPersistedSession() {
+        // Check if we're on /in/<identifier>
+        const pathname = window.location.pathname;
+        const inMatch = pathname.match(/^\/in\/(.+)$/);
 
-        if (projectFromUrl) {
-          state.currentProjectId = projectFromUrl;
-          state.currentProjectCode = codeFromUrl;
-          return true;
+        if (inMatch) {
+          const identifier = decodeURIComponent(inMatch[1]);
+          try {
+            // Resolve via rooms join endpoint — works for codes and room names
+            const project = await apiFetch(`/rooms/${encodeURIComponent(identifier)}/join`, { method: "POST" });
+             state.currentProjectId = project.room_id || identifier;
+            state.currentProjectCode = normalizeRoomCode(project.code || "");
+            state.currentRoomIdentifier = project.room_id || state.currentProjectCode || identifier;
+            state.currentRoomName = project.name || "";
+            return true;
+          } catch (_error) {
+            // Identifier didn't resolve
+            return false;
+          }
         }
 
-        try {
-          const raw = localStorage.getItem("letagents:web:session");
-          if (!raw) return false;
-          const parsed = JSON.parse(raw);
-          state.currentProjectId = parsed.id || "";
-          state.currentProjectCode = (parsed.code || "").toUpperCase();
-          return Boolean(state.currentProjectId);
-        } catch (_error) {
-          return false;
-        }
+        // No /in/ path and no localStorage fallback — URL is the source of truth
+        return false;
       }
 
       async function apiFetch(path, options) {
@@ -1461,40 +1446,7 @@
         return payload;
       }
 
-      async function createProject() {
-        toggleProjectButtons(true);
-        setStatus("Creating a fresh project room...", "");
-        try {
-          const project = await apiFetch("/projects", { method: "POST" });
-          await activateProject(project.id, project.code, true);
-          setStatus("Project created and live stream connected.", "success");
-        } catch (error) {
-          setStatus(error.message || "Could not create project.", "error");
-        } finally {
-          toggleProjectButtons(false);
-        }
-      }
 
-      async function joinProject() {
-        const code = elements.joinCodeInput.value.trim().toUpperCase();
-        if (!code) {
-          setStatus("Enter a join code before attempting to join.", "error");
-          elements.joinCodeInput.focus();
-          return;
-        }
-
-        toggleProjectButtons(true);
-        setStatus(`Joining ${code}...`, "");
-        try {
-          const project = await apiFetch(`/projects/join/${encodeURIComponent(code)}`, { method: "GET" });
-          await activateProject(project.id, project.code, true);
-          setStatus(`Joined ${project.code} and synced message history.`, "success");
-        } catch (error) {
-          setStatus(error.message || "Could not join that code.", "error");
-        } finally {
-          toggleProjectButtons(false);
-        }
-      }
 
       function disconnectStream() {
         if (state.eventSource) {
@@ -1513,12 +1465,12 @@
       function connectStream() {
         disconnectStream();
 
-        if (!state.currentProjectId) {
+        if (!state.currentRoomIdentifier) {
           setPresence("idle", "Waiting for room");
           return;
         }
 
-        const streamUrl = `/projects/${encodeURIComponent(state.currentProjectId)}/messages/stream`;
+        const streamUrl = `/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages/stream`;
         const source = new EventSource(streamUrl);
         state.eventSource = source;
         setPresence("connecting", "Connecting live");
@@ -1544,7 +1496,7 @@
           source.close();
           state.eventSource = null;
 
-          if (!state.currentProjectId) {
+          if (!state.currentRoomIdentifier) {
             return;
           }
 
@@ -1557,12 +1509,12 @@
       }
 
       async function fetchMessages() {
-        if (!state.currentProjectId) {
+        if (!state.currentRoomIdentifier) {
           resetMessages();
           return;
         }
 
-        const payload = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/messages`, {
+        const payload = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
           method: "GET",
         });
         state.messages.clear();
@@ -1572,9 +1524,11 @@
         renderMessages();
       }
 
-      async function activateProject(projectId, projectCode, focusComposer) {
+      async function activateProject(projectId, projectCode, focusComposer, roomName) {
         state.currentProjectId = projectId;
-        state.currentProjectCode = String(projectCode || "").toUpperCase();
+        state.currentProjectCode = normalizeRoomCode(projectCode || "");
+        state.currentRoomIdentifier = roomName || state.currentProjectCode || projectId;
+        state.currentRoomName = roomName || state.currentRoomName || "";
         updateProjectUi();
         persistSession();
         resetMessages();
@@ -1586,7 +1540,7 @@
       }
 
       async function restoreProjectIfPossible() {
-        const foundSession = loadPersistedSession();
+        const foundSession = await loadPersistedSession();
         updateProjectUi();
 
         if (!foundSession || !state.currentProjectId) {
@@ -1594,14 +1548,16 @@
           return;
         }
 
-        setStatus(`Restoring ${state.currentProjectId}...`, "");
+        setStatus(`Restoring room...`, "");
         try {
-          await activateProject(state.currentProjectId, state.currentProjectCode, false);
+          await activateProject(state.currentProjectId, state.currentProjectCode, false, state.currentRoomName);
           setStatus("Restored previous room and resumed live updates.", "success");
         } catch (error) {
           disconnectStream();
           state.currentProjectId = "";
           state.currentProjectCode = "";
+          state.currentRoomIdentifier = "";
+          state.currentRoomName = "";
           updateProjectUi();
           persistSession();
           setPresence("error", "Room unavailable");
@@ -1612,7 +1568,7 @@
       async function sendMessage(event) {
         event.preventDefault();
 
-        if (!state.currentProjectId) {
+        if (!state.currentRoomIdentifier) {
           setStatus("Create or join a room before sending messages.", "error");
           return;
         }
@@ -1627,7 +1583,7 @@
 
         elements.sendMessageBtn.disabled = true;
         try {
-          const message = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/messages`, {
+          const message = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
             method: "POST",
             body: JSON.stringify({ sender, text }),
           });
@@ -1660,10 +1616,7 @@
         }
       }
 
-      function toggleProjectButtons(disabled) {
-        elements.createProjectBtn.disabled = disabled;
-        elements.joinProjectBtn.disabled = disabled;
-      }
+
 
       // Theme toggle
       const themeToggleBtn = document.getElementById("themeToggle");
@@ -1697,16 +1650,8 @@
 
       initTheme();
 
-      elements.createProjectBtn.addEventListener("click", createProject);
-      elements.joinProjectBtn.addEventListener("click", joinProject);
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.composerForm.addEventListener("submit", sendMessage);
-      elements.joinCodeInput.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          joinProject();
-        }
-      });
 
       window.addEventListener("beforeunload", () => {
         disconnectStream();
@@ -1820,7 +1765,7 @@
             const newStatus = btn.dataset.newStatus;
             btn.disabled = true;
             try {
-              await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks/${encodeURIComponent(taskId)}`, {
+              await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`, {
                 method: "PATCH",
                 body: JSON.stringify({ status: newStatus }),
               });
@@ -1835,9 +1780,9 @@
       }
 
       async function refreshBoard() {
-        if (!state.currentProjectId) return;
+        if (!state.currentRoomIdentifier) return;
         try {
-          const data = await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks?open=true`);
+          const data = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/tasks?open=true`);
           boardTasks = data.tasks || [];
           renderBoard();
         } catch (e) {
@@ -1848,10 +1793,10 @@
       addTaskBtn.addEventListener("click", async () => {
         const title = taskTitleInput.value.trim();
         if (!title) return;
-        if (!state.currentProjectId) { setStatus("Join a room first.", "error"); return; }
+        if (!state.currentRoomIdentifier) { setStatus("Join a room first.", "error"); return; }
         addTaskBtn.disabled = true;
         try {
-          await apiFetch(`/projects/${encodeURIComponent(state.currentProjectId)}/tasks`, {
+          await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/tasks`, {
             method: "POST",
             body: JSON.stringify({ title, created_by: "human" }),
           });
