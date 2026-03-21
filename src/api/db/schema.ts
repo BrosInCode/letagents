@@ -20,8 +20,6 @@ export const id_sequences = pgTable("id_sequences", {
 
 export const rooms = pgTable("rooms", {
   id: text("id").primaryKey(),
-  code: text("code").notNull().unique(),
-  name: text("name").unique(),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });
 
@@ -97,7 +95,7 @@ export const participants = pgTable(
     id: text("id").primaryKey(),
     room_id: text("room_id")
       .notNull()
-      .references(() => rooms.id, { onDelete: "cascade" }),
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     github_id: text("github_id"),
     github_login: text("github_login"),
     display_name: text("display_name").notNull(),
@@ -132,7 +130,7 @@ export const project_admins = pgTable(
   {
     project_id: text("project_id")
       .notNull()
-      .references(() => rooms.id, { onDelete: "cascade" }),
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     account_id: text("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
@@ -147,26 +145,27 @@ export const project_admins = pgTable(
 export const messages = pgTable(
   "messages",
   {
-    id: text("id").primaryKey(),
-    project_id: text("room_id")
+    room_id: text("room_id")
       .notNull()
-      .references(() => rooms.id, { onDelete: "cascade" }),
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    number: integer("number").notNull(),
     sender: text("sender").notNull(),
     text: text("text").notNull(),
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    room_idx: index("messages_room_id_idx").on(table.project_id),
+    pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
+    room_idx: index("messages_room_id_idx").on(table.room_id),
   })
 );
 
 export const tasks = pgTable(
   "tasks",
   {
-    id: text("id").primaryKey(),
-    project_id: text("room_id")
+    room_id: text("room_id")
       .notNull()
-      .references(() => rooms.id, { onDelete: "cascade" }),
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    number: integer("number").notNull(),
     title: text("title").notNull(),
     description: text("description"),
     status: taskStatusEnum("status").notNull().default("proposed"),
@@ -178,7 +177,8 @@ export const tasks = pgTable(
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    room_idx: index("tasks_room_id_idx").on(table.project_id),
+    pk: primaryKey({ name: "tasks_pk", columns: [table.room_id, table.number] }),
+    room_idx: index("tasks_room_id_idx").on(table.room_id),
     status_idx: index("tasks_status_idx").on(table.status),
   })
 );
@@ -189,7 +189,7 @@ export const invites = pgTable(
     id: text("id").primaryKey(),
     room_id: text("room_id")
       .notNull()
-      .references(() => rooms.id, { onDelete: "cascade" }),
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     code: text("code").notNull().unique(),
     created_by: text("created_by"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
