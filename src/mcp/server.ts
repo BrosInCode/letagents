@@ -2,7 +2,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { writeFileSync, existsSync } from "fs";
 import { userInfo } from "os";
 import { join, dirname } from "path";
@@ -74,9 +74,10 @@ const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim
 const AGENT_IDE_LABEL = (process.env.LETAGENTS_AGENT_IDE || process.env.AGENT_IDE || "").trim();
 const AGENT_OWNER_LABEL = (process.env.LETAGENTS_AGENT_OWNER_LABEL || "").trim();
 const EXPLICIT_AGENT_IDENTITY_KEY = getExplicitAgentIdentityStorageKey();
+const AGENT_INSTANCE_UUID = randomUUID();
 
 currentAgentIdentityKey =
-  EXPLICIT_AGENT_IDENTITY_KEY ?? getFallbackAgentIdentityNamespaceKey(detectAgentIdeLabel());
+  EXPLICIT_AGENT_IDENTITY_KEY ?? `instance:${AGENT_INSTANCE_UUID}`;
 currentAgentIdentity = getStoredAgentIdentity(currentAgentIdentityKey);
 
 interface ResolvedOwnerContext {
@@ -432,9 +433,12 @@ function ensureAgentIdentityKey(ideLabel: string): string {
     return currentAgentIdentityKey;
   }
 
-  const claimed = claimFallbackIdentityKey(getFallbackAgentIdentityNamespaceKey(ideLabel));
-  currentAgentIdentityKey = claimed.identityKey;
-  currentAgentIdentity = claimed.identity;
+  // v1: Use per-instance UUID for guaranteed distinct identity.
+  // Each MCP process gets a unique UUID — no slot/PID coordination needed.
+  // Trade-off: process restart = new identity (accepted for v1).
+  const uuidKey = `instance:${AGENT_INSTANCE_UUID}`;
+  currentAgentIdentityKey = uuidKey;
+  currentAgentIdentity = getStoredAgentIdentity(currentAgentIdentityKey);
   return currentAgentIdentityKey;
 }
 
@@ -672,6 +676,7 @@ function toPublicAgentIdentity(
     actor_label: identity.actor_label,
     canonical_key: identity.canonical_key ?? null,
     runtime_key: identity.runtime_key ?? null,
+    agent_instance_id: AGENT_INSTANCE_UUID,
     source: identity.source,
   };
 }
