@@ -32,6 +32,7 @@ import {
 } from "./local-state.js";
 import {
   encodeRoomIdPath,
+  getCanonicalRoomWebPath,
   looksLikeInviteCode,
   normalizeInviteCode,
   type JoinedVia,
@@ -822,17 +823,32 @@ function toRoomState(input: {
   };
 }
 
+function getCanonicalRoomWebUrl(roomId: string): string {
+  return new URL(getCanonicalRoomWebPath(roomId), `${API_URL}/`).toString();
+}
+
+function withCanonicalRoomLink<T extends Record<string, unknown>>(
+  roomId: string,
+  payload: T
+): T & { room_path: string; room_url: string } {
+  return {
+    ...payload,
+    room_path: getCanonicalRoomWebPath(roomId),
+    room_url: getCanonicalRoomWebUrl(roomId),
+  };
+}
+
 function toPublicRoomState(state: RoomState | null): Record<string, unknown> | null {
   if (!state) {
     return null;
   }
 
-  return {
+  return withCanonicalRoomLink(state.room_id, {
     room_id: state.room_id,
     code: state.code ?? null,
     display_name: state.display_name ?? null,
     joined_via: state.joined_via,
-  };
+  });
 }
 
 function toPublicStoredRoomSession(session: RoomSessionState | null): Record<string, unknown> | null {
@@ -840,7 +856,7 @@ function toPublicStoredRoomSession(session: RoomSessionState | null): Record<str
     return null;
   }
 
-  return {
+  return withCanonicalRoomLink(session.room_id, {
     room_id: session.room_id,
     code: session.code ?? null,
     display_name: session.display_name ?? null,
@@ -848,7 +864,7 @@ function toPublicStoredRoomSession(session: RoomSessionState | null): Record<str
     joined_at: session.joined_at,
     last_seen_at: session.last_seen_at,
     last_message_id: session.last_message_id ?? null,
-  };
+  });
 }
 
 function toPublicRoomResponse(
@@ -862,7 +878,10 @@ function toPublicRoomResponse(
   } = response;
 
   return {
-    ...rest,
+    ...withCanonicalRoomLink(
+      typeof rest.room_id === "string" ? rest.room_id : fallbackRoomId,
+      rest
+    ),
     room_id: typeof rest.room_id === "string" ? rest.room_id : fallbackRoomId,
   };
 }
@@ -2398,7 +2417,7 @@ server.tool(
                 rejoined_from_local_state: true,
                 server_session_resumed: false,
                 last_message_id_before_restart: savedRoom.last_message_id ?? null,
-                room: joined.room,
+                room: toPublicRoomState(joined.room),
                 agent_identity: toPublicAgentIdentity(agentIdentity),
               },
               null,
