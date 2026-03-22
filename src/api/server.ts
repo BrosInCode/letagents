@@ -156,6 +156,12 @@ function parsePollTimeout(timeoutValue: string | undefined): number {
   return Math.min(parsed, 180000);
 }
 
+function parseLimit(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed;
+}
+
 function parseCookies(header: string | undefined): Record<string, string> {
   if (!header) return {};
 
@@ -1074,9 +1080,14 @@ app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const result = await getMessages(projectId, { limit, after });
+
   res.json({
     project_id: projectId,
-    messages: await getMessages(projectId),
+    messages: result.messages,
+    has_more: result.has_more,
   });
 });
 
@@ -1135,10 +1146,11 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
 
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
-  const existingMessages = await getMessagesAfter(projectId, after);
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const existing = await getMessagesAfter(projectId, after, { limit });
 
-  if (existingMessages.length > 0) {
-    res.json({ project_id: projectId, messages: existingMessages });
+  if (existing.messages.length > 0) {
+    res.json({ project_id: projectId, messages: existing.messages, has_more: existing.has_more });
     return;
   }
 
@@ -1150,14 +1162,14 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
     req.off("close", onClientClose);
   };
 
-  const resolveRequest = (nextMessages: Message[]) => {
+  const resolveRequest = (msgs: Message[], hasMore = false) => {
     if (settled) {
       return;
     }
 
     settled = true;
     cleanup();
-    res.json({ project_id: projectId, messages: nextMessages });
+    res.json({ project_id: projectId, messages: msgs, has_more: hasMore });
   };
 
   const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
@@ -1165,9 +1177,9 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
       return;
     }
 
-    const nextMessages = await getMessagesAfter(projectId, after);
-    if (nextMessages.length > 0) {
-      resolveRequest(nextMessages);
+    const next = await getMessagesAfter(projectId, after, { limit });
+    if (next.messages.length > 0) {
+      resolveRequest(next.messages, next.has_more);
     }
   };
 
@@ -1245,9 +1257,11 @@ app.get("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
 
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const open = req.query.open === "true";
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
 
-  const taskList = open ? await getOpenTasks(projectId) : await getTasks(projectId, status);
-  res.json({ project_id: projectId, tasks: taskList });
+  const result = open ? await getOpenTasks(projectId, { limit, after }) : await getTasks(projectId, status, { limit, after });
+  res.json({ project_id: projectId, tasks: result.tasks, has_more: result.has_more });
 });
 
 app.get("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
@@ -1454,9 +1468,14 @@ app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
 
   if (!(await requireParticipant(req, res, project))) return;
 
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const result = await getMessages(project.id, { limit, after });
+
   res.json({
     room_id: roomId,
-    messages: await getMessages(project.id),
+    messages: result.messages,
+    has_more: result.has_more,
   });
 });
 
@@ -1472,10 +1491,11 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
   const projectId = project.id;
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
-  const existingMessages = await getMessagesAfter(projectId, after);
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const existing = await getMessagesAfter(projectId, after, { limit });
 
-  if (existingMessages.length > 0) {
-    res.json({ room_id: roomId, messages: existingMessages });
+  if (existing.messages.length > 0) {
+    res.json({ room_id: roomId, messages: existing.messages, has_more: existing.has_more });
     return;
   }
 
@@ -1487,17 +1507,17 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
     req.off("close", onClientClose);
   };
 
-  const resolveRequest = (nextMessages: Message[]) => {
+  const resolveRequest = (msgs: Message[], hasMore = false) => {
     if (settled) return;
     settled = true;
     cleanup();
-    res.json({ room_id: roomId, messages: nextMessages });
+    res.json({ room_id: roomId, messages: msgs, has_more: hasMore });
   };
 
   const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) return;
-    const nextMessages = await getMessagesAfter(projectId, after);
-    if (nextMessages.length > 0) resolveRequest(nextMessages);
+    const next = await getMessagesAfter(projectId, after, { limit });
+    if (next.messages.length > 0) resolveRequest(next.messages, next.has_more);
   };
 
   const onClientClose = () => {
@@ -1554,9 +1574,11 @@ app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
 
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
   const open = req.query.open === "true";
-  const taskList = open ? await getOpenTasks(project.id) : await getTasks(project.id, status);
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const result = open ? await getOpenTasks(project.id, { limit, after }) : await getTasks(project.id, status, { limit, after });
 
-  res.json({ room_id: roomId, tasks: taskList });
+  res.json({ room_id: roomId, tasks: result.tasks, has_more: result.has_more });
 });
 
 app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
