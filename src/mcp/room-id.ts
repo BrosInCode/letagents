@@ -7,6 +7,10 @@ export function encodeRoomIdPath(roomId: string): string {
     .join("/");
 }
 
+export function getCanonicalRoomWebPath(roomId: string): string {
+  return `/in/${encodeRoomIdPath(roomId)}`;
+}
+
 export function looksLikeInviteCode(value: string): boolean {
   return /^[A-Z0-9]{4}(?:-[A-Z0-9]{4})+$/.test(value.trim().toUpperCase());
 }
