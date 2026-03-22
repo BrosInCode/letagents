@@ -2149,17 +2149,53 @@ server.tool(
   async ({ room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
-    const result = await roomScopedApiCall({
-      room_id: targetRoomId,
-      project_id: targetProjectId,
-      room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages`,
-      project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
-    });
+
+    // Paginate through all pages to honor the "read all messages" contract
+    const allMessages: unknown[] = [];
+    let afterCursor: string | undefined;
+    let roomIdFromResponse: string | undefined;
+
+    for (;;) {
+      const query = new URLSearchParams();
+      if (afterCursor) query.set("after", afterCursor);
+
+      const qs = query.toString();
+      const result = await roomScopedApiCall<{
+        messages?: Array<{ id?: string }>;
+        has_more?: boolean;
+        room_id?: string;
+        project_id?: string;
+      }>({
+        room_id: targetRoomId,
+        project_id: targetProjectId,
+        room_path: (targetRoomId) =>
+          `/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`,
+        project_path: (targetProjectId) =>
+          `/projects/${encodeURIComponent(targetProjectId)}/messages${qs ? `?${qs}` : ""}`,
+      });
+
+      roomIdFromResponse = roomIdFromResponse || result.room_id || result.project_id;
+      const msgs = result.messages ?? [];
+      allMessages.push(...msgs);
+
+      if (!result.has_more || msgs.length === 0) break;
+
+      // Use the last message ID as the cursor for the next page
+      const lastMsg = msgs[msgs.length - 1];
+      if (!lastMsg?.id) break;
+      afterCursor = lastMsg.id;
+    }
+
+    const output: Record<string, unknown> = { messages: allMessages };
+    if (roomIdFromResponse) {
+      output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
+    }
+
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(result, null, 2),
+          text: JSON.stringify(output, null, 2),
         },
       ],
     };
