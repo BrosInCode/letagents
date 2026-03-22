@@ -1681,13 +1681,9 @@
       function scrollToNextUnread() {
         if (_unreadMessageIds.length === 0) return;
         const nextId = _unreadMessageIds.shift();
-        const allMessages = elements.messages.querySelectorAll(".message");
-        const sortedMsgs = Array.from(state.messages.values()).sort((a, b) =>
-          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-        );
-        const idx = sortedMsgs.findIndex(m => m.id === nextId);
-        if (idx >= 0 && allMessages[idx]) {
-          allMessages[idx].scrollIntoView({ behavior: "smooth", block: "start" });
+        const el = elements.messages.querySelector(`[data-msg-id="${nextId}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
         }
         updateNewMessagesPill();
       }
@@ -1730,7 +1726,7 @@
         legend.appendChild(sysChip);
       }
 
-      function renderMessages() {
+      function renderMessages(skipScroll = false) {
         const sortedMessages = Array.from(state.messages.values()).sort((a, b) => {
           return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
@@ -1756,6 +1752,7 @@
             : "";
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
+          wrapper.dataset.msgId = message.id;
           wrapper.style.setProperty("--sender-color", senderColor);
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
@@ -1781,6 +1778,9 @@
 
         elements.messages.appendChild(fragment);
         updateOwnerLegend();
+        if (!skipScroll) {
+          requestAnimationFrame(() => scrollMessagesToBottom(true));
+        }
       }
 
       function upsertMessages(items) {
@@ -1796,7 +1796,7 @@
           changed = true;
         }
         if (changed) {
-          renderMessages();
+          renderMessages(true);
           if (wasNearBottom) {
             scrollMessagesToBottom(true);
           } else {
@@ -2023,6 +2023,7 @@
         }
 
         renderMessages();
+        requestAnimationFrame(() => scrollMessagesToBottom(true));
       }
 
       async function activateProject(projectId, projectCode, focusComposer, roomName) {
@@ -2208,12 +2209,19 @@
       elements.composerForm.addEventListener("submit", sendMessage);
 
       // --- New messages pill: sequential scroll ---
-      document.getElementById("newMessagesPill").addEventListener("click", scrollToNextUnread);
+      const _pillEl = document.getElementById("newMessagesPill");
+      if (_pillEl) _pillEl.addEventListener("click", scrollToNextUnread);
+      let _scrollRafPending = false;
       elements.messages.addEventListener("scroll", () => {
-        if (isNearBottom() && _unreadMessageIds.length > 0) {
-          _unreadMessageIds.length = 0;
-          updateNewMessagesPill();
-        }
+        if (_scrollRafPending) return;
+        _scrollRafPending = true;
+        requestAnimationFrame(() => {
+          _scrollRafPending = false;
+          if (isNearBottom() && _unreadMessageIds.length > 0) {
+            _unreadMessageIds.length = 0;
+            updateNewMessagesPill();
+          }
+        });
       });
 
       // --- Textarea: Enter sends, Shift+Enter for new line ---
