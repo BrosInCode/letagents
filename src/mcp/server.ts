@@ -1393,8 +1393,13 @@ server.tool(
 server.tool(
   "get_current_room",
   "Get information about the currently joined room, including how it was joined.",
-  {},
-  async () => {
+  {
+    conversation_id: z
+      .string()
+      .optional()
+      .describe("Optional conversation ID to report the conversation-scoped identity instead of the global one."),
+  },
+  async ({ conversation_id }) => {
     return {
       content: [
         {
@@ -1405,7 +1410,9 @@ server.tool(
                   connected: true,
                   ...toPublicRoomState(currentRoom),
                   agent_identity: toPublicAgentIdentity(
-                    currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey)
+                    getConversationIdentity(conversation_id)
+                      ?? currentAgentIdentity
+                      ?? getStoredAgentIdentity(currentAgentIdentityKey)
                   ),
                   auth: getStoredAuth()
                     ? {
