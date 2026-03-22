@@ -46,6 +46,7 @@ export const auth_states = pgTable("auth_states", {
   id: text("id").primaryKey(),
   state: text("state").notNull().unique(),
   redirect_to: text("redirect_to"),
+  expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });
 
