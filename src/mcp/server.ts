@@ -70,6 +70,38 @@ let currentRoom: RoomState | null = null;
 let currentAgentIdentityKey = "";
 let currentAgentIdentity: StoredAgentIdentityState | null = null;
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
+
+// ---------------------------------------------------------------------------
+// Conversation-scoped identity (Option C: per-conversation hints)
+// ---------------------------------------------------------------------------
+const MAX_CONVERSATION_IDENTITIES = 20;
+const conversationIdentities = new Map<string, StoredAgentIdentityState>();
+
+/**
+ * Get or set a conversation-scoped identity override.
+ * Falls back to the global `currentAgentIdentity` when conversationId is absent.
+ */
+function getConversationIdentity(
+  conversationId?: string | null
+): StoredAgentIdentityState | null {
+  if (!conversationId) return currentAgentIdentity;
+  return conversationIdentities.get(conversationId) ?? currentAgentIdentity;
+}
+
+function setConversationIdentity(
+  conversationId: string,
+  identity: StoredAgentIdentityState
+): void {
+  // LRU-style eviction: if at cap, remove oldest entry
+  if (
+    !conversationIdentities.has(conversationId) &&
+    conversationIdentities.size >= MAX_CONVERSATION_IDENTITIES
+  ) {
+    const oldestKey = conversationIdentities.keys().next().value;
+    if (oldestKey !== undefined) conversationIdentities.delete(oldestKey);
+  }
+  conversationIdentities.set(conversationId, identity);
+}
 let currentAuthenticatedAccountSource: "env" | "stored" | null = null;
 let currentAuthenticatedEnvToken: string | null = null;
 
@@ -1361,8 +1393,13 @@ server.tool(
 server.tool(
   "get_current_room",
   "Get information about the currently joined room, including how it was joined.",
-  {},
-  async () => {
+  {
+    conversation_id: z
+      .string()
+      .optional()
+      .describe("Optional conversation ID to report the conversation-scoped identity instead of the global one."),
+  },
+  async ({ conversation_id }) => {
     return {
       content: [
         {
@@ -1373,7 +1410,9 @@ server.tool(
                   connected: true,
                   ...toPublicRoomState(currentRoom),
                   agent_identity: toPublicAgentIdentity(
-                    currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey)
+                    getConversationIdentity(conversation_id)
+                      ?? currentAgentIdentity
+                      ?? getStoredAgentIdentity(currentAgentIdentityKey)
                   ),
                   auth: getStoredAuth()
                     ? {
@@ -1470,8 +1509,12 @@ server.tool(
       .string()
       .optional()
       .describe("Canonical room ID. Defaults to the current room."),
+    conversation_id: z
+      .string()
+      .optional()
+      .describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ sender: _sender, status, room_id }) => {
+  async ({ sender: _sender, status, room_id, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
 
@@ -1496,7 +1539,7 @@ server.tool(
 
     // Status messages use a reserved prefix so the UI (and agents) can distinguish
     // them from normal chat messages without changing the data model.
-    const identity = await ensureAgentIdentity();
+    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
     const sender = identity.actor_label;
     const statusText = `[status] ${status}`;
 
@@ -1556,8 +1599,9 @@ server.tool(
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ title, description, created_by: _createdBy, source_message_id, room_id }) => {
+  async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -1566,7 +1610,7 @@ server.tool(
       };
     }
 
-    const identity = await ensureAgentIdentity();
+    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
     const task = await roomScopedApiCall({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -1667,8 +1711,9 @@ server.tool(
       .optional()
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ task_id, assignee: _assignee, room_id }) => {
+  async ({ task_id, assignee: _assignee, room_id, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -1678,7 +1723,7 @@ server.tool(
     }
 
     try {
-      const identity = await ensureAgentIdentity();
+      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -1724,8 +1769,9 @@ server.tool(
       .describe("New assignee for the task. Defaults to the current agent when status=assigned."),
     pr_url: z.string().optional().describe("PR URL to link to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ task_id, status, assignee, pr_url, room_id }) => {
+  async ({ task_id, status, assignee, pr_url, room_id, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -1737,7 +1783,7 @@ server.tool(
     try {
       const identity =
         status === "assigned" && !assignee
-          ? await ensureAgentIdentity()
+          ? (getConversationIdentity(conversation_id) ?? await ensureAgentIdentity())
           : null;
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
@@ -1787,8 +1833,9 @@ server.tool(
     task_id: z.string().describe("The task ID to submit for review"),
     pr_url: z.string().optional().describe("GitHub PR URL for the work"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ task_id, pr_url, room_id }) => {
+  async ({ task_id, pr_url, room_id, conversation_id: _conversationId }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2021,15 +2068,19 @@ server.tool(
       .optional()
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     text: z.string().describe("The message text to send"),
+    conversation_id: z
+      .string()
+      .optional()
+      .describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ room_id, sender: _sender, text }) => {
+  async ({ room_id, sender: _sender, text, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       throw new Error("No room is currently selected. Join a room first or pass room_id.");
     }
 
-    const identity = await ensureAgentIdentity();
+    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
     const message = await roomScopedApiCall<Record<string, unknown>>({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -2553,8 +2604,12 @@ server.tool(
       .min(2)
       .max(64)
       .describe("The desired display name for this agent (2-64 characters)."),
+    conversation_id: z
+      .string()
+      .optional()
+      .describe("Optional conversation ID to scope this name change. When provided, only this conversation uses the new name; other conversations keep their own identity."),
   },
-  async ({ name: desiredName }) => {
+  async ({ name: desiredName, conversation_id }) => {
     const trimmedName = desiredName.trim();
     if (trimmedName.length < 2 || trimmedName.length > 64) {
       return {
@@ -2591,15 +2646,6 @@ server.tool(
 
     try {
       const owner = await resolveOwnerContext();
-      const registered = await apiCall<Record<string, unknown>>("/agents", {
-        method: "POST",
-        body: JSON.stringify({
-          name: slugName,
-          display_name: trimmedName,
-          owner_label: owner.label,
-        }),
-      });
-
       const ideLabel = detectAgentIdeLabel();
       const ownerAttribution = formatOwnerAttribution(owner.label);
       const actorLabel = buildAgentActorLabel({
@@ -2608,6 +2654,23 @@ server.tool(
         ide_label: ideLabel,
       });
 
+      // When conversation_id is provided, skip server-side /agents registration
+      // to avoid creating stranded durable agent records from ephemeral renames.
+      let canonicalKey: string | null = owner.login ? `${owner.login}/${slugName}` : null;
+      if (!conversation_id) {
+        const registered = await apiCall<Record<string, unknown>>("/agents", {
+          method: "POST",
+          body: JSON.stringify({
+            name: slugName,
+            display_name: trimmedName,
+            owner_label: owner.label,
+          }),
+        });
+        if (typeof registered.canonical_key === "string") {
+          canonicalKey = registered.canonical_key;
+        }
+      }
+
       const updatedIdentity: StoredAgentIdentityState = {
         name: slugName,
         display_name: trimmedName,
@@ -2615,16 +2678,19 @@ server.tool(
         owner_attribution: ownerAttribution,
         ide_label: ideLabel,
         actor_label: actorLabel,
-        canonical_key:
-          typeof registered.canonical_key === "string"
-            ? registered.canonical_key
-            : owner.login ? `${owner.login}/${slugName}` : null,
+        canonical_key: canonicalKey,
         runtime_key: currentAgentIdentityKey,
-        source: "api",
+        source: conversation_id ? "local" : "api",
         resolved_at: new Date().toISOString(),
       };
 
-      currentAgentIdentity = setStoredAgentIdentity(updatedIdentity, currentAgentIdentityKey);
+      if (conversation_id) {
+        // Scope to this conversation only
+        setConversationIdentity(conversation_id, updatedIdentity);
+      } else {
+        // Global rename (backward compatible)
+        currentAgentIdentity = setStoredAgentIdentity(updatedIdentity, currentAgentIdentityKey);
+      }
 
       return {
         content: [
@@ -2634,7 +2700,11 @@ server.tool(
               {
                 success: true,
                 message: `Agent name changed to "${trimmedName}".`,
-                agent_identity: toPublicAgentIdentity(currentAgentIdentity),
+                agent_identity: toPublicAgentIdentity(
+                  conversation_id
+                    ? getConversationIdentity(conversation_id)
+                    : currentAgentIdentity
+                ),
               },
               null,
               2
