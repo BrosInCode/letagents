@@ -67,6 +67,12 @@ interface MessageCreatedEvent {
 
 interface AuthenticatedRequest extends express.Request {
   sessionAccount?: SessionAccount | OwnerTokenAccount | null;
+  authKind?: "session" | "owner_token" | null;
+}
+
+interface ResolvedRequestAuth {
+  account: SessionAccount | OwnerTokenAccount | null;
+  authKind: "session" | "owner_token" | null;
 }
 
 const messageEvents = new EventEmitter();
@@ -405,34 +411,47 @@ async function resolveGitHubRoomEntryDecision(input: {
   };
 }
 
-async function resolveRequestAccount(
-  req: express.Request
-): Promise<SessionAccount | OwnerTokenAccount | null> {
+async function resolveRequestAuth(req: express.Request): Promise<ResolvedRequestAuth> {
   const cookies = parseCookies(req.headers.cookie);
   const sessionToken = cookies.letagents_session;
   if (sessionToken) {
     const sessionAccount = await getSessionAccountByToken(sessionToken);
     if (sessionAccount) {
-      return sessionAccount;
+      return {
+        account: sessionAccount,
+        authKind: "session",
+      };
     }
   }
 
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
-    return null;
+    return {
+      account: null,
+      authKind: null,
+    };
   }
 
   const providerToken = authHeader.slice("Bearer ".length).trim();
   if (!providerToken) {
-    return null;
+    return {
+      account: null,
+      authKind: null,
+    };
   }
 
   const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
   if (ownerTokenAccount) {
-    return ownerTokenAccount;
+    return {
+      account: ownerTokenAccount,
+      authKind: "owner_token",
+    };
   }
 
-  return null;
+  return {
+    account: null,
+    authKind: null,
+  };
 }
 
 async function resolveRoomOrReply(
@@ -470,7 +489,9 @@ app.use(express.json());
 
 app.use(async (req: AuthenticatedRequest, _res, next) => {
   try {
-    req.sessionAccount = await resolveRequestAccount(req);
+    const auth = await resolveRequestAuth(req);
+    req.sessionAccount = auth.account;
+    req.authKind = auth.authKind;
     next();
   } catch (error) {
     next(error);
@@ -934,8 +955,7 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  // Server-determined: browser sessions (cookie auth) → "browser", otherwise null
-  const source = req.sessionAccount ? "browser" : undefined;
+  const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
   const message = await emitProjectMessage(projectId, sender, text, source);
   res.status(201).json(message);
 });
@@ -1311,8 +1331,7 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
     return;
   }
 
-  // Server-determined: browser sessions (cookie auth) → "browser", otherwise null
-  const source = req.sessionAccount ? "browser" : undefined;
+  const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
   const message = await emitProjectMessage(project.id, sender, text, source);
   res.status(201).json({
     ...message,
