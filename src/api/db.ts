@@ -160,6 +160,16 @@ const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   cancelled: [],
 };
 
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 500;
+
+function clampLimit(requested: number | undefined, defaultVal = DEFAULT_LIST_LIMIT, maxVal = MAX_LIST_LIMIT): number {
+  if (requested === undefined || requested === null || Number.isNaN(requested) || requested <= 0) {
+    return defaultVal;
+  }
+  return Math.min(requested, maxVal);
+}
+
 function generateCode(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   const seg1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
@@ -444,7 +454,13 @@ export async function addMessage(roomId: string, sender: string, text: string, s
   return toMessage(message);
 }
 
-export async function getMessages(roomId: string): Promise<Message[]> {
+export async function getMessages(
+  roomId: string,
+  options?: { limit?: number; after?: string }
+): Promise<{ messages: Message[]; has_more: boolean }> {
+  const limit = clampLimit(options?.limit);
+  const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
+
   const rows = await db
     .select({
       room_id: messages.room_id,
@@ -455,35 +471,25 @@ export async function getMessages(roomId: string): Promise<Message[]> {
       timestamp: messages.timestamp,
     })
     .from(messages)
-    .where(eq(messages.room_id, roomId))
-    .orderBy(asc(messages.number));
+    .where(
+      afterNumber
+        ? and(eq(messages.room_id, roomId), sql`${messages.number} > ${afterNumber}`)
+        : eq(messages.room_id, roomId)
+    )
+    .orderBy(asc(messages.number))
+    .limit(limit + 1);
 
-  return rows.map(toMessage);
+  const has_more = rows.length > limit;
+  const bounded = has_more ? rows.slice(0, limit) : rows;
+  return { messages: bounded.map(toMessage), has_more };
 }
 
 export async function getMessagesAfter(
   roomId: string,
-  afterMessageId: string | undefined
-): Promise<Message[]> {
-  const afterNumber = afterMessageId ? parseScopedId(afterMessageId, "msg") : null;
-  if (!afterNumber) {
-    return getMessages(roomId);
-  }
-
-  const rows = await db
-    .select({
-      room_id: messages.room_id,
-      number: messages.number,
-      sender: messages.sender,
-      text: messages.text,
-      source: messages.source,
-      timestamp: messages.timestamp,
-    })
-    .from(messages)
-    .where(and(eq(messages.room_id, roomId), sql`${messages.number} > ${afterNumber}`))
-    .orderBy(asc(messages.number));
-
-  return rows.map(toMessage);
+  afterMessageId: string | undefined,
+  options?: { limit?: number }
+): Promise<{ messages: Message[]; has_more: boolean }> {
+  return getMessages(roomId, { ...options, after: afterMessageId });
 }
 
 export async function hasMessagesFromSender(roomId: string, sender: string): Promise<boolean> {
@@ -806,29 +812,54 @@ export async function createTask(
   return toTask(task);
 }
 
-export async function getTasks(roomId: string, statusFilter?: string): Promise<Task[]> {
+export async function getTasks(
+  roomId: string,
+  statusFilter?: string,
+  options?: { limit?: number; after?: string }
+): Promise<{ tasks: Task[]; has_more: boolean }> {
+  const limit = clampLimit(options?.limit);
+  const afterNumber = options?.after ? parseScopedId(options.after, "task") : null;
+
+  const conditions = [eq(tasks.room_id, roomId)];
+  if (statusFilter) conditions.push(eq(tasks.status, statusFilter as TaskStatus));
+  if (afterNumber) conditions.push(sql`${tasks.number} > ${afterNumber}`);
+
   const query = db
     .select()
     .from(tasks)
-    .where(
-      statusFilter
-        ? and(eq(tasks.room_id, roomId), eq(tasks.status, statusFilter as TaskStatus))
-        : eq(tasks.room_id, roomId)
-    )
-    .orderBy(asc(tasks.number));
+    .where(and(...conditions))
+    .orderBy(asc(tasks.number))
+    .limit(limit + 1);
 
   const rows = (await query) as TaskRow[];
-  return rows.map(toTask);
+  const has_more = rows.length > limit;
+  const bounded = has_more ? rows.slice(0, limit) : rows;
+  return { tasks: bounded.map(toTask), has_more };
 }
 
-export async function getOpenTasks(roomId: string): Promise<Task[]> {
+export async function getOpenTasks(
+  roomId: string,
+  options?: { limit?: number; after?: string }
+): Promise<{ tasks: Task[]; has_more: boolean }> {
+  const limit = clampLimit(options?.limit);
+  const afterNumber = options?.after ? parseScopedId(options.after, "task") : null;
+
+  const conditions = [
+    eq(tasks.room_id, roomId),
+    notInArray(tasks.status, ["done", "cancelled"]),
+  ];
+  if (afterNumber) conditions.push(sql`${tasks.number} > ${afterNumber}`);
+
   const rows = (await db
     .select()
     .from(tasks)
-    .where(and(eq(tasks.room_id, roomId), notInArray(tasks.status, ["done", "cancelled"])))
-    .orderBy(asc(tasks.number))) as TaskRow[];
+    .where(and(...conditions))
+    .orderBy(asc(tasks.number))
+    .limit(limit + 1)) as TaskRow[];
 
-  return rows.map(toTask);
+  const has_more = rows.length > limit;
+  const bounded = has_more ? rows.slice(0, limit) : rows;
+  return { tasks: bounded.map(toTask), has_more };
 }
 
 export async function getTaskById(roomId: string, taskId: string): Promise<Task | undefined> {
