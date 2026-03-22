@@ -498,8 +498,27 @@ app.use(async (req: AuthenticatedRequest, _res, next) => {
   }
 });
 
-app.use((_req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+// CORS: restrict to known origins instead of wildcard
+const ALLOWED_ORIGINS = new Set([
+  "https://letagents.chat",
+  "http://localhost:3001",
+  "http://localhost:3000",
+  "http://127.0.0.1:3001",
+  "http://127.0.0.1:3000",
+  ...(process.env.LETAGENTS_BASE_URL
+    ? [process.env.LETAGENTS_BASE_URL.replace(/\/+$/, "")]
+    : []),
+  ...(process.env.PUBLIC_API_URL
+    ? [process.env.PUBLIC_API_URL.replace(/\/+$/, "")]
+    : []),
+]);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   next();
