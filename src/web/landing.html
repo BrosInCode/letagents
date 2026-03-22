@@ -652,6 +652,50 @@
         return /^[A-Z0-9]{4}(-[A-Z0-9]{4}){1,2}$/.test(str);
       }
 
+      function normalizeRepoRoomIdentifier(value) {
+        let normalized = String(value || "").trim();
+        if (!normalized) {
+          return "";
+        }
+
+        if (normalized.startsWith("https://")) {
+          normalized = normalized.slice("https://".length);
+        } else if (normalized.startsWith("http://")) {
+          normalized = normalized.slice("http://".length);
+        }
+
+        const sshMatch = normalized.match(/^git@([^:]+):(.+)$/);
+        if (sshMatch) {
+          normalized = `${sshMatch[1]}/${sshMatch[2]}`;
+        }
+
+        normalized = normalized.replace(/\/+$/, "");
+        if (normalized.endsWith(".git")) {
+          normalized = normalized.slice(0, -4);
+        }
+
+        const parts = normalized.split("/");
+        if (parts[0] && ["github.com", "gitlab.com", "bitbucket.org"].includes(parts[0].toLowerCase())) {
+          parts[0] = parts[0].toLowerCase();
+          if (parts[0] === "github.com") {
+            normalized = parts.join("/").toLowerCase();
+          } else {
+            normalized = parts.join("/");
+          }
+        }
+
+        return normalized;
+      }
+
+      function isRepoRoomIdentifier(value) {
+        const normalized = normalizeRepoRoomIdentifier(value);
+        const parts = normalized.split("/");
+        return (
+          parts.length === 3 &&
+          ["github.com", "gitlab.com", "bitbucket.org"].includes(parts[0])
+        );
+      }
+
       function redirectToRoom(roomCode) {
         if (roomCode) {
           // Only uppercase invite codes, leave repo names as-is
@@ -700,12 +744,19 @@
       }
 
       async function joinByCode() {
-        const code = elements.joinCodeInput.value.trim().toUpperCase();
-        if (!code) {
+        const rawValue = elements.joinCodeInput.value.trim();
+        if (!rawValue) {
           setStatus("Enter a room code before joining.", "error");
           elements.joinCodeInput.focus();
           return;
         }
+
+        if (isRepoRoomIdentifier(rawValue)) {
+          redirectToRoom(normalizeRepoRoomIdentifier(rawValue));
+          return;
+        }
+
+        const code = rawValue.toUpperCase();
 
         elements.joinCodeBtn.disabled = true;
         setStatus(`Joining ${code}...`);
