@@ -76,6 +76,15 @@ function setCachedRepoAccess(roomName: string, login: string, allowed: boolean):
   });
 }
 
+export function clearGitHubRepoAccessCacheForLogin(login: string): void {
+  const suffix = `::${login.toLowerCase()}`;
+  for (const cacheKey of repoAccessCache.keys()) {
+    if (cacheKey.endsWith(suffix)) {
+      repoAccessCache.delete(cacheKey);
+    }
+  }
+}
+
 async function fetchGitHubRepo(roomName: string, accessToken?: string): Promise<Response> {
   const repo = parseGitHubRepoName(roomName);
   if (!repo) {

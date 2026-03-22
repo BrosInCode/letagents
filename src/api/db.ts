@@ -612,6 +612,33 @@ export async function createSession(
   return session;
 }
 
+export async function refreshProviderAccessTokenForAccount(
+  accountId: string,
+  providerAccessToken: string | null | undefined
+): Promise<void> {
+  if (!providerAccessToken) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+
+  await Promise.all([
+    db
+      .update(auth_sessions)
+      .set({
+        provider_access_token: providerAccessToken,
+      })
+      .where(eq(auth_sessions.account_id, accountId)),
+    db
+      .update(owner_tokens)
+      .set({
+        provider_access_token: providerAccessToken,
+        updated_at: now,
+      })
+      .where(eq(owner_tokens.account_id, accountId)),
+  ]);
+}
+
 export async function getSessionAccountByToken(token: string): Promise<SessionAccount | null> {
   const tokenHash = hashToken(token);
   const [session] = await db
