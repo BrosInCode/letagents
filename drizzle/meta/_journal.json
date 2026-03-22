@@ -43,6 +43,13 @@
       "when": 1774131774550,
       "tag": "0005_magenta_ricochet",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1774172993435,
+      "tag": "0006_premium_blue_marvel",
+      "breakpoints": true
     }
   ]
 }

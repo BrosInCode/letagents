@@ -56,7 +56,7 @@ export const auth_sessions = pgTable(
     account_id: text("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
-    token: text("token").notNull().unique(),
+    token_hash: text("token_hash").notNull().unique(),
     provider_access_token: text("provider_access_token"),
     expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
