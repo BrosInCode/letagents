@@ -519,6 +519,39 @@
         overflow: hidden;
       }
 
+      .new-messages-pill {
+        position: absolute;
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%) translateY(60px);
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 10px 20px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #8b5cf6, #3b82f6);
+        color: white;
+        font-size: 0.88rem;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 8px 28px rgba(99, 102, 241, 0.4);
+        border: none;
+        opacity: 0;
+        pointer-events: none;
+        transition: transform 280ms ease, opacity 280ms ease;
+      }
+
+      .new-messages-pill.visible {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      .new-messages-pill:hover {
+        box-shadow: 0 12px 36px rgba(99, 102, 241, 0.5);
+      }
+
       .messages {
         height: 100%;
         overflow-y: auto;
@@ -1227,6 +1260,9 @@
 
         <div class="messages-wrap">
           <div class="messages" id="messages"></div>
+          <button class="new-messages-pill" id="newMessagesPill" type="button">
+            ↓ <span id="newMessagesCount">0</span> new messages
+          </button>
           <div class="empty-state" id="emptyState">
             <div class="empty-state-card">
               <h3>Open a room to begin</h3>
@@ -1622,11 +1658,41 @@
         `;
       }
 
+      /* ── Sequential scroll behavior ────────────────────────── */
+      const _unreadMessageIds = [];
+
+      function isNearBottom() {
+        const el = elements.messages;
+        return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+      }
+
+      function updateNewMessagesPill() {
+        const pill = document.getElementById("newMessagesPill");
+        const countEl = document.getElementById("newMessagesCount");
+        if (!pill || !countEl) return;
+        if (_unreadMessageIds.length > 0) {
+          countEl.textContent = _unreadMessageIds.length;
+          pill.classList.add("visible");
+        } else {
+          pill.classList.remove("visible");
+        }
+      }
+
+      function scrollToNextUnread() {
+        if (_unreadMessageIds.length === 0) return;
+        const nextId = _unreadMessageIds.shift();
+        const el = elements.messages.querySelector(`[data-msg-id="${nextId}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        updateNewMessagesPill();
+      }
+
       function scrollMessagesToBottom(force) {
-        const distanceFromBottom =
-          elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
-        if (force || distanceFromBottom < 140) {
+        if (force || isNearBottom()) {
           elements.messages.scrollTop = elements.messages.scrollHeight;
+          _unreadMessageIds.length = 0;
+          updateNewMessagesPill();
         }
       }
 
@@ -1660,7 +1726,7 @@
         legend.appendChild(sysChip);
       }
 
-      function renderMessages() {
+      function renderMessages(skipScroll = false) {
         const sortedMessages = Array.from(state.messages.values()).sort((a, b) => {
           return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
         });
@@ -1686,6 +1752,7 @@
             : "";
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
+          wrapper.dataset.msgId = message.id;
           wrapper.style.setProperty("--sender-color", senderColor);
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
@@ -1711,20 +1778,31 @@
 
         elements.messages.appendChild(fragment);
         updateOwnerLegend();
-        requestAnimationFrame(() => scrollMessagesToBottom(true));
+        if (!skipScroll) {
+          requestAnimationFrame(() => scrollMessagesToBottom(true));
+        }
       }
 
       function upsertMessages(items) {
         let changed = false;
+        const wasNearBottom = isNearBottom();
+        const newIds = [];
         for (const item of items) {
           if (!item || !item.id || state.messages.has(item.id)) {
             continue;
           }
           state.messages.set(item.id, item);
+          newIds.push(item.id);
           changed = true;
         }
         if (changed) {
-          renderMessages();
+          renderMessages(true);
+          if (wasNearBottom) {
+            scrollMessagesToBottom(true);
+          } else {
+            _unreadMessageIds.push(...newIds);
+            updateNewMessagesPill();
+          }
           if (state.isStreaming) playNotificationSound();
         }
       }
@@ -1945,6 +2023,7 @@
         }
 
         renderMessages();
+        requestAnimationFrame(() => scrollMessagesToBottom(true));
       }
 
       async function activateProject(projectId, projectCode, focusComposer, roomName) {
@@ -2128,6 +2207,22 @@
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
       elements.composerForm.addEventListener("submit", sendMessage);
+
+      // --- New messages pill: sequential scroll ---
+      const _pillEl = document.getElementById("newMessagesPill");
+      if (_pillEl) _pillEl.addEventListener("click", scrollToNextUnread);
+      let _scrollRafPending = false;
+      elements.messages.addEventListener("scroll", () => {
+        if (_scrollRafPending) return;
+        _scrollRafPending = true;
+        requestAnimationFrame(() => {
+          _scrollRafPending = false;
+          if (isNearBottom() && _unreadMessageIds.length > 0) {
+            _unreadMessageIds.length = 0;
+            updateNewMessagesPill();
+          }
+        });
+      });
 
       // --- Textarea: Enter sends, Shift+Enter for new line ---
       elements.messageInput.addEventListener("keydown", (e) => {
