@@ -11,6 +11,15 @@ import { SseClient, type Message } from "./sse-client.js";
 import { getRoomFromConfig } from "./config-reader.js";
 import { getGitRemoteIdentity } from "./git-remote.js";
 import {
+  AGENT_CODENAMES,
+  AGENT_CODENAME_SPACE,
+  normalizeSlugSegment,
+  normalizeAgentBaseName,
+  hashStringToIndex,
+  codenameFromIndex,
+  pickLocalCodename,
+} from "./codenames.js";
+import {
   clearPendingDeviceAuth,
   clearStoredAuth,
   getLocalStatePath,
@@ -113,21 +122,9 @@ function readCommandOutput(command: string, cwd = process.cwd()): string | null 
   }
 }
 
-function normalizeSlugSegment(input: string, fallback: string): string {
-  const normalized = input
-    .normalize("NFKD")
-    .replace(/[^\x00-\x7F]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/-{2,}/g, "-");
-
-  return normalized || fallback;
-}
-
-function normalizeAgentBaseName(input: string): string {
-  return normalizeSlugSegment(input, "agent").replace(/-agent$/, "") || "agent";
-}
+// normalizeSlugSegment, normalizeAgentBaseName, AGENT_CODENAMES,
+// AGENT_CODENAME_SPACE, hashStringToIndex, codenameFromIndex,
+// pickLocalCodename — all imported from ./codenames.js
 
 function isCodexRuntime(): boolean {
   return Boolean(
@@ -138,111 +135,6 @@ function isCodexRuntime(): boolean {
   );
 }
 
-const AGENT_CODENAMES = [
-  "amber",
-  "anchor",
-  "autumn",
-  "badger",
-  "bay",
-  "bear",
-  "brook",
-  "calm",
-  "canyon",
-  "cedar",
-  "clear",
-  "cloud",
-  "comet",
-  "copper",
-  "creek",
-  "crisp",
-  "crest",
-  "dawn",
-  "delta",
-  "dune",
-  "ember",
-  "falcon",
-  "fern",
-  "field",
-  "firefly",
-  "fjord",
-  "forest",
-  "fox",
-  "garden",
-  "glade",
-  "golden",
-  "granite",
-  "grove",
-  "harbor",
-  "hawk",
-  "hollow",
-  "indigo",
-  "ivory",
-  "jade",
-  "juniper",
-  "lagoon",
-  "lake",
-  "lantern",
-  "leaf",
-  "lively",
-  "lunar",
-  "lynx",
-  "maple",
-  "marsh",
-  "meadow",
-  "mesa",
-  "misty",
-  "moon",
-  "morrow",
-  "moss",
-  "noble",
-  "oak",
-  "olive",
-  "opal",
-  "otter",
-  "owl",
-  "peak",
-  "pearl",
-  "pine",
-  "quiet",
-  "raven",
-  "reef",
-  "ridge",
-  "river",
-  "rook",
-  "sage",
-  "scarlet",
-  "shore",
-  "silver",
-  "sky",
-  "solar",
-  "sparrow",
-  "spring",
-  "star",
-  "stone",
-  "storm",
-  "summit",
-  "sun",
-  "sunlit",
-  "swift",
-  "thicket",
-  "tidal",
-  "timber",
-  "trail",
-  "valley",
-  "verdant",
-  "vista",
-  "warm",
-  "wave",
-  "west",
-  "wild",
-  "willow",
-  "wind",
-  "winter",
-  "wolf",
-  "wood",
-  "wren",
-] as const;
-const AGENT_CODENAME_SPACE = AGENT_CODENAMES.length * AGENT_CODENAMES.length;
 const AGENT_IDENTITY_SLOT_SUFFIX = ":slot:";
 
 function getExplicitAgentIdentityStorageKey(): string | null {
@@ -263,24 +155,6 @@ function getExplicitAgentIdentityStorageKey(): string | null {
 
 function getFallbackAgentIdentityNamespaceKey(ideLabel: string): string {
   return `cwd:${process.cwd()}:ide:${normalizeAgentBaseName(ideLabel)}`;
-}
-
-function hashStringToIndex(value: string, modulo: number): number {
-  const digest = createHash("sha256").update(value).digest();
-  return digest.readUInt16BE(0) % modulo;
-}
-
-function codenameFromIndex(index: number): { name: string; display_name: string } {
-  const normalizedIndex = ((index % AGENT_CODENAME_SPACE) + AGENT_CODENAME_SPACE) % AGENT_CODENAME_SPACE;
-  const firstIndex = Math.floor(normalizedIndex / AGENT_CODENAMES.length);
-  const secondIndex = normalizedIndex % AGENT_CODENAMES.length;
-  const first = AGENT_CODENAMES[firstIndex];
-  const second = AGENT_CODENAMES[secondIndex];
-
-  return {
-    name: normalizeAgentBaseName(`${first}-${second}`),
-    display_name: `${toTitleCaseCodename(first)} ${toTitleCaseCodename(second)}`,
-  };
 }
 
 function detectAgentIdeLabel(): string {
@@ -501,10 +375,7 @@ function resolveExplicitAgentIdentity(): { name: string; display_name: string } 
   return null;
 }
 
-function pickLocalCodename(runtimeKey: string, offset = 0): { name: string; display_name: string } {
-  const index = hashStringToIndex(runtimeKey, AGENT_CODENAME_SPACE) + offset;
-  return codenameFromIndex(index);
-}
+// pickLocalCodename — imported from ./codenames.js
 
 async function resolveAgentName(
   authAvailable: boolean,
@@ -2630,7 +2501,11 @@ server.tool(
               account: storedAuth.account ?? null,
               expires_at: storedAuth.expires_at ?? null,
               auto_joined_room: joinedRoom,
+              ...(joinedRoom?.room_id
+                ? withCanonicalRoomLink(joinedRoom.room_id, {})
+                : {}),
               agent_identity: toPublicAgentIdentity(agentIdentity),
+              hint: "You can change your agent's display name anytime using the set_agent_name tool.",
             },
             null,
             2
@@ -2666,6 +2541,124 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+server.tool(
+  "set_agent_name",
+  "Set or change the agent's display name. The agent will be known by this name in the room. Use this to pick a custom name instead of the auto-generated codename.",
+  {
+    name: z
+      .string()
+      .min(2)
+      .max(64)
+      .describe("The desired display name for this agent (2-64 characters)."),
+  },
+  async ({ name: desiredName }) => {
+    const trimmedName = desiredName.trim();
+    if (trimmedName.length < 2 || trimmedName.length > 64) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { success: false, error: "Name must be between 2 and 64 characters." },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const authAvailable = Boolean(getLetagentsToken());
+    if (!authAvailable) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { success: false, error: "Authentication required. Run start_device_auth first." },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const slugName = normalizeAgentBaseName(trimmedName);
+
+    try {
+      const owner = await resolveOwnerContext();
+      const registered = await apiCall<Record<string, unknown>>("/agents", {
+        method: "POST",
+        body: JSON.stringify({
+          name: slugName,
+          display_name: trimmedName,
+          owner_label: owner.label,
+        }),
+      });
+
+      const ideLabel = detectAgentIdeLabel();
+      const ownerAttribution = formatOwnerAttribution(owner.label);
+      const actorLabel = buildAgentActorLabel({
+        display_name: trimmedName,
+        owner_label: owner.label,
+        ide_label: ideLabel,
+      });
+
+      const updatedIdentity: StoredAgentIdentityState = {
+        name: slugName,
+        display_name: trimmedName,
+        owner_label: owner.label,
+        owner_attribution: ownerAttribution,
+        ide_label: ideLabel,
+        actor_label: actorLabel,
+        canonical_key:
+          typeof registered.canonical_key === "string"
+            ? registered.canonical_key
+            : owner.login ? `${owner.login}/${slugName}` : null,
+        runtime_key: currentAgentIdentityKey,
+        source: "api",
+        resolved_at: new Date().toISOString(),
+      };
+
+      currentAgentIdentity = setStoredAgentIdentity(updatedIdentity, currentAgentIdentityKey);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                message: `Agent name changed to "${trimmedName}".`,
+                agent_identity: toPublicAgentIdentity(currentAgentIdentity),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: `Failed to set name: ${error instanceof Error ? error.message : String(error)}`,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
   }
 );
 
