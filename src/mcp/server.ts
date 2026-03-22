@@ -237,6 +237,7 @@ const AGENT_CODENAMES = [
   "wood",
   "wren",
 ] as const;
+const AGENT_CODENAME_SPACE = AGENT_CODENAMES.length * AGENT_CODENAMES.length;
 
 function getAgentIdentityStorageKey(): string {
   const runtimeSignals = [
@@ -251,12 +252,26 @@ function getAgentIdentityStorageKey(): string {
     return runtimeSignals[0];
   }
 
-  return `cwd:${process.cwd()}`;
+  const pidSegment = Number.isFinite(process.pid) ? `pid:${process.pid}` : "pid:unknown";
+  return `cwd:${process.cwd()}:${pidSegment}`;
 }
 
 function hashStringToIndex(value: string, modulo: number): number {
   const digest = createHash("sha256").update(value).digest();
   return digest.readUInt16BE(0) % modulo;
+}
+
+function codenameFromIndex(index: number): { name: string; display_name: string } {
+  const normalizedIndex = ((index % AGENT_CODENAME_SPACE) + AGENT_CODENAME_SPACE) % AGENT_CODENAME_SPACE;
+  const firstIndex = Math.floor(normalizedIndex / AGENT_CODENAMES.length);
+  const secondIndex = normalizedIndex % AGENT_CODENAMES.length;
+  const first = AGENT_CODENAMES[firstIndex];
+  const second = AGENT_CODENAMES[secondIndex];
+
+  return {
+    name: normalizeAgentBaseName(`${first}-${second}`),
+    display_name: `${toTitleCaseCodename(first)} ${toTitleCaseCodename(second)}`,
+  };
 }
 
 function detectAgentIdeLabel(): string {
@@ -330,12 +345,8 @@ function resolveExplicitAgentIdentity(): { name: string; display_name: string } 
 }
 
 function pickLocalCodename(runtimeKey: string, offset = 0): { name: string; display_name: string } {
-  const index = (hashStringToIndex(runtimeKey, AGENT_CODENAMES.length) + offset) % AGENT_CODENAMES.length;
-  const word = AGENT_CODENAMES[index];
-  return {
-    name: normalizeAgentBaseName(word),
-    display_name: toTitleCaseCodename(word),
-  };
+  const index = hashStringToIndex(runtimeKey, AGENT_CODENAME_SPACE) + offset;
+  return codenameFromIndex(index);
 }
 
 async function resolveAgentName(
@@ -364,7 +375,7 @@ async function resolveAgentName(
       .filter(Boolean)
   );
 
-  for (let offset = 0; offset < AGENT_CODENAMES.length; offset += 1) {
+  for (let offset = 0; offset < AGENT_CODENAME_SPACE; offset += 1) {
     const candidate = pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY, offset);
     if (!existingNames.has(candidate.name)) {
       return candidate;
