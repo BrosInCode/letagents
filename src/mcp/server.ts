@@ -1324,18 +1324,43 @@ server.resource(
     const storedSession =
       getStoredRoomSession(normalizedRoomId) ??
       (currentRoom?.room_id === normalizedRoomId ? getStoredCurrentRoom() : null);
-    const result = await roomScopedApiCall({
-      room_id: normalizedRoomId,
-      project_id: storedSession?.project_id ?? null,
-      room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages`,
-      project_path: (projectId) => `/projects/${encodeURIComponent(projectId)}/messages`,
-    });
+
+    // Paginate through all pages to return full message history
+    const allMessages: unknown[] = [];
+    let afterCursor: string | undefined;
+
+    for (;;) {
+      const query = new URLSearchParams();
+      if (afterCursor) query.set("after", afterCursor);
+      const qs = query.toString();
+
+      const result = await roomScopedApiCall<{
+        messages?: Array<{ id?: string }>;
+        has_more?: boolean;
+      }>({
+        room_id: normalizedRoomId,
+        project_id: storedSession?.project_id ?? null,
+        room_path: (targetRoomId) =>
+          `/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`,
+        project_path: (projectId) =>
+          `/projects/${encodeURIComponent(projectId)}/messages${qs ? `?${qs}` : ""}`,
+      });
+
+      const msgs = result.messages ?? [];
+      allMessages.push(...msgs);
+
+      if (!result.has_more || msgs.length === 0) break;
+      const lastMsg = msgs[msgs.length - 1];
+      if (!lastMsg?.id) break;
+      afterCursor = lastMsg.id;
+    }
+
     return {
       contents: [
         {
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(result, null, 2),
+          text: JSON.stringify({ messages: allMessages }, null, 2),
         },
       ],
     };
@@ -1720,16 +1745,36 @@ server.tool(
     if (status) params.set("status", status);
     if (open_only !== false) params.set("open", "true");
 
-    const qs = params.toString();
-    const result = await roomScopedApiCall<Record<string, unknown>>({
-      room_id: targetRoomId,
-      project_id: targetProjectId,
-      room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/tasks${qs ? `?${qs}` : ""}`,
-      project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks${qs ? `?${qs}` : ""}`,
-    });
+    // Paginate through all pages to return the full board
+    const allTasks: unknown[] = [];
+    let afterCursor: string | undefined;
+
+    for (;;) {
+      const pageParams = new URLSearchParams(params);
+      if (afterCursor) pageParams.set("after", afterCursor);
+      const qs = pageParams.toString();
+
+      const result = await roomScopedApiCall<{
+        tasks?: Array<{ id?: string }>;
+        has_more?: boolean;
+      }>({
+        room_id: targetRoomId,
+        project_id: targetProjectId,
+        room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/tasks${qs ? `?${qs}` : ""}`,
+        project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks${qs ? `?${qs}` : ""}`,
+      });
+
+      const tasks = result.tasks ?? [];
+      allTasks.push(...tasks);
+
+      if (!result.has_more || tasks.length === 0) break;
+      const lastTask = tasks[tasks.length - 1];
+      if (!lastTask?.id) break;
+      afterCursor = lastTask.id;
+    }
 
     return {
-      content: [{ type: "text" as const, text: JSON.stringify({ success: true, ...result }, null, 2) }],
+      content: [{ type: "text" as const, text: JSON.stringify({ success: true, tasks: allTasks }, null, 2) }],
     };
   }
 );
