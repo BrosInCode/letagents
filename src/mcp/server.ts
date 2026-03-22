@@ -25,6 +25,7 @@ import {
   setPendingDeviceAuth,
   setStoredAuth,
   touchRoomSession,
+  updateLocalState,
   type PendingDeviceAuthState,
   type RoomSessionState,
   type StoredAgentIdentityState,
@@ -55,12 +56,9 @@ interface RoomState {
   joined_via: JoinedVia;
 }
 
-const CURRENT_AGENT_IDENTITY_KEY = getAgentIdentityStorageKey();
-
 let currentRoom: RoomState | null = null;
-let currentAgentIdentity: StoredAgentIdentityState | null = getStoredAgentIdentity(
-  CURRENT_AGENT_IDENTITY_KEY
-);
+let currentAgentIdentityKey = "";
+let currentAgentIdentity: StoredAgentIdentityState | null = null;
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
 let currentAuthenticatedAccountSource: "env" | "stored" | null = null;
 let currentAuthenticatedEnvToken: string | null = null;
@@ -74,6 +72,11 @@ const AGENT_NAME = (process.env.LETAGENTS_AGENT_NAME || process.env.AGENT_NAME |
 const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim();
 const AGENT_IDE_LABEL = (process.env.LETAGENTS_AGENT_IDE || process.env.AGENT_IDE || "").trim();
 const AGENT_OWNER_LABEL = (process.env.LETAGENTS_AGENT_OWNER_LABEL || "").trim();
+const EXPLICIT_AGENT_IDENTITY_KEY = getExplicitAgentIdentityStorageKey();
+
+currentAgentIdentityKey =
+  EXPLICIT_AGENT_IDENTITY_KEY ?? getFallbackAgentIdentityNamespaceKey(detectAgentIdeLabel());
+currentAgentIdentity = getStoredAgentIdentity(currentAgentIdentityKey);
 
 interface ResolvedOwnerContext {
   slug: string;
@@ -238,8 +241,9 @@ const AGENT_CODENAMES = [
   "wren",
 ] as const;
 const AGENT_CODENAME_SPACE = AGENT_CODENAMES.length * AGENT_CODENAMES.length;
+const AGENT_IDENTITY_SLOT_SUFFIX = ":slot:";
 
-function getAgentIdentityStorageKey(): string {
+function getExplicitAgentIdentityStorageKey(): string | null {
   const runtimeSignals = [
     process.env.LETAGENTS_AGENT_INSTANCE_ID,
     process.env.CODEX_THREAD_ID && `codex:${process.env.CODEX_THREAD_ID}`,
@@ -252,8 +256,11 @@ function getAgentIdentityStorageKey(): string {
     return runtimeSignals[0];
   }
 
-  const pidSegment = Number.isFinite(process.pid) ? `pid:${process.pid}` : "pid:unknown";
-  return `cwd:${process.cwd()}:${pidSegment}`;
+  return null;
+}
+
+function getFallbackAgentIdentityNamespaceKey(ideLabel: string): string {
+  return `cwd:${process.cwd()}:ide:${normalizeAgentBaseName(ideLabel)}`;
 }
 
 function hashStringToIndex(value: string, modulo: number): number {
@@ -288,6 +295,148 @@ function detectAgentIdeLabel(): string {
   return inferred || "Agent";
 }
 
+function getFallbackSlotPrefix(namespaceKey: string): string {
+  return `${namespaceKey}${AGENT_IDENTITY_SLOT_SUFFIX}`;
+}
+
+function getFallbackSlotKey(namespaceKey: string, slotIndex: number): string {
+  return `${getFallbackSlotPrefix(namespaceKey)}${slotIndex}`;
+}
+
+function parseFallbackSlotIndex(identityKey: string, namespaceKey: string): number | null {
+  const prefix = getFallbackSlotPrefix(namespaceKey);
+  if (!identityKey.startsWith(prefix)) {
+    return null;
+  }
+
+  const slotIndex = Number.parseInt(identityKey.slice(prefix.length), 10);
+  return Number.isInteger(slotIndex) && slotIndex >= 0 ? slotIndex : null;
+}
+
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    return err.code === "EPERM";
+  }
+}
+
+function claimFallbackIdentityKey(namespaceKey: string): {
+  identityKey: string;
+  identity: StoredAgentIdentityState | null;
+} {
+  let claimedKey = getFallbackSlotKey(namespaceKey, 0);
+  let claimedIdentity: StoredAgentIdentityState | null = null;
+  const now = new Date().toISOString();
+
+  updateLocalState((state) => {
+    const identities = state.agent_identities ?? {};
+    const leases = state.agent_identity_leases ?? {};
+    const namespacePrefix = getFallbackSlotPrefix(namespaceKey);
+
+    for (const [identityKey, lease] of Object.entries(leases)) {
+      if (!identityKey.startsWith(namespacePrefix) || lease.namespace_key !== namespaceKey) {
+        continue;
+      }
+
+      if (!isProcessAlive(lease.pid)) {
+        delete leases[identityKey];
+      }
+    }
+
+    const activeLeaseForPid = Object.entries(leases).find(
+      ([identityKey, lease]) =>
+        identityKey.startsWith(namespacePrefix) &&
+        lease.namespace_key === namespaceKey &&
+        lease.pid === process.pid
+    );
+
+    if (activeLeaseForPid) {
+      const [identityKey, lease] = activeLeaseForPid;
+      lease.updated_at = now;
+      claimedKey = identityKey;
+      claimedIdentity = identities[identityKey] ?? null;
+      state.agent_identity_leases = leases;
+      return state;
+    }
+
+    const slotKeys = new Set<string>();
+    for (const identityKey of Object.keys(identities)) {
+      if (identityKey.startsWith(namespacePrefix)) {
+        slotKeys.add(identityKey);
+      }
+    }
+    for (const identityKey of Object.keys(leases)) {
+      if (identityKey.startsWith(namespacePrefix)) {
+        slotKeys.add(identityKey);
+      }
+    }
+
+    const sortedSlotKeys = [...slotKeys].sort((left, right) => {
+      const leftIndex = parseFallbackSlotIndex(left, namespaceKey) ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = parseFallbackSlotIndex(right, namespaceKey) ?? Number.MAX_SAFE_INTEGER;
+      return leftIndex - rightIndex;
+    });
+
+    for (const identityKey of sortedSlotKeys) {
+      if (leases[identityKey]) {
+        continue;
+      }
+
+      leases[identityKey] = {
+        namespace_key: namespaceKey,
+        pid: process.pid,
+        acquired_at: now,
+        updated_at: now,
+      };
+      claimedKey = identityKey;
+      claimedIdentity = identities[identityKey] ?? null;
+      state.agent_identity_leases = leases;
+      return state;
+    }
+
+    let nextSlotIndex = 0;
+    while (slotKeys.has(getFallbackSlotKey(namespaceKey, nextSlotIndex))) {
+      nextSlotIndex += 1;
+    }
+
+    claimedKey = getFallbackSlotKey(namespaceKey, nextSlotIndex);
+    leases[claimedKey] = {
+      namespace_key: namespaceKey,
+      pid: process.pid,
+      acquired_at: now,
+      updated_at: now,
+    };
+    claimedIdentity = identities[claimedKey] ?? null;
+    state.agent_identity_leases = leases;
+    return state;
+  });
+
+  return {
+    identityKey: claimedKey,
+    identity: claimedIdentity,
+  };
+}
+
+function ensureAgentIdentityKey(ideLabel: string): string {
+  if (EXPLICIT_AGENT_IDENTITY_KEY) {
+    currentAgentIdentityKey = EXPLICIT_AGENT_IDENTITY_KEY;
+    currentAgentIdentity = getStoredAgentIdentity(currentAgentIdentityKey);
+    return currentAgentIdentityKey;
+  }
+
+  const claimed = claimFallbackIdentityKey(getFallbackAgentIdentityNamespaceKey(ideLabel));
+  currentAgentIdentityKey = claimed.identityKey;
+  currentAgentIdentity = claimed.identity;
+  return currentAgentIdentityKey;
+}
+
 async function getAuthenticatedAgentDirectory(): Promise<{
   account: AuthenticatedAccountLookup;
   agents: AuthenticatedAgentLookup[];
@@ -315,10 +464,13 @@ async function getAuthenticatedAgentDirectory(): Promise<{
   }
 }
 
-function shouldReuseStoredIdentity(identity: StoredAgentIdentityState | null): boolean {
+function shouldReuseStoredIdentity(
+  identity: StoredAgentIdentityState | null,
+  identityKey: string
+): boolean {
   return Boolean(
     identity &&
-      identity.runtime_key === CURRENT_AGENT_IDENTITY_KEY &&
+      identity.runtime_key === identityKey &&
       identity.display_name?.trim() &&
       identity.ide_label?.trim() &&
       identity.owner_attribution?.trim()
@@ -350,14 +502,15 @@ function pickLocalCodename(runtimeKey: string, offset = 0): { name: string; disp
 }
 
 async function resolveAgentName(
-  authAvailable: boolean
+  authAvailable: boolean,
+  identityKey: string
 ): Promise<{ name: string; display_name: string }> {
   const explicit = resolveExplicitAgentIdentity();
   if (explicit) {
     return explicit;
   }
 
-  if (shouldReuseStoredIdentity(currentAgentIdentity)) {
+  if (shouldReuseStoredIdentity(currentAgentIdentity, identityKey)) {
     return {
       name: currentAgentIdentity!.name,
       display_name: currentAgentIdentity!.display_name,
@@ -365,7 +518,7 @@ async function resolveAgentName(
   }
 
   if (!authAvailable) {
-    return pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY);
+    return pickLocalCodename(identityKey);
   }
 
   const directory = await getAuthenticatedAgentDirectory();
@@ -376,17 +529,17 @@ async function resolveAgentName(
   );
 
   for (let offset = 0; offset < AGENT_CODENAME_SPACE; offset += 1) {
-    const candidate = pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY, offset);
+    const candidate = pickLocalCodename(identityKey, offset);
     if (!existingNames.has(candidate.name)) {
       return candidate;
     }
   }
 
   const fallbackHash = createHash("sha256")
-    .update(CURRENT_AGENT_IDENTITY_KEY)
+    .update(identityKey)
     .digest("hex")
     .slice(0, 4);
-  const fallback = pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY);
+  const fallback = pickLocalCodename(identityKey);
   return {
     name: `${fallback.name}-${fallbackHash}`,
     display_name: `${fallback.display_name} ${fallbackHash.toUpperCase()}`,
@@ -526,8 +679,9 @@ async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
   const owner = await resolveOwnerContext();
   const authAvailable = Boolean(getLetagentsToken());
   const ideLabel = detectAgentIdeLabel();
+  const identityKey = ensureAgentIdentityKey(ideLabel);
   const ownerAttribution = formatOwnerAttribution(owner.label);
-  const { name, display_name: displayName } = await resolveAgentName(authAvailable);
+  const { name, display_name: displayName } = await resolveAgentName(authAvailable, identityKey);
   const actorLabel = buildAgentActorLabel({
     display_name: displayName,
     owner_label: owner.label,
@@ -542,7 +696,7 @@ async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
     ide_label: ideLabel,
     actor_label: actorLabel,
     canonical_key: owner.login ? `${owner.login}/${name}` : null,
-    runtime_key: CURRENT_AGENT_IDENTITY_KEY,
+    runtime_key: identityKey,
     source: "local",
     resolved_at: new Date().toISOString(),
   };
@@ -608,7 +762,7 @@ async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
         ...resolved,
         resolved_at: new Date().toISOString(),
       },
-      CURRENT_AGENT_IDENTITY_KEY
+      identityKey
     );
   }
 
@@ -1299,7 +1453,7 @@ server.tool(
                   connected: true,
                   ...toPublicRoomState(currentRoom),
                   agent_identity: toPublicAgentIdentity(
-                    currentAgentIdentity ?? getStoredAgentIdentity(CURRENT_AGENT_IDENTITY_KEY)
+                    currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey)
                   ),
                   auth: getStoredAuth()
                     ? {
@@ -2093,7 +2247,7 @@ server.tool(
               token_expires_at: storedAuth?.expires_at ?? null,
               pending_device_auth: pendingAuth,
               agent_identity: toPublicAgentIdentity(
-                currentAgentIdentity ?? getStoredAgentIdentity(CURRENT_AGENT_IDENTITY_KEY)
+                currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey)
               ),
               current_room: toPublicRoomState(currentRoom),
               saved_current_room: toPublicStoredRoomSession(savedCurrentRoom),
