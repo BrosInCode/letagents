@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, lte, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lte, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./db/client.js";
 import {
@@ -263,6 +263,10 @@ async function nextRoomScopedNumber(sequenceName: string, roomId: string): Promi
   return next.value;
 }
 
+function getRoomScopedSequenceNames(roomId: string): [string, string] {
+  return [`messages:${roomId}`, `tasks:${roomId}`];
+}
+
 export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
@@ -275,7 +279,12 @@ export async function createProject(): Promise<Project> {
     const display_name = generateRoomDisplayName(roomId);
 
     try {
-      await db.insert(rooms).values({ id: roomId, display_name, created_at });
+      await db.transaction(async (tx) => {
+        await tx.insert(rooms).values({ id: roomId, display_name, created_at });
+        await tx
+          .delete(id_sequences)
+          .where(inArray(id_sequences.name, getRoomScopedSequenceNames(roomId)));
+      });
       return {
         id: roomId,
         code: roomId,
@@ -318,7 +327,12 @@ export async function getOrCreateCanonicalRoom(
   const created_at = new Date().toISOString();
   const display_name = generateRoomDisplayName(canonicalId);
   try {
-    await db.insert(rooms).values({ id: canonicalId, display_name, created_at });
+    await db.transaction(async (tx) => {
+      await tx.insert(rooms).values({ id: canonicalId, display_name, created_at });
+      await tx
+        .delete(id_sequences)
+        .where(inArray(id_sequences.name, getRoomScopedSequenceNames(canonicalId)));
+    });
     return {
       room: {
         id: canonicalId,
