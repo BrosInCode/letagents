@@ -28,6 +28,7 @@ import {
   getTasks,
   hasMessagesFromSender,
   isProjectAdmin,
+  refreshProviderAccessTokenForAccount,
   registerAgentIdentity,
   rotateProjectCode,
   createOwnerToken,
@@ -42,6 +43,7 @@ import {
 } from "./db.js";
 import {
   buildGitHubAuthorizeUrl,
+  clearGitHubRepoAccessCacheForLogin,
   exchangeGitHubDeviceCodeForAccessToken,
   exchangeGitHubCodeForAccessToken,
   fetchGitHubUser,
@@ -753,6 +755,8 @@ app.get("/auth/device/poll/:requestId", async (req, res) => {
       display_name: githubUser.name,
       avatar_url: githubUser.avatar_url,
     });
+    await refreshProviderAccessTokenForAccount(account.id, result.accessToken);
+    clearGitHubRepoAccessCacheForLogin(account.login);
 
     const ownerToken = crypto.randomBytes(32).toString("hex");
     const ownerCredential = await createOwnerToken({
@@ -813,6 +817,8 @@ app.get("/auth/github/callback", async (req, res) => {
       display_name: githubUser.name,
       avatar_url: githubUser.avatar_url,
     });
+    await refreshProviderAccessTokenForAccount(account.id, accessToken);
+    clearGitHubRepoAccessCacheForLogin(account.login);
 
     const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString();
     const sessionToken = crypto.randomBytes(32).toString("hex");
