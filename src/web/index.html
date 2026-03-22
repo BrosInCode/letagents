@@ -1416,8 +1416,10 @@
 
       function isHumanSender(sender, source) {
         const normalized = String(sender || "").trim().toLowerCase();
-        if (normalized === "human" || normalized === "anonymous") return true;
         if (normalized === "letagents" || normalized === "system") return false;
+        if (source === "browser") return true;
+        if (source === "agent") return false;
+        if (normalized === "human" || normalized === "anonymous") return true;
 
         const parsed = parseAgentIdentity(sender);
         if (parsed?.structured || parsed?.ownerAttribution || parsed?.ideLabel) {
@@ -1453,9 +1455,11 @@
       }
 
       function getSenderProvenance(sender, source) {
-        if (isHumanSender(sender, source)) return "human";
         const normalized = String(sender || "").trim().toLowerCase();
         if (normalized === "letagents" || normalized === "system") return "system";
+        if (source === "browser") return "human";
+        if (source === "agent") return "agent";
+        if (isHumanSender(sender, source)) return "human";
         return "agent";
       }
 
