@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, lte, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./db/client.js";
 import {
@@ -76,6 +76,7 @@ export interface AuthState {
   id: string;
   state: string;
   redirect_to: string | null;
+  expires_at: string;
   created_at: string;
 }
 
@@ -229,6 +230,8 @@ function toTask(row: TaskRow): Task {
 function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
+
+const AUTH_STATE_TTL_MS = 15 * 60 * 1000;
 
 async function nextPrefixedId(sequenceName: string, prefix: string): Promise<string> {
   const [next] = await db
@@ -481,11 +484,18 @@ export async function hasMessagesFromSender(roomId: string, sender: string): Pro
 }
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + AUTH_STATE_TTL_MS).toISOString();
+
+  await db.delete(auth_states).where(lte(auth_states.expires_at, createdAt));
+
   const authState: AuthState = {
     id: await nextPrefixedId("auth_states", "auth_state"),
     state,
     redirect_to: redirectTo ?? null,
-    created_at: new Date().toISOString(),
+    expires_at: expiresAt,
+    created_at: createdAt,
   };
 
   await db.insert(auth_states).values(authState);
@@ -494,6 +504,9 @@ export async function createAuthState(state: string, redirectTo?: string): Promi
 
 export async function consumeAuthState(state: string): Promise<AuthState | null> {
   return db.transaction(async (tx) => {
+    const now = new Date().toISOString();
+    await tx.delete(auth_states).where(lte(auth_states.expires_at, now));
+
     const [authState] = await tx.select().from(auth_states).where(eq(auth_states.state, state)).limit(1);
     if (!authState) {
       return null;
