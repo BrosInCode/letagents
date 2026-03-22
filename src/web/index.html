@@ -1807,13 +1807,24 @@
           return;
         }
 
-        const payload = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
-          method: "GET",
-        });
         state.messages.clear();
-        for (const message of payload.messages || []) {
-          state.messages.set(message.id, message);
+        let afterCursor = "";
+
+        for (;;) {
+          const qs = afterCursor ? `?after=${encodeURIComponent(afterCursor)}` : "";
+          const payload = await apiFetch(
+            `/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages${qs}`,
+            { method: "GET" }
+          );
+          const msgs = payload.messages || [];
+          for (const message of msgs) {
+            state.messages.set(message.id, message);
+          }
+
+          if (!payload.has_more || msgs.length === 0) break;
+          afterCursor = msgs[msgs.length - 1].id;
         }
+
         renderMessages();
       }
 
@@ -2160,8 +2171,24 @@
       async function refreshBoard() {
         if (!state.currentRoomIdentifier) return;
         try {
-          const data = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/tasks?open=true`);
-          boardTasks = data.tasks || [];
+          const allTasks = [];
+          let afterCursor = "";
+
+          for (;;) {
+            const qs = afterCursor
+              ? `?open=true&after=${encodeURIComponent(afterCursor)}`
+              : "?open=true";
+            const data = await apiFetch(
+              `/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/tasks${qs}`
+            );
+            const tasks = data.tasks || [];
+            allTasks.push(...tasks);
+
+            if (!data.has_more || tasks.length === 0) break;
+            afterCursor = tasks[tasks.length - 1].id;
+          }
+
+          boardTasks = allTasks;
           renderBoard();
         } catch (e) {
           boardContent.innerHTML = `<div class="board-empty"><p>Could not load board: ${escapeHtml(e.message)}</p></div>`;
