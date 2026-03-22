@@ -262,6 +262,12 @@ export function getStoredAgentIdentity(identityKey?: string | null): StoredAgent
     if (scoped) {
       return scoped;
     }
+    // For UUID-based identity keys, do NOT fall back to the shared global
+    // agent_identity — that would cause different processes to inherit each
+    // other's identity. Only legacy (non-UUID) keys use the global fallback.
+    if (identityKey.startsWith("instance:")) {
+      return null;
+    }
   }
   return state.agent_identity ?? null;
 }

@@ -144,7 +144,7 @@ export function normalizeAgentBaseName(input: string): string {
 
 export function hashStringToIndex(value: string, modulo: number): number {
   const digest = createHash("sha256").update(value).digest();
-  return digest.readUInt16BE(0) % modulo;
+  return digest.readUInt32BE(0) % modulo;
 }
 
 export function codenameFromIndex(index: number): { name: string; display_name: string } {
