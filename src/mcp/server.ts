@@ -2280,21 +2280,65 @@ server.tool(
     params.set("timeout", String(serverTimeout));
 
     const queryString = params.toString();
-    const result = await roomScopedApiCall({
+    const firstResult = await roomScopedApiCall<{
+      messages?: Array<{ id?: string }>;
+      has_more?: boolean;
+      room_id?: string;
+      project_id?: string;
+    }>({
       room_id: targetRoomId,
       project_id: targetProjectId,
       room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`,
       project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`,
       options: { signal: AbortSignal.timeout(clientTimeout) },
     });
+
+    const allMessages: unknown[] = [...(firstResult.messages ?? [])];
+    const roomIdFromResponse = firstResult.room_id || firstResult.project_id;
+
+    // If the immediate response has more pages, paginate through them
+    if (firstResult.has_more && allMessages.length > 0) {
+      let afterCursor = (allMessages[allMessages.length - 1] as { id?: string })?.id;
+
+      while (afterCursor) {
+        const pageParams = new URLSearchParams();
+        pageParams.set("after", afterCursor);
+        const qs = pageParams.toString();
+
+        const page = await roomScopedApiCall<{
+          messages?: Array<{ id?: string }>;
+          has_more?: boolean;
+        }>({
+          room_id: targetRoomId,
+          project_id: targetProjectId,
+          room_path: (targetRoomId) =>
+            `/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`,
+          project_path: (targetProjectId) =>
+            `/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`,
+        });
+
+        const msgs = page.messages ?? [];
+        allMessages.push(...msgs);
+
+        if (!page.has_more || msgs.length === 0) break;
+        afterCursor = (msgs[msgs.length - 1] as { id?: string })?.id;
+        if (!afterCursor) break;
+      }
+    }
+
+    const output: Record<string, unknown> = { messages: allMessages };
+    if (roomIdFromResponse) {
+      output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
+    }
+
     if (targetRoomId) {
-      touchRoomSession(targetRoomId, getLastMessageId(result));
+      touchRoomSession(targetRoomId, getLastMessageId(output));
     }
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(result, null, 2),
+          text: JSON.stringify(output, null, 2),
         },
       ],
     };
