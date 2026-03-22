@@ -1159,12 +1159,8 @@
             <h2>Sender Palette</h2>
             <span>message identity</span>
           </div>
-          <div class="legend">
-            <span class="legend-chip" style="--chip-color: var(--sender-orchestrator)">orchestrator</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-codex)">codex</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-claude)">claude</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-human)">human</span>
-            <span class="legend-chip" style="--chip-color: var(--sender-default)">other</span>
+          <div class="legend" id="ownerLegend">
+            <span class="legend-chip" style="--chip-color: var(--sender-default)">system</span>
           </div>
         </section>
 
@@ -1440,18 +1436,66 @@
           .toLowerCase();
       }
 
+      /* ── Owner-based color palette ─────────────────────────── */
+      const OWNER_COLOR_PALETTE = [
+        "#a855f7", // purple
+        "#3b82f6", // blue
+        "#22c55e", // green
+        "#f59e0b", // amber
+        "#ef4444", // red
+        "#06b6d4", // cyan
+        "#ec4899", // pink
+        "#14b8a6", // teal
+        "#f97316", // orange
+        "#8b5cf6", // violet
+        "#10b981", // emerald
+        "#6366f1", // indigo
+      ];
+
+      const _ownerColorCache = new Map();
+
+      function hashString(str) {
+        let hash = 5381;
+        for (let i = 0; i < str.length; i++) {
+          hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;
+        }
+        return hash;
+      }
+
+      function getOwnerFromSender(sender, source) {
+        const raw = String(sender || "").trim();
+        if (!raw) return null;
+        const normalized = raw.toLowerCase();
+        if (normalized === "letagents" || normalized === "system") return null;
+
+        // Human sender: the sender name IS the owner
+        if (source === "browser") return raw;
+
+        // Agent sender: extract owner from "Name | Owner's agent | IDE"
+        const parsed = parseAgentIdentity(sender);
+        if (parsed?.ownerAttribution) {
+          const ownerMatch = parsed.ownerAttribution.match(/^(.+?)(?:'s?\s+agent)$/i);
+          if (ownerMatch) return ownerMatch[1].trim();
+          return parsed.ownerAttribution;
+        }
+
+        return null;
+      }
+
       function getSenderColor(sender, source) {
-        const normalized = getSenderIdentityKey(sender, source);
-        if (normalized === "orchestrator" || normalized.startsWith("orchestrator-")) return "var(--sender-orchestrator)";
-        if (normalized === "codex" || normalized === "codex-agent" || normalized.startsWith("codex-")) return "var(--sender-codex)";
-        if (
-          normalized === "claude" ||
-          normalized.startsWith("claude-") ||
-          normalized === "antigravity" ||
-          normalized.startsWith("antigravity-")
-        ) return "var(--sender-claude)";
-        if (isHumanSender(sender, source)) return "var(--sender-human)";
-        return "var(--sender-default)";
+        const raw = String(sender || "").trim().toLowerCase();
+        if (raw === "letagents" || raw === "system") return "var(--sender-default)";
+
+        const owner = getOwnerFromSender(sender, source);
+        if (!owner) return "var(--sender-default)";
+
+        const ownerKey = owner.toLowerCase();
+        if (_ownerColorCache.has(ownerKey)) return _ownerColorCache.get(ownerKey);
+
+        const idx = hashString(ownerKey) % OWNER_COLOR_PALETTE.length;
+        const color = OWNER_COLOR_PALETTE[idx];
+        _ownerColorCache.set(ownerKey, color);
+        return color;
       }
 
       function getSenderProvenance(sender, source) {
@@ -1542,6 +1586,36 @@
         }
       }
 
+      function updateOwnerLegend() {
+        const legend = document.getElementById("ownerLegend");
+        if (!legend) return;
+
+        const owners = new Map();
+        for (const message of state.messages.values()) {
+          const owner = getOwnerFromSender(message.sender, message.source);
+          if (owner && !owners.has(owner.toLowerCase())) {
+            owners.set(owner.toLowerCase(), {
+              label: owner,
+              color: getSenderColor(message.sender, message.source),
+            });
+          }
+        }
+
+        legend.innerHTML = "";
+        for (const { label, color } of owners.values()) {
+          const chip = document.createElement("span");
+          chip.className = "legend-chip";
+          chip.style.setProperty("--chip-color", color);
+          chip.textContent = label;
+          legend.appendChild(chip);
+        }
+        const sysChip = document.createElement("span");
+        sysChip.className = "legend-chip";
+        sysChip.style.setProperty("--chip-color", "var(--sender-default)");
+        sysChip.textContent = "system";
+        legend.appendChild(sysChip);
+      }
+
       function renderMessages() {
         const sortedMessages = Array.from(state.messages.values()).sort((a, b) => {
           return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
@@ -1592,6 +1666,7 @@
         }
 
         elements.messages.appendChild(fragment);
+        updateOwnerLegend();
         requestAnimationFrame(() => scrollMessagesToBottom(true));
       }
 
