@@ -756,19 +756,49 @@
       .agent-runtime-badge {
         display: inline-flex;
         align-items: center;
-        padding: 2px 8px;
+        gap: 4px;
+        padding: 3px 10px;
         border-radius: 999px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        background: rgba(255, 255, 255, 0.06);
-        color: var(--text);
-        font-size: 0.72rem;
+        font-size: 0.73rem;
         font-weight: 700;
         letter-spacing: 0.02em;
+        white-space: nowrap;
       }
 
       .agent-runtime-badge.compact {
-        padding: 1px 7px;
+        padding: 2px 8px;
         font-size: 0.68rem;
+        gap: 3px;
+      }
+
+      .agent-runtime-badge.ide-codex {
+        background: rgba(34, 197, 94, 0.15);
+        color: #22c55e;
+        border: 1px solid rgba(34, 197, 94, 0.3);
+      }
+
+      .agent-runtime-badge.ide-antigravity {
+        background: rgba(96, 165, 250, 0.15);
+        color: #60a5fa;
+        border: 1px solid rgba(96, 165, 250, 0.3);
+      }
+
+      .agent-runtime-badge.ide-claude {
+        background: rgba(251, 146, 60, 0.15);
+        color: #fb923c;
+        border: 1px solid rgba(251, 146, 60, 0.3);
+      }
+
+      .agent-runtime-badge.ide-cursor {
+        background: rgba(168, 85, 247, 0.15);
+        color: #a855f7;
+        border: 1px solid rgba(168, 85, 247, 0.3);
+      }
+
+      .agent-runtime-badge.ide-default {
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+        border: 1px solid rgba(255, 255, 255, 0.12);
       }
 
       .message.system-message .message-avatar {
@@ -1352,6 +1382,7 @@
         if (normalized === "codex") return "Codex";
         if (normalized === "antigravity") return "Antigravity";
         if (normalized === "claude") return "Claude";
+        if (normalized === "cursor") return "Cursor";
         if (normalized === "orchestrator") return "Orchestrator";
         if (normalized === "agent") return "Agent";
         return normalized
@@ -1367,6 +1398,7 @@
         if (normalized === "codex" || normalized.startsWith("codex-")) return "Codex";
         if (normalized === "antigravity" || normalized.startsWith("antigravity-")) return "Antigravity";
         if (normalized === "claude" || normalized.startsWith("claude-")) return "Claude";
+        if (normalized === "cursor" || normalized.startsWith("cursor-")) return "Cursor";
         if (normalized === "orchestrator" || normalized.startsWith("orchestrator-")) return "Orchestrator";
         return null;
       }
@@ -1549,10 +1581,22 @@
           .toUpperCase();
       }
 
+      const IDE_BADGE_CONFIG = {
+        codex:       { icon: "⚡", cssClass: "ide-codex" },
+        antigravity: { icon: "🚀", cssClass: "ide-antigravity" },
+        claude:      { icon: "🔶", cssClass: "ide-claude" },
+        cursor:      { icon: "✨", cssClass: "ide-cursor" },
+        orchestrator:{ icon: "🎯", cssClass: "ide-default" },
+        agent:       { icon: "🤖", cssClass: "ide-default" },
+      };
+
       function renderRuntimeBadge(ideLabel, compact) {
         const normalized = normalizeAgentIdeLabel(ideLabel);
         if (!normalized) return "";
-        return `<span class="agent-runtime-badge${compact ? " compact" : ""}">${escapeHtml(normalized)}</span>`;
+        const key = normalized.toLowerCase();
+        const config = IDE_BADGE_CONFIG[key] || { icon: "🤖", cssClass: "ide-default" };
+        const sizeClass = compact ? " compact" : "";
+        return `<span class="agent-runtime-badge ${config.cssClass}${sizeClass}">${config.icon} ${escapeHtml(normalized)}</span>`;
       }
 
       function renderTaskActor(label, roleLabel) {
