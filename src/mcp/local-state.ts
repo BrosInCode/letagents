@@ -63,11 +63,19 @@ export interface StoredAgentIdentityState {
   resolved_at: string;
 }
 
+export interface StoredAgentIdentityLeaseState {
+  namespace_key: string;
+  pid: number;
+  acquired_at: string;
+  updated_at: string;
+}
+
 export interface LetagentsLocalState {
   auth?: StoredAuthState;
   pending_device_auth?: PendingDeviceAuthState;
   agent_identity?: StoredAgentIdentityState;
   agent_identities?: Record<string, StoredAgentIdentityState>;
+  agent_identity_leases?: Record<string, StoredAgentIdentityLeaseState>;
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
 }
