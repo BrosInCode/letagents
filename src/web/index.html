@@ -15,6 +15,8 @@
       rel="stylesheet"
     />
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
+    <link rel="stylesheet" id="hljs-theme" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -695,6 +697,29 @@
         padding: 0;
         background: transparent;
         font-size: 0.85em;
+      }
+
+      /* highlight.js overrides for chat bubbles */
+      .message-bubble .md-content pre code.hljs {
+        background: transparent;
+        padding: 0;
+      }
+
+      .message-bubble .md-content pre {
+        position: relative;
+      }
+
+      .code-lang-label {
+        position: absolute;
+        top: 6px;
+        right: 10px;
+        font-size: 0.7em;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        opacity: 0.6;
+        font-family: 'Inter', sans-serif;
+        pointer-events: none;
       }
 
       .message-bubble .md-content ul,
@@ -1466,7 +1491,24 @@
       function renderMarkdown(text) {
         if (typeof marked !== "undefined" && marked.parse) {
           try {
-            return marked.parse(text, { breaks: true, gfm: true });
+            /* Configure marked to use highlight.js for code blocks */
+            const options = { breaks: true, gfm: true };
+            if (typeof hljs !== "undefined") {
+              const renderer = new marked.Renderer();
+              renderer.code = function({ text, lang }) {
+                const language = lang && hljs.getLanguage(lang) ? lang : null;
+                const highlighted = language
+                  ? hljs.highlight(text, { language }).value
+                  : hljs.highlightAuto(text).value;
+                const langClass = language ? ` class="hljs language-${language}"` : ' class="hljs"';
+                const langLabel = language
+                  ? `<span class="code-lang-label">${language}</span>`
+                  : '';
+                return `<pre>${langLabel}<code${langClass}>${highlighted}</code></pre>`;
+              };
+              options.renderer = renderer;
+            }
+            return marked.parse(text, options);
           } catch (_) {
             return escapeHtml(text);
           }
