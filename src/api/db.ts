@@ -39,7 +39,7 @@ export interface Account {
 export interface Session {
   id: string;
   account_id: string;
-  token: string;
+  token_hash: string;
   provider_access_token: string | null;
   expires_at: string;
   created_at: string;
@@ -578,10 +578,11 @@ export async function createSession(
   expiresAt: string,
   providerAccessToken?: string | null
 ): Promise<Session> {
+  const tokenHash = hashToken(token);
   const session: Session = {
     id: await nextPrefixedId("auth_sessions", "sess"),
     account_id: accountId,
-    token,
+    token_hash: tokenHash,
     provider_access_token: providerAccessToken ?? null,
     expires_at: expiresAt,
     created_at: new Date().toISOString(),
@@ -592,11 +593,12 @@ export async function createSession(
 }
 
 export async function getSessionAccountByToken(token: string): Promise<SessionAccount | null> {
+  const tokenHash = hashToken(token);
   const [session] = await db
     .select({
       id: auth_sessions.id,
       account_id: auth_sessions.account_id,
-      token: auth_sessions.token,
+      token_hash: auth_sessions.token_hash,
       provider_access_token: auth_sessions.provider_access_token,
       expires_at: auth_sessions.expires_at,
       created_at: auth_sessions.created_at,
@@ -608,7 +610,7 @@ export async function getSessionAccountByToken(token: string): Promise<SessionAc
     })
     .from(auth_sessions)
     .innerJoin(accounts, eq(auth_sessions.account_id, accounts.id))
-    .where(eq(auth_sessions.token, token))
+    .where(eq(auth_sessions.token_hash, tokenHash))
     .limit(1);
 
   if (!session) {
@@ -624,7 +626,8 @@ export async function getSessionAccountByToken(token: string): Promise<SessionAc
 }
 
 export async function deleteSessionByToken(token: string): Promise<void> {
-  await db.delete(auth_sessions).where(eq(auth_sessions.token, token));
+  const tokenHash = hashToken(token);
+  await db.delete(auth_sessions).where(eq(auth_sessions.token_hash, tokenHash));
 }
 
 export async function createOwnerToken(input: {
