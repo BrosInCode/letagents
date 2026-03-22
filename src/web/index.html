@@ -513,6 +513,77 @@
         box-shadow: 0 0 18px rgba(251, 113, 133, 0.42);
       }
 
+      /* Search bar */
+      .search-bar {
+        display: flex;
+        padding: 8px 16px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+        background: rgba(0,0,0,0.15);
+      }
+      [data-theme="light"] .search-bar {
+        background: rgba(0,0,0,0.03);
+        border-bottom-color: rgba(0,0,0,0.08);
+      }
+      .search-input-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 8px;
+        padding: 6px 12px;
+        transition: border-color 0.2s;
+      }
+      .search-input-wrap:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.18);
+      }
+      [data-theme="light"] .search-input-wrap {
+        background: rgba(0,0,0,0.04);
+        border-color: rgba(0,0,0,0.12);
+      }
+      .search-input-wrap svg {
+        flex-shrink: 0;
+        opacity: 0.5;
+      }
+      .search-input-wrap .input {
+        flex: 1;
+        border: none;
+        background: none;
+        outline: none;
+        font-size: 0.88rem;
+        color: inherit;
+        padding: 0;
+      }
+      .search-count {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+        white-space: nowrap;
+      }
+      .search-close {
+        background: none;
+        border: none;
+        color: var(--text-dim);
+        font-size: 1.2rem;
+        cursor: pointer;
+        padding: 0 4px;
+        line-height: 1;
+        transition: color 0.15s;
+      }
+      .search-close:hover { color: var(--text-primary); }
+
+      /* Search match styling */
+      .message.search-dim {
+        opacity: 0.2;
+        transition: opacity 0.2s;
+      }
+      .message.search-match {
+        border-left: 3px solid var(--accent);
+        padding-left: 8px;
+        transition: border-color 0.2s, opacity 0.2s;
+      }
+
       .messages-wrap {
         position: relative;
         min-height: 0;
@@ -1191,6 +1262,7 @@
           </div>
           <div style="display: flex; align-items: center; gap: 12px;">
             <button class="btn btn-secondary" id="renameRoomBtn" type="button" hidden>Rename Room</button>
+            <button class="btn btn-secondary" id="searchToggleBtn" type="button" title="Search messages (Ctrl+F)" style="padding: 8px 10px; font-size: 0.85rem;">🔍</button>
             <div class="tab-bar" role="tablist">
               <button role="tab" aria-selected="true" id="tabChat" type="button">Chat</button>
               <button role="tab" aria-selected="false" id="tabBoard" type="button">Board</button>
@@ -1198,6 +1270,15 @@
             <div class="presence" id="presenceBadge" data-state="idle">Waiting for room</div>
           </div>
         </header>
+
+        <div class="search-bar" id="searchBar" hidden>
+          <div class="search-input-wrap">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="searchInput" class="input" placeholder="Search messages..." autocomplete="off" />
+            <span class="search-count" id="searchCount"></span>
+            <button class="search-close" id="searchClose" type="button" aria-label="Close search">&times;</button>
+          </div>
+        </div>
 
         <div class="messages-wrap">
           <div class="messages" id="messages"></div>
@@ -1248,6 +1329,7 @@
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
+        searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
@@ -1270,6 +1352,10 @@
         joinCodeText: document.getElementById("joinCodeText"),
         renameRoomBtn: document.getElementById("renameRoomBtn"),
         messages: document.getElementById("messages"),
+        searchBar: document.getElementById("searchBar"),
+        searchInput: document.getElementById("searchInput"),
+        searchCount: document.getElementById("searchCount"),
+        searchClose: document.getElementById("searchClose"),
         messageInput: document.getElementById("messageInput"),
         presenceBadge: document.getElementById("presenceBadge"),
         projectIdLabel: document.getElementById("projectIdLabel"),
@@ -1556,9 +1642,23 @@
 
         elements.emptyState.classList.add("hidden");
 
+        const query = state.searchQuery.toLowerCase();
+        const filtered = query
+          ? sortedMessages.filter(m => {
+              const text = (m.text || "").toLowerCase();
+              const sender = (m.sender || "").toLowerCase();
+              return text.includes(query) || sender.includes(query);
+            })
+          : sortedMessages;
+
+        if (query) {
+          elements.searchCount.textContent = `${filtered.length} match${filtered.length !== 1 ? "es" : ""}`;
+        }
+
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
+          const isMatch = !query || filtered.includes(message);
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
           const parsedIdentity = provenance === "agent" ? parseAgentIdentity(message.sender) : null;
@@ -1567,7 +1667,7 @@
             ? `<span class="message-sender-subtitle">${escapeHtml(parsedIdentity.ownerAttribution)}</span>`
             : "";
           const wrapper = document.createElement("article");
-          wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
+          wrapper.className = "message" + (provenance === "system" ? " system-message" : "") + (query && !isMatch ? " search-dim" : "") + (query && isMatch ? " search-match" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
@@ -1592,7 +1692,13 @@
         }
 
         elements.messages.appendChild(fragment);
-        requestAnimationFrame(() => scrollMessagesToBottom(true));
+        if (!query) {
+          requestAnimationFrame(() => scrollMessagesToBottom(true));
+        } else if (filtered.length) {
+          // Scroll to first match
+          const firstMatch = elements.messages.querySelector(".search-match");
+          if (firstMatch) firstMatch.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
       }
 
       function upsertMessages(items) {
@@ -1998,6 +2104,38 @@
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
       elements.composerForm.addEventListener("submit", sendMessage);
+
+      // Search handlers
+      let searchDebounce = null;
+      function openSearch() {
+        elements.searchBar.hidden = false;
+        elements.searchInput.focus();
+      }
+      function closeSearch() {
+        elements.searchBar.hidden = true;
+        state.searchQuery = "";
+        elements.searchInput.value = "";
+        elements.searchCount.textContent = "";
+        renderMessages();
+      }
+      document.getElementById("searchToggleBtn").addEventListener("click", openSearch);
+      elements.searchClose.addEventListener("click", closeSearch);
+      elements.searchInput.addEventListener("input", (e) => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+          state.searchQuery = e.target.value.trim();
+          renderMessages();
+        }, 200);
+      });
+      elements.searchInput.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+      });
+      document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "f" && state.currentRoomIdentifier) {
+          e.preventDefault();
+          openSearch();
+        }
+      });
 
       // --- Textarea: Enter sends, Shift+Enter for new line ---
       elements.messageInput.addEventListener("keydown", (e) => {
