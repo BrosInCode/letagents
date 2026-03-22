@@ -58,6 +58,7 @@ import {
   normalizeRoomName,
   resolveRoomIdentifier,
 } from "./room-routing.js";
+import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -102,14 +103,15 @@ function formatTaskLifecycleStatus(task: {
   status: TaskStatus;
   assignee: string | null;
 }): string {
+  const assigneeLabel = getAgentPrimaryLabel(task.assignee);
   switch (task.status) {
     case "assigned":
-      return task.assignee
-        ? `[status] ${task.assignee} claimed ${task.id}: ${task.title}`
+      return assigneeLabel
+        ? `[status] ${assigneeLabel} claimed ${task.id}: ${task.title}`
         : `[status] ${task.id} moved to assigned: ${task.title}`;
     case "in_progress":
-      return task.assignee
-        ? `[status] ${task.assignee} is working on ${task.id}: ${task.title}`
+      return assigneeLabel
+        ? `[status] ${assigneeLabel} is working on ${task.id}: ${task.title}`
         : `[status] ${task.id} is in progress: ${task.title}`;
     case "blocked":
       return `[status] ${task.id} is blocked: ${task.title}`;

@@ -43,8 +43,11 @@ export interface StoredAgentIdentityState {
   name: string;
   display_name: string;
   owner_label: string;
+  owner_attribution?: string;
+  ide_label?: string;
   actor_label: string;
   canonical_key?: string | null;
+  runtime_key?: string | null;
   source: "api" | "local";
   resolved_at: string;
 }
@@ -53,6 +56,7 @@ export interface LetagentsLocalState {
   auth?: StoredAuthState;
   pending_device_auth?: PendingDeviceAuthState;
   agent_identity?: StoredAgentIdentityState;
+  agent_identities?: Record<string, StoredAgentIdentityState>;
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
 }
@@ -165,16 +169,27 @@ export function clearPendingDeviceAuth(): void {
   });
 }
 
-export function getStoredAgentIdentity(): StoredAgentIdentityState | null {
+export function getStoredAgentIdentity(identityKey?: string | null): StoredAgentIdentityState | null {
   const state = readLocalState();
+  if (identityKey?.trim()) {
+    const scoped = state.agent_identities?.[identityKey.trim()];
+    if (scoped) {
+      return scoped;
+    }
+  }
   return state.agent_identity ?? null;
 }
 
 export function setStoredAgentIdentity(
-  agentIdentity: StoredAgentIdentityState
+  agentIdentity: StoredAgentIdentityState,
+  identityKey?: string | null
 ): StoredAgentIdentityState {
   updateLocalState((state) => {
     state.agent_identity = agentIdentity;
+    if (identityKey?.trim()) {
+      state.agent_identities = state.agent_identities ?? {};
+      state.agent_identities[identityKey.trim()] = agentIdentity;
+    }
     return state;
   });
   return agentIdentity;

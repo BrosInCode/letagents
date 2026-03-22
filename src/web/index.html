@@ -600,14 +600,35 @@
 
       .message-meta {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
+        justify-content: space-between;
+        flex-wrap: wrap;
         gap: 10px;
         margin-bottom: 8px;
         line-height: 1.2;
       }
 
+      .message-sender {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+
       .message-meta strong {
         font-size: 0.95rem;
+      }
+
+      .message-sender-subtitle {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .message-meta-tail {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
       }
 
       .message-meta time {
@@ -730,6 +751,24 @@
       .provenance-badge.system {
         background: rgba(148, 163, 184, 0.15);
         color: #94a3b8;
+      }
+
+      .agent-runtime-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+
+      .agent-runtime-badge.compact {
+        padding: 1px 7px;
+        font-size: 0.68rem;
       }
 
       .message.system-message .message-avatar {
@@ -981,11 +1020,49 @@
 
       .task-meta {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
+        flex-wrap: wrap;
         gap: 12px;
         color: var(--muted);
         font-size: 0.82rem;
         margin-bottom: 10px;
+      }
+
+      .task-person-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .task-person-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .task-person-role {
+        color: var(--muted);
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .task-person-name {
+        color: var(--text);
+        font-size: 0.82rem;
+        font-weight: 700;
+        line-height: 1.1;
+      }
+
+      .task-person-subtitle {
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1.1;
       }
 
       .task-actions {
@@ -1269,6 +1346,74 @@
         elements.presenceBadge.textContent = label;
       }
 
+      function normalizeAgentIdeLabel(label) {
+        const normalized = String(label || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
+        if (!normalized) return null;
+        if (normalized === "codex") return "Codex";
+        if (normalized === "antigravity") return "Antigravity";
+        if (normalized === "claude") return "Claude";
+        if (normalized === "orchestrator") return "Orchestrator";
+        if (normalized === "agent") return "Agent";
+        return normalized
+          .split("-")
+          .filter(Boolean)
+          .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ");
+      }
+
+      function inferAgentIdeLabel(value) {
+        const normalized = String(value || "").trim().toLowerCase();
+        if (!normalized) return null;
+        if (normalized === "codex" || normalized.startsWith("codex-")) return "Codex";
+        if (normalized === "antigravity" || normalized.startsWith("antigravity-")) return "Antigravity";
+        if (normalized === "claude" || normalized.startsWith("claude-")) return "Claude";
+        if (normalized === "orchestrator" || normalized.startsWith("orchestrator-")) return "Orchestrator";
+        return null;
+      }
+
+      function parseAgentIdentity(sender) {
+        const raw = String(sender || "").trim();
+        if (!raw) return null;
+
+        const structuredParts = raw.split(" | ").map(part => part.trim()).filter(Boolean);
+        const structuredIde = structuredParts.length === 3
+          ? normalizeAgentIdeLabel(structuredParts[2])
+          : null;
+        if (structuredParts.length === 3 && /agent$/i.test(structuredParts[1]) && structuredIde) {
+          return {
+            raw,
+            displayName: structuredParts[0],
+            ownerAttribution: structuredParts[1],
+            ideLabel: structuredIde,
+            structured: true,
+          };
+        }
+
+        const legacyMatch = raw.match(/^(.*?)\s*\(([^)]+agent)\)$/i);
+        if (legacyMatch) {
+          const displayName = String(legacyMatch[1] || "").trim() || raw;
+          return {
+            raw,
+            displayName,
+            ownerAttribution: String(legacyMatch[2] || "").trim() || null,
+            ideLabel: inferAgentIdeLabel(displayName),
+            structured: false,
+          };
+        }
+
+        return {
+          raw,
+          displayName: raw,
+          ownerAttribution: null,
+          ideLabel: inferAgentIdeLabel(raw),
+          structured: false,
+        };
+      }
+
       function isHumanSender(sender, source) {
         if (source === "browser") return true;
         const normalized = String(sender || "").toLowerCase();
@@ -1276,15 +1421,19 @@
         return false;
       }
 
-      function getSenderIdentityKey(sender) {
-        return String(sender || "")
-          .split("(")[0]
+      function getSenderIdentityKey(sender, source) {
+        if (isHumanSender(sender, source)) {
+          return String(sender || "").trim().toLowerCase();
+        }
+
+        const parsed = parseAgentIdentity(sender);
+        return String(parsed?.ideLabel || parsed?.displayName || sender || "")
           .trim()
           .toLowerCase();
       }
 
       function getSenderColor(sender, source) {
-        const normalized = getSenderIdentityKey(sender);
+        const normalized = getSenderIdentityKey(sender, source);
         if (normalized === "orchestrator" || normalized.startsWith("orchestrator-")) return "var(--sender-orchestrator)";
         if (normalized === "codex" || normalized === "codex-agent" || normalized.startsWith("codex-")) return "var(--sender-codex)";
         if (
@@ -1299,7 +1448,7 @@
 
       function getSenderProvenance(sender, source) {
         if (isHumanSender(sender, source)) return "human";
-        const normalized = String(sender || "").toLowerCase();
+        const normalized = String(sender || "").trim().toLowerCase();
         if (normalized === "letagents" || normalized === "system") return "system";
         return "agent";
       }
@@ -1339,10 +1488,40 @@
       }
 
       function senderInitials(sender) {
-        return String(sender || "?")
+        const parsed = parseAgentIdentity(sender);
+        return String(parsed?.displayName || sender || "?")
           .trim()
           .slice(0, 2)
           .toUpperCase();
+      }
+
+      function renderRuntimeBadge(ideLabel, compact) {
+        const normalized = normalizeAgentIdeLabel(ideLabel);
+        if (!normalized) return "";
+        return `<span class="agent-runtime-badge${compact ? " compact" : ""}">${escapeHtml(normalized)}</span>`;
+      }
+
+      function renderTaskActor(label, roleLabel) {
+        const parsed = parseAgentIdentity(label);
+        const primary = parsed?.displayName || String(label || "").trim();
+        if (!primary) {
+          return "";
+        }
+
+        return `
+          <span class="task-person-chip">
+            <span class="task-person-copy">
+              <span class="task-person-role">${escapeHtml(roleLabel)}</span>
+              <span class="task-person-name">${escapeHtml(primary)}</span>
+              ${
+                parsed?.ownerAttribution
+                  ? `<span class="task-person-subtitle">${escapeHtml(parsed.ownerAttribution)}</span>`
+                  : ""
+              }
+            </span>
+            ${renderRuntimeBadge(parsed?.ideLabel, true)}
+          </span>
+        `;
       }
 
       function scrollMessagesToBottom(force) {
@@ -1372,6 +1551,11 @@
         for (const message of sortedMessages) {
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
+          const parsedIdentity = provenance === "agent" ? parseAgentIdentity(message.sender) : null;
+          const senderName = parsedIdentity?.displayName || String(message.sender || "").trim() || "Unknown";
+          const senderSubtitle = parsedIdentity?.ownerAttribution
+            ? `<span class="message-sender-subtitle">${escapeHtml(parsedIdentity.ownerAttribution)}</span>`
+            : "";
           const wrapper = document.createElement("article");
           wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
           wrapper.style.setProperty("--sender-color", senderColor);
@@ -1379,9 +1563,15 @@
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
               <div class="message-meta">
-                <strong>${escapeHtml(message.sender)}</strong>
-                <span class="provenance-badge ${provenance}">${provenance}</span>
-                <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
+                <div class="message-sender">
+                  <strong>${escapeHtml(senderName)}</strong>
+                  ${senderSubtitle}
+                </div>
+                <div class="message-meta-tail">
+                  ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
+                  <span class="provenance-badge ${provenance}">${provenance}</span>
+                  <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
+                </div>
               </div>
               <div class="message-bubble">
                 <div class="md-content">${renderMarkdown(message.text)}</div>
@@ -1919,8 +2109,8 @@
             html += `<div class="task-card">`;
             html += `<div class="task-card-header"><h4 class="task-card-title">${escapeHtml(task.title)}</h4><span class="task-status-badge" data-status="${task.status}">${STATUS_LABELS[task.status] || task.status}</span></div>`;
             html += `<div class="task-meta">`;
-            if (task.assignee) html += `<span>👤 ${escapeHtml(task.assignee)}</span>`;
-            html += `<span>by ${escapeHtml(task.created_by)}</span>`;
+            if (task.assignee) html += renderTaskActor(task.assignee, "Assignee");
+            html += renderTaskActor(task.created_by, "Created by");
             html += `<span>${escapeHtml(formatTimestamp(task.created_at))}</span>`;
             html += `</div>`;
             if (task.description) html += `<p style="margin: 0 0 10px; color: var(--muted); font-size: 0.88rem;">${escapeHtml(task.description)}</p>`;
