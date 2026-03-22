@@ -1415,10 +1415,16 @@
       }
 
       function isHumanSender(sender, source) {
-        if (source === "browser") return true;
-        const normalized = String(sender || "").toLowerCase();
+        const normalized = String(sender || "").trim().toLowerCase();
         if (normalized === "human" || normalized === "anonymous") return true;
-        return false;
+        if (normalized === "letagents" || normalized === "system") return false;
+
+        const parsed = parseAgentIdentity(sender);
+        if (parsed?.structured || parsed?.ownerAttribution || parsed?.ideLabel) {
+          return false;
+        }
+
+        return source === "browser";
       }
 
       function getSenderIdentityKey(sender, source) {
