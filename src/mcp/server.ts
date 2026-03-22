@@ -2,6 +2,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { createHash } from "crypto";
 import { writeFileSync, existsSync } from "fs";
 import { userInfo } from "os";
 import { join, dirname } from "path";
@@ -35,6 +36,12 @@ import {
   normalizeInviteCode,
   type JoinedVia,
 } from "./room-id.js";
+import {
+  buildAgentActorLabel,
+  formatOwnerAttribution,
+  inferAgentIdeLabel,
+  toTitleCaseCodename,
+} from "../shared/agent-identity.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -48,8 +55,12 @@ interface RoomState {
   joined_via: JoinedVia;
 }
 
+const CURRENT_AGENT_IDENTITY_KEY = getAgentIdentityStorageKey();
+
 let currentRoom: RoomState | null = null;
-let currentAgentIdentity: StoredAgentIdentityState | null = getStoredAgentIdentity();
+let currentAgentIdentity: StoredAgentIdentityState | null = getStoredAgentIdentity(
+  CURRENT_AGENT_IDENTITY_KEY
+);
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
 let currentAuthenticatedAccountSource: "env" | "stored" | null = null;
 let currentAuthenticatedEnvToken: string | null = null;
@@ -61,6 +72,7 @@ let currentAuthenticatedEnvToken: string | null = null;
 const API_URL = (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
 const AGENT_NAME = (process.env.LETAGENTS_AGENT_NAME || process.env.AGENT_NAME || "").trim();
 const AGENT_DISPLAY_NAME = (process.env.LETAGENTS_AGENT_DISPLAY_NAME || "").trim();
+const AGENT_IDE_LABEL = (process.env.LETAGENTS_AGENT_IDE || process.env.AGENT_IDE || "").trim();
 const AGENT_OWNER_LABEL = (process.env.LETAGENTS_AGENT_OWNER_LABEL || "").trim();
 
 interface ResolvedOwnerContext {
@@ -73,6 +85,10 @@ interface AuthenticatedAccountLookup {
   id?: string;
   login: string;
   display_name?: string | null;
+}
+
+interface AuthenticatedAgentLookup {
+  name?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,20 +133,253 @@ function isCodexRuntime(): boolean {
   );
 }
 
-function detectAgentBaseName(): string {
-  if (AGENT_NAME) {
-    return normalizeAgentBaseName(AGENT_NAME);
+const AGENT_CODENAMES = [
+  "amber",
+  "anchor",
+  "autumn",
+  "badger",
+  "bay",
+  "bear",
+  "brook",
+  "calm",
+  "canyon",
+  "cedar",
+  "clear",
+  "cloud",
+  "comet",
+  "copper",
+  "creek",
+  "crisp",
+  "crest",
+  "dawn",
+  "delta",
+  "dune",
+  "ember",
+  "falcon",
+  "fern",
+  "field",
+  "firefly",
+  "fjord",
+  "forest",
+  "fox",
+  "garden",
+  "glade",
+  "golden",
+  "granite",
+  "grove",
+  "harbor",
+  "hawk",
+  "hollow",
+  "indigo",
+  "ivory",
+  "jade",
+  "juniper",
+  "lagoon",
+  "lake",
+  "lantern",
+  "leaf",
+  "lively",
+  "lunar",
+  "lynx",
+  "maple",
+  "marsh",
+  "meadow",
+  "mesa",
+  "misty",
+  "moon",
+  "morrow",
+  "moss",
+  "noble",
+  "oak",
+  "olive",
+  "opal",
+  "otter",
+  "owl",
+  "peak",
+  "pearl",
+  "pine",
+  "quiet",
+  "raven",
+  "reef",
+  "ridge",
+  "river",
+  "rook",
+  "sage",
+  "scarlet",
+  "shore",
+  "silver",
+  "sky",
+  "solar",
+  "sparrow",
+  "spring",
+  "star",
+  "stone",
+  "storm",
+  "summit",
+  "sun",
+  "sunlit",
+  "swift",
+  "thicket",
+  "tidal",
+  "timber",
+  "trail",
+  "valley",
+  "verdant",
+  "vista",
+  "warm",
+  "wave",
+  "west",
+  "wild",
+  "willow",
+  "wind",
+  "winter",
+  "wolf",
+  "wood",
+  "wren",
+] as const;
+
+function getAgentIdentityStorageKey(): string {
+  const runtimeSignals = [
+    process.env.LETAGENTS_AGENT_INSTANCE_ID,
+    process.env.CODEX_THREAD_ID && `codex:${process.env.CODEX_THREAD_ID}`,
+    process.env.ANTIGRAVITY_THREAD_ID && `antigravity:${process.env.ANTIGRAVITY_THREAD_ID}`,
+    process.env.CLAUDECODE_SESSION_ID && `claude:${process.env.CLAUDECODE_SESSION_ID}`,
+    process.env.MCP_SESSION_ID && `mcp:${process.env.MCP_SESSION_ID}`,
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  if (runtimeSignals.length) {
+    return runtimeSignals[0];
   }
 
-  if (AGENT_DISPLAY_NAME) {
-    return normalizeAgentBaseName(AGENT_DISPLAY_NAME);
+  return `cwd:${process.cwd()}`;
+}
+
+function hashStringToIndex(value: string, modulo: number): number {
+  const digest = createHash("sha256").update(value).digest();
+  return digest.readUInt16BE(0) % modulo;
+}
+
+function detectAgentIdeLabel(): string {
+  if (AGENT_IDE_LABEL) {
+    return toTitleCaseCodename(AGENT_IDE_LABEL);
   }
 
   if (isCodexRuntime()) {
-    return "codex";
+    return "Codex";
   }
 
-  return "agent";
+  const explicitName = normalizeAgentBaseName(AGENT_NAME || AGENT_DISPLAY_NAME);
+  const inferred = inferAgentIdeLabel(explicitName);
+  return inferred || "Agent";
+}
+
+async function getAuthenticatedAgentDirectory(): Promise<{
+  account: AuthenticatedAccountLookup;
+  agents: AuthenticatedAgentLookup[];
+} | null> {
+  try {
+    const result = await apiCall<{
+      account?: AuthenticatedAccountLookup;
+      agents?: AuthenticatedAgentLookup[];
+    }>("/agents/me");
+    const account = result?.account;
+    if (!account?.login?.trim()) {
+      return null;
+    }
+
+    currentAuthenticatedAccount = account;
+    currentAuthenticatedAccountSource = process.env.LETAGENTS_TOKEN?.trim() ? "env" : "stored";
+    currentAuthenticatedEnvToken = process.env.LETAGENTS_TOKEN?.trim() || null;
+
+    return {
+      account,
+      agents: Array.isArray(result?.agents) ? result.agents : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function shouldReuseStoredIdentity(identity: StoredAgentIdentityState | null): boolean {
+  return Boolean(
+    identity &&
+      identity.runtime_key === CURRENT_AGENT_IDENTITY_KEY &&
+      identity.display_name?.trim() &&
+      identity.ide_label?.trim() &&
+      identity.owner_attribution?.trim()
+  );
+}
+
+function resolveExplicitAgentIdentity(): { name: string; display_name: string } | null {
+  if (AGENT_NAME) {
+    const name = normalizeAgentBaseName(AGENT_NAME);
+    return {
+      name,
+      display_name: AGENT_DISPLAY_NAME || toTitleCaseCodename(AGENT_NAME),
+    };
+  }
+
+  if (AGENT_DISPLAY_NAME) {
+    return {
+      name: normalizeAgentBaseName(AGENT_DISPLAY_NAME),
+      display_name: AGENT_DISPLAY_NAME.trim(),
+    };
+  }
+
+  return null;
+}
+
+function pickLocalCodename(runtimeKey: string, offset = 0): { name: string; display_name: string } {
+  const index = (hashStringToIndex(runtimeKey, AGENT_CODENAMES.length) + offset) % AGENT_CODENAMES.length;
+  const word = AGENT_CODENAMES[index];
+  return {
+    name: normalizeAgentBaseName(word),
+    display_name: toTitleCaseCodename(word),
+  };
+}
+
+async function resolveAgentName(
+  authAvailable: boolean
+): Promise<{ name: string; display_name: string }> {
+  const explicit = resolveExplicitAgentIdentity();
+  if (explicit) {
+    return explicit;
+  }
+
+  if (shouldReuseStoredIdentity(currentAgentIdentity)) {
+    return {
+      name: currentAgentIdentity!.name,
+      display_name: currentAgentIdentity!.display_name,
+    };
+  }
+
+  if (!authAvailable) {
+    return pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY);
+  }
+
+  const directory = await getAuthenticatedAgentDirectory();
+  const existingNames = new Set(
+    (directory?.agents ?? [])
+      .map((agent) => normalizeAgentBaseName(agent.name || ""))
+      .filter(Boolean)
+  );
+
+  for (let offset = 0; offset < AGENT_CODENAMES.length; offset += 1) {
+    const candidate = pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY, offset);
+    if (!existingNames.has(candidate.name)) {
+      return candidate;
+    }
+  }
+
+  const fallbackHash = createHash("sha256")
+    .update(CURRENT_AGENT_IDENTITY_KEY)
+    .digest("hex")
+    .slice(0, 4);
+  const fallback = pickLocalCodename(CURRENT_AGENT_IDENTITY_KEY);
+  return {
+    name: `${fallback.name}-${fallbackHash}`,
+    display_name: `${fallback.display_name} ${fallbackHash.toUpperCase()}`,
+  };
 }
 
 async function getAuthenticatedAccountProfile(): Promise<AuthenticatedAccountLookup | null> {
@@ -144,18 +393,9 @@ async function getAuthenticatedAccountProfile(): Promise<AuthenticatedAccountLoo
       return currentAuthenticatedAccount;
     }
 
-    try {
-      const result = await apiCall<{ account?: AuthenticatedAccountLookup }>("/agents/me");
-      const account = result?.account;
-      if (account?.login?.trim()) {
-        currentAuthenticatedAccount = account;
-        currentAuthenticatedAccountSource = "env";
-        currentAuthenticatedEnvToken = envToken;
-        return account;
-      }
-    } catch {
-      // Fall through to non-auth identity sources when the active env token
-      // cannot resolve to an account profile.
+    const directory = await getAuthenticatedAgentDirectory();
+    if (directory?.account?.login?.trim()) {
+      return directory.account;
     }
 
     return null;
@@ -183,17 +423,9 @@ async function getAuthenticatedAccountProfile(): Promise<AuthenticatedAccountLoo
     return currentAuthenticatedAccount;
   }
 
-  try {
-    const result = await apiCall<{ account?: AuthenticatedAccountLookup }>("/agents/me");
-    const account = result?.account;
-    if (account?.login?.trim()) {
-      currentAuthenticatedAccount = account;
-      currentAuthenticatedAccountSource = "stored";
-      currentAuthenticatedEnvToken = null;
-      return account;
-    }
-  } catch {
-    // Fall through to local non-auth identity sources.
+  const directory = await getAuthenticatedAgentDirectory();
+  if (directory?.account?.login?.trim()) {
+    return directory.account;
   }
 
   return null;
@@ -241,24 +473,6 @@ async function resolveOwnerContext(): Promise<ResolvedOwnerContext> {
   };
 }
 
-function buildAgentIdentityName(baseName: string, ownerSlug: string): string {
-  const normalizedBase = normalizeAgentBaseName(baseName);
-  if (!ownerSlug || normalizedBase.endsWith(`-${ownerSlug}`)) {
-    return normalizedBase;
-  }
-
-  return `${normalizedBase}-${ownerSlug}`;
-}
-
-function formatOwnerAttribution(ownerLabel: string): string {
-  const trimmed = ownerLabel.trim() || "Owner";
-  return /s$/i.test(trimmed) ? `${trimmed}' agent` : `${trimmed}'s agent`;
-}
-
-function buildActorLabel(name: string, ownerLabel: string): string {
-  return `${name} (${formatOwnerAttribution(ownerLabel)})`;
-}
-
 function sameAgentIdentity(
   left: StoredAgentIdentityState | null,
   right: StoredAgentIdentityState
@@ -268,8 +482,11 @@ function sameAgentIdentity(
       left.name === right.name &&
       left.display_name === right.display_name &&
       left.owner_label === right.owner_label &&
+      left.owner_attribution === right.owner_attribution &&
+      left.ide_label === right.ide_label &&
       left.actor_label === right.actor_label &&
       left.canonical_key === right.canonical_key &&
+      left.runtime_key === right.runtime_key &&
       left.source === right.source
   );
 }
@@ -285,25 +502,36 @@ function toPublicAgentIdentity(
     name: identity.name,
     display_name: identity.display_name,
     owner_label: identity.owner_label,
+    owner_attribution: identity.owner_attribution ?? formatOwnerAttribution(identity.owner_label),
+    ide_label: identity.ide_label ?? inferAgentIdeLabel(identity.display_name) ?? "Agent",
     actor_label: identity.actor_label,
     canonical_key: identity.canonical_key ?? null,
+    runtime_key: identity.runtime_key ?? null,
     source: identity.source,
   };
 }
 
 async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
   const owner = await resolveOwnerContext();
-  const name = buildAgentIdentityName(detectAgentBaseName(), owner.slug);
-  const displayName = name;
-  const actorLabel = buildActorLabel(displayName, owner.label);
   const authAvailable = Boolean(getLetagentsToken());
+  const ideLabel = detectAgentIdeLabel();
+  const ownerAttribution = formatOwnerAttribution(owner.label);
+  const { name, display_name: displayName } = await resolveAgentName(authAvailable);
+  const actorLabel = buildAgentActorLabel({
+    display_name: displayName,
+    owner_label: owner.label,
+    ide_label: ideLabel,
+  });
 
   let resolved: StoredAgentIdentityState = {
     name,
     display_name: displayName,
     owner_label: owner.label,
+    owner_attribution: ownerAttribution,
+    ide_label: ideLabel,
     actor_label: actorLabel,
     canonical_key: owner.login ? `${owner.login}/${name}` : null,
+    runtime_key: CURRENT_AGENT_IDENTITY_KEY,
     source: "local",
     resolved_at: new Date().toISOString(),
   };
@@ -313,7 +541,10 @@ async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
     currentAgentIdentity.name === resolved.name &&
     currentAgentIdentity.display_name === resolved.display_name &&
     currentAgentIdentity.owner_label === resolved.owner_label &&
+    currentAgentIdentity.owner_attribution === resolved.owner_attribution &&
+    currentAgentIdentity.ide_label === resolved.ide_label &&
     currentAgentIdentity.actor_label === resolved.actor_label &&
+    currentAgentIdentity.runtime_key === resolved.runtime_key &&
     (!authAvailable || currentAgentIdentity.source === "api")
   ) {
     return currentAgentIdentity;
@@ -346,7 +577,12 @@ async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
             : resolved.owner_label,
         source: "api",
       };
-      resolved.actor_label = buildActorLabel(resolved.display_name, resolved.owner_label);
+      resolved.owner_attribution = formatOwnerAttribution(resolved.owner_label);
+      resolved.actor_label = buildAgentActorLabel({
+        display_name: resolved.display_name,
+        owner_label: resolved.owner_label,
+        ide_label: resolved.ide_label,
+      });
     } catch (error) {
       console.error(
         "Agent identity registration failed:",
@@ -356,10 +592,13 @@ async function ensureAgentIdentity(): Promise<StoredAgentIdentityState> {
   }
 
   if (!sameAgentIdentity(currentAgentIdentity, resolved)) {
-    currentAgentIdentity = setStoredAgentIdentity({
-      ...resolved,
-      resolved_at: new Date().toISOString(),
-    });
+    currentAgentIdentity = setStoredAgentIdentity(
+      {
+        ...resolved,
+        resolved_at: new Date().toISOString(),
+      },
+      CURRENT_AGENT_IDENTITY_KEY
+    );
   }
 
   return currentAgentIdentity ?? resolved;
@@ -1049,7 +1288,7 @@ server.tool(
                   connected: true,
                   ...toPublicRoomState(currentRoom),
                   agent_identity: toPublicAgentIdentity(
-                    currentAgentIdentity ?? getStoredAgentIdentity()
+                    currentAgentIdentity ?? getStoredAgentIdentity(CURRENT_AGENT_IDENTITY_KEY)
                   ),
                   auth: getStoredAuth()
                     ? {
@@ -1843,7 +2082,7 @@ server.tool(
               token_expires_at: storedAuth?.expires_at ?? null,
               pending_device_auth: pendingAuth,
               agent_identity: toPublicAgentIdentity(
-                currentAgentIdentity ?? getStoredAgentIdentity()
+                currentAgentIdentity ?? getStoredAgentIdentity(CURRENT_AGENT_IDENTITY_KEY)
               ),
               current_room: toPublicRoomState(currentRoom),
               saved_current_room: toPublicStoredRoomSession(savedCurrentRoom),
