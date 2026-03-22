@@ -1,6 +1,6 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
-import express from "express";
+import express, { type Response } from "express";
 import path from "path";
 
 import {
@@ -487,6 +487,58 @@ const WEB_DIR = path.resolve(process.cwd(), "src", "web");
 const app = express();
 app.use(express.json());
 
+const SAFE_BAD_REQUEST_PATTERNS = [
+  /^Invalid transition:/,
+  /^display_name must be between 2 and 64 characters$/,
+];
+
+function logServerError(context: string, error: unknown): void {
+  console.error(`[${context}]`, error);
+}
+
+function isSafeBadRequestError(error: unknown): error is Error {
+  return (
+    error instanceof Error &&
+    SAFE_BAD_REQUEST_PATTERNS.some((pattern) => pattern.test(error.message))
+  );
+}
+
+function respondWithInternalError(
+  res: Response,
+  context: string,
+  error: unknown,
+  message: string
+): void {
+  return respondWithError(res, 500, context, message, error);
+}
+
+function respondWithBadRequest(
+  res: Response,
+  context: string,
+  error: unknown,
+  fallbackMessage: string
+): void {
+  if (isSafeBadRequestError(error)) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+
+  respondWithError(res, 400, context, fallbackMessage, error);
+}
+
+function respondWithError(
+  res: Response,
+  status: number,
+  context: string,
+  message: string,
+  error?: unknown
+): void {
+  if (error !== undefined) {
+    logServerError(context, error);
+  }
+  res.status(status).json({ error: message });
+}
+
 app.use(async (req: AuthenticatedRequest, _res, next) => {
   try {
     const auth = await resolveRequestAuth(req);
@@ -598,7 +650,12 @@ app.post("/auth/github/login", async (req, res) => {
     const authUrl = buildGitHubAuthorizeUrl(state);
     res.json({ auth_url: authUrl, state, redirect_to: redirectTo });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    respondWithInternalError(
+      res,
+      "POST /auth/github/login",
+      error,
+      "GitHub login is currently unavailable."
+    );
   }
 });
 
@@ -625,7 +682,12 @@ app.post("/auth/device/start", async (_req, res) => {
       interval: device.interval,
     });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    respondWithInternalError(
+      res,
+      "POST /auth/device/start",
+      error,
+      "Device authorization is currently unavailable."
+    );
   }
 });
 
@@ -711,7 +773,12 @@ app.get("/auth/device/poll/:requestId", async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    respondWithInternalError(
+      res,
+      "GET /auth/device/poll/:requestId",
+      error,
+      "Device authorization polling failed."
+    );
   }
 });
 
@@ -761,7 +828,12 @@ app.get("/auth/github/callback", async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    respondWithInternalError(
+      res,
+      "GET /auth/github/callback",
+      error,
+      "GitHub authentication failed."
+    );
   }
 });
 
@@ -1231,7 +1303,12 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     }
     res.json(updated);
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    respondWithBadRequest(
+      res,
+      "PATCH /projects/:id/tasks/:taskId",
+      error,
+      "Task update could not be completed."
+    );
   }
 });
 
@@ -1563,7 +1640,12 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     }
     res.json({ ...updated, room_id: roomId });
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    respondWithBadRequest(
+      res,
+      "PATCH /rooms/:room_id/tasks/:task_id",
+      error,
+      "Task update could not be completed."
+    );
   }
 });
 
@@ -1600,7 +1682,12 @@ app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
       authenticated: Boolean(req.sessionAccount),
     });
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    respondWithBadRequest(
+      res,
+      "PATCH /rooms/:room_id",
+      error,
+      "Room update could not be completed."
+    );
   }
 });
 
