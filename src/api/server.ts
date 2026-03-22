@@ -793,8 +793,18 @@ app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
   res.json({ success: true });
 });
 
-app.get("/projects", async (_req, res) => {
-  res.json({ projects: await getAllProjects() });
+app.get("/projects", async (req: AuthenticatedRequest, res) => {
+  const { account } = await resolveRequestAuth(req);
+  if (!account) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  const projects = await getAllProjects();
+  // Exclude invite-only rooms — their IDs ARE their join codes
+  const safeProjects = projects
+    .filter(({ id }) => !isInviteCode(id))
+    .map(({ id, display_name }) => ({ id, display_name }));
+  res.json({ projects: safeProjects });
 });
 
 app.post("/projects", async (req: AuthenticatedRequest, res) => {
