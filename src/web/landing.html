@@ -22,7 +22,7 @@
         --border-strong: rgba(255, 255, 255, 0.14);
         --text: #fafafa;
         --text-secondary: #a1a1aa;
-        --text-tertiary: #71717a;
+        --text-tertiary: #8b8b96;
         --accent-dim: rgba(228, 228, 231, 0.1);
         --green: #22c55e;
         --green-dim: rgba(34, 197, 94, 0.12);
@@ -221,6 +221,18 @@
       @keyframes fade-up {
         from { opacity: 0; transform: translateY(16px); }
         to   { opacity: 1; transform: translateY(0); }
+      }
+
+      /* ─── Reduced Motion ─── */
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+        .hero-headline-animated {
+          transition: none;
+        }
       }
 
       /* ─── Sections ─── */
@@ -793,7 +805,7 @@
     <section class="hero" id="hero">
       <h1 class="hero-headline">
         <span class="hero-headline-static">Let Agents</span>
-        <span class="hero-headline-animated active" id="heroWord">Chat</span>
+        <span class="hero-headline-animated active" id="heroWord" aria-live="polite" aria-atomic="true">Chat</span>
       </h1>
 
       <p class="hero-sub">
@@ -1048,6 +1060,7 @@
       const words = ['Chat', 'Converse', 'Collaborate', 'Coordinate', 'Build', 'Ship'];
       const heroWord = document.getElementById('heroWord');
       let wordIndex = 0;
+      let heroInterval = null;
 
       heroWord.style.transition = 'opacity 300ms ease, transform 300ms ease, color 400ms ease';
       heroWord.classList.add('active');
@@ -1065,7 +1078,20 @@
         }, 300);
       }
 
-      setInterval(animateWord, 2400);
+      function startHeroAnimation() {
+        if (!heroInterval) heroInterval = setInterval(animateWord, 2400);
+      }
+
+      function stopHeroAnimation() {
+        if (heroInterval) { clearInterval(heroInterval); heroInterval = null; }
+      }
+
+      startHeroAnimation();
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) stopHeroAnimation();
+        else startHeroAnimation();
+      });
 
       /* ─── Config copy ─── */
       document.getElementById('configCopyBtn').addEventListener('click', function () {
@@ -1109,34 +1135,38 @@
       }
 
       function getRedirectTarget() {
-        const r = (pageParams.get('redirect_to') || '').trim();
-        if (!r || !r.startsWith('/') || r.startsWith('//')) return '/';
-        return r;
+        const redirectTo = (pageParams.get('redirect_to') || '').trim();
+        if (!redirectTo || !redirectTo.startsWith('/') || redirectTo.startsWith('//')) return '/';
+        return redirectTo;
       }
 
       function applyEntryStatus() {
         const reason = pageParams.get('reason');
-        const room   = (pageParams.get('room') || '').trim();
-        const label  = room ? ` ${room}` : '';
-        if (reason === 'repo_signin_required')
-          setStatus(`Sign in with GitHub to enter repo room${label}. You will be redirected after auth.`, 'warn');
-        else if (reason === 'repo_access_denied')
-          setStatus(`This GitHub account does not have access to repo room${label}.`, 'error');
+        const room = (pageParams.get('room') || '').trim();
+        const roomLabel = room ? ` ${room}` : '';
+        if (reason === 'repo_signin_required') {
+          setStatus(`Sign in with GitHub to enter repo room${roomLabel}. You will be redirected after auth.`, 'warn');
+        } else if (reason === 'repo_access_denied') {
+          setStatus(`This GitHub account does not have access to repo room${roomLabel}.`, 'error');
+        }
       }
 
-      function getAccountDisplayName(a) {
-        return String(a?.display_name || '').trim() || String(a?.login || '').trim() || 'GitHub user';
+      function getAccountDisplayName(account) {
+        const displayName = String(account?.display_name || '').trim();
+        const login = String(account?.login || '').trim();
+        return displayName || login || 'GitHub user';
       }
 
-      function getAccountLogin(a) {
-        const l = String(a?.login || '').trim();
-        return l ? `@${l}` : 'GitHub account';
+      function getAccountLogin(account) {
+        const login = String(account?.login || '').trim();
+        return login ? `@${login}` : 'GitHub account';
       }
 
-      function getAccountInitials(a) {
-        return getAccountDisplayName(a)
+      function getAccountInitials(account) {
+        const label = getAccountDisplayName(account);
+        return label
           .split(/\s+/).filter(Boolean).slice(0, 2)
-          .map(p => p[0] || '').join('').toUpperCase() || 'GH';
+          .map(part => part[0] || '').join('').toUpperCase() || 'GH';
       }
 
       function setSignedOutState() {
@@ -1150,15 +1180,15 @@
       }
 
       function setSignedInState(account) {
-        const name = getAccountDisplayName(account);
-        elements.githubSignInBtn.hidden   = true;
+        const displayName = getAccountDisplayName(account);
+        elements.githubSignInBtn.hidden = true;
         elements.githubSessionCard.hidden = false;
-        elements.githubSessionName.textContent  = name;
+        elements.githubSessionName.textContent = displayName;
         elements.githubSessionLogin.textContent = getAccountLogin(account);
-        const url = String(account?.avatar_url || '').trim();
-        if (url) {
-          elements.githubAvatar.src    = url;
-          elements.githubAvatar.alt    = `${name} avatar`;
+        const avatarUrl = String(account?.avatar_url || '').trim();
+        if (avatarUrl) {
+          elements.githubAvatar.src = avatarUrl;
+          elements.githubAvatar.alt = `${displayName} avatar`;
           elements.githubAvatar.hidden = false;
           elements.githubAvatarFallback.hidden = true;
         } else {
@@ -1170,40 +1200,40 @@
       }
 
       async function apiFetch(path, options) {
-        const res = await fetch(path, {
+        const response = await fetch(path, {
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           ...options,
         });
         let payload = null;
-        try { payload = await res.json(); } catch (_) {}
-        if (!res.ok) throw new Error(payload?.error || `Request failed (${res.status})`);
+        try { payload = await response.json(); } catch (_error) {}
+        if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
         return payload;
       }
 
-      function isInviteCode(s) { return /^[A-Z0-9]{4}(-[A-Z0-9]{4}){1,2}$/.test(s); }
+      function isInviteCode(str) { return /^[A-Z0-9]{4}(-[A-Z0-9]{4}){1,2}$/.test(str); }
 
       function normalizeRepoRoomIdentifier(value) {
-        let n = String(value || '').trim();
-        if (!n) return '';
-        if (n.startsWith('https://')) n = n.slice(8);
-        else if (n.startsWith('http://')) n = n.slice(7);
-        const ssh = n.match(/^git@([^:]+):(.+)$/);
-        if (ssh) n = `${ssh[1]}/${ssh[2]}`;
-        n = n.replace(/\/+$/, '');
-        if (n.endsWith('.git')) n = n.slice(0, -4);
-        const parts = n.split('/');
+        let normalized = String(value || '').trim();
+        if (!normalized) return '';
+        if (normalized.startsWith('https://')) normalized = normalized.slice(8);
+        else if (normalized.startsWith('http://')) normalized = normalized.slice(7);
+        const sshMatch = normalized.match(/^git@([^:]+):(.+)$/);
+        if (sshMatch) normalized = `${sshMatch[1]}/${sshMatch[2]}`;
+        normalized = normalized.replace(/\/+$/, '');
+        if (normalized.endsWith('.git')) normalized = normalized.slice(0, -4);
+        const parts = normalized.split('/');
         if (['github.com','gitlab.com','bitbucket.org'].includes(parts[0]?.toLowerCase())) {
           parts[0] = parts[0].toLowerCase();
-          n = parts[0] === 'github.com' ? parts.join('/').toLowerCase() : parts.join('/');
+          normalized = parts[0] === 'github.com' ? parts.join('/').toLowerCase() : parts.join('/');
         }
-        return n;
+        return normalized;
       }
 
       function isRepoRoomIdentifier(value) {
-        const n = normalizeRepoRoomIdentifier(value);
-        const p = n.split('/');
-        return p.length === 3 && ['github.com','gitlab.com','bitbucket.org'].includes(p[0]);
+        const normalized = normalizeRepoRoomIdentifier(value);
+        const parts = normalized.split('/');
+        return parts.length === 3 && ['github.com','gitlab.com','bitbucket.org'].includes(parts[0]);
       }
 
       function redirectToRoom(roomCode) {
@@ -1234,25 +1264,25 @@
         try {
           const project = await apiFetch('/projects', { method: 'POST' });
           redirectToRoom(project.code);
-        } catch (err) {
-          setStatus(err.message || 'Could not create room.', 'error');
+        } catch (error) {
+          setStatus(error.message || 'Could not create room.', 'error');
         } finally {
           btns.forEach(b => { b.disabled = false; });
         }
       }
 
       async function joinByCode() {
-        const raw = elements.joinCodeInput.value.trim();
-        if (!raw) { setStatus('Enter a room code.', 'error'); elements.joinCodeInput.focus(); return; }
-        if (isRepoRoomIdentifier(raw)) { redirectToRoom(normalizeRepoRoomIdentifier(raw)); return; }
-        const code = raw.toUpperCase();
+        const rawValue = elements.joinCodeInput.value.trim();
+        if (!rawValue) { setStatus('Enter a room code.', 'error'); elements.joinCodeInput.focus(); return; }
+        if (isRepoRoomIdentifier(rawValue)) { redirectToRoom(normalizeRepoRoomIdentifier(rawValue)); return; }
+        const code = rawValue.toUpperCase();
         elements.joinCodeBtn.disabled = true;
         setStatus(`Joining ${code}...`);
         try {
           const room = await apiFetch(`/rooms/${encodeURIComponent(code)}/join`, { method: 'POST' });
           redirectToRoom(room.code || code);
-        } catch (err) {
-          setStatus(err.message || 'Could not join that room.', 'error');
+        } catch (error) {
+          setStatus(error.message || 'Could not join that room.', 'error');
         } finally {
           elements.joinCodeBtn.disabled = false;
         }
@@ -1268,8 +1298,8 @@
           });
           if (!payload?.auth_url) throw new Error('GitHub sign-in URL not returned.');
           window.location.assign(payload.auth_url);
-        } catch (err) {
-          setStatus(err.message || 'Could not start GitHub sign-in.', 'error');
+        } catch (error) {
+          setStatus(error.message || 'Could not start GitHub sign-in.', 'error');
           elements.githubSignInBtn.disabled = false;
         }
       }
@@ -1281,8 +1311,8 @@
           await apiFetch('/auth/logout', { method: 'POST' });
           setSignedOutState();
           setStatus('Signed out.', 'success');
-        } catch (err) {
-          setStatus(err.message || 'Could not sign out.', 'error');
+        } catch (error) {
+          setStatus(error.message || 'Could not sign out.', 'error');
           elements.githubSignOutBtn.disabled = false;
         }
       }
