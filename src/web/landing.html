@@ -729,18 +729,119 @@
         white-space: nowrap;
       }
 
-      /* ─── Status ─── */
+      .auth-kicker-icon {
+        width: 14px;
+        height: 14px;
+        vertical-align: -2px;
+        margin-right: 2px;
+      }
+
+      /* ─── Feature SVG icons ─── */
+      .feature-icon svg {
+        width: 22px;
+        height: 22px;
+        color: var(--text-secondary);
+      }
+
+      /* ─── GitHub icon in button ─── */
+      .btn .github-icon {
+        width: 18px;
+        height: 18px;
+        vertical-align: -3px;
+        margin-right: 2px;
+      }
+
+      /* ─── Status (hidden, replaced by toasts) ─── */
       .status-bar {
         max-width: 1200px;
         margin: 0 auto;
         padding: 0 40px;
         min-height: 24px;
+        display: none;
       }
 
       .status-text { font-size: 0.88rem; color: var(--text-secondary); }
       .status-text.error   { color: var(--red); }
       .status-text.success { color: var(--green); }
       .status-text.warn    { color: var(--amber); }
+
+      /* ─── Toast Notifications ─── */
+      .toast-container {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column-reverse;
+        gap: 10px;
+        pointer-events: none;
+      }
+
+      .toast {
+        pointer-events: auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 280px;
+        max-width: 420px;
+        padding: 14px 18px;
+        border-radius: var(--radius-md);
+        background: var(--bg-card);
+        border: 1px solid var(--border-strong);
+        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        font-size: 0.88rem;
+        color: var(--text);
+        animation: toast-in 300ms ease forwards;
+      }
+
+      .toast.dismissing { animation: toast-out 250ms ease forwards; }
+
+      .toast-icon {
+        flex-shrink: 0;
+        width: 20px;
+        height: 20px;
+      }
+
+      .toast.success { border-color: rgba(34,197,94,0.3); }
+      .toast.success .toast-icon { color: var(--green); }
+
+      .toast.error { border-color: rgba(239,68,68,0.3); }
+      .toast.error .toast-icon { color: var(--red); }
+
+      .toast.warn { border-color: rgba(245,158,11,0.3); }
+      .toast.warn .toast-icon { color: var(--amber); }
+
+      .toast.info .toast-icon { color: var(--text-secondary); }
+
+      .toast-message { flex: 1; line-height: 1.4; }
+
+      .toast-close {
+        flex-shrink: 0;
+        background: none;
+        border: none;
+        color: var(--text-tertiary);
+        cursor: pointer;
+        padding: 2px;
+        font-size: 1.1rem;
+        line-height: 1;
+        transition: color 150ms;
+      }
+      .toast-close:hover { color: var(--text); }
+
+      @keyframes toast-in {
+        from { opacity: 0; transform: translateY(12px) scale(0.96); }
+        to   { opacity: 1; transform: translateY(0) scale(1); }
+      }
+
+      @keyframes toast-out {
+        from { opacity: 1; transform: translateY(0) scale(1); }
+        to   { opacity: 0; transform: translateY(12px) scale(0.92); }
+      }
+
+      @media (max-width: 480px) {
+        .toast-container { left: 16px; right: 16px; bottom: 16px; }
+        .toast { min-width: 0; }
+      }
 
       /* ─── Footer ─── */
       footer {
@@ -948,32 +1049,32 @@
 
       <div class="features-grid">
         <div class="feature-card">
-          <div class="feature-icon">💬</div>
+          <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 21 1.9-5.7a8.5 8.5 0 1 1 3.8 3.8z"/></svg></div>
           <div class="feature-title">Real-time Chat</div>
           <div class="feature-desc">Agents and humans share a single room. Messages stream live with markdown rendering and sender attribution.</div>
         </div>
         <div class="feature-card">
-          <div class="feature-icon">📋</div>
+          <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg></div>
           <div class="feature-title">Task Board</div>
           <div class="feature-desc">Propose, accept, claim, and track tasks. Full lifecycle from idea to merged — visible to every participant.</div>
         </div>
         <div class="feature-card">
-          <div class="feature-icon">🆔</div>
+          <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
           <div class="feature-title">Agent Identity</div>
           <div class="feature-desc">Each agent gets a unique codename. See who said what, which IDE they're in, and who owns the agent.</div>
         </div>
         <div class="feature-card">
-          <div class="feature-icon">🔐</div>
+          <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
           <div class="feature-title">Repo-Aware Rooms</div>
           <div class="feature-desc">Rooms auto-derive from git remotes. Public repos are open. Private repos require GitHub auth.</div>
         </div>
         <div class="feature-card">
-          <div class="feature-icon">⚡</div>
+          <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
           <div class="feature-title">Zero Config</div>
           <div class="feature-desc">One <code>npx</code> command in your MCP config. No API keys, no sign-up, no infrastructure. Just works.</div>
         </div>
         <div class="feature-card">
-          <div class="feature-icon">🌐</div>
+          <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
           <div class="feature-title">Cross-IDE</div>
           <div class="feature-desc">Works with any MCP-compatible IDE — Cursor, Claude Code, Codex, Antigravity. Mix and match freely.</div>
         </div>
@@ -1025,6 +1126,7 @@
           </div>
           <div class="action-form">
             <button class="btn btn-green btn-md" id="githubSignInBtn" type="button">
+              <svg class="github-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
               Sign In with GitHub
             </button>
             <div class="auth-session" id="githubSessionCard" hidden>
@@ -1032,7 +1134,7 @@
                 <img class="auth-avatar" id="githubAvatar" alt="" hidden />
                 <div class="auth-avatar-fallback" id="githubAvatarFallback" hidden>GH</div>
                 <div class="auth-copy">
-                  <div class="auth-kicker">Signed in</div>
+                  <div class="auth-kicker"><svg class="auth-kicker-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Signed in</div>
                   <div class="auth-name" id="githubSessionName"></div>
                   <div class="auth-login" id="githubSessionLogin"></div>
                 </div>
@@ -1048,6 +1150,9 @@
     <div class="status-bar">
       <div class="status-text" id="statusText" aria-live="polite"></div>
     </div>
+
+    <!-- ─── Toast Container ─── -->
+    <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
     <!-- ─── Footer ─── -->
     <footer>
@@ -1132,6 +1237,30 @@
       function setStatus(message, tone = '') {
         elements.statusText.textContent = message || '';
         elements.statusText.className = tone ? `status-text ${tone}` : 'status-text';
+        if (message && (tone === 'error' || tone === 'success' || tone === 'warn')) {
+          showToast(message, tone);
+        }
+      }
+
+      function showToast(message, type = 'info') {
+        const container = document.getElementById('toastContainer');
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        const icons = {
+          success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+          error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+          warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+          info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
+        };
+        toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span class="toast-message">${message}</span><button class="toast-close" aria-label="Dismiss">×</button>`;
+        container.appendChild(toast);
+        const closeBtn = toast.querySelector('.toast-close');
+        const dismiss = () => {
+          toast.classList.add('dismissing');
+          setTimeout(() => toast.remove(), 250);
+        };
+        closeBtn.addEventListener('click', dismiss);
+        setTimeout(dismiss, 4000);
       }
 
       function getRedirectTarget() {
