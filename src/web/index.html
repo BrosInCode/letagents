@@ -15,6 +15,8 @@
       rel="stylesheet"
     />
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -190,16 +192,25 @@
       .copy-help { font-size: 0.72rem; color: var(--muted); margin-top: 6px; }
 
       /* Legend chips */
-      .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+      .legend { display: flex; flex-wrap: wrap; gap: 4px; }
       .legend-chip {
-        display: inline-flex; align-items: center; gap: 6px;
-        padding: 4px 8px; border-radius: 6px;
-        background: var(--surface); font-size: 0.72rem; color: var(--muted);
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 6px; border-radius: 4px;
+        background: var(--surface); font-size: 0.65rem; color: var(--muted);
+        max-width: 120px; cursor: default;
+      }
+      .legend-chip-label {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .legend-chip::before {
-        content: ""; width: 6px; height: 6px; border-radius: 50%;
+        content: ""; width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
         background: var(--chip-color, var(--sender-default));
       }
+      .legend-chip.overflow-chip {
+        background: var(--line); color: var(--text); font-weight: 600;
+        max-width: none;
+      }
+      .legend-chip.overflow-chip::before { display: none; }
 
       /* Drawer buttons row */
       .drawer-actions { display: flex; gap: 6px; }
@@ -299,6 +310,46 @@
       .rename-btn:hover { background: var(--surface); color: var(--text); }
 
       /* ── Messages ────────────────────────────────── */
+
+      /* Search */
+      /* Inline search within header */
+      .chat-title.searching { display: none; }
+      .header-search {
+        display: none; flex: 1; align-items: center; gap: 8px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 4px 10px;
+        min-width: 0;
+        transition: border-color 0.2s;
+      }
+      .header-search.active { display: flex; }
+      .header-search:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.18);
+      }
+      .header-search svg { flex-shrink: 0; opacity: 0.5; width: 14px; height: 14px; }
+      .header-search .input {
+        flex: 1; border: none; background: none; outline: none;
+        font-size: 0.82rem; color: inherit; padding: 0; min-width: 0;
+      }
+      .header-search .search-count { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+      .header-search .search-close {
+        background: none; border: none; color: var(--muted);
+        font-size: 1.1rem; cursor: pointer; padding: 0 2px; line-height: 1;
+        transition: color 0.15s;
+      }
+      .header-search .search-close:hover { color: var(--text); }
+      .message.search-dim { opacity: 0.15; transition: opacity 0.2s; }
+      .message.search-match {
+        border-left: 3px solid var(--accent);
+        padding-left: 8px;
+        transition: border-color 0.2s, opacity 0.2s;
+      }
+      .search-highlight {
+        background: rgba(250, 204, 21, 0.35);
+        border-radius: 2px; padding: 0 1px;
+      }
       .messages-wrap { position: relative; min-height: 0; overflow: hidden; }
 
       .messages {
@@ -387,10 +438,18 @@
         background: var(--surface); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.84em;
       }
       .message-bubble .md-content pre {
+        position: relative;
         padding: 12px; border-radius: 8px;
         background: var(--bg-2); margin: 6px 0; overflow-x: auto;
       }
+      .message-bubble .md-content pre code.hljs { background: transparent; padding: 0; font-size: 0.82em; }
       .message-bubble .md-content pre code { padding: 0; background: none; font-size: 0.82em; }
+      .code-lang-label {
+        position: absolute; top: 6px; right: 10px;
+        font-size: 0.68em; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--muted); opacity: 0.6; font-family: 'Inter', sans-serif;
+        pointer-events: none;
+      }
       .message-bubble .md-content ul, .message-bubble .md-content ol { margin: 4px 0; padding-left: 1.4em; }
       .message-bubble .md-content a { color: #60a5fa; text-decoration: none; }
       .message-bubble .md-content a:hover { text-decoration: underline; }
@@ -402,7 +461,7 @@
 
       /* Provenance badge — understated */
       .provenance-badge {
-        padding: 1px 6px; border-radius: 4px;
+        padding: 3px 10px; border-radius: 4px;
         font-size: 0.62rem; font-weight: 700;
         text-transform: uppercase; letter-spacing: 0.04em;
       }
@@ -731,8 +790,15 @@
           <h2 id="chatTitle">No active room</h2>
           <p id="chatSubtitle">Create a new room or join one with a code.</p>
         </div>
+        <div class="header-search" id="headerSearch">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="searchInput" class="input" placeholder="Search messages..." autocomplete="off" />
+          <span class="search-count" id="searchCount"></span>
+          <button class="search-close" id="searchClose" type="button" aria-label="Close search">&times;</button>
+        </div>
         <div class="header-actions">
           <button class="rename-btn" id="renameRoomBtn" type="button" hidden aria-label="Rename room"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
+          <button class="rename-btn" id="searchToggleBtn" type="button" aria-label="Search messages" title="Search messages"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
           <div class="tab-bar" role="tablist">
             <button role="tab" aria-selected="true" id="tabChat" type="button">Chat</button>
             <button role="tab" aria-selected="false" id="tabBoard" type="button">Board</button>
@@ -803,6 +869,7 @@
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
+        searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
@@ -835,6 +902,10 @@
         sendMessageBtn: document.getElementById("sendMessageBtn"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
+        headerSearch: document.getElementById("headerSearch"),
+        searchInput: document.getElementById("searchInput"),
+        searchCount: document.getElementById("searchCount"),
+        searchClose: document.getElementById("searchClose"),
       };
 
       // --- Drawer Toggle ---
@@ -1112,6 +1183,38 @@
         return "agent";
       }
 
+      // Configure marked to open links in new tabs
+      // NOTE: text param is pre-rendered HTML from marked (e.g. <strong>bold</strong>),
+      // so it is intentionally NOT escaped here.
+      if (typeof marked !== "undefined" && marked.use) {
+        const rendererOverrides = {
+          link({ href, title, text }) {
+            // Sanitize href: block javascript: protocol, preserve valid URL chars
+            const rawHref = (href || "").trim();
+            const safeHref = /^\s*javascript\s*:/i.test(rawHref) ? "" : rawHref.replace(/"/g, "&quot;");
+            const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+            return `<a href="${safeHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
+          },
+        };
+
+        // Syntax highlighting via highlight.js
+        if (typeof hljs !== "undefined") {
+          rendererOverrides.code = function({ text, lang }) {
+            const language = lang && hljs.getLanguage(lang) ? lang : null;
+            const highlighted = language
+              ? hljs.highlight(text, { language }).value
+              : hljs.highlightAuto(text).value;
+            const langClass = language ? `hljs language-${escapeHtml(language)}` : "hljs";
+            const langLabel = language
+              ? `<span class="code-lang-label">${escapeHtml(language)}</span>`
+              : "";
+            return `<pre>${langLabel}<code class="${langClass}">${highlighted}</code></pre>`;
+          };
+        }
+
+        marked.use({ renderer: rendererOverrides });
+      }
+
       function renderMarkdown(text) {
         if (typeof marked !== "undefined" && marked.parse) {
           try {
@@ -1238,6 +1341,7 @@
         const legend = document.getElementById("ownerLegend");
         if (!legend) return;
 
+        const MAX_VISIBLE_CHIPS = 6;
         const owners = new Map();
         for (const message of state.messages.values()) {
           const owner = getOwnerFromSender(message.sender, message.source);
@@ -1250,17 +1354,38 @@
         }
 
         legend.innerHTML = "";
-        for (const { label, color } of owners.values()) {
+        const allOwners = Array.from(owners.values());
+        const visible = allOwners.slice(0, MAX_VISIBLE_CHIPS);
+        const overflowCount = allOwners.length - MAX_VISIBLE_CHIPS;
+
+        for (const { label, color } of visible) {
           const chip = document.createElement("span");
           chip.className = "legend-chip";
           chip.style.setProperty("--chip-color", color);
-          chip.textContent = label;
+          chip.title = label;
+          const labelSpan = document.createElement("span");
+          labelSpan.className = "legend-chip-label";
+          labelSpan.textContent = label;
+          chip.appendChild(labelSpan);
           legend.appendChild(chip);
         }
+
+        if (overflowCount > 0) {
+          const overflow = document.createElement("span");
+          overflow.className = "legend-chip overflow-chip";
+          overflow.textContent = `+${overflowCount} more`;
+          overflow.title = allOwners.slice(MAX_VISIBLE_CHIPS).map(o => o.label).join(", ");
+          legend.appendChild(overflow);
+        }
+
         const sysChip = document.createElement("span");
         sysChip.className = "legend-chip";
         sysChip.style.setProperty("--chip-color", "var(--sender-default)");
-        sysChip.textContent = "system";
+        sysChip.title = "System messages";
+        const sysLabel = document.createElement("span");
+        sysLabel.className = "legend-chip-label";
+        sysLabel.textContent = "system";
+        sysChip.appendChild(sysLabel);
         legend.appendChild(sysChip);
       }
 
@@ -1278,9 +1403,25 @@
 
         elements.emptyState.classList.add("hidden");
 
+        const query = state.searchQuery.toLowerCase();
+        const matchIds = query
+          ? new Set(sortedMessages.filter(m => {
+              const text = (m.text || "").toLowerCase();
+              const sender = (m.sender || "").toLowerCase();
+              return text.includes(query) || sender.includes(query);
+            }).map(m => m.id))
+          : null;
+
+        if (query) {
+          elements.searchCount.textContent = `${matchIds.size} match${matchIds.size !== 1 ? "es" : ""}`;
+        } else {
+          elements.searchCount.textContent = "";
+        }
+
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
+          const isMatch = !query || matchIds.has(message.id);
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
           const parsedIdentity = provenance === "agent" ? parseAgentIdentity(message.sender) : null;
@@ -1288,12 +1429,17 @@
           const senderSubtitle = parsedIdentity?.ownerAttribution
             ? `<span class="message-sender-subtitle">${escapeHtml(parsedIdentity.ownerAttribution)}</span>`
             : "";
-          // Hide redundant "agent" badge when owner attribution is present
           const showProvenanceBadge = !(provenance === "agent" && parsedIdentity?.ownerAttribution);
           const wrapper = document.createElement("article");
-          wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
+          wrapper.className = "message" + (provenance === "system" ? " system-message" : "") + (query && !isMatch ? " search-dim" : "") + (query && isMatch ? " search-match" : "");
           wrapper.dataset.msgId = message.id;
           wrapper.style.setProperty("--sender-color", senderColor);
+
+          let renderedText = renderMarkdown(message.text);
+          if (query && isMatch) {
+            renderedText = highlightTextInHtml(renderedText, query);
+          }
+
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
@@ -1309,7 +1455,7 @@
                 </div>
               </div>
               <div class="message-bubble">
-                <div class="md-content">${renderMarkdown(message.text)}</div>
+                <div class="md-content">${renderedText}</div>
               </div>
             </div>
           `;
@@ -1318,9 +1464,22 @@
 
         elements.messages.appendChild(fragment);
         updateOwnerLegend();
-        if (!skipScroll) {
+        if (!query && !skipScroll) {
           requestAnimationFrame(() => scrollMessagesToBottom(true));
+        } else if (query && matchIds.size) {
+          const firstMatch = elements.messages.querySelector(".search-match");
+          if (firstMatch) firstMatch.scrollIntoView({ behavior: "smooth", block: "center" });
         }
+      }
+
+      function highlightTextInHtml(html, query) {
+        const parts = html.split(/(<[^>]+>)/);
+        const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`(${safeQuery})`, "gi");
+        return parts.map(part => {
+          if (part.startsWith("<")) return part;
+          return part.replace(re, '<span class="search-highlight">$1</span>');
+        }).join("");
       }
 
       function upsertMessages(items) {
@@ -1358,11 +1517,13 @@
         const roomDisplayName = state.currentRoomDisplayName || roomLocator;
         const shareKind = getRoomShareKind();
         const shareValue = getRoomShareValue();
+        const shareDisplayValue = getRoomShareDisplayValue();
         elements.shareCardTitle.textContent = shareKind === "url" ? "Room URL" : "Invite Code";
         elements.copyHelpText.textContent = shareKind === "url"
           ? "Share this room URL instantly"
           : "Share this room instantly";
-        elements.joinCodeText.textContent = shareValue || "----";
+        elements.joinCodeText.textContent = shareDisplayValue || "----";
+        elements.joinCodeText.title = shareValue || "";
         elements.copyJoinCodeBtn.dataset.shareKind = shareKind;
         elements.projectIdLabel.textContent = hasRoom
           ? roomDisplayName
@@ -1409,6 +1570,33 @@
         }
 
         return `${window.location.origin}/in/${encodeRoomPathIdentifier(identifier)}`;
+      }
+
+      function abbreviateMiddle(text, maxLength = 52) {
+        if (!text || text.length <= maxLength) {
+          return text;
+        }
+
+        const sideLength = Math.max(8, Math.floor((maxLength - 3) / 2));
+        return `${text.slice(0, sideLength)}...${text.slice(-sideLength)}`;
+      }
+
+      function getRoomShareDisplayValue() {
+        const shareValue = getRoomShareValue();
+        if (!shareValue) {
+          return "";
+        }
+
+        if (getRoomShareKind() !== "url") {
+          return shareValue;
+        }
+
+        try {
+          const shareUrl = new URL(shareValue);
+          return abbreviateMiddle(`${shareUrl.host}${decodeURIComponent(shareUrl.pathname)}`);
+        } catch (_error) {
+          return abbreviateMiddle(shareValue.replace(/^https?:\/\//, ""));
+        }
       }
 
       function persistSession() {
@@ -1795,6 +1983,34 @@
           state.senderName = "anonymous";
         }
       })();
+
+      // --- Search handlers ---
+      let searchDebounce = null;
+      function openSearch() {
+        document.querySelector(".chat-title").classList.add("searching");
+        elements.headerSearch.classList.add("active");
+        elements.searchInput.focus();
+      }
+      function closeSearch() {
+        document.querySelector(".chat-title").classList.remove("searching");
+        elements.headerSearch.classList.remove("active");
+        state.searchQuery = "";
+        elements.searchInput.value = "";
+        elements.searchCount.textContent = "";
+        renderMessages();
+      }
+      document.getElementById("searchToggleBtn").addEventListener("click", openSearch);
+      elements.searchClose.addEventListener("click", closeSearch);
+      elements.searchInput.addEventListener("input", (e) => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+          state.searchQuery = e.target.value.trim();
+          renderMessages();
+        }, 250);
+      });
+      elements.searchInput.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+      });
 
       window.addEventListener("beforeunload", () => {
         disconnectStream();
