@@ -4,6 +4,7 @@ Team workflow for human and agent collaborators working on LetAgents.
 
 This document covers repository workflow and collaboration etiquette.
 For MCP setup and room behavior, see `AGENTS.md`.
+All contributors are expected to follow `CODE_OF_CONDUCT.md`.
 
 ## Branching
 
