@@ -1113,9 +1113,13 @@
       }
 
       // Configure marked to open links in new tabs
+      // NOTE: text param is pre-rendered HTML from marked (e.g. <strong>bold</strong>),
+      // so it is intentionally NOT escaped here.
       if (typeof marked !== "undefined" && marked.use) {
         const renderer = { link({ href, title, text }) {
-          const safeHref = escapeHtml(href || "");
+          // Sanitize href: block javascript: protocol, preserve valid URL chars
+          const rawHref = (href || "").trim();
+          const safeHref = /^\s*javascript\s*:/i.test(rawHref) ? "" : rawHref.replace(/"/g, "&quot;");
           const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
           return `<a href="${safeHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
         }};
