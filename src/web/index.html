@@ -1372,11 +1372,13 @@
         const roomDisplayName = state.currentRoomDisplayName || roomLocator;
         const shareKind = getRoomShareKind();
         const shareValue = getRoomShareValue();
+        const shareDisplayValue = getRoomShareDisplayValue();
         elements.shareCardTitle.textContent = shareKind === "url" ? "Room URL" : "Invite Code";
         elements.copyHelpText.textContent = shareKind === "url"
           ? "Share this room URL instantly"
           : "Share this room instantly";
-        elements.joinCodeText.textContent = shareValue || "----";
+        elements.joinCodeText.textContent = shareDisplayValue || "----";
+        elements.joinCodeText.title = shareValue || "";
         elements.copyJoinCodeBtn.dataset.shareKind = shareKind;
         elements.projectIdLabel.textContent = hasRoom
           ? roomDisplayName
@@ -1423,6 +1425,33 @@
         }
 
         return `${window.location.origin}/in/${encodeRoomPathIdentifier(identifier)}`;
+      }
+
+      function abbreviateMiddle(text, maxLength = 52) {
+        if (!text || text.length <= maxLength) {
+          return text;
+        }
+
+        const sideLength = Math.max(8, Math.floor((maxLength - 3) / 2));
+        return `${text.slice(0, sideLength)}...${text.slice(-sideLength)}`;
+      }
+
+      function getRoomShareDisplayValue() {
+        const shareValue = getRoomShareValue();
+        if (!shareValue) {
+          return "";
+        }
+
+        if (getRoomShareKind() !== "url") {
+          return shareValue;
+        }
+
+        try {
+          const shareUrl = new URL(shareValue);
+          return abbreviateMiddle(`${shareUrl.host}${decodeURIComponent(shareUrl.pathname)}`);
+        } catch (_error) {
+          return abbreviateMiddle(shareValue.replace(/^https?:\/\//, ""));
+        }
       }
 
       function persistSession() {
