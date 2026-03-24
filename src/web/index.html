@@ -1112,6 +1112,15 @@
         return "agent";
       }
 
+      // Configure marked to open links in new tabs
+      if (typeof marked !== "undefined" && marked.use) {
+        const renderer = { link({ href, title, text }) {
+          const titleAttr = title ? ` title="${title}"` : "";
+          return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
+        }};
+        marked.use({ renderer });
+      }
+
       function renderMarkdown(text) {
         if (typeof marked !== "undefined" && marked.parse) {
           try {
