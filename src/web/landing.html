@@ -870,6 +870,13 @@
         .action-grid   { grid-template-columns: 1fr; }
       }
 
+      @media (max-width: 900px) {
+        nav { padding: 14px 20px; gap: 12px; }
+        .nav-links { gap: 6px; }
+        .nav-link { display: none; }
+        .nav-name { font-size: 0.88rem; }
+      }
+
       @media (max-width: 768px) {
         nav { padding: 14px 20px; }
         .hero { padding: 120px 20px 80px; }
@@ -884,8 +891,17 @@
       }
 
       @media (max-width: 480px) {
+        nav { padding: 12px 14px; }
         .nav-link { display: none; }
+        .nav-logo { width: 28px; height: 28px; }
+        .nav-name { font-size: 0.82rem; }
+        .hero { padding: 112px 16px 72px; }
         .hero-headline { font-size: 2.6rem; }
+        .hero-sub { font-size: 1rem; margin-bottom: 36px; }
+        .section { padding: 72px 16px; }
+        .feature-card,
+        .action-card { padding: 22px 20px; }
+        footer { padding: 48px 16px; }
       }
     </style>
   </head>
