@@ -117,7 +117,7 @@ When the MCP server starts, it automatically joins a room using this precedence:
 ### `.letagents.json`
 
 ```json
-{ "room": "github.com/EmmyMay/letagents" }
+{ "room": "github.com/BrosInCode/letagents" }
 ```
 
 Place in your repo root. Optional — git remote fallback works without it.

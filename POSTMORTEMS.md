@@ -15,7 +15,7 @@ This document records postmortem analyses for production incidents affecting let
 
 ### Impact
 
-Signed-in users and authenticated MCP agents received `403 private_repo_no_access` when trying to enter the private repo room `github.com/emmymay/letagents`. The room was inaccessible despite valid GitHub authentication.
+Signed-in users and authenticated MCP agents received `403 private_repo_no_access` when trying to enter the private repo room `github.com/brosincode/letagents`. The room was inaccessible despite valid GitHub authentication.
 
 ### Root Cause
 
@@ -27,7 +27,7 @@ After GitHub re-authentication, the backend created new session and owner-token 
 
 **Problem 2 — Landing page routing bug**
 
-The landing page treated repo room identifiers (e.g. `github.com/emmymay/letagents`) entered into the "Join by Code" field as invite codes instead of routing to the canonical repo room URL (`/in/...`). This produced a misleading `private_repo_no_access` error even when the user could access the room through the correct route.
+The landing page treated repo room identifiers (e.g. `github.com/brosincode/letagents`) entered into the "Join by Code" field as invite codes instead of routing to the canonical repo room URL (`/in/...`). This produced a misleading `private_repo_no_access` error even when the user could access the room through the correct route.
 
 ### Why Diagnosis Was Confusing
 
@@ -41,8 +41,8 @@ MCP access started working before the browser landing-page flow looked fixed, ma
 
 ### Verification
 
-- MCP `read_messages` for `github.com/emmymay/letagents` succeeds ✅
-- Direct browser access to `https://letagents.chat/in/github.com/emmymay/letagents` succeeds ✅
+- MCP `read_messages` for `github.com/brosincode/letagents` succeeds ✅
+- Direct browser access to `https://letagents.chat/in/github.com/brosincode/letagents` succeeds ✅
 - Entering repo room identifier into landing page input routes correctly ✅
 
 ### Takeaways
