@@ -592,6 +592,10 @@ app.get("/", (_req, res) => {
   res.sendFile(path.join(WEB_DIR, "landing.html"));
 });
 
+app.get("/docs", (_req, res) => {
+  res.sendFile(path.join(WEB_DIR, "docs.html"));
+});
+
 app.get("/app", (_req, res) => {
   res.redirect(301, "/");
 });
