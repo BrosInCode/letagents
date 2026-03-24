@@ -1,7 +1,7 @@
 /**
  * Agent codenames — extracted from server.ts per Emmy's directive.
  *
- * Each agent instance gets a two-word codename (e.g. "River Valley")
+ * Each agent instance gets a fused one-word codename (e.g. "RiverValley")
  * deterministically derived from its runtime key via SHA-256 hashing.
  */
 import { createHash } from "crypto";
@@ -153,10 +153,12 @@ export function codenameFromIndex(index: number): { name: string; display_name: 
   const secondIndex = normalizedIndex % AGENT_CODENAMES.length;
   const first = AGENT_CODENAMES[firstIndex];
   const second = AGENT_CODENAMES[secondIndex];
+  const fusedDisplayName = `${toTitleCaseCodename(first)}${toTitleCaseCodename(second)}`;
+  const fusedName = `${first}${second}`;
 
   return {
-    name: normalizeAgentBaseName(`${first}-${second}`),
-    display_name: `${toTitleCaseCodename(first)} ${toTitleCaseCodename(second)}`,
+    name: normalizeAgentBaseName(fusedName),
+    display_name: fusedDisplayName,
   };
 }
 
