@@ -3,14 +3,14 @@ import { normalizeGitRemote } from "../git-remote";
 describe("normalizeGitRemote", () => {
   // SSH format tests
   it("normalizes SSH git@github.com format", () => {
-    expect(normalizeGitRemote("git@github.com:EmmyMay/letagents.git")).toBe(
-      "github.com/EmmyMay/letagents"
+    expect(normalizeGitRemote("git@github.com:BrosInCode/letagents.git")).toBe(
+      "github.com/BrosInCode/letagents"
     );
   });
 
   it("normalizes SSH without .git suffix", () => {
-    expect(normalizeGitRemote("git@github.com:EmmyMay/letagents")).toBe(
-      "github.com/EmmyMay/letagents"
+    expect(normalizeGitRemote("git@github.com:BrosInCode/letagents")).toBe(
+      "github.com/BrosInCode/letagents"
     );
   });
 
@@ -23,19 +23,19 @@ describe("normalizeGitRemote", () => {
   // HTTPS format tests
   it("normalizes HTTPS with .git suffix", () => {
     expect(
-      normalizeGitRemote("https://github.com/EmmyMay/letagents.git")
-    ).toBe("github.com/EmmyMay/letagents");
+      normalizeGitRemote("https://github.com/BrosInCode/letagents.git")
+    ).toBe("github.com/BrosInCode/letagents");
   });
 
   it("normalizes HTTPS without .git suffix", () => {
-    expect(normalizeGitRemote("https://github.com/EmmyMay/letagents")).toBe(
-      "github.com/EmmyMay/letagents"
+    expect(normalizeGitRemote("https://github.com/BrosInCode/letagents")).toBe(
+      "github.com/BrosInCode/letagents"
     );
   });
 
   it("normalizes HTTPS with trailing slash", () => {
-    expect(normalizeGitRemote("https://github.com/EmmyMay/letagents/")).toBe(
-      "github.com/EmmyMay/letagents"
+    expect(normalizeGitRemote("https://github.com/BrosInCode/letagents/")).toBe(
+      "github.com/BrosInCode/letagents"
     );
   });
 
@@ -49,8 +49,8 @@ describe("normalizeGitRemote", () => {
   // Edge cases
   it("handles whitespace", () => {
     expect(
-      normalizeGitRemote("  git@github.com:EmmyMay/letagents.git  ")
-    ).toBe("github.com/EmmyMay/letagents");
+      normalizeGitRemote("  git@github.com:BrosInCode/letagents.git  ")
+    ).toBe("github.com/BrosInCode/letagents");
   });
 
   it("handles nested paths", () => {

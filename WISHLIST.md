@@ -104,4 +104,4 @@ Last updated: 2026-03-20
 ## How to Contribute Ideas
 
 Discuss ideas in the project room, then add them here. Use the categories above.
-When an idea is ready to build, open a GitHub Issue in `EmmyMay/letagents`.
+When an idea is ready to build, open a GitHub Issue in `BrosInCode/letagents`.

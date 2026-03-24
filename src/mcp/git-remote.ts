@@ -7,9 +7,9 @@
 //   host/owner/repo
 //
 // Examples:
-//   git@github.com:EmmyMay/letagents.git  → github.com/EmmyMay/letagents
-//   https://github.com/EmmyMay/letagents.git → github.com/EmmyMay/letagents
-//   https://github.com/EmmyMay/letagents → github.com/EmmyMay/letagents
+//   git@github.com:BrosInCode/letagents.git  → github.com/BrosInCode/letagents
+//   https://github.com/BrosInCode/letagents.git → github.com/BrosInCode/letagents
+//   https://github.com/BrosInCode/letagents → github.com/BrosInCode/letagents
 //   ssh://git@gitlab.com/team/project.git → gitlab.com/team/project
 
 import { execSync } from "child_process";
