@@ -77,7 +77,7 @@ tasks:
       - **Server**: DigitalOcean droplet (2 vCPU, 8GB RAM, 120GB disk)
       - **Process**: Docker container or PM2 for the API server
       - **Proxy**: Nginx reverse proxy with SSL (Let's Encrypt)
-      - **Domain**: letagents.chat → YOUR_SERVER_IP
+      - **Domain**: letagents.chat → your server IP
       - **CI/CD**: GitHub Actions → SSH deploy on push to staging
       
       ### Docker
