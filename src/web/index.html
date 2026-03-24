@@ -197,8 +197,10 @@
         display: inline-flex; align-items: center; gap: 4px;
         padding: 2px 6px; border-radius: 4px;
         background: var(--surface); font-size: 0.65rem; color: var(--muted);
-        max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-        cursor: default;
+        max-width: 120px; cursor: default;
+      }
+      .legend-chip-label {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .legend-chip::before {
         content: ""; width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
@@ -1365,8 +1367,11 @@
           const chip = document.createElement("span");
           chip.className = "legend-chip";
           chip.style.setProperty("--chip-color", color);
-          chip.textContent = label;
           chip.title = label;
+          const labelSpan = document.createElement("span");
+          labelSpan.className = "legend-chip-label";
+          labelSpan.textContent = label;
+          chip.appendChild(labelSpan);
           legend.appendChild(chip);
         }
 
@@ -1381,8 +1386,11 @@
         const sysChip = document.createElement("span");
         sysChip.className = "legend-chip";
         sysChip.style.setProperty("--chip-color", "var(--sender-default)");
-        sysChip.textContent = "system";
         sysChip.title = "System messages";
+        const sysLabel = document.createElement("span");
+        sysLabel.className = "legend-chip-label";
+        sysLabel.textContent = "system";
+        sysChip.appendChild(sysLabel);
         legend.appendChild(sysChip);
       }
 
