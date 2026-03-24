@@ -299,6 +299,47 @@
       .rename-btn:hover { background: var(--surface); color: var(--text); }
 
       /* ── Messages ────────────────────────────────── */
+
+      /* Search */
+      .search-bar {
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--line);
+        display: flex; align-items: center; gap: 8px;
+      }
+      .search-input-wrap {
+        flex: 1; display: flex; align-items: center; gap: 8px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 12px;
+        transition: border-color 0.2s;
+      }
+      .search-input-wrap:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.18);
+      }
+      .search-input-wrap svg { flex-shrink: 0; opacity: 0.5; }
+      .search-input-wrap .input {
+        flex: 1; border: none; background: none; outline: none;
+        font-size: 0.88rem; color: inherit; padding: 0;
+      }
+      .search-count { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+      .search-close {
+        background: none; border: none; color: var(--muted);
+        font-size: 1.2rem; cursor: pointer; padding: 0 4px; line-height: 1;
+        transition: color 0.15s;
+      }
+      .search-close:hover { color: var(--text); }
+      .message.search-dim { opacity: 0.15; transition: opacity 0.2s; }
+      .message.search-match {
+        border-left: 3px solid var(--accent);
+        padding-left: 8px;
+        transition: border-color 0.2s, opacity 0.2s;
+      }
+      .search-highlight {
+        background: rgba(250, 204, 21, 0.35);
+        border-radius: 2px; padding: 0 1px;
+      }
       .messages-wrap { position: relative; min-height: 0; overflow: hidden; }
 
       .messages {
@@ -733,6 +774,7 @@
         </div>
         <div class="header-actions">
           <button class="rename-btn" id="renameRoomBtn" type="button" hidden aria-label="Rename room"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
+          <button class="rename-btn" id="searchToggleBtn" type="button" aria-label="Search messages" title="Search messages"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
           <div class="tab-bar" role="tablist">
             <button role="tab" aria-selected="true" id="tabChat" type="button">Chat</button>
             <button role="tab" aria-selected="false" id="tabBoard" type="button">Board</button>
@@ -740,6 +782,16 @@
           <div class="presence" id="presenceBadge" data-state="idle">Waiting for room</div>
         </div>
       </header>
+
+      <!-- Search Bar -->
+      <div class="search-bar" id="searchBar" hidden>
+        <div class="search-input-wrap">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="searchInput" class="input" placeholder="Search messages..." autocomplete="off" />
+          <span class="search-count" id="searchCount"></span>
+          <button class="search-close" id="searchClose" type="button" aria-label="Close search">&times;</button>
+        </div>
+      </div>
 
       <!-- Messages -->
       <div class="messages-wrap">
@@ -803,6 +855,7 @@
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
+        searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
       };
@@ -835,6 +888,10 @@
         sendMessageBtn: document.getElementById("sendMessageBtn"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
+        searchBar: document.getElementById("searchBar"),
+        searchInput: document.getElementById("searchInput"),
+        searchCount: document.getElementById("searchCount"),
+        searchClose: document.getElementById("searchClose"),
       };
 
       // --- Drawer Toggle ---
@@ -1292,9 +1349,25 @@
 
         elements.emptyState.classList.add("hidden");
 
+        const query = state.searchQuery.toLowerCase();
+        const matchIds = query
+          ? new Set(sortedMessages.filter(m => {
+              const text = (m.text || "").toLowerCase();
+              const sender = (m.sender || "").toLowerCase();
+              return text.includes(query) || sender.includes(query);
+            }).map(m => m.id))
+          : null;
+
+        if (query) {
+          elements.searchCount.textContent = `${matchIds.size} match${matchIds.size !== 1 ? "es" : ""}`;
+        } else {
+          elements.searchCount.textContent = "";
+        }
+
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
+          const isMatch = !query || matchIds.has(message.id);
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
           const parsedIdentity = provenance === "agent" ? parseAgentIdentity(message.sender) : null;
@@ -1302,12 +1375,17 @@
           const senderSubtitle = parsedIdentity?.ownerAttribution
             ? `<span class="message-sender-subtitle">${escapeHtml(parsedIdentity.ownerAttribution)}</span>`
             : "";
-          // Hide redundant "agent" badge when owner attribution is present
           const showProvenanceBadge = !(provenance === "agent" && parsedIdentity?.ownerAttribution);
           const wrapper = document.createElement("article");
-          wrapper.className = "message" + (provenance === "system" ? " system-message" : "");
+          wrapper.className = "message" + (provenance === "system" ? " system-message" : "") + (query && !isMatch ? " search-dim" : "") + (query && isMatch ? " search-match" : "");
           wrapper.dataset.msgId = message.id;
           wrapper.style.setProperty("--sender-color", senderColor);
+
+          let renderedText = renderMarkdown(message.text);
+          if (query && isMatch) {
+            renderedText = highlightTextInHtml(renderedText, query);
+          }
+
           wrapper.innerHTML = `
             <div class="message-avatar" aria-hidden="true">${escapeHtml(senderInitials(message.sender))}</div>
             <div class="message-body">
@@ -1323,7 +1401,7 @@
                 </div>
               </div>
               <div class="message-bubble">
-                <div class="md-content">${renderMarkdown(message.text)}</div>
+                <div class="md-content">${renderedText}</div>
               </div>
             </div>
           `;
@@ -1332,9 +1410,22 @@
 
         elements.messages.appendChild(fragment);
         updateOwnerLegend();
-        if (!skipScroll) {
+        if (!query && !skipScroll) {
           requestAnimationFrame(() => scrollMessagesToBottom(true));
+        } else if (query && matchIds.size) {
+          const firstMatch = elements.messages.querySelector(".search-match");
+          if (firstMatch) firstMatch.scrollIntoView({ behavior: "smooth", block: "center" });
         }
+      }
+
+      function highlightTextInHtml(html, query) {
+        const parts = html.split(/(<[^>]+>)/);
+        const safeQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`(${safeQuery})`, "gi");
+        return parts.map(part => {
+          if (part.startsWith("<")) return part;
+          return part.replace(re, '<span class="search-highlight">$1</span>');
+        }).join("");
       }
 
       function upsertMessages(items) {
@@ -1838,6 +1929,32 @@
           state.senderName = "anonymous";
         }
       })();
+
+      // --- Search handlers ---
+      let searchDebounce = null;
+      function openSearch() {
+        elements.searchBar.hidden = false;
+        elements.searchInput.focus();
+      }
+      function closeSearch() {
+        elements.searchBar.hidden = true;
+        state.searchQuery = "";
+        elements.searchInput.value = "";
+        elements.searchCount.textContent = "";
+        renderMessages();
+      }
+      document.getElementById("searchToggleBtn").addEventListener("click", openSearch);
+      elements.searchClose.addEventListener("click", closeSearch);
+      elements.searchInput.addEventListener("input", (e) => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+          state.searchQuery = e.target.value.trim();
+          renderMessages();
+        }, 250);
+      });
+      elements.searchInput.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+      });
 
       window.addEventListener("beforeunload", () => {
         disconnectStream();
