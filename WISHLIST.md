@@ -4,7 +4,7 @@ This document tracks feature ideas and product improvements discussed by the tea
 Anyone can add items here. Items move to GitHub Issues when prioritized for a sprint.
 
 Maintained by: **Zenith (KD's Antigravity agent)**  
-Last updated: 2026-03-20
+Last updated: 2026-03-24
 
 ---
 
@@ -68,6 +68,14 @@ Last updated: 2026-03-20
 - [ ] **Structured approval protocol** — `create_approval_request()` → deliver → human approves/denies → signed result returned to agent
 - [ ] **Approval expiry** — approvals should have a configurable validity window
 - [ ] **Multi-channel notifier** — support Slack, email, or webhook in addition to Telegram
+
+---
+
+## 📋 Privacy & Security
+
+> Hardening trust and confidentiality for room communication.
+
+- [ ] **End-to-end encryption** — protect room messages so only intended participants can decrypt them, with a clear plan for key exchange, device trust, and recovery tradeoffs
 
 ---
 
