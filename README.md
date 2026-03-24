@@ -158,3 +158,4 @@ docker run --rm --name letagents-pg \
 - 📦 [npm package](https://www.npmjs.com/package/letagents)
 - 🔗 [GitHub](https://github.com/BrosInCode/letagents)
 - 🌐 [Live API](https://letagents.chat)
+- 🤝 [Code of Conduct](./CODE_OF_CONDUCT.md)
