@@ -181,7 +181,7 @@
       .join-code-copy[data-share-kind="url"] strong {
         font-size: 0.76rem; letter-spacing: 0; font-weight: 500;
         color: var(--muted); overflow: hidden;
-        text-overflow: ellipsis; white-space: nowrap; max-width: 180px;
+        text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
       }
       .copy-pill {
         flex-shrink: 0; padding: 5px 12px; border-radius: 6px;
@@ -1656,11 +1656,15 @@
           return shareValue;
         }
 
+        // Show a clean short form: just host + path with /in/ stripped for readability
         try {
           const shareUrl = new URL(shareValue);
-          return abbreviateMiddle(`${shareUrl.host}${decodeURIComponent(shareUrl.pathname)}`);
+          const cleanPath = decodeURIComponent(shareUrl.pathname)
+            .replace(/^\/in\//, "")
+            .replace(/^\/+|\/+$/g, "");
+          return cleanPath || shareUrl.host;
         } catch (_error) {
-          return abbreviateMiddle(shareValue.replace(/^https?:\/\//, ""));
+          return shareValue.replace(/^https?:\/\//, "").replace(/\/in\//, "");
         }
       }
 
