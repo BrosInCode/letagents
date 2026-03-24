@@ -704,11 +704,76 @@
         .toast { max-width: none; }
       }
 
+      @media (max-width: 860px) {
+        .chat-header {
+          flex-wrap: wrap;
+          align-items: flex-start;
+          height: auto;
+          padding: 12px 16px;
+          row-gap: 10px;
+        }
+        .chat-title {
+          flex: 1 1 220px;
+          min-width: min(220px, 100%);
+        }
+        .header-actions {
+          flex: 1 1 100%;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .header-search.active {
+          order: 3;
+          flex: 1 1 100%;
+          width: 100%;
+        }
+        .tab-bar {
+          flex: 1 1 auto;
+          min-width: 0;
+        }
+        .tab-bar button {
+          flex: 1 1 0;
+          text-align: center;
+        }
+        .presence {
+          margin-left: auto;
+        }
+        .composer-toolbar {
+          flex-wrap: wrap;
+          align-items: flex-end;
+        }
+        .composer-toolbar-left {
+          flex: 1 1 100%;
+        }
+      }
+
       @media (max-width: 640px) {
-        .chat-header { padding: 0 12px; height: 48px; }
+        .chat-header { padding: 10px 12px; }
+        .chat-title h2 { font-size: 0.86rem; }
+        .chat-title p { font-size: 0.68rem; }
+        .header-actions { gap: 6px; }
+        .presence {
+          padding: 4px 8px;
+          font-size: 0.68rem;
+        }
+        .tab-bar { width: 100%; }
         .messages { padding: 12px; }
         .composer { padding: 10px 12px 14px; }
+        .composer-card { border-radius: 14px; }
+        .composer-toolbar {
+          padding: 8px 8px 10px 14px;
+        }
+        .composer .message-textarea {
+          padding: 14px 14px 6px;
+        }
         .composer-footer { padding: 0 12px 6px; }
+        .board-panel { padding: 12px; }
+        .add-task-form { flex-direction: column; }
+        .join-code-copy[data-share-kind="url"] strong { max-width: 100%; }
+        .message-meta-tail {
+          width: 100%;
+          margin-left: 0;
+        }
       }
 
       /* ── Compat: hide old sidebar class ──────────── */
