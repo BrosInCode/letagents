@@ -312,35 +312,34 @@
       /* ── Messages ────────────────────────────────── */
 
       /* Search */
-      .search-bar {
-        padding: 8px 16px;
-        border-bottom: 1px solid var(--line);
-        display: flex; align-items: center; gap: 8px;
-      }
-      .search-input-wrap {
-        flex: 1; display: flex; align-items: center; gap: 8px;
+      /* Inline search within header */
+      .chat-title.searching { display: none; }
+      .header-search {
+        display: none; flex: 1; align-items: center; gap: 8px;
         background: var(--surface);
         border: 1px solid var(--line);
         border-radius: 8px;
-        padding: 6px 12px;
+        padding: 4px 10px;
+        min-width: 0;
         transition: border-color 0.2s;
       }
-      .search-input-wrap:focus-within {
+      .header-search.active { display: flex; }
+      .header-search:focus-within {
         border-color: var(--accent);
         box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.18);
       }
-      .search-input-wrap svg { flex-shrink: 0; opacity: 0.5; }
-      .search-input-wrap .input {
+      .header-search svg { flex-shrink: 0; opacity: 0.5; width: 14px; height: 14px; }
+      .header-search .input {
         flex: 1; border: none; background: none; outline: none;
-        font-size: 0.88rem; color: inherit; padding: 0;
+        font-size: 0.82rem; color: inherit; padding: 0; min-width: 0;
       }
-      .search-count { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
-      .search-close {
+      .header-search .search-count { font-size: 0.72rem; color: var(--muted); white-space: nowrap; }
+      .header-search .search-close {
         background: none; border: none; color: var(--muted);
-        font-size: 1.2rem; cursor: pointer; padding: 0 4px; line-height: 1;
+        font-size: 1.1rem; cursor: pointer; padding: 0 2px; line-height: 1;
         transition: color 0.15s;
       }
-      .search-close:hover { color: var(--text); }
+      .header-search .search-close:hover { color: var(--text); }
       .message.search-dim { opacity: 0.15; transition: opacity 0.2s; }
       .message.search-match {
         border-left: 3px solid var(--accent);
@@ -791,6 +790,12 @@
           <h2 id="chatTitle">No active room</h2>
           <p id="chatSubtitle">Create a new room or join one with a code.</p>
         </div>
+        <div class="header-search" id="headerSearch">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="searchInput" class="input" placeholder="Search messages..." autocomplete="off" />
+          <span class="search-count" id="searchCount"></span>
+          <button class="search-close" id="searchClose" type="button" aria-label="Close search">&times;</button>
+        </div>
         <div class="header-actions">
           <button class="rename-btn" id="renameRoomBtn" type="button" hidden aria-label="Rename room"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
           <button class="rename-btn" id="searchToggleBtn" type="button" aria-label="Search messages" title="Search messages"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
@@ -801,16 +806,6 @@
           <div class="presence" id="presenceBadge" data-state="idle">Waiting for room</div>
         </div>
       </header>
-
-      <!-- Search Bar -->
-      <div class="search-bar" id="searchBar" hidden>
-        <div class="search-input-wrap">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input type="text" id="searchInput" class="input" placeholder="Search messages..." autocomplete="off" />
-          <span class="search-count" id="searchCount"></span>
-          <button class="search-close" id="searchClose" type="button" aria-label="Close search">&times;</button>
-        </div>
-      </div>
 
       <!-- Messages -->
       <div class="messages-wrap">
@@ -907,7 +902,7 @@
         sendMessageBtn: document.getElementById("sendMessageBtn"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
-        searchBar: document.getElementById("searchBar"),
+        headerSearch: document.getElementById("headerSearch"),
         searchInput: document.getElementById("searchInput"),
         searchCount: document.getElementById("searchCount"),
         searchClose: document.getElementById("searchClose"),
@@ -1992,11 +1987,13 @@
       // --- Search handlers ---
       let searchDebounce = null;
       function openSearch() {
-        elements.searchBar.hidden = false;
+        document.querySelector(".chat-title").classList.add("searching");
+        elements.headerSearch.classList.add("active");
         elements.searchInput.focus();
       }
       function closeSearch() {
-        elements.searchBar.hidden = true;
+        document.querySelector(".chat-title").classList.remove("searching");
+        elements.headerSearch.classList.remove("active");
         state.searchQuery = "";
         elements.searchInput.value = "";
         elements.searchCount.textContent = "";
