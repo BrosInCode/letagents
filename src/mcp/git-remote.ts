@@ -1,5 +1,7 @@
 // ---------------------------------------------------------------------------
-// Task 3: Git Remote URL Normalization
+// Git Remote URL Normalization
+// @module git-remote
+// @author Kingdavid Ehindero <kdof64squares@gmail.com>
 // ---------------------------------------------------------------------------
 // Normalizes SSH and HTTPS git remote URLs to a canonical form:
 //   host/owner/repo

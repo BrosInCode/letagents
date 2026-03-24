@@ -1,3 +1,5 @@
+import { encodeRoomIdPath } from "./room-id.js";
+
 export interface Message {
   id: string;
   sender: string;
@@ -10,63 +12,108 @@ interface Subscription {
   promise: Promise<void>;
 }
 
+interface SubscriptionTarget {
+  roomId: string;
+  projectId?: string | null;
+}
+
 export class SseClient {
   private readonly apiUrl: string;
+  private readonly getAccessToken?: () => string | null;
   private readonly subscriptions = new Map<string, Subscription>();
 
-  constructor(apiUrl: string) {
+  constructor(apiUrl: string, getAccessToken?: () => string | null) {
     this.apiUrl = apiUrl.replace(/\/$/, "");
+    this.getAccessToken = getAccessToken;
   }
 
-  subscribe(projectId: string, onMessage: (message: Message) => void): void {
-    if (this.subscriptions.has(projectId)) {
+  subscribe(target: SubscriptionTarget, onMessage: (message: Message) => void): void {
+    const subscriptionKey = target.roomId;
+    if (this.subscriptions.has(subscriptionKey)) {
       return;
     }
 
     const controller = new AbortController();
-    const promise = this.consumeStream(projectId, controller.signal, onMessage)
+    const promise = this.consumeStream(target, controller.signal, onMessage)
       .catch((error: unknown) => {
         if (controller.signal.aborted) {
           return;
         }
 
-        console.error(`SSE subscription failed for project ${projectId}:`, error);
+        console.error(`SSE subscription failed for room ${target.roomId}:`, error);
       })
       .finally(() => {
-        const current = this.subscriptions.get(projectId);
+        const current = this.subscriptions.get(subscriptionKey);
         if (current?.controller === controller) {
-          this.subscriptions.delete(projectId);
+          this.subscriptions.delete(subscriptionKey);
         }
       });
 
-    this.subscriptions.set(projectId, { controller, promise });
+    this.subscriptions.set(subscriptionKey, { controller, promise });
   }
 
-  unsubscribe(projectId: string): void {
-    const subscription = this.subscriptions.get(projectId);
+  unsubscribe(roomId: string): void {
+    const subscription = this.subscriptions.get(roomId);
     if (!subscription) {
       return;
     }
 
     subscription.controller.abort();
-    this.subscriptions.delete(projectId);
+    this.subscriptions.delete(roomId);
   }
 
   unsubscribeAll(): void {
-    for (const projectId of this.subscriptions.keys()) {
-      this.unsubscribe(projectId);
+    for (const roomId of this.subscriptions.keys()) {
+      this.unsubscribe(roomId);
     }
   }
 
+  private getHeaders(): Record<string, string> {
+    const token = this.getAccessToken?.();
+    if (!token) {
+      return { Accept: "text/event-stream" };
+    }
+
+    return {
+      Accept: "text/event-stream",
+      Authorization: `Bearer ${token}`,
+    };
+  }
+
   private async consumeStream(
-    projectId: string,
+    target: SubscriptionTarget,
+    signal: AbortSignal,
+    onMessage: (message: Message) => void
+  ): Promise<void> {
+    try {
+      await this.openStream(
+        `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`,
+        signal,
+        onMessage
+      );
+      return;
+    } catch (error) {
+      if (!target.projectId || !this.isMissingRouteError(error)) {
+        throw error;
+      }
+    }
+
+    await this.openStream(
+      `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`,
+      signal,
+      onMessage
+    );
+  }
+
+  private async openStream(
+    url: string,
     signal: AbortSignal,
     onMessage: (message: Message) => void
   ): Promise<void> {
     const response = await fetch(
-      `${this.apiUrl}/projects/${encodeURIComponent(projectId)}/messages/stream`,
+      url,
       {
-        headers: { Accept: "text/event-stream" },
+        headers: this.getHeaders(),
         signal,
       }
     );
@@ -118,5 +165,12 @@ export class SseClient {
     }
 
     onMessage(JSON.parse(dataLines.join("\n")) as Message);
+  }
+
+  private isMissingRouteError(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      /status 404|status 405|Cannot (GET|POST|PATCH)/.test(error.message)
+    );
   }
 }
