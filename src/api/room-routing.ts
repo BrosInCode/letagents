@@ -49,10 +49,10 @@ export function isInviteCode(value: string): boolean {
  *   - Apply provider-specific casing (GitHub → lowercase)
  *
  * Examples:
- *   "github.com/EmmyMay/letagents.git"         → "github.com/emmymay/letagents"
- *   "https://github.com/EmmyMay/LetAgents/"    → "github.com/emmymay/letagents"
- *   "git@github.com:EmmyMay/letagents.git"     → "github.com/emmymay/letagents"
- *   "github.com/EmmyMay/LetAgents/"            → "github.com/emmymay/letagents"
+ *   "github.com/BrosInCode/letagents.git"         → "github.com/brosincode/letagents"
+ *   "https://github.com/BrosInCode/letagents/"    → "github.com/brosincode/letagents"
+ *   "git@github.com:BrosInCode/letagents.git"     → "github.com/brosincode/letagents"
+ *   "github.com/BrosInCode/letagents/"            → "github.com/brosincode/letagents"
  *   "gitlab.com/User/Repo"                     → "gitlab.com/User/Repo" (preserves case)
  */
 export function normalizeRoomName(name: string): string {

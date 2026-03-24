@@ -29,11 +29,11 @@ describe("findLetagentsConfig", () => {
     tempDir = createTempDir();
     writeFileSync(
       join(tempDir, ".letagents.json"),
-      JSON.stringify({ room: "github.com/EmmyMay/letagents" })
+      JSON.stringify({ room: "github.com/BrosInCode/letagents" })
     );
 
     const config = findLetagentsConfig(tempDir);
-    expect(config).toEqual({ room: "github.com/EmmyMay/letagents" });
+    expect(config).toEqual({ room: "github.com/BrosInCode/letagents" });
   });
 
   it("walks up to find config in parent directory", () => {
@@ -96,11 +96,11 @@ describe("findLetagentsConfig", () => {
     tempDir = createTempDir();
     writeFileSync(
       join(tempDir, ".letagents.json"),
-      JSON.stringify({ room: "  github.com/EmmyMay/letagents  " })
+      JSON.stringify({ room: "  github.com/BrosInCode/letagents  " })
     );
 
     const config = findLetagentsConfig(tempDir);
-    expect(config).toEqual({ room: "github.com/EmmyMay/letagents" });
+    expect(config).toEqual({ room: "github.com/BrosInCode/letagents" });
   });
 });
 
@@ -115,11 +115,11 @@ describe("getRoomFromConfig", () => {
     tempDir = createTempDir();
     writeFileSync(
       join(tempDir, ".letagents.json"),
-      JSON.stringify({ room: "github.com/EmmyMay/letagents" })
+      JSON.stringify({ room: "github.com/BrosInCode/letagents" })
     );
 
     const room = getRoomFromConfig(tempDir);
-    expect(room).toBe("github.com/EmmyMay/letagents");
+    expect(room).toBe("github.com/BrosInCode/letagents");
   });
 
   it("returns null when no config exists", () => {

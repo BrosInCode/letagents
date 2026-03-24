@@ -7,7 +7,7 @@
 // Parses the config and returns the room name if found.
 //
 // Config format:
-//   { "room": "github.com/EmmyMay/letagents" }
+//   { "room": "github.com/BrosInCode/letagents" }
 
 import { readFileSync, existsSync } from "fs";
 import { join, dirname, resolve } from "path";
