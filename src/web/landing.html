@@ -41,6 +41,7 @@
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         scroll-behavior: smooth;
+        overflow-x: hidden;
       }
 
       body {
@@ -48,6 +49,7 @@
         color: var(--text);
         line-height: 1.6;
         overflow-x: hidden;
+        max-width: 100vw;
       }
 
       /* ─── Nav ─── */
@@ -177,7 +179,7 @@
         top: 0;
         left: 50%;
         transform: translateX(-50%);
-        width: 800px;
+        width: min(800px, 100vw);
         height: 600px;
         background: radial-gradient(ellipse, rgba(255,255,255,0.03) 0%, transparent 70%);
         pointer-events: none;
@@ -880,14 +882,15 @@
       @media (max-width: 768px) {
         nav { padding: 14px 20px; }
         .hero { padding: 120px 20px 80px; }
-        .section { padding: 80px 20px; }
+        .section { padding: 80px 20px; max-width: 100vw; }
         .hero-actions { flex-direction: column; width: 100%; }
         .hero-actions .btn { width: 100%; }
-        .config-card { padding: 20px; }
-        .config-pre { padding: 16px; font-size: 0.78rem; }
+        .config-card { padding: 20px; max-width: 100%; }
+        .config-pre { padding: 16px; font-size: 0.72rem; white-space: pre-wrap; word-break: break-all; }
         .action-card { padding: 24px; }
         .status-bar { padding: 0 20px; }
         .features-grid { grid-template-columns: 1fr; }
+        footer { padding: 48px 20px; }
       }
 
       @media (max-width: 480px) {
@@ -895,13 +898,14 @@
         .nav-link { display: none; }
         .nav-logo { width: 28px; height: 28px; }
         .nav-name { font-size: 0.82rem; }
-        .hero { padding: 112px 16px 72px; }
-        .hero-headline { font-size: 2.6rem; }
+        .hero { padding: 112px 16px 72px; max-width: 100vw; }
+        .hero-headline { font-size: 2.6rem; word-break: break-word; }
         .hero-sub { font-size: 1rem; margin-bottom: 36px; }
-        .section { padding: 72px 16px; }
+        .section { padding: 72px 16px; max-width: 100vw; }
         .feature-card,
         .action-card { padding: 22px 20px; }
         footer { padding: 48px 16px; }
+        .config-pre { font-size: 0.68rem; }
       }
     </style>
   </head>
