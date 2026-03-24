@@ -32,7 +32,7 @@
     "type": "git",
     "url": "https://github.com/BrosInCode/letagents.git"
   },
-  "license": "MIT",
+  "license": "BUSL-1.1",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "drizzle-orm": "^0.45.1",
