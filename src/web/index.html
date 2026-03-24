@@ -1651,6 +1651,8 @@
             })
           : sortedMessages;
 
+        const matchIds = query ? new Set(filtered.map(m => m.id)) : null;
+
         if (query) {
           elements.searchCount.textContent = `${filtered.length} match${filtered.length !== 1 ? "es" : ""}`;
         }
@@ -1658,7 +1660,7 @@
         const fragment = document.createDocumentFragment();
 
         for (const message of sortedMessages) {
-          const isMatch = !query || filtered.includes(message);
+          const isMatch = !query || matchIds.has(message.id);
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
           const parsedIdentity = provenance === "agent" ? parseAgentIdentity(message.sender) : null;
