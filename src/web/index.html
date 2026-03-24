@@ -15,6 +15,8 @@
       rel="stylesheet"
     />
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -387,10 +389,18 @@
         background: var(--surface); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.84em;
       }
       .message-bubble .md-content pre {
+        position: relative;
         padding: 12px; border-radius: 8px;
         background: var(--bg-2); margin: 6px 0; overflow-x: auto;
       }
+      .message-bubble .md-content pre code.hljs { background: transparent; padding: 0; font-size: 0.82em; }
       .message-bubble .md-content pre code { padding: 0; background: none; font-size: 0.82em; }
+      .code-lang-label {
+        position: absolute; top: 6px; right: 10px;
+        font-size: 0.68em; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--muted); opacity: 0.6; font-family: 'Inter', sans-serif;
+        pointer-events: none;
+      }
       .message-bubble .md-content ul, .message-bubble .md-content ol { margin: 4px 0; padding-left: 1.4em; }
       .message-bubble .md-content a { color: #60a5fa; text-decoration: none; }
       .message-bubble .md-content a:hover { text-decoration: underline; }
@@ -1116,14 +1126,32 @@
       // NOTE: text param is pre-rendered HTML from marked (e.g. <strong>bold</strong>),
       // so it is intentionally NOT escaped here.
       if (typeof marked !== "undefined" && marked.use) {
-        const renderer = { link({ href, title, text }) {
-          // Sanitize href: block javascript: protocol, preserve valid URL chars
-          const rawHref = (href || "").trim();
-          const safeHref = /^\s*javascript\s*:/i.test(rawHref) ? "" : rawHref.replace(/"/g, "&quot;");
-          const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-          return `<a href="${safeHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
-        }};
-        marked.use({ renderer });
+        const rendererOverrides = {
+          link({ href, title, text }) {
+            // Sanitize href: block javascript: protocol, preserve valid URL chars
+            const rawHref = (href || "").trim();
+            const safeHref = /^\s*javascript\s*:/i.test(rawHref) ? "" : rawHref.replace(/"/g, "&quot;");
+            const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+            return `<a href="${safeHref}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
+          },
+        };
+
+        // Syntax highlighting via highlight.js
+        if (typeof hljs !== "undefined") {
+          rendererOverrides.code = function({ text, lang }) {
+            const language = lang && hljs.getLanguage(lang) ? lang : null;
+            const highlighted = language
+              ? hljs.highlight(text, { language }).value
+              : hljs.highlightAuto(text).value;
+            const langClass = language ? `hljs language-${escapeHtml(language)}` : "hljs";
+            const langLabel = language
+              ? `<span class="code-lang-label">${escapeHtml(language)}</span>`
+              : "";
+            return `<pre>${langLabel}<code class="${langClass}">${highlighted}</code></pre>`;
+          };
+        }
+
+        marked.use({ renderer: rendererOverrides });
       }
 
       function renderMarkdown(text) {
