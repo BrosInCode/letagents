@@ -55,16 +55,33 @@
       /* ─── Nav ─── */
       nav {
         position: fixed;
-        top: 0; left: 0; right: 0;
+        top: 12px; left: 24px; right: 24px;
         z-index: 100;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 16px 40px;
-        background: rgba(10, 10, 10, 0.72);
-        backdrop-filter: blur(20px) saturate(180%);
-        -webkit-backdrop-filter: blur(20px) saturate(180%);
-        border-bottom: 1px solid var(--border);
+        padding: 12px 24px;
+        background: rgba(12, 12, 12, 0.78);
+        backdrop-filter: blur(24px) saturate(200%);
+        -webkit-backdrop-filter: blur(24px) saturate(200%);
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        box-shadow:
+          0 0 0 1px rgba(255,255,255,0.03),
+          0 4px 24px rgba(0,0,0,0.4),
+          0 1px 3px rgba(0,0,0,0.2),
+          inset 0 1px 0 rgba(255,255,255,0.04);
+      }
+
+      nav::after {
+        content: '';
+        position: absolute;
+        bottom: -1px;
+        left: 20%;
+        right: 20%;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(148,163,184,0.25), rgba(226,232,240,0.15), rgba(148,163,184,0.25), transparent);
+        border-radius: 1px;
       }
 
       .nav-brand {
@@ -73,51 +90,84 @@
         gap: 12px;
         text-decoration: none;
         color: var(--text);
+        transition: opacity 200ms;
       }
 
+      .nav-brand:hover { opacity: 0.85; }
+
       .nav-logo {
-        width: 32px;
-        height: 32px;
+        width: 30px;
+        height: 30px;
         border-radius: 8px;
-        background: linear-gradient(135deg, #e2e8f0, #94a3b8);
+        background: linear-gradient(135deg, #e2e8f0 0%, #94a3b8 50%, #cbd5e1 100%);
         display: grid;
         place-items: center;
         font-weight: 900;
-        font-size: 0.7rem;
+        font-size: 0.62rem;
         color: #0f172a;
-        letter-spacing: 0.02em;
+        letter-spacing: 0.04em;
+        box-shadow: 0 2px 8px rgba(148,163,184,0.2);
+        transition: transform 300ms, box-shadow 300ms;
+      }
+
+      .nav-brand:hover .nav-logo {
+        transform: scale(1.06);
+        box-shadow: 0 3px 12px rgba(148,163,184,0.3);
       }
 
       .nav-name {
-        font-size: 0.95rem;
+        font-size: 0.9rem;
         font-weight: 600;
         letter-spacing: -0.01em;
+        color: rgba(255,255,255,0.9);
       }
 
       .nav-links {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 2px;
       }
 
       .nav-link {
-        padding: 8px 16px;
-        border-radius: var(--radius-sm);
-        font-size: 0.88rem;
+        position: relative;
+        padding: 6px 14px;
+        border-radius: 8px;
+        font-size: 0.82rem;
         font-weight: 500;
-        color: var(--text-secondary);
+        color: rgba(255,255,255,0.45);
         text-decoration: none;
-        transition: color 200ms, background 200ms;
+        transition: color 250ms, background 250ms;
+        letter-spacing: 0.01em;
       }
 
-      .nav-link:hover { color: var(--text); background: var(--accent-dim); }
+      .nav-link::after {
+        content: '';
+        position: absolute;
+        bottom: 2px;
+        left: 50%;
+        width: 0;
+        height: 1.5px;
+        background: linear-gradient(90deg, #94a3b8, #e2e8f0);
+        border-radius: 1px;
+        transform: translateX(-50%);
+        transition: width 250ms ease;
+      }
+
+      .nav-link:hover {
+        color: rgba(255,255,255,0.9);
+        background: rgba(255,255,255,0.04);
+      }
+
+      .nav-link:hover::after {
+        width: 60%;
+      }
 
       /* ─── Nav Auth ─── */
       .nav-divider {
         width: 1px;
-        height: 20px;
-        background: var(--border-strong);
-        margin: 0 4px;
+        height: 18px;
+        background: linear-gradient(180deg, transparent, rgba(255,255,255,0.12), transparent);
+        margin: 0 8px;
       }
 
       .nav-auth {
@@ -133,30 +183,31 @@
       }
 
       .nav-avatar {
-        width: 28px;
-        height: 28px;
-        border-radius: 8px;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
         object-fit: cover;
-        border: 1px solid var(--border);
+        border: 1.5px solid rgba(255,255,255,0.12);
+        box-shadow: 0 1px 4px rgba(0,0,0,0.3);
       }
 
       .nav-avatar-fallback {
-        width: 28px;
-        height: 28px;
-        border-radius: 8px;
-        background: var(--accent-dim);
-        border: 1px solid var(--border);
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, rgba(148,163,184,0.2), rgba(226,232,240,0.1));
+        border: 1.5px solid rgba(255,255,255,0.1);
         display: grid;
         place-items: center;
         font-weight: 800;
-        font-size: 0.62rem;
+        font-size: 0.58rem;
         color: var(--text);
       }
 
       .nav-username {
-        font-size: 0.82rem;
+        font-size: 0.8rem;
         font-weight: 600;
-        color: var(--text);
+        color: rgba(255,255,255,0.8);
         max-width: 120px;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -164,21 +215,22 @@
       }
 
       .nav-signout {
-        padding: 6px 12px;
-        border-radius: 8px;
-        font-size: 0.78rem;
+        padding: 5px 12px;
+        border-radius: 6px;
+        font-size: 0.72rem;
         font-weight: 600;
-        color: var(--text-tertiary);
-        background: none;
-        border: 1px solid var(--border);
+        color: rgba(255,255,255,0.35);
+        background: transparent;
+        border: 1px solid rgba(255,255,255,0.08);
         cursor: pointer;
-        transition: color 200ms, border-color 200ms, background 200ms;
+        transition: all 200ms;
+        letter-spacing: 0.01em;
       }
 
       .nav-signout:hover {
-        color: var(--text);
-        border-color: var(--border-strong);
-        background: var(--accent-dim);
+        color: rgba(255,255,255,0.8);
+        border-color: rgba(255,255,255,0.15);
+        background: rgba(255,255,255,0.04);
       }
 
       /* ─── Buttons ─── */
@@ -1061,16 +1113,16 @@
       }
 
       @media (max-width: 900px) {
-        nav { padding: 14px 20px; gap: 12px; }
-        .nav-links { gap: 6px; }
+        nav { padding: 10px 18px; left: 16px; right: 16px; gap: 8px; }
+        .nav-links { gap: 2px; }
         .nav-link.nav-section-link { display: none; }
-        .nav-name { font-size: 0.88rem; }
+        .nav-name { font-size: 0.84rem; }
         .nav-divider { display: none; }
         .nav-username { display: none; }
       }
 
       @media (max-width: 768px) {
-        nav { padding: 14px 20px; }
+        nav { padding: 10px 16px; left: 12px; right: 12px; top: 8px; }
         .hero { padding: 120px 20px 80px; }
         .section { padding: 80px 20px; max-width: 100vw; }
         .hero-actions { flex-direction: column; width: 100%; }
@@ -1084,10 +1136,10 @@
       }
 
       @media (max-width: 480px) {
-        nav { padding: 12px 14px; }
+        nav { padding: 10px 12px; left: 8px; right: 8px; top: 6px; border-radius: 12px; }
         .nav-link.nav-section-link { display: none; }
-        .nav-logo { width: 28px; height: 28px; }
-        .nav-name { font-size: 0.82rem; }
+        .nav-logo { width: 26px; height: 26px; }
+        .nav-name { font-size: 0.8rem; }
         .hero { padding: 112px 16px 72px; max-width: 100vw; }
         .hero-headline { font-size: 2.6rem; word-break: break-word; }
         .hero-sub { font-size: 1rem; margin-bottom: 36px; }
