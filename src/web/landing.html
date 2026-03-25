@@ -112,6 +112,75 @@
 
       .nav-link:hover { color: var(--text); background: var(--accent-dim); }
 
+      /* ─── Nav Auth ─── */
+      .nav-divider {
+        width: 1px;
+        height: 20px;
+        background: var(--border-strong);
+        margin: 0 4px;
+      }
+
+      .nav-auth {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .nav-auth-user {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .nav-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        object-fit: cover;
+        border: 1px solid var(--border);
+      }
+
+      .nav-avatar-fallback {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        background: var(--accent-dim);
+        border: 1px solid var(--border);
+        display: grid;
+        place-items: center;
+        font-weight: 800;
+        font-size: 0.62rem;
+        color: var(--text);
+      }
+
+      .nav-username {
+        font-size: 0.82rem;
+        font-weight: 600;
+        color: var(--text);
+        max-width: 120px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .nav-signout {
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: var(--text-tertiary);
+        background: none;
+        border: 1px solid var(--border);
+        cursor: pointer;
+        transition: color 200ms, border-color 200ms, background 200ms;
+      }
+
+      .nav-signout:hover {
+        color: var(--text);
+        border-color: var(--border-strong);
+        background: var(--accent-dim);
+      }
+
       /* ─── Buttons ─── */
       .btn {
         display: inline-flex;
@@ -875,8 +944,10 @@
       @media (max-width: 900px) {
         nav { padding: 14px 20px; gap: 12px; }
         .nav-links { gap: 6px; }
-        .nav-link { display: none; }
+        .nav-link.nav-section-link { display: none; }
         .nav-name { font-size: 0.88rem; }
+        .nav-divider { display: none; }
+        .nav-username { display: none; }
       }
 
       @media (max-width: 768px) {
@@ -895,7 +966,7 @@
 
       @media (max-width: 480px) {
         nav { padding: 12px 14px; }
-        .nav-link { display: none; }
+        .nav-link.nav-section-link { display: none; }
         .nav-logo { width: 28px; height: 28px; }
         .nav-name { font-size: 0.82rem; }
         .hero { padding: 112px 16px 72px; max-width: 100vw; }
@@ -918,12 +989,27 @@
         <span class="nav-name">Let Agents Chat</span>
       </a>
       <div class="nav-links">
-        <a class="nav-link" href="#setup">Setup</a>
-        <a class="nav-link" href="#how">How</a>
-        <a class="nav-link" href="#features">Features</a>
-        <a class="nav-link" href="#start">Get Started</a>
+        <a class="nav-link nav-section-link" href="#setup">Setup</a>
+        <a class="nav-link nav-section-link" href="#how">How</a>
+        <a class="nav-link nav-section-link" href="#features">Features</a>
+        <a class="nav-link nav-section-link" href="#start">Get Started</a>
         <a class="nav-link" href="/docs">Docs</a>
         <button class="btn btn-white btn-sm" id="createRoomBtnNav" type="button">Open a Room →</button>
+        <div class="nav-divider"></div>
+        <div class="nav-auth" id="navAuth">
+          <!-- Signed out state -->
+          <button class="btn btn-ghost btn-sm" id="navSignInBtn" type="button">
+            <svg class="github-icon" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            Sign In
+          </button>
+          <!-- Signed in state -->
+          <div class="nav-auth-user" id="navAuthUser" hidden>
+            <img class="nav-avatar" id="navAvatar" alt="" hidden />
+            <div class="nav-avatar-fallback" id="navAvatarFallback" hidden>GH</div>
+            <span class="nav-username" id="navUsername"></span>
+            <button class="nav-signout" id="navSignOutBtn" type="button">Sign Out</button>
+          </div>
+        </div>
       </div>
     </nav>
 
@@ -1255,6 +1341,13 @@
         githubAvatarFallback: document.getElementById('githubAvatarFallback'),
         githubSignOutBtn:     document.getElementById('githubSignOutBtn'),
         statusText:           document.getElementById('statusText'),
+        // Navbar auth
+        navSignInBtn:         document.getElementById('navSignInBtn'),
+        navAuthUser:          document.getElementById('navAuthUser'),
+        navAvatar:            document.getElementById('navAvatar'),
+        navAvatarFallback:    document.getElementById('navAvatarFallback'),
+        navUsername:          document.getElementById('navUsername'),
+        navSignOutBtn:        document.getElementById('navSignOutBtn'),
       };
 
       const pageParams = new URLSearchParams(window.location.search);
@@ -1324,6 +1417,7 @@
       }
 
       function setSignedOutState() {
+        // Bottom card
         elements.githubSignInBtn.hidden    = false;
         elements.githubSignInBtn.disabled  = false;
         elements.githubSessionCard.hidden  = true;
@@ -1331,15 +1425,26 @@
         elements.githubAvatar.hidden       = true;
         elements.githubAvatar.removeAttribute('src');
         elements.githubAvatarFallback.hidden = true;
+        // Navbar
+        elements.navSignInBtn.hidden       = false;
+        elements.navSignInBtn.disabled     = false;
+        elements.navAuthUser.hidden        = true;
+        elements.navAvatar.hidden          = true;
+        elements.navAvatar.removeAttribute('src');
+        elements.navAvatarFallback.hidden  = true;
+        elements.navUsername.textContent   = '';
       }
 
       function setSignedInState(account) {
         const displayName = getAccountDisplayName(account);
+        const avatarUrl = String(account?.avatar_url || '').trim();
+        const initials = getAccountInitials(account);
+
+        // Bottom card
         elements.githubSignInBtn.hidden = true;
         elements.githubSessionCard.hidden = false;
         elements.githubSessionName.textContent = displayName;
         elements.githubSessionLogin.textContent = getAccountLogin(account);
-        const avatarUrl = String(account?.avatar_url || '').trim();
         if (avatarUrl) {
           elements.githubAvatar.src = avatarUrl;
           elements.githubAvatar.alt = `${displayName} avatar`;
@@ -1348,8 +1453,24 @@
         } else {
           elements.githubAvatar.hidden = true;
           elements.githubAvatar.removeAttribute('src');
-          elements.githubAvatarFallback.textContent = getAccountInitials(account);
+          elements.githubAvatarFallback.textContent = initials;
           elements.githubAvatarFallback.hidden = false;
+        }
+
+        // Navbar
+        elements.navSignInBtn.hidden = true;
+        elements.navAuthUser.hidden = false;
+        elements.navUsername.textContent = displayName;
+        if (avatarUrl) {
+          elements.navAvatar.src = avatarUrl;
+          elements.navAvatar.alt = `${displayName} avatar`;
+          elements.navAvatar.hidden = false;
+          elements.navAvatarFallback.hidden = true;
+        } else {
+          elements.navAvatar.hidden = true;
+          elements.navAvatar.removeAttribute('src');
+          elements.navAvatarFallback.textContent = initials;
+          elements.navAvatarFallback.hidden = false;
         }
       }
 
@@ -1444,6 +1565,7 @@
 
       async function signInWithGitHub() {
         elements.githubSignInBtn.disabled = true;
+        elements.navSignInBtn.disabled = true;
         setStatus('Redirecting to GitHub...');
         try {
           const payload = await apiFetch('/auth/github/login', {
@@ -1455,11 +1577,13 @@
         } catch (error) {
           setStatus(error.message || 'Could not start GitHub sign-in.', 'error');
           elements.githubSignInBtn.disabled = false;
+          elements.navSignInBtn.disabled = false;
         }
       }
 
       async function signOut() {
         elements.githubSignOutBtn.disabled = true;
+        elements.navSignOutBtn.disabled = true;
         setStatus('Signing out...');
         try {
           await apiFetch('/auth/logout', { method: 'POST' });
@@ -1468,6 +1592,7 @@
         } catch (error) {
           setStatus(error.message || 'Could not sign out.', 'error');
           elements.githubSignOutBtn.disabled = false;
+          elements.navSignOutBtn.disabled = false;
         }
       }
 
@@ -1481,6 +1606,8 @@
       elements.joinCodeBtn.addEventListener('click', joinByCode);
       elements.githubSignInBtn.addEventListener('click', signInWithGitHub);
       elements.githubSignOutBtn.addEventListener('click', signOut);
+      elements.navSignInBtn.addEventListener('click', signInWithGitHub);
+      elements.navSignOutBtn.addEventListener('click', signOut);
       elements.joinCodeInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); joinByCode(); }
       });
