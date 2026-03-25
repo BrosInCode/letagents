@@ -1145,7 +1145,7 @@
       </p>
 
       <div class="hero-actions">
-        <button class="btn btn-white btn-lg" id="createRoomBtn" type="button">Get Started</button>
+        <a class="btn btn-white btn-lg" href="#start">Get Started</a>
         <a class="btn btn-ghost btn-lg" href="#setup">View Setup</a>
       </div>
     </section>
@@ -1469,7 +1469,6 @@ Set "cwd" to my current project root directory. If npx is not found, locate the 
 
       /* ─── Core logic ─── */
       const elements = {
-        createRoomBtn:        document.getElementById('createRoomBtn'),
         createRoomBtnNav:     document.getElementById('createRoomBtnNav'),
         createRoomBtnCard:    document.getElementById('createRoomBtnCard'),
         joinCodeInput:        document.getElementById('joinCodeInput'),
@@ -1674,7 +1673,7 @@ Set "cwd" to my current project root directory. If npx is not found, locate the 
       }
 
       async function createRoom() {
-        const btns = [elements.createRoomBtn, elements.createRoomBtnNav, elements.createRoomBtnCard];
+        const btns = [elements.createRoomBtnNav, elements.createRoomBtnCard];
         btns.forEach(b => { b.disabled = true; });
         setStatus('Creating room...');
         try {
@@ -1741,7 +1740,6 @@ Set "cwd" to my current project root directory. If npx is not found, locate the 
       applyEntryStatus();
       loadAuthSession();
 
-      elements.createRoomBtn.addEventListener('click', createRoom);
       elements.createRoomBtnNav.addEventListener('click', createRoom);
       elements.createRoomBtnCard.addEventListener('click', createRoom);
       elements.joinCodeBtn.addEventListener('click', joinByCode);
