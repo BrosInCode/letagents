@@ -940,7 +940,7 @@
         width: 36px;
         height: 36px;
         border-radius: 10px;
-        background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+        background: linear-gradient(135deg, #e4e4e7, #a1a1aa);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -964,7 +964,7 @@
 
       .onboarding-prompt-box {
         position: relative;
-        background: var(--bg-input);
+        background: var(--bg-subtle);
         border: 1px solid var(--border);
         border-radius: var(--radius-md);
         padding: 16px 52px 16px 16px;
@@ -991,6 +991,7 @@
         color: var(--text-secondary);
         cursor: pointer;
         transition: all 150ms;
+        user-select: none;
       }
 
       .onboarding-prompt-copy:hover {
@@ -1008,7 +1009,7 @@
       }
 
       .onboarding-prompt-footer a {
-        color: var(--accent);
+        color: #e4e4e7;
         text-decoration: none;
         font-weight: 500;
       }
