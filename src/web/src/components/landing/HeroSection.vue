@@ -3,9 +3,7 @@
     <h1 class="hero-headline">
       Let Agents
       <span class="hero-rotating">
-        <TransitionGroup name="slide">
-          <span :key="currentWord" class="hero-word">{{ currentWord }}</span>
-        </TransitionGroup>
+        <span ref="wordEl" class="hero-word active">{{ currentWord }}</span>
       </span>
     </h1>
     <p class="hero-sub">
@@ -21,19 +19,54 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
-const words = ['Chat', 'Talk', 'Collaborate', 'Connect', 'Coordinate']
-const currentIndex = ref(0)
+const words = ['Chat', 'Converse', 'Collaborate', 'Coordinate', 'Build', 'Ship']
 const currentWord = ref(words[0])
-let interval: ReturnType<typeof setInterval>
+const wordEl = ref<HTMLSpanElement | null>(null)
+let wordIndex = 0
+let interval: ReturnType<typeof setInterval> | null = null
+
+function animateWord() {
+  const el = wordEl.value
+  if (!el) return
+
+  // Fade out + nudge down
+  el.style.opacity = '0'
+  el.style.transform = 'translateY(8px)'
+  el.classList.remove('active')
+
+  setTimeout(() => {
+    wordIndex = (wordIndex + 1) % words.length
+    currentWord.value = words[wordIndex]
+
+    // Fade in from nudged position
+    el.style.opacity = '1'
+    el.style.transform = 'translateY(0)'
+    el.classList.add('active')
+  }, 300)
+}
+
+function startAnimation() {
+  if (!interval) interval = setInterval(animateWord, 2400)
+}
+
+function stopAnimation() {
+  if (interval) { clearInterval(interval); interval = null }
+}
+
+function onVisibility() {
+  if (document.hidden) stopAnimation()
+  else startAnimation()
+}
 
 onMounted(() => {
-  interval = setInterval(() => {
-    currentIndex.value = (currentIndex.value + 1) % words.length
-    currentWord.value = words[currentIndex.value]
-  }, 2500)
+  startAnimation()
+  document.addEventListener('visibilitychange', onVisibility)
 })
 
-onUnmounted(() => clearInterval(interval))
+onUnmounted(() => {
+  stopAnimation()
+  document.removeEventListener('visibilitychange', onVisibility)
+})
 </script>
 
 <style scoped>
@@ -56,34 +89,12 @@ onUnmounted(() => clearInterval(interval))
 .hero-rotating {
   display: block;
   position: relative;
-  height: 1.15em;
-  overflow: hidden;
 }
 
 .hero-word {
   display: block;
   color: #fafafa;
-}
-
-/* Slide transition */
-.slide-enter-active {
-  transition: transform 500ms cubic-bezier(0.16, 1, 0.3, 1), opacity 400ms ease;
-}
-.slide-leave-active {
-  transition: transform 400ms cubic-bezier(0.7, 0, 0.84, 0), opacity 300ms ease;
-}
-
-.slide-enter-from {
-  transform: translateY(100%);
-  opacity: 0;
-}
-
-.slide-leave-to {
-  transform: translateY(-100%);
-  opacity: 0;
-  position: absolute;
-  left: 0;
-  right: 0;
+  transition: opacity 300ms ease, transform 300ms ease;
 }
 
 .hero-sub {
