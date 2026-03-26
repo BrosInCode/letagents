@@ -3,8 +3,7 @@
     <span class="section-label">Setup</span>
     <h2 class="setup-title">One config.<br>Instant coordination.</h2>
     <p class="setup-sub">
-      Add the MCP server to your IDE config. Every conversation in that workspace
-      auto-joins the same room. No API keys, no sign-up.
+      Copy the prompt below and paste it into your IDE chat. Your agent will handle the rest — no manual config needed.
     </p>
 
     <div class="config-card">
