@@ -21,7 +21,7 @@ git checkout staging && git log --oneline -3
 
 2. SSH into server and deploy via git pull:
 ```bash
-ssh emmy@YOUR_SERVER_IP "cd ~/letagents && git pull origin staging && npm install && sudo systemctl restart letagents"
+ssh emmy@YOUR_SERVER_IP "cd ~/letagents && git pull origin staging && npm install && npm run build:web && sudo systemctl restart letagents"
 ```
 
 3. Verify the server is healthy:
