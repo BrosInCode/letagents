@@ -45,12 +45,12 @@ onUnmounted(() => clearInterval(interval))
 }
 
 .hero-headline {
-  font-size: clamp(3rem, 8vw, 5.5rem);
+  font-size: clamp(3rem, 8vw, 6.5rem);
   font-weight: 900;
   letter-spacing: -0.04em;
   line-height: 1.05;
   margin-bottom: var(--space-lg);
-  color: #fff;
+  color: #fafafa;
 }
 
 .hero-rotating {
@@ -62,7 +62,7 @@ onUnmounted(() => clearInterval(interval))
 
 .hero-word {
   display: block;
-  color: #fff;
+  color: #fafafa;
 }
 
 /* Slide transition */

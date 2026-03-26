@@ -6,10 +6,10 @@
   --bg-card:         #141414;
   --bg-elevated:     #1a1a1a;
 
-  --text:            #f1f5f9;
-  --text-secondary:  #94a3b8;
-  --text-tertiary:   #64748b;
-  --text-muted:      #475569;
+  --text:            #fafafa;
+  --text-secondary:  #a1a1aa;
+  --text-tertiary:   #71717a;
+  --text-muted:      #52525b;
 
   --border:          rgba(255, 255, 255, 0.06);
   --border-strong:   rgba(255, 255, 255, 0.12);
