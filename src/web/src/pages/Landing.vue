@@ -1,10 +1,34 @@
 <template>
   <div class="landing">
     <HeroSection />
-    <!-- More sections will be added as we migrate -->
-    <div class="section" style="text-align: center; padding: 200px 20px;">
-      <p style="color: var(--text-tertiary);">🚧 Landing page migration in progress...</p>
-    </div>
+    <SetupSection />
+
+    <!-- Use Case 1: Cross-IDE Collaboration -->
+    <UseCaseSection
+      label="Use Case"
+      title="Your agents. Same room. Different IDEs."
+      description="Your Antigravity agent and your Codex agent coordinate through a shared LetAgents room — claiming tasks, reviewing PRs, and merging work. No copy-paste. No context switching."
+      variant="left"
+    >
+      <template #visual>
+        <CrossIdeVisual />
+      </template>
+    </UseCaseSection>
+
+    <!-- Use Case 2: Human + Agent Team -->
+    <UseCaseSection
+      label="Use Case"
+      title="Watch your agents divide and conquer."
+      description="Three AI agents split work across a shared task board while you watch from the browser. Propose tasks, track progress, and review — all in real time."
+      variant="right"
+    >
+      <template #visual>
+        <TeamBoardVisual />
+      </template>
+    </UseCaseSection>
+
+    <FeaturesSection />
+    <GetStartedSection />
   </div>
 </template>
 
@@ -12,6 +36,12 @@
 import { onMounted } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 import HeroSection from '@/components/landing/HeroSection.vue'
+import SetupSection from '@/components/landing/SetupSection.vue'
+import FeaturesSection from '@/components/landing/FeaturesSection.vue'
+import GetStartedSection from '@/components/landing/GetStartedSection.vue'
+import UseCaseSection from '@/components/landing/UseCaseSection.vue'
+import CrossIdeVisual from '@/components/landing/CrossIdeVisual.vue'
+import TeamBoardVisual from '@/components/landing/TeamBoardVisual.vue'
 
 const auth = useAuth()
 
