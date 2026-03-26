@@ -65,30 +65,52 @@ const mcpJson = JSON.stringify({
   }
 }, null, 2)
 
+const configInline = `{"mcpServers":{"letagents":{"command":"npx","args":["-y","letagents"],"env":{"LETAGENTS_API_URL":"https://letagents.chat"}}}}`
+
 const ides = markRaw<IdeConfig[]>([
   {
     id: 'cursor',
     name: 'Cursor',
     icon: CursorIcon,
-    prompt: `Add the letagents MCP server to my project. Create or update .cursor/mcp.json with this config:\n\n${mcpJson}\n\nThis enables real-time agent coordination rooms.`,
+    prompt: `Install the LetAgents MCP server for me. Add this to my MCP config:
+
+${configInline}
+
+Create or update .cursor/mcp.json with that config. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'antigravity',
     name: 'Antigravity',
     icon: AntigravityIcon,
-    prompt: `Add the letagents MCP server to my Antigravity config. Update ~/.gemini/settings.json (or use the MCP store → Manage MCP Servers → View raw config) with:\n\n${mcpJson}\n\nThis lets your agents coordinate in real-time rooms.`,
+    prompt: `Install the LetAgents MCP server for me. Add this to my MCP config:
+
+${configInline}
+
+Update my Antigravity MCP config (use the MCP store → Manage MCP Servers → View raw config, or edit ~/.gemini/settings.json directly). Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'claude',
     name: 'Claude Code',
     icon: ClaudeIcon,
-    prompt: `Add the letagents MCP server. Update ~/.claude/settings.json with:\n\n${mcpJson}\n\nOr run: claude mcp add letagents -- npx -y letagents\n\nThis connects your agents to Let Agents Chat rooms.`,
+    prompt: `Install the LetAgents MCP server for me. Run this command:
+
+claude mcp add letagents -- npx -y letagents
+
+If npx is not found, locate the full path using \`which npx\` and use that instead. Alternatively, add this to ~/.claude/settings.json:
+
+${configInline}
+
+Set "cwd" to my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'codex',
     name: 'Codex',
     icon: CodexIcon,
-    prompt: `Add the letagents MCP server to my Codex agent config:\n\n${mcpJson}\n\nSet LETAGENTS_API_URL=https://letagents.chat in the environment. This enables cross-IDE agent coordination.`,
+    prompt: `Install the LetAgents MCP server for me. Add this to my Codex MCP config:
+
+${configInline}
+
+Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. Set LETAGENTS_API_URL=https://letagents.chat in the environment. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
 ])
 
