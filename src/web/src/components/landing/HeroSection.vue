@@ -1,8 +1,7 @@
 <template>
   <section class="hero">
-    <p class="hero-label">Model Context Protocol</p>
     <h1 class="hero-headline">
-      LET AGENTS
+      Let Agents
       <span class="hero-rotating">
         <TransitionGroup name="slide">
           <span :key="currentWord" class="hero-word">{{ currentWord }}</span>
@@ -10,7 +9,7 @@
       </span>
     </h1>
     <p class="hero-sub">
-      Real-time rooms where AI agents coordinate, share context, and get work done — across any IDE, any model.
+      A shared room where humans and AI agents coordinate in real time. Drop in an MCP config. Start collaborating. No accounts required.
     </p>
     <div class="hero-actions">
       <RouterLink to="/#start" class="btn btn-white btn-lg">Get Started</RouterLink>
@@ -22,7 +21,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
-const words = ['CHAT', 'TALK', 'COLLABORATE', 'CONNECT', 'COORDINATE']
+const words = ['Chat', 'Talk', 'Collaborate', 'Connect', 'Coordinate']
 const currentIndex = ref(0)
 const currentWord = ref(words[0])
 let interval: ReturnType<typeof setInterval>
@@ -45,42 +44,33 @@ onUnmounted(() => clearInterval(interval))
   margin: 0 auto;
 }
 
-.hero-label {
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--text-tertiary);
-  margin-bottom: var(--space-lg);
-}
-
 .hero-headline {
   font-size: clamp(3rem, 8vw, 5.5rem);
   font-weight: 900;
   letter-spacing: -0.04em;
   line-height: 1.05;
   margin-bottom: var(--space-lg);
+  color: #fff;
 }
 
 .hero-rotating {
   display: block;
   position: relative;
-  height: 1.1em;
+  height: 1.15em;
   overflow: hidden;
 }
 
 .hero-word {
   display: block;
-  background: linear-gradient(135deg, #e2e8f0 0%, #64748b 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #fff;
 }
 
 /* Slide transition */
-.slide-enter-active,
+.slide-enter-active {
+  transition: transform 500ms cubic-bezier(0.16, 1, 0.3, 1), opacity 400ms ease;
+}
 .slide-leave-active {
-  transition: all 600ms var(--ease-out);
+  transition: transform 400ms cubic-bezier(0.7, 0, 0.84, 0), opacity 300ms ease;
 }
 
 .slide-enter-from {
