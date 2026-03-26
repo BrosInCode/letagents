@@ -31,6 +31,7 @@
       </div>
 
       <div class="prompt-body">
+        <p class="prompt-instruction">Paste this into your {{ currentIde.name }} chat to get set up instantly:</p>
         <p class="prompt-text">{{ currentIde.prompt }}</p>
       </div>
     </div>
@@ -205,6 +206,13 @@ async function copyPrompt() {
 
 .prompt-body {
   padding: 24px 28px;
+}
+
+.prompt-instruction {
+  font-size: 0.82rem;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-md);
+  font-weight: 500;
 }
 
 .prompt-text {
