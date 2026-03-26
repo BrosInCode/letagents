@@ -3,16 +3,13 @@
     :width="size"
     :height="size"
     viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    stroke-width="2"
-    stroke-linecap="round"
-    stroke-linejoin="round"
+    fill="currentColor"
     :class="cssClass"
     role="img"
     :aria-label="label"
   >
-    <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>
+    <!-- Cursor's custom cursor pointer shape -->
+    <path d="M5.5 3.21V20.8c0 .45.54.67.86.35l4.86-4.86h5.47c.43 0 .65-.52.35-.86L6.36 2.85a.5.5 0 0 0-.86.36z"/>
   </svg>
 </template>
 
