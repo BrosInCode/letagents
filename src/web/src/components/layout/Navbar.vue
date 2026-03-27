@@ -59,9 +59,7 @@ const auth = useAuth()
 
 const sectionLinks = [
   { to: '/#setup', label: 'Setup' },
-  { to: '/#how', label: 'How' },
   { to: '/#features', label: 'Features' },
-  { to: '/#start', label: 'Get Started' },
 ]
 
 const isScrolled = ref(false)
