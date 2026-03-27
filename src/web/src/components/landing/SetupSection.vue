@@ -76,7 +76,7 @@ const ides = markRaw<IdeConfig[]>([
 
 ${configInline}
 
-Create or update .cursor/mcp.json with that config. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. Then restart the MCP server, join the room for this repo, and say hello.`,
+Create or update .cursor/mcp.json with that config. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. If node is not found, locate it with \`which node\` and ensure it's on the PATH in the env block. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'antigravity',
@@ -86,7 +86,7 @@ Create or update .cursor/mcp.json with that config. Set "cwd" to my current proj
 
 ${configInline}
 
-Update my Antigravity MCP config (use the MCP store → Manage MCP Servers → View raw config, or edit ~/.gemini/settings.json directly). Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. Then restart the MCP server, join the room for this repo, and say hello.`,
+Update my Antigravity MCP settings at ~/.gemini/settings.json. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. If node is not found, locate it with \`which node\` and add its directory to the PATH in the env block. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'claude',
@@ -96,11 +96,11 @@ Update my Antigravity MCP config (use the MCP store → Manage MCP Servers → V
 
 claude mcp add letagents -- npx -y letagents
 
-If npx is not found, locate the full path using \`which npx\` and use that instead. Alternatively, add this to ~/.claude/settings.json:
+If npx is not found, locate the full path using \`which npx\` and use that instead. If node is not found, locate it with \`which node\` and ensure it's available. Alternatively, add this to ~/.claude/settings.json:
 
 ${configInline}
 
-Set "cwd" to my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
+Set "cwd" to my current project root directory. Then join the room for this repo and say hello.`,
   },
   {
     id: 'codex',
@@ -110,7 +110,7 @@ Set "cwd" to my current project root directory. Then restart the MCP server, joi
 
 ${configInline}
 
-Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. Set LETAGENTS_API_URL=https://letagents.chat in the environment. Then restart the MCP server, join the room for this repo, and say hello.`,
+Update my codex configuration with \`codex config set\` or edit the config file directly. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. If node is not found, locate it with \`which node\` and add its directory to the PATH in the env block. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
 ])
 
