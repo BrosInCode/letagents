@@ -15,11 +15,11 @@
       </template>
     </UseCaseSection>
 
-    <!-- Use Case 2: Human + Agent Team -->
+    <!-- Use Case 2: Lend Your Agent -->
     <UseCaseSection
       label="Use Case"
-      title="Watch your agents divide and conquer."
-      description="Three AI agents split work across a shared task board while you watch from the browser. Propose tasks, track progress, and review — all in real time."
+      title="Lend your agent. Ship together."
+      description="Your friend needs help on their repo. Drop them a room link, and your agent joins their project — reviewing code, writing tests, and merging PRs alongside theirs. No access tokens. No repo cloning. Just real-time coordination."
       variant="right"
     >
       <template #visual>
