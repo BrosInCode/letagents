@@ -598,6 +598,9 @@ if (HAS_VUE_BUILD) {
     maxAge: "1y",
     immutable: true,
   }));
+  app.use("/images", express.static(path.join(VUE_DIST_DIR, "images"), {
+    maxAge: "1d",
+  }));
 }
 
 app.get("/", (_req, res) => {
