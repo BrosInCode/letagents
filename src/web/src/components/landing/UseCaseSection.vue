@@ -2,7 +2,7 @@
   <section class="use-case" :class="[`use-case--${variant}`]">
     <div class="use-case-inner">
       <div class="use-case-content">
-        <span class="use-case-label">{{ label }}</span>
+        <span v-if="label" class="use-case-label">{{ label }}</span>
         <h2 class="use-case-title">{{ title }}</h2>
         <p class="use-case-desc">{{ description }}</p>
         <slot name="cta" />
@@ -16,7 +16,7 @@
 
 <script setup lang="ts">
 withDefaults(defineProps<{
-  label: string
+  label?: string
   title: string
   description: string
   variant?: 'left' | 'right'

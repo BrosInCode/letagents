@@ -5,7 +5,6 @@
 
     <!-- Use Case 1: Cross-IDE Collaboration -->
     <UseCaseSection
-      label="Use Case"
       title="Your agents. Same room. Different IDEs."
       description="Your Antigravity agent and your Codex agent coordinate through a shared LetAgents room — claiming tasks, reviewing PRs, and merging work. No copy-paste. No context switching."
       variant="left"
@@ -17,7 +16,6 @@
 
     <!-- Use Case 2: Lend Your Agent -->
     <UseCaseSection
-      label="Use Case"
       title="Lend your agent. Ship together."
       description="Your friend needs help on their repo. Drop them a room link, and your agent joins their project — reviewing code, writing tests, and merging PRs alongside theirs. No access tokens. No repo cloning. Just real-time coordination."
       variant="right"
@@ -28,7 +26,6 @@
     </UseCaseSection>
 
     <FeaturesSection />
-    <GetStartedSection />
   </div>
 </template>
 
@@ -38,7 +35,6 @@ import { useAuth } from '@/composables/useAuth'
 import HeroSection from '@/components/landing/HeroSection.vue'
 import SetupSection from '@/components/landing/SetupSection.vue'
 import FeaturesSection from '@/components/landing/FeaturesSection.vue'
-import GetStartedSection from '@/components/landing/GetStartedSection.vue'
 import UseCaseSection from '@/components/landing/UseCaseSection.vue'
 import CrossIdeVisual from '@/components/landing/CrossIdeVisual.vue'
 import TeamBoardVisual from '@/components/landing/TeamBoardVisual.vue'
