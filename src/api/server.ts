@@ -502,8 +502,9 @@ function normalizeWebMode(rawMode: string | undefined): "legacy" | "vue" {
     return "vue";
   }
   if (normalized !== "" && normalized !== "legacy") {
+    const safeRawMode = JSON.stringify(rawMode ?? "");
     console.warn(
-      `[web] Unknown LETAGENTS_WEB_MODE="${rawMode}". Falling back to legacy mode.`
+      `[web] Unknown LETAGENTS_WEB_MODE=${safeRawMode}. Falling back to legacy mode.`
     );
   }
   return "legacy";
@@ -517,6 +518,10 @@ if (WEB_MODE === "vue" && !HAS_VUE_BUILD) {
     `[web] LETAGENTS_WEB_MODE=vue was set, but ${VUE_INDEX} is missing. Falling back to legacy pages.`
   );
 }
+
+console.log(
+  `[web] Serving ${SHOULD_SERVE_VUE ? "vue" : "legacy"} web UI (requested mode: ${WEB_MODE}).`
+);
 
 const app = express();
 app.use(express.json());

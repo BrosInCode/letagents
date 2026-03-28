@@ -21,7 +21,7 @@ git checkout staging && git log --oneline -3
 
 2. SSH into server and deploy via git pull:
 ```bash
-ssh emmy@YOUR_SERVER_IP "cd ~/letagents && git pull origin staging && npm install && npm run build && rm -rf src/web/dist && sudo systemctl restart letagents"
+ssh emmy@YOUR_SERVER_IP "cd ~/letagents && git pull origin staging && npm install && npm run build && sudo systemctl restart letagents"
 ```
 
 3. Verify the server is healthy:
@@ -53,6 +53,7 @@ ssh emmy@YOUR_SERVER_IP "cd ~/letagents && npm install && sudo systemctl restart
 - Build the web app with `npm run build:web`
 - Set `LETAGENTS_WEB_MODE=vue` in the experiment server's environment before restarting
 - Do not enable `LETAGENTS_WEB_MODE=vue` on the staging server at `letagents.chat`
+- Staging does not need `src/web/dist` removed anymore; the server now defaults to legacy unless `LETAGENTS_WEB_MODE=vue` is explicitly set
 
 ## Important
 - **NEVER rsync to the server** — it overwrites the SQLite database and destroys chat history.
