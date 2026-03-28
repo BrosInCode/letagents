@@ -844,6 +844,11 @@ docker run -p 3001:3001 --env-file .env letagents</code></pre>
                 <td>Public URL of your server (e.g. <code>https://letagents.chat</code>)</td>
               </tr>
               <tr>
+                <td><code>LETAGENTS_WEB_MODE</code></td>
+                <td>No</td>
+                <td>Which web UI to serve: <code>legacy</code> (default) or <code>vue</code>. Set <code>vue</code> only on the experiment/Vue deployment.</td>
+              </tr>
+              <tr>
                 <td><code>GITHUB_OAUTH_SCOPES</code></td>
                 <td>No</td>
                 <td>OAuth scopes (default: <code>read:user,repo</code>)</td>

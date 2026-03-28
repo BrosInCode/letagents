@@ -496,6 +496,28 @@ const VUE_DIST_DIR = path.join(WEB_DIR, "dist");
 const VUE_INDEX = path.join(VUE_DIST_DIR, "index.html");
 const HAS_VUE_BUILD = fs.existsSync(VUE_INDEX);
 
+function normalizeWebMode(rawMode: string | undefined): "legacy" | "vue" {
+  const normalized = (rawMode || "legacy").trim().toLowerCase();
+  if (normalized === "vue") {
+    return "vue";
+  }
+  if (normalized !== "" && normalized !== "legacy") {
+    console.warn(
+      `[web] Unknown LETAGENTS_WEB_MODE="${rawMode}". Falling back to legacy mode.`
+    );
+  }
+  return "legacy";
+}
+
+const WEB_MODE = normalizeWebMode(process.env.LETAGENTS_WEB_MODE);
+const SHOULD_SERVE_VUE = WEB_MODE === "vue" && HAS_VUE_BUILD;
+
+if (WEB_MODE === "vue" && !HAS_VUE_BUILD) {
+  console.warn(
+    `[web] LETAGENTS_WEB_MODE=vue was set, but ${VUE_INDEX} is missing. Falling back to legacy pages.`
+  );
+}
+
 const app = express();
 app.use(express.json());
 
@@ -592,8 +614,8 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
-// Serve Vue build assets first (hashed filenames, safe to cache)
-if (HAS_VUE_BUILD) {
+// Serve Vue build assets only when the server is explicitly configured to use the Vue frontend.
+if (SHOULD_SERVE_VUE) {
   app.use("/assets", express.static(path.join(VUE_DIST_DIR, "assets"), {
     maxAge: "1y",
     immutable: true,
@@ -604,7 +626,7 @@ if (HAS_VUE_BUILD) {
 }
 
 app.get("/", (_req, res) => {
-  if (HAS_VUE_BUILD) {
+  if (SHOULD_SERVE_VUE) {
     res.sendFile(VUE_INDEX);
   } else {
     res.sendFile(path.join(WEB_DIR, "landing.html"));
@@ -612,7 +634,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/docs", (_req, res) => {
-  if (HAS_VUE_BUILD) {
+  if (SHOULD_SERVE_VUE) {
     res.sendFile(VUE_INDEX);
   } else {
     res.sendFile(path.join(WEB_DIR, "docs.html"));
@@ -665,7 +687,7 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  if (HAS_VUE_BUILD) {
+  if (SHOULD_SERVE_VUE) {
     res.sendFile(VUE_INDEX);
   } else {
     res.sendFile(path.join(WEB_DIR, "index.html"));
