@@ -553,21 +553,25 @@
       }
 
       .composer-toolbar {
+        display: flex; flex-direction: column;
+        padding: 4px 8px 8px 14px;
+        gap: 6px;
+      }
+      .composer-toolbar-top {
         display: flex; align-items: center; justify-content: space-between;
-        padding: 6px 8px 8px 16px;
         gap: 8px;
       }
-      .composer-toolbar-left {
-        display: flex; align-items: center; gap: 10px;
-        min-width: 0;
+      .composer-toolbar-pills {
+        display: flex; align-items: center; gap: 6px;
         flex-wrap: wrap;
       }
+      .composer-toolbar-bottom {
+        display: flex; align-items: center; gap: 8px;
+      }
       .composer-identity-cluster {
-        display: flex;
+        display: inline-flex;
         align-items: center;
-        gap: 10px;
-        min-width: 0;
-        flex-wrap: wrap;
+        gap: 6px;
       }
       .composer-sender-label {
         font-size: 0.72rem; color: var(--muted);
@@ -961,11 +965,7 @@
           margin-left: auto;
         }
         .composer-toolbar {
-          flex-wrap: wrap;
-          align-items: flex-end;
-        }
-        .composer-toolbar-left {
-          flex: 1 1 100%;
+          gap: 4px;
         }
         .composer-prompt-panel {
           left: auto;
@@ -1128,9 +1128,8 @@
             rows="1"
           ></textarea>
           <div class="composer-toolbar">
-            <div class="composer-toolbar-left">
-              <div class="composer-identity-cluster">
-                <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
+            <div class="composer-toolbar-top">
+              <div class="composer-toolbar-pills">
                 <div class="composer-prompt-menu" id="promptMenu">
                   <button
                     class="composer-prompt-trigger"
@@ -1162,7 +1161,7 @@
                     >
                       <span class="composer-prompt-option-copy">
                         <span class="composer-prompt-option-title">Auto read + poll</span>
-                        <span class="composer-prompt-option-meta">Prime the agent on room join, then send hidden stay-in-room reminders every 20 seconds.</span>
+                        <span class="composer-prompt-option-meta">Send hidden stay-in-room reminders every 20s</span>
                       </span>
                       <span class="composer-prompt-option-check" id="autoKeepPollingOptionState">Off</span>
                     </button>
@@ -1175,19 +1174,22 @@
                     >
                       <span class="composer-prompt-option-copy">
                         <span class="composer-prompt-option-title">Prompt injection</span>
-                        <span class="composer-prompt-option-meta">Append a hidden polling/read-and-act directive to each visible message you send.</span>
+                        <span class="composer-prompt-option-meta">Append hidden directive to each message</span>
                       </span>
                       <span class="composer-prompt-option-check" id="injectKeepPollingOptionState">Off</span>
                     </button>
-                    <p class="composer-prompt-help">Prompt-only nudges stay hidden. Visible messages with injection get a small label in the room timeline.</p>
+                    <p class="composer-prompt-help">Hidden prompts stay invisible in the timeline.</p>
                   </div>
                 </div>
               </div>
-              <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
+              <button class="send-btn" id="sendMessageBtn" type="submit" aria-label="Send message">
+                <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+              </button>
             </div>
-            <button class="send-btn" id="sendMessageBtn" type="submit" aria-label="Send message">
-              <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
-            </button>
+            <div class="composer-toolbar-bottom">
+              <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
+              <span class="composer-shortcut-hint">⏎ send · ⇧⏎ new line</span>
+            </div>
           </div>
         </div>
       </form>
