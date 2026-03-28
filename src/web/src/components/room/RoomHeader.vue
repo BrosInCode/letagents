@@ -73,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from 'vue'
+import { computed, ref, watch, nextTick, onUnmounted } from 'vue'
 
 const props = defineProps<{
   title: string
@@ -113,8 +113,20 @@ watch(() => props.searchActive, async (active) => {
     await nextTick()
     searchInputEl.value?.focus()
   } else {
+    // Clear pending debounce to prevent stale query from reapplying
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+      debounceTimer = null
+    }
     searchValue.value = ''
     searchCountText.value = ''
+  }
+})
+
+onUnmounted(() => {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer)
+    debounceTimer = null
   }
 })
 

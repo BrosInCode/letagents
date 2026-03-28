@@ -96,19 +96,27 @@ const formattedTime = computed(() => formatTimestamp(props.message.timestamp))
 
 const renderedContent = computed(() => {
   const text = props.message.text || ''
+  let html: string
+
   // Use marked if available globally, otherwise fallback to basic rendering
   if (typeof (window as any).marked !== 'undefined') {
     try {
-      let html = (window as any).marked.parse(text, { breaks: true, gfm: true })
-      if (props.searchQuery && isSearchMatch.value) {
-        html = highlightSearch(html, props.searchQuery)
-      }
-      return html
+      html = (window as any).marked.parse(text, { breaks: true, gfm: true })
     } catch {
-      return escapeAndFormat(text)
+      html = escapeAndFormat(text)
     }
+  } else {
+    html = escapeAndFormat(text)
   }
-  return escapeAndFormat(text)
+
+  // Always sanitize to prevent XSS from room participants
+  html = sanitizeHtml(html)
+
+  if (props.searchQuery && isSearchMatch.value) {
+    html = highlightSearch(html, props.searchQuery)
+  }
+
+  return html
 })
 
 function escapeHtml(str: string): string {
@@ -120,6 +128,61 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#39;')
 }
 
+/** Allowlisted tags and attributes for sanitization */
+const ALLOWED_TAGS = new Set([
+  'p', 'br', 'strong', 'b', 'em', 'i', 'code', 'pre', 'a',
+  'ul', 'ol', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'span', 'div', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+  'del', 'ins', 'sup', 'sub', 'details', 'summary',
+])
+const DANGEROUS_PROTO_RE = /^\s*(javascript|vbscript|data)\s*:/i
+const EVENT_ATTR_RE = /^on/i
+
+function sanitizeHtml(html: string): string {
+  // Parse and filter tags — strip disallowed tags, dangerous attrs, and bad protocols
+  return html.replace(/<\/?([a-z][a-z0-9]*)\b([^>]*)?\/?>/gi, (match, tag, attrs) => {
+    const tagLower = tag.toLowerCase()
+    if (!ALLOWED_TAGS.has(tagLower)) return ''
+
+    // For closing tags, no attrs to process
+    if (match.startsWith('</')) return `</${tagLower}>`
+
+    // Filter attributes
+    const cleanAttrs: string[] = []
+    if (attrs) {
+      const attrRe = /([a-z_-][a-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/gi
+      let m: RegExpExecArray | null
+      while ((m = attrRe.exec(attrs)) !== null) {
+        const attrName = m[1].toLowerCase()
+        const attrValue = m[2] ?? m[3] ?? m[4] ?? ''
+
+        // Block event handlers
+        if (EVENT_ATTR_RE.test(attrName)) continue
+
+        // Block dangerous protocols on href/src
+        if ((attrName === 'href' || attrName === 'src') && DANGEROUS_PROTO_RE.test(attrValue)) continue
+
+        // Only allow safe attributes
+        if (['href', 'src', 'class', 'id', 'target', 'rel', 'title', 'alt', 'colspan', 'rowspan'].includes(attrName)) {
+          cleanAttrs.push(`${attrName}="${escapeHtml(attrValue)}"`)
+        }
+      }
+    }
+
+    // Force external links to open safely
+    if (tagLower === 'a') {
+      if (!cleanAttrs.some(a => a.startsWith('target='))) cleanAttrs.push('target="_blank"')
+      if (!cleanAttrs.some(a => a.startsWith('rel='))) cleanAttrs.push('rel="noopener noreferrer"')
+    }
+
+    return cleanAttrs.length > 0 ? `<${tagLower} ${cleanAttrs.join(' ')}>` : `<${tagLower}>`
+  })
+}
+
+function isSafeUrl(url: string): boolean {
+  return !DANGEROUS_PROTO_RE.test(url)
+}
+
 function escapeAndFormat(text: string): string {
   let html = escapeHtml(text)
   // Basic markdown-like formatting
@@ -129,7 +192,11 @@ function escapeAndFormat(text: string): string {
   })
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+  // Validate link URLs before creating anchors
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, linkText, url) => {
+    if (!isSafeUrl(url)) return escapeHtml(linkText)
+    return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${linkText}</a>`
+  })
   html = html.replace(/\n/g, '<br>')
   return html
 }
