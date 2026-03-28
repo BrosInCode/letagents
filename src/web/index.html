@@ -1227,7 +1227,8 @@
 
     <script>
       const KEEP_POLLING_INTERVAL_MS = 20_000;
-      const PROMPT_PREFERENCES_KEY = "letagents:web:prompt-preferences";
+      const PROMPT_PREFERENCES_STORAGE_PREFIX = "letagents:web:prompt-preferences";
+      const TRUSTED_PROMPT_MESSAGE_IDS_STORAGE_PREFIX = "letagents:web:trusted-prompt-message-ids";
 
       const state = {
         currentProjectId: "",
@@ -1241,6 +1242,7 @@
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
+        trustedPromptMessageIds: new Set(),
         searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem("lac-sound") !== "off",
@@ -1351,32 +1353,46 @@
         return `[[letagents:prompt:${kind}]]\n${buildHiddenPromptInstruction(kind)}\n[[/letagents:prompt]]`;
       }
 
+      function containsPromptBlock(text) {
+        return /\[\[letagents:prompt:[a-z_]+\]\][\s\S]*?\[\[\/letagents:prompt\]\]/i.test(String(text || ""));
+      }
+
       function appendHiddenPromptBlock(text, kind) {
-        if (extractPromptMetadata(text).hasPrompt) {
+        if (containsPromptBlock(text)) {
           return text;
         }
         return `${text}\n\n${buildHiddenPromptBlock(kind)}`;
       }
 
-      function extractPromptMetadata(text) {
+      function extractPromptMetadata(text, trustedPrompt = false) {
         const rawText = String(text || "");
         const promptKinds = [];
         const promptPattern = /\n*\[\[letagents:prompt:([a-z_]+)\]\]\n?([\s\S]*?)\n?\[\[\/letagents:prompt\]\]\n*/gi;
-        const visibleText = rawText
-          .replace(promptPattern, (_match, kind) => {
+        let visibleText = rawText.trim();
+
+        if (trustedPrompt) {
+          visibleText = rawText
+            .replace(promptPattern, (_match, kind) => {
+              promptKinds.push(String(kind || "").toLowerCase());
+              return "\n";
+            })
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+        } else {
+          rawText.replace(promptPattern, (_match, kind) => {
             promptKinds.push(String(kind || "").toLowerCase());
             return "\n";
-          })
-          .replace(/\n{3,}/g, "\n\n")
-          .trim();
+          });
+        }
 
         return {
           rawText,
           visibleText,
           hasPrompt: promptKinds.length > 0,
-          promptOnly: promptKinds.length > 0 && !visibleText,
+          promptOnly: trustedPrompt && promptKinds.length > 0 && !visibleText,
           promptKinds,
           primaryKind: promptKinds[promptKinds.length - 1] || "",
+          trustedPrompt,
         };
       }
 
@@ -1393,13 +1409,19 @@
         return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
       }
 
+      function createMessageRecord(message) {
+        return {
+          message,
+          promptMeta: extractPromptMetadata(
+            message.text,
+            state.trustedPromptMessageIds.has(message.id)
+          ),
+        };
+      }
+
       function getRenderableMessages() {
         return Array.from(state.messages.values())
-          .sort(sortMessagesByTimestamp)
-          .map((message) => ({
-            message,
-            promptMeta: extractPromptMetadata(message.text),
-          }))
+          .sort((a, b) => sortMessagesByTimestamp(a.message, b.message))
           .filter(({ promptMeta }) => !promptMeta.promptOnly);
       }
 
@@ -1421,7 +1443,9 @@
         md += `Exported: ${new Date().toISOString()}\n\n---\n\n`;
         for (const { message, promptMeta } of renderableMessages) {
           const exportedText = promptMeta.visibleText || message.text || "";
-          const promptNote = promptMeta.hasPrompt ? "\n\n_Prompt injected in background._" : "";
+          const promptNote = promptMeta.trustedPrompt && promptMeta.hasPrompt
+            ? "\n\n_Prompt injected in background._"
+            : "";
           md += `**${message.sender}** _${formatTimestamp(message.timestamp)}_\n\n${exportedText}${promptNote}\n\n---\n\n`;
         }
         const blob = new Blob([md], { type: 'text/markdown' });
@@ -1909,7 +1933,7 @@
                 </div>
                 <div class="message-meta-tail">
                   ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
-                  ${promptMeta.hasPrompt ? renderPromptInjectionBadge(promptMeta.primaryKind) : ""}
+                  ${promptMeta.trustedPrompt && promptMeta.hasPrompt ? renderPromptInjectionBadge(promptMeta.primaryKind) : ""}
                   ${showProvenanceBadge ? `<span class="provenance-badge ${provenance}">${provenance}</span>` : ""}
                   <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
                 </div>
@@ -1950,8 +1974,9 @@
           if (!item || !item.id || state.messages.has(item.id)) {
             continue;
           }
-          state.messages.set(item.id, item);
-          if (!extractPromptMetadata(item.text).promptOnly) {
+          const messageRecord = createMessageRecord(item);
+          state.messages.set(item.id, messageRecord);
+          if (!messageRecord.promptMeta.promptOnly) {
             newVisibleIds.push(item.id);
           }
           changed = true;
@@ -2011,21 +2036,101 @@
         elements.promptMenuButton.setAttribute("aria-expanded", "false");
       }
 
+      function getRoomStorageSuffix() {
+        return state.currentRoomIdentifier || state.currentRoomName || state.currentProjectCode || state.currentProjectId || "";
+      }
+
+      function getPromptPreferencesKey() {
+        const roomSuffix = getRoomStorageSuffix();
+        return roomSuffix
+          ? `${PROMPT_PREFERENCES_STORAGE_PREFIX}:${roomSuffix}`
+          : PROMPT_PREFERENCES_STORAGE_PREFIX;
+      }
+
+      function getTrustedPromptMessageIdsKey() {
+        const roomSuffix = getRoomStorageSuffix();
+        return roomSuffix
+          ? `${TRUSTED_PROMPT_MESSAGE_IDS_STORAGE_PREFIX}:${roomSuffix}`
+          : TRUSTED_PROMPT_MESSAGE_IDS_STORAGE_PREFIX;
+      }
+
       function persistPromptPreferences() {
-        localStorage.setItem(PROMPT_PREFERENCES_KEY, JSON.stringify({
+        if (!getRoomStorageSuffix()) {
+          return;
+        }
+
+        localStorage.setItem(getPromptPreferencesKey(), JSON.stringify({
           autoKeepPolling: state.autoKeepPolling,
           injectKeepPolling: state.injectKeepPolling,
         }));
       }
 
       function loadPromptPreferences() {
+        if (!getRoomStorageSuffix()) {
+          state.autoKeepPolling = false;
+          state.injectKeepPolling = false;
+          return;
+        }
+
         try {
-          const saved = JSON.parse(localStorage.getItem(PROMPT_PREFERENCES_KEY) || "{}");
+          const saved = JSON.parse(localStorage.getItem(getPromptPreferencesKey()) || "{}");
           state.autoKeepPolling = Boolean(saved.autoKeepPolling);
           state.injectKeepPolling = Boolean(saved.injectKeepPolling);
         } catch (_error) {
           state.autoKeepPolling = false;
           state.injectKeepPolling = false;
+        }
+      }
+
+      function persistTrustedPromptMessageIds() {
+        if (!getRoomStorageSuffix()) {
+          return;
+        }
+
+        const trustedIds = Array.from(state.trustedPromptMessageIds).slice(-200);
+        localStorage.setItem(getTrustedPromptMessageIdsKey(), JSON.stringify(trustedIds));
+      }
+
+      function loadTrustedPromptMessageIds() {
+        state.trustedPromptMessageIds.clear();
+
+        if (!getRoomStorageSuffix()) {
+          return;
+        }
+
+        try {
+          const saved = JSON.parse(localStorage.getItem(getTrustedPromptMessageIdsKey()) || "[]");
+          if (!Array.isArray(saved)) {
+            return;
+          }
+          for (const id of saved) {
+            if (typeof id === "string" && id) {
+              state.trustedPromptMessageIds.add(id);
+            }
+          }
+        } catch (_error) {
+          state.trustedPromptMessageIds.clear();
+        }
+      }
+
+      function markPromptMessageTrusted(messageId) {
+        if (!messageId) {
+          return;
+        }
+
+        state.trustedPromptMessageIds.delete(messageId);
+        state.trustedPromptMessageIds.add(messageId);
+
+        while (state.trustedPromptMessageIds.size > 200) {
+          const oldestId = state.trustedPromptMessageIds.values().next().value;
+          state.trustedPromptMessageIds.delete(oldestId);
+        }
+
+        persistTrustedPromptMessageIds();
+
+        const existingRecord = state.messages.get(messageId);
+        if (existingRecord) {
+          state.messages.set(messageId, createMessageRecord(existingRecord.message));
         }
       }
 
@@ -2075,6 +2180,7 @@
             buildHiddenPromptBlock(kind),
             state.senderName || "anonymous"
           );
+          markPromptMessageTrusted(message.id);
           upsertMessages([message]);
           return true;
         } catch (_error) {
@@ -2347,7 +2453,7 @@
           );
           const msgs = payload.messages || [];
           for (const message of msgs) {
-            state.messages.set(message.id, message);
+            state.messages.set(message.id, createMessageRecord(message));
           }
 
           if (!payload.has_more || msgs.length === 0) break;
@@ -2369,6 +2475,8 @@
         state.currentProjectCode = normalizeRoomCode(projectCode || "");
         state.currentRoomIdentifier = nextRoomIdentifier;
         state.currentRoomName = roomName || state.currentRoomName || "";
+        loadPromptPreferences();
+        loadTrustedPromptMessageIds();
         updateProjectUi();
         persistSession();
         resetMessages();
@@ -2407,7 +2515,9 @@
           state.currentRoomDisplayName = "";
           state.currentRoomRole = "";
           state.currentRoomAuthenticated = false;
+          state.trustedPromptMessageIds.clear();
           resetKeepPollingOptions();
+          loadPromptPreferences();
           updateProjectUi();
           persistSession();
           setPresence("error", "Room unavailable");
@@ -2431,19 +2541,23 @@
           return;
         }
 
-        const text = state.injectKeepPolling
+        const injectedPrompt = state.injectKeepPolling && !containsPromptBlock(rawText);
+        const text = injectedPrompt
           ? appendHiddenPromptBlock(rawText, "inline")
           : rawText;
 
         elements.sendMessageBtn.disabled = true;
         try {
           const message = await postRoomMessage(text, sender);
+          if (injectedPrompt) {
+            markPromptMessageTrusted(message.id);
+          }
           upsertMessages([message]);
           elements.messageInput.value = "";
           elements.messageInput.style.height = "auto";
           scrollMessagesToBottom(true);
           setStatus(
-            state.injectKeepPolling
+            injectedPrompt
               ? `Message sent as ${sender}; hidden agent prompt injected.`
               : `Message sent as ${sender}.`,
             "success"
@@ -2596,6 +2710,7 @@
 
       initTheme();
       loadPromptPreferences();
+      loadTrustedPromptMessageIds();
       syncKeepPollingControls();
 
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
