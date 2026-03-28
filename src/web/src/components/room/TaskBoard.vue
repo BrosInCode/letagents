@@ -100,27 +100,36 @@ const groupedTasks = computed(() => {
 </script>
 
 <style scoped>
-.board-panel { height: 100%; overflow-y: auto; padding: 16px 20px; }
-.board-group { margin-bottom: 16px; }
+.board-panel { height: 100%; overflow-y: auto; padding: 24px; }
+.board-group { margin-bottom: 24px; max-width: 980px; margin-left: auto; margin-right: auto; }
 .board-group-title {
   font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.06em; color: var(--muted, #71717a); margin-bottom: 8px;
+  letter-spacing: 0.08em; color: rgba(255, 255, 255, 0.44); margin-bottom: 10px;
   display: flex; align-items: center; gap: 6px;
 }
 .board-group-count {
-  padding: 1px 6px; border-radius: 4px;
-  background: var(--surface, #18181b); font-size: 0.66rem;
+  padding: 3px 8px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05); font-size: 0.66rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .task-card {
-  padding: 10px 12px; border-radius: 8px;
-  border: 1px solid var(--line, #27272a); background: var(--bg-1, #0f0f11);
-  margin-bottom: 6px; transition: border-color 150ms;
+  padding: 16px 18px; border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    rgba(18, 18, 20, 0.9);
+  margin-bottom: 10px; transition: border-color 150ms, transform 150ms, box-shadow 150ms;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.16);
 }
-.task-card:hover { border-color: var(--line-strong, #3f3f46); }
+.task-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.2);
+}
 .task-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.task-card-title { font-size: 0.82rem; font-weight: 600; }
+.task-card-title { font-size: 0.92rem; font-weight: 650; letter-spacing: -0.02em; }
 .task-status-badge {
-  padding: 2px 6px; border-radius: 4px;
+  padding: 5px 10px; border-radius: 999px;
   font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
 }
 .task-status-badge[data-status="proposed"] { background: rgba(113,113,122,0.15); color: #71717a; }
@@ -136,8 +145,8 @@ const groupedTasks = computed(() => {
 .task-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted, #71717a); font-size: 0.72rem; }
 .task-person-chip {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 6px; border-radius: 6px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
+  padding: 5px 10px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .task-person-copy { display: flex; flex-direction: column; }
 .task-person-role { font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted, #71717a); }
@@ -145,22 +154,41 @@ const groupedTasks = computed(() => {
 
 .add-task-form {
   display: flex; gap: 6px;
-  padding: 10px; border-radius: 8px;
-  border: 1px dashed var(--line-strong, #3f3f46); margin-bottom: 12px;
+  max-width: 980px;
+  margin: 0 auto 18px;
+  padding: 12px; border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .add-task-form .input {
-  flex: 1; padding: 10px 12px; border-radius: 8px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
-  font-size: 0.85rem; outline: none; color: var(--text, #fafafa);
+  flex: 1; padding: 12px 14px; border-radius: 14px;
+  background: rgba(7, 7, 8, 0.34); border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.88rem; outline: none; color: var(--text, #fafafa);
 }
 .btn {
-  padding: 10px 14px; border-radius: 8px;
+  padding: 12px 16px; border-radius: 14px;
   font-weight: 600; font-size: 0.82rem;
   transition: background 150ms;
   border: none; cursor: pointer;
 }
-.btn-primary { background: var(--text, #fafafa); color: var(--bg-0, #09090b); }
+.btn-primary {
+  background: var(--text, #fafafa);
+  color: var(--bg-0, #09090b);
+  box-shadow: 0 10px 24px rgba(255, 255, 255, 0.1);
+}
 
 .board-empty { display: grid; place-items: center; text-align: center; padding: 40px 20px; color: var(--muted, #71717a); }
 .board-empty h3 { color: var(--text, #fafafa); margin-bottom: 4px; font-size: 0.88rem; }
+
+@media (max-width: 900px) {
+  .board-panel {
+    padding: 16px 14px;
+  }
+
+  .add-task-form {
+    flex-direction: column;
+    border-radius: 18px;
+  }
+}
 </style>

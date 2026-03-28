@@ -62,25 +62,32 @@ const presenceLabel = computed(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 20px;
-  height: 56px;
-  border-bottom: 1px solid var(--line, #27272a);
-  background: var(--bg-0, #09090b);
+  padding: 18px 22px 16px;
+  min-height: 84px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 72%),
+    rgba(28, 28, 30, 0.76);
+  backdrop-filter: blur(20px);
 }
 
 .menu-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: none;
-  border: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   cursor: pointer;
-  transition: background 150ms;
+  transition: background 150ms, border-color 150ms, transform 150ms;
 }
-.menu-btn:hover { background: var(--surface, #18181b); }
+.menu-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
 .menu-btn svg {
   width: 18px;
   height: 18px;
@@ -92,56 +99,70 @@ const presenceLabel = computed(() => {
 
 .chat-title { flex: 1; min-width: 0; }
 .chat-title h2 {
-  font-size: 0.92rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-size: 1rem;
+  font-weight: 720;
+  letter-spacing: -0.03em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .chat-title p {
-  font-size: 0.72rem;
-  color: var(--muted, #71717a);
+  margin-top: 3px;
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.52);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.header-actions { display: flex; align-items: center; gap: 4px; }
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 
 .tab-bar {
   display: flex;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--surface, #18181b);
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .tab-bar button {
-  padding: 5px 14px;
-  border-radius: 6px;
-  font-size: 0.78rem;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 0.75rem;
   font-weight: 600;
-  color: var(--muted, #71717a);
+  color: rgba(255, 255, 255, 0.48);
   background: none;
   border: none;
   cursor: pointer;
-  transition: all 150ms;
+  transition: all 150ms ease;
 }
 .tab-bar button[aria-selected="true"] {
-  background: var(--bg-0, #09090b);
+  background: rgba(255, 255, 255, 0.1);
   color: var(--text, #fafafa);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 22px rgba(0, 0, 0, 0.22);
 }
-.tab-bar button:hover:not([aria-selected="true"]) { color: var(--text, #fafafa); }
+.tab-bar button:hover:not([aria-selected="true"]) {
+  color: rgba(255, 255, 255, 0.82);
+}
 
 .presence {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 0.72rem;
-  color: var(--muted, #71717a);
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.58);
   white-space: nowrap;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .presence::before {
   content: '';
@@ -153,4 +174,18 @@ const presenceLabel = computed(() => {
 }
 .presence[data-state="live"]::before { background: var(--success, #34d399); }
 .presence[data-state="error"]::before { background: var(--danger, #f87171); }
+
+@media (max-width: 900px) {
+  .chat-header {
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
 </style>
