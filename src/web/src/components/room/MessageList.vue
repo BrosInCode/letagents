@@ -70,17 +70,12 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.messages-wrap {
-  position: relative;
-  min-height: 0;
-  overflow: hidden;
-  flex: 1;
-}
+.messages-wrap { position: relative; min-height: 0; overflow: hidden; flex: 1; }
 
 .messages {
   height: 100%;
   overflow-y: auto;
-  padding: 24px 24px 18px;
+  padding: 16px 20px;
   scroll-behavior: smooth;
 }
 .messages::before {
@@ -88,41 +83,30 @@ onUnmounted(() => {
   position: sticky;
   top: 0;
   display: block;
-  height: 20px;
-  background: linear-gradient(rgba(17, 17, 19, 0.98), transparent);
+  height: 12px;
+  background: linear-gradient(var(--bg-0, #09090b), transparent);
   pointer-events: none;
   z-index: 1;
 }
 
-.messages > * {
-  max-width: 980px;
-  margin: 0 auto;
-}
-
 .new-messages-pill {
   position: absolute;
-  bottom: 18px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 10px 16px;
+  padding: 6px 16px;
   border-radius: 999px;
-  background: rgba(244, 244, 245, 0.92);
-  color: #101013;
-  font-size: 0.72rem;
+  background: var(--text, #fafafa);
+  color: var(--bg-0, #09090b);
+  font-size: 0.75rem;
   font-weight: 600;
   border: none;
   cursor: pointer;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.22);
-  transition: transform 250ms ease, opacity 250ms ease, box-shadow 200ms ease;
-}
-
-.new-messages-pill:hover {
-  transform: translateX(-50%) translateY(-1px);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  transition: transform 250ms ease, opacity 250ms ease;
 }
 
 .empty-state {
@@ -132,28 +116,7 @@ onUnmounted(() => {
   padding: 40px 20px;
   text-align: center;
 }
-.empty-state-card {
-  max-width: 360px;
-  padding: 28px 28px 24px;
-  border-radius: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
-  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.25);
-}
-.empty-state-card h3 {
-  font-size: 1rem;
-  font-weight: 650;
-  margin-bottom: 8px;
-}
-.empty-state-card p {
-  font-size: 0.84rem;
-  color: rgba(255, 255, 255, 0.56);
-  line-height: 1.6;
-}
-
-@media (max-width: 900px) {
-  .messages {
-    padding: 18px 14px 14px;
-  }
-}
+.empty-state-card { max-width: 320px; }
+.empty-state-card h3 { font-size: 0.92rem; font-weight: 600; margin-bottom: 6px; }
+.empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 </style>

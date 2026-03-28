@@ -1,39 +1,35 @@
 <template>
   <div class="room-shell" :data-theme="theme">
-    <div class="room-frame">
-      <RoomHeader
-        :title="roomTitle"
-        :subtitle="roomSubtitle"
-        :activeTab="activeTab"
-        :connectionState="connectionState"
-        @toggleDrawer="drawerOpen = !drawerOpen"
-        @update:activeTab="activeTab = $event"
-      />
+    <RoomHeader
+      :title="roomTitle"
+      :subtitle="roomSubtitle"
+      :activeTab="activeTab"
+      :connectionState="connectionState"
+      @toggleDrawer="drawerOpen = !drawerOpen"
+      @update:activeTab="activeTab = $event"
+    />
 
-      <div class="room-stage">
-        <MessageList
-          v-show="activeTab === 'chat'"
-          :messages="messages"
-        />
+    <MessageList
+      v-show="activeTab === 'chat'"
+      :messages="messages"
+    />
 
-        <TaskBoard
-          v-show="activeTab === 'board'"
-          :tasks="tasks"
-          @addTask="handleAddTask"
-        />
-      </div>
+    <TaskBoard
+      v-show="activeTab === 'board'"
+      :tasks="tasks"
+      @addTask="handleAddTask"
+    />
 
-      <Composer
-        v-if="activeTab === 'chat'"
-        :senderName="senderName"
-        :autoKeepPolling="autoKeepPolling"
-        :keepPollingIntervalSeconds="KEEP_POLLING_INTERVAL_MS / 1000"
-        :injectKeepPolling="injectKeepPolling"
-        @send="handleSend"
-        @update:autoKeepPolling="handleAutoKeepPollingChange"
-        @update:injectKeepPolling="handleInjectKeepPollingChange"
-      />
-    </div>
+    <Composer
+      v-if="activeTab === 'chat'"
+      :senderName="senderName"
+      :autoKeepPolling="autoKeepPolling"
+      :keepPollingIntervalSeconds="KEEP_POLLING_INTERVAL_MS / 1000"
+      :injectKeepPolling="injectKeepPolling"
+      @send="handleSend"
+      @update:autoKeepPolling="handleAutoKeepPollingChange"
+      @update:injectKeepPolling="handleInjectKeepPollingChange"
+    />
   </div>
 </template>
 
@@ -167,77 +163,10 @@ watch(() => route.params.roomId, async (newId) => {
 
 <style scoped>
 .room-shell {
-  position: relative;
-  min-height: 100vh;
-  padding: 18px;
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.08), transparent 34%),
-    radial-gradient(circle at top right, rgba(255, 255, 255, 0.05), transparent 28%),
-    linear-gradient(180deg, #0b0b0c 0%, #080809 100%);
-  color: var(--text, #fafafa);
-  overflow: hidden;
-}
-
-.room-shell::before,
-.room-shell::after {
-  content: '';
-  position: absolute;
-  border-radius: 999px;
-  filter: blur(90px);
-  opacity: 0.42;
-  pointer-events: none;
-}
-
-.room-shell::before {
-  width: 320px;
-  height: 320px;
-  top: -110px;
-  left: -60px;
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.room-shell::after {
-  width: 260px;
-  height: 260px;
-  right: -70px;
-  bottom: 8%;
-  background: rgba(113, 113, 122, 0.12);
-}
-
-.room-frame {
-  position: relative;
-  z-index: 1;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: calc(100vh - 36px);
-  max-width: 1320px;
-  margin: 0 auto;
-  border-radius: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background:
-    linear-gradient(180deg, rgba(34, 34, 36, 0.9) 0%, rgba(20, 20, 22, 0.96) 100%);
-  box-shadow:
-    0 28px 80px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  overflow: hidden;
-  backdrop-filter: blur(24px);
-}
-
-.room-stage {
-  min-height: 0;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 12%),
-    rgba(14, 14, 16, 0.88);
-}
-
-@media (max-width: 900px) {
-  .room-shell {
-    padding: 10px;
-  }
-
-  .room-frame {
-    height: calc(100vh - 20px);
-    border-radius: 24px;
-  }
+  height: 100vh;
+  background: var(--bg-0, #09090b);
+  color: var(--text, #fafafa);
 }
 </style>
