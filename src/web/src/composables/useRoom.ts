@@ -1,4 +1,4 @@
-import { ref, readonly, computed, onUnmounted } from 'vue'
+import { ref, readonly, onUnmounted } from 'vue'
 
 /** ── Types ── */
 export interface RoomMessage {
@@ -32,6 +32,7 @@ export interface RoomTask {
 export interface RoomInfo {
   projectId: string
   code: string
+  identifier: string
   name: string
   displayName: string
   role: string
@@ -45,15 +46,17 @@ const room = ref<RoomInfo | null>(null)
 const isConnected = ref(false)
 const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
+const soundEnabled = ref(localStorage.getItem('lac-sound') !== 'off')
 
 let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1200
 
-/** ── Color Palette ── */
+/** ── Color Palette (matches legacy 12 colors) ── */
 const OWNER_COLORS = [
   '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ef4444',
   '#06b6d4', '#ec4899', '#14b8a6', '#f97316', '#8b5cf6',
+  '#10b981', '#6366f1',
 ]
 const colorCache = new Map<string, string>()
 
@@ -66,15 +69,18 @@ function hashString(str: string): number {
 }
 
 export function getSenderColor(sender: string, source: string | null): string {
-  const key = getSenderIdentityKey(sender, source)
-  if (colorCache.has(key)) return colorCache.get(key)!
-  const color = OWNER_COLORS[hashString(key) % OWNER_COLORS.length]
-  colorCache.set(key, color)
+  const owner = getOwnerFromSender(sender, source)
+  if (!owner) return 'var(--sender-default)'
+  const ownerKey = owner.toLowerCase()
+  if (colorCache.has(ownerKey)) return colorCache.get(ownerKey)!
+  const color = OWNER_COLORS[hashString(ownerKey) % OWNER_COLORS.length]
+  colorCache.set(ownerKey, color)
   return color
 }
 
 /** ── Identity Parsing ── */
 export interface ParsedIdentity {
+  raw: string
   displayName: string
   ownerAttribution: string | null
   ideLabel: string | null
@@ -83,11 +89,12 @@ export interface ParsedIdentity {
 
 export function parseAgentIdentity(sender: string): ParsedIdentity {
   const raw = (sender || '').trim()
-  if (!raw) return { displayName: raw, ownerAttribution: null, ideLabel: null, structured: false }
+  if (!raw) return { raw, displayName: raw, ownerAttribution: null, ideLabel: null, structured: false }
 
   const parts = raw.split(' | ').map(p => p.trim()).filter(Boolean)
   if (parts.length === 3 && /agent$/i.test(parts[1])) {
     return {
+      raw,
       displayName: parts[0],
       ownerAttribution: parts[1],
       ideLabel: normalizeIdeLabel(parts[2]),
@@ -98,6 +105,7 @@ export function parseAgentIdentity(sender: string): ParsedIdentity {
   const legacy = raw.match(/^(.*?)\s*\(([^)]+agent)\)$/i)
   if (legacy) {
     return {
+      raw,
       displayName: (legacy[1] || '').trim() || raw,
       ownerAttribution: (legacy[2] || '').trim() || null,
       ideLabel: inferIdeLabel((legacy[1] || '').trim()),
@@ -105,22 +113,27 @@ export function parseAgentIdentity(sender: string): ParsedIdentity {
     }
   }
 
-  return { displayName: raw, ownerAttribution: null, ideLabel: inferIdeLabel(raw), structured: false }
+  return { raw, displayName: raw, ownerAttribution: null, ideLabel: inferIdeLabel(raw), structured: false }
 }
 
 function normalizeIdeLabel(label: string): string | null {
   const n = (label || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   if (!n) return null
-  const known: Record<string, string> = { codex: 'Codex', antigravity: 'Antigravity', claude: 'Claude', cursor: 'Cursor', agent: 'Agent' }
+  const known: Record<string, string> = {
+    codex: 'Codex', antigravity: 'Antigravity', claude: 'Claude',
+    cursor: 'Cursor', orchestrator: 'Orchestrator', agent: 'Agent',
+  }
   return known[n] || n.split('-').filter(Boolean).map(p => p[0].toUpperCase() + p.slice(1)).join(' ')
 }
 
 function inferIdeLabel(value: string): string | null {
   const n = (value || '').trim().toLowerCase()
-  if (n.startsWith('codex')) return 'Codex'
-  if (n.startsWith('antigravity')) return 'Antigravity'
-  if (n.startsWith('claude')) return 'Claude'
-  if (n.startsWith('cursor')) return 'Cursor'
+  if (!n) return null
+  if (n === 'codex' || n.startsWith('codex-')) return 'Codex'
+  if (n === 'antigravity' || n.startsWith('antigravity-')) return 'Antigravity'
+  if (n === 'claude' || n.startsWith('claude-')) return 'Claude'
+  if (n === 'cursor' || n.startsWith('cursor-')) return 'Cursor'
+  if (n === 'orchestrator' || n.startsWith('orchestrator-')) return 'Orchestrator'
   return null
 }
 
@@ -131,62 +144,77 @@ export function isHumanSender(sender: string, source: string | null): boolean {
   if (source === 'agent') return false
   if (n === 'human' || n === 'anonymous') return true
   const parsed = parseAgentIdentity(sender)
-  return !!(parsed.structured || parsed.ownerAttribution || parsed.ideLabel) ? false : source === 'browser'
+  return !(parsed.structured || parsed.ownerAttribution || parsed.ideLabel) && source === 'browser'
 }
 
-function getSenderIdentityKey(sender: string, source: string | null): string {
-  if (isHumanSender(sender, source)) return (sender || '').trim().toLowerCase()
+export function getSenderProvenance(sender: string, source: string | null): 'human' | 'agent' | 'system' {
+  const n = (sender || '').trim().toLowerCase()
+  if (n === 'letagents' || n === 'system') return 'system'
+  if (source === 'browser') return 'human'
+  if (source === 'agent') return 'agent'
+  if (isHumanSender(sender, source)) return 'human'
+  return 'agent'
+}
+
+export function getOwnerFromSender(sender: string, source: string | null): string | null {
+  const raw = (sender || '').trim()
+  if (!raw) return null
+  const n = raw.toLowerCase()
+  if (n === 'letagents' || n === 'system') return null
+  if (source === 'browser') return raw
   const parsed = parseAgentIdentity(sender)
-  return (parsed.ideLabel || parsed.displayName || sender || '').trim().toLowerCase()
+  if (parsed.ownerAttribution) {
+    const ownerMatch = parsed.ownerAttribution.match(/^(.+?)(?:'s?\s+agent)$/i)
+    if (ownerMatch) return ownerMatch[1].trim()
+    return parsed.ownerAttribution
+  }
+  return null
 }
 
-/** ── API ── */
-async function fetchRoom(roomId: string): Promise<RoomInfo | null> {
-  try {
-    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`)
-    if (!res.ok) return null
-    const data = await res.json()
-    return {
-      projectId: data.id,
-      code: data.code || '',
-      name: data.name || data.id,
-      displayName: data.display_name || data.name || data.id,
-      role: data.role || 'participant',
-      authenticated: !!data.authenticated,
-    }
-  } catch {
-    return null
-  }
+function isInviteCode(str: string): boolean {
+  return /^[A-Z0-9]{4}(-[A-Z0-9]{4}){1,2}$/.test(String(str).toUpperCase())
 }
 
-async function fetchMessages(projectId: string): Promise<RoomMessage[]> {
-  try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/messages`)
-    if (!res.ok) return []
-    const data = await res.json()
-    return data.messages || []
-  } catch {
-    return []
-  }
+function normalizeRoomCode(code: string): string {
+  return isInviteCode(code) ? String(code).toUpperCase() : String(code)
 }
 
-async function fetchTasks(projectId: string): Promise<RoomTask[]> {
-  try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/tasks`)
-    if (!res.ok) return []
-    const data = await res.json()
-    return data.tasks || []
-  } catch {
-    return []
+function encodeRoomPathIdentifier(identifier: string): string {
+  return String(identifier).split('/').map(s => encodeURIComponent(s)).join('/')
+}
+
+/** ── API Helper ── */
+async function apiFetch(path: string, options?: RequestInit) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  })
+  let payload = null
+  try { payload = await res.json() } catch { payload = null }
+  if (!res.ok) {
+    throw new Error(payload?.error || `Request failed (${res.status})`)
   }
+  return payload
+}
+
+/** ── Session Persistence ── */
+function persistSession() {
+  if (!room.value) return
+  const payload = JSON.stringify({
+    id: room.value.projectId,
+    code: room.value.code,
+    roomName: room.value.name || '',
+    displayName: room.value.displayName || '',
+  })
+  localStorage.setItem('letagents:web:session', payload)
 }
 
 /** ── SSE Streaming ── */
-function startStreaming(projectId: string) {
+function startStreaming(roomIdentifier: string) {
   stopStreaming()
   connectionState.value = 'connecting'
 
-  const url = `/api/projects/${encodeURIComponent(projectId)}/messages/stream`
+  const url = `/rooms/${encodeURIComponent(roomIdentifier)}/messages/stream`
   eventSource = new EventSource(url)
 
   eventSource.onopen = () => {
@@ -195,7 +223,7 @@ function startStreaming(projectId: string) {
     reconnectDelay = 1200
   }
 
-  eventSource.addEventListener('message', (e) => {
+  eventSource.onmessage = (e) => {
     try {
       const msg: RoomMessage = JSON.parse(e.data)
       const exists = messages.value.some(m => m.id === msg.id)
@@ -203,21 +231,7 @@ function startStreaming(projectId: string) {
         messages.value = [...messages.value, msg]
       }
     } catch { /* ignore parse errors */ }
-  })
-
-  eventSource.addEventListener('task_update', (e) => {
-    try {
-      const task: RoomTask = JSON.parse(e.data)
-      const idx = tasks.value.findIndex(t => t.id === task.id)
-      if (idx >= 0) {
-        const updated = [...tasks.value]
-        updated[idx] = task
-        tasks.value = updated
-      } else {
-        tasks.value = [...tasks.value, task]
-      }
-    } catch { /* ignore */ }
-  })
+  }
 
   eventSource.onerror = () => {
     connectionState.value = 'error'
@@ -225,10 +239,13 @@ function startStreaming(projectId: string) {
     eventSource?.close()
     eventSource = null
 
+    if (!room.value) return
+
+    const delay = Math.min(reconnectDelay, 8000)
     reconnectTimer = setTimeout(() => {
-      startStreaming(projectId)
-    }, reconnectDelay)
-    reconnectDelay = Math.min(reconnectDelay * 1.5, 30000)
+      if (room.value) startStreaming(room.value.identifier)
+    }, delay)
+    reconnectDelay = Math.min(delay * 1.8, 8000)
   }
 }
 
@@ -242,16 +259,59 @@ function stopStreaming() {
   }
 }
 
+/** ── Fetch with cursor pagination ── */
+async function fetchAllMessages(roomIdentifier: string): Promise<RoomMessage[]> {
+  const allMessages: RoomMessage[] = []
+  let afterCursor = ''
+
+  for (;;) {
+    const qs = afterCursor ? `?after=${encodeURIComponent(afterCursor)}` : ''
+    const payload = await apiFetch(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/messages${qs}`,
+      { method: 'GET' }
+    )
+    const msgs = payload.messages || []
+    allMessages.push(...msgs)
+    if (!payload.has_more || msgs.length === 0) break
+    afterCursor = msgs[msgs.length - 1].id
+  }
+
+  return allMessages
+}
+
+async function fetchAllTasks(roomIdentifier: string): Promise<RoomTask[]> {
+  const allTasks: RoomTask[] = []
+  let afterCursor = ''
+
+  for (;;) {
+    const qs = afterCursor
+      ? `?open=true&after=${encodeURIComponent(afterCursor)}`
+      : '?open=true'
+    const payload = await apiFetch(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/tasks${qs}`,
+    )
+    const tsks = payload.tasks || []
+    allTasks.push(...tsks)
+    if (!payload.has_more || tsks.length === 0) break
+    afterCursor = tsks[tsks.length - 1].id
+  }
+
+  return allTasks
+}
+
 /** ── Actions ── */
 async function sendMessage(text: string, sender?: string): Promise<boolean> {
   if (!room.value) return false
   try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(room.value.projectId)}/messages`, {
+    const msg = await apiFetch(`/rooms/${encodeURIComponent(room.value.identifier)}/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, sender: sender || 'anonymous', source: 'browser' }),
+      body: JSON.stringify({ text, sender: sender || 'anonymous' }),
     })
-    return res.ok
+    // Upsert locally in case SSE hasn't delivered it yet
+    if (msg && msg.id && !messages.value.some(m => m.id === msg.id)) {
+      messages.value = [...messages.value, msg]
+    }
+    return true
   } catch {
     return false
   }
@@ -260,41 +320,54 @@ async function sendMessage(text: string, sender?: string): Promise<boolean> {
 async function addTask(title: string): Promise<boolean> {
   if (!room.value) return false
   try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(room.value.projectId)}/tasks`, {
+    await apiFetch(`/rooms/${encodeURIComponent(room.value.identifier)}/tasks`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, created_by: 'human' }),
     })
-    if (res.ok) {
-      const data = await res.json()
-      if (data.task) tasks.value = [...tasks.value, data.task]
-    }
-    return res.ok
+    // Refresh the full task list
+    await refreshTasks()
+    return true
   } catch {
     return false
   }
 }
 
-async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<boolean> {
+async function updateTask(taskId: string, newStatus: string): Promise<boolean> {
   if (!room.value) return false
   try {
-    const res = await fetch(`/api/projects/${encodeURIComponent(room.value.projectId)}/tasks/${taskId}`, {
+    await apiFetch(`/rooms/${encodeURIComponent(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates),
+      body: JSON.stringify({ status: newStatus }),
     })
-    if (res.ok) {
-      const data = await res.json()
-      if (data.task) {
-        const idx = tasks.value.findIndex(t => t.id === taskId)
-        if (idx >= 0) {
-          const updated = [...tasks.value]
-          updated[idx] = data.task
-          tasks.value = updated
-        }
-      }
+    await refreshTasks()
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function refreshTasks() {
+  if (!room.value) return
+  try {
+    tasks.value = await fetchAllTasks(room.value.identifier)
+  } catch { /* silent */ }
+}
+
+async function renameRoom(newDisplayName: string): Promise<boolean> {
+  if (!room.value) return false
+  try {
+    const result = await apiFetch(`/rooms/${encodeURIComponent(room.value.identifier)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ display_name: newDisplayName }),
+    })
+    room.value = {
+      ...room.value,
+      displayName: result.display_name || newDisplayName,
+      role: result.role || room.value.role,
+      authenticated: result.authenticated ?? room.value.authenticated,
     }
-    return res.ok
+    persistSession()
+    return true
   } catch {
     return false
   }
@@ -302,26 +375,40 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
 
 /** ── Join Room ── */
 async function joinRoom(roomIdentifier: string) {
-  const info = await fetchRoom(roomIdentifier)
-  if (!info) {
+  connectionState.value = 'connecting'
+  try {
+    const project = await apiFetch(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
+      method: 'POST',
+    })
+
+    room.value = {
+      projectId: project.room_id || roomIdentifier,
+      code: normalizeRoomCode(project.code || ''),
+      identifier: project.room_id || project.code || roomIdentifier,
+      name: project.name || '',
+      displayName: project.display_name || project.name || project.code || roomIdentifier,
+      role: project.role || 'participant',
+      authenticated: !!project.authenticated,
+    }
+
+    isConnected.value = true
+    persistSession()
+
+    // Load existing data
+    const [msgs, tsks] = await Promise.all([
+      fetchAllMessages(room.value.identifier),
+      fetchAllTasks(room.value.identifier),
+    ])
+    messages.value = msgs
+    tasks.value = tsks
+
+    // Start real-time streaming
+    startStreaming(room.value.identifier)
+    return true
+  } catch (error) {
     connectionState.value = 'error'
     return false
   }
-
-  room.value = info
-  isConnected.value = true
-
-  // Load existing messages and tasks
-  const [msgs, tsks] = await Promise.all([
-    fetchMessages(info.projectId),
-    fetchTasks(info.projectId),
-  ])
-  messages.value = msgs
-  tasks.value = tsks
-
-  // Start real-time streaming
-  startStreaming(info.projectId)
-  return true
 }
 
 function leaveRoom() {
@@ -333,11 +420,125 @@ function leaveRoom() {
   connectionState.value = 'idle'
 }
 
+/** ── Share Helpers ── */
+function getRoomShareKind(): 'code' | 'url' {
+  if (!room.value?.projectId || room.value.code) return 'code'
+  return 'url'
+}
+
+function getRoomShareValue(): string {
+  if (!room.value?.projectId) return ''
+  if (room.value.code) return room.value.code
+  const identifier = room.value.identifier || room.value.projectId
+  if (!identifier) return ''
+  return `${window.location.origin}/in/${encodeRoomPathIdentifier(identifier)}`
+}
+
+function getRoomShareDisplayValue(): string {
+  const shareValue = getRoomShareValue()
+  if (!shareValue) return ''
+  if (getRoomShareKind() !== 'url') return shareValue
+  try {
+    const shareUrl = new URL(shareValue)
+    const cleanPath = decodeURIComponent(shareUrl.pathname)
+      .replace(/^\/in\//, '')
+      .replace(/^\/+|\/+$/g, '')
+    return cleanPath || shareUrl.host
+  } catch {
+    return shareValue.replace(/^https?:\/\//, '').replace(/\/in\//, '')
+  }
+}
+
+/** ── Export chat ── */
+function exportChat(): string | null {
+  if (!messages.value.length) return null
+  const sorted = [...messages.value].sort((a, b) =>
+    new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  )
+  let md = `# Chat Export — ${room.value?.projectId || 'Room'}\n`
+  md += `Exported: ${new Date().toISOString()}\n\n---\n\n`
+  for (const m of sorted) {
+    md += `**${m.sender}** _${formatTimestamp(m.timestamp)}_\n\n${m.text}\n\n---\n\n`
+  }
+  return md
+}
+
+function downloadExport() {
+  const md = exportChat()
+  if (!md) return
+  const blob = new Blob([md], { type: 'text/markdown' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `letagents-export-${room.value?.projectId || 'room'}-${Date.now()}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** ── Sound ── */
+let audioCtx: AudioContext | null = null
+
+function playNotificationSound() {
+  if (!soundEnabled.value) return
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const oscillator = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+    oscillator.connect(gain)
+    gain.connect(audioCtx.destination)
+    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime)
+    oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.08)
+    gain.gain.setValueAtTime(0.12, audioCtx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2)
+    oscillator.start(audioCtx.currentTime)
+    oscillator.stop(audioCtx.currentTime + 0.2)
+  } catch { /* audio not available */ }
+}
+
+function toggleSound() {
+  soundEnabled.value = !soundEnabled.value
+  localStorage.setItem('lac-sound', soundEnabled.value ? 'on' : 'off')
+}
+
+/** ── Formatting ── */
+export function formatTimestamp(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short',
+    day: 'numeric',
+  }).format(date)
+}
+
+/** ── Owner list for legend ── */
+function getOwnerLegend(): { label: string; color: string }[] {
+  const owners = new Map<string, { label: string; color: string }>()
+  for (const msg of messages.value) {
+    const owner = getOwnerFromSender(msg.sender, msg.source)
+    if (owner && !owners.has(owner.toLowerCase())) {
+      owners.set(owner.toLowerCase(), {
+        label: owner,
+        color: getSenderColor(msg.sender, msg.source),
+      })
+    }
+  }
+  return Array.from(owners.values())
+}
+
 /** ── Composable ── */
 export function useRoom() {
+  // Clean up SSE on window unload
+  const handleBeforeUnload = () => stopStreaming()
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', handleBeforeUnload)
+  }
+
   onUnmounted(() => {
-    // Don't stop streaming on unmount — other components may need it
-    // Only stopStreaming when explicitly leaving
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
   })
 
   return {
@@ -348,6 +549,7 @@ export function useRoom() {
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
     connectionState: readonly(connectionState),
+    soundEnabled: readonly(soundEnabled),
 
     // Actions
     joinRoom,
@@ -355,10 +557,26 @@ export function useRoom() {
     sendMessage,
     addTask,
     updateTask,
+    refreshTasks,
+    renameRoom,
+    downloadExport,
+
+    // Share helpers
+    getRoomShareKind,
+    getRoomShareValue,
+    getRoomShareDisplayValue,
+
+    // Sound
+    toggleSound,
+    playNotificationSound,
 
     // Utilities
     getSenderColor,
     parseAgentIdentity,
     isHumanSender,
+    getSenderProvenance,
+    getOwnerFromSender,
+    getOwnerLegend,
+    formatTimestamp,
   }
 }

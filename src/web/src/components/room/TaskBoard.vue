@@ -14,30 +14,41 @@
     <div v-if="groupedTasks.length === 0" class="board-empty">
       <div>
         <h3>No tasks yet</h3>
-        <p>Add a task to get started.</p>
+        <p>Add a task or use the <code>add_task</code> MCP tool.</p>
       </div>
     </div>
 
     <div v-for="group in groupedTasks" :key="group.status" class="board-group">
-      <div class="board-group-title">
+      <h3 class="board-group-title">
         {{ group.label }}
         <span class="board-group-count">{{ group.tasks.length }}</span>
-      </div>
+      </h3>
       <div v-for="task in group.tasks" :key="task.id" class="task-card">
         <div class="task-card-header">
-          <span class="task-card-title">{{ task.title }}</span>
-          <span class="task-status-badge" :data-status="task.status">{{ formatStatus(task.status) }}</span>
+          <h4 class="task-card-title">{{ task.title }}</h4>
+          <span class="task-status-badge" :data-status="task.status">
+            {{ STATUS_LABELS[task.status] || task.status }}
+          </span>
         </div>
         <div class="task-meta">
-          <div v-if="task.assignee" class="task-person-chip">
-            <div class="task-person-copy">
-              <span class="task-person-role">Assignee</span>
-              <span class="task-person-name">{{ task.assignee }}</span>
-            </div>
-          </div>
-          <div v-if="task.pr_url" style="font-size: 0.72rem;">
-            <a :href="task.pr_url" target="_blank" style="color: #60a5fa;">PR ↗</a>
-          </div>
+          <TaskActorChip v-if="task.assignee" :label="task.assignee" role="Assignee" />
+          <TaskActorChip v-if="task.created_by" :label="task.created_by" role="Created by" />
+          <span>{{ formatTimestamp(task.created_at) }}</span>
+        </div>
+        <p v-if="task.description" class="task-description">{{ task.description }}</p>
+        <div v-if="task.pr_url" class="task-pr">
+          <a :href="task.pr_url" target="_blank" rel="noopener noreferrer">PR ↗</a>
+        </div>
+        <div v-if="getActions(task).length" class="task-actions">
+          <button
+            v-for="action in getActions(task)"
+            :key="action.status"
+            class="task-action-btn"
+            :class="action.cls"
+            @click="$emit('updateTask', task.id, action.status)"
+          >
+            {{ action.label }}
+          </button>
         </div>
       </div>
     </div>
@@ -46,7 +57,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { type RoomTask } from '@/composables/useRoom'
+import { type RoomTask, formatTimestamp, parseAgentIdentity } from '@/composables/useRoom'
+import TaskActorChip from './TaskActorChip.vue'
 
 const props = defineProps<{
   tasks: readonly RoomTask[]
@@ -54,6 +66,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   addTask: [title: string]
+  updateTask: [taskId: string, newStatus: string]
 }>()
 
 const newTaskTitle = ref('')
@@ -65,21 +78,42 @@ function handleAdd() {
   newTaskTitle.value = ''
 }
 
-function formatStatus(status: string): string {
-  return status.replace(/_/g, ' ')
+const STATUS_ORDER = [
+  'in_progress', 'blocked', 'in_review', 'accepted', 'assigned',
+  'proposed', 'merged', 'done', 'cancelled',
+]
+
+const STATUS_LABELS: Record<string, string> = {
+  proposed: 'Proposed', accepted: 'Accepted', assigned: 'Assigned',
+  in_progress: 'In Progress', blocked: 'Blocked', in_review: 'In Review',
+  merged: 'Merged', done: 'Done', cancelled: 'Cancelled',
 }
 
-const STATUS_ORDER = ['proposed', 'accepted', 'assigned', 'in_progress', 'blocked', 'in_review', 'merged', 'done', 'cancelled']
-const STATUS_LABELS: Record<string, string> = {
-  proposed: 'Proposed',
-  accepted: 'Accepted',
-  assigned: 'Assigned',
-  in_progress: 'In Progress',
-  blocked: 'Blocked',
-  in_review: 'In Review',
-  merged: 'Merged',
-  done: 'Done',
-  cancelled: 'Cancelled',
+interface TaskAction {
+  label: string
+  cls: string
+  status: string
+}
+
+function getActions(task: RoomTask): TaskAction[] {
+  const actions: TaskAction[] = []
+  switch (task.status) {
+    case 'proposed':
+      actions.push({ label: 'Accept', cls: 'accept', status: 'accepted' })
+      actions.push({ label: 'Cancel', cls: 'cancel', status: 'cancelled' })
+      break
+    case 'in_review':
+      actions.push({ label: 'Mark Merged', cls: 'merge', status: 'merged' })
+      actions.push({ label: 'Needs Work', cls: 'cancel', status: 'in_progress' })
+      break
+    case 'merged':
+      actions.push({ label: 'Mark Done', cls: 'merge', status: 'done' })
+      break
+    case 'accepted':
+      actions.push({ label: 'Cancel', cls: 'cancel', status: 'cancelled' })
+      break
+  }
+  return actions
 }
 
 const groupedTasks = computed(() => {
@@ -99,26 +133,32 @@ const groupedTasks = computed(() => {
 })
 </script>
 
+
+
+
 <style scoped>
 .board-panel { height: 100%; overflow-y: auto; padding: 16px 20px; }
 .board-group { margin-bottom: 16px; }
 .board-group-title {
   font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.06em; color: var(--muted, #71717a); margin-bottom: 8px;
+  letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px;
   display: flex; align-items: center; gap: 6px;
 }
 .board-group-count {
   padding: 1px 6px; border-radius: 4px;
-  background: var(--surface, #18181b); font-size: 0.66rem;
+  background: var(--surface); font-size: 0.66rem;
 }
 .task-card {
   padding: 10px 12px; border-radius: 8px;
-  border: 1px solid var(--line, #27272a); background: var(--bg-1, #0f0f11);
+  border: 1px solid var(--line); background: var(--bg-1);
   margin-bottom: 6px; transition: border-color 150ms;
 }
-.task-card:hover { border-color: var(--line-strong, #3f3f46); }
-.task-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.task-card-title { font-size: 0.82rem; font-weight: 600; }
+.task-card:hover { border-color: var(--line-strong); }
+.task-card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 4px;
+}
+.task-card-title { font-size: 0.82rem; font-weight: 600; margin: 0; }
 .task-status-badge {
   padding: 2px 6px; border-radius: 4px;
   font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
@@ -133,34 +173,54 @@ const groupedTasks = computed(() => {
 .task-status-badge[data-status="done"] { background: rgba(34,197,94,0.12); color: #22c55e; }
 .task-status-badge[data-status="cancelled"] { background: rgba(100,116,139,0.12); color: #64748b; }
 
-.task-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted, #71717a); font-size: 0.72rem; }
-.task-person-chip {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 6px; border-radius: 6px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
+.task-meta {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  color: var(--muted); font-size: 0.72rem; margin-bottom: 6px;
 }
-.task-person-copy { display: flex; flex-direction: column; }
-.task-person-role { font-size: 0.58rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted, #71717a); }
-.task-person-name { font-size: 0.72rem; font-weight: 700; color: var(--text, #fafafa); }
+.task-description {
+  margin: 0 0 10px; color: var(--muted); font-size: 0.88rem;
+}
+.task-pr { margin-bottom: 6px; }
+.task-pr a { color: #60a5fa; font-size: 0.72rem; text-decoration: none; }
+.task-pr a:hover { text-decoration: underline; }
+
+.task-actions { display: flex; gap: 4px; }
+.task-action-btn {
+  padding: 3px 8px; border-radius: 6px;
+  background: var(--surface); border: 1px solid var(--line);
+  font-size: 0.7rem; font-weight: 600; cursor: pointer;
+  color: var(--text); transition: background 150ms;
+}
+.task-action-btn:hover { background: var(--surface-hover); }
+.task-action-btn.accept { color: #60a5fa; }
+.task-action-btn.cancel { color: #f87171; }
+.task-action-btn.merge { color: #34d399; }
 
 .add-task-form {
   display: flex; gap: 6px;
   padding: 10px; border-radius: 8px;
-  border: 1px dashed var(--line-strong, #3f3f46); margin-bottom: 12px;
+  border: 1px dashed var(--line-strong); margin-bottom: 12px;
 }
 .add-task-form .input {
   flex: 1; padding: 10px 12px; border-radius: 8px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
-  font-size: 0.85rem; outline: none; color: var(--text, #fafafa);
+  background: var(--surface); border: 1px solid var(--line);
+  font-size: 0.85rem; outline: none; color: var(--text);
 }
 .btn {
   padding: 10px 14px; border-radius: 8px;
   font-weight: 600; font-size: 0.82rem;
-  transition: background 150ms;
-  border: none; cursor: pointer;
+  transition: background 150ms; border: none; cursor: pointer;
 }
-.btn-primary { background: var(--text, #fafafa); color: var(--bg-0, #09090b); }
+.btn-primary { background: var(--text); color: var(--bg-0); }
 
-.board-empty { display: grid; place-items: center; text-align: center; padding: 40px 20px; color: var(--muted, #71717a); }
-.board-empty h3 { color: var(--text, #fafafa); margin-bottom: 4px; font-size: 0.88rem; }
+.board-empty {
+  display: grid; place-items: center; text-align: center;
+  padding: 40px 20px; color: var(--muted);
+}
+.board-empty h3 { color: var(--text); margin-bottom: 4px; font-size: 0.88rem; }
+
+@media (max-width: 640px) {
+  .board-panel { padding: 12px; }
+  .add-task-form { flex-direction: column; }
+}
 </style>

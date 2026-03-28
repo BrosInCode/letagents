@@ -69,6 +69,57 @@
   /* Layout */
   --max-width:    1200px;
   --nav-height:   64px;
+
+  /* ─── Room‐specific palette (dark default) ─── */
+  --bg-0:          #09090b;
+  --bg-1:          #0f0f11;
+  --bg-2:          #18181b;
+  --surface:       #18181b;
+  --surface-hover: #27272a;
+  --line:          #27272a;
+  --line-strong:   #3f3f46;
+  --muted:         #71717a;
+  --warning:       #fbbf24;
+  --success:       #34d399;
+  --danger:        #f87171;
+  --sender-default: #71717a;
+}
+
+/* ─── Light Theme ─── */
+:root[data-theme="light"],
+[data-theme="light"] {
+  --bg:            #fafafa;
+  --bg-subtle:     #f4f4f5;
+  --bg-card:       #ffffff;
+  --bg-elevated:   #f9fafb;
+  --text:          #18181b;
+  --text-secondary:#52525b;
+  --text-tertiary: #71717a;
+  --text-muted:    #a1a1aa;
+  --border:        rgba(0, 0, 0, 0.06);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --border-accent: rgba(0, 0, 0, 0.18);
+  --accent-dim:    rgba(0, 0, 0, 0.03);
+  --accent-hover:  rgba(0, 0, 0, 0.06);
+  --accent-active: rgba(0, 0, 0, 0.1);
+  --shadow-sm:     0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md:     0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg:     0 8px 32px rgba(0, 0, 0, 0.1);
+  --shadow-xl:     0 16px 48px rgba(0, 0, 0, 0.12);
+
+  /* Room tokens (light) */
+  --bg-0:          #ffffff;
+  --bg-1:          #f9fafb;
+  --bg-2:          #f4f4f5;
+  --surface:       #f4f4f5;
+  --surface-hover: #e4e4e7;
+  --line:          #e4e4e7;
+  --line-strong:   #d4d4d8;
+  --muted:         #71717a;
+  --warning:       #f59e0b;
+  --success:       #22c55e;
+  --danger:        #ef4444;
+  --sender-default:#a1a1aa;
 }
 
 /* ─── Reset & Base ─── */
