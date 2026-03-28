@@ -6,6 +6,7 @@
         class="message-textarea"
         placeholder="Write a message…"
         v-model="text"
+        :disabled="disabled"
         @keydown="handleKeyDown"
         rows="1"
       />
@@ -16,16 +17,27 @@
           </span>
           <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
         </div>
-        <label class="keep-polling-toggle">
-          <input
-            type="checkbox"
-            :checked="autoKeepPolling"
-            :disabled="disabled"
-            @change="handleAutoKeepPollingToggle"
-          />
-          <span>Auto keep polling every {{ keepPollingIntervalSeconds }}s</span>
-        </label>
-        <button class="send-btn" type="submit" :disabled="!text.trim()" aria-label="Send message">
+        <div class="keep-polling-controls">
+          <label class="keep-polling-toggle">
+            <input
+              type="checkbox"
+              :checked="autoKeepPolling"
+              :disabled="disabled"
+              @change="handleAutoKeepPollingToggle"
+            />
+            <span>Auto keep polling every {{ keepPollingIntervalSeconds }}s</span>
+          </label>
+          <label class="keep-polling-toggle">
+            <input
+              type="checkbox"
+              :checked="injectKeepPolling"
+              :disabled="disabled"
+              @change="handleInjectKeepPollingToggle"
+            />
+            <span>Append <code>keep polling</code> to messages</span>
+          </label>
+        </div>
+        <button class="send-btn" type="submit" :disabled="!text.trim() || disabled" aria-label="Send message">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
       </div>
@@ -41,16 +53,19 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   autoKeepPolling?: boolean
   keepPollingIntervalSeconds?: number
+  injectKeepPolling?: boolean
 }>(), {
   senderName: 'anonymous',
   disabled: false,
   autoKeepPolling: false,
   keepPollingIntervalSeconds: 20,
+  injectKeepPolling: false,
 })
 
 const emit = defineEmits<{
   send: [text: string]
   'update:autoKeepPolling': [enabled: boolean]
+  'update:injectKeepPolling': [enabled: boolean]
 }>()
 
 const text = ref('')
@@ -76,6 +91,11 @@ function handleKeyDown(e: KeyboardEvent) {
 function handleAutoKeepPollingToggle(e: Event) {
   const target = e.target as HTMLInputElement | null
   emit('update:autoKeepPolling', !!target?.checked)
+}
+
+function handleInjectKeepPollingToggle(e: Event) {
+  const target = e.target as HTMLInputElement | null
+  emit('update:injectKeepPolling', !!target?.checked)
 }
 
 onMounted(() => {
@@ -135,6 +155,14 @@ onMounted(() => {
   gap: 8px;
   min-width: 0;
 }
+.keep-polling-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 12px;
+  margin-left: auto;
+}
 .composer-sender-label {
   font-size: 0.72rem;
   color: var(--muted, #71717a);
@@ -157,13 +185,16 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
   font-size: 0.7rem;
   color: var(--muted, #a1a1aa);
   user-select: none;
 }
 .keep-polling-toggle input {
   accent-color: var(--text, #fafafa);
+}
+.keep-polling-toggle code {
+  font-size: 0.68rem;
+  color: var(--text, #fafafa);
 }
 @media (min-width: 641px) {
   .composer-shortcut-hint { display: inline; }

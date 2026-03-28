@@ -25,8 +25,10 @@
       :senderName="senderName"
       :autoKeepPolling="autoKeepPolling"
       :keepPollingIntervalSeconds="KEEP_POLLING_INTERVAL_MS / 1000"
+      :injectKeepPolling="injectKeepPolling"
       @send="handleSend"
       @update:autoKeepPolling="handleAutoKeepPollingChange"
+      @update:injectKeepPolling="handleInjectKeepPollingChange"
     />
   </div>
 </template>
@@ -52,6 +54,7 @@ const activeTab = ref<'chat' | 'board'>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const autoKeepPolling = ref(false)
+const injectKeepPolling = ref(false)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
 let keepPollingInFlight = false
@@ -65,7 +68,8 @@ const roomSubtitle = computed(() =>
 )
 
 async function handleSend(text: string) {
-  await sendMessage(text, senderName.value)
+  const finalText = injectKeepPolling.value ? appendKeepPollingInstruction(text) : text
+  await sendMessage(finalText, senderName.value)
 }
 
 async function sendKeepPollingMessage() {
@@ -96,6 +100,17 @@ async function startKeepPollingLoop() {
 
 function handleAutoKeepPollingChange(enabled: boolean) {
   autoKeepPolling.value = enabled
+}
+
+function handleInjectKeepPollingChange(enabled: boolean) {
+  injectKeepPolling.value = enabled
+}
+
+function appendKeepPollingInstruction(text: string) {
+  if (text.toLowerCase().includes(KEEP_POLLING_TEXT)) {
+    return text
+  }
+  return `${text}\n\n${KEEP_POLLING_TEXT}`
 }
 
 async function handleAddTask(title: string) {
@@ -136,6 +151,7 @@ watch(() => room.value?.projectId, (newProjectId, oldProjectId) => {
   if (newProjectId === oldProjectId) return
   stopKeepPollingLoop()
   autoKeepPolling.value = false
+  injectKeepPolling.value = false
 })
 
 watch(() => route.params.roomId, async (newId) => {
