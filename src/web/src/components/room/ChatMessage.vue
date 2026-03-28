@@ -86,27 +86,26 @@ const renderedContent = computed(() => {
 .message {
   display: flex;
   gap: 12px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line, #27272a);
+  padding: 12px 0;
   opacity: 0;
   transform: translateY(6px);
   animation: msg-in 200ms ease forwards;
 }
-.message:last-child { border-bottom: none; }
 @keyframes msg-in { to { opacity: 1; transform: none; } }
 
 .message-avatar {
   display: flex;
   align-items: flex-start;
-  padding-top: 5px;
+  padding-top: 10px;
 }
 .message-avatar::before {
   content: '';
   display: block;
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--sender-color, #71717a);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sender-color, #71717a) 18%, transparent);
 }
 
 .message-body { flex: 1; min-width: 0; }
@@ -116,7 +115,7 @@ const renderedContent = computed(() => {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
   line-height: 1;
 }
 
@@ -133,25 +132,33 @@ const renderedContent = computed(() => {
 .message-meta time { font-size: 0.68rem; color: var(--muted, #71717a); }
 
 .message-bubble {
-  border-left: 2px solid color-mix(in srgb, var(--sender-color, #71717a) 40%, transparent);
-  padding: 2px 0 2px 12px;
+  padding: 14px 16px;
   max-width: min(100%, 780px);
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--sender-color, #71717a) 22%, rgba(255, 255, 255, 0.06));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--sender-color, #71717a) 10%, rgba(255, 255, 255, 0.02)), rgba(255, 255, 255, 0.02)),
+    rgba(19, 19, 21, 0.94);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 10px 28px rgba(0, 0, 0, 0.18);
 }
 
-.message-bubble :deep(.md-content) { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }
+.message-bubble :deep(.md-content) { line-height: 1.65; font-size: 0.88rem; word-break: break-word; color: rgba(255,255,255,0.92); }
 .message-bubble :deep(.md-content) p { margin: 0 0 0.4em; }
 .message-bubble :deep(.md-content) p:last-child { margin-bottom: 0; }
 .message-bubble :deep(.md-content) code {
-  padding: 2px 5px;
-  border-radius: 4px;
-  background: var(--surface, #18181b);
+  padding: 3px 7px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.84em;
 }
 
 .provenance-badge {
-  padding: 3px 10px;
-  border-radius: 4px;
+  padding: 5px 10px;
+  border-radius: 999px;
   font-size: 0.62rem;
   font-weight: 700;
   text-transform: uppercase;
@@ -165,8 +172,8 @@ const renderedContent = computed(() => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
   font-size: 0.62rem;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -178,6 +185,10 @@ const renderedContent = computed(() => {
 .agent-runtime-badge.ide-cursor { background: rgba(168,85,247,0.08); color: #a855f7; }
 .agent-runtime-badge.ide-default { background: var(--surface, #18181b); color: var(--muted, #71717a); }
 
-.system-message .message-avatar::before { opacity: 0.4; }
-.system-message .message-bubble { opacity: 0.6; border-left-color: var(--line, #27272a); }
+.system-message .message-avatar::before { opacity: 0.35; box-shadow: none; }
+.system-message .message-bubble {
+  opacity: 0.78;
+  border-color: rgba(255, 255, 255, 0.05);
+  background: rgba(17, 17, 18, 0.9);
+}
 </style>

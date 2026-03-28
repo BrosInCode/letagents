@@ -526,84 +526,6 @@
         color: var(--muted); opacity: 0.6;
       }
 
-      .composer-options {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        padding: 0 14px 12px;
-      }
-      .composer-toggle {
-        position: relative;
-        display: inline-flex;
-        align-items: stretch;
-        cursor: pointer;
-      }
-      .composer-toggle input {
-        position: absolute;
-        opacity: 0;
-        pointer-events: none;
-      }
-      .composer-toggle-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        min-height: 42px;
-        padding: 9px 14px;
-        border-radius: 999px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        background: rgba(255, 255, 255, 0.03);
-        color: var(--muted);
-        transition: border-color 180ms ease, background 180ms ease, color 180ms ease, transform 180ms ease;
-      }
-      .composer-toggle-pill::before {
-        content: "";
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.2);
-        box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.04);
-        transition: background 180ms ease, box-shadow 180ms ease;
-      }
-      .composer-toggle-copy {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 2px;
-      }
-      .composer-toggle-title {
-        font-size: 0.76rem;
-        font-weight: 600;
-        color: var(--text);
-      }
-      .composer-toggle-meta {
-        font-size: 0.68rem;
-        color: var(--muted);
-      }
-      .composer-toggle input:checked + .composer-toggle-pill {
-        border-color: rgba(250, 250, 250, 0.16);
-        background: rgba(250, 250, 250, 0.08);
-        color: var(--text);
-      }
-      .composer-toggle input:checked + .composer-toggle-pill::before {
-        background: #fafafa;
-        box-shadow: 0 0 0 4px rgba(250, 250, 250, 0.1);
-      }
-      .composer-toggle:hover .composer-toggle-pill {
-        transform: translateY(-1px);
-      }
-      .composer-toggle input:disabled + .composer-toggle-pill {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-      [data-theme="light"] .composer-toggle-pill {
-        background: rgba(15, 23, 42, 0.04);
-        border-color: rgba(15, 23, 42, 0.08);
-      }
-      [data-theme="light"] .composer-toggle input:checked + .composer-toggle-pill {
-        background: rgba(15, 23, 42, 0.08);
-        border-color: rgba(15, 23, 42, 0.14);
-      }
-
       /* Bottom toolbar row inside the card */
       .composer-toolbar {
         display: flex; align-items: center; justify-content: space-between;
@@ -838,16 +760,6 @@
         .messages { padding: 12px; }
         .composer { padding: 10px 12px 14px; }
         .composer-card { border-radius: 14px; }
-        .composer-options {
-          padding: 0 12px 10px;
-          gap: 8px;
-        }
-        .composer-toggle {
-          width: 100%;
-        }
-        .composer-toggle-pill {
-          width: 100%;
-        }
         .composer-toolbar {
           padding: 8px 8px 10px 14px;
         }
@@ -984,26 +896,6 @@
             autocomplete="off"
             rows="1"
           ></textarea>
-          <div class="composer-options">
-            <label class="composer-toggle" for="autoKeepPollingToggle">
-              <input id="autoKeepPollingToggle" type="checkbox" />
-              <span class="composer-toggle-pill">
-                <span class="composer-toggle-copy">
-                  <span class="composer-toggle-title">Auto keep polling</span>
-                  <span class="composer-toggle-meta">Send `keep polling` every 20 seconds</span>
-                </span>
-              </span>
-            </label>
-            <label class="composer-toggle" for="injectKeepPollingToggle">
-              <input id="injectKeepPollingToggle" type="checkbox" />
-              <span class="composer-toggle-pill">
-                <span class="composer-toggle-copy">
-                  <span class="composer-toggle-title">Inject keep polling</span>
-                  <span class="composer-toggle-meta">Append `keep polling` to each message</span>
-                </span>
-              </span>
-            </label>
-          </div>
           <div class="composer-toolbar">
             <div class="composer-toolbar-left">
               <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
@@ -1030,9 +922,6 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
-      const KEEP_POLLING_TEXT = "keep polling";
-      const KEEP_POLLING_INTERVAL_MS = 20_000;
-
       const state = {
         currentProjectId: "",
         currentProjectCode: "",
@@ -1048,10 +937,6 @@
         searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem('lac-sound') !== 'off',
-        autoKeepPolling: false,
-        injectKeepPolling: false,
-        keepPollingTimer: null,
-        keepPollingInFlight: false,
       };
 
       function isInviteCode(str) {
@@ -1080,8 +965,6 @@
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
-        autoKeepPollingToggle: document.getElementById("autoKeepPollingToggle"),
-        injectKeepPollingToggle: document.getElementById("injectKeepPollingToggle"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
         headerSearch: document.getElementById("headerSearch"),
@@ -1693,73 +1576,6 @@
         renderMessages();
       }
 
-      function stopKeepPollingLoop() {
-        if (state.keepPollingTimer) {
-          window.clearInterval(state.keepPollingTimer);
-          state.keepPollingTimer = null;
-        }
-      }
-
-      function syncKeepPollingControls() {
-        elements.autoKeepPollingToggle.checked = state.autoKeepPolling;
-        elements.injectKeepPollingToggle.checked = state.injectKeepPolling;
-      }
-
-      function resetKeepPollingOptions() {
-        stopKeepPollingLoop();
-        state.autoKeepPolling = false;
-        state.injectKeepPolling = false;
-        state.keepPollingInFlight = false;
-        syncKeepPollingControls();
-      }
-
-      function appendKeepPollingInstruction(text) {
-        if (text.toLowerCase().includes(KEEP_POLLING_TEXT)) {
-          return text;
-        }
-        return `${text}\n\n${KEEP_POLLING_TEXT}`;
-      }
-
-      async function postRoomMessage(text, sender) {
-        return apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
-          method: "POST",
-          body: JSON.stringify({ sender, text }),
-        });
-      }
-
-      async function sendKeepPollingMessage() {
-        if (!state.currentRoomIdentifier || state.keepPollingInFlight) {
-          return;
-        }
-
-        state.keepPollingInFlight = true;
-        try {
-          const message = await postRoomMessage(KEEP_POLLING_TEXT, state.senderName || "anonymous");
-          upsertMessages([message]);
-          scrollMessagesToBottom(true);
-        } catch (_error) {
-          // Keep the opt-in loop quiet on transient failures; the room stream already reflects connection state.
-        } finally {
-          state.keepPollingInFlight = false;
-        }
-      }
-
-      async function startKeepPollingLoop() {
-        stopKeepPollingLoop();
-        if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
-          return;
-        }
-
-        await sendKeepPollingMessage();
-        if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
-          return;
-        }
-
-        state.keepPollingTimer = window.setInterval(() => {
-          void sendKeepPollingMessage();
-        }, KEEP_POLLING_INTERVAL_MS);
-      }
-
       function updateProjectUi() {
         const hasRoom = Boolean(state.currentProjectId);
         const roomLocator = state.currentRoomName || state.currentProjectCode || state.currentProjectId;
@@ -1788,8 +1604,6 @@
         elements.renameRoomBtn.disabled = !hasRoom;
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
-        elements.autoKeepPollingToggle.disabled = !hasRoom;
-        elements.injectKeepPollingToggle.disabled = !hasRoom;
       }
 
       function encodeRoomPathIdentifier(identifier) {
@@ -2010,24 +1824,15 @@
       }
 
       async function activateProject(projectId, projectCode, focusComposer, roomName) {
-        const nextRoomIdentifier = roomName || normalizeRoomCode(projectCode || "") || projectId;
-        const roomChanged = Boolean(state.currentRoomIdentifier) && state.currentRoomIdentifier !== nextRoomIdentifier;
-        if (roomChanged) {
-          resetKeepPollingOptions();
-        }
-
         state.currentProjectId = projectId;
         state.currentProjectCode = normalizeRoomCode(projectCode || "");
-        state.currentRoomIdentifier = nextRoomIdentifier;
+        state.currentRoomIdentifier = roomName || state.currentProjectCode || projectId;
         state.currentRoomName = roomName || state.currentRoomName || "";
         updateProjectUi();
         persistSession();
         resetMessages();
         await fetchMessages();
         connectStream();
-        if (state.autoKeepPolling) {
-          void startKeepPollingLoop();
-        }
         if (focusComposer) {
           elements.messageInput.focus();
         }
@@ -2055,7 +1860,6 @@
           state.currentRoomDisplayName = "";
           state.currentRoomRole = "";
           state.currentRoomAuthenticated = false;
-          resetKeepPollingOptions();
           updateProjectUi();
           persistSession();
           setPresence("error", "Room unavailable");
@@ -2072,20 +1876,19 @@
         }
 
         const sender = state.senderName || "anonymous";
-        const rawText = elements.messageInput.value.trim();
+        const text = elements.messageInput.value.trim();
 
-        if (!rawText) {
+        if (!text) {
           setStatus("Please enter a message.", "error");
           return;
         }
 
-        const text = state.injectKeepPolling
-          ? appendKeepPollingInstruction(rawText)
-          : rawText;
-
         elements.sendMessageBtn.disabled = true;
         try {
-          const message = await postRoomMessage(text, sender);
+          const message = await apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
+            method: "POST",
+            body: JSON.stringify({ sender, text }),
+          });
           upsertMessages([message]);
           elements.messageInput.value = "";
           elements.messageInput.style.height = "auto";
@@ -2201,18 +2004,6 @@
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
       elements.composerForm.addEventListener("submit", sendMessage);
-      elements.autoKeepPollingToggle.addEventListener("change", (event) => {
-        state.autoKeepPolling = Boolean(event.target.checked);
-        if (!state.autoKeepPolling) {
-          stopKeepPollingLoop();
-          return;
-        }
-        void startKeepPollingLoop();
-      });
-      elements.injectKeepPollingToggle.addEventListener("change", (event) => {
-        state.injectKeepPolling = Boolean(event.target.checked);
-      });
-      window.addEventListener("beforeunload", stopKeepPollingLoop);
 
       // --- New messages pill: sequential scroll ---
       const _pillEl = document.getElementById("newMessagesPill");
