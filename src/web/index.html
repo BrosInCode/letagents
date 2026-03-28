@@ -420,6 +420,32 @@
         margin-left: auto;
       }
       .message-meta time { font-size: 0.68rem; color: var(--muted); }
+      .prompt-injection-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(96, 165, 250, 0.18);
+        background: rgba(96, 165, 250, 0.08);
+        color: #bfdbfe;
+        font-size: 0.62rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .prompt-injection-badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: currentColor;
+        opacity: 0.9;
+      }
+      [data-theme="light"] .prompt-injection-badge {
+        border-color: rgba(37, 99, 235, 0.14);
+        background: rgba(37, 99, 235, 0.08);
+        color: #1d4ed8;
+      }
 
       /* Message content — left border accent */
       .message-bubble {
@@ -526,93 +552,22 @@
         color: var(--muted); opacity: 0.6;
       }
 
-      .composer-options {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        padding: 0 14px 12px;
-      }
-      .composer-toggle {
-        position: relative;
-        display: inline-flex;
-        align-items: stretch;
-        cursor: pointer;
-      }
-      .composer-toggle input {
-        position: absolute;
-        opacity: 0;
-        pointer-events: none;
-      }
-      .composer-toggle-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        min-height: 42px;
-        padding: 9px 14px;
-        border-radius: 999px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        background: rgba(255, 255, 255, 0.03);
-        color: var(--muted);
-        transition: border-color 180ms ease, background 180ms ease, color 180ms ease, transform 180ms ease;
-      }
-      .composer-toggle-pill::before {
-        content: "";
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.2);
-        box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.04);
-        transition: background 180ms ease, box-shadow 180ms ease;
-      }
-      .composer-toggle-copy {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 2px;
-      }
-      .composer-toggle-title {
-        font-size: 0.76rem;
-        font-weight: 600;
-        color: var(--text);
-      }
-      .composer-toggle-meta {
-        font-size: 0.68rem;
-        color: var(--muted);
-      }
-      .composer-toggle input:checked + .composer-toggle-pill {
-        border-color: rgba(250, 250, 250, 0.16);
-        background: rgba(250, 250, 250, 0.08);
-        color: var(--text);
-      }
-      .composer-toggle input:checked + .composer-toggle-pill::before {
-        background: #fafafa;
-        box-shadow: 0 0 0 4px rgba(250, 250, 250, 0.1);
-      }
-      .composer-toggle:hover .composer-toggle-pill {
-        transform: translateY(-1px);
-      }
-      .composer-toggle input:disabled + .composer-toggle-pill {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-      [data-theme="light"] .composer-toggle-pill {
-        background: rgba(15, 23, 42, 0.04);
-        border-color: rgba(15, 23, 42, 0.08);
-      }
-      [data-theme="light"] .composer-toggle input:checked + .composer-toggle-pill {
-        background: rgba(15, 23, 42, 0.08);
-        border-color: rgba(15, 23, 42, 0.14);
-      }
-
-      /* Bottom toolbar row inside the card */
       .composer-toolbar {
         display: flex; align-items: center; justify-content: space-between;
         padding: 6px 8px 8px 16px;
         gap: 8px;
       }
       .composer-toolbar-left {
-        display: flex; align-items: center; gap: 8px;
+        display: flex; align-items: center; gap: 10px;
         min-width: 0;
+        flex-wrap: wrap;
+      }
+      .composer-identity-cluster {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        flex-wrap: wrap;
       }
       .composer-sender-label {
         font-size: 0.72rem; color: var(--muted);
@@ -620,6 +575,204 @@
       }
       .composer-sender-label strong {
         color: var(--text); font-weight: 600;
+      }
+      .composer-prompt-menu {
+        position: relative;
+      }
+      .composer-prompt-trigger {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 36px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+      }
+      .composer-prompt-trigger:hover:not(:disabled),
+      .composer-prompt-menu.open .composer-prompt-trigger {
+        border-color: rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.07);
+        transform: translateY(-1px);
+      }
+      .composer-prompt-trigger:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .composer-prompt-trigger-copy {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        min-width: 0;
+      }
+      .composer-prompt-trigger-title {
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+      }
+      .composer-prompt-trigger-meta {
+        font-size: 0.68rem;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .composer-prompt-indicator {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.18);
+        box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.04);
+        flex-shrink: 0;
+      }
+      .composer-prompt-indicator[data-mode="auto"] { background: #f59e0b; }
+      .composer-prompt-indicator[data-mode="inject"] { background: #38bdf8; }
+      .composer-prompt-indicator[data-mode="auto+inject"] { background: #34d399; }
+      .composer-prompt-trigger svg {
+        width: 14px;
+        height: 14px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+      .composer-prompt-panel {
+        position: absolute;
+        left: 0;
+        bottom: calc(100% + 10px);
+        width: min(360px, calc(100vw - 48px));
+        padding: 12px;
+        border-radius: 18px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: color-mix(in srgb, var(--bg-1) 92%, transparent);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.38);
+        backdrop-filter: blur(18px);
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: opacity 160ms ease, transform 160ms ease;
+        z-index: 20;
+      }
+      .composer-prompt-menu.open .composer-prompt-panel {
+        opacity: 1;
+        transform: translateY(0);
+        pointer-events: auto;
+      }
+      .composer-prompt-panel-header {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin-bottom: 10px;
+      }
+      .composer-prompt-panel-header strong {
+        font-size: 0.78rem;
+        font-weight: 700;
+      }
+      .composer-prompt-panel-header span {
+        font-size: 0.68rem;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+      .composer-prompt-option {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        background: rgba(255, 255, 255, 0.03);
+        transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+      }
+      .composer-prompt-option + .composer-prompt-option {
+        margin-top: 8px;
+      }
+      .composer-prompt-option:hover:not(:disabled) {
+        border-color: rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        transform: translateY(-1px);
+      }
+      .composer-prompt-option:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .composer-prompt-option[data-active="true"] {
+        border-color: rgba(250, 250, 250, 0.16);
+        background: rgba(250, 250, 250, 0.08);
+      }
+      .composer-prompt-option-copy {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        min-width: 0;
+      }
+      .composer-prompt-option-title {
+        font-size: 0.76rem;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .composer-prompt-option-meta {
+        font-size: 0.68rem;
+        color: var(--muted);
+        line-height: 1.45;
+        text-align: left;
+      }
+      .composer-prompt-option-check {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 42px;
+        padding: 5px 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+        font-size: 0.68rem;
+        font-weight: 600;
+      }
+      .composer-prompt-option[data-active="true"] .composer-prompt-option-check {
+        background: rgba(250, 250, 250, 0.92);
+        color: #111827;
+      }
+      .composer-prompt-help {
+        margin: 10px 2px 0;
+        font-size: 0.66rem;
+        line-height: 1.45;
+        color: var(--muted);
+      }
+      [data-theme="light"] .composer-prompt-trigger {
+        background: rgba(15, 23, 42, 0.04);
+        border-color: rgba(15, 23, 42, 0.08);
+      }
+      [data-theme="light"] .composer-prompt-trigger:hover:not(:disabled),
+      [data-theme="light"] .composer-prompt-menu.open .composer-prompt-trigger {
+        background: rgba(15, 23, 42, 0.08);
+        border-color: rgba(15, 23, 42, 0.14);
+      }
+      [data-theme="light"] .composer-prompt-panel {
+        border-color: rgba(15, 23, 42, 0.08);
+        box-shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
+      }
+      [data-theme="light"] .composer-prompt-option {
+        background: rgba(15, 23, 42, 0.03);
+        border-color: rgba(15, 23, 42, 0.06);
+      }
+      [data-theme="light"] .composer-prompt-option:hover:not(:disabled),
+      [data-theme="light"] .composer-prompt-option[data-active="true"] {
+        background: rgba(15, 23, 42, 0.07);
+        border-color: rgba(15, 23, 42, 0.12);
+      }
+      [data-theme="light"] .composer-prompt-option-check {
+        background: rgba(15, 23, 42, 0.06);
+      }
+      [data-theme="light"] .composer-prompt-option[data-active="true"] .composer-prompt-option-check {
+        background: #111827;
+        color: #ffffff;
       }
       .composer-shortcut-hint {
         display: none; /* shown on desktop */
@@ -823,6 +976,10 @@
         .composer-toolbar-left {
           flex: 1 1 100%;
         }
+        .composer-prompt-panel {
+          left: auto;
+          right: 0;
+        }
       }
 
       @media (max-width: 640px) {
@@ -838,18 +995,26 @@
         .messages { padding: 12px; }
         .composer { padding: 10px 12px 14px; }
         .composer-card { border-radius: 14px; }
-        .composer-options {
-          padding: 0 12px 10px;
-          gap: 8px;
-        }
-        .composer-toggle {
-          width: 100%;
-        }
-        .composer-toggle-pill {
-          width: 100%;
-        }
         .composer-toolbar {
           padding: 8px 8px 10px 14px;
+        }
+        .composer-toolbar-left,
+        .composer-identity-cluster,
+        .composer-prompt-menu,
+        .composer-prompt-trigger {
+          width: 100%;
+        }
+        .composer-prompt-trigger {
+          justify-content: space-between;
+        }
+        .composer-prompt-trigger-copy {
+          min-width: 0;
+          flex-wrap: wrap;
+        }
+        .composer-prompt-panel {
+          left: 0;
+          right: 0;
+          width: 100%;
         }
         .composer .message-textarea {
           padding: 14px 14px 6px;
@@ -984,29 +1149,60 @@
             autocomplete="off"
             rows="1"
           ></textarea>
-          <div class="composer-options">
-            <label class="composer-toggle" for="autoKeepPollingToggle">
-              <input id="autoKeepPollingToggle" type="checkbox" />
-              <span class="composer-toggle-pill">
-                <span class="composer-toggle-copy">
-                  <span class="composer-toggle-title">Auto keep polling</span>
-                  <span class="composer-toggle-meta">Send `keep polling` every 20 seconds</span>
-                </span>
-              </span>
-            </label>
-            <label class="composer-toggle" for="injectKeepPollingToggle">
-              <input id="injectKeepPollingToggle" type="checkbox" />
-              <span class="composer-toggle-pill">
-                <span class="composer-toggle-copy">
-                  <span class="composer-toggle-title">Inject keep polling</span>
-                  <span class="composer-toggle-meta">Append `keep polling` to each message</span>
-                </span>
-              </span>
-            </label>
-          </div>
           <div class="composer-toolbar">
             <div class="composer-toolbar-left">
-              <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
+              <div class="composer-identity-cluster">
+                <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
+                <div class="composer-prompt-menu" id="promptMenu">
+                  <button
+                    class="composer-prompt-trigger"
+                    id="promptMenuButton"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                  >
+                    <span class="composer-prompt-indicator" id="promptMenuIndicator" data-mode="off"></span>
+                    <span class="composer-prompt-trigger-copy">
+                      <span class="composer-prompt-trigger-title">Agent prompts</span>
+                      <span class="composer-prompt-trigger-meta" id="promptMenuSummary">Off</span>
+                    </span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                  </button>
+                  <div class="composer-prompt-panel" id="promptMenuPanel" role="menu" aria-label="Agent prompt options">
+                    <div class="composer-prompt-panel-header">
+                      <strong>Agent prompt options</strong>
+                      <span>Quiet controls for keeping the IDE agent in-room, reading messages, and acting without visible keep-polling spam.</span>
+                    </div>
+                    <button
+                      class="composer-prompt-option"
+                      id="autoKeepPollingOption"
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked="false"
+                    >
+                      <span class="composer-prompt-option-copy">
+                        <span class="composer-prompt-option-title">Auto read + poll</span>
+                        <span class="composer-prompt-option-meta">Prime the agent on room join, then send hidden stay-in-room reminders every 20 seconds.</span>
+                      </span>
+                      <span class="composer-prompt-option-check" id="autoKeepPollingOptionState">Off</span>
+                    </button>
+                    <button
+                      class="composer-prompt-option"
+                      id="injectKeepPollingOption"
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked="false"
+                    >
+                      <span class="composer-prompt-option-copy">
+                        <span class="composer-prompt-option-title">Prompt injection</span>
+                        <span class="composer-prompt-option-meta">Append a hidden polling/read-and-act directive to each visible message you send.</span>
+                      </span>
+                      <span class="composer-prompt-option-check" id="injectKeepPollingOptionState">Off</span>
+                    </button>
+                    <p class="composer-prompt-help">Prompt-only nudges stay hidden. Visible messages with injection get a small label in the room timeline.</p>
+                  </div>
+                </div>
+              </div>
               <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
             </div>
             <button class="send-btn" id="sendMessageBtn" type="submit" aria-label="Send message">
@@ -1030,8 +1226,8 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
-      const KEEP_POLLING_TEXT = "keep polling";
       const KEEP_POLLING_INTERVAL_MS = 20_000;
+      const PROMPT_PREFERENCES_KEY = "letagents:web:prompt-preferences";
 
       const state = {
         currentProjectId: "",
@@ -1047,7 +1243,7 @@
         messages: new Map(),
         searchQuery: "",
         isStreaming: false,
-        soundEnabled: localStorage.getItem('lac-sound') !== 'off',
+        soundEnabled: localStorage.getItem("lac-sound") !== "off",
         autoKeepPolling: false,
         injectKeepPolling: false,
         keepPollingTimer: null,
@@ -1076,12 +1272,19 @@
         presenceBadge: document.getElementById("presenceBadge"),
         projectIdLabel: document.getElementById("projectIdLabel"),
         senderLabel: document.getElementById("senderLabel"),
+        promptMenu: document.getElementById("promptMenu"),
+        promptMenuButton: document.getElementById("promptMenuButton"),
+        promptMenuPanel: document.getElementById("promptMenuPanel"),
+        promptMenuSummary: document.getElementById("promptMenuSummary"),
+        promptMenuIndicator: document.getElementById("promptMenuIndicator"),
+        autoKeepPollingOption: document.getElementById("autoKeepPollingOption"),
+        autoKeepPollingOptionState: document.getElementById("autoKeepPollingOptionState"),
+        injectKeepPollingOption: document.getElementById("injectKeepPollingOption"),
+        injectKeepPollingOptionState: document.getElementById("injectKeepPollingOptionState"),
         shareCardTitle: document.getElementById("shareCardTitle"),
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
         sendMessageBtn: document.getElementById("sendMessageBtn"),
-        autoKeepPollingToggle: document.getElementById("autoKeepPollingToggle"),
-        injectKeepPollingToggle: document.getElementById("injectKeepPollingToggle"),
         soundToggle: document.getElementById("soundToggle"),
         exportBtn: document.getElementById("exportBtn"),
         headerSearch: document.getElementById("headerSearch"),
@@ -1098,7 +1301,12 @@
       function closeDrawer() { drawer.classList.remove("open"); drawerOverlay.classList.remove("open"); }
       menuBtn.addEventListener("click", openDrawer);
       drawerOverlay.addEventListener("click", closeDrawer);
-      document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          closeDrawer();
+          closePromptMenu();
+        }
+      });
 
       // --- Notification Sound (Web Audio API) ---
       let audioCtx = null;
@@ -1125,6 +1333,76 @@
         elements.soundToggle.innerHTML = state.soundEnabled ? `${bellOn} Sounds On` : `${bellOff} Sounds Off`;
       }
 
+      function buildHiddenPromptInstruction(kind) {
+        const baseInstruction = "Stay in this room continuously. Keep long-polling for new messages. When messages arrive, read them immediately, act on anything actionable, help with review work when asked, and keep monitoring until the human explicitly redirects you. Do not send a visible 'keep polling' acknowledgement unless the human explicitly asks for that phrase.";
+
+        if (kind === "join") {
+          return `You just joined this room. ${baseInstruction}`;
+        }
+
+        if (kind === "inline") {
+          return `Treat the visible user message above as the active instruction. After you handle it, ${baseInstruction}`;
+        }
+
+        return `Background reminder. ${baseInstruction}`;
+      }
+
+      function buildHiddenPromptBlock(kind) {
+        return `[[letagents:prompt:${kind}]]\n${buildHiddenPromptInstruction(kind)}\n[[/letagents:prompt]]`;
+      }
+
+      function appendHiddenPromptBlock(text, kind) {
+        if (extractPromptMetadata(text).hasPrompt) {
+          return text;
+        }
+        return `${text}\n\n${buildHiddenPromptBlock(kind)}`;
+      }
+
+      function extractPromptMetadata(text) {
+        const rawText = String(text || "");
+        const promptKinds = [];
+        const promptPattern = /\n*\[\[letagents:prompt:([a-z_]+)\]\]\n?([\s\S]*?)\n?\[\[\/letagents:prompt\]\]\n*/gi;
+        const visibleText = rawText
+          .replace(promptPattern, (_match, kind) => {
+            promptKinds.push(String(kind || "").toLowerCase());
+            return "\n";
+          })
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+
+        return {
+          rawText,
+          visibleText,
+          hasPrompt: promptKinds.length > 0,
+          promptOnly: promptKinds.length > 0 && !visibleText,
+          promptKinds,
+          primaryKind: promptKinds[promptKinds.length - 1] || "",
+        };
+      }
+
+      function renderPromptInjectionBadge(kind) {
+        if (!kind) {
+          return "";
+        }
+
+        const label = kind === "inline" ? "Prompt injected" : "Hidden prompt";
+        return `<span class="prompt-injection-badge">${escapeHtml(label)}</span>`;
+      }
+
+      function sortMessagesByTimestamp(a, b) {
+        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      }
+
+      function getRenderableMessages() {
+        return Array.from(state.messages.values())
+          .sort(sortMessagesByTimestamp)
+          .map((message) => ({
+            message,
+            promptMeta: extractPromptMetadata(message.text),
+          }))
+          .filter(({ promptMeta }) => !promptMeta.promptOnly);
+      }
+
       elements.soundToggle.addEventListener('click', () => {
         state.soundEnabled = !state.soundEnabled;
         localStorage.setItem('lac-sound', state.soundEnabled ? 'on' : 'off');
@@ -1134,17 +1412,17 @@
 
       // --- Export Room ---
       elements.exportBtn.addEventListener('click', () => {
-        if (!state.messages.size) {
+        const renderableMessages = getRenderableMessages();
+        if (!renderableMessages.length) {
           setStatus('No messages to export.', 'error');
           return;
         }
-        const sorted = Array.from(state.messages.values()).sort((a, b) =>
-          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-        );
         let md = `# Chat Export — ${state.currentProjectId || 'Room'}\n`;
         md += `Exported: ${new Date().toISOString()}\n\n---\n\n`;
-        for (const m of sorted) {
-          md += `**${m.sender}** _${formatTimestamp(m.timestamp)}_\n\n${m.text}\n\n---\n\n`;
+        for (const { message, promptMeta } of renderableMessages) {
+          const exportedText = promptMeta.visibleText || message.text || "";
+          const promptNote = promptMeta.hasPrompt ? "\n\n_Prompt injected in background._" : "";
+          md += `**${message.sender}** _${formatTimestamp(message.timestamp)}_\n\n${exportedText}${promptNote}\n\n---\n\n`;
         }
         const blob = new Blob([md], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
@@ -1519,13 +1797,13 @@
         }
       }
 
-      function updateOwnerLegend() {
+      function updateOwnerLegend(renderableMessages = getRenderableMessages()) {
         const legend = document.getElementById("ownerLegend");
         if (!legend) return;
 
         const MAX_VISIBLE_CHIPS = 6;
         const owners = new Map();
-        for (const message of state.messages.values()) {
+        for (const { message } of renderableMessages) {
           const owner = getOwnerFromSender(message.sender, message.source);
           if (owner && !owners.has(owner.toLowerCase())) {
             owners.set(owner.toLowerCase(), {
@@ -1572,14 +1850,13 @@
       }
 
       function renderMessages(skipScroll = false) {
-        const sortedMessages = Array.from(state.messages.values()).sort((a, b) => {
-          return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-        });
+        const renderableMessages = getRenderableMessages();
 
         elements.messages.innerHTML = "";
 
-        if (!sortedMessages.length) {
+        if (!renderableMessages.length) {
           elements.emptyState.classList.remove("hidden");
+          updateOwnerLegend(renderableMessages);
           return;
         }
 
@@ -1587,11 +1864,11 @@
 
         const query = state.searchQuery.toLowerCase();
         const matchIds = query
-          ? new Set(sortedMessages.filter(m => {
-              const text = (m.text || "").toLowerCase();
-              const sender = (m.sender || "").toLowerCase();
+          ? new Set(renderableMessages.filter(({ message, promptMeta }) => {
+              const text = (promptMeta.visibleText || "").toLowerCase();
+              const sender = (message.sender || "").toLowerCase();
               return text.includes(query) || sender.includes(query);
-            }).map(m => m.id))
+            }).map(({ message }) => message.id))
           : null;
 
         if (query) {
@@ -1602,7 +1879,7 @@
 
         const fragment = document.createDocumentFragment();
 
-        for (const message of sortedMessages) {
+        for (const { message, promptMeta } of renderableMessages) {
           const isMatch = !query || matchIds.has(message.id);
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
@@ -1617,7 +1894,7 @@
           wrapper.dataset.msgId = message.id;
           wrapper.style.setProperty("--sender-color", senderColor);
 
-          let renderedText = renderMarkdown(message.text);
+          let renderedText = renderMarkdown(promptMeta.visibleText || "");
           if (query && isMatch) {
             renderedText = highlightTextInHtml(renderedText, query);
           }
@@ -1632,6 +1909,7 @@
                 </div>
                 <div class="message-meta-tail">
                   ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
+                  ${promptMeta.hasPrompt ? renderPromptInjectionBadge(promptMeta.primaryKind) : ""}
                   ${showProvenanceBadge ? `<span class="provenance-badge ${provenance}">${provenance}</span>` : ""}
                   <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
                 </div>
@@ -1645,7 +1923,7 @@
         }
 
         elements.messages.appendChild(fragment);
-        updateOwnerLegend();
+        updateOwnerLegend(renderableMessages);
         if (!query && !skipScroll) {
           requestAnimationFrame(() => scrollMessagesToBottom(true));
         } else if (query && matchIds.size) {
@@ -1667,24 +1945,26 @@
       function upsertMessages(items) {
         let changed = false;
         const wasNearBottom = isNearBottom();
-        const newIds = [];
+        const newVisibleIds = [];
         for (const item of items) {
           if (!item || !item.id || state.messages.has(item.id)) {
             continue;
           }
           state.messages.set(item.id, item);
-          newIds.push(item.id);
+          if (!extractPromptMetadata(item.text).promptOnly) {
+            newVisibleIds.push(item.id);
+          }
           changed = true;
         }
         if (changed) {
           renderMessages(true);
-          if (wasNearBottom) {
+          if (wasNearBottom && newVisibleIds.length) {
             scrollMessagesToBottom(true);
-          } else {
-            _unreadMessageIds.push(...newIds);
+          } else if (newVisibleIds.length) {
+            _unreadMessageIds.push(...newVisibleIds);
             updateNewMessagesPill();
           }
-          if (state.isStreaming) playNotificationSound();
+          if (state.isStreaming && newVisibleIds.length) playNotificationSound();
         }
       }
 
@@ -1700,24 +1980,81 @@
         }
       }
 
-      function syncKeepPollingControls() {
-        elements.autoKeepPollingToggle.checked = state.autoKeepPolling;
-        elements.injectKeepPollingToggle.checked = state.injectKeepPolling;
-      }
-
-      function resetKeepPollingOptions() {
-        stopKeepPollingLoop();
-        state.autoKeepPolling = false;
-        state.injectKeepPolling = false;
-        state.keepPollingInFlight = false;
-        syncKeepPollingControls();
-      }
-
-      function appendKeepPollingInstruction(text) {
-        if (text.toLowerCase().includes(KEEP_POLLING_TEXT)) {
-          return text;
+      function getPromptModeSummary() {
+        if (state.autoKeepPolling && state.injectKeepPolling) {
+          return "Auto + inject";
         }
-        return `${text}\n\n${KEEP_POLLING_TEXT}`;
+        if (state.autoKeepPolling) {
+          return "Auto";
+        }
+        if (state.injectKeepPolling) {
+          return "Inject";
+        }
+        return "Off";
+      }
+
+      function getPromptModeIndicator() {
+        if (state.autoKeepPolling && state.injectKeepPolling) {
+          return "auto+inject";
+        }
+        if (state.autoKeepPolling) {
+          return "auto";
+        }
+        if (state.injectKeepPolling) {
+          return "inject";
+        }
+        return "off";
+      }
+
+      function closePromptMenu() {
+        elements.promptMenu.classList.remove("open");
+        elements.promptMenuButton.setAttribute("aria-expanded", "false");
+      }
+
+      function persistPromptPreferences() {
+        localStorage.setItem(PROMPT_PREFERENCES_KEY, JSON.stringify({
+          autoKeepPolling: state.autoKeepPolling,
+          injectKeepPolling: state.injectKeepPolling,
+        }));
+      }
+
+      function loadPromptPreferences() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(PROMPT_PREFERENCES_KEY) || "{}");
+          state.autoKeepPolling = Boolean(saved.autoKeepPolling);
+          state.injectKeepPolling = Boolean(saved.injectKeepPolling);
+        } catch (_error) {
+          state.autoKeepPolling = false;
+          state.injectKeepPolling = false;
+        }
+      }
+
+      function syncPromptOption(element, stateElement, active) {
+        element.dataset.active = active ? "true" : "false";
+        element.setAttribute("aria-checked", active ? "true" : "false");
+        stateElement.textContent = active ? "On" : "Off";
+      }
+
+      function syncKeepPollingControls() {
+        const modeSummary = getPromptModeSummary();
+        const indicatorMode = getPromptModeIndicator();
+        elements.promptMenuSummary.textContent = modeSummary;
+        elements.promptMenuIndicator.dataset.mode = indicatorMode;
+        elements.promptMenuButton.dataset.mode = indicatorMode;
+        syncPromptOption(elements.autoKeepPollingOption, elements.autoKeepPollingOptionState, state.autoKeepPolling);
+        syncPromptOption(elements.injectKeepPollingOption, elements.injectKeepPollingOptionState, state.injectKeepPolling);
+      }
+
+      function resetKeepPollingOptions(preservePreferences = true) {
+        stopKeepPollingLoop();
+        if (!preservePreferences) {
+          state.autoKeepPolling = false;
+          state.injectKeepPolling = false;
+          persistPromptPreferences();
+        }
+        state.keepPollingInFlight = false;
+        closePromptMenu();
+        syncKeepPollingControls();
       }
 
       async function postRoomMessage(text, sender) {
@@ -1727,36 +2064,43 @@
         });
       }
 
-      async function sendKeepPollingMessage() {
+      async function sendBackgroundPrompt(kind) {
         if (!state.currentRoomIdentifier || state.keepPollingInFlight) {
-          return;
+          return false;
         }
 
         state.keepPollingInFlight = true;
         try {
-          const message = await postRoomMessage(KEEP_POLLING_TEXT, state.senderName || "anonymous");
+          const message = await postRoomMessage(
+            buildHiddenPromptBlock(kind),
+            state.senderName || "anonymous"
+          );
           upsertMessages([message]);
-          scrollMessagesToBottom(true);
+          return true;
         } catch (_error) {
           // Keep the opt-in loop quiet on transient failures; the room stream already reflects connection state.
+          return false;
         } finally {
           state.keepPollingInFlight = false;
         }
       }
 
-      async function startKeepPollingLoop() {
+      async function startKeepPollingLoop({ sendImmediately = true } = {}) {
         stopKeepPollingLoop();
         if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
           return;
         }
 
-        await sendKeepPollingMessage();
+        if (sendImmediately) {
+          await sendBackgroundPrompt("auto");
+        }
+
         if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
           return;
         }
 
         state.keepPollingTimer = window.setInterval(() => {
-          void sendKeepPollingMessage();
+          void sendBackgroundPrompt("auto");
         }, KEEP_POLLING_INTERVAL_MS);
       }
 
@@ -1788,8 +2132,13 @@
         elements.renameRoomBtn.disabled = !hasRoom;
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
-        elements.autoKeepPollingToggle.disabled = !hasRoom;
-        elements.injectKeepPollingToggle.disabled = !hasRoom;
+        elements.promptMenuButton.disabled = !hasRoom;
+        elements.autoKeepPollingOption.disabled = !hasRoom;
+        elements.injectKeepPollingOption.disabled = !hasRoom;
+        if (!hasRoom) {
+          closePromptMenu();
+        }
+        syncKeepPollingControls();
       }
 
       function encodeRoomPathIdentifier(identifier) {
@@ -2026,7 +2375,10 @@
         await fetchMessages();
         connectStream();
         if (state.autoKeepPolling) {
-          void startKeepPollingLoop();
+          void startKeepPollingLoop({ sendImmediately: false });
+        }
+        if (state.autoKeepPolling || state.injectKeepPolling) {
+          void sendBackgroundPrompt("join");
         }
         if (focusComposer) {
           elements.messageInput.focus();
@@ -2080,7 +2432,7 @@
         }
 
         const text = state.injectKeepPolling
-          ? appendKeepPollingInstruction(rawText)
+          ? appendHiddenPromptBlock(rawText, "inline")
           : rawText;
 
         elements.sendMessageBtn.disabled = true;
@@ -2090,7 +2442,12 @@
           elements.messageInput.value = "";
           elements.messageInput.style.height = "auto";
           scrollMessagesToBottom(true);
-          setStatus(`Message sent as ${sender}.`, "success");
+          setStatus(
+            state.injectKeepPolling
+              ? `Message sent as ${sender}; hidden agent prompt injected.`
+              : `Message sent as ${sender}.`,
+            "success"
+          );
         } catch (error) {
           setStatus(error.message || "Could not send message.", "error");
         } finally {
@@ -2196,23 +2553,70 @@
         }
       });
 
+      async function toggleAutoKeepPolling() {
+        state.autoKeepPolling = !state.autoKeepPolling;
+        persistPromptPreferences();
+        syncKeepPollingControls();
+
+        if (!state.autoKeepPolling) {
+          stopKeepPollingLoop();
+          setStatus("Auto polling prompt disabled.", "");
+          return;
+        }
+
+        await sendBackgroundPrompt("auto");
+        if (state.autoKeepPolling) {
+          await startKeepPollingLoop({ sendImmediately: false });
+        }
+        setStatus("Auto polling prompt enabled.", "success");
+      }
+
+      async function toggleInjectKeepPolling() {
+        state.injectKeepPolling = !state.injectKeepPolling;
+        persistPromptPreferences();
+        syncKeepPollingControls();
+
+        if (!state.injectKeepPolling) {
+          setStatus("Prompt injection disabled.", "");
+          return;
+        }
+
+        await sendBackgroundPrompt("join");
+        setStatus("Prompt injection enabled for future messages.", "success");
+      }
+
+      function togglePromptMenu() {
+        if (elements.promptMenuButton.disabled) {
+          return;
+        }
+
+        const isOpen = elements.promptMenu.classList.toggle("open");
+        elements.promptMenuButton.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      }
+
       initTheme();
+      loadPromptPreferences();
+      syncKeepPollingControls();
 
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
       elements.composerForm.addEventListener("submit", sendMessage);
-      elements.autoKeepPollingToggle.addEventListener("change", (event) => {
-        state.autoKeepPolling = Boolean(event.target.checked);
-        if (!state.autoKeepPolling) {
-          stopKeepPollingLoop();
-          return;
-        }
-        void startKeepPollingLoop();
+      elements.promptMenuButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        togglePromptMenu();
       });
-      elements.injectKeepPollingToggle.addEventListener("change", (event) => {
-        state.injectKeepPolling = Boolean(event.target.checked);
+      elements.autoKeepPollingOption.addEventListener("click", () => {
+        void toggleAutoKeepPolling();
+      });
+      elements.injectKeepPollingOption.addEventListener("click", () => {
+        void toggleInjectKeepPolling();
       });
       window.addEventListener("beforeunload", stopKeepPollingLoop);
+      document.addEventListener("click", (event) => {
+        if (!elements.promptMenu.contains(event.target)) {
+          closePromptMenu();
+        }
+      });
 
       // --- New messages pill: sequential scroll ---
       const _pillEl = document.getElementById("newMessagesPill");
