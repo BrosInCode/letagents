@@ -23,16 +23,13 @@
     <Composer
       v-if="activeTab === 'chat'"
       :senderName="senderName"
-      :autoKeepPolling="autoKeepPolling"
-      :keepPollingIntervalSeconds="KEEP_POLLING_INTERVAL_MS / 1000"
       @send="handleSend"
-      @update:autoKeepPolling="handleAutoKeepPollingChange"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
@@ -41,9 +38,6 @@ import MessageList from '@/components/room/MessageList.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 
-const KEEP_POLLING_TEXT = 'keep polling'
-const KEEP_POLLING_INTERVAL_MS = 20_000
-
 const route = useRoute()
 const { messages, tasks, room, connectionState, joinRoom, sendMessage, addTask } = useRoom()
 const auth = useAuth()
@@ -51,12 +45,8 @@ const auth = useAuth()
 const activeTab = ref<'chat' | 'board'>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
-const autoKeepPolling = ref(false)
 
-let keepPollingTimer: ReturnType<typeof setInterval> | null = null
-let keepPollingInFlight = false
-
-const senderName = computed(() => auth.user.value?.login || 'anonymous')
+const senderName = computed(() => auth.session.value?.username || 'anonymous')
 const roomTitle = computed(() => room.value?.displayName || 'No active room')
 const roomSubtitle = computed(() =>
   room.value
@@ -66,36 +56,6 @@ const roomSubtitle = computed(() =>
 
 async function handleSend(text: string) {
   await sendMessage(text, senderName.value)
-}
-
-async function sendKeepPollingMessage() {
-  if (!room.value || keepPollingInFlight) return
-  keepPollingInFlight = true
-  try {
-    await sendMessage(KEEP_POLLING_TEXT, senderName.value)
-  } finally {
-    keepPollingInFlight = false
-  }
-}
-
-function stopKeepPollingLoop() {
-  if (keepPollingTimer) {
-    clearInterval(keepPollingTimer)
-    keepPollingTimer = null
-  }
-}
-
-async function startKeepPollingLoop() {
-  stopKeepPollingLoop()
-  if (!autoKeepPolling.value || !room.value) return
-  await sendKeepPollingMessage()
-  keepPollingTimer = setInterval(() => {
-    void sendKeepPollingMessage()
-  }, KEEP_POLLING_INTERVAL_MS)
-}
-
-function handleAutoKeepPollingChange(enabled: boolean) {
-  autoKeepPolling.value = enabled
 }
 
 async function handleAddTask(title: string) {
@@ -108,34 +68,6 @@ onMounted(async () => {
   if (roomId) {
     await joinRoom(roomId)
   }
-})
-
-onUnmounted(() => {
-  stopKeepPollingLoop()
-})
-
-watch(autoKeepPolling, (enabled) => {
-  if (!enabled) {
-    stopKeepPollingLoop()
-    return
-  }
-  void startKeepPollingLoop()
-})
-
-watch(() => room.value?.projectId, (newProjectId, oldProjectId) => {
-  if (!newProjectId) {
-    stopKeepPollingLoop()
-    return
-  }
-  if (!oldProjectId) {
-    if (autoKeepPolling.value) {
-      void startKeepPollingLoop()
-    }
-    return
-  }
-  if (newProjectId === oldProjectId) return
-  stopKeepPollingLoop()
-  autoKeepPolling.value = false
 })
 
 watch(() => route.params.roomId, async (newId) => {

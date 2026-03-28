@@ -16,15 +16,6 @@
           </span>
           <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
         </div>
-        <label class="keep-polling-toggle">
-          <input
-            type="checkbox"
-            :checked="autoKeepPolling"
-            :disabled="disabled"
-            @change="handleAutoKeepPollingToggle"
-          />
-          <span>Auto keep polling every {{ keepPollingIntervalSeconds }}s</span>
-        </label>
         <button class="send-btn" type="submit" :disabled="!text.trim()" aria-label="Send message">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
@@ -39,18 +30,13 @@ import { ref, onMounted } from 'vue'
 const props = withDefaults(defineProps<{
   senderName?: string
   disabled?: boolean
-  autoKeepPolling?: boolean
-  keepPollingIntervalSeconds?: number
 }>(), {
   senderName: 'anonymous',
   disabled: false,
-  autoKeepPolling: false,
-  keepPollingIntervalSeconds: 20,
 })
 
 const emit = defineEmits<{
   send: [text: string]
-  'update:autoKeepPolling': [enabled: boolean]
 }>()
 
 const text = ref('')
@@ -71,11 +57,6 @@ function handleKeyDown(e: KeyboardEvent) {
     e.preventDefault()
     handleSend()
   }
-}
-
-function handleAutoKeepPollingToggle(e: Event) {
-  const target = e.target as HTMLInputElement | null
-  emit('update:autoKeepPolling', !!target?.checked)
 }
 
 onMounted(() => {
@@ -125,7 +106,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
   padding: 6px 8px 8px 16px;
   gap: 8px;
 }
@@ -152,18 +132,6 @@ onMounted(() => {
   color: var(--muted, #71717a);
   opacity: 0.5;
   white-space: nowrap;
-}
-.keep-polling-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-  font-size: 0.7rem;
-  color: var(--muted, #a1a1aa);
-  user-select: none;
-}
-.keep-polling-toggle input {
-  accent-color: var(--text, #fafafa);
 }
 @media (min-width: 641px) {
   .composer-shortcut-hint { display: inline; }
