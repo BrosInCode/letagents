@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
+import fs from "fs";
 import express, { type Response } from "express";
 import path from "path";
 
@@ -491,6 +492,9 @@ async function resolveRoomOrReply(
 }
 
 const WEB_DIR = path.resolve(process.cwd(), "src", "web");
+const VUE_DIST_DIR = path.join(WEB_DIR, "dist");
+const VUE_INDEX = path.join(VUE_DIST_DIR, "index.html");
+const HAS_VUE_BUILD = fs.existsSync(VUE_INDEX);
 
 const app = express();
 app.use(express.json());
@@ -588,12 +592,31 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
+// Serve Vue build assets first (hashed filenames, safe to cache)
+if (HAS_VUE_BUILD) {
+  app.use("/assets", express.static(path.join(VUE_DIST_DIR, "assets"), {
+    maxAge: "1y",
+    immutable: true,
+  }));
+  app.use("/images", express.static(path.join(VUE_DIST_DIR, "images"), {
+    maxAge: "1d",
+  }));
+}
+
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(WEB_DIR, "landing.html"));
+  if (HAS_VUE_BUILD) {
+    res.sendFile(VUE_INDEX);
+  } else {
+    res.sendFile(path.join(WEB_DIR, "landing.html"));
+  }
 });
 
 app.get("/docs", (_req, res) => {
-  res.sendFile(path.join(WEB_DIR, "docs.html"));
+  if (HAS_VUE_BUILD) {
+    res.sendFile(VUE_INDEX);
+  } else {
+    res.sendFile(path.join(WEB_DIR, "docs.html"));
+  }
 });
 
 app.get("/app", (_req, res) => {
@@ -642,7 +665,11 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  res.sendFile(path.join(WEB_DIR, "index.html"));
+  if (HAS_VUE_BUILD) {
+    res.sendFile(VUE_INDEX);
+  } else {
+    res.sendFile(path.join(WEB_DIR, "index.html"));
+  }
 });
 
 app.get("/api/health", (_req, res) => {
