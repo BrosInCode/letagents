@@ -19,44 +19,52 @@
     </div>
 
     <div v-for="group in groupedTasks" :key="group.status" class="board-group">
-      <h3 class="board-group-title">
+      <h3
+        class="board-group-title"
+        @click="toggleGroup(group.status)"
+      >
+        <span class="board-group-chevron" :class="{ collapsed: collapsedGroups.has(group.status) }">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </span>
         {{ group.label }}
         <span class="board-group-count">{{ group.tasks.length }}</span>
       </h3>
-      <div v-for="task in group.tasks" :key="task.id" class="task-card">
-        <div class="task-card-header">
-          <h4 class="task-card-title">{{ task.title }}</h4>
-          <span class="task-status-badge" :data-status="task.status">
-            {{ STATUS_LABELS[task.status] || task.status }}
-          </span>
+      <template v-if="!collapsedGroups.has(group.status)">
+        <div v-for="task in group.tasks" :key="task.id" class="task-card">
+          <div class="task-card-header">
+            <h4 class="task-card-title">{{ task.title }}</h4>
+            <span class="task-status-badge" :data-status="task.status">
+              {{ STATUS_LABELS[task.status] || task.status }}
+            </span>
+          </div>
+          <div class="task-meta">
+            <!-- Assignee chip -->
+            <TaskPersonChip v-if="task.assignee" :sender="task.assignee" role="Assignee" />
+            <!-- Created by chip -->
+            <TaskPersonChip v-if="task.created_by" :sender="task.created_by" role="Created by" />
+            <!-- Date -->
+            <span>{{ formatTimestamp(task.created_at) }}</span>
+          </div>
+          <p v-if="task.description" class="task-description">{{ task.description }}</p>
+          <div v-if="task.pr_url" class="task-pr-link">
+            <a :href="task.pr_url" target="_blank">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              View PR
+            </a>
+          </div>
+          <div v-if="getTaskActions(task).length" class="task-actions">
+            <button
+              v-for="action in getTaskActions(task)"
+              :key="action.status"
+              :class="['task-action-btn', action.cls]"
+              :disabled="updatingTask === task.id"
+              @click="handleUpdateStatus(task.id, action.status)"
+            >
+              {{ action.label }}
+            </button>
+          </div>
         </div>
-        <div class="task-meta">
-          <!-- Assignee chip -->
-          <TaskPersonChip v-if="task.assignee" :sender="task.assignee" role="Assignee" />
-          <!-- Created by chip -->
-          <TaskPersonChip v-if="task.created_by" :sender="task.created_by" role="Created by" />
-          <!-- Date -->
-          <span>{{ formatTimestamp(task.created_at) }}</span>
-        </div>
-        <p v-if="task.description" class="task-description">{{ task.description }}</p>
-        <div v-if="task.pr_url" class="task-pr-link">
-          <a :href="task.pr_url" target="_blank">
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-            View PR
-          </a>
-        </div>
-        <div v-if="getTaskActions(task).length" class="task-actions">
-          <button
-            v-for="action in getTaskActions(task)"
-            :key="action.status"
-            :class="['task-action-btn', action.cls]"
-            :disabled="updatingTask === task.id"
-            @click="handleUpdateStatus(task.id, action.status)"
-          >
-            {{ action.label }}
-          </button>
-        </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>
@@ -77,6 +85,18 @@ const emit = defineEmits<{
 
 const newTaskTitle = ref('')
 const updatingTask = ref<string | null>(null)
+const collapsedGroups = ref(new Set<string>())
+
+function toggleGroup(status: string) {
+  const s = collapsedGroups.value
+  if (s.has(status)) {
+    s.delete(status)
+  } else {
+    s.add(status)
+  }
+  // Trigger reactivity
+  collapsedGroups.value = new Set(s)
+}
 
 function handleAdd() {
   const title = newTaskTitle.value.trim()
@@ -194,7 +214,15 @@ const groupedTasks = computed(() => {
   font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--muted, #71717a); margin-bottom: 8px;
   display: flex; align-items: center; gap: 6px;
+  cursor: pointer; user-select: none;
+  transition: color 150ms;
 }
+.board-group-title:hover { color: var(--text, #fafafa); }
+.board-group-chevron {
+  display: flex; align-items: center; justify-content: center;
+  transition: transform 200ms ease;
+}
+.board-group-chevron.collapsed { transform: rotate(-90deg); }
 .board-group-count {
   padding: 1px 6px; border-radius: 4px;
   background: var(--surface, #18181b); font-size: 0.66rem;
