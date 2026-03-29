@@ -1120,44 +1120,27 @@
                 aria-expanded="false"
                 data-mode="off"
               >
-                <span class="composer-prompt-indicator" id="promptMenuIndicator" data-mode="off"></span>
-                <span class="composer-prompt-trigger-copy">
-                  <span class="composer-prompt-trigger-title">Agent prompts</span>
-                  <span class="composer-prompt-trigger-meta" id="promptMenuSummary">Off</span>
-                </span>
-                <span id="promptMenuLabel">Prompts off</span>
+                <span id="promptMenuLabel">Inject</span>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </button>
               <div class="composer-prompt-panel" id="promptMenuPanel" role="menu" aria-label="Agent prompt options">
                 <div class="composer-prompt-panel-header">
-                  <strong>Agent prompts</strong>
+                  <strong>Inject prompt</strong>
                 </div>
                 <button
                   class="composer-prompt-option"
-                  id="autoKeepPollingOption"
+                  id="injectPromptOption"
                   type="button"
                   role="menuitemcheckbox"
                   aria-checked="false"
                 >
                   <span class="composer-prompt-option-copy">
-                    <span class="composer-prompt-option-title">Auto read + poll</span>
-                    <span class="composer-prompt-option-meta">Hidden stay-in-room reminders every 20s</span>
+                    <span class="composer-prompt-option-title">Attach room prompt</span>
+                    <span class="composer-prompt-option-meta">Send the visible message normally and attach the stay-in-room agent prompt as hidden metadata.</span>
                   </span>
-                  <span class="composer-prompt-option-check" id="autoKeepPollingOptionState"></span>
+                  <span class="composer-prompt-option-check" id="injectPromptOptionState"></span>
                 </button>
-                <button
-                  class="composer-prompt-option"
-                  id="injectKeepPollingOption"
-                  type="button"
-                  role="menuitemcheckbox"
-                  aria-checked="false"
-                >
-                  <span class="composer-prompt-option-copy">
-                    <span class="composer-prompt-option-title">Prompt injection</span>
-                    <span class="composer-prompt-option-meta">Append hidden directive to sent messages</span>
-                  </span>
-                  <span class="composer-prompt-option-check" id="injectKeepPollingOptionState"></span>
-                </button>
+                <p class="composer-prompt-help">The prompt stays out of the transcript. Messages with injection show a small badge in the timeline.</p>
               </div>
             </div>
           </div>
@@ -1193,9 +1176,7 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
-      const KEEP_POLLING_INTERVAL_MS = 20_000;
       const PROMPT_PREFERENCES_STORAGE_PREFIX = "letagents:web:prompt-preferences";
-      const TRUSTED_PROMPT_MESSAGE_IDS_STORAGE_PREFIX = "letagents:web:trusted-prompt-message-ids";
 
       const state = {
         currentProjectId: "",
@@ -1209,14 +1190,10 @@
         reconnectTimer: null,
         reconnectDelay: 1200,
         messages: new Map(),
-        trustedPromptMessageIds: new Set(),
         searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem("lac-sound") !== "off",
-        autoKeepPolling: false,
-        injectKeepPolling: false,
-        keepPollingTimer: null,
-        keepPollingInFlight: false,
+        injectPrompt: false,
       };
 
       function isInviteCode(str) {
@@ -1244,13 +1221,9 @@
         promptMenu: document.getElementById("promptMenu"),
         promptMenuButton: document.getElementById("promptMenuButton"),
         promptMenuPanel: document.getElementById("promptMenuPanel"),
-        promptMenuSummary: document.getElementById("promptMenuSummary"),
-        promptMenuIndicator: document.getElementById("promptMenuIndicator"),
         promptMenuLabel: document.getElementById("promptMenuLabel"),
-        autoKeepPollingOption: document.getElementById("autoKeepPollingOption"),
-        autoKeepPollingOptionState: document.getElementById("autoKeepPollingOptionState"),
-        injectKeepPollingOption: document.getElementById("injectKeepPollingOption"),
-        injectKeepPollingOptionState: document.getElementById("injectKeepPollingOptionState"),
+        injectPromptOption: document.getElementById("injectPromptOption"),
+        injectPromptOptionState: document.getElementById("injectPromptOptionState"),
         shareCardTitle: document.getElementById("shareCardTitle"),
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
@@ -1303,94 +1276,17 @@
         elements.soundToggle.innerHTML = state.soundEnabled ? `${bellOn} Sounds On` : `${bellOff} Sounds Off`;
       }
 
-      function buildHiddenPromptInstruction(kind) {
-        const baseInstruction = "Stay in this room continuously. Keep long-polling for new messages. When messages arrive, read them immediately, act on anything actionable, help with review work when asked, and keep monitoring until the human explicitly redirects you. Do not send a visible 'keep polling' acknowledgement unless the human explicitly asks for that phrase.";
-
-        if (kind === "join") {
-          return `You just joined this room. ${baseInstruction}`;
-        }
-
-        if (kind === "inline") {
-          return `Treat the visible user message above as the active instruction. After you handle it, ${baseInstruction}`;
-        }
-
-        return `Background reminder. ${baseInstruction}`;
-      }
-
-      function buildHiddenPromptBlock(kind) {
-        return `[[letagents:prompt:${kind}]]\n${buildHiddenPromptInstruction(kind)}\n[[/letagents:prompt]]`;
-      }
-
-      function containsPromptBlock(text) {
-        return /\[\[letagents:prompt:[a-z_]+\]\][\s\S]*?\[\[\/letagents:prompt\]\]/i.test(String(text || ""));
-      }
-
-      function appendHiddenPromptBlock(text, kind) {
-        if (containsPromptBlock(text)) {
-          return text;
-        }
-        return `${text}\n\n${buildHiddenPromptBlock(kind)}`;
-      }
-
-      function extractPromptMetadata(text, trustedPrompt = false) {
-        const rawText = String(text || "");
-        const promptKinds = [];
-        const promptPattern = /\n*\[\[letagents:prompt:([a-z_]+)\]\]\n?([\s\S]*?)\n?\[\[\/letagents:prompt\]\]\n*/gi;
-        let visibleText = rawText.trim();
-
-        if (trustedPrompt) {
-          visibleText = rawText
-            .replace(promptPattern, (_match, kind) => {
-              promptKinds.push(String(kind || "").toLowerCase());
-              return "\n";
-            })
-            .replace(/\n{3,}/g, "\n\n")
-            .trim();
-        } else {
-          rawText.replace(promptPattern, (_match, kind) => {
-            promptKinds.push(String(kind || "").toLowerCase());
-            return "\n";
-          });
-        }
-
-        return {
-          rawText,
-          visibleText,
-          hasPrompt: promptKinds.length > 0,
-          promptOnly: trustedPrompt && promptKinds.length > 0 && !visibleText,
-          promptKinds,
-          primaryKind: promptKinds[promptKinds.length - 1] || "",
-          trustedPrompt,
-        };
-      }
-
-      function renderPromptInjectionBadge(kind) {
-        if (!kind) {
-          return "";
-        }
-
-        const label = kind === "inline" ? "Prompt injected" : "Hidden prompt";
-        return `<span class="prompt-injection-badge">${escapeHtml(label)}</span>`;
+      function renderPromptInjectionBadge() {
+        return '<span class="prompt-injection-badge">Prompt injected</span>';
       }
 
       function sortMessagesByTimestamp(a, b) {
         return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
       }
 
-      function createMessageRecord(message) {
-        return {
-          message,
-          promptMeta: extractPromptMetadata(
-            message.text,
-            state.trustedPromptMessageIds.has(message.id)
-          ),
-        };
-      }
-
       function getRenderableMessages() {
         return Array.from(state.messages.values())
-          .sort((a, b) => sortMessagesByTimestamp(a.message, b.message))
-          .filter(({ promptMeta }) => !promptMeta.promptOnly);
+          .sort(sortMessagesByTimestamp);
       }
 
       elements.soundToggle.addEventListener('click', () => {
@@ -1409,9 +1305,9 @@
         }
         let md = `# Chat Export — ${state.currentProjectId || 'Room'}\n`;
         md += `Exported: ${new Date().toISOString()}\n\n---\n\n`;
-        for (const { message, promptMeta } of renderableMessages) {
-          const exportedText = promptMeta.visibleText || message.text || "";
-          const promptNote = promptMeta.trustedPrompt && promptMeta.hasPrompt
+        for (const message of renderableMessages) {
+          const exportedText = message.text || "";
+          const promptNote = message.agent_prompt_kind
             ? "\n\n_Prompt injected in background._"
             : "";
           md += `**${message.sender}** _${formatTimestamp(message.timestamp)}_\n\n${exportedText}${promptNote}\n\n---\n\n`;
@@ -1795,7 +1691,7 @@
 
         const MAX_VISIBLE_CHIPS = 6;
         const owners = new Map();
-        for (const { message } of renderableMessages) {
+        for (const message of renderableMessages) {
           const owner = getOwnerFromSender(message.sender, message.source);
           if (owner && !owners.has(owner.toLowerCase())) {
             owners.set(owner.toLowerCase(), {
@@ -1856,11 +1752,11 @@
 
         const query = state.searchQuery.toLowerCase();
         const matchIds = query
-          ? new Set(renderableMessages.filter(({ message, promptMeta }) => {
-              const text = (promptMeta.visibleText || "").toLowerCase();
+          ? new Set(renderableMessages.filter((message) => {
+              const text = (message.text || "").toLowerCase();
               const sender = (message.sender || "").toLowerCase();
               return text.includes(query) || sender.includes(query);
-            }).map(({ message }) => message.id))
+            }).map((message) => message.id))
           : null;
 
         if (query) {
@@ -1871,7 +1767,7 @@
 
         const fragment = document.createDocumentFragment();
 
-        for (const { message, promptMeta } of renderableMessages) {
+        for (const message of renderableMessages) {
           const isMatch = !query || matchIds.has(message.id);
           const senderColor = getSenderColor(message.sender, message.source);
           const provenance = getSenderProvenance(message.sender, message.source);
@@ -1886,7 +1782,7 @@
           wrapper.dataset.msgId = message.id;
           wrapper.style.setProperty("--sender-color", senderColor);
 
-          let renderedText = renderMarkdown(promptMeta.visibleText || "");
+          let renderedText = renderMarkdown(message.text || "");
           if (query && isMatch) {
             renderedText = highlightTextInHtml(renderedText, query);
           }
@@ -1901,7 +1797,7 @@
                 </div>
                 <div class="message-meta-tail">
                   ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
-                  ${promptMeta.trustedPrompt && promptMeta.hasPrompt ? renderPromptInjectionBadge(promptMeta.primaryKind) : ""}
+                  ${message.agent_prompt_kind ? renderPromptInjectionBadge() : ""}
                   ${showProvenanceBadge ? `<span class="provenance-badge ${provenance}">${provenance}</span>` : ""}
                   <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
                 </div>
@@ -1942,11 +1838,8 @@
           if (!item || !item.id || state.messages.has(item.id)) {
             continue;
           }
-          const messageRecord = createMessageRecord(item);
-          state.messages.set(item.id, messageRecord);
-          if (!messageRecord.promptMeta.promptOnly) {
-            newVisibleIds.push(item.id);
-          }
+          state.messages.set(item.id, item);
+          newVisibleIds.push(item.id);
           changed = true;
         }
         if (changed) {
@@ -1966,39 +1859,6 @@
         renderMessages();
       }
 
-      function stopKeepPollingLoop() {
-        if (state.keepPollingTimer) {
-          window.clearInterval(state.keepPollingTimer);
-          state.keepPollingTimer = null;
-        }
-      }
-
-      function getPromptModeSummary() {
-        if (state.autoKeepPolling && state.injectKeepPolling) {
-          return "Auto + inject";
-        }
-        if (state.autoKeepPolling) {
-          return "Auto";
-        }
-        if (state.injectKeepPolling) {
-          return "Inject";
-        }
-        return "Off";
-      }
-
-      function getPromptModeIndicator() {
-        if (state.autoKeepPolling && state.injectKeepPolling) {
-          return "auto+inject";
-        }
-        if (state.autoKeepPolling) {
-          return "auto";
-        }
-        if (state.injectKeepPolling) {
-          return "inject";
-        }
-        return "off";
-      }
-
       function closePromptMenu() {
         elements.promptMenu.classList.remove("open");
         elements.promptMenuButton.setAttribute("aria-expanded", "false");
@@ -2015,90 +1875,27 @@
           : PROMPT_PREFERENCES_STORAGE_PREFIX;
       }
 
-      function getTrustedPromptMessageIdsKey() {
-        const roomSuffix = getRoomStorageSuffix();
-        return roomSuffix
-          ? `${TRUSTED_PROMPT_MESSAGE_IDS_STORAGE_PREFIX}:${roomSuffix}`
-          : TRUSTED_PROMPT_MESSAGE_IDS_STORAGE_PREFIX;
-      }
-
       function persistPromptPreferences() {
         if (!getRoomStorageSuffix()) {
           return;
         }
 
         localStorage.setItem(getPromptPreferencesKey(), JSON.stringify({
-          autoKeepPolling: state.autoKeepPolling,
-          injectKeepPolling: state.injectKeepPolling,
+          injectPrompt: state.injectPrompt,
         }));
       }
 
       function loadPromptPreferences() {
         if (!getRoomStorageSuffix()) {
-          state.autoKeepPolling = false;
-          state.injectKeepPolling = false;
+          state.injectPrompt = false;
           return;
         }
 
         try {
           const saved = JSON.parse(localStorage.getItem(getPromptPreferencesKey()) || "{}");
-          state.autoKeepPolling = Boolean(saved.autoKeepPolling);
-          state.injectKeepPolling = Boolean(saved.injectKeepPolling);
+          state.injectPrompt = Boolean(saved.injectPrompt);
         } catch (_error) {
-          state.autoKeepPolling = false;
-          state.injectKeepPolling = false;
-        }
-      }
-
-      function persistTrustedPromptMessageIds() {
-        if (!getRoomStorageSuffix()) {
-          return;
-        }
-
-        const trustedIds = Array.from(state.trustedPromptMessageIds).slice(-200);
-        localStorage.setItem(getTrustedPromptMessageIdsKey(), JSON.stringify(trustedIds));
-      }
-
-      function loadTrustedPromptMessageIds() {
-        state.trustedPromptMessageIds.clear();
-
-        if (!getRoomStorageSuffix()) {
-          return;
-        }
-
-        try {
-          const saved = JSON.parse(localStorage.getItem(getTrustedPromptMessageIdsKey()) || "[]");
-          if (!Array.isArray(saved)) {
-            return;
-          }
-          for (const id of saved) {
-            if (typeof id === "string" && id) {
-              state.trustedPromptMessageIds.add(id);
-            }
-          }
-        } catch (_error) {
-          state.trustedPromptMessageIds.clear();
-        }
-      }
-
-      function markPromptMessageTrusted(messageId) {
-        if (!messageId) {
-          return;
-        }
-
-        state.trustedPromptMessageIds.delete(messageId);
-        state.trustedPromptMessageIds.add(messageId);
-
-        while (state.trustedPromptMessageIds.size > 200) {
-          const oldestId = state.trustedPromptMessageIds.values().next().value;
-          state.trustedPromptMessageIds.delete(oldestId);
-        }
-
-        persistTrustedPromptMessageIds();
-
-        const existingRecord = state.messages.get(messageId);
-        if (existingRecord) {
-          state.messages.set(messageId, createMessageRecord(existingRecord.message));
+          state.injectPrompt = false;
         }
       }
 
@@ -2108,82 +1905,30 @@
         stateElement.textContent = active ? "On" : "Off";
       }
 
-      function syncKeepPollingControls() {
-        const modeSummary = getPromptModeSummary();
-        const indicatorMode = getPromptModeIndicator();
-        elements.promptMenuSummary.textContent = modeSummary;
-        elements.promptMenuIndicator.dataset.mode = indicatorMode;
-        elements.promptMenuButton.dataset.mode = indicatorMode;
-        // Update compact pill label
-        const labelMap = {
-          off: "Prompts off",
-          auto: "Auto poll",
-          inject: "Inject",
-          "auto+inject": "Auto + inject",
-        };
-        elements.promptMenuLabel.textContent = labelMap[indicatorMode] || "Prompts";
-        syncPromptOption(elements.autoKeepPollingOption, elements.autoKeepPollingOptionState, state.autoKeepPolling);
-        syncPromptOption(elements.injectKeepPollingOption, elements.injectKeepPollingOptionState, state.injectKeepPolling);
+      function syncPromptControls() {
+        elements.promptMenuButton.dataset.mode = state.injectPrompt ? "inject" : "off";
+        elements.promptMenuLabel.textContent = state.injectPrompt ? "Inject on" : "Inject";
+        syncPromptOption(elements.injectPromptOption, elements.injectPromptOptionState, state.injectPrompt);
       }
 
-      function resetKeepPollingOptions(preservePreferences = true) {
-        stopKeepPollingLoop();
+      function resetPromptOptions(preservePreferences = true) {
         if (!preservePreferences) {
-          state.autoKeepPolling = false;
-          state.injectKeepPolling = false;
+          state.injectPrompt = false;
           persistPromptPreferences();
         }
-        state.keepPollingInFlight = false;
         closePromptMenu();
-        syncKeepPollingControls();
+        syncPromptControls();
       }
 
-      async function postRoomMessage(text, sender) {
+      async function postRoomMessage(text, sender, agentPromptKind = null) {
         return apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
           method: "POST",
-          body: JSON.stringify({ sender, text }),
+          body: JSON.stringify({
+            sender,
+            text,
+            agent_prompt_kind: agentPromptKind,
+          }),
         });
-      }
-
-      async function sendBackgroundPrompt(kind) {
-        if (!state.currentRoomIdentifier || state.keepPollingInFlight) {
-          return false;
-        }
-
-        state.keepPollingInFlight = true;
-        try {
-          const message = await postRoomMessage(
-            buildHiddenPromptBlock(kind),
-            state.senderName || "anonymous"
-          );
-          markPromptMessageTrusted(message.id);
-          upsertMessages([message]);
-          return true;
-        } catch (_error) {
-          // Keep the opt-in loop quiet on transient failures; the room stream already reflects connection state.
-          return false;
-        } finally {
-          state.keepPollingInFlight = false;
-        }
-      }
-
-      async function startKeepPollingLoop({ sendImmediately = true } = {}) {
-        stopKeepPollingLoop();
-        if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
-          return;
-        }
-
-        if (sendImmediately) {
-          await sendBackgroundPrompt("auto");
-        }
-
-        if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
-          return;
-        }
-
-        state.keepPollingTimer = window.setInterval(() => {
-          void sendBackgroundPrompt("auto");
-        }, KEEP_POLLING_INTERVAL_MS);
       }
 
       function updateProjectUi() {
@@ -2215,12 +1960,11 @@
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
         elements.promptMenuButton.disabled = !hasRoom;
-        elements.autoKeepPollingOption.disabled = !hasRoom;
-        elements.injectKeepPollingOption.disabled = !hasRoom;
+        elements.injectPromptOption.disabled = !hasRoom;
         if (!hasRoom) {
           closePromptMenu();
         }
-        syncKeepPollingControls();
+        syncPromptControls();
       }
 
       function encodeRoomPathIdentifier(identifier) {
@@ -2429,7 +2173,7 @@
           );
           const msgs = payload.messages || [];
           for (const message of msgs) {
-            state.messages.set(message.id, createMessageRecord(message));
+            state.messages.set(message.id, message);
           }
 
           if (!payload.has_more || msgs.length === 0) break;
@@ -2444,7 +2188,7 @@
         const nextRoomIdentifier = roomName || normalizeRoomCode(projectCode || "") || projectId;
         const roomChanged = Boolean(state.currentRoomIdentifier) && state.currentRoomIdentifier !== nextRoomIdentifier;
         if (roomChanged) {
-          resetKeepPollingOptions();
+          resetPromptOptions();
         }
 
         state.currentProjectId = projectId;
@@ -2452,18 +2196,11 @@
         state.currentRoomIdentifier = nextRoomIdentifier;
         state.currentRoomName = roomName || state.currentRoomName || "";
         loadPromptPreferences();
-        loadTrustedPromptMessageIds();
         updateProjectUi();
         persistSession();
         resetMessages();
         await fetchMessages();
         connectStream();
-        if (state.autoKeepPolling) {
-          void startKeepPollingLoop({ sendImmediately: false });
-        }
-        if (state.autoKeepPolling || state.injectKeepPolling) {
-          void sendBackgroundPrompt("join");
-        }
         if (focusComposer) {
           elements.messageInput.focus();
         }
@@ -2491,8 +2228,7 @@
           state.currentRoomDisplayName = "";
           state.currentRoomRole = "";
           state.currentRoomAuthenticated = false;
-          state.trustedPromptMessageIds.clear();
-          resetKeepPollingOptions();
+          resetPromptOptions();
           loadPromptPreferences();
           updateProjectUi();
           persistSession();
@@ -2517,17 +2253,16 @@
           return;
         }
 
-        const injectedPrompt = state.injectKeepPolling && !containsPromptBlock(rawText);
-        const text = injectedPrompt
-          ? appendHiddenPromptBlock(rawText, "inline")
-          : rawText;
+        const injectedPrompt = state.injectPrompt;
+        const text = rawText;
 
         elements.sendMessageBtn.disabled = true;
         try {
-          const message = await postRoomMessage(text, sender);
-          if (injectedPrompt) {
-            markPromptMessageTrusted(message.id);
-          }
+          const message = await postRoomMessage(
+            text,
+            sender,
+            injectedPrompt ? "inline" : null
+          );
           upsertMessages([message]);
           elements.messageInput.value = "";
           elements.messageInput.style.height = "auto";
@@ -2643,35 +2378,16 @@
         }
       });
 
-      async function toggleAutoKeepPolling() {
-        state.autoKeepPolling = !state.autoKeepPolling;
+      function toggleInjectPrompt() {
+        state.injectPrompt = !state.injectPrompt;
         persistPromptPreferences();
-        syncKeepPollingControls();
+        syncPromptControls();
 
-        if (!state.autoKeepPolling) {
-          stopKeepPollingLoop();
-          setStatus("Auto polling prompt disabled.", "");
-          return;
-        }
-
-        await sendBackgroundPrompt("auto");
-        if (state.autoKeepPolling) {
-          await startKeepPollingLoop({ sendImmediately: false });
-        }
-        setStatus("Auto polling prompt enabled.", "success");
-      }
-
-      async function toggleInjectKeepPolling() {
-        state.injectKeepPolling = !state.injectKeepPolling;
-        persistPromptPreferences();
-        syncKeepPollingControls();
-
-        if (!state.injectKeepPolling) {
+        if (!state.injectPrompt) {
           setStatus("Prompt injection disabled.", "");
           return;
         }
 
-        await sendBackgroundPrompt("join");
         setStatus("Prompt injection enabled for future messages.", "success");
       }
 
@@ -2686,8 +2402,7 @@
 
       initTheme();
       loadPromptPreferences();
-      loadTrustedPromptMessageIds();
-      syncKeepPollingControls();
+      syncPromptControls();
 
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
@@ -2696,13 +2411,9 @@
         event.preventDefault();
         togglePromptMenu();
       });
-      elements.autoKeepPollingOption.addEventListener("click", () => {
-        void toggleAutoKeepPolling();
+      elements.injectPromptOption.addEventListener("click", () => {
+        toggleInjectPrompt();
       });
-      elements.injectKeepPollingOption.addEventListener("click", () => {
-        void toggleInjectKeepPolling();
-      });
-      window.addEventListener("beforeunload", stopKeepPollingLoop);
       document.addEventListener("click", (event) => {
         if (!elements.promptMenu.contains(event.target)) {
           closePromptMenu();

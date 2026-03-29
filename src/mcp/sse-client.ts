@@ -4,6 +4,7 @@ export interface Message {
   id: string;
   sender: string;
   text: string;
+  agent_prompt_kind?: string | null;
   timestamp: string;
 }
 

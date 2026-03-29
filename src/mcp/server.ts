@@ -53,6 +53,11 @@ import {
   inferAgentIdeLabel,
   toTitleCaseCodename,
 } from "../shared/agent-identity.js";
+import {
+  buildAgentVisibleMessageText,
+  buildRoomAgentPrompt,
+  normalizeAgentPromptKind,
+} from "../shared/room-agent-prompts.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -1018,6 +1023,39 @@ function getLastMessageId(payload: unknown): string | undefined {
   return typeof lastMessage?.id === "string" ? lastMessage.id : undefined;
 }
 
+function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...payload,
+    agent_prompt_kind: "join",
+    agent_prompt: buildRoomAgentPrompt("join"),
+  };
+}
+
+function toAgentReadableMessage(message: unknown): unknown {
+  if (!message || typeof message !== "object") {
+    return message;
+  }
+
+  const record = message as Record<string, unknown>;
+  const kind = normalizeAgentPromptKind(record.agent_prompt_kind);
+  const text = typeof record.text === "string" ? record.text : null;
+
+  if (!kind || text === null) {
+    return record;
+  }
+
+  return {
+    ...record,
+    visible_text: text,
+    text: buildAgentVisibleMessageText(text, kind),
+    prompt_injected: true,
+  };
+}
+
+function toAgentReadableMessages(messages: unknown[] | undefined): unknown[] {
+  return (messages ?? []).map((message) => toAgentReadableMessage(message));
+}
+
 async function roomScopedApiCall<T>(input: {
   room_id?: string | null;
   project_id?: string | null;
@@ -1193,18 +1231,18 @@ async function createInviteRoom(): Promise<{
 
 async function joinInviteCode(code: string): Promise<Record<string, unknown>> {
   const joined = await joinRoomIdentifier(code, "join_code");
-  return withAgentIdentity({
+  return withJoinRoomAgentPrompt(await withAgentIdentity({
     ...toPublicRoomResponse(joined.response, joined.room.room_id),
     joined_via: "join_code",
-  });
+  }));
 }
 
 async function joinNamedRoom(name: string): Promise<Record<string, unknown>> {
   const joined = await joinRoomIdentifier(name, "join_room");
-  return withAgentIdentity({
+  return withJoinRoomAgentPrompt(await withAgentIdentity({
     ...toPublicRoomResponse(joined.response, joined.room.room_id),
     joined_via: "join_room",
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,7 +1306,7 @@ server.resource(
         {
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify({ messages: allMessages }, null, 2),
+          text: JSON.stringify({ messages: toAgentReadableMessages(allMessages) }, null, 2),
         },
       ],
     };
@@ -1287,7 +1325,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(created.response, null, 2),
+          text: JSON.stringify(withJoinRoomAgentPrompt(created.response), null, 2),
         },
       ],
     };
@@ -1306,7 +1344,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(created.response, null, 2),
+          text: JSON.stringify(withJoinRoomAgentPrompt(created.response), null, 2),
         },
       ],
     };
@@ -1406,7 +1444,7 @@ server.tool(
           type: "text" as const,
           text: JSON.stringify(
             currentRoom
-              ? {
+              ? withJoinRoomAgentPrompt({
                   connected: true,
                   ...toPublicRoomState(currentRoom),
                   agent_identity: toPublicAgentIdentity(
@@ -1421,7 +1459,7 @@ server.tool(
                         account: getStoredAuth()?.account ?? null,
                       }
                     : null,
-                }
+                })
               : { connected: false, message: "Not currently in any room" },
             null,
             2
@@ -2158,7 +2196,7 @@ server.tool(
       afterCursor = lastMsg.id;
     }
 
-    const output: Record<string, unknown> = { messages: allMessages };
+    const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages) };
     if (roomIdFromResponse) {
       output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
     }
@@ -2253,7 +2291,7 @@ server.tool(
       }
     }
 
-    const output: Record<string, unknown> = { messages: allMessages };
+    const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages) };
     if (roomIdFromResponse) {
       output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
     }
@@ -2770,14 +2808,14 @@ server.tool(
           {
             type: "text" as const,
             text: JSON.stringify(
-              {
+              withJoinRoomAgentPrompt({
                 success: true,
                 rejoined_from_local_state: true,
                 server_session_resumed: false,
                 last_message_id_before_restart: savedRoom.last_message_id ?? null,
                 room: toPublicRoomState(joined.room),
                 agent_identity: toPublicAgentIdentity(agentIdentity),
-              },
+              }),
               null,
               2
             ),

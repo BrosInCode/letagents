@@ -16,6 +16,10 @@ import {
 } from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomName } from "./room-routing.js";
+import {
+  normalizeAgentPromptKind,
+  type AgentPromptKind,
+} from "../shared/room-agent-prompts.js";
 
 export interface Project {
   id: string;
@@ -96,6 +100,7 @@ export interface Message {
   id: string;
   sender: string;
   text: string;
+  agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
   timestamp: string;
 }
@@ -130,6 +135,7 @@ interface MessageRow {
   number: number;
   sender: string;
   text: string;
+  agent_prompt_kind: string | null;
   source: string | null;
   timestamp: string;
 }
@@ -216,6 +222,7 @@ function toMessage(row: MessageRow): Message {
     id: formatMessageId(row.number),
     sender: row.sender,
     text: row.text,
+    agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,
     timestamp: row.timestamp,
   };
@@ -439,13 +446,22 @@ export async function updateProjectDisplayName(
   return updated ? toProject(updated) : null;
 }
 
-export async function addMessage(roomId: string, sender: string, text: string, source?: string): Promise<Message> {
+export async function addMessage(
+  roomId: string,
+  sender: string,
+  text: string,
+  options?: {
+    source?: string;
+    agent_prompt_kind?: AgentPromptKind | null;
+  }
+): Promise<Message> {
   const message: MessageRow = {
     room_id: roomId,
     number: await nextRoomScopedNumber("messages", roomId),
     sender,
     text,
-    source: source ?? null,
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    source: options?.source ?? null,
     timestamp: new Date().toISOString(),
   };
 
@@ -467,6 +483,7 @@ export async function getMessages(
       number: messages.number,
       sender: messages.sender,
       text: messages.text,
+      agent_prompt_kind: messages.agent_prompt_kind,
       source: messages.source,
       timestamp: messages.timestamp,
     })

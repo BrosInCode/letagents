@@ -5,6 +5,7 @@ export interface RoomMessage {
   id: string
   sender: string
   text: string
+  agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
   agent_identity?: {

@@ -62,6 +62,10 @@ import {
   resolveRoomIdentifier,
 } from "./room-routing.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
+import {
+  normalizeAgentPromptKind,
+  type AgentPromptKind,
+} from "../shared/room-agent-prompts.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -100,10 +104,38 @@ function cleanupExpiredDeviceAuths(): void {
   }
 }
 
-async function emitProjectMessage(projectId: string, sender: string, text: string, source?: string): Promise<Message> {
-  const message = await addMessage(projectId, sender, text, source);
+async function emitProjectMessage(
+  projectId: string,
+  sender: string,
+  text: string,
+  options?: {
+    source?: string;
+    agent_prompt_kind?: AgentPromptKind | null;
+  }
+): Promise<Message> {
+  const message = await addMessage(projectId, sender, text, {
+    source: options?.source,
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+  });
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
+}
+
+function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const kind = normalizeAgentPromptKind(value);
+  if (!kind) {
+    throw new Error("agent_prompt_kind must be one of: inline");
+  }
+
+  if (kind !== "inline") {
+    throw new Error("agent_prompt_kind must be one of: inline");
+  }
+
+  return kind;
 }
 
 function formatTaskLifecycleStatus(task: {
@@ -1119,16 +1151,33 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { sender, text } = req.body as { sender?: string; text?: string };
+  const { sender, text, agent_prompt_kind } = req.body as {
+    sender?: string;
+    text?: string;
+    agent_prompt_kind?: string;
+  };
 
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text are required" });
     return;
   }
 
-  const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-  const message = await emitProjectMessage(projectId, sender, text, source);
-  res.status(201).json(message);
+  try {
+    const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
+    const message = await emitProjectMessage(projectId, sender, text, {
+      source,
+      agent_prompt_kind: promptKind,
+    });
+    res.status(201).json(message);
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /projects/:id/messages",
+      error,
+      "Message could not be created."
+    );
+  }
 });
 
 app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
@@ -1509,18 +1558,35 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { sender, text } = req.body as { sender?: string; text?: string };
+  const { sender, text, agent_prompt_kind } = req.body as {
+    sender?: string;
+    text?: string;
+    agent_prompt_kind?: string;
+  };
   if (!sender || !text) {
     res.status(400).json({ error: "sender and text are required" });
     return;
   }
 
-  const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-  const message = await emitProjectMessage(project.id, sender, text, source);
-  res.status(201).json({
-    ...message,
-    room_id: roomId,
-  });
+  try {
+    const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
+    const message = await emitProjectMessage(project.id, sender, text, {
+      source,
+      agent_prompt_kind: promptKind,
+    });
+    res.status(201).json({
+      ...message,
+      room_id: roomId,
+    });
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /rooms/:room_id/messages",
+      error,
+      "Message could not be created."
+    );
+  }
 });
 
 app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
