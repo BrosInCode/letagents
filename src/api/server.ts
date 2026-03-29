@@ -43,17 +43,19 @@ import {
   type TaskStatus,
 } from "./db.js";
 import {
-  buildGitHubAuthorizeUrl,
   clearGitHubRepoAccessCacheForLogin,
-  exchangeGitHubDeviceCodeForAccessToken,
-  exchangeGitHubCodeForAccessToken,
-  fetchGitHubUser,
   getGitHubRepoVisibility,
   isGitHubRepoAdmin,
   isGitHubRepoCollaborator,
   parseGitHubRepoName,
+} from "./github-repo-access.js";
+import {
+  buildGitHubAuthorizeUrl,
+  exchangeGitHubDeviceCodeForAccessToken,
+  exchangeGitHubCodeForAccessToken,
+  fetchGitHubUser,
   requestGitHubDeviceCode,
-} from "./github-auth.js";
+} from "./github-oauth.js";
 import {
   isInviteCode,
   isKnownProvider,
