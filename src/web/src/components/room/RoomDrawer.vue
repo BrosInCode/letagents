@@ -294,6 +294,9 @@ function exportChat() {
   text-align: left;
 }
 .join-code-copy:disabled { opacity: 0.5; cursor: default; }
+.join-code-copy > span:first-child {
+  flex: 1; min-width: 0; overflow: hidden;
+}
 .join-code-copy strong {
   display: block; font-size: 1.1rem; font-weight: 700; letter-spacing: 0.12em; margin-top: 2px;
 }
@@ -301,7 +304,7 @@ function exportChat() {
 .join-code-copy[data-share-kind="url"] strong {
   font-size: 0.76rem; letter-spacing: 0; font-weight: 500;
   color: var(--muted, #71717a); overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  text-overflow: ellipsis; white-space: nowrap;
 }
 .copy-help { display: block; font-size: 0.72rem; color: var(--muted, #71717a); margin-top: 4px; }
 .copy-pill {

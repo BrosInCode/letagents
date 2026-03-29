@@ -39,6 +39,7 @@
       v-show="activeTab === 'board' && isConnected"
       :tasks="tasks"
       @addTask="handleAddTask"
+      @updateTask="handleUpdateTask"
     />
 
     <Composer
@@ -61,7 +62,7 @@ import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 
 const route = useRoute()
-const { messages, tasks, room, isConnected, connectionState, joinRoom, sendMessage, addTask, restoreSession, renameRoom } = useRoom()
+const { messages, tasks, room, isConnected, connectionState, joinRoom, sendMessage, addTask, updateTask, restoreSession, renameRoom } = useRoom()
 const auth = useAuth()
 
 const activeTab = ref<'chat' | 'board'>('chat')
@@ -85,6 +86,10 @@ async function handleSend(text: string) {
 
 async function handleAddTask(title: string) {
   await addTask(title)
+}
+
+async function handleUpdateTask(taskId: string, updates: { status: string }) {
+  await updateTask(taskId, updates as any)
 }
 
 async function handleRename() {
