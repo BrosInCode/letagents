@@ -782,11 +782,6 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  if (resolved.type === "room" && resolved.name !== roomIdentifier) {
-    res.redirect(301, `/in/${resolved.name}`);
-    return;
-  }
-
   if (SHOULD_SERVE_VUE) {
     res.sendFile(VUE_INDEX);
   } else {
