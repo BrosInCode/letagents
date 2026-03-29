@@ -13,8 +13,10 @@ import {
   createSession,
   createTask,
   deleteSessionByToken,
+  findTaskByPrUrl,
   getAllProjects,
   getAgentIdentitiesForOwner,
+  getGitHubAppRepositoryByFullName,
   getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
@@ -27,19 +29,40 @@ import {
   getTasks,
   hasMessagesFromSender,
   isProjectAdmin,
+  markGitHubAppInstallationUninstalled,
+  markGitHubAppRepositoryRemoved,
+  markGitHubWebhookDeliveryProcessed,
+  recordGitHubWebhookDelivery,
   refreshProviderAccessTokenForAccount,
   registerAgentIdentity,
   rotateProjectCode,
+  setGitHubAppInstallationSuspended,
   createOwnerToken,
+  upsertGitHubAppInstallation,
+  upsertGitHubAppRepository,
   upsertAccount,
   updateProjectDisplayName,
   updateTask,
+  type GitHubWebhookDeliveryStatus,
   type Message,
   type OwnerTokenAccount,
   type Project,
   type SessionAccount,
   type TaskStatus,
 } from "./db.js";
+import { getGitHubAppConfig } from "./github-config.js";
+import {
+  buildGitHubRepoRoomId,
+  extractReferencedTaskId,
+  formatGitHubPullRequestEventMessage,
+  getGitHubInstallationTarget,
+  getGitHubRepositoryOwnerLogin,
+  getGitHubWebhookMetadata,
+  verifyGitHubWebhookSignature,
+  type GitHubWebhookPayload,
+  type GitHubWebhookPullRequest,
+  type GitHubWebhookRepository,
+} from "./github-app.js";
 import {
   clearGitHubRepoAccessCacheForLogin,
   getGitHubRepoVisibility,
@@ -76,6 +99,7 @@ interface MessageCreatedEvent {
 interface AuthenticatedRequest extends express.Request {
   sessionAccount?: SessionAccount | OwnerTokenAccount | null;
   authKind?: "session" | "owner_token" | null;
+  rawBody?: Buffer;
 }
 
 interface ResolvedRequestAuth {
@@ -569,6 +593,359 @@ async function resolveCanonicalRoomRequestId(roomId: string): Promise<string> {
   return existing?.id ?? roomId;
 }
 
+function toGitHubWebhookId(value: string | number | null | undefined): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  return normalized || null;
+}
+
+async function syncGitHubAppInstallationFromPayload(
+  payload: GitHubWebhookPayload,
+  options?: {
+    suspended_at?: string | null;
+    uninstalled_at?: string | null;
+  }
+): Promise<string | null> {
+  const installationId = toGitHubWebhookId(payload.installation?.id);
+  if (!installationId) {
+    return null;
+  }
+
+  const target = getGitHubInstallationTarget(payload);
+  if (!target?.login) {
+    return installationId;
+  }
+
+  await upsertGitHubAppInstallation({
+    installation_id: installationId,
+    target_type: payload.installation?.target_type ?? target.type ?? "Account",
+    target_login: target.login,
+    target_github_id: toGitHubWebhookId(target.id) ?? installationId,
+    repository_selection: payload.installation?.repository_selection ?? "selected",
+    permissions: payload.installation?.permissions,
+    suspended_at: options?.suspended_at,
+    uninstalled_at: options?.uninstalled_at,
+  });
+
+  return installationId;
+}
+
+async function syncGitHubAppRepositoryFromPayload(
+  repository: GitHubWebhookRepository | undefined,
+  installationId: string | null
+): Promise<{
+  installationId: string | null;
+  githubRepoId: string | null;
+  roomId: string | null;
+}> {
+  if (!repository) {
+    return {
+      installationId,
+      githubRepoId: null,
+      roomId: null,
+    };
+  }
+
+  const githubRepoId = toGitHubWebhookId(repository.id);
+  const roomId = buildGitHubRepoRoomId(repository.full_name);
+  const ownerLogin = getGitHubRepositoryOwnerLogin(repository);
+  let resolvedInstallationId = installationId;
+
+  if (!resolvedInstallationId) {
+    resolvedInstallationId =
+      (await getGitHubAppRepositoryByFullName(repository.full_name))?.installation_id ?? null;
+  }
+
+  if (resolvedInstallationId && githubRepoId && ownerLogin && repository.name) {
+    await upsertGitHubAppRepository({
+      github_repo_id: githubRepoId,
+      installation_id: resolvedInstallationId,
+      owner_login: ownerLogin,
+      repo_name: repository.name,
+    });
+  }
+
+  return {
+    installationId: resolvedInstallationId,
+    githubRepoId,
+    roomId,
+  };
+}
+
+async function maybeLinkGitHubPullRequestToTask(
+  project: Project,
+  pullRequest: GitHubWebhookPullRequest,
+  action: string
+): Promise<string | null> {
+  let linkedTask = await findTaskByPrUrl(project.id, pullRequest.html_url);
+
+  if (!linkedTask) {
+    const referencedTaskId = extractReferencedTaskId(pullRequest.title, pullRequest.body);
+    if (referencedTaskId) {
+      linkedTask = await getTaskById(project.id, referencedTaskId);
+    }
+  }
+
+  if (!linkedTask) {
+    return null;
+  }
+
+  if (linkedTask.pr_url !== pullRequest.html_url) {
+    linkedTask = (await updateTask(project.id, linkedTask.id, {
+      pr_url: pullRequest.html_url,
+    })) ?? linkedTask;
+  }
+
+  if (action === "closed" && pullRequest.merged && linkedTask.status === "in_review") {
+    const mergedTask = await updateTask(project.id, linkedTask.id, {
+      status: "merged",
+      pr_url: pullRequest.html_url,
+    });
+    if (mergedTask) {
+      linkedTask = mergedTask;
+      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(mergedTask));
+    }
+  }
+
+  return linkedTask.id;
+}
+
+async function emitGitHubPullRequestEvent(
+  project: Project,
+  payload: GitHubWebhookPayload
+): Promise<{
+  status: Exclude<GitHubWebhookDeliveryStatus, "received">;
+  installationId: string | null;
+  githubRepoId: string | null;
+  roomId: string | null;
+}> {
+  const installationId =
+    (await syncGitHubAppInstallationFromPayload(payload)) ??
+    toGitHubWebhookId(payload.installation?.id);
+  const repositorySync = await syncGitHubAppRepositoryFromPayload(payload.repository, installationId);
+  const roomId = repositorySync.roomId ?? project.id;
+
+  if (!payload.repository || !payload.pull_request || !payload.action) {
+    return {
+      status: "ignored",
+      installationId: repositorySync.installationId,
+      githubRepoId: repositorySync.githubRepoId,
+      roomId,
+    };
+  }
+
+  const linkedTaskId = await maybeLinkGitHubPullRequestToTask(
+    project,
+    payload.pull_request,
+    payload.action
+  );
+  const message = formatGitHubPullRequestEventMessage({
+    action: payload.action,
+    repositoryFullName: payload.repository.full_name,
+    pullRequest: payload.pull_request,
+    senderLogin: payload.sender?.login ?? null,
+    linkedTaskId,
+  });
+
+  if (!message) {
+    return {
+      status: "ignored",
+      installationId: repositorySync.installationId,
+      githubRepoId: repositorySync.githubRepoId,
+      roomId,
+    };
+  }
+
+  await emitProjectMessage(project.id, "github", message, {
+    source: "github",
+  });
+
+  return {
+    status: "processed",
+    installationId: repositorySync.installationId,
+    githubRepoId: repositorySync.githubRepoId,
+    roomId: project.id,
+  };
+}
+
+async function handleGitHubWebhookEvent(
+  eventName: string,
+  payload: GitHubWebhookPayload
+): Promise<{
+  status: Exclude<GitHubWebhookDeliveryStatus, "received">;
+  installationId: string | null;
+  githubRepoId: string | null;
+  roomId: string | null;
+}> {
+  const installationId = toGitHubWebhookId(payload.installation?.id);
+  const githubRepoId = toGitHubWebhookId(payload.repository?.id);
+  const roomId = payload.repository?.full_name
+    ? buildGitHubRepoRoomId(payload.repository.full_name)
+    : null;
+
+  if (eventName === "ping") {
+    return {
+      status: "processed",
+      installationId,
+      githubRepoId,
+      roomId,
+    };
+  }
+
+  switch (eventName) {
+    case "installation": {
+      if (!installationId || !payload.action) {
+        return {
+          status: "ignored",
+          installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      const now = new Date().toISOString();
+      if (payload.action === "deleted") {
+        await markGitHubAppInstallationUninstalled(installationId, now);
+        return {
+          status: "processed",
+          installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      if (payload.action === "suspend") {
+        const syncedInstallationId = await syncGitHubAppInstallationFromPayload(payload, {
+          suspended_at: now,
+          uninstalled_at: null,
+        });
+        if (!payload.installation?.account) {
+          await setGitHubAppInstallationSuspended(installationId, now);
+        }
+        return {
+          status: "processed",
+          installationId: syncedInstallationId ?? installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      if (payload.action === "unsuspend") {
+        const syncedInstallationId = await syncGitHubAppInstallationFromPayload(payload, {
+          suspended_at: null,
+          uninstalled_at: null,
+        });
+        if (!payload.installation?.account) {
+          await setGitHubAppInstallationSuspended(installationId, null);
+        }
+        return {
+          status: syncedInstallationId ? "processed" : "ignored",
+          installationId: syncedInstallationId ?? installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      const syncedInstallationId = await syncGitHubAppInstallationFromPayload(payload, {
+        suspended_at: null,
+        uninstalled_at: null,
+      });
+      return {
+        status: syncedInstallationId ? "processed" : "ignored",
+        installationId: syncedInstallationId ?? installationId,
+        githubRepoId,
+        roomId,
+      };
+    }
+
+    case "installation_repositories": {
+      if (!installationId) {
+        return {
+          status: "ignored",
+          installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      const syncedInstallationId =
+        (await syncGitHubAppInstallationFromPayload(payload, {
+          suspended_at: null,
+          uninstalled_at: null,
+        })) ?? installationId;
+
+      for (const repository of payload.repositories_added ?? []) {
+        const ownerLogin = getGitHubRepositoryOwnerLogin(repository);
+        const repositoryId = toGitHubWebhookId(repository.id);
+        if (!repositoryId || !ownerLogin || !repository.name) {
+          continue;
+        }
+
+        await upsertGitHubAppRepository({
+          github_repo_id: repositoryId,
+          installation_id: syncedInstallationId,
+          owner_login: ownerLogin,
+          repo_name: repository.name,
+        });
+      }
+
+      for (const repository of payload.repositories_removed ?? []) {
+        const repositoryId = toGitHubWebhookId(repository.id);
+        if (!repositoryId) {
+          continue;
+        }
+
+        await markGitHubAppRepositoryRemoved(repositoryId);
+      }
+
+      return {
+        status: "processed",
+        installationId: syncedInstallationId,
+        githubRepoId,
+        roomId,
+      };
+    }
+
+    case "pull_request": {
+      if (!payload.repository) {
+        return {
+          status: "ignored",
+          installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      const project = await getProjectById(roomId ?? "");
+      if (!project) {
+        const repositorySync = await syncGitHubAppRepositoryFromPayload(
+          payload.repository,
+          (await syncGitHubAppInstallationFromPayload(payload)) ?? installationId
+        );
+        return {
+          status: "ignored",
+          installationId: repositorySync.installationId,
+          githubRepoId: repositorySync.githubRepoId,
+          roomId: repositorySync.roomId,
+        };
+      }
+
+      return emitGitHubPullRequestEvent(project, payload);
+    }
+
+    default:
+      return {
+        status: "ignored",
+        installationId,
+        githubRepoId,
+        roomId,
+      };
+  }
+}
+
 const WEB_DIR = path.resolve(process.cwd(), "src", "web");
 const VUE_DIST_DIR = path.join(WEB_DIR, "dist");
 const VUE_INDEX = path.join(VUE_DIST_DIR, "index.html");
@@ -602,7 +979,16 @@ console.log(
 );
 
 const app = express();
-app.use(express.json());
+app.use(
+  express.json({
+    verify(req, _res, buf) {
+      const request = req as AuthenticatedRequest & { originalUrl?: string };
+      if (request.originalUrl?.startsWith("/webhooks/github")) {
+        request.rawBody = Buffer.from(buf);
+      }
+    },
+  })
+);
 
 const SAFE_BAD_REQUEST_PATTERNS = [
   /^Invalid transition:/,
@@ -793,6 +1179,85 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
+});
+
+app.post("/webhooks/github", async (req: AuthenticatedRequest, res) => {
+  const config = getGitHubAppConfig();
+  if (!config.webhookSecret) {
+    res.status(503).json({ error: "GitHub App webhook handling is not configured" });
+    return;
+  }
+
+  const rawBody = req.rawBody;
+  if (!rawBody) {
+    res.status(400).json({ error: "Raw webhook body is required" });
+    return;
+  }
+
+  const metadata = getGitHubWebhookMetadata(
+    req.headers as Record<string, string | string[] | undefined>
+  );
+  if (!metadata.deliveryId || !metadata.eventName) {
+    res.status(400).json({ error: "Missing GitHub webhook headers" });
+    return;
+  }
+
+  if (!verifyGitHubWebhookSignature(rawBody, metadata.signature256, config.webhookSecret)) {
+    res.status(401).json({ error: "Invalid GitHub webhook signature" });
+    return;
+  }
+
+  const payload = req.body as GitHubWebhookPayload;
+  const initialInstallationId = toGitHubWebhookId(payload.installation?.id);
+  const initialGitHubRepoId = toGitHubWebhookId(payload.repository?.id);
+  const initialRoomId = payload.repository?.full_name
+    ? buildGitHubRepoRoomId(payload.repository.full_name)
+    : null;
+
+  const delivery = await recordGitHubWebhookDelivery({
+    delivery_id: metadata.deliveryId,
+    event_name: metadata.eventName,
+    action: payload.action ?? null,
+    installation_id: initialInstallationId,
+    github_repo_id: initialGitHubRepoId,
+    room_id: initialRoomId,
+  });
+
+  if (delivery.duplicate) {
+    res.status(202).json({ ok: true, duplicate: true });
+    return;
+  }
+
+  try {
+    const result = await handleGitHubWebhookEvent(metadata.eventName, payload);
+    await markGitHubWebhookDeliveryProcessed(metadata.deliveryId, {
+      status: result.status,
+      installation_id: result.installationId,
+      github_repo_id: result.githubRepoId,
+      room_id: result.roomId,
+      error: null,
+    });
+
+    res.status(202).json({
+      ok: true,
+      status: result.status,
+    });
+  } catch (error) {
+    await markGitHubWebhookDeliveryProcessed(metadata.deliveryId, {
+      status: "failed",
+      installation_id: initialInstallationId,
+      github_repo_id: initialGitHubRepoId,
+      room_id: initialRoomId,
+      error: error instanceof Error ? error.message : "Unknown GitHub webhook processing error",
+    });
+
+    respondWithInternalError(
+      res,
+      "POST /webhooks/github",
+      error,
+      "GitHub webhook processing failed."
+    );
+  }
 });
 
 app.post("/auth/github/login", async (req, res) => {

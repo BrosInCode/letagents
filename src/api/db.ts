@@ -7,6 +7,9 @@ import {
   agents,
   auth_sessions,
   auth_states,
+  github_app_installations,
+  github_app_repositories,
+  github_webhook_deliveries,
   github_repositories,
   id_sequences,
   messages,
@@ -46,6 +49,47 @@ export interface GitHubRepositoryLink {
   full_name: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface GitHubAppInstallation {
+  installation_id: string;
+  target_type: string;
+  target_login: string;
+  target_github_id: string;
+  repository_selection: string;
+  permissions_json: string | null;
+  suspended_at: string | null;
+  uninstalled_at: string | null;
+  last_synced_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubAppRepository {
+  github_repo_id: string;
+  installation_id: string;
+  owner_login: string;
+  repo_name: string;
+  full_name: string;
+  room_id: string;
+  removed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type GitHubWebhookDeliveryStatus = "received" | "processed" | "ignored" | "failed";
+
+export interface GitHubWebhookDelivery {
+  delivery_id: string;
+  event_name: string;
+  action: string | null;
+  installation_id: string | null;
+  github_repo_id: string | null;
+  room_id: string | null;
+  status: GitHubWebhookDeliveryStatus;
+  error: string | null;
+  received_at: string;
+  processed_at: string | null;
 }
 
 export interface Account {
@@ -237,6 +281,57 @@ function toGitHubRepositoryLink(
     full_name: row.full_name,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function toGitHubAppInstallation(
+  row: typeof github_app_installations.$inferSelect
+): GitHubAppInstallation {
+  return {
+    installation_id: row.installation_id,
+    target_type: row.target_type,
+    target_login: row.target_login,
+    target_github_id: row.target_github_id,
+    repository_selection: row.repository_selection,
+    permissions_json: row.permissions_json,
+    suspended_at: row.suspended_at,
+    uninstalled_at: row.uninstalled_at,
+    last_synced_at: row.last_synced_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toGitHubAppRepository(
+  row: typeof github_app_repositories.$inferSelect
+): GitHubAppRepository {
+  return {
+    github_repo_id: row.github_repo_id,
+    installation_id: row.installation_id,
+    owner_login: row.owner_login,
+    repo_name: row.repo_name,
+    full_name: row.full_name,
+    room_id: row.room_id,
+    removed_at: row.removed_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toGitHubWebhookDelivery(
+  row: typeof github_webhook_deliveries.$inferSelect
+): GitHubWebhookDelivery {
+  return {
+    delivery_id: row.delivery_id,
+    event_name: row.event_name,
+    action: row.action,
+    installation_id: row.installation_id,
+    github_repo_id: row.github_repo_id,
+    room_id: row.room_id,
+    status: row.status as GitHubWebhookDeliveryStatus,
+    error: row.error,
+    received_at: row.received_at,
+    processed_at: row.processed_at,
   };
 }
 
@@ -536,6 +631,21 @@ export async function updateProjectDisplayName(
   return updated ? toProject(updated) : null;
 }
 
+function serializeGitHubPermissions(
+  permissions: Record<string, string> | null | undefined
+): string | null {
+  if (!permissions) {
+    return null;
+  }
+
+  const entries = Object.entries(permissions).sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return JSON.stringify(Object.fromEntries(entries));
+}
+
 async function assertRoomAliasAvailable(
   alias: string,
   roomId: string,
@@ -692,6 +802,230 @@ export async function migrateGitHubRepositoryCanonicalRoom(input: {
   });
 
   return (await getProjectById(nextRoomId)) ?? null;
+}
+
+export async function upsertGitHubAppInstallation(input: {
+  installation_id: string;
+  target_type: string;
+  target_login: string;
+  target_github_id: string;
+  repository_selection: string;
+  permissions?: Record<string, string> | null;
+  suspended_at?: string | null;
+  uninstalled_at?: string | null;
+}): Promise<GitHubAppInstallation> {
+  const now = new Date().toISOString();
+  const permissions_json = serializeGitHubPermissions(input.permissions);
+
+  const [installation] = await db
+    .insert(github_app_installations)
+    .values({
+      installation_id: input.installation_id,
+      target_type: input.target_type,
+      target_login: input.target_login,
+      target_github_id: input.target_github_id,
+      repository_selection: input.repository_selection,
+      permissions_json,
+      suspended_at: input.suspended_at ?? null,
+      uninstalled_at: input.uninstalled_at ?? null,
+      last_synced_at: now,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: github_app_installations.installation_id,
+      set: {
+        target_type: input.target_type,
+        target_login: input.target_login,
+        target_github_id: input.target_github_id,
+        repository_selection: input.repository_selection,
+        permissions_json,
+        suspended_at: input.suspended_at ?? null,
+        uninstalled_at: input.uninstalled_at ?? null,
+        last_synced_at: now,
+        updated_at: now,
+      },
+    })
+    .returning();
+
+  return toGitHubAppInstallation(installation);
+}
+
+export async function markGitHubAppInstallationUninstalled(
+  installationId: string,
+  uninstalledAt = new Date().toISOString()
+): Promise<void> {
+  await db
+    .update(github_app_installations)
+    .set({
+      uninstalled_at: uninstalledAt,
+      last_synced_at: uninstalledAt,
+      updated_at: uninstalledAt,
+    })
+    .where(eq(github_app_installations.installation_id, installationId));
+}
+
+export async function setGitHubAppInstallationSuspended(
+  installationId: string,
+  suspendedAt: string | null
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .update(github_app_installations)
+    .set({
+      suspended_at: suspendedAt,
+      last_synced_at: now,
+      updated_at: now,
+    })
+    .where(eq(github_app_installations.installation_id, installationId));
+}
+
+export async function upsertGitHubAppRepository(input: {
+  github_repo_id: string;
+  installation_id: string;
+  owner_login: string;
+  repo_name: string;
+}): Promise<GitHubAppRepository> {
+  const now = new Date().toISOString();
+  const full_name = `${input.owner_login}/${input.repo_name}`;
+  const room_id = normalizeRoomName(`github.com/${full_name}`);
+
+  const [repository] = await db
+    .insert(github_app_repositories)
+    .values({
+      github_repo_id: input.github_repo_id,
+      installation_id: input.installation_id,
+      owner_login: input.owner_login,
+      repo_name: input.repo_name,
+      full_name,
+      room_id,
+      removed_at: null,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: github_app_repositories.github_repo_id,
+      set: {
+        installation_id: input.installation_id,
+        owner_login: input.owner_login,
+        repo_name: input.repo_name,
+        full_name,
+        room_id,
+        removed_at: null,
+        updated_at: now,
+      },
+    })
+    .returning();
+
+  return toGitHubAppRepository(repository);
+}
+
+export async function markGitHubAppRepositoryRemoved(
+  githubRepoId: string,
+  removedAt = new Date().toISOString()
+): Promise<void> {
+  await db
+    .update(github_app_repositories)
+    .set({
+      removed_at: removedAt,
+      updated_at: removedAt,
+    })
+    .where(eq(github_app_repositories.github_repo_id, githubRepoId));
+}
+
+export async function getGitHubAppRepositoryByFullName(
+  fullName: string
+): Promise<GitHubAppRepository | undefined> {
+  const [repository] = await db
+    .select()
+    .from(github_app_repositories)
+    .where(eq(github_app_repositories.full_name, fullName))
+    .limit(1);
+
+  return repository ? toGitHubAppRepository(repository) : undefined;
+}
+
+export async function recordGitHubWebhookDelivery(input: {
+  delivery_id: string;
+  event_name: string;
+  action?: string | null;
+  installation_id?: string | null;
+  github_repo_id?: string | null;
+  room_id?: string | null;
+}): Promise<{ delivery: GitHubWebhookDelivery; duplicate: boolean }> {
+  const received_at = new Date().toISOString();
+  const [created] = await db
+    .insert(github_webhook_deliveries)
+    .values({
+      delivery_id: input.delivery_id,
+      event_name: input.event_name,
+      action: input.action ?? null,
+      installation_id: input.installation_id ?? null,
+      github_repo_id: input.github_repo_id ?? null,
+      room_id: input.room_id ?? null,
+      status: "received",
+      error: null,
+      received_at,
+      processed_at: null,
+    })
+    .onConflictDoNothing()
+    .returning();
+
+  if (created) {
+    return {
+      delivery: toGitHubWebhookDelivery(created),
+      duplicate: false,
+    };
+  }
+
+  const [existing] = await db
+    .select()
+    .from(github_webhook_deliveries)
+    .where(eq(github_webhook_deliveries.delivery_id, input.delivery_id))
+    .limit(1);
+
+  if (!existing) {
+    throw new Error(`Webhook delivery '${input.delivery_id}' could not be recorded`);
+  }
+
+  return {
+    delivery: toGitHubWebhookDelivery(existing),
+    duplicate: true,
+  };
+}
+
+export async function markGitHubWebhookDeliveryProcessed(
+  deliveryId: string,
+  input: {
+    status: Exclude<GitHubWebhookDeliveryStatus, "received">;
+    error?: string | null;
+    installation_id?: string | null;
+    github_repo_id?: string | null;
+    room_id?: string | null;
+  }
+): Promise<void> {
+  const update: Partial<typeof github_webhook_deliveries.$inferInsert> = {
+    status: input.status,
+    processed_at: new Date().toISOString(),
+  };
+
+  if (input.error !== undefined) {
+    update.error = input.error;
+  }
+  if (input.installation_id !== undefined) {
+    update.installation_id = input.installation_id;
+  }
+  if (input.github_repo_id !== undefined) {
+    update.github_repo_id = input.github_repo_id;
+  }
+  if (input.room_id !== undefined) {
+    update.room_id = input.room_id;
+  }
+
+  await db
+    .update(github_webhook_deliveries)
+    .set(update)
+    .where(eq(github_webhook_deliveries.delivery_id, deliveryId));
 }
 
 export async function addMessage(
@@ -1183,6 +1517,17 @@ export async function getTaskById(roomId: string, taskId: string): Promise<Task 
     .select()
     .from(tasks)
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
+    .limit(1);
+
+  return task ? toTask(task as TaskRow) : undefined;
+}
+
+export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Task | undefined> {
+  const [task] = await db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.room_id, roomId), eq(tasks.pr_url, prUrl)))
+    .orderBy(asc(tasks.number))
     .limit(1);
 
   return task ? toTask(task as TaskRow) : undefined;
