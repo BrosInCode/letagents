@@ -15,6 +15,7 @@
         {{ link.label }}
       </RouterLink>
       <RouterLink to="/docs" class="nav-link">Docs</RouterLink>
+      <a href="https://github.com/BrosInCode/letagents" target="_blank" class="nav-link">GitHub</a>
 
       <div class="nav-divider" />
 
