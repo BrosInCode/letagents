@@ -9,19 +9,24 @@
       @update:activeTab="activeTab = $event"
     />
 
+    <div v-if="connectionState === 'error' && !isConnected" class="room-error">
+      <p>Could not connect to room.</p>
+      <button class="retry-btn" @click="retryJoin">Retry</button>
+    </div>
+
     <MessageList
-      v-show="activeTab === 'chat'"
+      v-show="activeTab === 'chat' && isConnected"
       :messages="messages"
     />
 
     <TaskBoard
-      v-show="activeTab === 'board'"
+      v-show="activeTab === 'board' && isConnected"
       :tasks="tasks"
       @addTask="handleAddTask"
     />
 
     <Composer
-      v-if="activeTab === 'chat'"
+      v-if="activeTab === 'chat' && isConnected"
       :senderName="senderName"
       @send="handleSend"
     />
@@ -30,7 +35,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
@@ -39,19 +44,20 @@ import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 
 const route = useRoute()
-const { messages, tasks, room, connectionState, joinRoom, sendMessage, addTask } = useRoom()
+const router = useRouter()
+const { messages, tasks, room, isConnected, connectionState, joinRoom, sendMessage, addTask, restoreSession } = useRoom()
 const auth = useAuth()
 
 const activeTab = ref<'chat' | 'board'>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 
-const senderName = computed(() => auth.session.value?.username || 'anonymous')
-const roomTitle = computed(() => room.value?.displayName || 'No active room')
+const senderName = computed(() => auth.user.value?.login || 'anonymous')
+const roomTitle = computed(() => room.value?.displayName || 'Connecting...')
 const roomSubtitle = computed(() =>
   room.value
     ? `Room: ${room.value.name}`
-    : 'Create a new room or join one.'
+    : connectionState.value === 'connecting' ? 'Joining room...' : 'Create a new room or join one.'
 )
 
 async function handleSend(text: string) {
@@ -62,11 +68,19 @@ async function handleAddTask(title: string) {
   await addTask(title)
 }
 
+async function retryJoin() {
+  const roomId = route.params.roomId as string
+  if (roomId) await joinRoom(roomId)
+}
+
 onMounted(async () => {
   await auth.checkSession()
   const roomId = route.params.roomId as string
   if (roomId) {
     await joinRoom(roomId)
+  } else {
+    // Try restoring a previous session
+    await restoreSession()
   }
 })
 
@@ -84,5 +98,29 @@ watch(() => route.params.roomId, async (newId) => {
   height: 100vh;
   background: var(--bg-0, #09090b);
   color: var(--text, #fafafa);
+}
+
+.room-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px;
+  color: var(--muted, #71717a);
+}
+
+.retry-btn {
+  padding: 8px 20px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #27272a);
+  background: var(--surface, #18181b);
+  color: var(--text, #fafafa);
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s;
+}
+.retry-btn:hover {
+  background: var(--border, #27272a);
 }
 </style>
