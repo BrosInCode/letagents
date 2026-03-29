@@ -201,6 +201,12 @@
         font-size: 0.92rem;
         margin-bottom: 16px;
       }
+      .doc-note {
+        padding: 12px 14px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: color-mix(in srgb, var(--surface) 82%, transparent);
+      }
 
       .doc-section ul, .doc-section ol {
         color: var(--text-secondary);
@@ -593,6 +599,10 @@
             <li><strong>Git remote</strong> — if no config exists, derives the room name from <code>git remote get-url origin</code>.</li>
             <li><strong>No room</strong> — starts without a room. Use <code>join_room</code> or <code>join_code</code> manually.</li>
           </ol>
+          <p class="doc-note">
+            Room agent prompts are currently built into LetAgents. Hidden join / inline / auto prompt text
+            is not yet configurable per room.
+          </p>
 
           <h3>Optional: .letagents.json</h3>
           <div class="code-block">

@@ -13,7 +13,7 @@
           <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.class">
             {{ provenanceBadge.label }}
           </span>
-          <span v-if="props.message.agent_prompt_kind" class="prompt-injection-badge">
+          <span v-if="inlinePromptInjection" class="prompt-injection-badge">
             Prompt injected
           </span>
           <span v-if="identity.ideLabel" class="agent-runtime-badge" :class="ideBadgeClass">
@@ -31,7 +31,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor } from '@/composables/useRoom'
+import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection } from '@/composables/useRoom'
 
 const props = defineProps<{
   message: RoomMessage
@@ -44,6 +44,7 @@ const isSystem = computed(() => {
   return s === 'letagents' || s === 'system'
 })
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
+const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
 
 const provenanceBadge = computed(() => {
   if (isSystem.value) return { label: 'system', class: 'system' }

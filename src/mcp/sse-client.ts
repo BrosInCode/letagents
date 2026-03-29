@@ -1,10 +1,14 @@
 import { encodeRoomIdPath } from "./room-id.js";
+import { buildRoomAgentPrompt, normalizeAgentPromptKind } from "../shared/room-agent-prompts.js";
 
 export interface Message {
   id: string;
   sender: string;
   text: string;
   agent_prompt_kind?: string | null;
+  visible_text?: string;
+  agent_prompt?: string;
+  prompt_injected?: boolean;
   timestamp: string;
 }
 
@@ -173,7 +177,21 @@ export class SseClient {
       return;
     }
 
-    onMessage(JSON.parse(dataLines.join("\n")) as Message);
+    onMessage(this.enrichPromptMetadata(JSON.parse(dataLines.join("\n")) as Message));
+  }
+
+  private enrichPromptMetadata(message: Message): Message {
+    const kind = normalizeAgentPromptKind(message.agent_prompt_kind);
+    if (!kind) {
+      return message;
+    }
+
+    return {
+      ...message,
+      visible_text: message.text,
+      agent_prompt: buildRoomAgentPrompt(kind),
+      prompt_injected: kind === "inline",
+    };
   }
 
   private isMissingRouteError(error: unknown): boolean {
