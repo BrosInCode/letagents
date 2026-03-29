@@ -39,6 +39,8 @@ export interface RoomInfo {
   authenticated: boolean
 }
 
+export type RoomAgentPromptKind = 'join' | 'inline' | 'auto'
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const tasks = ref<RoomTask[]>([])
@@ -141,6 +143,23 @@ function getSenderIdentityKey(sender: string, source: string | null): string {
   return (parsed.ideLabel || parsed.displayName || sender || '').trim().toLowerCase()
 }
 
+// SYNC: src/shared/room-agent-prompts.ts
+export function normalizeAgentPromptKind(value: unknown): RoomAgentPromptKind | null {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'join' || normalized === 'inline' || normalized === 'auto'
+    ? normalized
+    : null
+}
+
+export function isPromptOnlyRoomMessage(message: Pick<RoomMessage, 'text' | 'agent_prompt_kind'> | null | undefined): boolean {
+  return normalizeAgentPromptKind(message?.agent_prompt_kind) === 'auto'
+    && !String(message?.text || '').trim()
+}
+
+export function hasInlinePromptInjection(message: Pick<RoomMessage, 'agent_prompt_kind'> | null | undefined): boolean {
+  return normalizeAgentPromptKind(message?.agent_prompt_kind) === 'inline'
+}
+
 /** ── API ── */
 async function fetchRoom(roomId: string): Promise<RoomInfo | null> {
   try {
@@ -165,7 +184,7 @@ async function fetchMessages(projectId: string): Promise<RoomMessage[]> {
     const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/messages`)
     if (!res.ok) return []
     const data = await res.json()
-    return data.messages || []
+    return (data.messages || []).filter((message: RoomMessage) => !isPromptOnlyRoomMessage(message))
   } catch {
     return []
   }
@@ -199,6 +218,9 @@ function startStreaming(projectId: string) {
   eventSource.addEventListener('message', (e) => {
     try {
       const msg: RoomMessage = JSON.parse(e.data)
+      if (isPromptOnlyRoomMessage(msg)) {
+        return
+      }
       const exists = messages.value.some(m => m.id === msg.id)
       if (!exists) {
         messages.value = [...messages.value, msg]
@@ -247,10 +269,11 @@ function stopStreaming() {
 async function sendMessage(text: string, sender?: string): Promise<boolean> {
   if (!room.value) return false
   try {
+    const normalizedSender = String(sender || '').trim() || 'anonymous'
     const res = await fetch(`/api/projects/${encodeURIComponent(room.value.projectId)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, sender: sender || 'anonymous', source: 'browser' }),
+      body: JSON.stringify({ text, sender: normalizedSender, source: 'browser' }),
     })
     return res.ok
   } catch {

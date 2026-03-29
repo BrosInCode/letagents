@@ -1,4 +1,5 @@
-import { index, integer, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
 export const taskStatusEnum = pgEnum("task_status", [
@@ -160,6 +161,13 @@ export const messages = pgTable(
   (table) => ({
     pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
     room_idx: index("messages_room_id_idx").on(table.room_id),
+    auto_prompt_idx: index("messages_auto_prompt_idx")
+      .on(table.room_id, table.sender)
+      .where(sql`${table.agent_prompt_kind} = 'auto'`),
+    prompt_kind_check: check(
+      "messages_agent_prompt_kind_check",
+      sql`${table.agent_prompt_kind} IS NULL OR ${table.agent_prompt_kind} IN ('join', 'inline', 'auto')`
+    ),
   })
 );
 

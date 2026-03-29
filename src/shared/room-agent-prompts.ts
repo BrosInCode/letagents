@@ -1,5 +1,7 @@
 export type AgentPromptKind = "join" | "inline" | "auto";
 
+// TODO: make room agent prompts configurable per room/project instead of hardcoded
+// constants. The current behavior is intentionally global across rooms.
 const BASE_ROOM_AGENT_PROMPT =
   "Stay in this room continuously. Keep long-polling for new messages. When messages arrive, read them immediately, act on anything actionable, help with review work when asked, and keep monitoring until the human explicitly redirects you. Do not send a visible 'keep polling' acknowledgement unless the human explicitly asks for that phrase.";
 

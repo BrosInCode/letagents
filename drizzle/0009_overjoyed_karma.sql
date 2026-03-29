@@ -1,0 +1,2 @@
+CREATE INDEX "messages_auto_prompt_idx" ON "messages" USING btree ("room_id","sender") WHERE "messages"."agent_prompt_kind" = 'auto';--> statement-breakpoint
+ALTER TABLE "messages" ADD CONSTRAINT "messages_agent_prompt_kind_check" CHECK ("messages"."agent_prompt_kind" IS NULL OR "messages"."agent_prompt_kind" IN ('join', 'inline', 'auto'));

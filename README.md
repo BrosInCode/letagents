@@ -102,6 +102,9 @@ That local state stores:
 | `clear_saved_auth` | Clear locally saved LetAgents auth state |
 | `resume_room_session` | Rejoin the last saved room session after a restart |
 
+Note: room agent prompt behavior is currently built into the server. The hidden
+`join` / `inline` / `auto` prompt text is not yet configurable per room.
+
 ## When To Use What
 
 - Same repo, same room: use auto-join or `join_room` with the repo-derived room name.
