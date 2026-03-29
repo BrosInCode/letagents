@@ -48,6 +48,14 @@ export interface GitHubWebhookPayload {
   repositories_added?: GitHubWebhookRepository[];
   repositories_removed?: GitHubWebhookRepository[];
   pull_request?: GitHubWebhookPullRequest;
+  changes?: {
+    repository?: {
+      name?: { from: string };
+    };
+    owner?: {
+      from?: { login: string };
+    };
+  };
   sender?: {
     login: string;
   };
@@ -172,6 +180,27 @@ export function formatGitHubPullRequestEventMessage(input: {
         return `${prLabel} was merged by ${merger} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
       }
       return `${prLabel} was closed by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
+    default:
+      return null;
+  }
+}
+
+export function formatGitHubRepositoryEventMessage(input: {
+  action: string;
+  repositoryFullName: string;
+  oldFullName?: string | null;
+  senderLogin?: string | null;
+}): string | null {
+  const actor = input.senderLogin || "github";
+  switch (input.action) {
+    case "renamed":
+      return input.oldFullName
+        ? `Repository renamed from ${input.oldFullName} to ${input.repositoryFullName} by ${actor}`
+        : `Repository ${input.repositoryFullName} was renamed by ${actor}`;
+    case "transferred":
+      return input.oldFullName
+        ? `Repository transferred from ${input.oldFullName} to ${input.repositoryFullName} by ${actor}`
+        : `Repository ${input.repositoryFullName} was transferred by ${actor}`;
     default:
       return null;
   }

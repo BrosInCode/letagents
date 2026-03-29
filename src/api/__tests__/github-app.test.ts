@@ -6,6 +6,7 @@ import {
   buildGitHubRepoRoomId,
   extractReferencedTaskId,
   formatGitHubPullRequestEventMessage,
+  formatGitHubRepositoryEventMessage,
   verifyGitHubWebhookSignature,
 } from "../github-app.js";
 
@@ -50,4 +51,41 @@ test("formatGitHubPullRequestEventMessage includes linked task context for suppo
     message,
     "PR #98 opened by EmmyMay in brosincode/letagents linked to task_22: task_22: add webhook ingestion https://github.com/BrosInCode/letagents/pull/98"
   );
+});
+
+test("formatGitHubRepositoryEventMessage formats rename events correctly", () => {
+  const message = formatGitHubRepositoryEventMessage({
+    action: "renamed",
+    repositoryFullName: "BrosInCode/letagents",
+    oldFullName: "BrosInCode/old-name",
+    senderLogin: "EmmyMay",
+  });
+
+  assert.equal(
+    message,
+    "Repository renamed from BrosInCode/old-name to BrosInCode/letagents by EmmyMay"
+  );
+});
+
+test("formatGitHubRepositoryEventMessage formats transfer events correctly", () => {
+  const message = formatGitHubRepositoryEventMessage({
+    action: "transferred",
+    repositoryFullName: "NewOrg/letagents",
+    oldFullName: "OldOrg/letagents",
+    senderLogin: "EmmyMay",
+  });
+
+  assert.equal(
+    message,
+    "Repository transferred from OldOrg/letagents to NewOrg/letagents by EmmyMay"
+  );
+});
+
+test("formatGitHubRepositoryEventMessage returns null for unsupported actions", () => {
+  const message = formatGitHubRepositoryEventMessage({
+    action: "deleted",
+    repositoryFullName: "BrosInCode/letagents",
+  });
+
+  assert.equal(message, null);
 });

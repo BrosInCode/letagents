@@ -34,6 +34,7 @@ import {
   markGitHubAppInstallationUninstalled,
   markGitHubAppRepositoryRemoved,
   markGitHubWebhookDeliveryProcessed,
+  migrateGitHubRepositoryCanonicalRoom,
   recordGitHubWebhookDelivery,
   refreshProviderAccessTokenForAccount,
   registerAgentIdentity,
@@ -42,6 +43,7 @@ import {
   createOwnerToken,
   upsertGitHubAppInstallation,
   upsertGitHubAppRepository,
+  upsertGitHubRepositoryLink,
   upsertAccount,
   updateProjectDisplayName,
   updateTask,
@@ -57,6 +59,7 @@ import {
   buildGitHubRepoRoomId,
   extractReferencedTaskId,
   formatGitHubPullRequestEventMessage,
+  formatGitHubRepositoryEventMessage,
   getGitHubInstallationTarget,
   getGitHubRepositoryOwnerLogin,
   getGitHubWebhookMetadata,
@@ -673,6 +676,14 @@ async function syncGitHubAppRepositoryFromPayload(
       owner_login: ownerLogin,
       repo_name: repository.name,
     });
+
+    // Also populate the stable github_repositories mapping
+    await upsertGitHubRepositoryLink({
+      github_repo_id: githubRepoId,
+      room_id: roomId,
+      owner_login: ownerLogin,
+      repo_name: repository.name,
+    });
   }
 
   return {
@@ -897,6 +908,15 @@ async function handleGitHubWebhookEvent(
           owner_login: ownerLogin,
           repo_name: repository.name,
         });
+
+        // Also seed the stable github_repositories mapping for migration support
+        const repoRoomId = buildGitHubRepoRoomId(repository.full_name);
+        await upsertGitHubRepositoryLink({
+          github_repo_id: repositoryId,
+          room_id: repoRoomId,
+          owner_login: ownerLogin,
+          repo_name: repository.name,
+        });
       }
 
       for (const repository of payload.repositories_removed ?? []) {
@@ -941,6 +961,90 @@ async function handleGitHubWebhookEvent(
       }
 
       return emitGitHubPullRequestEvent(project, payload);
+    }
+
+    case "repository": {
+      if (!payload.repository || !payload.action) {
+        return {
+          status: "ignored",
+          installationId,
+          githubRepoId,
+          roomId,
+        };
+      }
+
+      // Sync installation first (doesn't touch room mapping)
+      const syncedInstallationId =
+        (await syncGitHubAppInstallationFromPayload(payload)) ?? installationId;
+
+      // For rename/transfer: migrate BEFORE syncing repo records to new path
+      if (payload.action === "renamed" || payload.action === "transferred") {
+        const currentOwner = getGitHubRepositoryOwnerLogin(payload.repository);
+        const currentName = payload.repository.name;
+        const currentFullName = payload.repository.full_name;
+        const repoId = toGitHubWebhookId(payload.repository.id);
+
+        // Compute the old full_name from changes
+        let oldFullName: string | null = null;
+        if (payload.action === "renamed" && payload.changes?.repository?.name?.from) {
+          const oldName = payload.changes.repository.name.from;
+          oldFullName = `${currentOwner}/${oldName}`;
+        } else if (payload.action === "transferred" && payload.changes?.owner?.from?.login) {
+          const oldOwner = payload.changes.owner.from.login;
+          oldFullName = `${oldOwner}/${currentName}`;
+        }
+
+        // Migrate the canonical room ID FIRST (before sync updates the mapping)
+        let migratedRoom = null;
+        if (repoId) {
+          migratedRoom = await migrateGitHubRepositoryCanonicalRoom({
+            github_repo_id: repoId,
+            owner_login: currentOwner,
+            repo_name: currentName,
+          });
+        }
+
+        // NOW sync repo records to the new path (safe because migration already ran)
+        const repositorySync = await syncGitHubAppRepositoryFromPayload(
+          payload.repository,
+          syncedInstallationId
+        );
+
+        // Emit a system event into the room if it exists
+        if (migratedRoom) {
+          const message = formatGitHubRepositoryEventMessage({
+            action: payload.action,
+            repositoryFullName: currentFullName,
+            oldFullName,
+            senderLogin: payload.sender?.login ?? null,
+          });
+          if (message) {
+            await emitProjectMessage(migratedRoom.id, "github", message, {
+              source: "github",
+            });
+          }
+        }
+
+        return {
+          status: "processed",
+          installationId: syncedInstallationId,
+          githubRepoId: repositorySync.githubRepoId,
+          roomId: repositorySync.roomId,
+        };
+      }
+
+      // For non-rename/transfer actions, sync normally
+      const repositorySync = await syncGitHubAppRepositoryFromPayload(
+        payload.repository,
+        syncedInstallationId
+      );
+
+      return {
+        status: "ignored",
+        installationId: syncedInstallationId,
+        githubRepoId: repositorySync.githubRepoId,
+        roomId: repositorySync.roomId,
+      };
     }
 
     default:
