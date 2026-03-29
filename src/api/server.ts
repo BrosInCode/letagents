@@ -95,6 +95,7 @@ interface PendingDeviceAuth {
 }
 
 const pendingDeviceAuths = new Map<string, PendingDeviceAuth>();
+const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
 function cleanupExpiredDeviceAuths(): void {
   const now = Date.now();
@@ -147,6 +148,31 @@ function shouldIncludePromptOnlyMessages(req: express.Request): boolean {
   }
 
   return value === "1" || value.toLowerCase() === "true";
+}
+
+function startSseStream(res: Response): NodeJS.Timeout {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  // nginx will otherwise buffer SSE in front of staging/production.
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  res.socket?.setKeepAlive(true, SSE_HEARTBEAT_INTERVAL_MS);
+  res.write(": connected\n\n");
+
+  return setInterval(() => {
+    if (res.writableEnded) {
+      return;
+    }
+    res.write(": heartbeat\n\n");
+  }, SSE_HEARTBEAT_INTERVAL_MS);
+}
+
+function stopSseStream(res: Response, heartbeat: NodeJS.Timeout): void {
+  clearInterval(heartbeat);
+  if (!res.writableEnded) {
+    res.end();
+  }
 }
 
 function formatTaskLifecycleStatus(task: {
@@ -1236,11 +1262,7 @@ app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) 
     return;
   }
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-  res.write(": connected\n\n");
+  const heartbeat = startSseStream(res);
 
   const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) {
@@ -1253,16 +1275,11 @@ app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) 
     res.write(`data: ${JSON.stringify(message)}\n\n`);
   };
 
-  const heartbeat = setInterval(() => {
-    res.write(": heartbeat\n\n");
-  }, 15000);
-
   messageEvents.on("message:created", onMessageCreated);
 
   req.on("close", () => {
-    clearInterval(heartbeat);
     messageEvents.off("message:created", onMessageCreated);
-    res.end();
+    stopSseStream(res, heartbeat);
   });
 });
 
@@ -1716,11 +1733,7 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
 
   const projectId = project.id;
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-  res.write(": connected\n\n");
+  const heartbeat = startSseStream(res);
 
   const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) return;
@@ -1730,13 +1743,11 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
     res.write(`data: ${JSON.stringify({ ...message, room_id: roomId })}\n\n`);
   };
 
-  const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15000);
   messageEvents.on("message:created", onMessageCreated);
 
   req.on("close", () => {
-    clearInterval(heartbeat);
     messageEvents.off("message:created", onMessageCreated);
-    res.end();
+    stopSseStream(res, heartbeat);
   });
 });
 
