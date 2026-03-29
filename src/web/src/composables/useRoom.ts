@@ -369,6 +369,13 @@ async function renameRoom(newName: string): Promise<boolean> {
 
 /** ── Join Room ── */
 async function joinRoom(roomIdentifier: string) {
+  // Clear active room state before attempting new join to prevent
+  // failed transitions from leaving stale room data that misdirects sends
+  stopStreaming()
+  room.value = null
+  messages.value = []
+  tasks.value = []
+  isConnected.value = false
   connectionState.value = 'connecting'
 
   try {
