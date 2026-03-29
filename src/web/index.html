@@ -1299,6 +1299,7 @@
         return '<span class="prompt-injection-badge">Prompt injected</span>';
       }
 
+      // SYNC: src/shared/room-agent-prompts.ts
       function normalizeAgentPromptKind(value) {
         const normalized = String(value || "").trim().toLowerCase();
         return normalized === "join" || normalized === "inline" || normalized === "auto"
@@ -2008,8 +2009,7 @@
 
         state.keepPollingInFlight = true;
         try {
-          const message = await postRoomMessage("", state.senderName || "anonymous", "auto");
-          upsertMessages([message]);
+          await postRoomMessage("", (state.senderName || "").trim() || "anonymous", "auto");
           return true;
         } catch (_error) {
           return false;
@@ -2280,6 +2280,9 @@
           );
           const msgs = payload.messages || [];
           for (const message of msgs) {
+            if (isPromptOnlyMessage(message)) {
+              continue;
+            }
             state.messages.set(message.id, message);
           }
 
@@ -2355,7 +2358,7 @@
           return;
         }
 
-        const sender = state.senderName || "anonymous";
+        const sender = (state.senderName || "").trim() || "anonymous";
         const rawText = elements.messageInput.value.trim();
 
         if (!rawText) {

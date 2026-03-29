@@ -1047,7 +1047,7 @@ function toAgentReadableMessage(message: unknown): unknown {
     ...record,
     visible_text: text,
     agent_prompt: buildRoomAgentPrompt(kind),
-    prompt_injected: true,
+    prompt_injected: kind === "inline",
   };
 }
 

@@ -266,7 +266,7 @@ async function nextPrefixedId(sequenceName: string, prefix: string): Promise<str
   return `${prefix}_${next.value}`;
 }
 
-type RoomSequenceExecutor = Pick<typeof db, "insert">;
+type RoomSequenceExecutor = Pick<typeof db, "insert" | "delete" | "select" | "update">;
 
 async function nextRoomScopedNumber(
   sequenceName: string,

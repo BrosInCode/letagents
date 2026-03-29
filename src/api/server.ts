@@ -1170,8 +1170,9 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
 
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const normalizedSender = typeof sender === "string" ? sender.trim() : "";
     if (
-      !sender ||
+      !normalizedSender ||
       typeof text !== "string" ||
       (!text.trim() && (!promptKind || promptKind !== "auto"))
     ) {
@@ -1179,7 +1180,7 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
       return;
     }
     const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-    const message = await emitProjectMessage(projectId, sender, text, {
+    const message = await emitProjectMessage(projectId, normalizedSender, text, {
       source,
       agent_prompt_kind: promptKind,
     });
@@ -1593,8 +1594,9 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
   };
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const normalizedSender = typeof sender === "string" ? sender.trim() : "";
     if (
-      !sender ||
+      !normalizedSender ||
       typeof text !== "string" ||
       (!text.trim() && (!promptKind || promptKind !== "auto"))
     ) {
@@ -1602,7 +1604,7 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
       return;
     }
     const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-    const message = await emitProjectMessage(project.id, sender, text, {
+    const message = await emitProjectMessage(project.id, normalizedSender, text, {
       source,
       agent_prompt_kind: promptKind,
     });
