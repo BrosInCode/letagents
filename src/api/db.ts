@@ -266,8 +266,14 @@ async function nextPrefixedId(sequenceName: string, prefix: string): Promise<str
   return `${prefix}_${next.value}`;
 }
 
-async function nextRoomScopedNumber(sequenceName: string, roomId: string): Promise<number> {
-  const [next] = await db
+type RoomSequenceExecutor = Pick<typeof db, "insert">;
+
+async function nextRoomScopedNumber(
+  sequenceName: string,
+  roomId: string,
+  executor: RoomSequenceExecutor = db
+): Promise<number> {
+  const [next] = await executor
     .insert(id_sequences)
     .values({ name: `${sequenceName}:${roomId}`, value: 1 })
     .onConflictDoUpdate({
@@ -458,20 +464,9 @@ export async function addMessage(
 ): Promise<Message> {
   const promptKind = options?.agent_prompt_kind ?? null;
   return db.transaction(async (tx) => {
-    const [next] = await tx
-      .insert(id_sequences)
-      .values({ name: `messages:${roomId}`, value: 1 })
-      .onConflictDoUpdate({
-        target: id_sequences.name,
-        set: {
-          value: sql`${id_sequences.value} + 1`,
-        },
-      })
-      .returning({ value: id_sequences.value });
-
     const message: MessageRow = {
       room_id: roomId,
-      number: next.value,
+      number: await nextRoomScopedNumber("messages", roomId, tx),
       sender,
       text,
       agent_prompt_kind: promptKind,

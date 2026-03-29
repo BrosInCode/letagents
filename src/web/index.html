@@ -1299,8 +1299,20 @@
         return '<span class="prompt-injection-badge">Prompt injected</span>';
       }
 
+      function normalizeAgentPromptKind(value) {
+        const normalized = String(value || "").trim().toLowerCase();
+        return normalized === "join" || normalized === "inline" || normalized === "auto"
+          ? normalized
+          : null;
+      }
+
       function isPromptOnlyMessage(message) {
-        return Boolean(message?.agent_prompt_kind) && !String(message?.text || "").trim();
+        return normalizeAgentPromptKind(message?.agent_prompt_kind) === "auto"
+          && !String(message?.text || "").trim();
+      }
+
+      function hasInlinePromptInjection(message) {
+        return normalizeAgentPromptKind(message?.agent_prompt_kind) === "inline";
       }
 
       function sortMessagesByTimestamp(a, b) {
@@ -1331,8 +1343,8 @@
         md += `Exported: ${new Date().toISOString()}\n\n---\n\n`;
         for (const message of renderableMessages) {
           const exportedText = message.text || "";
-          const promptNote = message.agent_prompt_kind
-            ? "\n\n_Prompt injected in background._"
+          const promptNote = hasInlinePromptInjection(message)
+            ? "\n\n_Prompt injected alongside this visible message._"
             : "";
           md += `**${message.sender}** _${formatTimestamp(message.timestamp)}_\n\n${exportedText}${promptNote}\n\n---\n\n`;
         }
@@ -1821,7 +1833,7 @@
                 </div>
                 <div class="message-meta-tail">
                   ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
-                  ${message.agent_prompt_kind ? renderPromptInjectionBadge() : ""}
+                  ${hasInlinePromptInjection(message) ? renderPromptInjectionBadge() : ""}
                   ${showProvenanceBadge ? `<span class="provenance-badge ${provenance}">${provenance}</span>` : ""}
                   <time datetime="${escapeHtml(message.timestamp)}">${escapeHtml(formatTimestamp(message.timestamp))}</time>
                 </div>
@@ -1862,10 +1874,11 @@
           if (!item || !item.id || state.messages.has(item.id)) {
             continue;
           }
-          state.messages.set(item.id, item);
-          if (!isPromptOnlyMessage(item)) {
-            newVisibleIds.push(item.id);
+          if (isPromptOnlyMessage(item)) {
+            continue;
           }
+          state.messages.set(item.id, item);
+          newVisibleIds.push(item.id);
           changed = true;
         }
         if (changed) {
