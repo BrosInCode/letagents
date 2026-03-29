@@ -5,6 +5,7 @@
       :open="drawerOpen"
       :room="room"
       :messages="messages"
+      :senderName="senderName"
       @close="drawerOpen = false"
     />
 

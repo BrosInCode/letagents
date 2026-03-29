@@ -18,17 +18,22 @@
         </span>
       </button>
 
-      <!-- Invite Code -->
+      <!-- Share card -->
       <div class="drawer-section share-block">
         <div class="drawer-section-title">
-          <h2>Invite Code</h2>
-          <span>{{ room?.name || 'No active room' }}</span>
+          <h2>{{ shareKind === 'url' ? 'Room URL' : 'Invite Code' }}</h2>
+          <span>{{ room?.displayName || 'No active room' }}</span>
         </div>
         <div class="join-code-display">
-          <button class="join-code-copy" @click="copyCode">
+          <button
+            class="join-code-copy"
+            :data-share-kind="shareKind"
+            :disabled="!shareValue"
+            @click="copyShareValue"
+          >
             <span>
-              <span class="copy-help">Share this room instantly</span>
-              <strong>{{ room?.code || '----' }}</strong>
+              <span class="copy-help">{{ shareKind === 'url' ? 'Share this room URL instantly' : 'Share this room instantly' }}</span>
+              <strong :title="shareValue">{{ shareDisplayValue || '----' }}</strong>
             </span>
             <span class="copy-pill">{{ codeCopied ? 'Copied!' : 'Copy' }}</span>
           </button>
@@ -38,25 +43,37 @@
       <!-- Sender Palette -->
       <div class="drawer-section">
         <div class="drawer-section-title">
-          <h2>Active Senders</h2>
+          <h2>Sender Palette</h2>
           <span>identity</span>
         </div>
         <div class="legend">
-          <span v-for="sender in uniqueSenders" :key="sender.name" class="legend-chip"
-                :style="{ '--chip-color': sender.color }">
-            {{ sender.name }}
+          <span
+            v-for="s in visibleOwners"
+            :key="s.label"
+            class="legend-chip"
+            :style="{ '--chip-color': s.color }"
+            :title="s.label"
+          >
+            <span class="legend-chip-label">{{ s.label }}</span>
           </span>
-          <span v-if="uniqueSenders.length === 0" class="legend-chip" style="--chip-color: var(--muted, #71717a)">system</span>
+          <span
+            v-if="overflowCount > 0"
+            class="legend-chip overflow-chip"
+            :title="overflowNames"
+          >+{{ overflowCount }} more</span>
+          <span class="legend-chip" style="--chip-color: var(--muted, #71717a)" title="System messages">
+            <span class="legend-chip-label">system</span>
+          </span>
         </div>
       </div>
 
-      <!-- Room Actions -->
+      <!-- Room Notes -->
       <div class="drawer-section">
         <div class="drawer-section-title">
           <h2>Room Notes</h2>
         </div>
         <div class="status-line">
-          <span class="status-text">{{ room ? `Connected to ${room.displayName}` : 'Create or join a room to start live chat.' }}</span>
+          <span class="status-text">{{ statusText }}</span>
         </div>
         <div class="drawer-actions">
           <button @click="toggleSound">
@@ -75,34 +92,104 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { type RoomInfo, type RoomMessage, getSenderColor } from '@/composables/useRoom'
+import { type RoomInfo, type RoomMessage, getSenderColor, parseAgentIdentity } from '@/composables/useRoom'
+
+const MAX_VISIBLE_CHIPS = 6
 
 const props = defineProps<{
   open: boolean
   room: RoomInfo | null
   messages: readonly RoomMessage[]
+  senderName?: string
 }>()
 
-const emit = defineEmits<{
-  close: []
-}>()
+defineEmits<{ close: [] }>()
 
 const isDark = ref(true)
 const soundOn = ref(true)
 const codeCopied = ref(false)
 
-const uniqueSenders = computed(() => {
-  const seen = new Map<string, { name: string; color: string }>()
-  for (const msg of props.messages) {
-    const s = (msg.sender || '').trim()
-    if (!s || s.toLowerCase() === 'letagents' || s.toLowerCase() === 'system') continue
-    if (!seen.has(s.toLowerCase())) {
-      seen.set(s.toLowerCase(), { name: s, color: getSenderColor(s, msg.source) })
-    }
-  }
-  return Array.from(seen.values())
+// ── Share logic (match legacy) ──
+const shareKind = computed(() => {
+  if (!props.room) return 'code'
+  return props.room.code ? 'code' : 'url'
 })
 
+const shareValue = computed(() => {
+  if (!props.room) return ''
+  if (props.room.code) return props.room.code
+  const identifier = props.room.identifier || props.room.projectId
+  if (!identifier) return ''
+  return `${window.location.origin}/in/${encodeRoomPathIdentifier(identifier)}`
+})
+
+const shareDisplayValue = computed(() => {
+  const val = shareValue.value
+  if (!val) return ''
+  if (shareKind.value !== 'url') return val
+  // Show clean short form: just the path without /in/ prefix
+  try {
+    const shareUrl = new URL(val)
+    const cleanPath = decodeURIComponent(shareUrl.pathname)
+      .replace(/^\/in\//, '')
+      .replace(/^\/+|\/+$/g, '')
+    return cleanPath || shareUrl.host
+  } catch {
+    return val.replace(/^https?:\/\//, '').replace(/\/in\//, '')
+  }
+})
+
+function encodeRoomPathIdentifier(identifier: string): string {
+  return String(identifier)
+    .split('/')
+    .map(s => encodeURIComponent(s))
+    .join('/')
+}
+
+// ── Owner extraction (match legacy getOwnerFromSender) ──
+function getOwnerFromSender(sender: string, source: string | null): string | null {
+  const raw = (sender || '').trim()
+  if (!raw) return null
+  const normalized = raw.toLowerCase()
+  if (normalized === 'letagents' || normalized === 'system') return null
+  if (source === 'browser') return raw
+  const parsed = parseAgentIdentity(sender)
+  if (parsed.ownerAttribution) {
+    const ownerMatch = parsed.ownerAttribution.match(/^(.+?)(?:'s?\s+agent)$/i)
+    if (ownerMatch) return ownerMatch[1].trim()
+    return parsed.ownerAttribution
+  }
+  return null
+}
+
+const allOwners = computed(() => {
+  const owners = new Map<string, { label: string; color: string }>()
+  for (const msg of props.messages) {
+    const owner = getOwnerFromSender(msg.sender, msg.source)
+    if (owner && !owners.has(owner.toLowerCase())) {
+      owners.set(owner.toLowerCase(), {
+        label: owner,
+        color: getSenderColor(msg.sender, msg.source),
+      })
+    }
+  }
+  return Array.from(owners.values())
+})
+
+const visibleOwners = computed(() => allOwners.value.slice(0, MAX_VISIBLE_CHIPS))
+const overflowCount = computed(() => Math.max(0, allOwners.value.length - MAX_VISIBLE_CHIPS))
+const overflowNames = computed(() => allOwners.value.slice(MAX_VISIBLE_CHIPS).map(o => o.label).join(', '))
+
+// ── Status text ──
+const statusText = computed(() => {
+  if (!props.room) return 'Create or join a room to start live chat.'
+  const parts: string[] = []
+  if (props.senderName) parts.push(`Sending as ${props.senderName}`)
+  parts.push(`Connected to ${props.room.displayName}`)
+  return parts.join('; ') + '.'
+})
+
+// ── Actions ──
 function toggleTheme() {
   isDark.value = !isDark.value
   document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
@@ -113,10 +200,11 @@ function toggleSound() {
   soundOn.value = !soundOn.value
 }
 
-async function copyCode() {
-  if (!props.room?.code) return
+async function copyShareValue() {
+  const val = shareValue.value
+  if (!val) return
   try {
-    await navigator.clipboard.writeText(props.room.code)
+    await navigator.clipboard.writeText(val)
     codeCopied.value = true
     setTimeout(() => { codeCopied.value = false }, 1500)
   } catch { /* silent */ }
@@ -143,8 +231,6 @@ function exportChat() {
   inset: 0;
   background: rgba(0,0,0,0.5);
   z-index: 200;
-  opacity: 1;
-  transition: opacity 200ms;
 }
 
 .drawer {
@@ -164,39 +250,22 @@ function exportChat() {
 }
 .drawer.open { transform: translateX(0); }
 
-.drawer-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+.drawer-brand { display: flex; align-items: center; gap: 12px; }
 .drawer-brand-mark {
-  width: 36px; height: 36px;
-  border-radius: 10px;
+  width: 36px; height: 36px; border-radius: 10px;
   background: linear-gradient(135deg, #e2e8f0, #94a3b8);
-  display: grid;
-  place-items: center;
-  font-weight: 900;
-  font-size: 0.7rem;
-  color: #0f172a;
-  flex-shrink: 0;
+  display: grid; place-items: center;
+  font-weight: 900; font-size: 0.7rem; color: #0f172a; flex-shrink: 0;
 }
 .drawer-brand h1 { font-size: 0.92rem; font-weight: 700; letter-spacing: -0.02em; }
 .drawer-brand p { margin-top: 2px; color: var(--muted, #71717a); font-size: 0.78rem; }
 
 .theme-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--surface, #18181b);
-  border: 1px solid var(--line, #27272a);
-  color: var(--text, #fafafa);
-  cursor: pointer;
-  font-size: 0.82rem;
-  font-weight: 500;
-  transition: background 150ms;
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 8px 12px; border-radius: 8px;
+  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
+  color: var(--text, #fafafa); cursor: pointer;
+  font-size: 0.82rem; font-weight: 500; transition: background 150ms;
 }
 .theme-toggle:hover { background: var(--surface-hover, #27272a); }
 .theme-icon { display: flex; align-items: center; opacity: 0.6; }
@@ -211,67 +280,68 @@ function exportChat() {
 }
 .drawer-section-title span { font-size: 0.72rem; color: var(--muted, #71717a); }
 
+/* ── Share card ── */
+.share-block {
+  padding: 12px; border-radius: 10px;
+  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
+}
 .join-code-display { display: flex; align-items: center; gap: 8px; }
 .join-code-copy {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--surface, #18181b);
-  border: 1px solid var(--line, #27272a);
-  color: var(--text, #fafafa);
-  cursor: pointer;
-  transition: border-color 150ms;
+  width: 100%; display: flex; align-items: center;
+  justify-content: space-between; gap: 8px;
+  background: none; border: none; padding: 0;
+  color: var(--text, #fafafa); cursor: pointer;
+  text-align: left;
 }
-.join-code-copy:hover { border-color: var(--text, #fafafa); }
-.copy-help { display: block; font-size: 0.68rem; color: var(--muted, #71717a); }
+.join-code-copy:disabled { opacity: 0.5; cursor: default; }
 .join-code-copy strong {
-  display: block;
-  font-size: 1.1rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  margin-top: 2px;
+  display: block; font-size: 1.1rem; font-weight: 700; letter-spacing: 0.12em; margin-top: 2px;
 }
+/* URL mode: smaller, muted, truncated */
+.join-code-copy[data-share-kind="url"] strong {
+  font-size: 0.76rem; letter-spacing: 0; font-weight: 500;
+  color: var(--muted, #71717a); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.copy-help { display: block; font-size: 0.72rem; color: var(--muted, #71717a); margin-top: 4px; }
 .copy-pill {
-  font-size: 0.68rem;
-  font-weight: 600;
-  padding: 3px 10px;
-  border-radius: 6px;
-  background: var(--surface-hover, #27272a);
-  color: var(--muted, #71717a);
-  transition: background 150ms;
+  flex-shrink: 0; padding: 5px 12px; border-radius: 6px;
+  background: var(--bg-0, #09090b); font-size: 0.72rem; font-weight: 600;
+  color: var(--text, #fafafa); transition: background 150ms;
 }
+.join-code-copy:hover .copy-pill { background: var(--surface-hover, #27272a); }
 
-.legend { display: flex; flex-wrap: wrap; gap: 6px; }
+/* ── Sender legend (compact dot chips) ── */
+.legend { display: flex; flex-wrap: wrap; gap: 4px; }
 .legend-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 6px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  background: color-mix(in srgb, var(--chip-color, #71717a) 15%, transparent);
-  color: var(--chip-color, #71717a);
-  border: 1px solid color-mix(in srgb, var(--chip-color, #71717a) 25%, transparent);
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px; border-radius: 4px;
+  background: var(--surface, #18181b);
+  font-size: 0.65rem; color: var(--muted, #71717a);
+  max-width: 120px; cursor: default;
 }
+.legend-chip-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.legend-chip::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
+  background: var(--chip-color, var(--muted, #71717a));
+}
+.overflow-chip {
+  background: var(--line, #27272a); color: var(--text, #fafafa);
+  font-weight: 600; max-width: none;
+}
+.overflow-chip::before { display: none; }
 
-.status-line { font-size: 0.82rem; color: var(--muted, #71717a); }
+.status-line { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 .drawer-actions { display: flex; gap: 6px; }
 .drawer-actions button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  font-size: 0.78rem;
-  font-weight: 600;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 8px;
+  font-size: 0.78rem; font-weight: 600;
   background: var(--surface, #18181b);
   border: 1px solid var(--line, #27272a);
-  color: var(--text, #fafafa);
-  cursor: pointer;
+  color: var(--text, #fafafa); cursor: pointer;
   transition: background 150ms;
 }
 .drawer-actions button:hover { background: var(--surface-hover, #27272a); }
