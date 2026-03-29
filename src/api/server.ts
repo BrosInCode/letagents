@@ -16,7 +16,9 @@ import {
   findTaskByPrUrl,
   getAllProjects,
   getAgentIdentitiesForOwner,
+  getGitHubAppInstallationById,
   getGitHubAppRepositoryByFullName,
+  getGitHubAppRepositoryByRoomId,
   getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
@@ -50,7 +52,7 @@ import {
   type SessionAccount,
   type TaskStatus,
 } from "./db.js";
-import { getGitHubAppConfig } from "./github-config.js";
+import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
 import {
   buildGitHubRepoRoomId,
   extractReferencedTaskId,
@@ -63,6 +65,11 @@ import {
   type GitHubWebhookPullRequest,
   type GitHubWebhookRepository,
 } from "./github-app.js";
+import {
+  buildGitHubAppInstallationUrl,
+  buildGitHubAppSetupRedirectPath,
+  resolveGitHubAppRoomIntegrationStatus,
+} from "./github-app-installation.js";
 import {
   clearGitHubRepoAccessCacheForLogin,
   getGitHubRepoVisibility,
@@ -1181,6 +1188,30 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
 });
 
+app.get("/auth/github/app/callback", async (req, res) => {
+  const state = typeof req.query.state === "string" ? req.query.state : undefined;
+  const setupAction = typeof req.query.setup_action === "string" ? req.query.setup_action : undefined;
+
+  let stateValid = false;
+  let redirectTo = "/";
+  if (state) {
+    const authState = await consumeAuthState(state);
+    if (authState) {
+      stateValid = true;
+      redirectTo = authState.redirect_to || "/";
+    }
+  }
+
+  res.redirect(
+    302,
+    buildGitHubAppSetupRedirectPath({
+      redirectTo,
+      setupAction,
+      stateValid,
+    })
+  );
+});
+
 app.post("/webhooks/github", async (req: AuthenticatedRequest, res) => {
   const config = getGitHubAppConfig();
   if (!config.webhookSecret) {
@@ -1462,6 +1493,133 @@ app.get("/auth/github/callback", async (req, res) => {
       "GitHub authentication failed."
     );
   }
+});
+
+async function getGitHubRoomIntegrationProject(
+  req: AuthenticatedRequest,
+  res: Response,
+  rawId: string
+): Promise<Project | null> {
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) {
+    return null;
+  }
+
+  if (!isRepoBackedProject(project)) {
+    res.status(400).json({ error: "GitHub App integrations are only available for repo-backed rooms" });
+    return null;
+  }
+
+  if (!(await requireParticipant(req, res, project))) {
+    return null;
+  }
+
+  return project;
+}
+
+async function buildGitHubRoomIntegrationResponse(project: Project): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
+  const config = getGitHubAppConfig();
+  const repository = await getGitHubAppRepositoryByRoomId(project.id);
+  const installation = repository
+    ? await getGitHubAppInstallationById(repository.installation_id)
+    : null;
+
+  return resolveGitHubAppRoomIntegrationStatus({
+    configured: hasGitHubAppConfig(),
+    appSlug: config.appSlug ?? null,
+    setupUrl: config.setupUrl ?? null,
+    repository,
+    installation,
+  });
+}
+
+app.get(/^\/api\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const project = await getGitHubRoomIntegrationProject(req, res, rawId);
+  if (!project) {
+    return;
+  }
+
+  res.json({
+    room_id: project.id,
+    ...(await buildGitHubRoomIntegrationResponse(project)),
+  });
+});
+
+app.get(/^\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const project = await getGitHubRoomIntegrationProject(req, res, rawId);
+  if (!project) {
+    return;
+  }
+
+  res.json({
+    room_id: project.id,
+    ...(await buildGitHubRoomIntegrationResponse(project)),
+  });
+});
+
+app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/install-url$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const project = await getGitHubRoomIntegrationProject(req, res, rawId);
+  if (!project) {
+    return;
+  }
+
+  if (!(await requireAdmin(req, res, project))) {
+    return;
+  }
+
+  const config = getGitHubAppConfig();
+  if (!hasGitHubAppConfig() || !config.appSlug) {
+    res.status(503).json({ error: "GitHub App install flow is not configured" });
+    return;
+  }
+
+  const state = crypto.randomBytes(24).toString("hex");
+  await createAuthState(state, `/in/${project.id}`);
+
+  res.json({
+    room_id: project.id,
+    install_url: buildGitHubAppInstallationUrl({
+      appSlug: config.appSlug,
+      state,
+    }),
+    setup_url: config.setupUrl,
+    state,
+  });
+});
+
+app.post(/^\/rooms\/(.+)\/integrations\/github\/install-url$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const project = await getGitHubRoomIntegrationProject(req, res, rawId);
+  if (!project) {
+    return;
+  }
+
+  if (!(await requireAdmin(req, res, project))) {
+    return;
+  }
+
+  const config = getGitHubAppConfig();
+  if (!hasGitHubAppConfig() || !config.appSlug) {
+    res.status(503).json({ error: "GitHub App install flow is not configured" });
+    return;
+  }
+
+  const state = crypto.randomBytes(24).toString("hex");
+  await createAuthState(state, `/in/${project.id}`);
+
+  res.json({
+    room_id: project.id,
+    install_url: buildGitHubAppInstallationUrl({
+      appSlug: config.appSlug,
+      state,
+    }),
+    setup_url: config.setupUrl,
+    state,
+  });
 });
 
 app.get("/auth/session", (req: AuthenticatedRequest, res) => {

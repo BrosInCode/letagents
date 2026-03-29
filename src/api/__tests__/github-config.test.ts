@@ -64,6 +64,7 @@ test("getGitHubAppConfig normalizes multiline private keys and callback url", ()
     {
       LETAGENTS_BASE_URL: "https://letagents.chat",
       GITHUB_APP_ID: "12345",
+      GITHUB_APP_SLUG: "letagents",
       GITHUB_APP_CLIENT_ID: "iv-app-client",
       GITHUB_APP_CLIENT_SECRET: "app-secret",
       GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----\\nline-1\\nline-2\\n-----END KEY-----",
@@ -72,11 +73,13 @@ test("getGitHubAppConfig normalizes multiline private keys and callback url", ()
     () => {
       const config = getGitHubAppConfig();
       assert.equal(config.appId, "12345");
+      assert.equal(config.appSlug, "letagents");
       assert.equal(config.clientId, "iv-app-client");
       assert.equal(config.clientSecret, "app-secret");
       assert.equal(config.privateKey, "-----BEGIN KEY-----\nline-1\nline-2\n-----END KEY-----");
       assert.equal(config.webhookSecret, "webhook-secret");
       assert.equal(config.callbackUrl, "https://letagents.chat/auth/github/app/callback");
+      assert.equal(config.setupUrl, "https://letagents.chat/auth/github/app/callback");
       assert.equal(hasGitHubAppConfig(), true);
     }
   ));
@@ -87,6 +90,7 @@ test("hasGitHubAppConfig returns false when app credentials are incomplete", () 
       LETAGENTS_BASE_URL: undefined,
       PUBLIC_API_URL: undefined,
       GITHUB_APP_ID: "12345",
+      GITHUB_APP_SLUG: undefined,
       GITHUB_APP_CLIENT_ID: "iv-app-client",
       GITHUB_APP_CLIENT_SECRET: undefined,
       GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----\\nline-1\\n-----END KEY-----",

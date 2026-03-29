@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, inArray, lte, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./db/client.js";
 import {
@@ -943,6 +943,31 @@ export async function getGitHubAppRepositoryByFullName(
     .limit(1);
 
   return repository ? toGitHubAppRepository(repository) : undefined;
+}
+
+export async function getGitHubAppRepositoryByRoomId(
+  roomId: string
+): Promise<GitHubAppRepository | undefined> {
+  const [repository] = await db
+    .select()
+    .from(github_app_repositories)
+    .where(eq(github_app_repositories.room_id, roomId))
+    .orderBy(desc(github_app_repositories.updated_at))
+    .limit(1);
+
+  return repository ? toGitHubAppRepository(repository) : undefined;
+}
+
+export async function getGitHubAppInstallationById(
+  installationId: string
+): Promise<GitHubAppInstallation | undefined> {
+  const [installation] = await db
+    .select()
+    .from(github_app_installations)
+    .where(eq(github_app_installations.installation_id, installationId))
+    .limit(1);
+
+  return installation ? toGitHubAppInstallation(installation) : undefined;
 }
 
 export async function recordGitHubWebhookDelivery(input: {
