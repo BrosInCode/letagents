@@ -10,12 +10,14 @@ export interface GitHubOAuthConfig {
 
 export interface GitHubAppConfig {
   appId: string | undefined;
+  appSlug: string | undefined;
   clientId: string | undefined;
   clientSecret: string | undefined;
   privateKey: string | undefined;
   webhookSecret: string | undefined;
   baseUrl: string;
   callbackUrl: string;
+  setupUrl: string;
 }
 
 function resolveBaseUrl(): string {
@@ -48,15 +50,18 @@ export function getGitHubOAuthConfig(): GitHubOAuthConfig {
 
 export function getGitHubAppConfig(): GitHubAppConfig {
   const baseUrl = resolveBaseUrl();
+  const setupUrl = `${baseUrl}/auth/github/app/callback`;
 
   return {
     appId: process.env.GITHUB_APP_ID,
+    appSlug: process.env.GITHUB_APP_SLUG,
     clientId: process.env.GITHUB_APP_CLIENT_ID,
     clientSecret: process.env.GITHUB_APP_CLIENT_SECRET,
     privateKey: normalizePrivateKey(process.env.GITHUB_APP_PRIVATE_KEY),
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
     baseUrl,
-    callbackUrl: `${baseUrl}/auth/github/app/callback`,
+    callbackUrl: setupUrl,
+    setupUrl,
   };
 }
 
