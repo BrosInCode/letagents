@@ -901,6 +901,15 @@ async function handleGitHubWebhookEvent(
           owner_login: ownerLogin,
           repo_name: repository.name,
         });
+
+        // Also seed the stable github_repositories mapping for migration support
+        const repoRoomId = buildGitHubRepoRoomId(repository.full_name);
+        await upsertGitHubRepositoryLink({
+          github_repo_id: repositoryId,
+          room_id: repoRoomId,
+          owner_login: ownerLogin,
+          repo_name: repository.name,
+        });
       }
 
       for (const repository of payload.repositories_removed ?? []) {
