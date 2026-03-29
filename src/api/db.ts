@@ -457,32 +457,45 @@ export async function addMessage(
   }
 ): Promise<Message> {
   const promptKind = options?.agent_prompt_kind ?? null;
-  const message: MessageRow = {
-    room_id: roomId,
-    number: await nextRoomScopedNumber("messages", roomId),
-    sender,
-    text,
-    agent_prompt_kind: promptKind,
-    source: options?.source ?? null,
-    timestamp: new Date().toISOString(),
-  };
+  return db.transaction(async (tx) => {
+    const [next] = await tx
+      .insert(id_sequences)
+      .values({ name: `messages:${roomId}`, value: 1 })
+      .onConflictDoUpdate({
+        target: id_sequences.name,
+        set: {
+          value: sql`${id_sequences.value} + 1`,
+        },
+      })
+      .returning({ value: id_sequences.value });
 
-  await db.insert(messages).values(message);
-  if (isPromptOnlyAgentMessage(message.text, promptKind) && promptKind === "auto") {
-    await db
-      .delete(messages)
-      .where(
-        and(
-          eq(messages.room_id, roomId),
-          eq(messages.sender, sender),
-          eq(messages.agent_prompt_kind, "auto"),
-          sql`BTRIM(${messages.text}) = ''`,
-          sql`${messages.number} < ${message.number}`
-        )
-      );
-  }
+    const message: MessageRow = {
+      room_id: roomId,
+      number: next.value,
+      sender,
+      text,
+      agent_prompt_kind: promptKind,
+      source: options?.source ?? null,
+      timestamp: new Date().toISOString(),
+    };
 
-  return toMessage(message);
+    await tx.insert(messages).values(message);
+    if (isPromptOnlyAgentMessage(message.text, promptKind)) {
+      await tx
+        .delete(messages)
+        .where(
+          and(
+            eq(messages.room_id, roomId),
+            eq(messages.sender, sender),
+            eq(messages.agent_prompt_kind, "auto"),
+            sql`BTRIM(${messages.text}) = ''`,
+            sql`${messages.number} < ${message.number}`
+          )
+        );
+    }
+
+    return toMessage(message);
+  });
 }
 
 export async function getMessages(
@@ -493,7 +506,7 @@ export async function getMessages(
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
   const visibilityCondition = options?.include_prompt_only
     ? sql`TRUE`
-    : sql`NOT (${messages.agent_prompt_kind} IS NOT NULL AND BTRIM(${messages.text}) = '')`;
+    : sql`NOT (${messages.agent_prompt_kind} = 'auto' AND BTRIM(${messages.text}) = '')`;
 
   const rows = await db
     .select({

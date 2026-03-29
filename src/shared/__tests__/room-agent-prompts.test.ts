@@ -20,8 +20,9 @@ test("normalizeAgentPromptKind rejects unknown prompt kinds", () => {
 
 test("isPromptOnlyAgentMessage only hides empty prompt-bearing messages", () => {
   assert.equal(isPromptOnlyAgentMessage("", "auto"), true);
-  assert.equal(isPromptOnlyAgentMessage("   ", "inline"), true);
+  assert.equal(isPromptOnlyAgentMessage("   ", "inline"), false);
   assert.equal(isPromptOnlyAgentMessage("hello", "inline"), false);
+  assert.equal(isPromptOnlyAgentMessage("", "bogus"), false);
   assert.equal(isPromptOnlyAgentMessage("", null), false);
 });
 

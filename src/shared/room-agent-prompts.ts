@@ -30,7 +30,7 @@ export function normalizeAgentPromptKind(value: unknown): AgentPromptKind | null
 
 export function isPromptOnlyAgentMessage(
   text: string | null | undefined,
-  kind: AgentPromptKind | null | undefined
+  kind: string | null | undefined
 ): boolean {
-  return Boolean(kind) && !String(text || "").trim();
+  return normalizeAgentPromptKind(kind) === "auto" && !String(text || "").trim();
 }
