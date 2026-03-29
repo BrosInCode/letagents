@@ -58,6 +58,73 @@ export const github_repositories = pgTable(
   })
 );
 
+export const github_app_installations = pgTable(
+  "github_app_installations",
+  {
+    installation_id: text("installation_id").primaryKey(),
+    target_type: text("target_type").notNull(),
+    target_login: text("target_login").notNull(),
+    target_github_id: text("target_github_id").notNull(),
+    repository_selection: text("repository_selection").notNull(),
+    permissions_json: text("permissions_json"),
+    suspended_at: timestamp("suspended_at", { mode: "string", withTimezone: true }),
+    uninstalled_at: timestamp("uninstalled_at", { mode: "string", withTimezone: true }),
+    last_synced_at: timestamp("last_synced_at", { mode: "string", withTimezone: true }).notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    target_login_idx: index("github_app_installations_target_login_idx").on(table.target_login),
+    target_id_idx: index("github_app_installations_target_github_id_idx").on(table.target_github_id),
+  })
+);
+
+export const github_app_repositories = pgTable(
+  "github_app_repositories",
+  {
+    github_repo_id: text("github_repo_id").primaryKey(),
+    installation_id: text("installation_id")
+      .notNull()
+      .references(() => github_app_installations.installation_id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    owner_login: text("owner_login").notNull(),
+    repo_name: text("repo_name").notNull(),
+    full_name: text("full_name").notNull(),
+    room_id: text("room_id").notNull(),
+    removed_at: timestamp("removed_at", { mode: "string", withTimezone: true }),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    installation_idx: index("github_app_repositories_installation_id_idx").on(table.installation_id),
+    full_name_idx: uniqueIndex("github_app_repositories_full_name_idx").on(table.full_name),
+    room_idx: index("github_app_repositories_room_id_idx").on(table.room_id),
+  })
+);
+
+export const github_webhook_deliveries = pgTable(
+  "github_webhook_deliveries",
+  {
+    delivery_id: text("delivery_id").primaryKey(),
+    event_name: text("event_name").notNull(),
+    action: text("action"),
+    installation_id: text("installation_id"),
+    github_repo_id: text("github_repo_id"),
+    room_id: text("room_id"),
+    status: text("status").notNull(),
+    error: text("error"),
+    received_at: timestamp("received_at", { mode: "string", withTimezone: true }).notNull(),
+    processed_at: timestamp("processed_at", { mode: "string", withTimezone: true }),
+  },
+  (table) => ({
+    event_idx: index("github_webhook_deliveries_event_name_idx").on(table.event_name),
+    installation_idx: index("github_webhook_deliveries_installation_id_idx").on(table.installation_id),
+    room_idx: index("github_webhook_deliveries_room_id_idx").on(table.room_id),
+  })
+);
+
 export const accounts = pgTable(
   "accounts",
   {
