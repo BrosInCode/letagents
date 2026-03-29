@@ -29,7 +29,7 @@ import { type RoomMessage } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 
 const props = defineProps<{
-  messages: RoomMessage[]
+  messages: readonly RoomMessage[]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
