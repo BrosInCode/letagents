@@ -7,15 +7,17 @@ import {
   agents,
   auth_sessions,
   auth_states,
+  github_repositories,
   id_sequences,
   messages,
   owner_tokens,
   project_admins,
+  room_aliases,
   rooms,
   tasks,
 } from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
-import { isInviteCode, normalizeRoomName } from "./room-routing.js";
+import { isInviteCode, normalizeRoomId, normalizeRoomName } from "./room-routing.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
@@ -28,6 +30,22 @@ export interface Project {
   display_name: string;
   name?: string;
   created_at: string;
+}
+
+export interface RoomAlias {
+  alias: string;
+  room_id: string;
+  created_at: string;
+}
+
+export interface GitHubRepositoryLink {
+  github_repo_id: string;
+  room_id: string;
+  owner_login: string;
+  repo_name: string;
+  full_name: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Account {
@@ -197,6 +215,28 @@ function toProject(row: typeof rooms.$inferSelect): Project {
     display_name: row.display_name,
     name: inviteRoom ? undefined : row.id,
     created_at: row.created_at,
+  };
+}
+
+function toRoomAlias(row: typeof room_aliases.$inferSelect): RoomAlias {
+  return {
+    alias: row.alias,
+    room_id: row.room_id,
+    created_at: row.created_at,
+  };
+}
+
+function toGitHubRepositoryLink(
+  row: typeof github_repositories.$inferSelect
+): GitHubRepositoryLink {
+  return {
+    github_repo_id: row.github_repo_id,
+    room_id: row.room_id,
+    owner_login: row.owner_login,
+    repo_name: row.repo_name,
+    full_name: row.full_name,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -396,12 +436,55 @@ export async function getProjectByCode(code: string): Promise<Project | undefine
     return undefined;
   }
 
-  return getProjectById(normalizedCode);
+  const [project] = await db.select().from(rooms).where(eq(rooms.id, normalizedCode)).limit(1);
+  return project ? toProject(project) : undefined;
+}
+
+export async function getRoomAlias(alias: string): Promise<RoomAlias | undefined> {
+  const normalizedAlias = normalizeRoomName(alias);
+  const [roomAlias] = await db
+    .select()
+    .from(room_aliases)
+    .where(eq(room_aliases.alias, normalizedAlias))
+    .limit(1);
+
+  return roomAlias ? toRoomAlias(roomAlias) : undefined;
+}
+
+export async function getGitHubRepositoryLinkById(
+  githubRepoId: string
+): Promise<GitHubRepositoryLink | undefined> {
+  const [repo] = await db
+    .select()
+    .from(github_repositories)
+    .where(eq(github_repositories.github_repo_id, githubRepoId))
+    .limit(1);
+
+  return repo ? toGitHubRepositoryLink(repo) : undefined;
 }
 
 export async function getProjectById(id: string): Promise<Project | undefined> {
-  const [project] = await db.select().from(rooms).where(eq(rooms.id, id)).limit(1);
-  return project ? toProject(project) : undefined;
+  const normalizedId = normalizeRoomId(id);
+  const [project] = await db.select().from(rooms).where(eq(rooms.id, normalizedId)).limit(1);
+  if (project) {
+    return toProject(project);
+  }
+
+  if (isInviteCode(normalizedId)) {
+    return undefined;
+  }
+
+  const roomAlias = await getRoomAlias(normalizedId);
+  if (!roomAlias) {
+    return undefined;
+  }
+
+  const [aliasedProject] = await db
+    .select()
+    .from(rooms)
+    .where(eq(rooms.id, roomAlias.room_id))
+    .limit(1);
+  return aliasedProject ? toProject(aliasedProject) : undefined;
 }
 
 export async function rotateProjectCode(projectId: string): Promise<Project | null> {
@@ -451,6 +534,164 @@ export async function updateProjectDisplayName(
     .returning();
 
   return updated ? toProject(updated) : null;
+}
+
+async function assertRoomAliasAvailable(
+  alias: string,
+  roomId: string,
+  executor: RoomSequenceExecutor = db
+): Promise<void> {
+  const [occupiedRoom] = await executor
+    .select({ id: rooms.id })
+    .from(rooms)
+    .where(eq(rooms.id, alias))
+    .limit(1);
+  if (occupiedRoom && occupiedRoom.id !== roomId) {
+    throw new Error(`Alias '${alias}' is already a canonical room id`);
+  }
+
+  const [occupiedAlias] = await executor
+    .select()
+    .from(room_aliases)
+    .where(eq(room_aliases.alias, alias))
+    .limit(1);
+  if (occupiedAlias && occupiedAlias.room_id !== roomId) {
+    throw new Error(`Alias '${alias}' is already assigned to a different room`);
+  }
+}
+
+export async function createRoomAlias(roomId: string, alias: string): Promise<RoomAlias> {
+  const normalizedAlias = normalizeRoomName(alias);
+  if (isInviteCode(normalizedAlias)) {
+    throw new Error("Invite codes cannot be registered as room aliases");
+  }
+  if (normalizedAlias === roomId) {
+    throw new Error("Alias must differ from the canonical room id");
+  }
+
+  const created_at = new Date().toISOString();
+  return db.transaction(async (tx) => {
+    await assertRoomAliasAvailable(normalizedAlias, roomId, tx);
+
+    const [existing] = await tx
+      .select()
+      .from(room_aliases)
+      .where(eq(room_aliases.alias, normalizedAlias))
+      .limit(1);
+    if (existing) {
+      return toRoomAlias(existing);
+    }
+
+    const [created] = await tx
+      .insert(room_aliases)
+      .values({
+        alias: normalizedAlias,
+        room_id: roomId,
+        created_at,
+      })
+      .returning();
+
+    return toRoomAlias(created);
+  });
+}
+
+export async function upsertGitHubRepositoryLink(input: {
+  github_repo_id: string;
+  room_id: string;
+  owner_login: string;
+  repo_name: string;
+}): Promise<GitHubRepositoryLink> {
+  const created_at = new Date().toISOString();
+  const updated_at = created_at;
+  const full_name = `${input.owner_login}/${input.repo_name}`;
+
+  const [repo] = await db
+    .insert(github_repositories)
+    .values({
+      github_repo_id: input.github_repo_id,
+      room_id: input.room_id,
+      owner_login: input.owner_login,
+      repo_name: input.repo_name,
+      full_name,
+      created_at,
+      updated_at,
+    })
+    .onConflictDoUpdate({
+      target: github_repositories.github_repo_id,
+      set: {
+        room_id: input.room_id,
+        owner_login: input.owner_login,
+        repo_name: input.repo_name,
+        full_name,
+        updated_at,
+      },
+    })
+    .returning();
+
+  return toGitHubRepositoryLink(repo);
+}
+
+export async function migrateGitHubRepositoryCanonicalRoom(input: {
+  github_repo_id: string;
+  owner_login: string;
+  repo_name: string;
+}): Promise<Project | null> {
+  const existing = await getGitHubRepositoryLinkById(input.github_repo_id);
+  if (!existing) {
+    return null;
+  }
+
+  const nextRoomId = normalizeRoomName(`github.com/${input.owner_login}/${input.repo_name}`);
+  if (existing.room_id === nextRoomId) {
+    await upsertGitHubRepositoryLink({
+      github_repo_id: input.github_repo_id,
+      room_id: nextRoomId,
+      owner_login: input.owner_login,
+      repo_name: input.repo_name,
+    });
+    return (await getProjectById(nextRoomId)) ?? null;
+  }
+
+  const updated_at = new Date().toISOString();
+  await db.transaction(async (tx) => {
+    await assertRoomAliasAvailable(nextRoomId, existing.room_id, tx);
+
+    const [existingAlias] = await tx
+      .select()
+      .from(room_aliases)
+      .where(eq(room_aliases.alias, nextRoomId))
+      .limit(1);
+    if (existingAlias?.room_id === existing.room_id) {
+      await tx.delete(room_aliases).where(eq(room_aliases.alias, nextRoomId));
+    }
+
+    await tx
+      .update(rooms)
+      .set({ id: nextRoomId })
+      .where(eq(rooms.id, existing.room_id));
+
+    await tx
+      .insert(room_aliases)
+      .values({
+        alias: existing.room_id,
+        room_id: nextRoomId,
+        created_at: updated_at,
+      })
+      .onConflictDoNothing();
+
+    await tx
+      .update(github_repositories)
+      .set({
+        room_id: nextRoomId,
+        owner_login: input.owner_login,
+        repo_name: input.repo_name,
+        full_name: `${input.owner_login}/${input.repo_name}`,
+        updated_at,
+      })
+      .where(eq(github_repositories.github_repo_id, input.github_repo_id));
+  });
+
+  return (await getProjectById(nextRoomId)) ?? null;
 }
 
 export async function addMessage(
