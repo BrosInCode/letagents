@@ -65,10 +65,9 @@ import {
 } from "./github-app.js";
 import {
   clearGitHubRepoAccessCacheForLogin,
-  getGitHubRepoVisibility,
   isGitHubRepoAdmin,
-  isGitHubRepoCollaborator,
   parseGitHubRepoName,
+  resolveGitHubRepoRoomAccessDecision,
 } from "./github-repo-access.js";
 import {
   buildGitHubAuthorizeUrl,
@@ -386,36 +385,7 @@ async function resolveRepoRoomAccessDecision(input: {
     return { kind: "allow" };
   }
 
-  if (!input.sessionAccount) {
-    return { kind: "auth_required" };
-  }
-
-  const githubRepo = parseGitHubRepoName(input.roomName);
-  if (!githubRepo) {
-    return { kind: "allow" };
-  }
-
-  const accessToken = input.sessionAccount.provider_access_token ?? undefined;
-  const visibility = await getGitHubRepoVisibility(input.roomName, accessToken);
-
-  if (visibility === "public") {
-    return { kind: "allow" };
-  }
-
-  if (
-    input.sessionAccount.provider !== "github" ||
-    !input.sessionAccount.provider_access_token
-  ) {
-    return { kind: "private_repo_no_access" };
-  }
-
-  const allowed = await isGitHubRepoCollaborator({
-    roomName: input.roomName,
-    login: input.sessionAccount.login,
-    accessToken: input.sessionAccount.provider_access_token,
-  });
-
-  return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };
+  return resolveGitHubRepoRoomAccessDecision(input);
 }
 
 async function resolveProjectRole(

@@ -10,6 +10,25 @@ interface GitHubPermissionResponse {
 }
 
 export type GitHubRepoVisibility = "public" | "private" | "unknown";
+export type RepoRoomAccessDecision =
+  | { kind: "allow" }
+  | { kind: "auth_required" }
+  | { kind: "private_repo_no_access" };
+
+interface RepoRoomAccessIdentity {
+  provider?: string | null;
+  provider_access_token?: string | null;
+  login?: string | null;
+}
+
+interface RepoRoomAccessDecisionDeps {
+  getVisibility: (roomName: string, accessToken?: string) => Promise<GitHubRepoVisibility>;
+  isCollaborator: (input: {
+    roomName: string;
+    login: string;
+    accessToken: string;
+  }) => Promise<boolean>;
+}
 
 const REPO_VISIBILITY_TTL_MS = 1000 * 60 * 60;
 const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
@@ -196,4 +215,43 @@ export async function isGitHubRepoAdmin(input: {
 
   const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
   return permissionPayload.permission === "admin";
+}
+
+export async function resolveGitHubRepoRoomAccessDecision(input: {
+  roomName: string;
+  sessionAccount: RepoRoomAccessIdentity | null | undefined;
+}, deps: RepoRoomAccessDecisionDeps = {
+  getVisibility: getGitHubRepoVisibility,
+  isCollaborator: isGitHubRepoCollaborator,
+}): Promise<RepoRoomAccessDecision> {
+  const githubRepo = parseGitHubRepoName(input.roomName);
+  if (!githubRepo) {
+    return { kind: "allow" };
+  }
+
+  const accessToken = input.sessionAccount?.provider_access_token ?? undefined;
+  const visibility = await deps.getVisibility(input.roomName, accessToken);
+  if (visibility === "public") {
+    return { kind: "allow" };
+  }
+
+  if (!input.sessionAccount) {
+    return { kind: "auth_required" };
+  }
+
+  if (
+    input.sessionAccount.provider !== "github" ||
+    !input.sessionAccount.provider_access_token ||
+    !input.sessionAccount.login
+  ) {
+    return { kind: "private_repo_no_access" };
+  }
+
+  const allowed = await deps.isCollaborator({
+    roomName: input.roomName,
+    login: input.sessionAccount.login,
+    accessToken: input.sessionAccount.provider_access_token,
+  });
+
+  return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };
 }
