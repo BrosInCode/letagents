@@ -957,20 +957,16 @@ async function handleGitHubWebhookEvent(
         };
       }
 
-      // Sync installation and repo records
+      // Sync installation first (doesn't touch room mapping)
       const syncedInstallationId =
         (await syncGitHubAppInstallationFromPayload(payload)) ?? installationId;
-      const repositorySync = await syncGitHubAppRepositoryFromPayload(
-        payload.repository,
-        syncedInstallationId
-      );
 
-      // For rename/transfer: derive the old name and trigger migration
+      // For rename/transfer: migrate BEFORE syncing repo records to new path
       if (payload.action === "renamed" || payload.action === "transferred") {
         const currentOwner = getGitHubRepositoryOwnerLogin(payload.repository);
         const currentName = payload.repository.name;
         const currentFullName = payload.repository.full_name;
-        const repoId = repositorySync.githubRepoId;
+        const repoId = toGitHubWebhookId(payload.repository.id);
 
         // Compute the old full_name from changes
         let oldFullName: string | null = null;
@@ -982,27 +978,34 @@ async function handleGitHubWebhookEvent(
           oldFullName = `${oldOwner}/${currentName}`;
         }
 
-        // Migrate the canonical room ID
+        // Migrate the canonical room ID FIRST (before sync updates the mapping)
+        let migratedRoom = null;
         if (repoId) {
-          const migratedRoom = await migrateGitHubRepositoryCanonicalRoom({
+          migratedRoom = await migrateGitHubRepositoryCanonicalRoom({
             github_repo_id: repoId,
             owner_login: currentOwner,
             repo_name: currentName,
           });
+        }
 
-          // Emit a system event into the room if it exists
-          if (migratedRoom) {
-            const message = formatGitHubRepositoryEventMessage({
-              action: payload.action,
-              repositoryFullName: currentFullName,
-              oldFullName,
-              senderLogin: payload.sender?.login ?? null,
+        // NOW sync repo records to the new path (safe because migration already ran)
+        const repositorySync = await syncGitHubAppRepositoryFromPayload(
+          payload.repository,
+          syncedInstallationId
+        );
+
+        // Emit a system event into the room if it exists
+        if (migratedRoom) {
+          const message = formatGitHubRepositoryEventMessage({
+            action: payload.action,
+            repositoryFullName: currentFullName,
+            oldFullName,
+            senderLogin: payload.sender?.login ?? null,
+          });
+          if (message) {
+            await emitProjectMessage(migratedRoom.id, "github", message, {
+              source: "github",
             });
-            if (message) {
-              await emitProjectMessage(migratedRoom.id, "github", message, {
-                source: "github",
-              });
-            }
           }
         }
 
@@ -1013,6 +1016,12 @@ async function handleGitHubWebhookEvent(
           roomId: repositorySync.roomId,
         };
       }
+
+      // For non-rename/transfer actions, sync normally
+      const repositorySync = await syncGitHubAppRepositoryFromPayload(
+        payload.repository,
+        syncedInstallationId
+      );
 
       return {
         status: "ignored",
