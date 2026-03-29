@@ -54,7 +54,6 @@ import {
   toTitleCaseCodename,
 } from "../shared/agent-identity.js";
 import {
-  buildAgentVisibleMessageText,
   buildRoomAgentPrompt,
   normalizeAgentPromptKind,
 } from "../shared/room-agent-prompts.js";
@@ -1047,7 +1046,7 @@ function toAgentReadableMessage(message: unknown): unknown {
   return {
     ...record,
     visible_text: text,
-    text: buildAgentVisibleMessageText(text, kind),
+    agent_prompt: buildRoomAgentPrompt(kind),
     prompt_injected: true,
   };
 }

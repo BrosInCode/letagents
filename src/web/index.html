@@ -1125,8 +1125,21 @@
               </button>
               <div class="composer-prompt-panel" id="promptMenuPanel" role="menu" aria-label="Agent prompt options">
                 <div class="composer-prompt-panel-header">
-                  <strong>Inject prompt</strong>
+                  <strong>Agent prompts</strong>
                 </div>
+                <button
+                  class="composer-prompt-option"
+                  id="autoKeepPollingOption"
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked="false"
+                >
+                  <span class="composer-prompt-option-copy">
+                    <span class="composer-prompt-option-title">Auto read + poll</span>
+                    <span class="composer-prompt-option-meta">Send quiet metadata-only reminders every 20 seconds to keep the agent actively polling this room.</span>
+                  </span>
+                  <span class="composer-prompt-option-check" id="autoKeepPollingOptionState"></span>
+                </button>
                 <button
                   class="composer-prompt-option"
                   id="injectPromptOption"
@@ -1140,7 +1153,7 @@
                   </span>
                   <span class="composer-prompt-option-check" id="injectPromptOptionState"></span>
                 </button>
-                <p class="composer-prompt-help">The prompt stays out of the transcript. Messages with injection show a small badge in the timeline.</p>
+                <p class="composer-prompt-help">Prompts stay out of the transcript. Injected visible messages get a small badge; auto-poll reminders stay hidden.</p>
               </div>
             </div>
           </div>
@@ -1176,6 +1189,7 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
+      const KEEP_POLLING_INTERVAL_MS = 20_000;
       const PROMPT_PREFERENCES_STORAGE_PREFIX = "letagents:web:prompt-preferences";
 
       const state = {
@@ -1193,7 +1207,10 @@
         searchQuery: "",
         isStreaming: false,
         soundEnabled: localStorage.getItem("lac-sound") !== "off",
+        autoKeepPolling: false,
         injectPrompt: false,
+        keepPollingTimer: null,
+        keepPollingInFlight: false,
       };
 
       function isInviteCode(str) {
@@ -1222,6 +1239,8 @@
         promptMenuButton: document.getElementById("promptMenuButton"),
         promptMenuPanel: document.getElementById("promptMenuPanel"),
         promptMenuLabel: document.getElementById("promptMenuLabel"),
+        autoKeepPollingOption: document.getElementById("autoKeepPollingOption"),
+        autoKeepPollingOptionState: document.getElementById("autoKeepPollingOptionState"),
         injectPromptOption: document.getElementById("injectPromptOption"),
         injectPromptOptionState: document.getElementById("injectPromptOptionState"),
         shareCardTitle: document.getElementById("shareCardTitle"),
@@ -1280,13 +1299,18 @@
         return '<span class="prompt-injection-badge">Prompt injected</span>';
       }
 
+      function isPromptOnlyMessage(message) {
+        return Boolean(message?.agent_prompt_kind) && !String(message?.text || "").trim();
+      }
+
       function sortMessagesByTimestamp(a, b) {
         return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
       }
 
       function getRenderableMessages() {
         return Array.from(state.messages.values())
-          .sort(sortMessagesByTimestamp);
+          .sort(sortMessagesByTimestamp)
+          .filter((message) => !isPromptOnlyMessage(message));
       }
 
       elements.soundToggle.addEventListener('click', () => {
@@ -1839,7 +1863,9 @@
             continue;
           }
           state.messages.set(item.id, item);
-          newVisibleIds.push(item.id);
+          if (!isPromptOnlyMessage(item)) {
+            newVisibleIds.push(item.id);
+          }
           changed = true;
         }
         if (changed) {
@@ -1881,20 +1907,24 @@
         }
 
         localStorage.setItem(getPromptPreferencesKey(), JSON.stringify({
+          autoKeepPolling: state.autoKeepPolling,
           injectPrompt: state.injectPrompt,
         }));
       }
 
       function loadPromptPreferences() {
         if (!getRoomStorageSuffix()) {
+          state.autoKeepPolling = false;
           state.injectPrompt = false;
           return;
         }
 
         try {
           const saved = JSON.parse(localStorage.getItem(getPromptPreferencesKey()) || "{}");
+          state.autoKeepPolling = Boolean(saved.autoKeepPolling);
           state.injectPrompt = Boolean(saved.injectPrompt);
         } catch (_error) {
+          state.autoKeepPolling = false;
           state.injectPrompt = false;
         }
       }
@@ -1906,13 +1936,29 @@
       }
 
       function syncPromptControls() {
-        elements.promptMenuButton.dataset.mode = state.injectPrompt ? "inject" : "off";
-        elements.promptMenuLabel.textContent = state.injectPrompt ? "Inject on" : "Inject";
+        const mode = state.autoKeepPolling && state.injectPrompt
+          ? "auto+inject"
+          : state.autoKeepPolling
+            ? "auto"
+            : state.injectPrompt
+              ? "inject"
+              : "off";
+        const labelMap = {
+          off: "Inject",
+          auto: "Auto poll",
+          inject: "Inject on",
+          "auto+inject": "Auto + inject",
+        };
+        elements.promptMenuButton.dataset.mode = mode;
+        elements.promptMenuLabel.textContent = labelMap[mode] || "Inject";
+        syncPromptOption(elements.autoKeepPollingOption, elements.autoKeepPollingOptionState, state.autoKeepPolling);
         syncPromptOption(elements.injectPromptOption, elements.injectPromptOptionState, state.injectPrompt);
       }
 
       function resetPromptOptions(preservePreferences = true) {
+        stopKeepPollingLoop();
         if (!preservePreferences) {
+          state.autoKeepPolling = false;
           state.injectPrompt = false;
           persistPromptPreferences();
         }
@@ -1929,6 +1975,49 @@
             agent_prompt_kind: agentPromptKind,
           }),
         });
+      }
+
+      function stopKeepPollingLoop() {
+        if (state.keepPollingTimer) {
+          window.clearInterval(state.keepPollingTimer);
+          state.keepPollingTimer = null;
+        }
+      }
+
+      async function sendAutoPollingPrompt() {
+        if (!state.currentRoomIdentifier || state.keepPollingInFlight) {
+          return false;
+        }
+
+        state.keepPollingInFlight = true;
+        try {
+          const message = await postRoomMessage("", state.senderName || "anonymous", "auto");
+          upsertMessages([message]);
+          return true;
+        } catch (_error) {
+          return false;
+        } finally {
+          state.keepPollingInFlight = false;
+        }
+      }
+
+      async function startKeepPollingLoop({ sendImmediately = true } = {}) {
+        stopKeepPollingLoop();
+        if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
+          return;
+        }
+
+        if (sendImmediately) {
+          await sendAutoPollingPrompt();
+        }
+
+        if (!state.autoKeepPolling || !state.currentRoomIdentifier) {
+          return;
+        }
+
+        state.keepPollingTimer = window.setInterval(() => {
+          void sendAutoPollingPrompt();
+        }, KEEP_POLLING_INTERVAL_MS);
       }
 
       function updateProjectUi() {
@@ -1960,6 +2049,7 @@
         elements.sendMessageBtn.disabled = !hasRoom;
         elements.messageInput.disabled = !hasRoom;
         elements.promptMenuButton.disabled = !hasRoom;
+        elements.autoKeepPollingOption.disabled = !hasRoom;
         elements.injectPromptOption.disabled = !hasRoom;
         if (!hasRoom) {
           closePromptMenu();
@@ -2201,6 +2291,9 @@
         resetMessages();
         await fetchMessages();
         connectStream();
+        if (state.autoKeepPolling) {
+          void startKeepPollingLoop();
+        }
         if (focusComposer) {
           elements.messageInput.focus();
         }
@@ -2391,6 +2484,21 @@
         setStatus("Prompt injection enabled for future messages.", "success");
       }
 
+      async function toggleAutoKeepPolling() {
+        state.autoKeepPolling = !state.autoKeepPolling;
+        persistPromptPreferences();
+        syncPromptControls();
+
+        if (!state.autoKeepPolling) {
+          stopKeepPollingLoop();
+          setStatus("Auto polling prompt disabled.", "");
+          return;
+        }
+
+        await startKeepPollingLoop();
+        setStatus("Auto polling prompt enabled.", "success");
+      }
+
       function togglePromptMenu() {
         if (elements.promptMenuButton.disabled) {
           return;
@@ -2411,9 +2519,13 @@
         event.preventDefault();
         togglePromptMenu();
       });
+      elements.autoKeepPollingOption.addEventListener("click", () => {
+        void toggleAutoKeepPolling();
+      });
       elements.injectPromptOption.addEventListener("click", () => {
         toggleInjectPrompt();
       });
+      window.addEventListener("beforeunload", stopKeepPollingLoop);
       document.addEventListener("click", (event) => {
         if (!elements.promptMenu.contains(event.target)) {
           closePromptMenu();

@@ -127,12 +127,8 @@ function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
   }
 
   const kind = normalizeAgentPromptKind(value);
-  if (!kind) {
-    throw new Error("agent_prompt_kind must be one of: inline");
-  }
-
-  if (kind !== "inline") {
-    throw new Error("agent_prompt_kind must be one of: inline");
+  if (!kind || kind === "join") {
+    throw new Error("agent_prompt_kind must be one of: inline, auto");
   }
 
   return kind;
@@ -1157,13 +1153,12 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     agent_prompt_kind?: string;
   };
 
-  if (!sender || !text) {
-    res.status(400).json({ error: "sender and text are required" });
-    return;
-  }
-
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    if (!sender || typeof text !== "string" || (!text.trim() && !promptKind)) {
+      res.status(400).json({ error: "sender and text are required" });
+      return;
+    }
     const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
     const message = await emitProjectMessage(projectId, sender, text, {
       source,
@@ -1563,13 +1558,12 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
     text?: string;
     agent_prompt_kind?: string;
   };
-  if (!sender || !text) {
-    res.status(400).json({ error: "sender and text are required" });
-    return;
-  }
-
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    if (!sender || typeof text !== "string" || (!text.trim() && !promptKind)) {
+      res.status(400).json({ error: "sender and text are required" });
+      return;
+    }
     const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
     const message = await emitProjectMessage(project.id, sender, text, {
       source,
