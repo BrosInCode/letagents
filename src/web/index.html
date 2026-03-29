@@ -552,17 +552,16 @@
         color: var(--muted); opacity: 0.6;
       }
 
-      .composer-toolbar {
+      .composer-pills-row {
         display: flex; align-items: center; justify-content: space-between;
-        padding: 4px 6px 6px 12px;
-        gap: 8px;
+        padding: 0 4px 6px;
       }
       .composer-toolbar-pills {
         display: flex; align-items: center; gap: 6px;
       }
-      .composer-footer {
-        display: flex; align-items: center; gap: 8px;
-        padding: 4px 4px 0;
+      .composer-toolbar {
+        display: flex; align-items: center; justify-content: flex-end;
+        padding: 0 6px 6px;
       }
       .composer-sender-label {
         font-size: 0.68rem; color: var(--muted);
@@ -578,14 +577,14 @@
       .composer-prompt-trigger {
         display: inline-flex;
         align-items: center;
-        gap: 4px;
-        height: 28px;
-        padding: 0 10px;
+        gap: 3px;
+        height: 22px;
+        padding: 0 8px;
         border-radius: 999px;
         border: none;
         background: rgba(255, 255, 255, 0.08);
         color: var(--text);
-        font-size: 0.75rem;
+        font-size: 0.68rem;
         font-weight: 500;
         cursor: pointer;
         transition: background 150ms ease;
@@ -610,8 +609,8 @@
         filter: brightness(1.15);
       }
       .composer-prompt-trigger svg {
-        width: 12px;
-        height: 12px;
+        width: 10px;
+        height: 10px;
         fill: none;
         stroke: currentColor;
         stroke-width: 2.5;
@@ -1110,6 +1109,60 @@
 
       <!-- Composer -->
       <form class="composer" id="composerForm">
+        <div class="composer-pills-row">
+          <div class="composer-toolbar-pills">
+            <div class="composer-prompt-menu" id="promptMenu">
+              <button
+                class="composer-prompt-trigger"
+                id="promptMenuButton"
+                type="button"
+                aria-haspopup="true"
+                aria-expanded="false"
+                data-mode="off"
+              >
+                <span class="composer-prompt-indicator" id="promptMenuIndicator" data-mode="off"></span>
+                <span class="composer-prompt-trigger-copy">
+                  <span class="composer-prompt-trigger-title">Agent prompts</span>
+                  <span class="composer-prompt-trigger-meta" id="promptMenuSummary">Off</span>
+                </span>
+                <span id="promptMenuLabel">Prompts off</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="composer-prompt-panel" id="promptMenuPanel" role="menu" aria-label="Agent prompt options">
+                <div class="composer-prompt-panel-header">
+                  <strong>Agent prompts</strong>
+                </div>
+                <button
+                  class="composer-prompt-option"
+                  id="autoKeepPollingOption"
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked="false"
+                >
+                  <span class="composer-prompt-option-copy">
+                    <span class="composer-prompt-option-title">Auto read + poll</span>
+                    <span class="composer-prompt-option-meta">Hidden stay-in-room reminders every 20s</span>
+                  </span>
+                  <span class="composer-prompt-option-check" id="autoKeepPollingOptionState"></span>
+                </button>
+                <button
+                  class="composer-prompt-option"
+                  id="injectKeepPollingOption"
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked="false"
+                >
+                  <span class="composer-prompt-option-copy">
+                    <span class="composer-prompt-option-title">Prompt injection</span>
+                    <span class="composer-prompt-option-meta">Append hidden directive to sent messages</span>
+                  </span>
+                  <span class="composer-prompt-option-check" id="injectKeepPollingOptionState"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
+        </div>
         <div class="composer-card">
           <textarea
             class="message-textarea"
@@ -1119,64 +1172,10 @@
             rows="1"
           ></textarea>
           <div class="composer-toolbar">
-            <div class="composer-toolbar-pills">
-              <div class="composer-prompt-menu" id="promptMenu">
-                <button
-                  class="composer-prompt-trigger"
-                  id="promptMenuButton"
-                  type="button"
-                  aria-haspopup="true"
-                  aria-expanded="false"
-                  data-mode="off"
-                >
-                  <span class="composer-prompt-indicator" id="promptMenuIndicator" data-mode="off"></span>
-                  <span class="composer-prompt-trigger-copy">
-                    <span class="composer-prompt-trigger-title">Agent prompts</span>
-                    <span class="composer-prompt-trigger-meta" id="promptMenuSummary">Off</span>
-                  </span>
-                  <span id="promptMenuLabel">Prompts off</span>
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-                </button>
-                <div class="composer-prompt-panel" id="promptMenuPanel" role="menu" aria-label="Agent prompt options">
-                  <div class="composer-prompt-panel-header">
-                    <strong>Agent prompts</strong>
-                  </div>
-                  <button
-                    class="composer-prompt-option"
-                    id="autoKeepPollingOption"
-                    type="button"
-                    role="menuitemcheckbox"
-                    aria-checked="false"
-                  >
-                    <span class="composer-prompt-option-copy">
-                      <span class="composer-prompt-option-title">Auto read + poll</span>
-                      <span class="composer-prompt-option-meta">Hidden stay-in-room reminders every 20s</span>
-                    </span>
-                    <span class="composer-prompt-option-check" id="autoKeepPollingOptionState"></span>
-                  </button>
-                  <button
-                    class="composer-prompt-option"
-                    id="injectKeepPollingOption"
-                    type="button"
-                    role="menuitemcheckbox"
-                    aria-checked="false"
-                  >
-                    <span class="composer-prompt-option-copy">
-                      <span class="composer-prompt-option-title">Prompt injection</span>
-                      <span class="composer-prompt-option-meta">Append hidden directive to sent messages</span>
-                    </span>
-                    <span class="composer-prompt-option-check" id="injectKeepPollingOptionState"></span>
-                  </button>
-                </div>
-              </div>
-            </div>
             <button class="send-btn" id="sendMessageBtn" type="submit" aria-label="Send message">
               <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
             </button>
           </div>
-        </div>
-        <div class="composer-footer">
-          <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
         </div>
       </form>
 
