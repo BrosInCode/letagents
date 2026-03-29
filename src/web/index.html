@@ -1295,13 +1295,16 @@
       }
 
       function getGithubEventBadge(message) {
+        // Parse only the event prefix (before first colon) to avoid PR title misclassification
         const text = (message.text || "").toLowerCase();
-        if (text.includes("merged")) return '<span class="github-event-badge pr-merged">merged</span>';
-        if (text.includes("opened") || text.includes("created")) return '<span class="github-event-badge pr-opened">opened</span>';
-        if (text.includes("closed")) return '<span class="github-event-badge pr-closed">closed</span>';
-        if (text.includes("review") || text.includes("approved")) return '<span class="github-event-badge pr-review">review</span>';
-        if (text.includes("comment")) return '<span class="github-event-badge pr-comment">comment</span>';
-        if (text.includes("push")) return '<span class="github-event-badge push">push</span>';
+        const colonIdx = text.indexOf(":");
+        const prefix = colonIdx > 0 ? text.substring(0, colonIdx) : text;
+        if (prefix.includes("merged") || prefix.includes("was merged")) return '<span class="github-event-badge pr-merged">merged</span>';
+        if (prefix.includes("opened") || prefix.includes("created") || prefix.includes("reopened")) return '<span class="github-event-badge pr-opened">opened</span>';
+        if (prefix.includes("closed") || prefix.includes("was closed")) return '<span class="github-event-badge pr-closed">closed</span>';
+        if (prefix.includes("review") || prefix.includes("approved") || prefix.includes("ready for review")) return '<span class="github-event-badge pr-review">review</span>';
+        if (prefix.includes("comment")) return '<span class="github-event-badge pr-comment">comment</span>';
+        if (prefix.includes("push") || prefix.includes("new commits") || prefix.includes("draft")) return '<span class="github-event-badge push">push</span>';
         return '<span class="github-event-badge push">event</span>';
       }
 
@@ -1956,10 +1959,11 @@
           fragment.appendChild(wrapper);
         }
 
-        // Show/hide GitHub filter button based on whether events exist
+        // Show/hide GitHub filter button and sync active state
         if (githubEventCount > 0) {
           elements.githubFilterBtn.hidden = false;
           elements.githubFilterLabel.textContent = `Events (${githubEventCount})`;
+          elements.githubFilterBtn.classList.toggle("active", state.showGithubEvents);
         } else {
           elements.githubFilterBtn.hidden = true;
         }
