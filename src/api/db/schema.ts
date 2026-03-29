@@ -25,6 +25,39 @@ export const rooms = pgTable("rooms", {
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });
 
+export const room_aliases = pgTable(
+  "room_aliases",
+  {
+    alias: text("alias").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    room_idx: index("room_aliases_room_id_idx").on(table.room_id),
+  })
+);
+
+export const github_repositories = pgTable(
+  "github_repositories",
+  {
+    github_repo_id: text("github_repo_id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    owner_login: text("owner_login").notNull(),
+    repo_name: text("repo_name").notNull(),
+    full_name: text("full_name").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    room_idx: uniqueIndex("github_repositories_room_id_idx").on(table.room_id),
+    full_name_idx: uniqueIndex("github_repositories_full_name_idx").on(table.full_name),
+  })
+);
+
 export const accounts = pgTable(
   "accounts",
   {

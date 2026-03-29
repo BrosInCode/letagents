@@ -20,10 +20,8 @@ import {
   getMessagesAfter,
   getOpenTasks,
   getOrCreateCanonicalRoom,
-  getOrCreateProjectByName,
   getProjectByCode,
   getProjectById,
-  getProjectByName,
   getSessionAccountByToken,
   getTaskById,
   getTasks,
@@ -560,6 +558,15 @@ async function resolveRoomOrReply(
   return found;
 }
 
+async function resolveCanonicalRoomRequestId(roomId: string): Promise<string> {
+  if (isInviteCode(roomId)) {
+    return roomId;
+  }
+
+  const existing = await getProjectById(roomId);
+  return existing?.id ?? roomId;
+}
+
 const WEB_DIR = path.resolve(process.cwd(), "src", "web");
 const VUE_DIST_DIR = path.join(WEB_DIR, "dist");
 const VUE_INDEX = path.join(VUE_DIST_DIR, "index.html");
@@ -721,10 +728,19 @@ app.get("/app", (_req, res) => {
 
 app.use(express.static(WEB_DIR, { index: false }));
 
-app.get(/^\/api\/rooms\/resolve\/(.+)$/, (req, res) => {
+app.get(/^\/api\/rooms\/resolve\/(.+)$/, async (req, res) => {
   const identifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(identifier);
-  res.json(resolved);
+  if (resolved.type === "invite") {
+    res.json(resolved);
+    return;
+  }
+
+  const project = await getProjectById(resolved.name);
+  res.json({
+    ...resolved,
+    canonical_room_id: project?.id ?? resolved.name,
+  });
 });
 
 app.get("/:provider/:owner/:repo", (req, res, next) => {
@@ -743,22 +759,32 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   const roomIdentifier = decodeURIComponent(req.params[0] || "");
   const resolved = resolveRoomIdentifier(roomIdentifier);
 
+  if (resolved.type === "room") {
+    const project = await getProjectById(resolved.name);
+    const canonicalRoomId = project?.id ?? resolved.name;
+
+    if (canonicalRoomId !== roomIdentifier) {
+      res.redirect(301, `/in/${canonicalRoomId}`);
+      return;
+    }
+
+    if (isRepoBackedRoomId(canonicalRoomId)) {
+      const decision = await resolveGitHubRoomEntryDecision({
+        roomName: canonicalRoomId,
+        sessionAccount: req.sessionAccount,
+        redirectTo: `/in/${canonicalRoomId}`,
+      });
+
+      if (decision.kind === "redirect") {
+        res.redirect(302, decision.location);
+        return;
+      }
+    }
+  }
+
   if (resolved.type === "room" && resolved.name !== roomIdentifier) {
     res.redirect(301, `/in/${resolved.name}`);
     return;
-  }
-
-  if (resolved.type === "room" && isRepoBackedRoomId(resolved.name)) {
-    const decision = await resolveGitHubRoomEntryDecision({
-      roomName: resolved.name,
-      sessionAccount: req.sessionAccount,
-      redirectTo: `/in/${resolved.name}`,
-    });
-
-    if (decision.kind === "redirect") {
-      res.redirect(302, decision.location);
-      return;
-    }
   }
 
   if (SHOULD_SERVE_VUE) {
@@ -1045,7 +1071,8 @@ app.get("/projects/join/:code", async (req, res) => {
 
 app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
   const name = decodeURIComponent(String(req.params.name));
-  const roomId = normalizeRoomId(name);
+  const requestedRoomId = normalizeRoomId(name);
+  const roomId = await resolveCanonicalRoomRequestId(requestedRoomId);
 
   if (isRepoBackedRoomId(roomId)) {
     const decision = await resolveRepoRoomAccessDecision({
@@ -1058,7 +1085,7 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  const { project, created } = await getOrCreateProjectByName(name);
+  const { room: project, created } = await getOrCreateCanonicalRoom(roomId);
 
   if (req.sessionAccount && created) {
     if (isRepoBackedProject(project)) {
@@ -1077,7 +1104,7 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
@@ -1101,7 +1128,7 @@ app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
 });
 
 app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
@@ -1176,7 +1203,7 @@ app.post("/agents", async (req: AuthenticatedRequest, res) => {
 });
 
 app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
 
   if (!project) {
@@ -1222,7 +1249,7 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
 
   if (!project) {
@@ -1250,7 +1277,7 @@ app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
 
   if (!project) {
@@ -1284,7 +1311,7 @@ app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) 
 });
 
 app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
 
   if (!project) {
@@ -1360,7 +1387,7 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
 });
 
 app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
 
   if (!project) {
@@ -1402,7 +1429,7 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
 
   if (!project) {
@@ -1424,7 +1451,7 @@ app.get("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
 });
 
 app.get("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const project = await getProjectById(projectId);
   const taskId = String(req.params.taskId);
   const task = await getTaskById(projectId, taskId);
@@ -1447,7 +1474,7 @@ app.get("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) =>
 });
 
 app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
-  const projectId = String(req.params.id);
+  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const taskId = String(req.params.taskId);
   const task = await getTaskById(projectId, taskId);
 
@@ -1537,16 +1564,28 @@ function checkJoinRateLimit(ip: string): boolean {
 
 
 
-app.get("/rooms/resolve/:identifier", (req, res) => {
+app.get("/rooms/resolve/:identifier", async (req, res) => {
   const identifier = decodeURIComponent(req.params.identifier);
   const normalized = normalizeRoomId(identifier);
   const resolved = resolveRoomIdentifier(normalized);
-  res.json({ input: identifier, normalized, resolved });
+  if (resolved.type === "invite") {
+    res.json({ input: identifier, normalized, resolved });
+    return;
+  }
+
+  const project = await getProjectById(resolved.name);
+  res.json({
+    input: identifier,
+    normalized,
+    resolved,
+    canonical_room_id: project?.id ?? resolved.name,
+  });
 });
 
 app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const requestedRoomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(requestedRoomId);
 
   const ip =
     req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ??
@@ -1585,7 +1624,7 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
   const role = await resolveProjectRole(project, req.sessionAccount);
 
   res.status(200).json({
-    room_id: roomId,
+    room_id: project.id,
     name: project.name ?? null,
     display_name: project.display_name,
     code: project.code,
@@ -1597,7 +1636,7 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
 
 app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
@@ -1627,7 +1666,7 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
     });
     res.status(201).json({
       ...message,
-      room_id: roomId,
+      room_id: project.id,
     });
   } catch (error) {
     respondWithBadRequest(
@@ -1641,7 +1680,7 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
 
 app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
@@ -1657,7 +1696,7 @@ app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
   });
 
   res.json({
-    room_id: roomId,
+    room_id: project.id,
     messages: result.messages,
     has_more: result.has_more,
   });
@@ -1665,7 +1704,7 @@ app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
 
 app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
@@ -1683,7 +1722,7 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
   });
 
   if (existing.messages.length > 0) {
-    res.json({ room_id: roomId, messages: existing.messages, has_more: existing.has_more });
+    res.json({ room_id: project.id, messages: existing.messages, has_more: existing.has_more });
     return;
   }
 
@@ -1699,7 +1738,7 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
     if (settled) return;
     settled = true;
     cleanup();
-    res.json({ room_id: roomId, messages: msgs, has_more: hasMore });
+    res.json({ room_id: project.id, messages: msgs, has_more: hasMore });
   };
 
   const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
@@ -1724,7 +1763,7 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
 
 app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
@@ -1740,7 +1779,7 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
     if (!shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
       return;
     }
-    res.write(`data: ${JSON.stringify({ ...message, room_id: roomId })}\n\n`);
+    res.write(`data: ${JSON.stringify({ ...message, room_id: project.id })}\n\n`);
   };
 
   messageEvents.on("message:created", onMessageCreated);
@@ -1753,7 +1792,7 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
 
 app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
@@ -1766,12 +1805,12 @@ app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const result = open ? await getOpenTasks(project.id, { limit, after }) : await getTasks(project.id, status, { limit, after });
 
-  res.json({ room_id: roomId, tasks: result.tasks, has_more: result.has_more });
+  res.json({ room_id: project.id, tasks: result.tasks, has_more: result.has_more });
 });
 
 app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
   if (!project) return;
@@ -1793,7 +1832,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const task = await createTask(project.id, title, created_by, description, source_message_id);
 
   if (!(await isTrustedAgentCreator(project.id, created_by))) {
-    res.status(201).json({ ...task, room_id: roomId });
+    res.status(201).json({ ...task, room_id: project.id });
     return;
   }
 
@@ -1804,12 +1843,12 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   }
 
   await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
-  res.status(201).json({ ...acceptedTask, room_id: roomId });
+  res.status(201).json({ ...acceptedTask, room_id: project.id });
 });
 
 app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
   const taskId = (req.params as Record<string, string>)[1] ?? "";
 
   const project = await resolveRoomOrReply(roomId, res);
@@ -1823,12 +1862,12 @@ app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res
     return;
   }
 
-  res.json({ ...task, room_id: roomId });
+  res.json({ ...task, room_id: project.id });
 });
 
 app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
   const taskId = (req.params as Record<string, string>)[1] ?? "";
 
   const project = await resolveRoomOrReply(roomId, res);
@@ -1858,7 +1897,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     if (updated && status && status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }
-    res.json({ ...updated, room_id: roomId });
+    res.json({ ...updated, room_id: project.id });
   } catch (error) {
     respondWithBadRequest(
       res,
@@ -1871,7 +1910,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
 
 app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = normalizeRoomId(rawId);
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
   const project = await resolveRoomOrReply(roomId, res);
   if (!project) return;
