@@ -63,6 +63,7 @@ import {
 } from "./room-routing.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 import {
+  isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
@@ -126,12 +127,26 @@ function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
     return null;
   }
 
-  const kind = normalizeAgentPromptKind(value);
-  if (!kind || kind === "join") {
+  const normalizedValue = typeof value === "string" ? value.trim().toLowerCase() : value;
+  if (normalizedValue === "join") {
+    throw new Error("agent_prompt_kind must be one of: inline, auto");
+  }
+
+  const kind = normalizeAgentPromptKind(normalizedValue);
+  if (!kind) {
     throw new Error("agent_prompt_kind must be one of: inline, auto");
   }
 
   return kind;
+}
+
+function shouldIncludePromptOnlyMessages(req: express.Request): boolean {
+  const value = req.query.include_prompt_only;
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  return value === "1" || value.toLowerCase() === "true";
 }
 
 function formatTaskLifecycleStatus(task: {
@@ -1155,7 +1170,11 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
 
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
-    if (!sender || typeof text !== "string" || (!text.trim() && !promptKind)) {
+    if (
+      !sender ||
+      typeof text !== "string" ||
+      (!text.trim() && (!promptKind || promptKind !== "auto"))
+    ) {
       res.status(400).json({ error: "sender and text are required" });
       return;
     }
@@ -1190,7 +1209,11 @@ app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
 
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const result = await getMessages(projectId, { limit, after });
+  const result = await getMessages(projectId, {
+    limit,
+    after,
+    include_prompt_only: shouldIncludePromptOnlyMessages(req),
+  });
 
   res.json({
     project_id: projectId,
@@ -1220,6 +1243,9 @@ app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) 
 
   const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) {
+      return;
+    }
+    if (!shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
       return;
     }
 
@@ -1255,7 +1281,11 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const existing = await getMessagesAfter(projectId, after, { limit });
+  const includePromptOnly = shouldIncludePromptOnlyMessages(req);
+  const existing = await getMessagesAfter(projectId, after, {
+    limit,
+    include_prompt_only: includePromptOnly,
+  });
 
   if (existing.messages.length > 0) {
     res.json({ project_id: projectId, messages: existing.messages, has_more: existing.has_more });
@@ -1285,7 +1315,10 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
       return;
     }
 
-    const next = await getMessagesAfter(projectId, after, { limit });
+    const next = await getMessagesAfter(projectId, after, {
+      limit,
+      include_prompt_only: includePromptOnly,
+    });
     if (next.messages.length > 0) {
       resolveRequest(next.messages, next.has_more);
     }
@@ -1560,7 +1593,11 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
   };
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
-    if (!sender || typeof text !== "string" || (!text.trim() && !promptKind)) {
+    if (
+      !sender ||
+      typeof text !== "string" ||
+      (!text.trim() && (!promptKind || promptKind !== "auto"))
+    ) {
       res.status(400).json({ error: "sender and text are required" });
       return;
     }
@@ -1594,7 +1631,11 @@ app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
 
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const result = await getMessages(project.id, { limit, after });
+  const result = await getMessages(project.id, {
+    limit,
+    after,
+    include_prompt_only: shouldIncludePromptOnlyMessages(req),
+  });
 
   res.json({
     room_id: roomId,
@@ -1616,7 +1657,11 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const existing = await getMessagesAfter(projectId, after, { limit });
+  const includePromptOnly = shouldIncludePromptOnlyMessages(req);
+  const existing = await getMessagesAfter(projectId, after, {
+    limit,
+    include_prompt_only: includePromptOnly,
+  });
 
   if (existing.messages.length > 0) {
     res.json({ room_id: roomId, messages: existing.messages, has_more: existing.has_more });
@@ -1640,7 +1685,10 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
 
   const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) return;
-    const next = await getMessagesAfter(projectId, after, { limit });
+    const next = await getMessagesAfter(projectId, after, {
+      limit,
+      include_prompt_only: includePromptOnly,
+    });
     if (next.messages.length > 0) resolveRequest(next.messages, next.has_more);
   };
 
@@ -1674,6 +1722,9 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
 
   const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) return;
+    if (!shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
+      return;
+    }
     res.write(`data: ${JSON.stringify({ ...message, room_id: roomId })}\n\n`);
   };
 

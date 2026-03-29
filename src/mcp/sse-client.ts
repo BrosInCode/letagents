@@ -88,7 +88,9 @@ export class SseClient {
   ): Promise<void> {
     try {
       await this.openStream(
-        `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`,
+        this.withIncludePromptOnly(
+          `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`
+        ),
         signal,
         onMessage
       );
@@ -100,10 +102,16 @@ export class SseClient {
     }
 
     await this.openStream(
-      `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`,
+      this.withIncludePromptOnly(
+        `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`
+      ),
       signal,
       onMessage
     );
+  }
+
+  private withIncludePromptOnly(url: string): string {
+    return `${url}${url.includes("?") ? "&" : "?"}include_prompt_only=1`;
   }
 
   private async openStream(

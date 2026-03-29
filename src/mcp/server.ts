@@ -1055,6 +1055,10 @@ function toAgentReadableMessages(messages: unknown[] | undefined): unknown[] {
   return (messages ?? []).map((message) => toAgentReadableMessage(message));
 }
 
+function appendIncludePromptOnly(path: string): string {
+  return `${path}${path.includes("?") ? "&" : "?"}include_prompt_only=1`;
+}
+
 async function roomScopedApiCall<T>(input: {
   room_id?: string | null;
   project_id?: string | null;
@@ -1286,9 +1290,9 @@ server.resource(
         room_id: normalizedRoomId,
         project_id: storedSession?.project_id ?? null,
         room_path: (targetRoomId) =>
-          `/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`,
+          appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`),
         project_path: (projectId) =>
-          `/projects/${encodeURIComponent(projectId)}/messages${qs ? `?${qs}` : ""}`,
+          appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages${qs ? `?${qs}` : ""}`),
       });
 
       const msgs = result.messages ?? [];
@@ -2178,9 +2182,9 @@ server.tool(
         room_id: targetRoomId,
         project_id: targetProjectId,
         room_path: (targetRoomId) =>
-          `/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`,
+          appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`),
         project_path: (targetProjectId) =>
-          `/projects/${encodeURIComponent(targetProjectId)}/messages${qs ? `?${qs}` : ""}`,
+          appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages${qs ? `?${qs}` : ""}`),
       });
 
       roomIdFromResponse = roomIdFromResponse || result.room_id || result.project_id;
@@ -2252,8 +2256,10 @@ server.tool(
     }>({
       room_id: targetRoomId,
       project_id: targetProjectId,
-      room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`,
-      project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`,
+      room_path: (targetRoomId) =>
+        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
+      project_path: (targetProjectId) =>
+        appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
       options: { signal: AbortSignal.timeout(clientTimeout) },
     });
 
@@ -2276,9 +2282,9 @@ server.tool(
           room_id: targetRoomId,
           project_id: targetProjectId,
           room_path: (targetRoomId) =>
-            `/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`,
+            appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`),
           project_path: (targetProjectId) =>
-            `/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`,
+            appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`),
         });
 
         const msgs = page.messages ?? [];
