@@ -1,12 +1,25 @@
 <template>
   <div class="room-shell" :data-theme="theme">
+    <!-- Drawer -->
+    <RoomDrawer
+      :open="drawerOpen"
+      :room="room"
+      :messages="messages"
+      @close="drawerOpen = false"
+    />
+
     <RoomHeader
       :title="roomTitle"
       :subtitle="roomSubtitle"
       :activeTab="activeTab"
       :connectionState="connectionState"
+      :searchQuery="searchQuery"
+      :matchCount="matchCount"
+      :canRename="room?.authenticated ?? false"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="activeTab = $event"
+      @update:searchQuery="searchQuery = $event"
+      @rename="handleRename"
     />
 
     <div v-if="connectionState === 'error' && !isConnected" class="room-error">
@@ -16,7 +29,9 @@
 
     <MessageList
       v-show="activeTab === 'chat' && isConnected"
+      ref="messageListRef"
       :messages="messages"
+      :searchQuery="searchQuery"
     />
 
     <TaskBoard
@@ -35,23 +50,26 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
+import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import MessageList from '@/components/room/MessageList.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 
 const route = useRoute()
-const router = useRouter()
-const { messages, tasks, room, isConnected, connectionState, joinRoom, sendMessage, addTask, restoreSession } = useRoom()
+const { messages, tasks, room, isConnected, connectionState, joinRoom, sendMessage, addTask, restoreSession, renameRoom } = useRoom()
 const auth = useAuth()
 
 const activeTab = ref<'chat' | 'board'>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
+const searchQuery = ref('')
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 
+const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const senderName = computed(() => auth.user.value?.login || 'anonymous')
 const roomTitle = computed(() => room.value?.displayName || 'Connecting...')
 const roomSubtitle = computed(() =>
@@ -68,6 +86,13 @@ async function handleAddTask(title: string) {
   await addTask(title)
 }
 
+async function handleRename() {
+  const newName = prompt('Rename room:', room.value?.displayName || '')
+  if (newName && newName.trim()) {
+    await renameRoom(newName.trim())
+  }
+}
+
 async function retryJoin() {
   const roomId = route.params.roomId as string
   if (roomId) await joinRoom(roomId)
@@ -79,7 +104,6 @@ onMounted(async () => {
   if (roomId) {
     await joinRoom(roomId)
   } else {
-    // Try restoring a previous session
     await restoreSession()
   }
 })

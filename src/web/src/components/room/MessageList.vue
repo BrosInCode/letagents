@@ -5,6 +5,8 @@
         v-for="msg in messages"
         :key="msg.id"
         :message="msg"
+        :class="searchClasses(msg)"
+        :searchQuery="searchQuery"
       />
     </div>
     <button
@@ -24,17 +26,40 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
+  searchQuery?: string
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
 const unreadCount = ref(0)
 let isScrolledToBottom = true
+
+const matchedIds = computed(() => {
+  const q = (props.searchQuery || '').toLowerCase().trim()
+  if (!q) return new Set<string>()
+  const ids = new Set<string>()
+  for (const msg of props.messages) {
+    if ((msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
+      ids.add(msg.id)
+    }
+  }
+  return ids
+})
+
+function searchClasses(msg: RoomMessage): Record<string, boolean> {
+  const q = (props.searchQuery || '').trim()
+  if (!q) return {}
+  const isMatch = matchedIds.value.has(msg.id)
+  return {
+    'search-dim': !isMatch,
+    'search-match': isMatch,
+  }
+}
 
 function checkScroll() {
   if (!messagesEl.value) return
@@ -47,6 +72,15 @@ function scrollToBottom() {
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
   unreadCount.value = 0
 }
+
+// Scroll to first match when search changes
+watch(() => props.searchQuery, async () => {
+  await nextTick()
+  const firstMatch = messagesEl.value?.querySelector('.search-match')
+  if (firstMatch) {
+    firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+})
 
 watch(() => props.messages.length, async (newLen, oldLen) => {
   if (newLen > (oldLen || 0)) {
@@ -67,6 +101,8 @@ onMounted(() => {
 onUnmounted(() => {
   messagesEl.value?.removeEventListener('scroll', checkScroll)
 })
+
+defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 </script>
 
 <style scoped>
@@ -119,4 +155,14 @@ onUnmounted(() => {
 .empty-state-card { max-width: 320px; }
 .empty-state-card h3 { font-size: 0.92rem; font-weight: 600; margin-bottom: 6px; }
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
+</style>
+
+<style>
+/* Global search styles (not scoped, applied to ChatMessage children) */
+.search-dim { opacity: 0.15; transition: opacity 0.2s; }
+.search-match {
+  border-left: 2px solid var(--success, #34d399);
+  padding-left: 8px;
+  transition: all 0.2s;
+}
 </style>
