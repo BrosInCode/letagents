@@ -153,6 +153,7 @@ export const messages = pgTable(
     number: integer("number").notNull(),
     sender: text("sender").notNull(),
     text: text("text").notNull(),
+    agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },

@@ -13,6 +13,9 @@
           <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.class">
             {{ provenanceBadge.label }}
           </span>
+          <span v-if="props.message.agent_prompt_kind" class="prompt-injection-badge">
+            Prompt injected
+          </span>
           <span v-if="identity.ideLabel" class="agent-runtime-badge" :class="ideBadgeClass">
             {{ identity.ideLabel }}
           </span>
@@ -160,6 +163,28 @@ const renderedContent = computed(() => {
 .provenance-badge.human { background: rgba(251,146,60,0.1); color: #fb923c; }
 .provenance-badge.agent { background: rgba(96,165,250,0.1); color: #60a5fa; }
 .provenance-badge.system { background: var(--surface, #18181b); color: var(--muted, #71717a); }
+
+.prompt-injection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.prompt-injection-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
 
 .agent-runtime-badge {
   display: inline-flex;

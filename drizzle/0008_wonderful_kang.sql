@@ -1,0 +1,1 @@
+ALTER TABLE "messages" ADD COLUMN "agent_prompt_kind" text;

@@ -16,6 +16,11 @@ import {
 } from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomName } from "./room-routing.js";
+import {
+  isPromptOnlyAgentMessage,
+  normalizeAgentPromptKind,
+  type AgentPromptKind,
+} from "../shared/room-agent-prompts.js";
 
 export interface Project {
   id: string;
@@ -96,6 +101,7 @@ export interface Message {
   id: string;
   sender: string;
   text: string;
+  agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
   timestamp: string;
 }
@@ -130,6 +136,7 @@ interface MessageRow {
   number: number;
   sender: string;
   text: string;
+  agent_prompt_kind: string | null;
   source: string | null;
   timestamp: string;
 }
@@ -216,6 +223,7 @@ function toMessage(row: MessageRow): Message {
     id: formatMessageId(row.number),
     sender: row.sender,
     text: row.text,
+    agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,
     timestamp: row.timestamp,
   };
@@ -258,8 +266,14 @@ async function nextPrefixedId(sequenceName: string, prefix: string): Promise<str
   return `${prefix}_${next.value}`;
 }
 
-async function nextRoomScopedNumber(sequenceName: string, roomId: string): Promise<number> {
-  const [next] = await db
+type RoomSequenceExecutor = Pick<typeof db, "insert" | "delete" | "select" | "update">;
+
+async function nextRoomScopedNumber(
+  sequenceName: string,
+  roomId: string,
+  executor: RoomSequenceExecutor = db
+): Promise<number> {
+  const [next] = await executor
     .insert(id_sequences)
     .values({ name: `${sequenceName}:${roomId}`, value: 1 })
     .onConflictDoUpdate({
@@ -439,27 +453,55 @@ export async function updateProjectDisplayName(
   return updated ? toProject(updated) : null;
 }
 
-export async function addMessage(roomId: string, sender: string, text: string, source?: string): Promise<Message> {
-  const message: MessageRow = {
-    room_id: roomId,
-    number: await nextRoomScopedNumber("messages", roomId),
-    sender,
-    text,
-    source: source ?? null,
-    timestamp: new Date().toISOString(),
-  };
+export async function addMessage(
+  roomId: string,
+  sender: string,
+  text: string,
+  options?: {
+    source?: string;
+    agent_prompt_kind?: AgentPromptKind | null;
+  }
+): Promise<Message> {
+  const promptKind = options?.agent_prompt_kind ?? null;
+  return db.transaction(async (tx) => {
+    const message: MessageRow = {
+      room_id: roomId,
+      number: await nextRoomScopedNumber("messages", roomId, tx),
+      sender,
+      text,
+      agent_prompt_kind: promptKind,
+      source: options?.source ?? null,
+      timestamp: new Date().toISOString(),
+    };
 
-  await db.insert(messages).values(message);
+    await tx.insert(messages).values(message);
+    if (isPromptOnlyAgentMessage(message.text, promptKind)) {
+      await tx
+        .delete(messages)
+        .where(
+          and(
+            eq(messages.room_id, roomId),
+            eq(messages.sender, sender),
+            eq(messages.agent_prompt_kind, "auto"),
+            sql`BTRIM(${messages.text}) = ''`,
+            sql`${messages.number} < ${message.number}`
+          )
+        );
+    }
 
-  return toMessage(message);
+    return toMessage(message);
+  });
 }
 
 export async function getMessages(
   roomId: string,
-  options?: { limit?: number; after?: string }
+  options?: { limit?: number; after?: string; include_prompt_only?: boolean }
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
+  const visibilityCondition = options?.include_prompt_only
+    ? sql`TRUE`
+    : sql`NOT (${messages.agent_prompt_kind} = 'auto' AND BTRIM(${messages.text}) = '')`;
 
   const rows = await db
     .select({
@@ -467,14 +509,15 @@ export async function getMessages(
       number: messages.number,
       sender: messages.sender,
       text: messages.text,
+      agent_prompt_kind: messages.agent_prompt_kind,
       source: messages.source,
       timestamp: messages.timestamp,
     })
     .from(messages)
     .where(
       afterNumber
-        ? and(eq(messages.room_id, roomId), sql`${messages.number} > ${afterNumber}`)
-        : eq(messages.room_id, roomId)
+        ? and(eq(messages.room_id, roomId), sql`${messages.number} > ${afterNumber}`, visibilityCondition)
+        : and(eq(messages.room_id, roomId), visibilityCondition)
     )
     .orderBy(asc(messages.number))
     .limit(limit + 1);
@@ -487,7 +530,7 @@ export async function getMessages(
 export async function getMessagesAfter(
   roomId: string,
   afterMessageId: string | undefined,
-  options?: { limit?: number }
+  options?: { limit?: number; include_prompt_only?: boolean }
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   return getMessages(roomId, { ...options, after: afterMessageId });
 }

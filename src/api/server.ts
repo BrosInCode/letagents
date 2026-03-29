@@ -62,6 +62,11 @@ import {
   resolveRoomIdentifier,
 } from "./room-routing.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
+import {
+  isPromptOnlyAgentMessage,
+  normalizeAgentPromptKind,
+  type AgentPromptKind,
+} from "../shared/room-agent-prompts.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -100,10 +105,48 @@ function cleanupExpiredDeviceAuths(): void {
   }
 }
 
-async function emitProjectMessage(projectId: string, sender: string, text: string, source?: string): Promise<Message> {
-  const message = await addMessage(projectId, sender, text, source);
+async function emitProjectMessage(
+  projectId: string,
+  sender: string,
+  text: string,
+  options?: {
+    source?: string;
+    agent_prompt_kind?: AgentPromptKind | null;
+  }
+): Promise<Message> {
+  const message = await addMessage(projectId, sender, text, {
+    source: options?.source,
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+  });
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
+}
+
+function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const normalizedValue = typeof value === "string" ? value.trim().toLowerCase() : value;
+  if (normalizedValue === "join") {
+    throw new Error("agent_prompt_kind must be one of: inline, auto");
+  }
+
+  const kind = normalizeAgentPromptKind(normalizedValue);
+  if (!kind) {
+    throw new Error("agent_prompt_kind must be one of: inline, auto");
+  }
+
+  return kind;
+}
+
+function shouldIncludePromptOnlyMessages(req: express.Request): boolean {
+  const value = req.query.include_prompt_only;
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  return value === "1" || value.toLowerCase() === "true";
 }
 
 function formatTaskLifecycleStatus(task: {
@@ -1119,16 +1162,37 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { sender, text } = req.body as { sender?: string; text?: string };
+  const { sender, text, agent_prompt_kind } = req.body as {
+    sender?: string;
+    text?: string;
+    agent_prompt_kind?: string;
+  };
 
-  if (!sender || !text) {
-    res.status(400).json({ error: "sender and text are required" });
-    return;
+  try {
+    const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const normalizedSender = typeof sender === "string" ? sender.trim() : "";
+    if (
+      !normalizedSender ||
+      typeof text !== "string" ||
+      (!text.trim() && (!promptKind || promptKind !== "auto"))
+    ) {
+      res.status(400).json({ error: "sender and text are required" });
+      return;
+    }
+    const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
+    const message = await emitProjectMessage(projectId, normalizedSender, text, {
+      source,
+      agent_prompt_kind: promptKind,
+    });
+    res.status(201).json(message);
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /projects/:id/messages",
+      error,
+      "Message could not be created."
+    );
   }
-
-  const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-  const message = await emitProjectMessage(projectId, sender, text, source);
-  res.status(201).json(message);
 });
 
 app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
@@ -1146,7 +1210,11 @@ app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
 
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const result = await getMessages(projectId, { limit, after });
+  const result = await getMessages(projectId, {
+    limit,
+    after,
+    include_prompt_only: shouldIncludePromptOnlyMessages(req),
+  });
 
   res.json({
     project_id: projectId,
@@ -1176,6 +1244,9 @@ app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) 
 
   const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) {
+      return;
+    }
+    if (!shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
       return;
     }
 
@@ -1211,7 +1282,11 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const existing = await getMessagesAfter(projectId, after, { limit });
+  const includePromptOnly = shouldIncludePromptOnlyMessages(req);
+  const existing = await getMessagesAfter(projectId, after, {
+    limit,
+    include_prompt_only: includePromptOnly,
+  });
 
   if (existing.messages.length > 0) {
     res.json({ project_id: projectId, messages: existing.messages, has_more: existing.has_more });
@@ -1241,7 +1316,10 @@ app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) =>
       return;
     }
 
-    const next = await getMessagesAfter(projectId, after, { limit });
+    const next = await getMessagesAfter(projectId, after, {
+      limit,
+      include_prompt_only: includePromptOnly,
+    });
     if (next.messages.length > 0) {
       resolveRequest(next.messages, next.has_more);
     }
@@ -1509,18 +1587,39 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { sender, text } = req.body as { sender?: string; text?: string };
-  if (!sender || !text) {
-    res.status(400).json({ error: "sender and text are required" });
-    return;
+  const { sender, text, agent_prompt_kind } = req.body as {
+    sender?: string;
+    text?: string;
+    agent_prompt_kind?: string;
+  };
+  try {
+    const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const normalizedSender = typeof sender === "string" ? sender.trim() : "";
+    if (
+      !normalizedSender ||
+      typeof text !== "string" ||
+      (!text.trim() && (!promptKind || promptKind !== "auto"))
+    ) {
+      res.status(400).json({ error: "sender and text are required" });
+      return;
+    }
+    const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
+    const message = await emitProjectMessage(project.id, normalizedSender, text, {
+      source,
+      agent_prompt_kind: promptKind,
+    });
+    res.status(201).json({
+      ...message,
+      room_id: roomId,
+    });
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /rooms/:room_id/messages",
+      error,
+      "Message could not be created."
+    );
   }
-
-  const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-  const message = await emitProjectMessage(project.id, sender, text, source);
-  res.status(201).json({
-    ...message,
-    room_id: roomId,
-  });
 });
 
 app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
@@ -1534,7 +1633,11 @@ app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
 
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const result = await getMessages(project.id, { limit, after });
+  const result = await getMessages(project.id, {
+    limit,
+    after,
+    include_prompt_only: shouldIncludePromptOnlyMessages(req),
+  });
 
   res.json({
     room_id: roomId,
@@ -1556,7 +1659,11 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const existing = await getMessagesAfter(projectId, after, { limit });
+  const includePromptOnly = shouldIncludePromptOnlyMessages(req);
+  const existing = await getMessagesAfter(projectId, after, {
+    limit,
+    include_prompt_only: includePromptOnly,
+  });
 
   if (existing.messages.length > 0) {
     res.json({ room_id: roomId, messages: existing.messages, has_more: existing.has_more });
@@ -1580,7 +1687,10 @@ app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res
 
   const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) return;
-    const next = await getMessagesAfter(projectId, after, { limit });
+    const next = await getMessagesAfter(projectId, after, {
+      limit,
+      include_prompt_only: includePromptOnly,
+    });
     if (next.messages.length > 0) resolveRequest(next.messages, next.has_more);
   };
 
@@ -1614,6 +1724,9 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
 
   const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
     if (eventProjectId !== projectId) return;
+    if (!shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
+      return;
+    }
     res.write(`data: ${JSON.stringify({ ...message, room_id: roomId })}\n\n`);
   };
 
