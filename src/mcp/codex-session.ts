@@ -543,7 +543,7 @@ export async function startLocalCodexSession(
   input: StartLocalCodexSessionInput
 ): Promise<StartLocalCodexSessionResult> {
   const cwd = resolve(input.cwd || process.cwd());
-  const currentSession = getCurrentCodexLiveSession();
+  const currentSession = getCurrentCodexLiveSession(input.room_id);
 
   if (
     currentSession &&
@@ -643,11 +643,12 @@ export async function startLocalCodexSession(
 
 export async function stopLocalCodexSession(options?: {
   session_id?: string | null;
+  room_id?: string | null;
   shutdown_server?: boolean;
 }): Promise<CodexLiveSessionState | null> {
   const session = options?.session_id
     ? getStoredCodexLiveSession(options.session_id)
-    : getCurrentCodexLiveSession();
+    : getCurrentCodexLiveSession(options?.room_id ?? undefined);
 
   if (!session) {
     return null;

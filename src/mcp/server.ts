@@ -1044,8 +1044,8 @@ function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
   return String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
 }
 
-function getCurrentLiveSessionPayload(): Record<string, unknown> | null {
-  const session = getCurrentCodexLiveSession();
+function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {
+  const session = getCurrentCodexLiveSession(roomId);
   return session ? toPublicCodexLiveSession(session) : null;
 }
 
@@ -1689,7 +1689,7 @@ server.tool(
               ? withJoinRoomAgentPrompt({
                   connected: true,
                   ...toPublicRoomState(currentRoom),
-                  current_local_codex_session: getCurrentLiveSessionPayload(),
+                  current_local_codex_session: getCurrentLiveSessionPayload(currentRoom.room_id),
                   local_codex_session_count: listStoredCodexLiveSessions().length,
                   agent_identity: toPublicAgentIdentity(
                     getConversationIdentity(conversation_id)
@@ -1707,7 +1707,7 @@ server.tool(
               : {
                   connected: false,
                   message: "Not currently in any room",
-                  current_local_codex_session: getCurrentLiveSessionPayload(),
+                  current_local_codex_session: getCurrentLiveSessionPayload(),  // no room context
                   local_codex_session_count: listStoredCodexLiveSessions().length,
                 },
             null,
