@@ -50,6 +50,38 @@ export interface RoomSessionState {
   last_message_id?: string;
 }
 
+export type CodexLiveSessionStatus =
+  | "starting"
+  | "running"
+  | "completed"
+  | "interrupted"
+  | "failed"
+  | "unknown";
+
+export interface CodexLiveSessionState {
+  session_id: string;
+  room_id: string;
+  room_identifier: string;
+  room_code?: string | null;
+  room_display_name?: string | null;
+  joined_via: JoinedVia;
+  cwd: string;
+  stop_phrase: string;
+  max_minutes: number;
+  deadline_utc?: string | null;
+  token: string;
+  thread_id: string;
+  turn_id: string;
+  server_url: string;
+  server_pid?: number | null;
+  launched_server: boolean;
+  codex_bin: string;
+  status: CodexLiveSessionStatus;
+  last_error?: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
 export interface StoredAgentIdentityState {
   name: string;
   display_name: string;
@@ -78,6 +110,8 @@ export interface LetagentsLocalState {
   agent_identity_leases?: Record<string, StoredAgentIdentityLeaseState>;
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
+  current_codex_live_session_ids?: Record<string, string>;
+  codex_live_sessions?: Record<string, CodexLiveSessionState>;
 }
 
 const DEFAULT_STATE_PATH = join(homedir(), ".letagents", "mcp-state.json");
@@ -350,4 +384,81 @@ export function touchRoomSession(roomId: string, lastMessageId?: string): RoomSe
   });
 
   return updated;
+}
+
+export function getCurrentCodexLiveSession(roomId?: string): CodexLiveSessionState | null {
+  const state = readLocalState();
+  const sessionIds = state.current_codex_live_session_ids;
+  if (!sessionIds) {
+    return null;
+  }
+
+  if (roomId) {
+    const sessionId = sessionIds[roomId];
+    return sessionId ? (state.codex_live_sessions?.[sessionId] ?? null) : null;
+  }
+
+  let best: CodexLiveSessionState | null = null;
+  for (const id of Object.values(sessionIds)) {
+    const session = state.codex_live_sessions?.[id];
+    if (session && (!best || session.updated_at > best.updated_at)) {
+      best = session;
+    }
+  }
+  return best;
+}
+
+export function getStoredCodexLiveSession(sessionId: string): CodexLiveSessionState | null {
+  const state = readLocalState();
+  return state.codex_live_sessions?.[sessionId] ?? null;
+}
+
+export function listStoredCodexLiveSessions(): CodexLiveSessionState[] {
+  const state = readLocalState();
+  return Object.values(state.codex_live_sessions ?? {}).sort((left, right) =>
+    right.updated_at.localeCompare(left.updated_at)
+  );
+}
+
+export function saveCodexLiveSession(
+  session: CodexLiveSessionState,
+  makeCurrent = true
+): CodexLiveSessionState {
+  updateLocalState((state) => {
+    state.codex_live_sessions = state.codex_live_sessions ?? {};
+    state.codex_live_sessions[session.session_id] = session;
+    if (makeCurrent) {
+      state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
+      state.current_codex_live_session_ids[session.room_id] = session.session_id;
+    }
+    return state;
+  });
+
+  return session;
+}
+
+export function updateCodexLiveSession(
+  sessionId: string,
+  updater: (session: CodexLiveSessionState) => CodexLiveSessionState
+): CodexLiveSessionState | null {
+  let updatedSession: CodexLiveSessionState | null = null;
+
+  updateLocalState((state) => {
+    const existing = state.codex_live_sessions?.[sessionId];
+    if (!existing) {
+      return state;
+    }
+
+    const updated = updater(existing);
+    state.codex_live_sessions = state.codex_live_sessions ?? {};
+    state.codex_live_sessions[sessionId] = updated;
+    state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
+    if (!state.current_codex_live_session_ids[updated.room_id]) {
+      state.current_codex_live_session_ids[updated.room_id] = sessionId;
+    }
+    updatedSession = updated;
+    return state;
+  });
+
+  return updatedSession;
 }

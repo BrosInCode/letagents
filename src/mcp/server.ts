@@ -22,12 +22,14 @@ import {
 import {
   clearPendingDeviceAuth,
   clearStoredAuth,
+  getCurrentCodexLiveSession,
   getLocalStatePath,
   getPendingDeviceAuth,
   getStoredAgentIdentity,
   getStoredAuth,
   getStoredCurrentRoom,
   getStoredRoomSession,
+  listStoredCodexLiveSessions,
   readLocalState,
   saveRoomSession,
   setStoredAgentIdentity,
@@ -57,6 +59,12 @@ import {
   buildRoomAgentPrompt,
   normalizeAgentPromptKind,
 } from "../shared/room-agent-prompts.js";
+import {
+  inspectLocalCodexSession,
+  startLocalCodexSession,
+  stopLocalCodexSession,
+  toPublicCodexLiveSession,
+} from "./codex-session.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -1030,6 +1038,17 @@ function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Record<strin
   };
 }
 
+type JoinSessionMode = "live" | "current";
+
+function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
+  return String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
+}
+
+function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {
+  const session = getCurrentCodexLiveSession(roomId);
+  return session ? toPublicCodexLiveSession(session) : null;
+}
+
 function toAgentReadableMessage(message: unknown): unknown {
   if (!message || typeof message !== "object") {
     return message;
@@ -1232,20 +1251,63 @@ async function createInviteRoom(): Promise<{
   };
 }
 
-async function joinInviteCode(code: string): Promise<Record<string, unknown>> {
-  const joined = await joinRoomIdentifier(code, "join_code");
-  return withJoinRoomAgentPrompt(await withAgentIdentity({
-    ...toPublicRoomResponse(joined.response, joined.room.room_id),
-    joined_via: "join_code",
-  }));
+async function buildJoinResponse(input: {
+  joined: { room: RoomState; response: Record<string, unknown> };
+  room_identifier: string;
+  joined_via: JoinedVia;
+  session_mode: JoinSessionMode;
+}): Promise<Record<string, unknown>> {
+  const basePayload = await withAgentIdentity({
+    ...toPublicRoomResponse(input.joined.response, input.joined.room.room_id),
+    joined_via: input.joined_via,
+    session_mode: input.session_mode,
+  });
+
+  if (input.session_mode === "current") {
+    return withJoinRoomAgentPrompt(basePayload);
+  }
+
+  const liveSession = await startLocalCodexSession({
+    room_id: input.joined.room.room_id,
+    room_identifier: input.room_identifier,
+    room_code: input.joined.room.code ?? null,
+    room_display_name: input.joined.room.display_name ?? null,
+    joined_via: input.joined_via,
+    cwd: process.cwd(),
+  });
+
+  return withJoinRoomAgentPrompt({
+    ...basePayload,
+    local_codex_session: toPublicCodexLiveSession(liveSession.session),
+    local_codex_session_started: !liveSession.reused,
+    local_codex_session_reused: liveSession.reused,
+  });
 }
 
-async function joinNamedRoom(name: string): Promise<Record<string, unknown>> {
+async function joinInviteCode(
+  code: string,
+  sessionMode: JoinSessionMode
+): Promise<Record<string, unknown>> {
+  const joined = await joinRoomIdentifier(code, "join_code");
+  return buildJoinResponse({
+    joined,
+    room_identifier: normalizeInviteCode(code),
+    joined_via: "join_code",
+    session_mode: sessionMode,
+  });
+}
+
+async function joinNamedRoom(
+  name: string,
+  sessionMode: JoinSessionMode
+): Promise<Record<string, unknown>> {
   const joined = await joinRoomIdentifier(name, "join_room");
-  return withJoinRoomAgentPrompt(await withAgentIdentity({
-    ...toPublicRoomResponse(joined.response, joined.room.room_id),
+  return buildJoinResponse({
+    joined,
+    room_identifier: name.trim(),
     joined_via: "join_room",
-  }));
+    session_mode: sessionMode,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,13 +1423,17 @@ server.tool(
   "Join an existing room using an invite code.",
   {
     code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
+    session_mode: z
+      .enum(["live", "current"])
+      .optional()
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
   },
-  async ({ code }) => {
+  async ({ code, session_mode }) => {
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(await joinInviteCode(code), null, 2),
+          text: JSON.stringify(await joinInviteCode(code, normalizeJoinSessionMode(session_mode)), null, 2),
         },
       ],
     };
@@ -1381,13 +1447,17 @@ server.tool(
   "Legacy alias for join_code. Join an existing room using an invite code.",
   {
     code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
+    session_mode: z
+      .enum(["live", "current"])
+      .optional()
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
   },
-  async ({ code }) => {
+  async ({ code, session_mode }) => {
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(await joinInviteCode(code), null, 2),
+          text: JSON.stringify(await joinInviteCode(code, normalizeJoinSessionMode(session_mode)), null, 2),
         },
       ],
     };
@@ -1401,14 +1471,18 @@ server.tool(
   "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. Use this for repo-based room joining.",
   {
     name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
+    session_mode: z
+      .enum(["live", "current"])
+      .optional()
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
   },
-  async ({ name }) => {
+  async ({ name, session_mode }) => {
     try {
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(await joinNamedRoom(name), null, 2),
+            text: JSON.stringify(await joinNamedRoom(name, normalizeJoinSessionMode(session_mode)), null, 2),
           },
         ],
       };
@@ -1426,6 +1500,172 @@ server.tool(
 
       throw error;
     }
+  }
+);
+
+// -- local Codex live sessions ---------------------------------------------
+
+server.tool(
+  "start_local_codex_session",
+  "Start or reuse a detached local Codex live session for a LetAgents room. The worker will join the room, keep polling, contribute in discussion, and do repo work from the current working directory when asked.",
+  {
+    room: z
+      .string()
+      .describe("Invite code or room name to run as a detached local Codex worker."),
+    cwd: z
+      .string()
+      .optional()
+      .describe("Working directory for repo work. Defaults to the current process directory."),
+    stop_phrase: z
+      .string()
+      .optional()
+      .describe("Exact room message text that tells the worker to stop. Defaults to /stop-codex-room."),
+    max_minutes: z
+      .number()
+      .optional()
+      .describe("Optional hard stop in minutes. Defaults to 0, which means run until stopped."),
+  },
+  async ({ room, cwd, stop_phrase, max_minutes }) => {
+    const joinedVia: JoinedVia = looksLikeInviteCode(room) ? "join_code" : "join_room";
+
+    try {
+      const joined = await joinRoomIdentifier(room, joinedVia);
+      const liveSession = await startLocalCodexSession({
+        room_id: joined.room.room_id,
+        room_identifier: joinedVia === "join_code" ? normalizeInviteCode(room) : room.trim(),
+        room_code: joined.room.code ?? null,
+        room_display_name: joined.room.display_name ?? null,
+        joined_via: joinedVia,
+        cwd: cwd || process.cwd(),
+        stop_phrase,
+        max_minutes,
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              await withAgentIdentity({
+                success: true,
+                room: toPublicRoomState(joined.room),
+                local_codex_session: toPublicCodexLiveSession(liveSession.session),
+                local_codex_session_started: !liveSession.reused,
+                local_codex_session_reused: liveSession.reused,
+              }),
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      if (error instanceof RepoRoomAuthRequiredError) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(toRepoRoomAuthRequiredResult(error), null, 2),
+            },
+          ],
+        };
+      }
+
+      throw error;
+    }
+  }
+);
+
+server.tool(
+  "status_local_codex_session",
+  "Inspect the current detached local Codex live session, or a specific one by session_id.",
+  {
+    session_id: z
+      .string()
+      .optional()
+      .describe("Optional session id. Defaults to the current local Codex live session."),
+  },
+  async ({ session_id }) => {
+    const status = await inspectLocalCodexSession(session_id, currentRoom?.room_id);
+    if (!status) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: false, error: "No local Codex live session found." }, null, 2),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              session: toPublicCodexLiveSession(status.session),
+              server_reachable: status.server_reachable,
+              thread_status: status.thread_status,
+              turn_status: status.turn_status,
+              recent_items: status.recent_items,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "stop_local_codex_session",
+  "Stop the current detached local Codex live session, or a specific one by session_id.",
+  {
+    session_id: z
+      .string()
+      .optional()
+      .describe("Optional session id. Defaults to the current local Codex live session."),
+    shutdown_server: z
+      .boolean()
+      .optional()
+      .describe("If true, also terminate the spawned codex app-server process when possible."),
+  },
+  async ({ session_id, shutdown_server }) => {
+    const stopped = await stopLocalCodexSession({
+      session_id,
+      room_id: currentRoom?.room_id,
+      shutdown_server,
+    });
+
+    if (!stopped) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: false, error: "No local Codex live session found." }, null, 2),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              session: toPublicCodexLiveSession(stopped),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
   }
 );
 
@@ -1450,6 +1690,8 @@ server.tool(
               ? withJoinRoomAgentPrompt({
                   connected: true,
                   ...toPublicRoomState(currentRoom),
+                  current_local_codex_session: getCurrentLiveSessionPayload(currentRoom.room_id),
+                  local_codex_session_count: listStoredCodexLiveSessions().length,
                   agent_identity: toPublicAgentIdentity(
                     getConversationIdentity(conversation_id)
                       ?? currentAgentIdentity
@@ -1463,7 +1705,12 @@ server.tool(
                       }
                     : null,
                 })
-              : { connected: false, message: "Not currently in any room" },
+              : {
+                  connected: false,
+                  message: "Not currently in any room",
+                  current_local_codex_session: getCurrentLiveSessionPayload(),  // no room context
+                  local_codex_session_count: listStoredCodexLiveSessions().length,
+                },
             null,
             2
           ),
