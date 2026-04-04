@@ -455,11 +455,12 @@ export function toPublicCodexLiveSession(
 }
 
 export async function inspectLocalCodexSession(
-  sessionId?: string | null
+  sessionId?: string | null,
+  roomId?: string | null
 ): Promise<LocalCodexSessionStatus | null> {
   const session = sessionId
     ? getStoredCodexLiveSession(sessionId)
-    : getCurrentCodexLiveSession();
+    : getCurrentCodexLiveSession(roomId ?? undefined);
 
   if (!session) {
     return null;

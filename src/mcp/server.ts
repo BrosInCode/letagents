@@ -1586,7 +1586,7 @@ server.tool(
       .describe("Optional session id. Defaults to the current local Codex live session."),
   },
   async ({ session_id }) => {
-    const status = await inspectLocalCodexSession(session_id);
+    const status = await inspectLocalCodexSession(session_id, currentRoom?.room_id);
     if (!status) {
       return {
         content: [
@@ -1636,6 +1636,7 @@ server.tool(
   async ({ session_id, shutdown_server }) => {
     const stopped = await stopLocalCodexSession({
       session_id,
+      room_id: currentRoom?.room_id,
       shutdown_server,
     });
 
