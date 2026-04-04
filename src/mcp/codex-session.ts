@@ -14,10 +14,12 @@ const DEFAULT_SERVER_URL = "ws://127.0.0.1:8765";
 const DEFAULT_STOP_PHRASE = "/stop-codex-room";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-const WebSocketCtor = globalThis.WebSocket;
-
-if (!WebSocketCtor) {
-  throw new Error("Codex live sessions require a Node runtime with global WebSocket support.");
+function getWebSocketCtor(): typeof WebSocket {
+  const ctor = globalThis.WebSocket;
+  if (!ctor) {
+    throw new Error("Codex live sessions require a Node runtime with global WebSocket support (Node >= 22).");
+  }
+  return ctor;
 }
 
 interface RpcResultEnvelope {
@@ -81,6 +83,30 @@ export interface StartLocalCodexSessionResult {
   reused: boolean;
 }
 
+/** Track spawned server PIDs for cleanup on process exit. */
+const spawnedServerPids = new Set<number>();
+
+let cleanupRegistered = false;
+function registerProcessCleanup(): void {
+  if (cleanupRegistered) return;
+  cleanupRegistered = true;
+
+  const cleanup = () => {
+    for (const pid of spawnedServerPids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // Already dead — ignore.
+      }
+    }
+    spawnedServerPids.clear();
+  };
+
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => { cleanup(); process.exit(130); });
+  process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+}
+
 class RpcClient {
   private readonly serverUrl: string;
   private ws: WebSocket | null = null;
@@ -98,8 +124,9 @@ class RpcClient {
   }
 
   async connect(): Promise<void> {
+    const WS = getWebSocketCtor();
     await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocketCtor(this.serverUrl);
+      const ws = new WS(this.serverUrl);
       this.ws = ws;
 
       ws.onopen = () => resolve();
@@ -137,7 +164,7 @@ class RpcClient {
   }
 
   close(): void {
-    if (this.ws?.readyState === WebSocketCtor.OPEN) {
+    if (this.ws?.readyState === getWebSocketCtor().OPEN) {
       this.ws.close();
     }
   }
@@ -217,7 +244,7 @@ function launchAppServer(serverUrl: string, codexBin: string): number | null {
 }
 
 function makeToken(): string {
-  return `LOCAL_CODEX_ROOM_${Date.now()}`;
+  return `LOCAL_CODEX_ROOM_${randomUUID()}`;
 }
 
 function formatDeadline(minutes: number): { utc: string | null } {
@@ -543,6 +570,10 @@ export async function startLocalCodexSession(
 
   if (launchedServer) {
     serverPid = launchAppServer(serverUrl, codexBin);
+    if (serverPid) {
+      spawnedServerPids.add(serverPid);
+      registerProcessCleanup();
+    }
     const ready = await waitForServer(serverUrl);
     if (!ready) {
       throw new Error(`Timed out waiting for codex app-server at ${serverUrl}`);
@@ -622,31 +653,40 @@ export async function stopLocalCodexSession(options?: {
     return null;
   }
 
-  const client = new RpcClient(session.server_url);
-  await client.connect();
-
-  try {
-    await client.request("turn/interrupt", {
-      threadId: session.thread_id,
-      turnId: session.turn_id,
-    });
-  } finally {
-    client.close();
+  // Attempt to interrupt the turn via RPC, but gracefully handle a dead server.
+  const serverReachable = await isServerReady(session.server_url);
+  if (serverReachable) {
+    try {
+      const client = new RpcClient(session.server_url);
+      await client.connect();
+      try {
+        await client.request("turn/interrupt", {
+          threadId: session.thread_id,
+          turnId: session.turn_id,
+        });
+      } finally {
+        client.close();
+      }
+    } catch {
+      // Server may have died between the readiness check and the RPC call.
+    }
   }
 
   const updated =
     updateCodexLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
-      last_error: null,
+      last_error: serverReachable ? null : "server unreachable at stop time",
       updated_at: new Date().toISOString(),
     })) ?? session;
 
   if (options?.shutdown_server && updated.server_pid) {
     try {
       process.kill(updated.server_pid, "SIGTERM");
+      spawnedServerPids.delete(updated.server_pid);
     } catch {
-      // Ignore shutdown errors. The session state is still marked interrupted.
+      // Process already dead — ignore.
+      spawnedServerPids.delete(updated.server_pid);
     }
   }
 

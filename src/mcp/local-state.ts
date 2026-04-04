@@ -110,7 +110,7 @@ export interface LetagentsLocalState {
   agent_identity_leases?: Record<string, StoredAgentIdentityLeaseState>;
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
-  current_codex_live_session_id?: string;
+  current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, CodexLiveSessionState>;
 }
 
@@ -386,14 +386,26 @@ export function touchRoomSession(roomId: string, lastMessageId?: string): RoomSe
   return updated;
 }
 
-export function getCurrentCodexLiveSession(): CodexLiveSessionState | null {
+export function getCurrentCodexLiveSession(roomId?: string): CodexLiveSessionState | null {
   const state = readLocalState();
-  const currentSessionId = state.current_codex_live_session_id;
-  if (!currentSessionId) {
+  const sessionIds = state.current_codex_live_session_ids;
+  if (!sessionIds) {
     return null;
   }
 
-  return state.codex_live_sessions?.[currentSessionId] ?? null;
+  if (roomId) {
+    const sessionId = sessionIds[roomId];
+    return sessionId ? (state.codex_live_sessions?.[sessionId] ?? null) : null;
+  }
+
+  let best: CodexLiveSessionState | null = null;
+  for (const id of Object.values(sessionIds)) {
+    const session = state.codex_live_sessions?.[id];
+    if (session && (!best || session.updated_at > best.updated_at)) {
+      best = session;
+    }
+  }
+  return best;
 }
 
 export function getStoredCodexLiveSession(sessionId: string): CodexLiveSessionState | null {
@@ -416,7 +428,8 @@ export function saveCodexLiveSession(
     state.codex_live_sessions = state.codex_live_sessions ?? {};
     state.codex_live_sessions[session.session_id] = session;
     if (makeCurrent) {
-      state.current_codex_live_session_id = session.session_id;
+      state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
+      state.current_codex_live_session_ids[session.room_id] = session.session_id;
     }
     return state;
   });
@@ -439,8 +452,9 @@ export function updateCodexLiveSession(
     const updated = updater(existing);
     state.codex_live_sessions = state.codex_live_sessions ?? {};
     state.codex_live_sessions[sessionId] = updated;
-    if (!state.current_codex_live_session_id) {
-      state.current_codex_live_session_id = sessionId;
+    state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
+    if (!state.current_codex_live_session_ids[updated.room_id]) {
+      state.current_codex_live_session_ids[updated.room_id] = sessionId;
     }
     updatedSession = updated;
     return state;

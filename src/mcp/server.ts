@@ -1041,7 +1041,7 @@ function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Record<strin
 type JoinSessionMode = "live" | "current";
 
 function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
-  return String(value || "").trim().toLowerCase() === "current" ? "current" : "live";
+  return String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
 }
 
 function getCurrentLiveSessionPayload(): Record<string, unknown> | null {
@@ -1420,13 +1420,13 @@ server.tool(
 
 server.tool(
   "join_code",
-  "Join an existing room using an invite code. By default this starts or reuses a detached local Codex live session for the room.",
+  "Join an existing room using an invite code.",
   {
     code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
     session_mode: z
       .enum(["live", "current"])
       .optional()
-      .describe("Use 'live' (default) to start/reuse a detached local Codex room worker. Use 'current' only for inline joins inside that worker."),
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
   },
   async ({ code, session_mode }) => {
     return {
@@ -1444,13 +1444,13 @@ server.tool(
 
 server.tool(
   "join_project",
-  "Legacy alias for join_code. By default this starts or reuses a detached local Codex live session for the room.",
+  "Legacy alias for join_code. Join an existing room using an invite code.",
   {
     code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
     session_mode: z
       .enum(["live", "current"])
       .optional()
-      .describe("Use 'live' (default) to start/reuse a detached local Codex room worker. Use 'current' only for inline joins inside that worker."),
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
   },
   async ({ code, session_mode }) => {
     return {
@@ -1468,13 +1468,13 @@ server.tool(
 
 server.tool(
   "join_room",
-  "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. By default this starts or reuses a detached local Codex live session for the room.",
+  "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. Use this for repo-based room joining.",
   {
     name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
     session_mode: z
       .enum(["live", "current"])
       .optional()
-      .describe("Use 'live' (default) to start/reuse a detached local Codex room worker. Use 'current' only for inline joins inside that worker."),
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
   },
   async ({ name, session_mode }) => {
     try {
