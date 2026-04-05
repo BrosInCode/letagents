@@ -695,14 +695,33 @@ async function maybeLinkPullRequestToTask(
     })) ?? linkedTask;
   }
 
-  if (action === "closed" && pullRequest.merged && linkedTask.status === "in_review") {
-    const mergedTask = await updateTask(project.id, linkedTask.id, {
-      status: "merged",
-      pr_url: pullRequest.url,
-    });
-    if (mergedTask) {
-      linkedTask = mergedTask;
-      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(mergedTask));
+  // Board projection: derive task state transitions from PR lifecycle events
+  const PRE_REVIEW_STATUSES = new Set<TaskStatus>(["assigned", "in_progress"]);
+  const MERGEABLE_STATUSES = new Set<TaskStatus>(["in_review", "in_progress", "assigned"]);
+
+  if (action === "opened" || action === "ready_for_review") {
+    // PR opened or moved out of draft → task should be in_review
+    if (PRE_REVIEW_STATUSES.has(linkedTask.status)) {
+      const reviewTask = await updateTask(project.id, linkedTask.id, {
+        status: "in_review",
+        pr_url: pullRequest.url,
+      });
+      if (reviewTask) {
+        linkedTask = reviewTask;
+        await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(reviewTask));
+      }
+    }
+  } else if (action === "closed" && pullRequest.merged) {
+    // PR merged → task should move to merged
+    if (MERGEABLE_STATUSES.has(linkedTask.status)) {
+      const mergedTask = await updateTask(project.id, linkedTask.id, {
+        status: "merged",
+        pr_url: pullRequest.url,
+      });
+      if (mergedTask) {
+        linkedTask = mergedTask;
+        await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(mergedTask));
+      }
     }
   }
 
@@ -1042,6 +1061,21 @@ async function handleGitHubWebhookEvent(
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
       const linkedTaskId = extractReferencedTaskId(payload.issue.title);
+
+      // Board projection: issue closed → transition linked task toward done
+      if (linkedTaskId && payload.action === "closed") {
+        const linkedTask = await getTaskById(project.id, linkedTaskId);
+        if (linkedTask) {
+          const CLOSEABLE_STATUSES = new Set<TaskStatus>(["merged", "in_review", "in_progress"]);
+          if (CLOSEABLE_STATUSES.has(linkedTask.status)) {
+            const doneTask = await updateTask(project.id, linkedTask.id, { status: "done" });
+            if (doneTask) {
+              await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(doneTask));
+            }
+          }
+        }
+      }
+
       const message = formatRepoIssueEventMessage({
         provider: "github",
         action: payload.action,
@@ -1105,6 +1139,18 @@ async function handleGitHubWebhookEvent(
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
       const linkedTaskId = extractReferencedTaskId(payload.pull_request.title, payload.pull_request.body);
+
+      // Board projection: review changes_requested → block the task
+      if (linkedTaskId && payload.action === "submitted" && payload.review.state === "changes_requested") {
+        const linkedTask = await getTaskById(project.id, linkedTaskId);
+        if (linkedTask && linkedTask.status === "in_review") {
+          const blockedTask = await updateTask(project.id, linkedTask.id, { status: "blocked" });
+          if (blockedTask) {
+            await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(blockedTask));
+          }
+        }
+      }
+
       const message = formatRepoPullRequestReviewEventMessage({
         provider: "github",
         action: payload.action,

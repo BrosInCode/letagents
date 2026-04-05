@@ -14,6 +14,9 @@ import {
   formatRepoRepositoryEventMessage,
   normalizeTaskWorkflowArtifacts,
   parseRepoRoomName,
+  projectIssueEvent,
+  projectPullRequestEvent,
+  projectPullRequestReviewEvent,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
   validateTaskWorkflowArtifactsInput,
 } from "../repo-workflow.js";
@@ -409,4 +412,78 @@ test("formatRepoCheckRunEventMessage surfaces failures only", () => {
     checkRun: { name: "lint", status: "completed", conclusion: "failure", url: "https://example.com/check", appName: "CI" },
   });
   assert.ok(failMsg?.includes('Check "lint" (CI) failure'));
+});
+
+// ---------------------------------------------------------------------------
+// Board projection tests
+// ---------------------------------------------------------------------------
+
+test("projectPullRequestEvent: PR opened transitions assigned → in_review", () => {
+  const result = projectPullRequestEvent({ action: "opened", merged: false, currentStatus: "assigned" });
+  assert.deepEqual(result, { newStatus: "in_review", reason: "pr_opened" });
+});
+
+test("projectPullRequestEvent: PR opened transitions in_progress → in_review", () => {
+  const result = projectPullRequestEvent({ action: "opened", merged: false, currentStatus: "in_progress" });
+  assert.deepEqual(result, { newStatus: "in_review", reason: "pr_opened" });
+});
+
+test("projectPullRequestEvent: PR opened does NOT transition already in_review task", () => {
+  const result = projectPullRequestEvent({ action: "opened", merged: false, currentStatus: "in_review" });
+  assert.equal(result, null);
+});
+
+test("projectPullRequestEvent: ready_for_review transitions in_progress → in_review", () => {
+  const result = projectPullRequestEvent({ action: "ready_for_review", merged: false, currentStatus: "in_progress" });
+  assert.deepEqual(result, { newStatus: "in_review", reason: "pr_opened" });
+});
+
+test("projectPullRequestEvent: PR merged transitions in_review → merged", () => {
+  const result = projectPullRequestEvent({ action: "closed", merged: true, currentStatus: "in_review" });
+  assert.deepEqual(result, { newStatus: "merged", reason: "pr_merged" });
+});
+
+test("projectPullRequestEvent: PR merged transitions assigned → merged", () => {
+  const result = projectPullRequestEvent({ action: "closed", merged: true, currentStatus: "assigned" });
+  assert.deepEqual(result, { newStatus: "merged", reason: "pr_merged" });
+});
+
+test("projectPullRequestEvent: PR closed without merge has no transition", () => {
+  const result = projectPullRequestEvent({ action: "closed", merged: false, currentStatus: "in_review" });
+  assert.equal(result, null);
+});
+
+test("projectPullRequestEvent: PR opened does NOT transition done task", () => {
+  const result = projectPullRequestEvent({ action: "opened", merged: false, currentStatus: "done" });
+  assert.equal(result, null);
+});
+
+test("projectPullRequestReviewEvent: changes_requested transitions in_review → blocked", () => {
+  const result = projectPullRequestReviewEvent({ action: "submitted", reviewState: "changes_requested", currentStatus: "in_review" });
+  assert.deepEqual(result, { newStatus: "blocked", reason: "review_changes_requested" });
+});
+
+test("projectPullRequestReviewEvent: approved review does NOT transition", () => {
+  const result = projectPullRequestReviewEvent({ action: "submitted", reviewState: "approved", currentStatus: "in_review" });
+  assert.equal(result, null);
+});
+
+test("projectIssueEvent: issue closed transitions merged → done", () => {
+  const result = projectIssueEvent({ action: "closed", currentStatus: "merged" });
+  assert.deepEqual(result, { newStatus: "done", reason: "issue_closed" });
+});
+
+test("projectIssueEvent: issue closed transitions in_progress → done", () => {
+  const result = projectIssueEvent({ action: "closed", currentStatus: "in_progress" });
+  assert.deepEqual(result, { newStatus: "done", reason: "issue_closed" });
+});
+
+test("projectIssueEvent: issue closed does NOT transition proposed task", () => {
+  const result = projectIssueEvent({ action: "closed", currentStatus: "proposed" });
+  assert.equal(result, null);
+});
+
+test("projectIssueEvent: issue opened does NOT transition", () => {
+  const result = projectIssueEvent({ action: "opened", currentStatus: "in_progress" });
+  assert.equal(result, null);
 });
