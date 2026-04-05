@@ -31,6 +31,7 @@ import {
   normalizeTaskWorkflowArtifacts,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
   type TaskWorkflowArtifact,
+  type TaskWorkflowArtifactMatch,
   type TaskWorkflowRef,
 } from "./repo-workflow.js";
 
@@ -1576,6 +1577,74 @@ export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Ta
     .limit(1);
 
   return task ? toTask(task as TaskRow) : undefined;
+}
+
+function hasTaskWorkflowArtifactMatchIdentifier(match: TaskWorkflowArtifactMatch): boolean {
+  return (
+    Boolean(match.url) ||
+    Boolean(match.id) ||
+    Boolean(match.ref) ||
+    Boolean(match.title) ||
+    (match.number !== undefined && match.number !== null)
+  );
+}
+
+function toTaskWorkflowArtifactMatchJson(match: TaskWorkflowArtifactMatch): string {
+  const artifact: Record<string, string | number> = {
+    provider: match.provider,
+    kind: match.kind,
+  };
+
+  if (match.id) {
+    artifact.id = match.id;
+  }
+
+  if (match.number !== undefined && match.number !== null) {
+    artifact.number = match.number;
+  }
+
+  if (match.title) {
+    artifact.title = match.title;
+  }
+
+  if (match.url) {
+    artifact.url = match.url;
+  }
+
+  if (match.ref) {
+    artifact.ref = match.ref;
+  }
+
+  return JSON.stringify([artifact]);
+}
+
+export async function findTaskByWorkflowArtifactMatches(
+  roomId: string,
+  matches: TaskWorkflowArtifactMatch[]
+): Promise<Task | undefined> {
+  for (const match of matches) {
+    if (!hasTaskWorkflowArtifactMatchIdentifier(match)) {
+      continue;
+    }
+
+    const [task] = await db
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.room_id, roomId),
+          sql`${tasks.workflow_artifacts} @> ${toTaskWorkflowArtifactMatchJson(match)}::jsonb`
+        )
+      )
+      .orderBy(asc(tasks.number))
+      .limit(1);
+
+    if (task) {
+      return toTask(task as TaskRow);
+    }
+  }
+
+  return undefined;
 }
 
 export async function updateTask(

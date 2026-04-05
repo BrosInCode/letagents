@@ -55,6 +55,16 @@ export interface TaskWorkflowArtifact {
   state?: string | null;
 }
 
+export interface TaskWorkflowArtifactMatch {
+  provider: TaskWorkflowRefProvider;
+  kind: TaskWorkflowArtifactKind;
+  id?: string | null;
+  number?: number | null;
+  title?: string | null;
+  url?: string | null;
+  ref?: string | null;
+}
+
 const TASK_WORKFLOW_ARTIFACT_PROVIDERS = new Set<TaskWorkflowRefProvider>([
   "github",
   "gitlab",
@@ -107,6 +117,53 @@ export interface TaskWorkflowRef {
   kind: TaskWorkflowRefKind;
   label: string;
   url: string;
+}
+
+function addTaskWorkflowArtifactMatch(
+  matches: TaskWorkflowArtifactMatch[],
+  seen: Set<string>,
+  match: TaskWorkflowArtifactMatch
+): void {
+  const key = JSON.stringify(match);
+  if (seen.has(key)) {
+    return;
+  }
+
+  seen.add(key);
+  matches.push(match);
+}
+
+export function buildTaskWorkflowArtifactMatches(
+  input: TaskWorkflowArtifactMatch
+): TaskWorkflowArtifactMatch[] {
+  const matches: TaskWorkflowArtifactMatch[] = [];
+  const seen = new Set<string>();
+  const base = {
+    provider: input.provider,
+    kind: input.kind,
+  } satisfies Pick<TaskWorkflowArtifactMatch, "provider" | "kind">;
+
+  if (input.url) {
+    addTaskWorkflowArtifactMatch(matches, seen, { ...base, url: input.url });
+  }
+
+  if (input.number !== undefined && input.number !== null) {
+    addTaskWorkflowArtifactMatch(matches, seen, { ...base, number: input.number });
+  }
+
+  if (input.id) {
+    addTaskWorkflowArtifactMatch(matches, seen, { ...base, id: input.id });
+  }
+
+  if (input.ref) {
+    addTaskWorkflowArtifactMatch(matches, seen, { ...base, ref: input.ref });
+  }
+
+  if (input.title) {
+    addTaskWorkflowArtifactMatch(matches, seen, { ...base, title: input.title });
+  }
+
+  return matches;
 }
 
 function getProviderHost(provider: RepoWorkflowProvider): string {
@@ -545,15 +602,17 @@ export function formatRepoCheckRunEventMessage(input: {
   action: string;
   repositoryFullName: string;
   checkRun: { name: string; status: string; conclusion: string | null; url: string; appName?: string | null };
+  linkedTaskId?: string | null;
 }): string | null {
   if (input.action !== "completed") return null;
 
   const conclusion = input.checkRun.conclusion || "unknown";
   const appLabel = input.checkRun.appName ? ` (${input.checkRun.appName})` : "";
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
 
   if (conclusion === "success") return null; // Only surface failures
 
-  return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName} ${input.checkRun.url}`;
+  return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName}${taskSuffix} ${input.checkRun.url}`;
 }
 
 // ---------------------------------------------------------------------------
