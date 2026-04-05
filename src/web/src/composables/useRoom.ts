@@ -363,14 +363,18 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
         body: JSON.stringify(updates),
       }
     )
-    if (data.task) {
+    // Server returns the updated task at top level (not nested under .task)
+    const updatedTask = data.task || (data.id ? data : null)
+    if (updatedTask) {
       const idx = tasks.value.findIndex(t => t.id === taskId)
       if (idx >= 0) {
         const updated = [...tasks.value]
-        updated[idx] = data.task
+        updated[idx] = updatedTask
         tasks.value = updated
       }
     }
+    // Re-fetch to stay in sync (like legacy refreshBoard)
+    tasks.value = await fetchTasks(room.value.identifier)
     return true
   } catch {
     return false
