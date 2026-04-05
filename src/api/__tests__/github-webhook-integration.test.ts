@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
-const testDatabaseUrl = process.env.TEST_DB_URL || process.env.DB_URL;
+const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) {
   process.env.DB_URL = testDatabaseUrl;
@@ -39,7 +39,7 @@ function sleep(ms: number): Promise<void> {
 
 async function waitForDatabaseReady(): Promise<void> {
   if (!pool) {
-    throw new Error("DB-backed webhook integration tests require TEST_DB_URL or DB_URL");
+    throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
   }
 
   let lastError: unknown;
@@ -59,7 +59,7 @@ async function waitForDatabaseReady(): Promise<void> {
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) {
-    throw new Error("DB-backed webhook integration tests require TEST_DB_URL or DB_URL");
+    throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
   }
 
   await waitForDatabaseReady();
@@ -92,7 +92,7 @@ async function waitForServer(port: number, child: ChildProcessWithoutNullStreams
 
 async function startServer(): Promise<{ child: ChildProcessWithoutNullStreams; port: number }> {
   if (!testDatabaseUrl) {
-    throw new Error("DB-backed webhook integration tests require TEST_DB_URL or DB_URL");
+    throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
   }
 
   const port = 3400 + Math.floor(Math.random() * 500);
@@ -188,11 +188,11 @@ test(
   "pull_request opened transitions an assigned task to in_review through the real webhook route",
   {
     concurrency: false,
-    skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed webhook integration tests" : false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
   },
   async (t) => {
     if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
-      throw new Error("DB-backed webhook integration tests require TEST_DB_URL or DB_URL");
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
     }
 
     const { child, port } = await startServer();
@@ -248,11 +248,11 @@ test(
   "pull_request_review changes_requested transitions an in_review task to blocked through the real webhook route",
   {
     concurrency: false,
-    skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed webhook integration tests" : false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
   },
   async (t) => {
     if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
-      throw new Error("DB-backed webhook integration tests require TEST_DB_URL or DB_URL");
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
     }
 
     const { child, port } = await startServer();
@@ -313,11 +313,11 @@ test(
   "pull_request merged transitions an in_review task to merged through the real webhook route",
   {
     concurrency: false,
-    skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed webhook integration tests" : false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
   },
   async (t) => {
     if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
-      throw new Error("DB-backed webhook integration tests require TEST_DB_URL or DB_URL");
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
     }
 
     const { child, port } = await startServer();
