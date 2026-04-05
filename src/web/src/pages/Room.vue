@@ -7,6 +7,7 @@
       :messages="messages"
       :senderName="senderName"
       @close="drawerOpen = false"
+      @themeChange="theme = $event"
     />
 
     <RoomHeader

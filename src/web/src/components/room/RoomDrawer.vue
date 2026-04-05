@@ -103,7 +103,7 @@ const props = defineProps<{
   senderName?: string
 }>()
 
-defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: [], themeChange: [theme: string] }>()
 
 const { soundEnabled, toggleSound } = useRoom()
 const isDark = ref(true)
@@ -192,8 +192,10 @@ const statusText = computed(() => {
 // ── Actions ──
 function toggleTheme() {
   isDark.value = !isDark.value
-  document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
-  localStorage.setItem('lac-theme', isDark.value ? 'dark' : 'light')
+  const newTheme = isDark.value ? 'dark' : 'light'
+  document.documentElement.setAttribute('data-theme', newTheme)
+  localStorage.setItem('lac-theme', newTheme)
+  emit('themeChange', newTheme)
 }
 
 
