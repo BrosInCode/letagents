@@ -69,10 +69,11 @@ import {
 } from "./github-app.js";
 import {
   extractReferencedTaskId,
-  formatRepoIssueEventMessage,
-  formatRepoIssueCommentEventMessage,
-  formatRepoPullRequestReviewEventMessage,
   formatRepoCheckRunEventMessage,
+  formatRepoIssueCommentEventMessage,
+  formatRepoIssueEventMessage,
+  formatRepoPullRequestReviewEventMessage,
+  validateTaskWorkflowArtifactsInput,
   type RepoPullRequestRef,
 } from "./repo-workflow.js";
 import {
@@ -2328,6 +2329,9 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     assignee?: string;
     pr_url?: string;
   };
+  const workflow_artifacts = validateTaskWorkflowArtifactsInput(
+    (req.body as { workflow_artifacts?: unknown }).workflow_artifacts
+  );
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
@@ -2337,7 +2341,12 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       }
     }
 
-    const updated = await updateTask(projectId, taskId, { status, assignee, pr_url });
+    const updated = await updateTask(projectId, taskId, {
+      status,
+      assignee,
+      pr_url,
+      workflow_artifacts,
+    });
     if (updated && status && status !== task.status) {
       await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
     }
@@ -2716,6 +2725,9 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     assignee?: string;
     pr_url?: string;
   };
+  const workflow_artifacts = validateTaskWorkflowArtifactsInput(
+    (req.body as { workflow_artifacts?: unknown }).workflow_artifacts
+  );
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
@@ -2723,7 +2735,12 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       if (!(await requireAdmin(req, res, project))) return;
     }
 
-    const updated = await updateTask(project.id, taskId, { status, assignee, pr_url });
+    const updated = await updateTask(project.id, taskId, {
+      status,
+      assignee,
+      pr_url,
+      workflow_artifacts,
+    });
     if (updated && status && status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }

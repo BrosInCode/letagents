@@ -26,7 +26,13 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
-import { buildTaskWorkflowRefs, type TaskWorkflowRef } from "./repo-workflow.js";
+import {
+  buildTaskWorkflowRefs,
+  normalizeTaskWorkflowArtifacts,
+  synchronizeTaskWorkflowArtifactsWithPrUrl,
+  type TaskWorkflowArtifact,
+  type TaskWorkflowRef,
+} from "./repo-workflow.js";
 
 export interface Project {
   id: string;
@@ -190,6 +196,7 @@ export interface Task {
   created_by: string;
   source_message_id: string | null;
   pr_url: string | null;
+  workflow_artifacts: TaskWorkflowArtifact[];
   workflow_refs: TaskWorkflowRef[];
   created_at: string;
   updated_at: string;
@@ -215,6 +222,7 @@ interface TaskRow {
   created_by: string;
   source_message_id: string | null;
   pr_url: string | null;
+  workflow_artifacts: TaskWorkflowArtifact[];
   created_at: string;
   updated_at: string;
 }
@@ -367,6 +375,10 @@ function toMessage(row: MessageRow): Message {
 }
 
 function toTask(row: TaskRow): Task {
+  const workflowArtifacts = normalizeTaskWorkflowArtifacts({
+    artifacts: row.workflow_artifacts,
+    prUrl: row.pr_url,
+  });
   return {
     id: formatTaskId(row.number),
     room_id: row.room_id,
@@ -377,7 +389,11 @@ function toTask(row: TaskRow): Task {
     created_by: row.created_by,
     source_message_id: row.source_message_id,
     pr_url: row.pr_url,
-    workflow_refs: buildTaskWorkflowRefs({ prUrl: row.pr_url }),
+    workflow_artifacts: workflowArtifacts,
+    workflow_refs: buildTaskWorkflowRefs({
+      artifacts: workflowArtifacts,
+      prUrl: row.pr_url,
+    }),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -1476,6 +1492,7 @@ export async function createTask(
     created_by: createdBy,
     source_message_id: sourceMessageId ?? null,
     pr_url: null,
+    workflow_artifacts: [],
     created_at: now,
     updated_at: now,
   };
@@ -1564,7 +1581,12 @@ export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Ta
 export async function updateTask(
   roomId: string,
   taskId: string,
-  updates: { status?: TaskStatus; assignee?: string; pr_url?: string }
+  updates: {
+    status?: TaskStatus;
+    assignee?: string;
+    pr_url?: string;
+    workflow_artifacts?: TaskWorkflowArtifact[];
+  }
 ): Promise<Task | null> {
   const task = await getTaskById(roomId, taskId);
   if (!task) return null;
@@ -1584,6 +1606,16 @@ export async function updateTask(
   const newStatus = updates.status ?? task.status;
   const newAssignee = updates.assignee ?? task.assignee;
   const newPrUrl = updates.pr_url ?? task.pr_url;
+  const newWorkflowArtifacts = updates.workflow_artifacts
+    ? normalizeTaskWorkflowArtifacts({
+        artifacts: updates.workflow_artifacts,
+        prUrl: newPrUrl,
+      })
+    : synchronizeTaskWorkflowArtifactsWithPrUrl({
+        artifacts: task.workflow_artifacts,
+        previousPrUrl: task.pr_url,
+        nextPrUrl: newPrUrl,
+      });
   const now = new Date().toISOString();
 
   await db
@@ -1592,6 +1624,7 @@ export async function updateTask(
       status: newStatus,
       assignee: newAssignee,
       pr_url: newPrUrl,
+      workflow_artifacts: newWorkflowArtifacts,
       updated_at: now,
     })
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
@@ -1601,6 +1634,7 @@ export async function updateTask(
     status: newStatus,
     assignee: newAssignee,
     pr_url: newPrUrl,
+    workflow_artifacts: newWorkflowArtifacts,
     updated_at: now,
   };
 }

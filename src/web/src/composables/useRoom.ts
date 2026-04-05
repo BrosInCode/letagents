@@ -26,6 +26,16 @@ export interface RoomTask {
   assignee: string | null
   created_by: string | null
   pr_url: string | null
+  workflow_artifacts: Array<{
+    provider: string
+    kind: string
+    id?: string | null
+    number?: number | null
+    title?: string | null
+    url?: string | null
+    ref?: string | null
+    state?: string | null
+  }>
   workflow_refs: Array<{
     provider: string
     kind: string

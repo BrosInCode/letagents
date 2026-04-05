@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildRepoRoomId,
+  buildLegacyTaskWorkflowArtifacts,
   buildTaskWorkflowRefs,
   extractReferencedTaskId,
   formatRepoCheckRunEventMessage,
@@ -11,7 +12,10 @@ import {
   formatRepoPullRequestEventMessage,
   formatRepoPullRequestReviewEventMessage,
   formatRepoRepositoryEventMessage,
+  normalizeTaskWorkflowArtifacts,
   parseRepoRoomName,
+  synchronizeTaskWorkflowArtifactsWithPrUrl,
+  validateTaskWorkflowArtifactsInput,
 } from "../repo-workflow.js";
 
 test("buildRepoRoomId normalizes GitHub repository names", () => {
@@ -132,6 +136,155 @@ test("buildTaskWorkflowRefs derives merge request refs from GitLab URLs", () => 
       label: "MR !14",
       url: "https://gitlab.com/TeamAlpha/platform/LetAgents/-/merge_requests/14",
     }]
+  );
+});
+
+test("buildLegacyTaskWorkflowArtifacts derives pull request artifacts from GitHub URLs", () => {
+  assert.deepEqual(
+    buildLegacyTaskWorkflowArtifacts({
+      prUrl: "https://github.com/BrosInCode/letagents/pull/107",
+    }),
+    [{
+      provider: "github",
+      kind: "pull_request",
+      number: 107,
+      url: "https://github.com/BrosInCode/letagents/pull/107",
+    }]
+  );
+});
+
+test("normalizeTaskWorkflowArtifacts keeps persisted artifacts and merges legacy pr_url backfill", () => {
+  assert.deepEqual(
+    normalizeTaskWorkflowArtifacts({
+      artifacts: [{
+        provider: "github",
+        kind: "issue",
+        number: 42,
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      }],
+      prUrl: "https://github.com/BrosInCode/letagents/pull/107",
+    }),
+    [
+      {
+        provider: "github",
+        kind: "issue",
+        number: 42,
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      },
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 107,
+        url: "https://github.com/BrosInCode/letagents/pull/107",
+      },
+    ]
+  );
+});
+
+test("buildTaskWorkflowRefs renders persisted issue and check artifacts", () => {
+  assert.deepEqual(
+    buildTaskWorkflowRefs({
+      artifacts: [
+        {
+          provider: "github",
+          kind: "issue",
+          number: 42,
+          url: "https://github.com/BrosInCode/letagents/issues/42",
+        },
+        {
+          provider: "github",
+          kind: "check_run",
+          title: "ci / build",
+          url: "https://github.com/BrosInCode/letagents/actions/runs/123",
+        },
+      ],
+    }),
+    [
+      {
+        provider: "github",
+        kind: "issue",
+        label: "Issue #42",
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      },
+      {
+        provider: "github",
+        kind: "check_run",
+        label: "Check ci / build",
+        url: "https://github.com/BrosInCode/letagents/actions/runs/123",
+      },
+    ]
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput rejects unsupported keys", () => {
+  assert.throws(
+    () =>
+      validateTaskWorkflowArtifactsInput([
+        {
+          provider: "github",
+          kind: "pull_request",
+          metadata: { danger: true },
+        },
+      ]),
+    /unsupported key/
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput accepts valid artifacts", () => {
+  assert.deepEqual(
+    validateTaskWorkflowArtifactsInput([
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 121,
+        url: "https://github.com/BrosInCode/letagents/pull/121",
+      },
+    ]),
+    [
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 121,
+        url: "https://github.com/BrosInCode/letagents/pull/121",
+      },
+    ]
+  );
+});
+
+test("synchronizeTaskWorkflowArtifactsWithPrUrl replaces stale legacy PR artifacts when pr_url changes", () => {
+  assert.deepEqual(
+    synchronizeTaskWorkflowArtifactsWithPrUrl({
+      artifacts: [
+        {
+          provider: "github",
+          kind: "issue",
+          number: 42,
+          url: "https://github.com/BrosInCode/letagents/issues/42",
+        },
+        {
+          provider: "github",
+          kind: "pull_request",
+          number: 107,
+          url: "https://github.com/BrosInCode/letagents/pull/107",
+        },
+      ],
+      previousPrUrl: "https://github.com/BrosInCode/letagents/pull/107",
+      nextPrUrl: "https://github.com/BrosInCode/letagents/pull/121",
+    }),
+    [
+      {
+        provider: "github",
+        kind: "issue",
+        number: 42,
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      },
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 121,
+        url: "https://github.com/BrosInCode/letagents/pull/121",
+      },
+    ]
   );
 });
 

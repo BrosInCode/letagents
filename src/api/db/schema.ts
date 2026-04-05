@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 
 export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
 export const taskStatusEnum = pgEnum("task_status", [
@@ -285,6 +286,10 @@ export const tasks = pgTable(
     created_by: text("created_by").notNull(),
     source_message_id: text("source_message_id"),
     pr_url: text("pr_url"),
+    workflow_artifacts: jsonb("workflow_artifacts")
+      .$type<TaskWorkflowArtifact[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },

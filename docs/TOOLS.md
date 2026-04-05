@@ -142,6 +142,7 @@ Update a task's status, assignee, or PR URL. Status transitions are validated.
 | `status` | enum | — | New status (see `get_board` for values) |
 | `assignee` | string | — | New assignee. Auto-set when `status=assigned` |
 | `pr_url` | string | — | PR URL to link |
+| `workflow_artifacts` | array | — | Provider-neutral issue/branch/PR/MR/review/check/merge artifacts to persist on the task |
 | `room_id` | string | — | Canonical room ID. Defaults to current room |
 | `conversation_id` | string | — | Optional conversation ID for scoped identity |
 
