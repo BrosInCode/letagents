@@ -82,6 +82,8 @@ const renderedContent = computed(() => {
     .replace(/>/g, '&gt;')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Linkify URLs — must run after HTML escaping but before newline conversion
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
     .replace(/\n/g, '<br>')
 })
 </script>
@@ -151,6 +153,14 @@ const renderedContent = computed(() => {
   background: var(--surface, #18181b);
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.84em;
+}
+.message-bubble :deep(.md-content) a {
+  color: #60a5fa;
+  text-decoration: none;
+  word-break: break-all;
+}
+.message-bubble :deep(.md-content) a:hover {
+  text-decoration: underline;
 }
 
 .provenance-badge {

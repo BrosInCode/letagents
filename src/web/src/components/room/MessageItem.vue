@@ -72,6 +72,10 @@ const renderedContent = computed(() => {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Linkify URLs
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
     .replace(/\n/g, '<br>')
 })
 </script>
@@ -117,6 +121,14 @@ const renderedContent = computed(() => {
   max-width: min(100%, 780px);
 }
 .md-content { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }
+.md-content :deep(a) { color: #60a5fa; text-decoration: none; word-break: break-all; }
+.md-content :deep(a:hover) { text-decoration: underline; }
+.md-content :deep(code) {
+  padding: 2px 5px; border-radius: 4px;
+  background: var(--surface, #18181b);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.84em;
+}
 
 /* Provenance badges */
 .provenance-badge {
