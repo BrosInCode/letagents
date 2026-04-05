@@ -81,7 +81,7 @@ async function handleCreate() {
   error.value = ''
   creating.value = true
   try {
-    const res = await fetch('/api/projects', { method: 'POST' })
+    const res = await fetch('/projects', { method: 'POST' })
     if (!res.ok) throw new Error('Failed to create room')
     const data = await res.json()
     const roomId = data.project?.id || data.id
@@ -89,6 +89,7 @@ async function handleCreate() {
     router.push(`/in/${encodeURIComponent(roomId)}`)
   } catch (e: any) {
     error.value = e.message || 'Something went wrong'
+  } finally {
     creating.value = false
   }
 }
@@ -119,12 +120,11 @@ async function handleCreate() {
 }
 
 .entry-card {
-  max-width: 560px;
   border-radius: 28px;
   overflow: hidden;
   border: 1px solid var(--border);
   background: #161616;
-  padding: 24px 28px;
+  padding: 32px 36px;
 }
 
 .join-row {
@@ -156,7 +156,7 @@ async function handleCreate() {
 
 .join-input {
   flex: 1;
-  padding: 12px 0;
+  padding: 14px 0;
   font-size: 0.88rem;
   color: var(--text);
   background: transparent;
@@ -195,7 +195,7 @@ async function handleCreate() {
   display: flex;
   align-items: center;
   gap: var(--space-md);
-  margin: var(--space-lg) 0;
+  margin: var(--space-xl) 0;
 }
 
 .divider-line {
@@ -217,7 +217,7 @@ async function handleCreate() {
   align-items: center;
   justify-content: center;
   gap: var(--space-xs);
-  padding: 12px;
+  padding: 14px;
   border-radius: var(--radius-md);
   font-size: 0.88rem;
   font-weight: 600;
