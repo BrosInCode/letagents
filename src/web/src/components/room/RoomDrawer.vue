@@ -106,7 +106,7 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [], themeChange: [theme: string] }>()
 
 const { soundEnabled, toggleSound } = useRoom()
-const isDark = ref(true)
+const isDark = ref(localStorage.getItem('lac-theme') !== 'light')
 const codeCopied = ref(false)
 
 // ── Share logic (match legacy) ──
