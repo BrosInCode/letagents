@@ -40,8 +40,12 @@
                 <span class="task-person-name">{{ truncateName(task.assignee) }}</span>
               </div>
             </div>
-            <div v-if="task.pr_url" class="task-person-chip">
-              <a :href="task.pr_url" target="_blank" class="task-person-name" style="color: #60a5fa; text-decoration: none;">PR</a>
+            <div
+              v-for="workflowRef in getTaskWorkflowRefs(task)"
+              :key="workflowRef.url"
+              class="task-person-chip"
+            >
+              <a :href="workflowRef.url" target="_blank" class="task-person-name" style="color: #60a5fa; text-decoration: none;">{{ workflowRef.label }}</a>
             </div>
           </div>
           <div class="task-actions">
@@ -77,6 +81,12 @@ export interface TaskData {
   assignee: string | null
   created_by: string
   pr_url: string | null
+  workflow_refs: Array<{
+    provider: string
+    kind: string
+    label: string
+    url: string
+  }>
 }
 
 const props = defineProps<{
@@ -125,6 +135,14 @@ function truncateName(name: string) {
   if (name.length <= 20) return name
   const parts = name.split('|').map(s => s.trim())
   return parts[0] || name.slice(0, 20) + '…'
+}
+
+function getTaskWorkflowRefs(task: TaskData) {
+  return task.workflow_refs?.length
+    ? task.workflow_refs
+    : task.pr_url
+      ? [{ provider: 'unknown', kind: 'pull_request', label: 'PR', url: task.pr_url }]
+      : []
 }
 </script>
 

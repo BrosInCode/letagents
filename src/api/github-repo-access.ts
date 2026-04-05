@@ -1,3 +1,5 @@
+import { parseRepoRoomName } from "./repo-workflow.js";
+
 interface GitHubRepo {
   private?: boolean;
   owner?: {
@@ -81,9 +83,11 @@ export function clearGitHubRepoAccessCacheForLogin(login: string): void {
 }
 
 export function parseGitHubRepoName(roomName: string): { owner: string; repo: string } | null {
-  const match = /^github\.com\/([^/]+)\/([^/]+)$/.exec(roomName);
-  if (!match) return null;
-  return { owner: match[1], repo: match[2] };
+  const repoRef = parseRepoRoomName(roomName);
+  if (!repoRef || repoRef.provider !== "github" || repoRef.namespace.includes("/")) {
+    return null;
+  }
+  return { owner: repoRef.namespace, repo: repoRef.repo };
 }
 
 async function fetchGitHubRepo(roomName: string, accessToken?: string): Promise<Response> {

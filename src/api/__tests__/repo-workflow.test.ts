@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   buildRepoRoomId,
+  buildTaskWorkflowRefs,
   extractReferencedTaskId,
   formatRepoPullRequestEventMessage,
   formatRepoRepositoryEventMessage,
+  parseRepoRoomName,
 } from "../repo-workflow.js";
 
 test("buildRepoRoomId normalizes GitHub repository names", () => {
@@ -14,6 +16,26 @@ test("buildRepoRoomId normalizes GitHub repository names", () => {
 
 test("buildRepoRoomId preserves case for GitLab repository names", () => {
   assert.equal(buildRepoRoomId("gitlab", "TeamAlpha/LetAgents"), "gitlab.com/TeamAlpha/LetAgents");
+});
+
+test("parseRepoRoomName parses a GitHub repo room", () => {
+  assert.deepEqual(parseRepoRoomName("github.com/BrosInCode/LetAgents"), {
+    provider: "github",
+    host: "github.com",
+    namespace: "brosincode",
+    repo: "letagents",
+    fullName: "brosincode/letagents",
+  });
+});
+
+test("parseRepoRoomName supports nested GitLab namespaces", () => {
+  assert.deepEqual(parseRepoRoomName("gitlab.com/TeamAlpha/platform/LetAgents"), {
+    provider: "gitlab",
+    host: "gitlab.com",
+    namespace: "TeamAlpha/platform",
+    repo: "LetAgents",
+    fullName: "TeamAlpha/platform/LetAgents",
+  });
 });
 
 test("extractReferencedTaskId returns the first explicit task reference from title or body", () => {
@@ -78,5 +100,33 @@ test("formatRepoRepositoryEventMessage formats repository transfers", () => {
   assert.equal(
     message,
     "Repository transferred from OldOrg/letagents to NewOrg/letagents by EmmyMay"
+  );
+});
+
+test("buildTaskWorkflowRefs derives provider-neutral pull request refs from GitHub URLs", () => {
+  assert.deepEqual(
+    buildTaskWorkflowRefs({
+      prUrl: "https://github.com/BrosInCode/letagents/pull/107",
+    }),
+    [{
+      provider: "github",
+      kind: "pull_request",
+      label: "PR #107",
+      url: "https://github.com/BrosInCode/letagents/pull/107",
+    }]
+  );
+});
+
+test("buildTaskWorkflowRefs derives merge request refs from GitLab URLs", () => {
+  assert.deepEqual(
+    buildTaskWorkflowRefs({
+      prUrl: "https://gitlab.com/TeamAlpha/platform/LetAgents/-/merge_requests/14",
+    }),
+    [{
+      provider: "gitlab",
+      kind: "merge_request",
+      label: "MR !14",
+      url: "https://gitlab.com/TeamAlpha/platform/LetAgents/-/merge_requests/14",
+    }]
   );
 });
