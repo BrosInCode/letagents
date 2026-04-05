@@ -239,9 +239,10 @@ onUnmounted(() => {
   document.removeEventListener('click', handleDocClick)
 })
 
-// Restart loop when room changes
+// Reload prefs + restart loop when room changes
 watch(() => props.roomIdentifier, (newId) => {
   stopKeepPollingLoop()
+  loadPrefs()
   if (newId && autoKeepPolling.value) {
     startKeepPollingLoop(false)
   }
