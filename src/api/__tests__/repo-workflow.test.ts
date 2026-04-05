@@ -5,7 +5,11 @@ import {
   buildRepoRoomId,
   buildTaskWorkflowRefs,
   extractReferencedTaskId,
+  formatRepoCheckRunEventMessage,
+  formatRepoIssueCommentEventMessage,
+  formatRepoIssueEventMessage,
   formatRepoPullRequestEventMessage,
+  formatRepoPullRequestReviewEventMessage,
   formatRepoRepositoryEventMessage,
   parseRepoRoomName,
 } from "../repo-workflow.js";
@@ -129,4 +133,113 @@ test("buildTaskWorkflowRefs derives merge request refs from GitLab URLs", () => 
       url: "https://gitlab.com/TeamAlpha/platform/LetAgents/-/merge_requests/14",
     }]
   );
+});
+
+// ─── Issue event formatter ───
+
+test("formatRepoIssueEventMessage formats opened issues", () => {
+  const message = formatRepoIssueEventMessage({
+    provider: "github",
+    action: "opened",
+    repositoryFullName: "brosincode/letagents",
+    issue: { number: 5, title: "Bug in login", url: "https://github.com/BrosInCode/letagents/issues/5" },
+    senderLogin: "EmmyMay",
+  });
+  assert.equal(
+    message,
+    "Issue #5 opened by EmmyMay in brosincode/letagents: Bug in login https://github.com/BrosInCode/letagents/issues/5"
+  );
+});
+
+test("formatRepoIssueEventMessage returns null for labeled events", () => {
+  assert.equal(
+    formatRepoIssueEventMessage({
+      provider: "github",
+      action: "labeled",
+      repositoryFullName: "brosincode/letagents",
+      issue: { number: 5, title: "Bug", url: "https://github.com/BrosInCode/letagents/issues/5" },
+    }),
+    null
+  );
+});
+
+// ─── Issue comment event formatter ───
+
+test("formatRepoIssueCommentEventMessage formats new comments", () => {
+  const message = formatRepoIssueCommentEventMessage({
+    provider: "github",
+    action: "created",
+    repositoryFullName: "brosincode/letagents",
+    issue: { number: 5, title: "Bug in login" },
+    comment: { body: "I can reproduce this", url: "https://github.com/BrosInCode/letagents/issues/5#comment-1" },
+    senderLogin: "EmmyMay",
+  });
+  assert.ok(message?.includes("EmmyMay commented on Issue #5"));
+  assert.ok(message?.includes("\"I can reproduce this\""));
+});
+
+test("formatRepoIssueCommentEventMessage returns null for edited comments", () => {
+  assert.equal(
+    formatRepoIssueCommentEventMessage({
+      provider: "github",
+      action: "edited",
+      repositoryFullName: "brosincode/letagents",
+      issue: { number: 5, title: "Bug" },
+      comment: { body: "updated", url: "https://example.com" },
+    }),
+    null
+  );
+});
+
+// ─── PR review event formatter ───
+
+test("formatRepoPullRequestReviewEventMessage formats approved reviews", () => {
+  const message = formatRepoPullRequestReviewEventMessage({
+    provider: "github",
+    action: "submitted",
+    repositoryFullName: "brosincode/letagents",
+    pullRequest: { number: 42, title: "Add feature" },
+    review: { state: "approved", url: "https://github.com/BrosInCode/letagents/pull/42#review-1" },
+    senderLogin: "reviewer",
+    linkedTaskId: "task_10",
+  });
+  assert.equal(
+    message,
+    "reviewer approved PR #42 in brosincode/letagents linked to task_10 https://github.com/BrosInCode/letagents/pull/42#review-1"
+  );
+});
+
+test("formatRepoPullRequestReviewEventMessage returns null for non-submitted actions", () => {
+  assert.equal(
+    formatRepoPullRequestReviewEventMessage({
+      provider: "github",
+      action: "dismissed",
+      repositoryFullName: "brosincode/letagents",
+      pullRequest: { number: 42, title: "Add feature" },
+      review: { state: "approved", url: "https://example.com" },
+    }),
+    null
+  );
+});
+
+// ─── Check run event formatter ───
+
+test("formatRepoCheckRunEventMessage surfaces failures only", () => {
+  assert.equal(
+    formatRepoCheckRunEventMessage({
+      provider: "github",
+      action: "completed",
+      repositoryFullName: "brosincode/letagents",
+      checkRun: { name: "tests", status: "completed", conclusion: "success", url: "https://example.com" },
+    }),
+    null
+  );
+
+  const failMsg = formatRepoCheckRunEventMessage({
+    provider: "github",
+    action: "completed",
+    repositoryFullName: "brosincode/letagents",
+    checkRun: { name: "lint", status: "completed", conclusion: "failure", url: "https://example.com/check", appName: "CI" },
+  });
+  assert.ok(failMsg?.includes('Check "lint" (CI) failure'));
 });

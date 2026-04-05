@@ -218,3 +218,95 @@ export function buildTaskWorkflowRefs(input: {
     url: input.prUrl,
   }];
 }
+
+export function formatRepoIssueEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  issue: { number: number; title: string; url: string };
+  senderLogin?: string | null;
+  linkedTaskId?: string | null;
+}): string | null {
+  const actor = input.senderLogin || input.provider;
+  const issueLabel = `Issue #${input.issue.number}`;
+  const title = input.issue.title.trim();
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
+
+  switch (input.action) {
+    case "opened":
+      return `${issueLabel} opened by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.issue.url}`;
+    case "closed":
+      return `${issueLabel} closed by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.issue.url}`;
+    case "reopened":
+      return `${issueLabel} reopened by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.issue.url}`;
+    case "labeled":
+    case "unlabeled":
+      return null; // Too noisy
+    default:
+      return null;
+  }
+}
+
+export function formatRepoIssueCommentEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  issue: { number: number; title: string };
+  comment: { body: string; url: string };
+  senderLogin?: string | null;
+  linkedTaskId?: string | null;
+}): string | null {
+  if (input.action !== "created") return null;
+
+  const actor = input.senderLogin || input.provider;
+  const issueLabel = `Issue #${input.issue.number}`;
+  const bodyPreview = input.comment.body.length > 80
+    ? input.comment.body.slice(0, 77) + "..."
+    : input.comment.body;
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
+
+  return `${actor} commented on ${issueLabel} in ${input.repositoryFullName}${taskSuffix}: "${bodyPreview}" ${input.comment.url}`;
+}
+
+export function formatRepoPullRequestReviewEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  pullRequest: { number: number; title: string };
+  review: { state: string; url: string };
+  senderLogin?: string | null;
+  linkedTaskId?: string | null;
+}): string | null {
+  if (input.action !== "submitted") return null;
+
+  const actor = input.senderLogin || input.provider;
+  const prLabel = getPullRequestLabel(input.provider, input.pullRequest.number);
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
+
+  switch (input.review.state) {
+    case "approved":
+      return `${actor} approved ${prLabel} in ${input.repositoryFullName}${taskSuffix} ${input.review.url}`;
+    case "changes_requested":
+      return `${actor} requested changes on ${prLabel} in ${input.repositoryFullName}${taskSuffix} ${input.review.url}`;
+    case "commented":
+      return `${actor} reviewed ${prLabel} in ${input.repositoryFullName}${taskSuffix} ${input.review.url}`;
+    default:
+      return null;
+  }
+}
+
+export function formatRepoCheckRunEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  checkRun: { name: string; status: string; conclusion: string | null; url: string; appName?: string | null };
+}): string | null {
+  if (input.action !== "completed") return null;
+
+  const conclusion = input.checkRun.conclusion || "unknown";
+  const appLabel = input.checkRun.appName ? ` (${input.checkRun.appName})` : "";
+
+  if (conclusion === "success") return null; // Only surface failures
+
+  return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName} ${input.checkRun.url}`;
+}

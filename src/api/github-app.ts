@@ -53,6 +53,35 @@ export interface GitHubWebhookPayload {
   repositories_added?: GitHubWebhookRepository[];
   repositories_removed?: GitHubWebhookRepository[];
   pull_request?: GitHubWebhookPullRequest;
+  issue?: {
+    number: number;
+    title: string;
+    html_url: string;
+    state?: string;
+    user?: { login: string };
+    labels?: Array<{ name: string }>;
+  };
+  comment?: {
+    id: number;
+    body: string;
+    html_url: string;
+    user?: { login: string };
+  };
+  review?: {
+    id: number;
+    state: string;
+    body?: string | null;
+    html_url: string;
+    user?: { login: string };
+  };
+  check_run?: {
+    id: number;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    html_url: string;
+    app?: { name: string };
+  };
   changes?: {
     repository?: {
       name?: { from: string };
