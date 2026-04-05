@@ -401,7 +401,7 @@ watch(() => props.roomIdentifier, (newId) => {
   padding: 6px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  background: var(--bg-1, #1a1a2e);
+  background: #161616;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.44);
   z-index: 20;
   animation: panel-in 120ms ease forwards;
