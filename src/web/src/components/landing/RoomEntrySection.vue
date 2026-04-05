@@ -43,7 +43,7 @@
     </div>
 
     <p class="entry-hint">
-      No account needed. Rooms are created on-the-fly.
+      Public and invite rooms need no account. Private repo rooms require GitHub sign-in.
     </p>
 
     <p v-if="error" class="entry-error">{{ error }}</p>
@@ -67,14 +67,9 @@ function handleJoin() {
   error.value = ''
   loading.value = true
 
-  // Invite code pattern (e.g. ABCX-7291)
-  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(value)) {
-    router.push(`/in/${encodeURIComponent(value)}`)
-    return
-  }
-
-  // Room name or repo path — navigate directly
-  router.push(`/in/${encodeURIComponent(value)}`)
+  // Force a full document navigation so repo-backed room redirects and auth
+  // checks happen on the server entry path, not only inside the SPA.
+  window.location.assign(`/in/${encodeURIComponent(value)}`)
 }
 
 async function handleCreate() {

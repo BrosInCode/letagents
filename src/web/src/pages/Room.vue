@@ -17,7 +17,7 @@
       :connectionState="connectionState"
       :searchQuery="searchQuery"
       :matchCount="matchCount"
-      :canRename="room?.authenticated ?? false"
+      :canRename="room?.role === 'admin'"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="activeTab = $event"
       @update:searchQuery="searchQuery = $event"
@@ -25,8 +25,14 @@
     />
 
     <div v-if="connectionState === 'error' && !isConnected" class="room-error">
-      <p>Could not connect to room.</p>
-      <button class="retry-btn" @click="retryJoin">Retry</button>
+      <p class="room-error-title">{{ joinErrorTitle }}</p>
+      <p class="room-error-body">{{ joinErrorBody }}</p>
+      <div class="room-error-actions">
+        <button v-if="showGitHubSignIn" class="retry-btn" @click="handleSignIn">
+          Sign in with GitHub
+        </button>
+        <button class="retry-btn secondary" @click="retryJoin">Retry</button>
+      </div>
     </div>
 
     <MessageList
@@ -64,7 +70,7 @@ import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 
 const route = useRoute()
-const { messages, tasks, room, isConnected, connectionState, joinRoom, sendMessage, addTask, updateTask, restoreSession, renameRoom } = useRoom()
+const { messages, tasks, room, isConnected, connectionState, joinError, joinRoom, sendMessage, addTask, updateTask, restoreSession, renameRoom } = useRoom()
 const auth = useAuth()
 
 const activeTab = ref<'chat' | 'board'>('chat')
@@ -81,6 +87,28 @@ const roomSubtitle = computed(() =>
     ? `Room: ${room.value.name}`
     : connectionState.value === 'connecting' ? 'Joining room...' : 'Create a new room or join one.'
 )
+const showGitHubSignIn = computed(() => joinError.value?.code === 'NOT_AUTHENTICATED')
+const joinErrorTitle = computed(() => {
+  if (joinError.value?.code === 'NOT_AUTHENTICATED') {
+    return 'GitHub sign-in required'
+  }
+  if (joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
+    return 'No repo access'
+  }
+  return 'Could not connect to room.'
+})
+const joinErrorBody = computed(() => {
+  if (joinError.value?.code === 'NOT_AUTHENTICATED') {
+    return 'This repo-backed room requires GitHub sign-in before you can join.'
+  }
+  if (joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
+    const login = auth.user.value?.login
+    return login
+      ? `Signed in as ${login}, but that account does not have access to this private repo room.`
+      : 'Your current account does not have access to this private repo room.'
+  }
+  return joinError.value?.message || 'Could not connect to room.'
+})
 
 async function handleSend(text: string, agentPromptKind: string | null) {
   await sendMessage(text, senderName.value, agentPromptKind)
@@ -104,6 +132,11 @@ async function handleRename() {
 async function retryJoin() {
   const roomId = route.params.roomId as string
   if (roomId) await joinRoom(roomId)
+}
+
+async function handleSignIn() {
+  const roomId = route.params.roomId as string
+  await auth.signIn(roomId ? `/in/${roomId}` : '/')
 }
 
 onMounted(async () => {
@@ -142,6 +175,27 @@ watch(() => route.params.roomId, async (newId) => {
   color: var(--muted, #71717a);
 }
 
+.room-error-title {
+  margin: 0;
+  color: var(--text, #fafafa);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.room-error-body {
+  margin: 0;
+  max-width: 420px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.room-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
 .retry-btn {
   padding: 8px 20px;
   border-radius: 8px;
@@ -154,5 +208,10 @@ watch(() => route.params.roomId, async (newId) => {
 }
 .retry-btn:hover {
   background: var(--border, #27272a);
+}
+
+.retry-btn.secondary {
+  background: transparent;
+  color: var(--muted, #a1a1aa);
 }
 </style>

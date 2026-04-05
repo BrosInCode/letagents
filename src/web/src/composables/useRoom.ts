@@ -58,6 +58,14 @@ export interface RoomInfo {
 
 export type RoomAgentPromptKind = 'join' | 'inline' | 'auto'
 
+export interface RoomJoinError {
+  status: number | null
+  code: string | null
+  message: string
+  roomId: string | null
+  deviceFlowUrl: string | null
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const tasks = ref<RoomTask[]>([])
@@ -65,6 +73,7 @@ const room = ref<RoomInfo | null>(null)
 const isConnected = ref(false)
 const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
+const joinError = ref<RoomJoinError | null>(null)
 
 let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -182,8 +191,29 @@ async function apiFetch(path: string, options?: RequestInit): Promise<any> {
     credentials: 'same-origin',
   })
   if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(body || `HTTP ${res.status}`)
+    const rawBody = await res.text().catch(() => '')
+    let payload: any = null
+    if (rawBody) {
+      try {
+        payload = JSON.parse(rawBody)
+      } catch {
+        payload = null
+      }
+    }
+    const error = new Error(
+      payload?.message ||
+      payload?.error ||
+      rawBody ||
+      `HTTP ${res.status}`
+    ) as Error & {
+      status?: number
+      code?: string | null
+      payload?: any
+    }
+    error.status = res.status
+    error.code = payload?.code || payload?.error || null
+    error.payload = payload
+    throw error
   }
   return res.json()
 }
@@ -432,6 +462,7 @@ async function joinRoom(roomIdentifier: string) {
   tasks.value = []
   isConnected.value = false
   connectionState.value = 'connecting'
+  joinError.value = null
 
   try {
     // Join via POST /rooms/:identifier/join
@@ -465,6 +496,22 @@ async function joinRoom(roomIdentifier: string) {
     return true
   } catch (err) {
     connectionState.value = 'error'
+    const error = err as Error & {
+      status?: number
+      code?: string | null
+      payload?: {
+        room_id?: string
+        device_flow_url?: string
+        message?: string
+      } | null
+    }
+    joinError.value = {
+      status: error.status ?? null,
+      code: error.code ?? null,
+      message: error.message || 'Could not connect to room.',
+      roomId: error.payload?.room_id ?? roomIdentifier,
+      deviceFlowUrl: error.payload?.device_flow_url ?? null,
+    }
     console.error('[useRoom] joinRoom failed:', err)
     return false
   }
@@ -484,6 +531,7 @@ function leaveRoom() {
   tasks.value = []
   isConnected.value = false
   connectionState.value = 'idle'
+  joinError.value = null
   clearPersistedSession()
 }
 
@@ -535,6 +583,7 @@ export function useRoom() {
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
     connectionState: readonly(connectionState),
+    joinError: readonly(joinError),
     soundEnabled: readonly(soundEnabled),
 
     // Actions
