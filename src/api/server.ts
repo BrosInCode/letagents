@@ -69,8 +69,8 @@ import {
 } from "./github-app.js";
 import {
   extractReferencedTaskId,
+  validateTaskWorkflowArtifactsInput,
   type RepoPullRequestRef,
-  type TaskWorkflowArtifact,
 } from "./repo-workflow.js";
 import {
   buildGitHubAppInstallationUrl,
@@ -2199,12 +2199,14 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     return;
   }
 
-  const { status, assignee, pr_url, workflow_artifacts } = req.body as {
+  const { status, assignee, pr_url } = req.body as {
     status?: TaskStatus;
     assignee?: string;
     pr_url?: string;
-    workflow_artifacts?: TaskWorkflowArtifact[];
   };
+  const workflow_artifacts = validateTaskWorkflowArtifactsInput(
+    (req.body as { workflow_artifacts?: unknown }).workflow_artifacts
+  );
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
@@ -2593,12 +2595,14 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     return;
   }
 
-  const { status, assignee, pr_url, workflow_artifacts } = req.body as {
+  const { status, assignee, pr_url } = req.body as {
     status?: TaskStatus;
     assignee?: string;
     pr_url?: string;
-    workflow_artifacts?: TaskWorkflowArtifact[];
   };
+  const workflow_artifacts = validateTaskWorkflowArtifactsInput(
+    (req.body as { workflow_artifacts?: unknown }).workflow_artifacts
+  );
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);

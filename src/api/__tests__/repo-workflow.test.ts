@@ -10,6 +10,7 @@ import {
   formatRepoRepositoryEventMessage,
   normalizeTaskWorkflowArtifacts,
   parseRepoRoomName,
+  validateTaskWorkflowArtifactsInput,
 } from "../repo-workflow.js";
 
 test("buildRepoRoomId normalizes GitHub repository names", () => {
@@ -147,7 +148,7 @@ test("buildLegacyTaskWorkflowArtifacts derives pull request artifacts from GitHu
   );
 });
 
-test("normalizeTaskWorkflowArtifacts prefers persisted artifacts over pr_url backfill", () => {
+test("normalizeTaskWorkflowArtifacts keeps persisted artifacts and merges legacy pr_url backfill", () => {
   assert.deepEqual(
     normalizeTaskWorkflowArtifacts({
       artifacts: [{
@@ -158,12 +159,20 @@ test("normalizeTaskWorkflowArtifacts prefers persisted artifacts over pr_url bac
       }],
       prUrl: "https://github.com/BrosInCode/letagents/pull/107",
     }),
-    [{
-      provider: "github",
-      kind: "issue",
-      number: 42,
-      url: "https://github.com/BrosInCode/letagents/issues/42",
-    }]
+    [
+      {
+        provider: "github",
+        kind: "issue",
+        number: 42,
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      },
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 107,
+        url: "https://github.com/BrosInCode/letagents/pull/107",
+      },
+    ]
   );
 });
 
@@ -197,6 +206,41 @@ test("buildTaskWorkflowRefs renders persisted issue and check artifacts", () => 
         kind: "check_run",
         label: "Check ci / build",
         url: "https://github.com/BrosInCode/letagents/actions/runs/123",
+      },
+    ]
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput rejects unsupported keys", () => {
+  assert.throws(
+    () =>
+      validateTaskWorkflowArtifactsInput([
+        {
+          provider: "github",
+          kind: "pull_request",
+          metadata: { danger: true },
+        },
+      ]),
+    /unsupported key/
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput accepts valid artifacts", () => {
+  assert.deepEqual(
+    validateTaskWorkflowArtifactsInput([
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 121,
+        url: "https://github.com/BrosInCode/letagents/pull/121",
+      },
+    ]),
+    [
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 121,
+        url: "https://github.com/BrosInCode/letagents/pull/121",
       },
     ]
   );

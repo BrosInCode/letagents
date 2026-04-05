@@ -53,8 +53,37 @@ export interface TaskWorkflowArtifact {
   url?: string | null;
   ref?: string | null;
   state?: string | null;
-  metadata?: Record<string, unknown> | null;
 }
+
+const TASK_WORKFLOW_ARTIFACT_PROVIDERS = new Set<TaskWorkflowRefProvider>([
+  "github",
+  "gitlab",
+  "bitbucket",
+  "unknown",
+]);
+
+const TASK_WORKFLOW_ARTIFACT_KINDS = new Set<TaskWorkflowArtifactKind>([
+  "issue",
+  "branch",
+  "pull_request",
+  "merge_request",
+  "review",
+  "check_run",
+  "merge",
+]);
+
+const TASK_WORKFLOW_ARTIFACT_KEYS = new Set([
+  "provider",
+  "kind",
+  "id",
+  "number",
+  "title",
+  "url",
+  "ref",
+  "state",
+]);
+
+const MAX_TASK_WORKFLOW_ARTIFACTS = 32;
 
 export interface TaskWorkflowRef {
   provider: TaskWorkflowRefProvider;
@@ -263,11 +292,36 @@ export function normalizeTaskWorkflowArtifacts(input: {
   artifacts?: TaskWorkflowArtifact[] | null;
   prUrl?: string | null;
 }): TaskWorkflowArtifact[] {
-  if (input.artifacts?.length) {
-    return input.artifacts;
+  const persisted = input.artifacts ?? [];
+  const legacy = buildLegacyTaskWorkflowArtifacts({ prUrl: input.prUrl });
+
+  if (!persisted.length) {
+    return legacy;
   }
 
-  return buildLegacyTaskWorkflowArtifacts({ prUrl: input.prUrl });
+  const merged = [...persisted];
+
+  for (const artifact of legacy) {
+    const alreadyPresent = merged.some((existing) => {
+      if (existing.url && artifact.url && existing.url === artifact.url) {
+        return true;
+      }
+
+      return (
+        existing.provider === artifact.provider &&
+        existing.kind === artifact.kind &&
+        (existing.number ?? null) === (artifact.number ?? null) &&
+        (existing.ref ?? null) === (artifact.ref ?? null) &&
+        (existing.id ?? null) === (artifact.id ?? null)
+      );
+    });
+
+    if (!alreadyPresent) {
+      merged.push(artifact);
+    }
+  }
+
+  return merged;
 }
 
 export function buildTaskWorkflowRefs(input: {
@@ -282,4 +336,92 @@ export function buildTaskWorkflowRefs(input: {
       label: buildTaskWorkflowRefLabel(artifact),
       url: artifact.url,
     }));
+}
+
+function asOptionalString(
+  value: unknown,
+  field: string,
+  index: number
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new Error(`workflow_artifacts[${index}].${field} must be a string`);
+  }
+  return value;
+}
+
+function asOptionalInteger(
+  value: unknown,
+  field: string,
+  index: number
+): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`workflow_artifacts[${index}].${field} must be a non-negative integer`);
+  }
+  return value;
+}
+
+export function validateTaskWorkflowArtifactsInput(input: unknown): TaskWorkflowArtifact[] | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(input)) {
+    throw new Error("workflow_artifacts must be an array");
+  }
+
+  if (input.length > MAX_TASK_WORKFLOW_ARTIFACTS) {
+    throw new Error(`workflow_artifacts cannot contain more than ${MAX_TASK_WORKFLOW_ARTIFACTS} entries`);
+  }
+
+  return input.map((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`workflow_artifacts[${index}] must be an object`);
+    }
+
+    const record = value as Record<string, unknown>;
+
+    for (const key of Object.keys(record)) {
+      if (!TASK_WORKFLOW_ARTIFACT_KEYS.has(key)) {
+        throw new Error(`workflow_artifacts[${index}] has unsupported key "${key}"`);
+      }
+    }
+
+    const provider = record.provider;
+    const kind = record.kind;
+
+    if (
+      typeof provider !== "string" ||
+      !TASK_WORKFLOW_ARTIFACT_PROVIDERS.has(provider as TaskWorkflowRefProvider)
+    ) {
+      throw new Error(`workflow_artifacts[${index}].provider is invalid`);
+    }
+
+    if (
+      typeof kind !== "string" ||
+      !TASK_WORKFLOW_ARTIFACT_KINDS.has(kind as TaskWorkflowArtifactKind)
+    ) {
+      throw new Error(`workflow_artifacts[${index}].kind is invalid`);
+    }
+
+    return {
+      provider: provider as TaskWorkflowRefProvider,
+      kind: kind as TaskWorkflowArtifactKind,
+      ...(record.id !== undefined ? { id: asOptionalString(record.id, "id", index) } : {}),
+      ...(record.number !== undefined
+        ? { number: asOptionalInteger(record.number, "number", index) }
+        : {}),
+      ...(record.title !== undefined
+        ? { title: asOptionalString(record.title, "title", index) }
+        : {}),
+      ...(record.url !== undefined ? { url: asOptionalString(record.url, "url", index) } : {}),
+      ...(record.ref !== undefined ? { ref: asOptionalString(record.ref, "ref", index) } : {}),
+      ...(record.state !== undefined
+        ? { state: asOptionalString(record.state, "state", index) }
+        : {}),
+    };
+  });
 }

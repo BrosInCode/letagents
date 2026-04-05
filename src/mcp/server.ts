@@ -2067,9 +2067,9 @@ server.tool(
           url: z.string().nullable().optional(),
           ref: z.string().nullable().optional(),
           state: z.string().nullable().optional(),
-          metadata: z.record(z.string(), z.unknown()).nullable().optional(),
-        })
+        }).strict()
       )
+      .max(32)
       .optional()
       .describe("Persisted provider-neutral task workflow artifacts to attach to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
