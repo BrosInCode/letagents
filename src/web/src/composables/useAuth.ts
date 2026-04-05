@@ -18,10 +18,10 @@ const isLoading = ref(false)
 export function useAuth() {
   async function checkSession() {
     try {
-      const res = await fetch('/api/session')
+      const res = await fetch('/auth/session', { credentials: 'include' })
       if (res.ok) {
         const data = await res.json()
-        if (data.account) {
+        if (data.authenticated && data.account) {
           user.value = data.account
           isSignedIn.value = true
           return
@@ -40,6 +40,7 @@ export function useAuth() {
       const res = await fetch('/auth/github/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ redirect_to: redirectTo || window.location.pathname }),
       })
       const data = await res.json()
@@ -56,7 +57,7 @@ export function useAuth() {
   async function signOut() {
     isLoading.value = true
     try {
-      await fetch('/auth/logout', { method: 'POST' })
+      await fetch('/auth/logout', { method: 'POST', credentials: 'include' })
     } catch {
       // silent
     }

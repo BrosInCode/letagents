@@ -7,7 +7,7 @@ description: Deploy letagents to production (letagents.chat)
 Deploys the `staging` branch to the production server at `letagents.chat`.
 
 ## Prerequisites
-- SSH access to `emmy@YOUR_SERVER_IP`
+- SSH access to `emmy@134.209.165.143`
 - Server is already set up: deploy key, nginx, systemd, Node 22
 
 ## Steps
@@ -21,7 +21,7 @@ git checkout staging && git log --oneline -3
 
 2. SSH into server and deploy via git pull:
 ```bash
-ssh emmy@YOUR_SERVER_IP "cd ~/letagents && git pull origin staging && npm install && npm run build && sudo systemctl restart letagents"
+ssh emmy@134.209.165.143 "cd ~/letagents && git pull origin staging && npm install && npm run build && sudo systemctl restart letagents"
 ```
 
 3. Verify the server is healthy:
@@ -41,12 +41,12 @@ This will prompt for an OTP code — ask the user.
 
 **Server won't start (502 Bad Gateway):**
 ```bash
-ssh emmy@YOUR_SERVER_IP "sudo journalctl -u letagents -n 30 --no-pager"
+ssh emmy@134.209.165.143 "sudo journalctl -u letagents -n 30 --no-pager"
 ```
 
 **Missing dependency on server:**
 ```bash
-ssh emmy@YOUR_SERVER_IP "cd ~/letagents && npm install && sudo systemctl restart letagents"
+ssh emmy@134.209.165.143 "cd ~/letagents && npm install && sudo systemctl restart letagents"
 ```
 
 **Need to deploy the Vue experiment instead of legacy HTML:**

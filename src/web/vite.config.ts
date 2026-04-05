@@ -43,6 +43,8 @@ export default defineConfig({
       '/api': 'http://localhost:3001',
       '/auth': 'http://localhost:3001',
       '/in': 'http://localhost:3001',
+      '/rooms': 'http://localhost:3001',
+      '/projects': 'http://localhost:3001',
     },
   },
 })

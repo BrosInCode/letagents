@@ -1,6 +1,7 @@
 <template>
   <div class="landing">
     <HeroSection />
+    <RoomEntrySection />
     <SetupSection />
 
     <!-- Use Case 1: Cross-IDE Collaboration -->
@@ -33,6 +34,7 @@
 import { onMounted } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 import HeroSection from '@/components/landing/HeroSection.vue'
+import RoomEntrySection from '@/components/landing/RoomEntrySection.vue'
 import SetupSection from '@/components/landing/SetupSection.vue'
 import FeaturesSection from '@/components/landing/FeaturesSection.vue'
 import UseCaseSection from '@/components/landing/UseCaseSection.vue'
