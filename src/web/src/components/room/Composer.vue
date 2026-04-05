@@ -1,5 +1,59 @@
 <template>
   <form class="composer" @submit.prevent="handleSend">
+    <div class="composer-pills-row">
+      <div class="composer-toolbar-pills">
+        <!-- Prompt injection pill -->
+        <div class="prompt-menu" ref="menuEl">
+          <button
+            class="prompt-trigger"
+            type="button"
+            :data-mode="promptMode"
+            @click="menuOpen = !menuOpen"
+          >
+            <span>{{ promptLabel }}</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div v-if="menuOpen" class="prompt-panel">
+            <div class="prompt-panel-header">
+              <strong>Agent prompts</strong>
+            </div>
+            <button
+              class="prompt-option"
+              type="button"
+              :data-active="autoKeepPolling"
+              @click="toggleAutoKeepPolling"
+            >
+              <span class="prompt-option-copy">
+                <span class="prompt-option-title">Auto read + poll</span>
+                <span class="prompt-option-meta">Send quiet metadata-only reminders every 20s to keep agents polling this room.</span>
+              </span>
+              <span class="prompt-option-check">
+                <template v-if="autoKeepPolling">✓</template>
+              </span>
+            </button>
+            <button
+              class="prompt-option"
+              type="button"
+              :data-active="injectPrompt"
+              @click="toggleInjectPrompt"
+            >
+              <span class="prompt-option-copy">
+                <span class="prompt-option-title">Attach room prompt</span>
+                <span class="prompt-option-meta">Send the visible message normally and attach the stay-in-room agent prompt as hidden metadata.</span>
+              </span>
+              <span class="prompt-option-check">
+                <template v-if="injectPrompt">✓</template>
+              </span>
+            </button>
+            <p class="prompt-help">Prompts stay out of the transcript. Injected visible messages get a small badge; auto-poll reminders stay hidden.</p>
+          </div>
+        </div>
+      </div>
+      <span class="composer-sender-label">
+        Sending as <strong>{{ senderName }}</strong>
+      </span>
+      <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
+    </div>
     <div class="composer-card">
       <textarea
         ref="textareaEl"
@@ -10,59 +64,6 @@
         rows="1"
       />
       <div class="composer-toolbar">
-        <div class="composer-toolbar-left">
-          <!-- Prompt injection pill -->
-          <div class="prompt-menu" ref="menuEl">
-            <button
-              class="prompt-trigger"
-              type="button"
-              :data-mode="promptMode"
-              @click="menuOpen = !menuOpen"
-            >
-              <span>{{ promptLabel }}</span>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-            </button>
-            <div v-if="menuOpen" class="prompt-panel">
-              <div class="prompt-panel-header">
-                <strong>Agent prompts</strong>
-              </div>
-              <button
-                class="prompt-option"
-                type="button"
-                :data-active="autoKeepPolling"
-                @click="toggleAutoKeepPolling"
-              >
-                <span class="prompt-option-copy">
-                  <span class="prompt-option-title">Auto read + poll</span>
-                  <span class="prompt-option-meta">Send quiet metadata-only reminders every 20s to keep agents polling this room.</span>
-                </span>
-                <span class="prompt-option-check">
-                  <template v-if="autoKeepPolling">✓</template>
-                </span>
-              </button>
-              <button
-                class="prompt-option"
-                type="button"
-                :data-active="injectPrompt"
-                @click="toggleInjectPrompt"
-              >
-                <span class="prompt-option-copy">
-                  <span class="prompt-option-title">Attach room prompt</span>
-                  <span class="prompt-option-meta">Send the visible message normally and attach the stay-in-room agent prompt as hidden metadata.</span>
-                </span>
-                <span class="prompt-option-check">
-                  <template v-if="injectPrompt">✓</template>
-                </span>
-              </button>
-              <p class="prompt-help">Prompts stay out of the transcript. Injected visible messages get a small badge; auto-poll reminders stay hidden.</p>
-            </div>
-          </div>
-
-          <span class="composer-sender-label">
-            Sending as <strong>{{ senderName }}</strong>
-          </span>
-          <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
-        </div>
         <button class="send-btn" type="submit" :disabled="!text.trim()" aria-label="Send message">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
@@ -271,7 +272,7 @@ watch(() => props.roomIdentifier, (newId) => {
 }
 .message-textarea {
   width: 100%;
-  min-height: 48px;
+  min-height: 56px;
   max-height: 180px;
   resize: none;
   overflow-y: auto;
@@ -288,12 +289,22 @@ watch(() => props.roomIdentifier, (newId) => {
   color: var(--muted, #71717a);
   opacity: 0.6;
 }
-.composer-toolbar {
+.composer-pills-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px 8px 16px;
-  gap: 8px;
+  padding: 0 4px 6px;
+}
+.composer-toolbar-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 6px 6px;
 }
 .composer-toolbar-left {
   display: flex;
