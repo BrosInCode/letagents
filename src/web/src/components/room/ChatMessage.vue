@@ -73,6 +73,8 @@ const formattedTime = computed(() => {
   }
 })
 
+const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
 const renderedContent = computed(() => {
   const text = props.message.text || ''
   // Simple markdown-like rendering (basic)
@@ -80,8 +82,14 @@ const renderedContent = computed(() => {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Linkify URLs — sanitize href to prevent attribute injection
+    .replace(/(https?:\/\/[^\s<"']+)/g, (_match, url) => {
+      const safeHref = escapeAttr(url)
+      return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${url}</a>`
+    })
     .replace(/\n/g, '<br>')
 })
 </script>
@@ -151,6 +159,14 @@ const renderedContent = computed(() => {
   background: var(--surface, #18181b);
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.84em;
+}
+.message-bubble :deep(.md-content) a {
+  color: #60a5fa;
+  text-decoration: none;
+  word-break: break-all;
+}
+.message-bubble :deep(.md-content) a:hover {
+  text-decoration: underline;
 }
 
 .provenance-badge {

@@ -555,3 +555,87 @@ export function formatRepoCheckRunEventMessage(input: {
 
   return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName} ${input.checkRun.url}`;
 }
+
+// ---------------------------------------------------------------------------
+// Board projection — pure functions to derive task status transitions from
+// provider events. These are intentionally side-effect-free so they can be
+// unit-tested without the database or server context.
+// ---------------------------------------------------------------------------
+
+export type TaskStatusLike =
+  | "proposed"
+  | "accepted"
+  | "assigned"
+  | "in_progress"
+  | "blocked"
+  | "in_review"
+  | "merged"
+  | "done"
+  | "cancelled";
+
+export interface BoardProjectionResult {
+  newStatus: TaskStatusLike;
+  reason: string;
+}
+
+/**
+ * Determine the task status transition when a pull request event occurs.
+ * Returns null when no transition should happen.
+ */
+export function projectPullRequestEvent(input: {
+  action: string;
+  merged: boolean;
+  currentStatus: TaskStatusLike;
+}): BoardProjectionResult | null {
+  const PRE_REVIEW: Set<TaskStatusLike> = new Set(["assigned", "in_progress"]);
+  const MERGEABLE: Set<TaskStatusLike> = new Set(["in_review", "in_progress", "assigned"]);
+
+  if (input.action === "opened" || input.action === "ready_for_review") {
+    if (PRE_REVIEW.has(input.currentStatus)) {
+      return { newStatus: "in_review", reason: "pr_opened" };
+    }
+  }
+
+  if (input.action === "closed" && input.merged) {
+    if (MERGEABLE.has(input.currentStatus)) {
+      return { newStatus: "merged", reason: "pr_merged" };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Determine the task status transition when a PR review event occurs.
+ * Returns null when no transition should happen.
+ */
+export function projectPullRequestReviewEvent(input: {
+  action: string;
+  reviewState: string;
+  currentStatus: TaskStatusLike;
+}): BoardProjectionResult | null {
+  if (input.action !== "submitted") return null;
+
+  if (input.reviewState === "changes_requested" && input.currentStatus === "in_review") {
+    return { newStatus: "blocked", reason: "review_changes_requested" };
+  }
+
+  return null;
+}
+
+/**
+ * Determine the task status transition when an issue event occurs.
+ * Returns null when no transition should happen.
+ */
+export function projectIssueEvent(input: {
+  action: string;
+  currentStatus: TaskStatusLike;
+}): BoardProjectionResult | null {
+  const CLOSEABLE: Set<TaskStatusLike> = new Set(["merged", "in_review", "in_progress"]);
+
+  if (input.action === "closed" && CLOSEABLE.has(input.currentStatus)) {
+    return { newStatus: "done", reason: "issue_closed" };
+  }
+
+  return null;
+}
