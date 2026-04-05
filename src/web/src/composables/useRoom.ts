@@ -246,6 +246,7 @@ function startStreaming(roomIdentifier: string) {
       const exists = messages.value.some(m => m.id === msg.id)
       if (!exists) {
         messages.value = [...messages.value, msg]
+        playNotificationSound()
       }
     } catch { /* ignore parse errors */ }
   })
@@ -328,8 +329,8 @@ async function sendMessage(text: string, sender?: string, agentPromptKind?: stri
       method: 'POST',
       body: JSON.stringify(body),
     })
-    // Optimistic add if SSE hasn't delivered it yet
-    if (msg?.id && !messages.value.some(m => m.id === msg.id)) {
+    // Optimistic add if SSE hasn't delivered it yet — skip prompt-only auto messages
+    if (msg?.id && !isPromptOnlyRoomMessage(msg) && !messages.value.some(m => m.id === msg.id)) {
       messages.value = [...messages.value, msg]
     }
     return true
@@ -459,6 +460,32 @@ function leaveRoom() {
   clearPersistedSession()
 }
 
+/** ── Notification Sound (Web Audio API) ── */
+const soundEnabled = ref(localStorage.getItem('lac-sound') !== 'off')
+let audioCtx: AudioContext | null = null
+
+function toggleSound() {
+  soundEnabled.value = !soundEnabled.value
+  localStorage.setItem('lac-sound', soundEnabled.value ? 'on' : 'off')
+}
+
+function playNotificationSound() {
+  if (!soundEnabled.value) return
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const oscillator = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+    oscillator.connect(gain)
+    gain.connect(audioCtx.destination)
+    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime)
+    oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.08)
+    gain.gain.setValueAtTime(0.12, audioCtx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2)
+    oscillator.start(audioCtx.currentTime)
+    oscillator.stop(audioCtx.currentTime + 0.2)
+  } catch { /* audio not available */ }
+}
+
 /** ── Cleanup ── */
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', () => {
@@ -481,6 +508,7 @@ export function useRoom() {
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
     connectionState: readonly(connectionState),
+    soundEnabled: readonly(soundEnabled),
 
     // Actions
     joinRoom,
@@ -490,6 +518,7 @@ export function useRoom() {
     updateTask,
     renameRoom,
     restoreSession,
+    toggleSound,
 
     // Utilities
     getSenderColor,

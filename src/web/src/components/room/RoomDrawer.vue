@@ -78,7 +78,7 @@
         <div class="drawer-actions">
           <button @click="toggleSound">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-            {{ soundOn ? 'Sounds On' : 'Sounds Off' }}
+            {{ soundEnabled ? 'Sounds On' : 'Sounds Off' }}
           </button>
           <button @click="exportChat">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -92,7 +92,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { type RoomInfo, type RoomMessage, getSenderColor, parseAgentIdentity } from '@/composables/useRoom'
+import { type RoomInfo, type RoomMessage, getSenderColor, parseAgentIdentity, useRoom } from '@/composables/useRoom'
 
 const MAX_VISIBLE_CHIPS = 6
 
@@ -105,8 +105,8 @@ const props = defineProps<{
 
 defineEmits<{ close: [] }>()
 
+const { soundEnabled, toggleSound } = useRoom()
 const isDark = ref(true)
-const soundOn = ref(true)
 const codeCopied = ref(false)
 
 // ── Share logic (match legacy) ──
@@ -196,9 +196,7 @@ function toggleTheme() {
   localStorage.setItem('lac-theme', isDark.value ? 'dark' : 'light')
 }
 
-function toggleSound() {
-  soundOn.value = !soundOn.value
-}
+
 
 async function copyShareValue() {
   const val = shareValue.value
