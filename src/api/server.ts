@@ -67,7 +67,14 @@ import {
   type GitHubWebhookPullRequest,
   type GitHubWebhookRepository,
 } from "./github-app.js";
-import { extractReferencedTaskId, type RepoPullRequestRef } from "./repo-workflow.js";
+import {
+  extractReferencedTaskId,
+  formatRepoIssueEventMessage,
+  formatRepoIssueCommentEventMessage,
+  formatRepoPullRequestReviewEventMessage,
+  formatRepoCheckRunEventMessage,
+  type RepoPullRequestRef,
+} from "./repo-workflow.js";
 import {
   buildGitHubAppInstallationUrl,
   buildGitHubAppSetupRedirectPath,
@@ -1023,6 +1030,127 @@ async function handleGitHubWebhookEvent(
         githubRepoId: repositorySync.githubRepoId,
         roomId: repositorySync.roomId,
       };
+    }
+
+    case "issues": {
+      if (!payload.repository || !payload.issue || !payload.action) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const project = await getProjectById(roomId ?? "");
+      if (!project) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const linkedTaskId = extractReferencedTaskId(payload.issue.title);
+      const message = formatRepoIssueEventMessage({
+        provider: "github",
+        action: payload.action,
+        repositoryFullName: payload.repository.full_name,
+        issue: {
+          number: payload.issue.number,
+          title: payload.issue.title,
+          url: payload.issue.html_url,
+        },
+        senderLogin: payload.sender?.login ?? null,
+        linkedTaskId,
+      });
+      if (!message) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      await emitProjectMessage(project.id, "github", message, { source: "github" });
+      return { status: "processed", installationId, githubRepoId, roomId: project.id };
+    }
+
+    case "issue_comment": {
+      if (!payload.repository || !payload.issue || !payload.comment || !payload.action) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const project = await getProjectById(roomId ?? "");
+      if (!project) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      // GitHub sends issue_comment for both real issues AND pull requests.
+      // When the issue is actually a PR, issue.pull_request is present.
+      const isPullRequest = !!payload.issue.pull_request;
+      const linkedTaskId = extractReferencedTaskId(payload.issue.title, payload.comment.body);
+      const message = formatRepoIssueCommentEventMessage({
+        provider: "github",
+        action: payload.action,
+        repositoryFullName: payload.repository.full_name,
+        issue: {
+          number: payload.issue.number,
+          title: payload.issue.title,
+        },
+        comment: {
+          body: payload.comment.body,
+          url: payload.comment.html_url,
+        },
+        senderLogin: payload.sender?.login ?? null,
+        linkedTaskId,
+        isPullRequest,
+      });
+      if (!message) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      await emitProjectMessage(project.id, "github", message, { source: "github" });
+      return { status: "processed", installationId, githubRepoId, roomId: project.id };
+    }
+
+    case "pull_request_review": {
+      if (!payload.repository || !payload.pull_request || !payload.review || !payload.action) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const project = await getProjectById(roomId ?? "");
+      if (!project) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const linkedTaskId = extractReferencedTaskId(payload.pull_request.title, payload.pull_request.body);
+      const message = formatRepoPullRequestReviewEventMessage({
+        provider: "github",
+        action: payload.action,
+        repositoryFullName: payload.repository.full_name,
+        pullRequest: {
+          number: payload.pull_request.number,
+          title: payload.pull_request.title,
+        },
+        review: {
+          state: payload.review.state,
+          url: payload.review.html_url,
+        },
+        senderLogin: payload.sender?.login ?? null,
+        linkedTaskId,
+      });
+      if (!message) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      await emitProjectMessage(project.id, "github", message, { source: "github" });
+      return { status: "processed", installationId, githubRepoId, roomId: project.id };
+    }
+
+    case "check_run": {
+      if (!payload.repository || !payload.check_run || !payload.action) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const project = await getProjectById(roomId ?? "");
+      if (!project) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      const message = formatRepoCheckRunEventMessage({
+        provider: "github",
+        action: payload.action,
+        repositoryFullName: payload.repository.full_name,
+        checkRun: {
+          name: payload.check_run.name,
+          status: payload.check_run.status,
+          conclusion: payload.check_run.conclusion,
+          url: payload.check_run.html_url,
+          appName: payload.check_run.app?.name ?? null,
+        },
+      });
+      if (!message) {
+        return { status: "ignored", installationId, githubRepoId, roomId };
+      }
+      await emitProjectMessage(project.id, "github", message, { source: "github" });
+      return { status: "processed", installationId, githubRepoId, roomId: project.id };
     }
 
     default:
