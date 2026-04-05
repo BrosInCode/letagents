@@ -8,6 +8,21 @@ const REPO_PROVIDER_HOSTS: Record<RepoWorkflowProvider, string> = {
   bitbucket: "bitbucket.org",
 };
 
+const HOST_TO_PROVIDER = new Map<string, RepoWorkflowProvider>(
+  Object.entries(REPO_PROVIDER_HOSTS).map(([provider, host]) => [
+    host,
+    provider as RepoWorkflowProvider,
+  ])
+);
+
+export interface RepoRoomRef {
+  provider: RepoWorkflowProvider;
+  host: string;
+  namespace: string;
+  repo: string;
+  fullName: string;
+}
+
 export interface RepoPullRequestRef {
   number: number;
   title: string;
@@ -16,6 +31,16 @@ export interface RepoPullRequestRef {
   merged?: boolean;
   authorLogin?: string | null;
   mergedByLogin?: string | null;
+}
+
+export type TaskWorkflowRefKind = "pull_request" | "merge_request";
+export type TaskWorkflowRefProvider = RepoWorkflowProvider | "unknown";
+
+export interface TaskWorkflowRef {
+  provider: TaskWorkflowRefProvider;
+  kind: TaskWorkflowRefKind;
+  label: string;
+  url: string;
 }
 
 function getProviderHost(provider: RepoWorkflowProvider): string {
@@ -33,6 +58,32 @@ function getPullRequestLabel(provider: RepoWorkflowProvider, number: number): st
 
 export function buildRepoRoomId(provider: RepoWorkflowProvider, fullName: string): string {
   return normalizeRoomName(`${getProviderHost(provider)}/${fullName}`);
+}
+
+export function parseRepoRoomName(roomName: string): RepoRoomRef | null {
+  const normalized = normalizeRoomName(roomName);
+  const parts = normalized.split("/");
+  const host = parts[0]?.toLowerCase();
+  const provider = host ? HOST_TO_PROVIDER.get(host) : undefined;
+
+  if (!provider || parts.length < 3) {
+    return null;
+  }
+
+  const repo = parts.at(-1) ?? "";
+  const namespace = parts.slice(1, -1).join("/");
+
+  if (!namespace || !repo) {
+    return null;
+  }
+
+  return {
+    provider,
+    host,
+    namespace,
+    repo,
+    fullName: `${namespace}/${repo}`,
+  };
 }
 
 export function extractReferencedTaskId(
@@ -107,4 +158,63 @@ export function formatRepoRepositoryEventMessage(input: {
     default:
       return null;
   }
+}
+
+export function buildTaskWorkflowRefs(input: {
+  prUrl?: string | null;
+}): TaskWorkflowRef[] {
+  if (!input.prUrl) {
+    return [];
+  }
+
+  try {
+    const url = new URL(input.prUrl);
+    const hostname = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, "");
+
+    if (hostname === "github.com") {
+      const match = /^\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(path);
+      if (match) {
+        return [{
+          provider: "github",
+          kind: "pull_request",
+          label: `PR #${match[1]}`,
+          url: input.prUrl,
+        }];
+      }
+    }
+
+    if (hostname === "gitlab.com") {
+      const match = /^\/.+\/-\/merge_requests\/(\d+)$/.exec(path);
+      if (match) {
+        return [{
+          provider: "gitlab",
+          kind: "merge_request",
+          label: `MR !${match[1]}`,
+          url: input.prUrl,
+        }];
+      }
+    }
+
+    if (hostname === "bitbucket.org") {
+      const match = /^\/[^/]+\/[^/]+\/pull-requests\/(\d+)$/.exec(path);
+      if (match) {
+        return [{
+          provider: "bitbucket",
+          kind: "pull_request",
+          label: `PR #${match[1]}`,
+          url: input.prUrl,
+        }];
+      }
+    }
+  } catch {
+    // Fall through to a generic link when the stored URL is not parseable.
+  }
+
+  return [{
+    provider: "unknown",
+    kind: "pull_request",
+    label: "Review",
+    url: input.prUrl,
+  }];
 }

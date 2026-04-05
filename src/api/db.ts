@@ -26,6 +26,7 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
+import { buildTaskWorkflowRefs, type TaskWorkflowRef } from "./repo-workflow.js";
 
 export interface Project {
   id: string;
@@ -189,6 +190,7 @@ export interface Task {
   created_by: string;
   source_message_id: string | null;
   pr_url: string | null;
+  workflow_refs: TaskWorkflowRef[];
   created_at: string;
   updated_at: string;
 }
@@ -375,6 +377,7 @@ function toTask(row: TaskRow): Task {
     created_by: row.created_by,
     source_message_id: row.source_message_id,
     pr_url: row.pr_url,
+    workflow_refs: buildTaskWorkflowRefs({ prUrl: row.pr_url }),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
