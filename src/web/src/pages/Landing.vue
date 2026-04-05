@@ -1,7 +1,6 @@
 <template>
   <div class="landing">
     <HeroSection />
-    <RoomEntrySection />
     <SetupSection />
 
     <!-- Use Case 1: Cross-IDE Collaboration -->
@@ -26,6 +25,7 @@
       </template>
     </UseCaseSection>
 
+    <RoomEntrySection />
     <FeaturesSection />
   </div>
 </template>
