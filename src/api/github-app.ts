@@ -1,6 +1,11 @@
 import crypto from "crypto";
 
-import { normalizeRoomName } from "./room-routing.js";
+import {
+  buildRepoRoomId,
+  formatRepoPullRequestEventMessage,
+  formatRepoRepositoryEventMessage,
+  type RepoPullRequestRef,
+} from "./repo-workflow.js";
 
 export interface GitHubWebhookAccount {
   id: number | string;
@@ -108,7 +113,7 @@ export function verifyGitHubWebhookSignature(
 }
 
 export function buildGitHubRepoRoomId(fullName: string): string {
-  return normalizeRoomName(`github.com/${fullName}`);
+  return buildRepoRoomId("github", fullName);
 }
 
 export function getGitHubRepositoryOwnerLogin(repository: GitHubWebhookRepository): string {
@@ -134,21 +139,18 @@ export function getGitHubInstallationTarget(
   return null;
 }
 
-export function extractReferencedTaskId(
-  ...texts: Array<string | null | undefined>
-): string | null {
-  for (const value of texts) {
-    if (!value) {
-      continue;
-    }
+export { extractReferencedTaskId } from "./repo-workflow.js";
 
-    const match = /\b(task_\d+)\b/i.exec(value);
-    if (match) {
-      return match[1].toLowerCase();
-    }
-  }
-
-  return null;
+function toRepoPullRequestRef(pullRequest: GitHubWebhookPullRequest): RepoPullRequestRef {
+  return {
+    number: pullRequest.number,
+    title: pullRequest.title,
+    url: pullRequest.html_url,
+    body: pullRequest.body,
+    merged: pullRequest.merged,
+    authorLogin: pullRequest.user?.login,
+    mergedByLogin: pullRequest.merged_by?.login,
+  };
 }
 
 export function formatGitHubPullRequestEventMessage(input: {
@@ -158,31 +160,14 @@ export function formatGitHubPullRequestEventMessage(input: {
   senderLogin?: string | null;
   linkedTaskId?: string | null;
 }): string | null {
-  const actor = input.senderLogin || input.pullRequest.user?.login || "github";
-  const prLabel = `PR #${input.pullRequest.number}`;
-  const title = input.pullRequest.title.trim();
-  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
-
-  switch (input.action) {
-    case "opened":
-      return `${prLabel} opened by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
-    case "reopened":
-      return `${prLabel} reopened by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
-    case "ready_for_review":
-      return `${prLabel} is ready for review in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
-    case "synchronize":
-      return `${prLabel} received new commits from ${actor} in ${input.repositoryFullName}${taskSuffix}: ${input.pullRequest.html_url}`;
-    case "converted_to_draft":
-      return `${prLabel} was converted to draft by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${input.pullRequest.html_url}`;
-    case "closed":
-      if (input.pullRequest.merged) {
-        const merger = input.pullRequest.merged_by?.login || actor;
-        return `${prLabel} was merged by ${merger} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
-      }
-      return `${prLabel} was closed by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.html_url}`;
-    default:
-      return null;
-  }
+  return formatRepoPullRequestEventMessage({
+    provider: "github",
+    action: input.action,
+    repositoryFullName: input.repositoryFullName,
+    pullRequest: toRepoPullRequestRef(input.pullRequest),
+    senderLogin: input.senderLogin,
+    linkedTaskId: input.linkedTaskId,
+  });
 }
 
 export function formatGitHubRepositoryEventMessage(input: {
@@ -191,17 +176,11 @@ export function formatGitHubRepositoryEventMessage(input: {
   oldFullName?: string | null;
   senderLogin?: string | null;
 }): string | null {
-  const actor = input.senderLogin || "github";
-  switch (input.action) {
-    case "renamed":
-      return input.oldFullName
-        ? `Repository renamed from ${input.oldFullName} to ${input.repositoryFullName} by ${actor}`
-        : `Repository ${input.repositoryFullName} was renamed by ${actor}`;
-    case "transferred":
-      return input.oldFullName
-        ? `Repository transferred from ${input.oldFullName} to ${input.repositoryFullName} by ${actor}`
-        : `Repository ${input.repositoryFullName} was transferred by ${actor}`;
-    default:
-      return null;
-  }
+  return formatRepoRepositoryEventMessage({
+    provider: "github",
+    action: input.action,
+    repositoryFullName: input.repositoryFullName,
+    oldFullName: input.oldFullName,
+    senderLogin: input.senderLogin,
+  });
 }
