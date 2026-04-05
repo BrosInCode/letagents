@@ -43,7 +43,7 @@
     </div>
 
     <p class="entry-hint">
-      Rooms are created on-the-fly. No account needed — just pick a name and go.
+      Rooms are created on-the-fly. No account needed — type any name to join or create it.
     </p>
 
     <p v-if="error" class="entry-error">{{ error }}</p>
@@ -119,6 +119,7 @@ async function handleCreate() {
 }
 
 .entry-card {
+  max-width: 560px;
   border-radius: 28px;
   overflow: hidden;
   border: 1px solid var(--border);
