@@ -65,6 +65,8 @@ const formattedTime = computed(() => {
   }
 })
 
+const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
 const renderedContent = computed(() => {
   // Basic text rendering — will use marked.js in the actual Room page
   const text = props.message.text || ''
@@ -72,10 +74,14 @@ const renderedContent = computed(() => {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    // Linkify URLs
-    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
+    // Linkify URLs — sanitize href to prevent attribute injection
+    .replace(/(https?:\/\/[^\s<"']+)/g, (_match, url) => {
+      const safeHref = escapeAttr(url)
+      return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${url}</a>`
+    })
     .replace(/\n/g, '<br>')
 })
 </script>
