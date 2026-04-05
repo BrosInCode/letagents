@@ -1068,6 +1068,9 @@ async function handleGitHubWebhookEvent(
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
+      // GitHub sends issue_comment for both real issues AND pull requests.
+      // When the issue is actually a PR, issue.pull_request is present.
+      const isPullRequest = !!payload.issue.pull_request;
       const linkedTaskId = extractReferencedTaskId(payload.issue.title, payload.comment.body);
       const message = formatRepoIssueCommentEventMessage({
         provider: "github",
@@ -1083,6 +1086,7 @@ async function handleGitHubWebhookEvent(
         },
         senderLogin: payload.sender?.login ?? null,
         linkedTaskId,
+        isPullRequest,
       });
       if (!message) {
         return { status: "ignored", installationId, githubRepoId, roomId };

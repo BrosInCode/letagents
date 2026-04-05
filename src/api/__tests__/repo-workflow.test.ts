@@ -178,6 +178,20 @@ test("formatRepoIssueCommentEventMessage formats new comments", () => {
   assert.ok(message?.includes("\"I can reproduce this\""));
 });
 
+test("formatRepoIssueCommentEventMessage uses PR label for pull request comments", () => {
+  const message = formatRepoIssueCommentEventMessage({
+    provider: "github",
+    action: "created",
+    repositoryFullName: "brosincode/letagents",
+    issue: { number: 42, title: "Add feature" },
+    comment: { body: "LGTM", url: "https://github.com/BrosInCode/letagents/pull/42#comment-1" },
+    senderLogin: "reviewer",
+    isPullRequest: true,
+  });
+  assert.ok(message?.includes("commented on PR #42"));
+  assert.ok(!message?.includes("Issue #42"));
+});
+
 test("formatRepoIssueCommentEventMessage returns null for edited comments", () => {
   assert.equal(
     formatRepoIssueCommentEventMessage({

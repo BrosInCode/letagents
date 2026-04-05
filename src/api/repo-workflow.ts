@@ -255,17 +255,21 @@ export function formatRepoIssueCommentEventMessage(input: {
   comment: { body: string; url: string };
   senderLogin?: string | null;
   linkedTaskId?: string | null;
+  isPullRequest?: boolean;
 }): string | null {
   if (input.action !== "created") return null;
 
   const actor = input.senderLogin || input.provider;
-  const issueLabel = `Issue #${input.issue.number}`;
+  // GitHub sends issue_comment for both issues and PRs; use the correct label
+  const contextLabel = input.isPullRequest
+    ? getPullRequestLabel(input.provider, input.issue.number)
+    : `Issue #${input.issue.number}`;
   const bodyPreview = input.comment.body.length > 80
     ? input.comment.body.slice(0, 77) + "..."
     : input.comment.body;
   const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
 
-  return `${actor} commented on ${issueLabel} in ${input.repositoryFullName}${taskSuffix}: "${bodyPreview}" ${input.comment.url}`;
+  return `${actor} commented on ${contextLabel} in ${input.repositoryFullName}${taskSuffix}: "${bodyPreview}" ${input.comment.url}`;
 }
 
 export function formatRepoPullRequestReviewEventMessage(input: {

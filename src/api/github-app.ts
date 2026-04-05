@@ -60,6 +60,7 @@ export interface GitHubWebhookPayload {
     state?: string;
     user?: { login: string };
     labels?: Array<{ name: string }>;
+    pull_request?: { url?: string }; // present when the "issue" is actually a PR
   };
   comment?: {
     id: number;
