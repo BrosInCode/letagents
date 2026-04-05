@@ -29,6 +29,7 @@ import {
 import {
   buildTaskWorkflowRefs,
   normalizeTaskWorkflowArtifacts,
+  synchronizeTaskWorkflowArtifactsWithPrUrl,
   type TaskWorkflowArtifact,
   type TaskWorkflowRef,
 } from "./repo-workflow.js";
@@ -1605,10 +1606,16 @@ export async function updateTask(
   const newStatus = updates.status ?? task.status;
   const newAssignee = updates.assignee ?? task.assignee;
   const newPrUrl = updates.pr_url ?? task.pr_url;
-  const newWorkflowArtifacts = normalizeTaskWorkflowArtifacts({
-    artifacts: updates.workflow_artifacts ?? task.workflow_artifacts,
-    prUrl: newPrUrl,
-  });
+  const newWorkflowArtifacts = updates.workflow_artifacts
+    ? normalizeTaskWorkflowArtifacts({
+        artifacts: updates.workflow_artifacts,
+        prUrl: newPrUrl,
+      })
+    : synchronizeTaskWorkflowArtifactsWithPrUrl({
+        artifacts: task.workflow_artifacts,
+        previousPrUrl: task.pr_url,
+        nextPrUrl: newPrUrl,
+      });
   const now = new Date().toISOString();
 
   await db

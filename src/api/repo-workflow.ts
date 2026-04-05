@@ -85,6 +85,23 @@ const TASK_WORKFLOW_ARTIFACT_KEYS = new Set([
 
 const MAX_TASK_WORKFLOW_ARTIFACTS = 32;
 
+function areSameTaskWorkflowArtifact(
+  left: TaskWorkflowArtifact,
+  right: TaskWorkflowArtifact
+): boolean {
+  if (left.url && right.url) {
+    return left.url === right.url;
+  }
+
+  return (
+    left.provider === right.provider &&
+    left.kind === right.kind &&
+    (left.number ?? null) === (right.number ?? null) &&
+    (left.ref ?? null) === (right.ref ?? null) &&
+    (left.id ?? null) === (right.id ?? null)
+  );
+}
+
 export interface TaskWorkflowRef {
   provider: TaskWorkflowRefProvider;
   kind: TaskWorkflowRefKind;
@@ -302,19 +319,7 @@ export function normalizeTaskWorkflowArtifacts(input: {
   const merged = [...persisted];
 
   for (const artifact of legacy) {
-    const alreadyPresent = merged.some((existing) => {
-      if (existing.url && artifact.url && existing.url === artifact.url) {
-        return true;
-      }
-
-      return (
-        existing.provider === artifact.provider &&
-        existing.kind === artifact.kind &&
-        (existing.number ?? null) === (artifact.number ?? null) &&
-        (existing.ref ?? null) === (artifact.ref ?? null) &&
-        (existing.id ?? null) === (artifact.id ?? null)
-      );
-    });
+    const alreadyPresent = merged.some((existing) => areSameTaskWorkflowArtifact(existing, artifact));
 
     if (!alreadyPresent) {
       merged.push(artifact);
@@ -423,5 +428,34 @@ export function validateTaskWorkflowArtifactsInput(input: unknown): TaskWorkflow
         ? { state: asOptionalString(record.state, "state", index) }
         : {}),
     };
+  });
+}
+
+export function synchronizeTaskWorkflowArtifactsWithPrUrl(input: {
+  artifacts?: TaskWorkflowArtifact[] | null;
+  previousPrUrl?: string | null;
+  nextPrUrl?: string | null;
+}): TaskWorkflowArtifact[] {
+  const baseArtifacts = [...(input.artifacts ?? [])];
+
+  if (input.previousPrUrl && input.previousPrUrl !== input.nextPrUrl) {
+    const previousLegacyArtifacts = buildLegacyTaskWorkflowArtifacts({
+      prUrl: input.previousPrUrl,
+    });
+
+    return normalizeTaskWorkflowArtifacts({
+      artifacts: baseArtifacts.filter(
+        (artifact) =>
+          !previousLegacyArtifacts.some((previousArtifact) =>
+            areSameTaskWorkflowArtifact(artifact, previousArtifact)
+          )
+      ),
+      prUrl: input.nextPrUrl,
+    });
+  }
+
+  return normalizeTaskWorkflowArtifacts({
+    artifacts: baseArtifacts,
+    prUrl: input.nextPrUrl,
   });
 }

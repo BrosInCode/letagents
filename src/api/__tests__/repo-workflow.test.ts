@@ -10,6 +10,7 @@ import {
   formatRepoRepositoryEventMessage,
   normalizeTaskWorkflowArtifacts,
   parseRepoRoomName,
+  synchronizeTaskWorkflowArtifactsWithPrUrl,
   validateTaskWorkflowArtifactsInput,
 } from "../repo-workflow.js";
 
@@ -236,6 +237,43 @@ test("validateTaskWorkflowArtifactsInput accepts valid artifacts", () => {
       },
     ]),
     [
+      {
+        provider: "github",
+        kind: "pull_request",
+        number: 121,
+        url: "https://github.com/BrosInCode/letagents/pull/121",
+      },
+    ]
+  );
+});
+
+test("synchronizeTaskWorkflowArtifactsWithPrUrl replaces stale legacy PR artifacts when pr_url changes", () => {
+  assert.deepEqual(
+    synchronizeTaskWorkflowArtifactsWithPrUrl({
+      artifacts: [
+        {
+          provider: "github",
+          kind: "issue",
+          number: 42,
+          url: "https://github.com/BrosInCode/letagents/issues/42",
+        },
+        {
+          provider: "github",
+          kind: "pull_request",
+          number: 107,
+          url: "https://github.com/BrosInCode/letagents/pull/107",
+        },
+      ],
+      previousPrUrl: "https://github.com/BrosInCode/letagents/pull/107",
+      nextPrUrl: "https://github.com/BrosInCode/letagents/pull/121",
+    }),
+    [
+      {
+        provider: "github",
+        kind: "issue",
+        number: 42,
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      },
       {
         provider: "github",
         kind: "pull_request",
