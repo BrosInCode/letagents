@@ -65,6 +65,9 @@ function checkScroll() {
   if (!messagesEl.value) return
   const el = messagesEl.value
   isScrolledToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+  if (isScrolledToBottom && unreadCount.value > 0) {
+    unreadCount.value = 0
+  }
 }
 
 function scrollToBottom() {
