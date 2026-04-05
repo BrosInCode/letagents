@@ -57,7 +57,6 @@ import {
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
 import {
   buildGitHubRepoRoomId,
-  extractReferencedTaskId,
   formatGitHubPullRequestEventMessage,
   formatGitHubRepositoryEventMessage,
   getGitHubInstallationTarget,
@@ -68,6 +67,7 @@ import {
   type GitHubWebhookPullRequest,
   type GitHubWebhookRepository,
 } from "./github-app.js";
+import { extractReferencedTaskId, type RepoPullRequestRef } from "./repo-workflow.js";
 import {
   buildGitHubAppInstallationUrl,
   buildGitHubAppSetupRedirectPath,
@@ -663,12 +663,12 @@ async function syncGitHubAppRepositoryFromPayload(
   };
 }
 
-async function maybeLinkGitHubPullRequestToTask(
+async function maybeLinkPullRequestToTask(
   project: Project,
-  pullRequest: GitHubWebhookPullRequest,
+  pullRequest: RepoPullRequestRef,
   action: string
 ): Promise<string | null> {
-  let linkedTask = await findTaskByPrUrl(project.id, pullRequest.html_url);
+  let linkedTask = await findTaskByPrUrl(project.id, pullRequest.url);
 
   if (!linkedTask) {
     const referencedTaskId = extractReferencedTaskId(pullRequest.title, pullRequest.body);
@@ -681,16 +681,16 @@ async function maybeLinkGitHubPullRequestToTask(
     return null;
   }
 
-  if (linkedTask.pr_url !== pullRequest.html_url) {
+  if (linkedTask.pr_url !== pullRequest.url) {
     linkedTask = (await updateTask(project.id, linkedTask.id, {
-      pr_url: pullRequest.html_url,
+      pr_url: pullRequest.url,
     })) ?? linkedTask;
   }
 
   if (action === "closed" && pullRequest.merged && linkedTask.status === "in_review") {
     const mergedTask = await updateTask(project.id, linkedTask.id, {
       status: "merged",
-      pr_url: pullRequest.html_url,
+      pr_url: pullRequest.url,
     });
     if (mergedTask) {
       linkedTask = mergedTask;
@@ -725,9 +725,17 @@ async function emitGitHubPullRequestEvent(
     };
   }
 
-  const linkedTaskId = await maybeLinkGitHubPullRequestToTask(
+  const linkedTaskId = await maybeLinkPullRequestToTask(
     project,
-    payload.pull_request,
+    {
+      number: payload.pull_request.number,
+      title: payload.pull_request.title,
+      url: payload.pull_request.html_url,
+      body: payload.pull_request.body,
+      merged: payload.pull_request.merged,
+      authorLogin: payload.pull_request.user?.login,
+      mergedByLogin: payload.pull_request.merged_by?.login,
+    },
     payload.action
   );
   const message = formatGitHubPullRequestEventMessage({

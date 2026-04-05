@@ -247,6 +247,13 @@ function startStreaming(roomIdentifier: string) {
       if (!exists) {
         messages.value = [...messages.value, msg]
         playNotificationSound()
+
+        // Auto-refresh board when task lifecycle messages arrive
+        if (msg.sender === 'letagents' && msg.text?.includes('task_')) {
+          if (room.value) {
+            fetchTasks(room.value.identifier).then(t => { tasks.value = t })
+          }
+        }
       }
     } catch { /* ignore parse errors */ }
   })
