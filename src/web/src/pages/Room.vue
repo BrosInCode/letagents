@@ -45,6 +45,7 @@
     <Composer
       v-if="activeTab === 'chat' && isConnected"
       :senderName="senderName"
+      :roomIdentifier="room?.identifier || ''"
       @send="handleSend"
     />
   </div>
@@ -80,8 +81,8 @@ const roomSubtitle = computed(() =>
     : connectionState.value === 'connecting' ? 'Joining room...' : 'Create a new room or join one.'
 )
 
-async function handleSend(text: string) {
-  await sendMessage(text, senderName.value)
+async function handleSend(text: string, agentPromptKind: string | null) {
+  await sendMessage(text, senderName.value, agentPromptKind)
 }
 
 async function handleAddTask(title: string) {

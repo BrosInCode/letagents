@@ -11,6 +11,53 @@
       />
       <div class="composer-toolbar">
         <div class="composer-toolbar-left">
+          <!-- Prompt injection pill -->
+          <div class="prompt-menu" ref="menuEl">
+            <button
+              class="prompt-trigger"
+              type="button"
+              :data-mode="promptMode"
+              @click="menuOpen = !menuOpen"
+            >
+              <span>{{ promptLabel }}</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div v-if="menuOpen" class="prompt-panel">
+              <div class="prompt-panel-header">
+                <strong>Agent prompts</strong>
+              </div>
+              <button
+                class="prompt-option"
+                type="button"
+                :data-active="autoKeepPolling"
+                @click="toggleAutoKeepPolling"
+              >
+                <span class="prompt-option-copy">
+                  <span class="prompt-option-title">Auto read + poll</span>
+                  <span class="prompt-option-meta">Send quiet metadata-only reminders every 20s to keep agents polling this room.</span>
+                </span>
+                <span class="prompt-option-check">
+                  <template v-if="autoKeepPolling">✓</template>
+                </span>
+              </button>
+              <button
+                class="prompt-option"
+                type="button"
+                :data-active="injectPrompt"
+                @click="toggleInjectPrompt"
+              >
+                <span class="prompt-option-copy">
+                  <span class="prompt-option-title">Attach room prompt</span>
+                  <span class="prompt-option-meta">Send the visible message normally and attach the stay-in-room agent prompt as hidden metadata.</span>
+                </span>
+                <span class="prompt-option-check">
+                  <template v-if="injectPrompt">✓</template>
+                </span>
+              </button>
+              <p class="prompt-help">Prompts stay out of the transcript. Injected visible messages get a small badge; auto-poll reminders stay hidden.</p>
+            </div>
+          </div>
+
           <span class="composer-sender-label">
             Sending as <strong>{{ senderName }}</strong>
           </span>
@@ -25,27 +72,144 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+
+const KEEP_POLLING_INTERVAL_MS = 20_000
+const PREFS_KEY = 'lac-prompt-prefs'
 
 const props = withDefaults(defineProps<{
   senderName?: string
   disabled?: boolean
+  roomIdentifier?: string
 }>(), {
   senderName: 'anonymous',
   disabled: false,
+  roomIdentifier: '',
 })
 
 const emit = defineEmits<{
-  send: [text: string]
+  send: [text: string, agentPromptKind: string | null]
 }>()
 
 const text = ref('')
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
+const menuEl = ref<HTMLDivElement | null>(null)
+const menuOpen = ref(false)
+const autoKeepPolling = ref(false)
+const injectPrompt = ref(false)
 
+let keepPollingTimer: ReturnType<typeof setInterval> | null = null
+let keepPollingInFlight = false
+
+// ── Prompt mode label ──
+const promptMode = computed(() => {
+  if (autoKeepPolling.value && injectPrompt.value) return 'auto+inject'
+  if (autoKeepPolling.value) return 'auto'
+  if (injectPrompt.value) return 'inject'
+  return 'off'
+})
+
+const promptLabel = computed(() => {
+  const labels: Record<string, string> = {
+    off: 'Inject',
+    auto: 'Auto poll',
+    inject: 'Inject on',
+    'auto+inject': 'Auto + inject',
+  }
+  return labels[promptMode.value] || 'Inject'
+})
+
+// ── Persistence ──
+function prefsKey(): string {
+  const room = props.roomIdentifier
+  return room ? `lac-prompt-prefs:${room}` : PREFS_KEY
+}
+
+function persistPrefs() {
+  try {
+    localStorage.setItem(prefsKey(), JSON.stringify({
+      autoKeepPolling: autoKeepPolling.value,
+      injectPrompt: injectPrompt.value,
+    }))
+  } catch { /* silent */ }
+}
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(prefsKey())
+    if (!raw) return
+    const saved = JSON.parse(raw)
+    autoKeepPolling.value = Boolean(saved.autoKeepPolling)
+    injectPrompt.value = Boolean(saved.injectPrompt)
+  } catch {
+    autoKeepPolling.value = false
+    injectPrompt.value = false
+  }
+}
+
+// ── Auto-poll loop ──
+async function sendAutoPollingPrompt() {
+  if (!props.roomIdentifier || keepPollingInFlight) return
+  keepPollingInFlight = true
+  try {
+    emit('send', '', 'auto')
+  } finally {
+    keepPollingInFlight = false
+  }
+}
+
+function startKeepPollingLoop(sendImmediately = true) {
+  stopKeepPollingLoop()
+  if (!autoKeepPolling.value || !props.roomIdentifier) return
+
+  if (sendImmediately) {
+    sendAutoPollingPrompt()
+  }
+
+  keepPollingTimer = setInterval(() => {
+    sendAutoPollingPrompt()
+  }, KEEP_POLLING_INTERVAL_MS)
+}
+
+function stopKeepPollingLoop() {
+  if (keepPollingTimer) {
+    clearInterval(keepPollingTimer)
+    keepPollingTimer = null
+  }
+}
+
+// ── Toggle handlers ──
+function toggleAutoKeepPolling() {
+  autoKeepPolling.value = !autoKeepPolling.value
+  persistPrefs()
+
+  if (autoKeepPolling.value) {
+    startKeepPollingLoop()
+  } else {
+    stopKeepPollingLoop()
+  }
+}
+
+function toggleInjectPrompt() {
+  injectPrompt.value = !injectPrompt.value
+  persistPrefs()
+}
+
+// ── Close menu on outside click ──
+function handleDocClick(e: MouseEvent) {
+  if (menuOpen.value && menuEl.value && !menuEl.value.contains(e.target as Node)) {
+    menuOpen.value = false
+  }
+}
+
+// ── Send ──
 function handleSend() {
   const trimmed = text.value.trim()
   if (!trimmed || props.disabled) return
-  emit('send', trimmed)
+
+  // Determine agent_prompt_kind for this message
+  const kind = injectPrompt.value ? 'inline' : null
+  emit('send', trimmed, kind)
   text.value = ''
   if (textareaEl.value) {
     textareaEl.value.style.height = 'auto'
@@ -59,8 +223,28 @@ function handleKeyDown(e: KeyboardEvent) {
   }
 }
 
+// ── Lifecycle ──
 onMounted(() => {
   textareaEl.value?.focus()
+  loadPrefs()
+  document.addEventListener('click', handleDocClick)
+  // Start auto-poll if it was persisted on
+  if (autoKeepPolling.value && props.roomIdentifier) {
+    startKeepPollingLoop(false)
+  }
+})
+
+onUnmounted(() => {
+  stopKeepPollingLoop()
+  document.removeEventListener('click', handleDocClick)
+})
+
+// Restart loop when room changes
+watch(() => props.roomIdentifier, (newId) => {
+  stopKeepPollingLoop()
+  if (newId && autoKeepPolling.value) {
+    startKeepPollingLoop(false)
+  }
 })
 </script>
 
@@ -97,6 +281,7 @@ onMounted(() => {
   font-size: 0.92rem;
   line-height: 1.55;
   color: var(--text, #fafafa);
+  font-family: inherit;
 }
 .message-textarea::placeholder {
   color: var(--muted, #71717a);
@@ -161,5 +346,120 @@ onMounted(() => {
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* ── Prompt menu ── */
+.prompt-menu {
+  position: relative;
+  display: inline-flex;
+}
+.prompt-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text, #fafafa);
+  font-size: 0.68rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 150ms ease;
+  white-space: nowrap;
+}
+.prompt-trigger:hover { background: rgba(255, 255, 255, 0.14); }
+.prompt-trigger svg {
+  width: 10px; height: 10px;
+  fill: none; stroke: currentColor;
+  stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round;
+  flex-shrink: 0; opacity: 0.6;
+}
+.prompt-trigger[data-mode="auto"] { background: rgba(245, 158, 11, 0.18); color: #fbbf24; }
+.prompt-trigger[data-mode="inject"] { background: rgba(56, 189, 248, 0.18); color: #7dd3fc; }
+.prompt-trigger[data-mode="auto+inject"] { background: rgba(52, 211, 153, 0.18); color: #6ee7b7; }
+
+/* Panel */
+.prompt-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  width: 260px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--bg-1, #1a1a2e);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.44);
+  z-index: 20;
+  animation: panel-in 120ms ease forwards;
+}
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.prompt-panel-header {
+  padding: 6px 10px 4px;
+}
+.prompt-panel-header strong {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted, #71717a);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.prompt-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms ease;
+  text-align: left;
+  color: inherit;
+  font-family: inherit;
+}
+.prompt-option + .prompt-option { margin-top: 2px; }
+.prompt-option:hover { background: rgba(255, 255, 255, 0.08); }
+.prompt-option[data-active="true"] { background: rgba(255, 255, 255, 0.06); }
+.prompt-option-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+}
+.prompt-option-title {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text, #fafafa);
+}
+.prompt-option-meta {
+  font-size: 0.66rem;
+  color: var(--muted, #71717a);
+  line-height: 1.3;
+}
+.prompt-option-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #34d399;
+}
+.prompt-help {
+  padding: 4px 10px 2px;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  color: var(--muted, #71717a);
+  opacity: 0.7;
 }
 </style>

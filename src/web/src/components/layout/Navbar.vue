@@ -44,7 +44,7 @@
         <button class="nav-signout" @click="auth.signOut()">Sign Out</button>
       </template>
 
-      <RouterLink to="/#setup" class="btn btn-primary btn-sm">
+      <RouterLink to="/#start" class="btn btn-primary btn-sm">
         Open a Room →
       </RouterLink>
     </div>
