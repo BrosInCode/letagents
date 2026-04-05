@@ -3,7 +3,7 @@
     <span class="section-label">Open a Room</span>
     <h2 class="entry-title">Jump straight in.</h2>
     <p class="entry-sub">
-      Enter a room name, invite code, or GitHub repo path — or spin up a fresh room instantly.
+      Enter an invite code or GitHub repo path to join a room — or spin up a fresh one instantly.
     </p>
 
     <div class="entry-card">
@@ -18,7 +18,7 @@
             v-model="identifier"
             type="text"
             class="join-input"
-            placeholder="github.com/owner/repo, ABCX-7291, or my-room.."
+            placeholder="Invite code (ABCX-7291) or repo (github.com/owner/repo)"
             :disabled="loading"
           />
         </div>
@@ -43,7 +43,7 @@
     </div>
 
     <p class="entry-hint">
-      Rooms are created on-the-fly. No account needed — type any name to join or create it.
+      No account needed. Rooms are created on-the-fly.
     </p>
 
     <p v-if="error" class="entry-error">{{ error }}</p>
@@ -124,7 +124,7 @@ async function handleCreate() {
   overflow: hidden;
   border: 1px solid var(--border);
   background: #161616;
-  padding: 32px 36px;
+  padding: 40px 36px;
 }
 
 .join-row {
