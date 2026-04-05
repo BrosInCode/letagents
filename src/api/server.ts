@@ -14,6 +14,7 @@ import {
   createTask,
   deleteSessionByToken,
   findTaskByPrUrl,
+  findTaskByWorkflowArtifactMatches,
   getAllProjects,
   getAgentIdentitiesForOwner,
   getGitHubAppInstallationById,
@@ -52,6 +53,7 @@ import {
   type OwnerTokenAccount,
   type Project,
   type SessionAccount,
+  type Task,
   type TaskStatus,
 } from "./db.js";
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
@@ -68,13 +70,18 @@ import {
   type GitHubWebhookRepository,
 } from "./github-app.js";
 import {
+  buildTaskWorkflowArtifactMatches,
   extractReferencedTaskId,
   formatRepoCheckRunEventMessage,
   formatRepoIssueCommentEventMessage,
   formatRepoIssueEventMessage,
   formatRepoPullRequestReviewEventMessage,
+  projectIssueEvent,
+  projectPullRequestEvent,
+  projectPullRequestReviewEvent,
   validateTaskWorkflowArtifactsInput,
   type RepoPullRequestRef,
+  type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
 import {
   buildGitHubAppInstallationUrl,
@@ -676,7 +683,16 @@ async function maybeLinkPullRequestToTask(
   pullRequest: RepoPullRequestRef,
   action: string
 ): Promise<string | null> {
-  let linkedTask = await findTaskByPrUrl(project.id, pullRequest.url);
+  let linkedTask =
+    (await findTaskByWorkflowArtifactMatches(
+      project.id,
+      buildTaskWorkflowArtifactMatches({
+        provider: "github",
+        kind: "pull_request",
+        url: pullRequest.url,
+        number: pullRequest.number,
+      })
+    )) ?? (await findTaskByPrUrl(project.id, pullRequest.url));
 
   if (!linkedTask) {
     const referencedTaskId = extractReferencedTaskId(pullRequest.title, pullRequest.body);
@@ -695,37 +711,151 @@ async function maybeLinkPullRequestToTask(
     })) ?? linkedTask;
   }
 
-  // Board projection: derive task state transitions from PR lifecycle events
-  const PRE_REVIEW_STATUSES = new Set<TaskStatus>(["assigned", "in_progress"]);
-  const MERGEABLE_STATUSES = new Set<TaskStatus>(["in_review", "in_progress", "assigned"]);
+  const projectedTaskState = projectPullRequestEvent({
+    action,
+    merged: Boolean(pullRequest.merged),
+    currentStatus: linkedTask.status,
+  });
 
-  if (action === "opened" || action === "ready_for_review") {
-    // PR opened or moved out of draft → task should be in_review
-    if (PRE_REVIEW_STATUSES.has(linkedTask.status)) {
-      const reviewTask = await updateTask(project.id, linkedTask.id, {
-        status: "in_review",
-        pr_url: pullRequest.url,
-      });
-      if (reviewTask) {
-        linkedTask = reviewTask;
-        await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(reviewTask));
-      }
-    }
-  } else if (action === "closed" && pullRequest.merged) {
-    // PR merged → task should move to merged
-    if (MERGEABLE_STATUSES.has(linkedTask.status)) {
-      const mergedTask = await updateTask(project.id, linkedTask.id, {
-        status: "merged",
-        pr_url: pullRequest.url,
-      });
-      if (mergedTask) {
-        linkedTask = mergedTask;
-        await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(mergedTask));
-      }
+  if (projectedTaskState) {
+    const nextTask = await updateTask(project.id, linkedTask.id, {
+      status: projectedTaskState.newStatus as TaskStatus,
+      pr_url: pullRequest.url,
+    });
+    if (nextTask) {
+      linkedTask = nextTask;
+      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
     }
   }
 
   return linkedTask.id;
+}
+
+async function resolveTaskByArtifactsOrReferences(
+  project: Project,
+  artifactMatches: TaskWorkflowArtifactMatch[],
+  ...fallbackTexts: Array<string | null | undefined>
+): Promise<Task | undefined> {
+  const artifactTask = await findTaskByWorkflowArtifactMatches(project.id, artifactMatches);
+  if (artifactTask) {
+    return artifactTask;
+  }
+
+  const referencedTaskId = extractReferencedTaskId(...fallbackTexts);
+  if (!referencedTaskId) {
+    return undefined;
+  }
+
+  return getTaskById(project.id, referencedTaskId);
+}
+
+function buildGitHubIssueArtifactMatches(input: {
+  issueNumber: number;
+  issueUrl: string;
+  isPullRequest?: boolean;
+}): TaskWorkflowArtifactMatch[] {
+  return buildTaskWorkflowArtifactMatches({
+    provider: "github",
+    kind: input.isPullRequest ? "pull_request" : "issue",
+    url: input.issueUrl,
+    number: input.issueNumber,
+  });
+}
+
+function buildGitHubPullRequestReviewArtifactMatches(input: {
+  pullRequestNumber: number;
+  pullRequestUrl: string;
+  reviewId: number;
+  reviewUrl: string;
+}): TaskWorkflowArtifactMatch[] {
+  return [
+    ...buildTaskWorkflowArtifactMatches({
+      provider: "github",
+      kind: "review",
+      id: String(input.reviewId),
+      url: input.reviewUrl,
+    }),
+    ...buildTaskWorkflowArtifactMatches({
+      provider: "github",
+      kind: "pull_request",
+      url: input.pullRequestUrl,
+      number: input.pullRequestNumber,
+    }),
+  ];
+}
+
+function buildGitHubCheckRunArtifactMatches(input: {
+  checkRunId: number;
+  checkRunName: string;
+  checkRunUrl: string;
+}): TaskWorkflowArtifactMatch[] {
+  return buildTaskWorkflowArtifactMatches({
+    provider: "github",
+    kind: "check_run",
+    id: String(input.checkRunId),
+    title: input.checkRunName,
+    url: input.checkRunUrl,
+  });
+}
+
+async function projectTaskStatusFromIssueEvent(
+  project: Project,
+  linkedTask: Task | undefined,
+  action: string
+): Promise<Task | undefined> {
+  if (!linkedTask) {
+    return undefined;
+  }
+
+  const projectedTaskState = projectIssueEvent({
+    action,
+    currentStatus: linkedTask.status,
+  });
+
+  if (!projectedTaskState) {
+    return linkedTask;
+  }
+
+  const nextTask = await updateTask(project.id, linkedTask.id, {
+    status: projectedTaskState.newStatus as TaskStatus,
+  });
+  if (nextTask) {
+    await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
+    return nextTask;
+  }
+
+  return linkedTask;
+}
+
+async function projectTaskStatusFromPullRequestReviewEvent(
+  project: Project,
+  linkedTask: Task | undefined,
+  action: string,
+  reviewState: string
+): Promise<Task | undefined> {
+  if (!linkedTask) {
+    return undefined;
+  }
+
+  const projectedTaskState = projectPullRequestReviewEvent({
+    action,
+    reviewState,
+    currentStatus: linkedTask.status,
+  });
+
+  if (!projectedTaskState) {
+    return linkedTask;
+  }
+
+  const nextTask = await updateTask(project.id, linkedTask.id, {
+    status: projectedTaskState.newStatus as TaskStatus,
+  });
+  if (nextTask) {
+    await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
+    return nextTask;
+  }
+
+  return linkedTask;
 }
 
 async function emitGitHubPullRequestEvent(
@@ -1060,21 +1190,17 @@ async function handleGitHubWebhookEvent(
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
-      const linkedTaskId = extractReferencedTaskId(payload.issue.title);
-
-      // Board projection: issue closed → transition linked task toward done
-      if (linkedTaskId && payload.action === "closed") {
-        const linkedTask = await getTaskById(project.id, linkedTaskId);
-        if (linkedTask) {
-          const CLOSEABLE_STATUSES = new Set<TaskStatus>(["merged", "in_review", "in_progress"]);
-          if (CLOSEABLE_STATUSES.has(linkedTask.status)) {
-            const doneTask = await updateTask(project.id, linkedTask.id, { status: "done" });
-            if (doneTask) {
-              await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(doneTask));
-            }
-          }
-        }
-      }
+      const linkedTask = await resolveTaskByArtifactsOrReferences(
+        project,
+        buildGitHubIssueArtifactMatches({
+          issueNumber: payload.issue.number,
+          issueUrl: payload.issue.html_url,
+          isPullRequest: Boolean(payload.issue.pull_request),
+        }),
+        payload.issue.title
+      );
+      const projectedTask = await projectTaskStatusFromIssueEvent(project, linkedTask, payload.action);
+      const linkedTaskId = projectedTask?.id ?? linkedTask?.id ?? null;
 
       const message = formatRepoIssueEventMessage({
         provider: "github",
@@ -1106,7 +1232,17 @@ async function handleGitHubWebhookEvent(
       // GitHub sends issue_comment for both real issues AND pull requests.
       // When the issue is actually a PR, issue.pull_request is present.
       const isPullRequest = !!payload.issue.pull_request;
-      const linkedTaskId = extractReferencedTaskId(payload.issue.title, payload.comment.body);
+      const linkedTask = await resolveTaskByArtifactsOrReferences(
+        project,
+        buildGitHubIssueArtifactMatches({
+          issueNumber: payload.issue.number,
+          issueUrl: payload.issue.html_url,
+          isPullRequest,
+        }),
+        payload.issue.title,
+        payload.comment.body
+      );
+      const linkedTaskId = linkedTask?.id ?? null;
       const message = formatRepoIssueCommentEventMessage({
         provider: "github",
         action: payload.action,
@@ -1138,18 +1274,24 @@ async function handleGitHubWebhookEvent(
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
-      const linkedTaskId = extractReferencedTaskId(payload.pull_request.title, payload.pull_request.body);
-
-      // Board projection: review changes_requested → block the task
-      if (linkedTaskId && payload.action === "submitted" && payload.review.state === "changes_requested") {
-        const linkedTask = await getTaskById(project.id, linkedTaskId);
-        if (linkedTask && linkedTask.status === "in_review") {
-          const blockedTask = await updateTask(project.id, linkedTask.id, { status: "blocked" });
-          if (blockedTask) {
-            await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(blockedTask));
-          }
-        }
-      }
+      const linkedTask = await resolveTaskByArtifactsOrReferences(
+        project,
+        buildGitHubPullRequestReviewArtifactMatches({
+          pullRequestNumber: payload.pull_request.number,
+          pullRequestUrl: payload.pull_request.html_url,
+          reviewId: payload.review.id,
+          reviewUrl: payload.review.html_url,
+        }),
+        payload.pull_request.title,
+        payload.pull_request.body
+      );
+      const projectedTask = await projectTaskStatusFromPullRequestReviewEvent(
+        project,
+        linkedTask,
+        payload.action,
+        payload.review.state
+      );
+      const linkedTaskId = projectedTask?.id ?? linkedTask?.id ?? null;
 
       const message = formatRepoPullRequestReviewEventMessage({
         provider: "github",
@@ -1181,6 +1323,14 @@ async function handleGitHubWebhookEvent(
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
+      const linkedTask = await findTaskByWorkflowArtifactMatches(
+        project.id,
+        buildGitHubCheckRunArtifactMatches({
+          checkRunId: payload.check_run.id,
+          checkRunName: payload.check_run.name,
+          checkRunUrl: payload.check_run.html_url,
+        })
+      );
       const message = formatRepoCheckRunEventMessage({
         provider: "github",
         action: payload.action,
@@ -1192,6 +1342,7 @@ async function handleGitHubWebhookEvent(
           url: payload.check_run.html_url,
           appName: payload.check_run.app?.name ?? null,
         },
+        linkedTaskId: linkedTask?.id ?? null,
       });
       if (!message) {
         return { status: "ignored", installationId, githubRepoId, roomId };

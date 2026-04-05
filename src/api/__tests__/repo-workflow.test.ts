@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildTaskWorkflowArtifactMatches,
   buildRepoRoomId,
   buildLegacyTaskWorkflowArtifacts,
   buildTaskWorkflowRefs,
@@ -219,6 +220,35 @@ test("buildTaskWorkflowRefs renders persisted issue and check artifacts", () => 
   );
 });
 
+test("buildTaskWorkflowArtifactMatches prioritizes stable artifact lookup fields", () => {
+  assert.deepEqual(
+    buildTaskWorkflowArtifactMatches({
+      provider: "github",
+      kind: "check_run",
+      id: "9001",
+      title: "ci / build",
+      url: "https://github.com/BrosInCode/letagents/actions/runs/9001",
+    }),
+    [
+      {
+        provider: "github",
+        kind: "check_run",
+        url: "https://github.com/BrosInCode/letagents/actions/runs/9001",
+      },
+      {
+        provider: "github",
+        kind: "check_run",
+        id: "9001",
+      },
+      {
+        provider: "github",
+        kind: "check_run",
+        title: "ci / build",
+      },
+    ]
+  );
+});
+
 test("validateTaskWorkflowArtifactsInput rejects unsupported keys", () => {
   assert.throws(
     () =>
@@ -412,6 +442,27 @@ test("formatRepoCheckRunEventMessage surfaces failures only", () => {
     checkRun: { name: "lint", status: "completed", conclusion: "failure", url: "https://example.com/check", appName: "CI" },
   });
   assert.ok(failMsg?.includes('Check "lint" (CI) failure'));
+});
+
+test("formatRepoCheckRunEventMessage includes linked task context when available", () => {
+  const message = formatRepoCheckRunEventMessage({
+    provider: "github",
+    action: "completed",
+    repositoryFullName: "brosincode/letagents",
+    linkedTaskId: "task_45",
+    checkRun: {
+      name: "lint",
+      status: "completed",
+      conclusion: "failure",
+      url: "https://example.com/check",
+      appName: "CI",
+    },
+  });
+
+  assert.equal(
+    message,
+    'Check "lint" (CI) failure in brosincode/letagents linked to task_45 https://example.com/check'
+  );
 });
 
 // ---------------------------------------------------------------------------
