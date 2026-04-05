@@ -1,8 +1,8 @@
 <template>
   <section id="start" class="section entry-section">
     <span class="section-label">Open a Room</span>
-    <h2 class="section-title">Jump straight in.</h2>
-    <p class="section-desc">
+    <h2 class="entry-title">Jump straight in.</h2>
+    <p class="entry-sub">
       Enter a room name, invite code, or GitHub repo path — or spin up a fresh room instantly.
     </p>
 
@@ -42,7 +42,9 @@
       </button>
     </div>
 
-    <p class="entry-hint">Rooms are created on-the-fly. No account needed — just pick a name and go.</p>
+    <p class="entry-hint">
+      Rooms are created on-the-fly. No account needed — just pick a name and go.
+    </p>
 
     <p v-if="error" class="entry-error">{{ error }}</p>
   </section>
@@ -94,20 +96,34 @@ async function handleCreate() {
 
 <style scoped>
 .entry-section {
-  text-align: center;
+  padding: 120px 40px;
+  max-width: var(--max-width);
+  margin: 0 auto;
 }
 
-.entry-section .section-desc {
-  margin: 0 auto var(--space-2xl);
+.entry-title {
+  font-size: 3rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  margin-bottom: var(--space-md);
+  color: var(--text);
+}
+
+.entry-sub {
+  font-size: 1.08rem;
+  color: var(--text-secondary);
+  max-width: 560px;
+  line-height: 1.7;
+  margin-bottom: var(--space-2xl);
 }
 
 .entry-card {
-  max-width: 560px;
-  margin: 0 auto;
-  padding: var(--space-xl);
-  border-radius: var(--radius-xl);
-  background: var(--bg-card);
+  border-radius: 28px;
+  overflow: hidden;
   border: 1px solid var(--border);
+  background: #161616;
+  padding: 24px 28px;
 }
 
 .join-row {
@@ -122,7 +138,7 @@ async function handleCreate() {
   align-items: center;
   gap: var(--space-sm);
   padding: 0 var(--space-md);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
   transition: border-color var(--duration-fast);
@@ -154,7 +170,7 @@ async function handleCreate() {
 
 .join-btn {
   padding: 12px 20px;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--bg);
@@ -201,7 +217,7 @@ async function handleCreate() {
   justify-content: center;
   gap: var(--space-xs);
   padding: 12px;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   font-size: 0.88rem;
   font-weight: 600;
   color: var(--text-secondary);
@@ -224,7 +240,7 @@ async function handleCreate() {
 
 .entry-hint {
   margin-top: var(--space-lg);
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   color: var(--text-tertiary);
 }
 
@@ -234,13 +250,15 @@ async function handleCreate() {
   color: #ef4444;
 }
 
+@media (max-width: 768px) {
+  .entry-section { padding: 80px 20px; }
+  .entry-title { font-size: 2.2rem; }
+  .entry-card { border-radius: 20px; padding: 16px 18px; }
+}
+
 @media (max-width: 480px) {
-  .join-row {
-    flex-direction: column;
-  }
-  .entry-card {
-    padding: var(--space-lg);
-    border-radius: var(--radius-lg);
-  }
+  .entry-section { padding: 64px 16px; }
+  .entry-card { border-radius: 16px; padding: 14px 16px; }
+  .join-row { flex-direction: column; }
 }
 </style>
