@@ -67,7 +67,11 @@ import {
   type GitHubWebhookPullRequest,
   type GitHubWebhookRepository,
 } from "./github-app.js";
-import { extractReferencedTaskId, type RepoPullRequestRef } from "./repo-workflow.js";
+import {
+  extractReferencedTaskId,
+  type RepoPullRequestRef,
+  type TaskWorkflowArtifact,
+} from "./repo-workflow.js";
 import {
   buildGitHubAppInstallationUrl,
   buildGitHubAppSetupRedirectPath,
@@ -2195,10 +2199,11 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     return;
   }
 
-  const { status, assignee, pr_url } = req.body as {
+  const { status, assignee, pr_url, workflow_artifacts } = req.body as {
     status?: TaskStatus;
     assignee?: string;
     pr_url?: string;
+    workflow_artifacts?: TaskWorkflowArtifact[];
   };
 
   try {
@@ -2209,7 +2214,12 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       }
     }
 
-    const updated = await updateTask(projectId, taskId, { status, assignee, pr_url });
+    const updated = await updateTask(projectId, taskId, {
+      status,
+      assignee,
+      pr_url,
+      workflow_artifacts,
+    });
     if (updated && status && status !== task.status) {
       await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
     }
@@ -2583,10 +2593,11 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     return;
   }
 
-  const { status, assignee, pr_url } = req.body as {
+  const { status, assignee, pr_url, workflow_artifacts } = req.body as {
     status?: TaskStatus;
     assignee?: string;
     pr_url?: string;
+    workflow_artifacts?: TaskWorkflowArtifact[];
   };
 
   try {
@@ -2595,7 +2606,12 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       if (!(await requireAdmin(req, res, project))) return;
     }
 
-    const updated = await updateTask(project.id, taskId, { status, assignee, pr_url });
+    const updated = await updateTask(project.id, taskId, {
+      status,
+      assignee,
+      pr_url,
+      workflow_artifacts,
+    });
     if (updated && status && status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }

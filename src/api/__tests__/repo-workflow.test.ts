@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   buildRepoRoomId,
+  buildLegacyTaskWorkflowArtifacts,
   buildTaskWorkflowRefs,
   extractReferencedTaskId,
   formatRepoPullRequestEventMessage,
   formatRepoRepositoryEventMessage,
+  normalizeTaskWorkflowArtifacts,
   parseRepoRoomName,
 } from "../repo-workflow.js";
 
@@ -128,5 +130,74 @@ test("buildTaskWorkflowRefs derives merge request refs from GitLab URLs", () => 
       label: "MR !14",
       url: "https://gitlab.com/TeamAlpha/platform/LetAgents/-/merge_requests/14",
     }]
+  );
+});
+
+test("buildLegacyTaskWorkflowArtifacts derives pull request artifacts from GitHub URLs", () => {
+  assert.deepEqual(
+    buildLegacyTaskWorkflowArtifacts({
+      prUrl: "https://github.com/BrosInCode/letagents/pull/107",
+    }),
+    [{
+      provider: "github",
+      kind: "pull_request",
+      number: 107,
+      url: "https://github.com/BrosInCode/letagents/pull/107",
+    }]
+  );
+});
+
+test("normalizeTaskWorkflowArtifacts prefers persisted artifacts over pr_url backfill", () => {
+  assert.deepEqual(
+    normalizeTaskWorkflowArtifacts({
+      artifacts: [{
+        provider: "github",
+        kind: "issue",
+        number: 42,
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      }],
+      prUrl: "https://github.com/BrosInCode/letagents/pull/107",
+    }),
+    [{
+      provider: "github",
+      kind: "issue",
+      number: 42,
+      url: "https://github.com/BrosInCode/letagents/issues/42",
+    }]
+  );
+});
+
+test("buildTaskWorkflowRefs renders persisted issue and check artifacts", () => {
+  assert.deepEqual(
+    buildTaskWorkflowRefs({
+      artifacts: [
+        {
+          provider: "github",
+          kind: "issue",
+          number: 42,
+          url: "https://github.com/BrosInCode/letagents/issues/42",
+        },
+        {
+          provider: "github",
+          kind: "check_run",
+          title: "ci / build",
+          url: "https://github.com/BrosInCode/letagents/actions/runs/123",
+        },
+      ],
+    }),
+    [
+      {
+        provider: "github",
+        kind: "issue",
+        label: "Issue #42",
+        url: "https://github.com/BrosInCode/letagents/issues/42",
+      },
+      {
+        provider: "github",
+        kind: "check_run",
+        label: "Check ci / build",
+        url: "https://github.com/BrosInCode/letagents/actions/runs/123",
+      },
+    ]
   );
 });

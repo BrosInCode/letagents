@@ -33,8 +33,28 @@ export interface RepoPullRequestRef {
   mergedByLogin?: string | null;
 }
 
-export type TaskWorkflowRefKind = "pull_request" | "merge_request";
 export type TaskWorkflowRefProvider = RepoWorkflowProvider | "unknown";
+export type TaskWorkflowArtifactKind =
+  | "issue"
+  | "branch"
+  | "pull_request"
+  | "merge_request"
+  | "review"
+  | "check_run"
+  | "merge";
+export type TaskWorkflowRefKind = TaskWorkflowArtifactKind;
+
+export interface TaskWorkflowArtifact {
+  provider: TaskWorkflowRefProvider;
+  kind: TaskWorkflowArtifactKind;
+  id?: string | null;
+  number?: number | null;
+  title?: string | null;
+  url?: string | null;
+  ref?: string | null;
+  state?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
 
 export interface TaskWorkflowRef {
   provider: TaskWorkflowRefProvider;
@@ -160,9 +180,30 @@ export function formatRepoRepositoryEventMessage(input: {
   }
 }
 
-export function buildTaskWorkflowRefs(input: {
+function buildTaskWorkflowRefLabel(artifact: TaskWorkflowArtifact): string {
+  switch (artifact.kind) {
+    case "issue":
+      return artifact.number ? `Issue #${artifact.number}` : "Issue";
+    case "branch":
+      return artifact.ref ? `Branch ${artifact.ref}` : "Branch";
+    case "pull_request":
+      return artifact.number ? `PR #${artifact.number}` : "PR";
+    case "merge_request":
+      return artifact.number ? `MR !${artifact.number}` : "MR";
+    case "review":
+      return "Review";
+    case "check_run":
+      return artifact.title ? `Check ${artifact.title}` : "Check";
+    case "merge":
+      return "Merge";
+    default:
+      return "Link";
+  }
+}
+
+export function buildLegacyTaskWorkflowArtifacts(input: {
   prUrl?: string | null;
-}): TaskWorkflowRef[] {
+}): TaskWorkflowArtifact[] {
   if (!input.prUrl) {
     return [];
   }
@@ -178,7 +219,7 @@ export function buildTaskWorkflowRefs(input: {
         return [{
           provider: "github",
           kind: "pull_request",
-          label: `PR #${match[1]}`,
+          number: Number(match[1]),
           url: input.prUrl,
         }];
       }
@@ -190,7 +231,7 @@ export function buildTaskWorkflowRefs(input: {
         return [{
           provider: "gitlab",
           kind: "merge_request",
-          label: `MR !${match[1]}`,
+          number: Number(match[1]),
           url: input.prUrl,
         }];
       }
@@ -202,19 +243,43 @@ export function buildTaskWorkflowRefs(input: {
         return [{
           provider: "bitbucket",
           kind: "pull_request",
-          label: `PR #${match[1]}`,
+          number: Number(match[1]),
           url: input.prUrl,
         }];
       }
     }
   } catch {
-    // Fall through to a generic link when the stored URL is not parseable.
+    // Fall through to a generic artifact when the stored URL is not parseable.
   }
 
   return [{
     provider: "unknown",
     kind: "pull_request",
-    label: "Review",
     url: input.prUrl,
   }];
+}
+
+export function normalizeTaskWorkflowArtifacts(input: {
+  artifacts?: TaskWorkflowArtifact[] | null;
+  prUrl?: string | null;
+}): TaskWorkflowArtifact[] {
+  if (input.artifacts?.length) {
+    return input.artifacts;
+  }
+
+  return buildLegacyTaskWorkflowArtifacts({ prUrl: input.prUrl });
+}
+
+export function buildTaskWorkflowRefs(input: {
+  artifacts?: TaskWorkflowArtifact[] | null;
+  prUrl?: string | null;
+}): TaskWorkflowRef[] {
+  return normalizeTaskWorkflowArtifacts(input)
+    .filter((artifact): artifact is TaskWorkflowArtifact & { url: string } => Boolean(artifact.url))
+    .map((artifact) => ({
+      provider: artifact.provider,
+      kind: artifact.kind,
+      label: buildTaskWorkflowRefLabel(artifact),
+      url: artifact.url,
+    }));
 }

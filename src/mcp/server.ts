@@ -2056,10 +2056,26 @@ server.tool(
       .optional()
       .describe("New assignee for the task. Defaults to the current agent when status=assigned."),
     pr_url: z.string().optional().describe("PR URL to link to the task"),
+    workflow_artifacts: z
+      .array(
+        z.object({
+          provider: z.enum(["github", "gitlab", "bitbucket", "unknown"]),
+          kind: z.enum(["issue", "branch", "pull_request", "merge_request", "review", "check_run", "merge"]),
+          id: z.string().nullable().optional(),
+          number: z.number().int().nullable().optional(),
+          title: z.string().nullable().optional(),
+          url: z.string().nullable().optional(),
+          ref: z.string().nullable().optional(),
+          state: z.string().nullable().optional(),
+          metadata: z.record(z.string(), z.unknown()).nullable().optional(),
+        })
+      )
+      .optional()
+      .describe("Persisted provider-neutral task workflow artifacts to attach to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ task_id, status, assignee, pr_url, room_id, conversation_id }) => {
+  async ({ task_id, status, assignee, pr_url, workflow_artifacts, room_id, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2084,6 +2100,7 @@ server.tool(
             status,
             assignee: assignee ?? identity?.actor_label,
             pr_url,
+            workflow_artifacts,
           }),
         },
       });
