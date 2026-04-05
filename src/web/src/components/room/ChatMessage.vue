@@ -44,8 +44,9 @@
           <time>{{ formattedTime }}</time>
         </div>
       </div>
-      <div class="message-bubble" :style="{ '--sender-color': senderColor }">
-        <div class="md-content" v-html="renderedContent" />
+      <div class="message-bubble" :class="{ 'github-message-bubble': githubEvent }" :style="{ '--sender-color': senderColor }">
+        <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
+        <div v-else class="md-content" v-html="renderedContent" />
       </div>
     </div>
   </div>
@@ -53,6 +54,8 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import GitHubEventCard from './GitHubEventCard.vue'
+import { parseGitHubEventPresentation } from './githubEventMessage'
 import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection } from '@/composables/useRoom'
 
 const props = defineProps<{
@@ -67,6 +70,7 @@ const isSystem = computed(() => {
 })
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
+const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
 
 // Prefer the rich agent_identity from the API, fall back to sender-string parsing
 const ideLabel = computed(() => {
@@ -88,6 +92,7 @@ const ideBadgeClass = computed(() => {
 const provenanceBadge = computed(() => {
   if (isSystem.value) return { label: 'system', class: 'system' }
   if (isHumanSender(props.message.sender, props.message.source)) return { label: 'human', class: 'human' }
+  if (props.message.source === 'github') return { label: 'github', class: 'github' }
   if (props.message.source === 'agent') return { label: 'agent', class: 'agent' }
   return null
 })
@@ -211,6 +216,11 @@ const renderedContent = computed(() => {
   max-width: min(100%, 780px);
 }
 
+.message-bubble.github-message-bubble {
+  border-left: none;
+  padding-left: 0;
+}
+
 .message-bubble :deep(.md-content) { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }
 .message-bubble :deep(.md-content) p { margin: 0 0 0.4em; }
 .message-bubble :deep(.md-content) p:last-child { margin-bottom: 0; }
@@ -240,6 +250,7 @@ const renderedContent = computed(() => {
 }
 .provenance-badge.human { background: rgba(251,146,60,0.1); color: #fb923c; }
 .provenance-badge.agent { background: rgba(96,165,250,0.1); color: #60a5fa; }
+.provenance-badge.github { background: rgba(167,139,250,0.14); color: #c4b5fd; }
 .provenance-badge.system { background: var(--surface, #18181b); color: var(--muted, #71717a); }
 
 .prompt-injection-badge {

@@ -37,8 +37,9 @@
           <time>{{ formattedTime }}</time>
         </div>
       </div>
-      <div class="message-bubble" :style="{ '--sender-color': senderColor }">
-        <div class="md-content" v-html="renderedContent" />
+      <div class="message-bubble" :class="{ 'github-message-bubble': githubEvent }" :style="{ '--sender-color': senderColor }">
+        <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
+        <div v-else class="md-content" v-html="renderedContent" />
       </div>
     </div>
   </div>
@@ -46,6 +47,8 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import GitHubEventCard from './GitHubEventCard.vue'
+import { parseGitHubEventPresentation } from './githubEventMessage'
 
 export interface MessageData {
   id: string
@@ -78,6 +81,7 @@ const provenanceLabel = computed(() => {
 })
 const ideBadge = computed(() => props.message.ideBadge || '')
 const ideNormalized = computed(() => (ideBadge.value || '').toLowerCase())
+const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
 
 const formattedTime = computed(() => {
   try {
@@ -177,6 +181,11 @@ const renderedContent = computed(() => {
   padding: 2px 0 2px 12px;
   max-width: min(100%, 780px);
 }
+
+.message-bubble.github-message-bubble {
+  border-left: none;
+  padding-left: 0;
+}
 .md-content { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }
 .md-content :deep(a) { color: #60a5fa; text-decoration: none; word-break: break-all; }
 .md-content :deep(a:hover) { text-decoration: underline; }
@@ -195,6 +204,7 @@ const renderedContent = computed(() => {
 }
 .provenance-badge.human { background: rgba(251,146,60,0.1); color: #fb923c; }
 .provenance-badge.agent { background: rgba(96,165,250,0.1); color: #60a5fa; }
+.provenance-badge.github { background: rgba(167,139,250,0.14); color: #c4b5fd; }
 .provenance-badge.system { background: var(--surface, #18181b); color: var(--muted, #71717a); }
 .provenance-badge.browser { background: rgba(251,146,60,0.1); color: #fb923c; }
 
