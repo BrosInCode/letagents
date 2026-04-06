@@ -420,15 +420,38 @@
         margin-left: auto;
       }
       .reply-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
         border: none;
+        border-radius: 999px;
         background: transparent;
         color: var(--muted);
-        font-size: 0.68rem;
-        font-weight: 600;
         cursor: pointer;
         padding: 0;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(2px);
+        transition: opacity 150ms ease, transform 150ms ease, background 150ms ease, color 150ms ease;
       }
-      .reply-action:hover { color: var(--text); }
+      .reply-action svg {
+        width: 14px;
+        height: 14px;
+      }
+      .message:hover .reply-action,
+      .message:focus-within .reply-action {
+        opacity: 1;
+        pointer-events: auto;
+        transform: none;
+      }
+      .reply-action:hover,
+      .reply-action:focus-visible {
+        color: var(--text);
+        background: color-mix(in srgb, var(--surface) 88%, transparent);
+        outline: none;
+      }
       .message-meta time { font-size: 0.68rem; color: var(--muted); }
       .prompt-injection-badge {
         display: inline-flex;
@@ -2084,7 +2107,12 @@
                   ${eventBadge}
                 </div>
                 <div class="message-meta-tail">
-                  <button class="reply-action" type="button" data-reply-id="${escapeHtml(message.id)}">Reply</button>
+                  <button class="reply-action" type="button" data-reply-id="${escapeHtml(message.id)}" aria-label="Reply to message" title="Reply">
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path d="M6.5 4.5L2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path>
+                      <path d="M3 8h5.5c2.485 0 4.5 2.015 4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path>
+                    </svg>
+                  </button>
                   ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
                   ${hasInlinePromptInjection(message) ? renderPromptInjectionBadge() : ""}
                   ${showProvenanceBadge ? `<span class="provenance-badge ${provenance}">${provenance}</span>` : ""}

@@ -35,8 +35,11 @@
           </span>
         </div>
         <div class="message-meta-tail">
-          <button class="reply-action" type="button" @click="emit('reply', message)">
-            Reply
+          <button class="reply-action" type="button" aria-label="Reply to message" title="Reply" @click="emit('reply', message)">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M6.5 4.5L2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3 8h5.5c2.485 0 4.5 2.015 4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
           </button>
           <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.class">
             {{ provenanceBadge.label }}
@@ -204,16 +207,37 @@ const renderedContent = computed(() => {
   margin-left: auto;
 }
 .reply-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   border: none;
+  border-radius: 999px;
   background: transparent;
   color: var(--muted, #71717a);
-  font-size: 0.68rem;
-  font-weight: 600;
   cursor: pointer;
   padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-.reply-action:hover {
+.reply-action svg {
+  width: 14px;
+  height: 14px;
+}
+.message:hover .reply-action,
+.message:focus-within .reply-action {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+.reply-action:hover,
+.reply-action:focus-visible {
+  background: color-mix(in srgb, var(--surface, #18181b) 88%, transparent);
   color: var(--text, #fafafa);
+  outline: none;
 }
 .message-meta time { font-size: 0.68rem; color: var(--muted, #71717a); }
 
