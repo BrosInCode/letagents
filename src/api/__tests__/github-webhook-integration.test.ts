@@ -372,3 +372,261 @@ test(
     ));
   }
 );
+
+test(
+  "pull_request_review approved keeps an in_review task in in_review through the real webhook route",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const task = await createTask(room.id, "Approved review coverage", "OliveWolf");
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/204";
+    await updateTask(room.id, task.id, {
+      status: "in_review",
+      pr_url: pullRequestUrl,
+    });
+
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-review-approved",
+      eventName: "pull_request_review",
+      payload: {
+        action: "submitted",
+        repository: buildRepositoryPayload(),
+        sender: { login: "approver" },
+        pull_request: {
+          number: 204,
+          title: `${task.id}: approved review integration coverage`,
+          body: "exercise approved review path",
+          html_url: pullRequestUrl,
+        },
+        review: {
+          id: 99,
+          state: "approved",
+          html_url: `${pullRequestUrl}#pullrequestreview-99`,
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const updatedTask = await getTaskById(room.id, task.id);
+    assert.equal(updatedTask?.status, "in_review", "approved review should NOT change task status from in_review");
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("approved") &&
+      message.text.includes("PR #204")
+    ));
+  }
+);
+
+test(
+  "pull_request closed without merge does not transition task to merged",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const task = await createTask(room.id, "Close without merge coverage", "OliveWolf");
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/205";
+    await updateTask(room.id, task.id, {
+      status: "in_review",
+      pr_url: pullRequestUrl,
+    });
+
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-closed-no-merge",
+      eventName: "pull_request",
+      payload: {
+        action: "closed",
+        repository: buildRepositoryPayload(),
+        sender: { login: "octocat" },
+        pull_request: {
+          number: 205,
+          title: `${task.id}: close without merge coverage`,
+          body: "this PR was closed, not merged",
+          html_url: pullRequestUrl,
+          merged: false,
+          user: { login: "octocat" },
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const updatedTask = await getTaskById(room.id, task.id);
+    assert.notEqual(updatedTask?.status, "merged", "closed-without-merge should NOT move task to merged");
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #205")
+    ));
+  }
+);
+
+test(
+  "issues opened broadcasts a room message through the real webhook route",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !getMessages) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-issue-opened",
+      eventName: "issues",
+      payload: {
+        action: "opened",
+        repository: buildRepositoryPayload(),
+        sender: { login: "issuebot" },
+        issue: {
+          number: 42,
+          title: "Something is broken",
+          body: "Please fix this ASAP",
+          html_url: "https://github.com/BrosInCode/letagents/issues/42",
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("#42") &&
+      message.text.includes("issuebot")
+    ), "issue opened event should produce a room message mentioning issue number and sender");
+  }
+);
+
+test(
+  "issue_comment created broadcasts a room message through the real webhook route",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !getMessages) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-issue-comment",
+      eventName: "issue_comment",
+      payload: {
+        action: "created",
+        repository: buildRepositoryPayload(),
+        sender: { login: "commenter" },
+        issue: {
+          number: 42,
+          title: "Something is broken",
+          html_url: "https://github.com/BrosInCode/letagents/issues/42",
+        },
+        comment: {
+          body: "I can reproduce this on my machine",
+          html_url: "https://github.com/BrosInCode/letagents/issues/42#issuecomment-1",
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("commenter") &&
+      message.text.includes("#42")
+    ), "issue_comment event should produce a room message mentioning commenter and issue number");
+  }
+);
+
+test(
+  "check_run completed broadcasts a room message through the real webhook route",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !getMessages) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-check-run",
+      eventName: "check_run",
+      payload: {
+        action: "completed",
+        repository: buildRepositoryPayload(),
+        sender: { login: "github-actions[bot]" },
+        check_run: {
+          id: 12345,
+          name: "CI / build-and-test",
+          status: "completed",
+          conclusion: "success",
+          html_url: "https://github.com/BrosInCode/letagents/runs/12345",
+          app: { name: "GitHub Actions" },
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("CI / build-and-test")
+    ), "check_run event should produce a room message mentioning the check name");
+  }
+);
