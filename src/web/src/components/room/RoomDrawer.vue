@@ -88,7 +88,7 @@
       </div>
 
       <!-- GitHub Integration -->
-      <div v-if="room" class="drawer-section">
+      <div v-if="room && !ghLoading && ghStatus" class="drawer-section">
         <div class="drawer-section-title">
           <h2>GitHub</h2>
           <span>integration</span>
@@ -308,7 +308,7 @@ async function installGitHubApp() {
     }
     const data = await res.json()
     if (data.install_url) {
-      window.open(data.install_url, '_blank', 'noopener')
+      window.location.assign(data.install_url)
     }
   } catch {
     ghError.value = 'Network error'
