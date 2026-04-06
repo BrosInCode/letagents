@@ -479,7 +479,7 @@ test(
     assert.equal(result.status, "processed");
 
     const updatedTask = await getTaskById(room.id, task.id);
-    assert.notEqual(updatedTask?.status, "merged", "closed-without-merge should NOT move task to merged");
+    assert.equal(updatedTask?.status, "in_review", "closed-without-merge should leave task status unchanged at in_review");
 
     const messages = (await getMessages(room.id)).messages;
     assert.ok(messages.some((message) =>
