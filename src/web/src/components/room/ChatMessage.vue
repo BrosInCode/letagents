@@ -1,5 +1,5 @@
 <template>
-  <div class="message" :class="{ 'system-message': isSystem }">
+  <div class="message" :class="{ 'system-message': isSystem }" :data-msg-id="message.id">
     <div class="message-avatar" :style="{ '--sender-color': senderColor }" />
     <div class="message-body">
       <div class="message-meta">
@@ -51,10 +51,15 @@
         </div>
       </div>
       <div class="message-bubble" :class="{ 'github-message-bubble': githubEvent }" :style="{ '--sender-color': senderColor }">
-        <div v-if="message.reply_to" class="reply-preview">
+        <button
+          v-if="message.reply_to"
+          class="reply-preview"
+          type="button"
+          @click="emit('scrollToReply', message.reply_to.id)"
+        >
           <span class="reply-preview-label">Replying to {{ replyDisplayName }}</span>
           <span class="reply-preview-text">{{ replyPreviewText }}</span>
-        </div>
+        </button>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
         <div v-else class="md-content" v-html="renderedContent" />
       </div>
@@ -73,6 +78,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
+  scrollToReply: [messageId: string]
 }>()
 
 const identity = computed(() => parseAgentIdentity(props.message.sender))
@@ -284,6 +290,13 @@ const renderedContent = computed(() => {
   border-left: 2px solid color-mix(in srgb, var(--sender-color, #71717a) 50%, transparent);
   background: color-mix(in srgb, var(--surface, #18181b) 82%, transparent);
   border-radius: 0 10px 10px 0;
+  width: 100%;
+  text-align: left;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .reply-preview-label {
@@ -298,6 +311,15 @@ const renderedContent = computed(() => {
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.reply-preview:hover,
+.reply-preview:focus-visible {
+  background: color-mix(in srgb, var(--surface, #18181b) 94%, var(--sender-color, #71717a) 6%);
+  border-left-color: var(--sender-color, #71717a);
+  outline: none;
+}
+.message.jump-target .message-bubble {
+  border-left-color: color-mix(in srgb, var(--sender-color, #71717a) 85%, white 15%);
 }
 
 .message-bubble :deep(.md-content) { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }

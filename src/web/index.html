@@ -526,6 +526,13 @@
         border-left: 2px solid color-mix(in srgb, var(--sender-color, var(--sender-default)) 50%, transparent);
         background: color-mix(in srgb, var(--surface) 82%, transparent);
         border-radius: 0 10px 10px 0;
+        width: 100%;
+        text-align: left;
+        border-top: none;
+        border-right: none;
+        border-bottom: none;
+        cursor: pointer;
+        transition: background 150ms ease, border-color 150ms ease;
       }
       .reply-preview-label {
         font-size: 0.68rem;
@@ -538,6 +545,15 @@
         line-height: 1.4;
         white-space: pre-wrap;
         word-break: break-word;
+      }
+      .reply-preview:hover,
+      .reply-preview:focus-visible {
+        background: color-mix(in srgb, var(--surface) 94%, var(--sender-color, var(--sender-default)) 6%);
+        border-left-color: var(--sender-color, var(--sender-default));
+        outline: none;
+      }
+      .message.jump-target .message-bubble {
+        border-left-color: color-mix(in srgb, var(--sender-color, var(--sender-default)) 85%, white 15%);
       }
 
       /* Provenance badge — understated */
@@ -1467,10 +1483,10 @@
           return "";
         }
         return `
-          <div class="reply-preview">
+          <button class="reply-preview" type="button" data-scroll-to-msg-id="${escapeHtml(reply.id)}" aria-label="Jump to original message">
             <span class="reply-preview-label">Replying to ${escapeHtml(getReplyDisplayName(reply))}</span>
             <span class="reply-preview-text">${escapeHtml(getReplyPreviewText(reply))}</span>
-          </div>
+          </button>
         `;
       }
 
@@ -1979,6 +1995,21 @@
           _unreadMessageIds.length = 0;
           updateNewMessagesPill();
         }
+      }
+
+      function scrollToMessageById(messageId) {
+        if (!messageId) {
+          return;
+        }
+        const target = elements.messages.querySelector(`[data-msg-id="${messageId}"]`);
+        if (!target) {
+          return;
+        }
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.classList.add("jump-target");
+        window.setTimeout(() => {
+          target.classList.remove("jump-target");
+        }, 1600);
       }
 
       function updateOwnerLegend(renderableMessages = getRenderableMessages()) {
@@ -2871,6 +2902,12 @@
       elements.messages.addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target : null;
         if (!target) {
+          return;
+        }
+        const jumpButton = target.closest("[data-scroll-to-msg-id]");
+        if (jumpButton) {
+          const originalMessageId = jumpButton.getAttribute("data-scroll-to-msg-id");
+          scrollToMessageById(originalMessageId);
           return;
         }
         const replyButton = target.closest("[data-reply-id]");

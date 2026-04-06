@@ -8,6 +8,7 @@
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
+        @scrollToReply="scrollToMessage"
       />
     </div>
     <button
@@ -78,6 +79,17 @@ function scrollToBottom() {
   if (!messagesEl.value) return
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
   unreadCount.value = 0
+}
+
+function scrollToMessage(messageId: string) {
+  if (!messagesEl.value || !messageId) return
+  const target = messagesEl.value.querySelector(`[data-msg-id="${messageId}"]`) as HTMLElement | null
+  if (!target) return
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  target.classList.add('jump-target')
+  window.setTimeout(() => {
+    target.classList.remove('jump-target')
+  }, 1600)
 }
 
 // Scroll to first match when search changes
