@@ -419,6 +419,16 @@
         display: inline-flex; align-items: center; gap: 5px;
         margin-left: auto;
       }
+      .reply-action {
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.68rem;
+        font-weight: 600;
+        cursor: pointer;
+        padding: 0;
+      }
+      .reply-action:hover { color: var(--text); }
       .message-meta time { font-size: 0.68rem; color: var(--muted); }
       .prompt-injection-badge {
         display: inline-flex;
@@ -484,6 +494,28 @@
         border-left: 2px solid var(--line); color: var(--muted);
       }
       .message-bubble .md-content strong { font-weight: 700; }
+      .reply-preview {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        margin-bottom: 10px;
+        padding: 8px 10px;
+        border-left: 2px solid color-mix(in srgb, var(--sender-color, var(--sender-default)) 50%, transparent);
+        background: color-mix(in srgb, var(--surface) 82%, transparent);
+        border-radius: 0 10px 10px 0;
+      }
+      .reply-preview-label {
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: var(--text);
+      }
+      .reply-preview-text {
+        font-size: 0.78rem;
+        color: var(--muted);
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
 
       /* Provenance badge — understated */
       .provenance-badge {
@@ -539,6 +571,43 @@
       [data-theme="light"] .composer-card:focus-within {
         box-shadow: 0 0 0 3px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.08);
       }
+      .reply-draft {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px 8px;
+        border-bottom: 1px solid var(--line);
+        background: color-mix(in srgb, var(--surface) 72%, transparent);
+      }
+      .reply-draft.hidden { display: none; }
+      .reply-draft-copy {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 0;
+      }
+      .reply-draft-copy strong {
+        font-size: 0.74rem;
+        color: var(--text);
+      }
+      .reply-draft-copy span {
+        font-size: 0.78rem;
+        color: var(--muted);
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .reply-draft-clear {
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.75rem;
+        font-weight: 600;
+        cursor: pointer;
+        padding: 0;
+      }
+      .reply-draft-clear:hover { color: var(--text); }
 
       .composer .message-textarea {
         width: 100%;
@@ -1234,6 +1303,13 @@
           <span class="composer-sender-label" id="senderLabel">Sending as <strong>anonymous</strong></span>
         </div>
         <div class="composer-card">
+          <div class="reply-draft hidden" id="replyDraft">
+            <div class="reply-draft-copy">
+              <strong id="replyDraftLabel">Replying to unknown</strong>
+              <span id="replyDraftText"></span>
+            </div>
+            <button class="reply-draft-clear" id="replyDraftClear" type="button">Cancel</button>
+          </div>
           <textarea
             class="message-textarea"
             id="messageInput"
@@ -1286,6 +1362,7 @@
         keepPollingTimer: null,
         keepPollingInFlight: false,
         showGithubEvents: true,
+        replyToMessage: null,
       };
 
       const GITHUB_ICON_SVG = '<svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>';
@@ -1316,6 +1393,64 @@
         return isInviteCode(code) ? String(code).toUpperCase() : String(code);
       }
 
+      function getReplyPreviewText(reply) {
+        const text = String(reply?.text || "").replace(/\s+/g, " ").trim();
+        return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+      }
+
+      function getReplyDisplayName(reply) {
+        if (!reply || !reply.sender) {
+          return "unknown";
+        }
+        const parsedIdentity = parseAgentIdentity(reply.sender);
+        return parsedIdentity?.displayName || String(reply.sender).trim() || "unknown";
+      }
+
+      function syncReplyDraftUi() {
+        const reply = state.replyToMessage;
+        const active = Boolean(reply && reply.id);
+        elements.replyDraft.classList.toggle("hidden", !active);
+        if (!active) {
+          elements.replyDraftLabel.textContent = "Replying to unknown";
+          elements.replyDraftText.textContent = "";
+          return;
+        }
+        elements.replyDraftLabel.textContent = `Replying to ${getReplyDisplayName(reply)}`;
+        elements.replyDraftText.textContent = getReplyPreviewText(reply);
+      }
+
+      function setReplyDraft(message) {
+        if (!message || !message.id) {
+          state.replyToMessage = null;
+        } else {
+          state.replyToMessage = {
+            id: message.id,
+            sender: message.sender,
+            text: message.text,
+            source: message.source || null,
+            timestamp: message.timestamp,
+          };
+        }
+        syncReplyDraftUi();
+      }
+
+      function clearReplyDraft() {
+        state.replyToMessage = null;
+        syncReplyDraftUi();
+      }
+
+      function renderReplyPreviewHtml(reply) {
+        if (!reply || !reply.id) {
+          return "";
+        }
+        return `
+          <div class="reply-preview">
+            <span class="reply-preview-label">Replying to ${escapeHtml(getReplyDisplayName(reply))}</span>
+            <span class="reply-preview-text">${escapeHtml(getReplyPreviewText(reply))}</span>
+          </div>
+        `;
+      }
+
       const elements = {
         chatTitle: document.getElementById("chatTitle"),
         chatSubtitle: document.getElementById("chatSubtitle"),
@@ -1338,6 +1473,10 @@
         autoKeepPollingOptionState: document.getElementById("autoKeepPollingOptionState"),
         injectPromptOption: document.getElementById("injectPromptOption"),
         injectPromptOptionState: document.getElementById("injectPromptOptionState"),
+        replyDraft: document.getElementById("replyDraft"),
+        replyDraftLabel: document.getElementById("replyDraftLabel"),
+        replyDraftText: document.getElementById("replyDraftText"),
+        replyDraftClear: document.getElementById("replyDraftClear"),
         shareCardTitle: document.getElementById("shareCardTitle"),
         statusText: document.getElementById("statusText"),
         composerForm: document.getElementById("composerForm"),
@@ -1945,6 +2084,7 @@
                   ${eventBadge}
                 </div>
                 <div class="message-meta-tail">
+                  <button class="reply-action" type="button" data-reply-id="${escapeHtml(message.id)}">Reply</button>
                   ${renderRuntimeBadge(parsedIdentity?.ideLabel, false)}
                   ${hasInlinePromptInjection(message) ? renderPromptInjectionBadge() : ""}
                   ${showProvenanceBadge ? `<span class="provenance-badge ${provenance}">${provenance}</span>` : ""}
@@ -1952,6 +2092,7 @@
                 </div>
               </div>
               <div class="message-bubble">
+                ${renderReplyPreviewHtml(message.reply_to)}
                 <div class="md-content">${renderedText}</div>
               </div>
             </div>
@@ -2017,6 +2158,7 @@
 
       function resetMessages() {
         state.messages.clear();
+        clearReplyDraft();
         renderMessages();
       }
 
@@ -2101,13 +2243,16 @@
         syncPromptControls();
       }
 
-      async function postRoomMessage(text, sender, agentPromptKind = null) {
+      async function postRoomMessage(text, sender, agentPromptKind = null, replyTo = null) {
         const payload = {
           sender,
           text,
         };
         if (agentPromptKind) {
           payload.agent_prompt_kind = agentPromptKind;
+        }
+        if (replyTo) {
+          payload.reply_to = replyTo;
         }
 
         return apiFetch(`/rooms/${encodeURIComponent(state.currentRoomIdentifier)}/messages`, {
@@ -2420,6 +2565,7 @@
         const roomChanged = Boolean(state.currentRoomIdentifier) && state.currentRoomIdentifier !== nextRoomIdentifier;
         if (roomChanged) {
           resetPromptOptions();
+          clearReplyDraft();
         }
 
         state.currentProjectId = projectId;
@@ -2495,11 +2641,13 @@
           const message = await postRoomMessage(
             text,
             sender,
-            injectedPrompt ? "inline" : null
+            injectedPrompt ? "inline" : null,
+            state.replyToMessage?.id || null
           );
           upsertMessages([message]);
           elements.messageInput.value = "";
           elements.messageInput.style.height = "auto";
+          clearReplyDraft();
           scrollMessagesToBottom(true);
           setStatus(
             injectedPrompt
@@ -2652,6 +2800,7 @@
       initTheme();
       loadPromptPreferences();
       syncPromptControls();
+      syncReplyDraftUi();
 
       elements.copyJoinCodeBtn.addEventListener("click", copyJoinCode);
       elements.renameRoomBtn.addEventListener("click", renameRoom);
@@ -2665,6 +2814,9 @@
       });
       elements.injectPromptOption.addEventListener("click", () => {
         toggleInjectPrompt();
+      });
+      elements.replyDraftClear.addEventListener("click", () => {
+        clearReplyDraft();
       });
       window.addEventListener("beforeunload", stopKeepPollingLoop);
       document.addEventListener("click", (event) => {
@@ -2687,6 +2839,26 @@
             updateNewMessagesPill();
           }
         });
+      });
+      elements.messages.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) {
+          return;
+        }
+        const replyButton = target.closest("[data-reply-id]");
+        if (!replyButton) {
+          return;
+        }
+        const messageId = replyButton.getAttribute("data-reply-id");
+        if (!messageId) {
+          return;
+        }
+        const message = state.messages.get(messageId);
+        if (!message) {
+          return;
+        }
+        setReplyDraft(message);
+        elements.messageInput.focus();
       });
 
       // --- Textarea: Enter sends, Shift+Enter for new line ---

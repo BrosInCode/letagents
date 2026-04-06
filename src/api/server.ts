@@ -161,11 +161,13 @@ async function emitProjectMessage(
   options?: {
     source?: string;
     agent_prompt_kind?: AgentPromptKind | null;
+    reply_to?: string | null;
   }
 ): Promise<Message> {
   const message = await addMessage(projectId, sender, text, {
     source: options?.source,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    reply_to_message_id: options?.reply_to ?? null,
   });
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
@@ -187,6 +189,23 @@ function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
   }
 
   return kind;
+}
+
+function parseOptionalReplyToMessageId(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error("reply_to must be a valid message id");
+  }
+
+  const normalized = value.trim();
+  if (!/^msg_\d+$/.test(normalized)) {
+    throw new Error("reply_to must be a valid message id");
+  }
+
+  return normalized;
 }
 
 function shouldIncludePromptOnlyMessages(req: express.Request): boolean {
@@ -2243,14 +2262,16 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { sender, text, agent_prompt_kind } = req.body as {
+  const { sender, text, agent_prompt_kind, reply_to } = req.body as {
     sender?: string;
     text?: string;
     agent_prompt_kind?: string;
+    reply_to?: string;
   };
 
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const replyToMessageId = parseOptionalReplyToMessageId(reply_to);
     const normalizedSender = typeof sender === "string" ? sender.trim() : "";
     if (
       !normalizedSender ||
@@ -2264,6 +2285,7 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     const message = await emitProjectMessage(projectId, normalizedSender, text, {
       source,
       agent_prompt_kind: promptKind,
+      reply_to: replyToMessageId,
     });
     res.status(201).json(message);
   } catch (error) {
@@ -2679,13 +2701,15 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { sender, text, agent_prompt_kind } = req.body as {
+  const { sender, text, agent_prompt_kind, reply_to } = req.body as {
     sender?: string;
     text?: string;
     agent_prompt_kind?: string;
+    reply_to?: string;
   };
   try {
     const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
+    const replyToMessageId = parseOptionalReplyToMessageId(reply_to);
     const normalizedSender = typeof sender === "string" ? sender.trim() : "";
     if (
       !normalizedSender ||
@@ -2699,6 +2723,7 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
     const message = await emitProjectMessage(project.id, normalizedSender, text, {
       source,
       agent_prompt_kind: promptKind,
+      reply_to: replyToMessageId,
     });
     res.status(201).json({
       ...message,

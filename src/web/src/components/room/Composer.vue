@@ -55,6 +55,13 @@
       <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
     </div>
     <div class="composer-card">
+      <div v-if="replyTo" class="reply-draft">
+        <div class="reply-draft-copy">
+          <strong>Replying to {{ replyDisplayName }}</strong>
+          <span>{{ replyPreviewText }}</span>
+        </div>
+        <button class="reply-draft-clear" type="button" @click="emit('clearReply')">Cancel</button>
+      </div>
       <textarea
         ref="textareaEl"
         class="message-textarea"
@@ -74,6 +81,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { type RoomMessage, parseAgentIdentity, getReplyPreviewText } from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
 const PREFS_KEY = 'lac-prompt-prefs'
@@ -82,14 +90,17 @@ const props = withDefaults(defineProps<{
   senderName?: string
   disabled?: boolean
   roomIdentifier?: string
+  replyTo?: RoomMessage | null
 }>(), {
   senderName: 'anonymous',
   disabled: false,
   roomIdentifier: '',
+  replyTo: null,
 })
 
 const emit = defineEmits<{
-  send: [text: string, agentPromptKind: string | null]
+  send: [text: string, agentPromptKind: string | null, replyTo: string | null]
+  clearReply: []
 }>()
 
 const text = ref('')
@@ -101,6 +112,14 @@ const injectPrompt = ref(false)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
 let keepPollingInFlight = false
+
+const replyDisplayName = computed(() => {
+  const reply = props.replyTo
+  if (!reply?.sender) return 'unknown'
+  return parseAgentIdentity(reply.sender).displayName || reply.sender
+})
+
+const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
 
 // ── Prompt mode label ──
 const promptMode = computed(() => {
@@ -153,7 +172,7 @@ async function sendAutoPollingPrompt() {
   if (!props.roomIdentifier || keepPollingInFlight) return
   keepPollingInFlight = true
   try {
-    emit('send', '', 'auto')
+    emit('send', '', 'auto', null)
   } finally {
     keepPollingInFlight = false
   }
@@ -210,7 +229,7 @@ function handleSend() {
 
   // Determine agent_prompt_kind for this message
   const kind = injectPrompt.value ? 'inline' : null
-  emit('send', trimmed, kind)
+  emit('send', trimmed, kind, props.replyTo?.id || null)
   text.value = ''
   if (textareaEl.value) {
     textareaEl.value.style.height = 'auto'
@@ -265,6 +284,44 @@ watch(() => props.roomIdentifier, (newId) => {
   border-radius: 16px;
   transition: border-color 200ms ease, box-shadow 200ms ease;
   overflow: hidden;
+}
+.reply-draft {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid var(--border, #27272a);
+  background: color-mix(in srgb, var(--surface, #18181b) 72%, transparent);
+}
+.reply-draft-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.reply-draft-copy strong {
+  font-size: 0.74rem;
+  color: var(--text, #fafafa);
+}
+.reply-draft-copy span {
+  font-size: 0.78rem;
+  color: var(--muted, #a1a1aa);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reply-draft-clear {
+  border: none;
+  background: transparent;
+  color: var(--muted, #71717a);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+.reply-draft-clear:hover {
+  color: var(--text, #fafafa);
 }
 .composer-card:focus-within {
   border-color: var(--line-strong, #3f3f46);

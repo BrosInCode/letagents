@@ -92,6 +92,13 @@
       "when": 1775418904144,
       "tag": "0012_red_cardiac",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1775510562247,
+      "tag": "0013_icy_baron_strucker",
+      "breakpoints": true
     }
   ]
 }

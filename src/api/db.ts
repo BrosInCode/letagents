@@ -174,6 +174,15 @@ export interface Message {
   agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
   timestamp: string;
+  reply_to: MessageReplyReference | null;
+}
+
+export interface MessageReplyReference {
+  id: string;
+  sender: string;
+  text: string;
+  source: string | null;
+  timestamp: string;
 }
 
 export type TaskStatus =
@@ -206,6 +215,7 @@ export interface Task {
 interface MessageRow {
   room_id: string;
   number: number;
+  reply_to_number: number | null;
   sender: string;
   text: string;
   agent_prompt_kind: string | null;
@@ -372,6 +382,32 @@ function toMessage(row: MessageRow): Message {
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,
     timestamp: row.timestamp,
+    reply_to: null,
+  };
+}
+
+function toMessageReplyReference(row: Pick<MessageRow, "number" | "sender" | "text" | "source" | "timestamp">): MessageReplyReference {
+  return {
+    id: formatMessageId(row.number),
+    sender: row.sender,
+    text: row.text,
+    source: row.source ?? null,
+    timestamp: row.timestamp,
+  };
+}
+
+function toMessageWithReply(
+  row: MessageRow,
+  replyReference: MessageReplyReference | null
+): Message {
+  return {
+    id: formatMessageId(row.number),
+    sender: row.sender,
+    text: row.text,
+    agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
+    source: row.source ?? null,
+    timestamp: row.timestamp,
+    reply_to: replyReference,
   };
 }
 
@@ -1080,13 +1116,50 @@ export async function addMessage(
   options?: {
     source?: string;
     agent_prompt_kind?: AgentPromptKind | null;
+    reply_to_message_id?: string | null;
   }
 ): Promise<Message> {
   const promptKind = options?.agent_prompt_kind ?? null;
   return db.transaction(async (tx) => {
+    let replyReference: MessageReplyReference | null = null;
+    const replyToNumber =
+      options?.reply_to_message_id
+        ? parseScopedId(options.reply_to_message_id, "msg")
+        : null;
+
+    if (options?.reply_to_message_id && !replyToNumber) {
+      throw new Error("reply_to must be a valid message id");
+    }
+
+    if (replyToNumber) {
+      const [replyTarget] = await tx
+        .select({
+          number: messages.number,
+          sender: messages.sender,
+          text: messages.text,
+          agent_prompt_kind: messages.agent_prompt_kind,
+          source: messages.source,
+          timestamp: messages.timestamp,
+        })
+        .from(messages)
+        .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
+        .limit(1);
+
+      if (!replyTarget) {
+        throw new Error("reply_to must reference an existing message in this room");
+      }
+
+      if (isPromptOnlyAgentMessage(replyTarget.text, normalizeAgentPromptKind(replyTarget.agent_prompt_kind))) {
+        throw new Error("reply_to must reference a visible message");
+      }
+
+      replyReference = toMessageReplyReference(replyTarget);
+    }
+
     const message: MessageRow = {
       room_id: roomId,
       number: await nextRoomScopedNumber("messages", roomId, tx),
+      reply_to_number: replyToNumber,
       sender,
       text,
       agent_prompt_kind: promptKind,
@@ -1109,7 +1182,7 @@ export async function addMessage(
         );
     }
 
-    return toMessage(message);
+    return toMessageWithReply(message, replyReference);
   });
 }
 
@@ -1127,6 +1200,7 @@ export async function getMessages(
     .select({
       room_id: messages.room_id,
       number: messages.number,
+      reply_to_number: messages.reply_to_number,
       sender: messages.sender,
       text: messages.text,
       agent_prompt_kind: messages.agent_prompt_kind,
@@ -1144,7 +1218,36 @@ export async function getMessages(
 
   const has_more = rows.length > limit;
   const bounded = has_more ? rows.slice(0, limit) : rows;
-  return { messages: bounded.map(toMessage), has_more };
+  const replyToNumbers = Array.from(
+    new Set(
+      bounded
+        .map((row) => row.reply_to_number)
+        .filter((value): value is number => value !== null && Number.isInteger(value) && value > 0)
+    )
+  );
+
+  const replyMap = new Map<number, MessageReplyReference>();
+  if (replyToNumbers.length > 0) {
+    const replyRows = await db
+      .select({
+        number: messages.number,
+        sender: messages.sender,
+        text: messages.text,
+        source: messages.source,
+        timestamp: messages.timestamp,
+      })
+      .from(messages)
+      .where(and(eq(messages.room_id, roomId), inArray(messages.number, replyToNumbers)));
+
+    for (const replyRow of replyRows) {
+      replyMap.set(replyRow.number, toMessageReplyReference(replyRow));
+    }
+  }
+
+  return {
+    messages: bounded.map((row) => toMessageWithReply(row, row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null)),
+    has_more,
+  };
 }
 
 export async function getMessagesAfter(
