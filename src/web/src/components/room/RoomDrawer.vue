@@ -108,7 +108,7 @@
             <span>Not connected</span>
           </div>
           <button
-            v-if="!ghLoading && !ghStatus?.connected && ghStatus?.install_url_available"
+            v-if="!ghLoading && !ghStatus?.connected && ghStatus?.install_url_available && room?.role === 'admin'"
             class="gh-install-btn"
             :disabled="ghInstalling"
             @click="installGitHubApp"
