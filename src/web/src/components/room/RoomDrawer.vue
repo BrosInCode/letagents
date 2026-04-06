@@ -86,12 +86,47 @@
           </button>
         </div>
       </div>
+
+      <!-- GitHub Integration -->
+      <div v-if="room" class="drawer-section">
+        <div class="drawer-section-title">
+          <h2>GitHub</h2>
+          <span>integration</span>
+        </div>
+        <div class="github-status">
+          <div v-if="ghLoading" class="gh-status-line">
+            <span class="gh-dot gh-dot-loading" />
+            <span>Checking…</span>
+          </div>
+          <div v-else-if="ghStatus?.connected" class="gh-status-line">
+            <span class="gh-dot gh-dot-connected" />
+            <span>Connected</span>
+            <span v-if="ghStatus.repository" class="gh-repo-name">{{ ghStatus.repository.full_name }}</span>
+          </div>
+          <div v-else class="gh-status-line">
+            <span class="gh-dot gh-dot-disconnected" />
+            <span>Not connected</span>
+          </div>
+          <button
+            v-if="!ghLoading && !ghStatus?.connected && ghStatus?.install_url_available"
+            class="gh-install-btn"
+            :disabled="ghInstalling"
+            @click="installGitHubApp"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+            </svg>
+            {{ ghInstalling ? 'Opening…' : 'Install GitHub App' }}
+          </button>
+          <p v-if="ghError" class="gh-error">{{ ghError }}</p>
+        </div>
+      </div>
     </aside>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { type RoomInfo, type RoomMessage, getSenderColor, parseAgentIdentity, useRoom } from '@/composables/useRoom'
 
 const MAX_VISIBLE_CHIPS = 6
@@ -223,6 +258,72 @@ function exportChat() {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+// ── GitHub Integration ──
+interface GitHubIntegrationStatus {
+  connected: boolean
+  install_url_available: boolean
+  repository: { full_name: string } | null
+}
+
+const ghStatus = ref<GitHubIntegrationStatus | null>(null)
+const ghLoading = ref(false)
+const ghInstalling = ref(false)
+const ghError = ref('')
+
+async function fetchGitHubStatus() {
+  const roomId = props.room?.projectId || props.room?.identifier
+  if (!roomId) return
+  ghLoading.value = true
+  ghError.value = ''
+  try {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/integrations/github`, { credentials: 'include' })
+    if (res.ok) {
+      ghStatus.value = await res.json()
+    } else {
+      ghStatus.value = null
+    }
+  } catch {
+    ghStatus.value = null
+  } finally {
+    ghLoading.value = false
+  }
+}
+
+async function installGitHubApp() {
+  const roomId = props.room?.projectId || props.room?.identifier
+  if (!roomId) return
+  ghInstalling.value = true
+  ghError.value = ''
+  try {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/integrations/github/install-url`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      ghError.value = body.error || `Failed (${res.status})`
+      return
+    }
+    const data = await res.json()
+    if (data.install_url) {
+      window.open(data.install_url, '_blank', 'noopener')
+    }
+  } catch {
+    ghError.value = 'Network error'
+  } finally {
+    ghInstalling.value = false
+  }
+}
+
+watch(() => props.room?.projectId, (newId) => {
+  if (newId) fetchGitHubStatus()
+}, { immediate: true })
+
+watch(() => props.open, (isOpen) => {
+  if (isOpen && props.room) fetchGitHubStatus()
+})
 </script>
 
 <style scoped>
@@ -348,4 +449,47 @@ function exportChat() {
   transition: background 150ms;
 }
 .drawer-actions button:hover { background: var(--surface-hover, #27272a); }
+
+/* ── GitHub integration ── */
+.github-status { display: flex; flex-direction: column; gap: 8px; }
+.gh-status-line {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.82rem; color: var(--muted, #71717a);
+}
+.gh-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.gh-dot-connected { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.4); }
+.gh-dot-disconnected { background: #71717a; }
+.gh-dot-loading {
+  background: #facc15;
+  animation: gh-pulse 1.2s ease-in-out infinite;
+}
+@keyframes gh-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.gh-repo-name {
+  font-size: 0.72rem; font-weight: 600;
+  padding: 1px 6px; border-radius: 4px;
+  background: var(--surface, #18181b); color: var(--text, #fafafa);
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gh-install-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 8px;
+  font-size: 0.82rem; font-weight: 600;
+  background: var(--surface, #18181b);
+  border: 1px solid var(--line, #27272a);
+  color: var(--text, #fafafa); cursor: pointer;
+  transition: background 150ms, border-color 150ms;
+}
+.gh-install-btn:hover:not(:disabled) {
+  background: var(--surface-hover, #27272a);
+  border-color: var(--muted, #52525b);
+}
+.gh-install-btn:disabled { opacity: 0.5; cursor: wait; }
+.gh-error {
+  margin: 0; font-size: 0.75rem; color: #ef4444;
+}
 </style>
