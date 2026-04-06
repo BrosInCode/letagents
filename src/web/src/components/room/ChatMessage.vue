@@ -1,5 +1,5 @@
 <template>
-  <div class="message" :class="{ 'system-message': isSystem }">
+  <div class="message" :class="{ 'system-message': isSystem }" :data-msg-id="message.id">
     <div class="message-avatar" :style="{ '--sender-color': senderColor }" />
     <div class="message-body">
       <div class="message-meta">
@@ -35,8 +35,11 @@
           </span>
         </div>
         <div class="message-meta-tail">
-          <button class="reply-action" type="button" @click="emit('reply', message)">
-            Reply
+          <button class="reply-action" type="button" aria-label="Reply to message" title="Reply" @click="emit('reply', message)">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M6.5 4.5L2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3 8h5.5c2.485 0 4.5 2.015 4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
           </button>
           <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.class">
             {{ provenanceBadge.label }}
@@ -48,10 +51,15 @@
         </div>
       </div>
       <div class="message-bubble" :class="{ 'github-message-bubble': githubEvent }" :style="{ '--sender-color': senderColor }">
-        <div v-if="message.reply_to" class="reply-preview">
+        <button
+          v-if="message.reply_to"
+          class="reply-preview"
+          type="button"
+          @click="emit('scrollToReply', message.reply_to.id)"
+        >
           <span class="reply-preview-label">Replying to {{ replyDisplayName }}</span>
           <span class="reply-preview-text">{{ replyPreviewText }}</span>
-        </div>
+        </button>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
         <div v-else class="md-content" v-html="renderedContent" />
       </div>
@@ -70,6 +78,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
+  scrollToReply: [messageId: string]
 }>()
 
 const identity = computed(() => parseAgentIdentity(props.message.sender))
@@ -204,16 +213,46 @@ const renderedContent = computed(() => {
   margin-left: auto;
 }
 .reply-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   border: none;
+  border-radius: 999px;
   background: transparent;
   color: var(--muted, #71717a);
-  font-size: 0.68rem;
-  font-weight: 600;
   cursor: pointer;
   padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-.reply-action:hover {
+.reply-action svg {
+  width: 14px;
+  height: 14px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .message:hover .reply-action,
+  .message:focus-within .reply-action {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .reply-action {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+.reply-action:hover,
+.reply-action:focus-visible {
+  background: color-mix(in srgb, var(--surface, #18181b) 88%, transparent);
   color: var(--text, #fafafa);
+  outline: none;
 }
 .message-meta time { font-size: 0.68rem; color: var(--muted, #71717a); }
 
@@ -260,6 +299,13 @@ const renderedContent = computed(() => {
   border-left: 2px solid color-mix(in srgb, var(--sender-color, #71717a) 50%, transparent);
   background: color-mix(in srgb, var(--surface, #18181b) 82%, transparent);
   border-radius: 0 10px 10px 0;
+  width: 100%;
+  text-align: left;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .reply-preview-label {
@@ -274,6 +320,15 @@ const renderedContent = computed(() => {
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.reply-preview:hover,
+.reply-preview:focus-visible {
+  background: color-mix(in srgb, var(--surface, #18181b) 94%, var(--sender-color, #71717a) 6%);
+  border-left-color: var(--sender-color, #71717a);
+  outline: none;
+}
+.message.jump-target .message-bubble {
+  border-left-color: color-mix(in srgb, var(--sender-color, #71717a) 85%, white 15%);
 }
 
 .message-bubble :deep(.md-content) { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }
