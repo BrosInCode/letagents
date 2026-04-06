@@ -233,11 +233,20 @@ const renderedContent = computed(() => {
   width: 14px;
   height: 14px;
 }
-.message:hover .reply-action,
-.message:focus-within .reply-action {
-  opacity: 1;
-  pointer-events: auto;
-  transform: none;
+@media (hover: hover) and (pointer: fine) {
+  .message:hover .reply-action,
+  .message:focus-within .reply-action {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .reply-action {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
 }
 .reply-action:hover,
 .reply-action:focus-visible {
