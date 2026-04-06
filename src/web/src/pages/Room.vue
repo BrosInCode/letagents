@@ -40,6 +40,7 @@
       ref="messageListRef"
       :messages="messages"
       :searchQuery="searchQuery"
+      @reply="selectedReply = $event"
     />
 
     <TaskBoard
@@ -53,7 +54,9 @@
       v-if="activeTab === 'chat' && isConnected"
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
+      :replyTo="selectedReply"
       @send="handleSend"
+      @clearReply="selectedReply = null"
     />
   </div>
 </template>
@@ -68,6 +71,7 @@ import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import MessageList from '@/components/room/MessageList.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
+import type { RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
 const { messages, tasks, room, isConnected, connectionState, joinError, joinRoom, sendMessage, addTask, updateTask, restoreSession, renameRoom } = useRoom()
@@ -78,6 +82,7 @@ const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
+const selectedReply = ref<RoomMessage | null>(null)
 
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const senderName = computed(() => auth.user.value?.login || 'anonymous')
@@ -110,8 +115,11 @@ const joinErrorBody = computed(() => {
   return joinError.value?.message || 'Could not connect to room.'
 })
 
-async function handleSend(text: string, agentPromptKind: string | null) {
-  await sendMessage(text, senderName.value, agentPromptKind)
+async function handleSend(text: string, agentPromptKind: string | null, replyTo: string | null) {
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo)
+  if (sent) {
+    selectedReply.value = null
+  }
 }
 
 async function handleAddTask(title: string) {
@@ -150,6 +158,7 @@ onMounted(async () => {
 })
 
 watch(() => route.params.roomId, async (newId) => {
+  selectedReply.value = null
   if (newId) {
     await joinRoom(newId as string)
   }

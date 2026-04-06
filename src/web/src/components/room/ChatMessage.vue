@@ -35,6 +35,9 @@
           </span>
         </div>
         <div class="message-meta-tail">
+          <button class="reply-action" type="button" @click="emit('reply', message)">
+            Reply
+          </button>
           <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.class">
             {{ provenanceBadge.label }}
           </span>
@@ -45,6 +48,10 @@
         </div>
       </div>
       <div class="message-bubble" :class="{ 'github-message-bubble': githubEvent }" :style="{ '--sender-color': senderColor }">
+        <div v-if="message.reply_to" class="reply-preview">
+          <span class="reply-preview-label">Replying to {{ replyDisplayName }}</span>
+          <span class="reply-preview-text">{{ replyPreviewText }}</span>
+        </div>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
         <div v-else class="md-content" v-html="renderedContent" />
       </div>
@@ -56,10 +63,13 @@
 import { computed } from 'vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
-import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection } from '@/composables/useRoom'
+import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
 
 const props = defineProps<{
   message: RoomMessage
+}>()
+const emit = defineEmits<{
+  reply: [message: RoomMessage]
 }>()
 
 const identity = computed(() => parseAgentIdentity(props.message.sender))
@@ -88,6 +98,14 @@ const ideBadgeClass = computed(() => {
   const known = ['codex', 'antigravity', 'claude', 'cursor']
   return known.includes(ide) ? `ide-${ide}` : 'ide-default'
 })
+
+const replyDisplayName = computed(() => {
+  const reply = props.message.reply_to
+  if (!reply) return 'unknown'
+  return parseAgentIdentity(reply.sender).displayName || reply.sender || 'unknown'
+})
+
+const replyPreviewText = computed(() => getReplyPreviewText(props.message.reply_to))
 
 const provenanceBadge = computed(() => {
   if (isSystem.value) return { label: 'system', class: 'system' }
@@ -185,6 +203,18 @@ const renderedContent = computed(() => {
   gap: 5px;
   margin-left: auto;
 }
+.reply-action {
+  border: none;
+  background: transparent;
+  color: var(--muted, #71717a);
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+.reply-action:hover {
+  color: var(--text, #fafafa);
+}
 .message-meta time { font-size: 0.68rem; color: var(--muted, #71717a); }
 
 /* ── IDE icon inline next to name ── */
@@ -219,6 +249,31 @@ const renderedContent = computed(() => {
 .message-bubble.github-message-bubble {
   border-left: none;
   padding-left: 0;
+}
+
+.reply-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--sender-color, #71717a) 50%, transparent);
+  background: color-mix(in srgb, var(--surface, #18181b) 82%, transparent);
+  border-radius: 0 10px 10px 0;
+}
+
+.reply-preview-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text, #fafafa);
+}
+
+.reply-preview-text {
+  font-size: 0.78rem;
+  color: var(--muted, #a1a1aa);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .message-bubble :deep(.md-content) { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }

@@ -2373,12 +2373,16 @@ server.tool(
       .optional()
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     text: z.string().describe("The message text to send"),
+    reply_to: z
+      .string()
+      .optional()
+      .describe("Optional message id to quote-reply to (for example `msg_42`)."),
     conversation_id: z
       .string()
       .optional()
       .describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ room_id, sender: _sender, text, conversation_id }) => {
+  async ({ room_id, sender: _sender, text, reply_to, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2393,7 +2397,7 @@ server.tool(
       project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
       options: {
         method: "POST",
-        body: JSON.stringify({ sender: identity.actor_label, text }),
+        body: JSON.stringify({ sender: identity.actor_label, text, reply_to }),
       },
     });
     touchCurrentRoom(typeof (message as { id?: string }).id === "string" ? (message as { id: string }).id : undefined);

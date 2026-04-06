@@ -253,6 +253,7 @@ export const messages = pgTable(
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     number: integer("number").notNull(),
+    reply_to_number: integer("reply_to_number"),
     sender: text("sender").notNull(),
     text: text("text").notNull(),
     agent_prompt_kind: text("agent_prompt_kind"),
@@ -262,6 +263,7 @@ export const messages = pgTable(
   (table) => ({
     pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
     room_idx: index("messages_room_id_idx").on(table.room_id),
+    reply_to_idx: index("messages_reply_to_idx").on(table.room_id, table.reply_to_number),
     auto_prompt_idx: index("messages_auto_prompt_idx")
       .on(table.room_id, table.sender)
       .where(sql`${table.agent_prompt_kind} = 'auto'`),

@@ -7,6 +7,7 @@
         :message="msg"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
+        @reply="emit('reply', $event)"
       />
     </div>
     <button
@@ -33,6 +34,9 @@ import ChatMessage from './ChatMessage.vue'
 const props = defineProps<{
   messages: readonly RoomMessage[]
   searchQuery?: string
+}>()
+const emit = defineEmits<{
+  reply: [message: RoomMessage]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)

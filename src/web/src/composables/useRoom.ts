@@ -1,6 +1,14 @@
 import { ref, readonly, onUnmounted } from 'vue'
 
 /** ── Types ── */
+export interface MessageReplyReference {
+  id: string
+  sender: string
+  text: string
+  source: string | null
+  timestamp: string
+}
+
 export interface RoomMessage {
   id: string
   sender: string
@@ -8,6 +16,7 @@ export interface RoomMessage {
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
+  reply_to?: MessageReplyReference | null
   agent_identity?: {
     name: string
     display_name: string
@@ -235,6 +244,11 @@ export function hasInlinePromptInjection(message: Pick<RoomMessage, 'agent_promp
   return normalizeAgentPromptKind(message?.agent_prompt_kind) === 'inline'
 }
 
+export function getReplyPreviewText(reply: Pick<MessageReplyReference, 'text'> | null | undefined): string {
+  const text = String(reply?.text || '').replace(/\s+/g, ' ').trim()
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text
+}
+
 /** ── API ── */
 function roomPath(identifier: string): string {
   return `/rooms/${encodeURIComponent(identifier)}`
@@ -371,12 +385,20 @@ function loadPersistedSession(): { identifier: string } | null {
 }
 
 /** ── Actions ── */
-async function sendMessage(text: string, sender?: string, agentPromptKind?: string | null): Promise<boolean> {
+async function sendMessage(
+  text: string,
+  sender?: string,
+  agentPromptKind?: string | null,
+  replyTo?: string | null
+): Promise<boolean> {
   if (!room.value) return false
   try {
     const body: Record<string, string> = { text, sender: sender || 'anonymous' }
     if (agentPromptKind) {
       body.agent_prompt_kind = agentPromptKind
+    }
+    if (replyTo) {
+      body.reply_to = replyTo
     }
     const msg = await apiFetch(`${roomPath(room.value.identifier)}/messages`, {
       method: 'POST',
