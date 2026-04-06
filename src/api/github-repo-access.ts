@@ -36,6 +36,7 @@ const REPO_VISIBILITY_TTL_MS = 1000 * 60 * 60;
 const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
 const repoAccessCache = new Map<string, { allowed: boolean; expiresAt: number }>();
+const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 
 function getCachedVisibility(roomName: string): GitHubRepoVisibility | null {
   const cached = repoVisibilityCache.get(roomName);
@@ -90,13 +91,21 @@ export function parseGitHubRepoName(roomName: string): { owner: string; repo: st
   return { owner: repoRef.namespace, repo: repoRef.repo };
 }
 
+function getGitHubApiBaseUrl(): string {
+  return (process.env.GITHUB_API_BASE_URL || DEFAULT_GITHUB_API_BASE_URL).replace(/\/+$/, "");
+}
+
+function buildGitHubApiUrl(pathname: string): string {
+  return new URL(pathname.replace(/^\/+/, ""), `${getGitHubApiBaseUrl()}/`).toString();
+}
+
 async function fetchGitHubRepo(roomName: string, accessToken?: string): Promise<Response> {
   const repo = parseGitHubRepoName(roomName);
   if (!repo) {
     throw new Error("Room is not a GitHub repo locator");
   }
 
-  return fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}`, {
+  return fetch(buildGitHubApiUrl(`/repos/${repo.owner}/${repo.repo}`), {
     headers: {
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       Accept: "application/vnd.github+json",
@@ -162,7 +171,9 @@ export async function isGitHubRepoCollaborator(input: {
   }
 
   const permissionResponse = await fetch(
-    `https://api.github.com/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`,
+    buildGitHubApiUrl(
+      `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
+    ),
     {
       headers: {
         Authorization: `Bearer ${input.accessToken}`,
@@ -203,7 +214,9 @@ export async function isGitHubRepoAdmin(input: {
   }
 
   const permissionResponse = await fetch(
-    `https://api.github.com/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`,
+    buildGitHubApiUrl(
+      `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
+    ),
     {
       headers: {
         Authorization: `Bearer ${input.accessToken}`,
