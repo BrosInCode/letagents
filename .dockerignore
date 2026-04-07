@@ -7,3 +7,5 @@ dist
 data/
 .DS_Store
 .npmrc
+src/web/node_modules
+src/web/dist
