@@ -1,3 +1,6 @@
+import { db } from "./db/client.js";
+import { system_github_app } from "./db/schema.js";
+
 const DEFAULT_BASE_URL = "http://localhost:3001";
 
 export interface GitHubOAuthConfig {
@@ -48,9 +51,29 @@ export function getGitHubOAuthConfig(): GitHubOAuthConfig {
   };
 }
 
-export function getGitHubAppConfig(): GitHubAppConfig {
+export async function getGitHubAppConfig(): Promise<GitHubAppConfig> {
   const baseUrl = resolveBaseUrl();
   const setupUrl = `${baseUrl}/auth/github/app/callback`;
+
+  try {
+    const dbConfigList = await db.select().from(system_github_app).limit(1);
+    if (dbConfigList.length > 0) {
+      const dbConfig = dbConfigList[0];
+      return {
+        appId: dbConfig.app_id,
+        appSlug: dbConfig.app_slug,
+        clientId: dbConfig.client_id,
+        clientSecret: dbConfig.client_secret,
+        privateKey: normalizePrivateKey(dbConfig.private_key),
+        webhookSecret: dbConfig.webhook_secret,
+        baseUrl,
+        callbackUrl: setupUrl,
+        setupUrl,
+      };
+    }
+  } catch (error) {
+    console.error("Failed to load GitHub App config from DB, falling back to env", error);
+  }
 
   return {
     appId: process.env.GITHUB_APP_ID,
@@ -65,8 +88,8 @@ export function getGitHubAppConfig(): GitHubAppConfig {
   };
 }
 
-export function hasGitHubAppConfig(): boolean {
-  const config = getGitHubAppConfig();
+export async function hasGitHubAppConfig(): Promise<boolean> {
+  const config = await getGitHubAppConfig();
   return Boolean(
     config.appId &&
       config.clientId &&

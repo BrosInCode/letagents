@@ -3,6 +3,7 @@ import type { GitHubAppInstallation, GitHubAppRepository } from "./db.js";
 export interface GitHubAppRoomIntegrationStatus {
   configured: boolean;
   install_url_available: boolean;
+  setup_manifest_available: boolean;
   app_slug: string | null;
   setup_url: string | null;
   connected: boolean;
@@ -77,6 +78,7 @@ export function resolveGitHubAppRoomIntegrationStatus(input: {
   return {
     configured: input.configured,
     install_url_available: Boolean(input.configured && input.appSlug),
+    setup_manifest_available: !input.configured,
     app_slug: input.appSlug?.trim() || null,
     setup_url: input.setupUrl?.trim() || null,
     connected,

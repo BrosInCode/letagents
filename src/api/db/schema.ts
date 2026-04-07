@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 
 export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
@@ -57,6 +57,21 @@ export const github_repositories = pgTable(
     room_idx: uniqueIndex("github_repositories_room_id_idx").on(table.room_id),
     full_name_idx: uniqueIndex("github_repositories_full_name_idx").on(table.full_name),
   })
+);
+
+export const system_github_app = pgTable(
+  "system_github_app",
+  {
+    id: serial("id").primaryKey(),
+    app_id: text("app_id").notNull(),
+    app_slug: text("app_slug").notNull(),
+    client_id: text("client_id").notNull(),
+    client_secret: text("client_secret").notNull(),
+    private_key: text("private_key").notNull(),
+    webhook_secret: text("webhook_secret").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).defaultNow().notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).defaultNow().notNull(),
+  }
 );
 
 export const github_app_installations = pgTable(

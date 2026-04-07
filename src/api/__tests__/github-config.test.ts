@@ -59,7 +59,7 @@ test("getGitHubOAuthConfig preserves the existing OAuth defaults", () =>
     }
   ));
 
-test("getGitHubAppConfig normalizes multiline private keys and callback url", () =>
+test("getGitHubAppConfig normalizes multiline private keys and callback url", async () =>
   withEnv(
     {
       LETAGENTS_BASE_URL: "https://letagents.chat",
@@ -70,8 +70,8 @@ test("getGitHubAppConfig normalizes multiline private keys and callback url", ()
       GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----\\nline-1\\nline-2\\n-----END KEY-----",
       GITHUB_WEBHOOK_SECRET: "webhook-secret",
     },
-    () => {
-      const config = getGitHubAppConfig();
+    async () => {
+      const config = await getGitHubAppConfig();
       assert.equal(config.appId, "12345");
       assert.equal(config.appSlug, "letagents");
       assert.equal(config.clientId, "iv-app-client");
@@ -80,11 +80,11 @@ test("getGitHubAppConfig normalizes multiline private keys and callback url", ()
       assert.equal(config.webhookSecret, "webhook-secret");
       assert.equal(config.callbackUrl, "https://letagents.chat/auth/github/app/callback");
       assert.equal(config.setupUrl, "https://letagents.chat/auth/github/app/callback");
-      assert.equal(hasGitHubAppConfig(), true);
+      assert.equal(await hasGitHubAppConfig(), true);
     }
   ));
 
-test("hasGitHubAppConfig returns false when app credentials are incomplete", () =>
+test("hasGitHubAppConfig returns false when app credentials are incomplete", async () =>
   withEnv(
     {
       LETAGENTS_BASE_URL: undefined,
@@ -96,9 +96,9 @@ test("hasGitHubAppConfig returns false when app credentials are incomplete", () 
       GITHUB_APP_PRIVATE_KEY: "-----BEGIN KEY-----\\nline-1\\n-----END KEY-----",
       GITHUB_WEBHOOK_SECRET: "webhook-secret",
     },
-    () => {
-      assert.equal(hasGitHubAppConfig(), false);
-      const config = getGitHubAppConfig();
+    async () => {
+      assert.equal(await hasGitHubAppConfig(), false);
+      const config = await getGitHubAppConfig();
       assert.equal(config.baseUrl, "http://localhost:3001");
     }
   ));
