@@ -88,6 +88,7 @@ import {
   type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
+import { selectStaleTaskAutoPrompt } from "./stale-work.js";
 import {
   buildGitHubAppInstallationUrl,
   buildGitHubAppSetupRedirectPath,
@@ -138,6 +139,17 @@ interface AuthenticatedRequest extends express.Request {
 interface ResolvedRequestAuth {
   account: SessionAccount | OwnerTokenAccount | null;
   authKind: "session" | "owner_token" | null;
+}
+
+const STALE_WORK_PROMPT_COOLDOWN_MS = 15 * 60 * 1000;
+const staleWorkPromptTimestamps = new Map<string, number>();
+
+function pruneStaleWorkPromptTimestamps(now: number): void {
+  for (const [key, timestamp] of staleWorkPromptTimestamps) {
+    if (now - timestamp > STALE_WORK_PROMPT_COOLDOWN_MS) {
+      staleWorkPromptTimestamps.delete(key);
+    }
+  }
 }
 
 const messageEvents = new EventEmitter();
@@ -303,6 +315,36 @@ async function emitTaskLifecycleStatusMessage(
   return emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(task), {
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
   });
+}
+
+async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
+  const [taskResult, presence] = await Promise.all([
+    getOpenTasks(projectId, { limit: 200 }),
+    getRoomAgentPresence(projectId, { limit: 50 }),
+  ]);
+
+  const prompt = selectStaleTaskAutoPrompt({
+    tasks: taskResult.tasks,
+    presence,
+  });
+  if (!prompt) {
+    return null;
+  }
+
+  const now = Date.now();
+  pruneStaleWorkPromptTimestamps(now);
+
+  const cacheKey = `${projectId}:${prompt.cache_key}`;
+  const lastPromptAt = staleWorkPromptTimestamps.get(cacheKey);
+  if (lastPromptAt && now - lastPromptAt < STALE_WORK_PROMPT_COOLDOWN_MS) {
+    return null;
+  }
+
+  const message = await emitProjectMessage(projectId, "letagents", prompt.prompt_text, {
+    agent_prompt_kind: "auto",
+  });
+  staleWorkPromptTimestamps.set(cacheKey, now);
+  return message;
 }
 
 async function isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean> {
@@ -2952,6 +2994,8 @@ app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => 
     status: normalizedStatus as AgentPresenceStatus,
     status_text: typeof status_text === "string" ? status_text.trim() || null : null,
   });
+
+  await maybeEmitStaleWorkPrompt(project.id);
 
   res.status(200).json({
     ...toPublicRoomAgentPresence(presence),
