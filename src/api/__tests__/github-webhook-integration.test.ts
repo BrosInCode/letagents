@@ -202,6 +202,7 @@ test(
 
     const room = await createProjectWithName("github.com/brosincode/letagents");
     const task = await createTask(room.id, "Webhook coverage", "OliveWolf");
+    await updateTask(room.id, task.id, { status: "accepted" });
     await updateTask(room.id, task.id, { status: "assigned" });
 
     const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/201";
@@ -265,6 +266,9 @@ test(
     const room = await createProjectWithName("github.com/brosincode/letagents");
     const task = await createTask(room.id, "Review transition coverage", "OliveWolf");
     const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/202";
+    await updateTask(room.id, task.id, { status: "accepted" });
+    await updateTask(room.id, task.id, { status: "assigned" });
+    await updateTask(room.id, task.id, { status: "in_progress" });
     await updateTask(room.id, task.id, {
       status: "in_review",
       pr_url: pullRequestUrl,
@@ -332,6 +336,9 @@ test(
     const room = await createProjectWithName("github.com/brosincode/letagents");
     const task = await createTask(room.id, "Merge transition coverage", "OliveWolf");
     const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/203";
+    await updateTask(room.id, task.id, { status: "accepted" });
+    await updateTask(room.id, task.id, { status: "assigned" });
+    await updateTask(room.id, task.id, { status: "in_progress" });
     await updateTask(room.id, task.id, {
       status: "in_review",
       pr_url: pullRequestUrl,
