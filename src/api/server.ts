@@ -1653,7 +1653,7 @@ app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (re
   await createAuthState(state, `/in/${project.id}`);
   const actionPath = `https://github.com/settings/apps/new?state=${state}`;
 
-  res.json({ actionUrl: actionPath, manifest });
+  res.json({ action: actionPath, manifest });
 });
 
 app.get("/api/health", (_req, res) => {
