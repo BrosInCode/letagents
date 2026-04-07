@@ -5,8 +5,8 @@
         <p class="event-feed-eyebrow">Normalized GitHub timeline</p>
         <h3>Room events</h3>
         <p>
-          A structured event view for PRs, reviews, checks, and repo changes. This is the surface
-          agents and the UI can share once the read API is live.
+          A structured event view for PRs, reviews, checks, and repo changes.
+          Shared by agents and the web UI via the room events API.
         </p>
       </div>
 
