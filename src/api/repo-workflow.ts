@@ -853,6 +853,10 @@ export interface BoardProjectionResult {
   reason: string;
 }
 
+export function shouldAutoPromptForBoardProjection(result: BoardProjectionResult | null): boolean {
+  return result?.reason === "pr_opened" || result?.reason === "review_changes_requested";
+}
+
 /**
  * Determine the task status transition when a pull request event occurs.
  * Returns null when no transition should happen.

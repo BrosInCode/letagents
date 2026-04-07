@@ -231,11 +231,13 @@ test(
     assert.equal(updatedTask?.pr_url, pullRequestUrl);
 
     const messages = (await getMessages(room.id)).messages;
-    assert.ok(messages.some((message) =>
+    const lifecycleMessage = messages.find((message) =>
       message.sender === "letagents" &&
       message.text.includes(`${task.id}`) &&
       message.text.includes("in review")
-    ));
+    );
+    assert.ok(lifecycleMessage);
+    assert.equal(lifecycleMessage?.agent_prompt_kind, "auto");
     assert.ok(messages.some((message) =>
       message.sender === "github" &&
       message.text.includes("PR #201 opened by octocat") &&
@@ -296,11 +298,13 @@ test(
     assert.equal(updatedTask?.status, "blocked");
 
     const messages = (await getMessages(room.id)).messages;
-    assert.ok(messages.some((message) =>
+    const lifecycleMessage = messages.find((message) =>
       message.sender === "letagents" &&
       message.text.includes(`${task.id}`) &&
       message.text.includes("blocked")
-    ));
+    );
+    assert.ok(lifecycleMessage);
+    assert.equal(lifecycleMessage?.agent_prompt_kind, "auto");
     assert.ok(messages.some((message) =>
       message.sender === "github" &&
       message.text.includes("reviewer requested changes on PR #202") &&
@@ -360,11 +364,13 @@ test(
     assert.equal(updatedTask?.pr_url, pullRequestUrl);
 
     const messages = (await getMessages(room.id)).messages;
-    assert.ok(messages.some((message) =>
+    const lifecycleMessage = messages.find((message) =>
       message.sender === "letagents" &&
       message.text.includes(`${task.id}`) &&
       message.text.includes("was merged")
-    ));
+    );
+    assert.ok(lifecycleMessage);
+    assert.equal(lifecycleMessage?.agent_prompt_kind, null);
     assert.ok(messages.some((message) =>
       message.sender === "github" &&
       message.text.includes("PR #203 was merged by octomerger") &&

@@ -80,6 +80,7 @@ import {
   formatRepoRoomEventMessage,
   getRepoRoomEventReferenceTexts,
   projectRepoRoomEvent,
+  shouldAutoPromptForBoardProjection,
   validateTaskWorkflowArtifactsInput,
   type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
@@ -272,6 +273,23 @@ function formatTaskLifecycleStatus(task: {
     default:
       return `[status] ${task.id} moved to ${task.status}: ${task.title}`;
   }
+}
+
+async function emitTaskLifecycleStatusMessage(
+  projectId: string,
+  task: {
+    id: string;
+    title: string;
+    status: TaskStatus;
+    assignee: string | null;
+  },
+  options?: {
+    agent_prompt_kind?: AgentPromptKind | null;
+  }
+): Promise<Message> {
+  return emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(task), {
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+  });
 }
 
 async function isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean> {
@@ -779,7 +797,11 @@ async function applyRepoRoomEventToTask(
   const nextTask = await updateTask(project.id, linkedTask.id, updates);
   if (nextTask) {
     if (updates.status) {
-      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
+      await emitTaskLifecycleStatusMessage(project.id, nextTask, {
+        agent_prompt_kind: shouldAutoPromptForBoardProjection(projectedTaskState)
+          ? "auto"
+          : null,
+      });
     }
     return nextTask;
   }

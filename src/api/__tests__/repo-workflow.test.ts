@@ -18,6 +18,7 @@ import {
   projectIssueEvent,
   projectPullRequestEvent,
   projectPullRequestReviewEvent,
+  shouldAutoPromptForBoardProjection,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
   validateTaskWorkflowArtifactsInput,
 } from "../repo-workflow.js";
@@ -59,6 +60,22 @@ test("extractReferencedTaskId returns the first explicit task reference from tit
     "task_22"
   );
   assert.equal(extractReferencedTaskId("No task here", null), null);
+});
+
+test("shouldAutoPromptForBoardProjection only flags actionable review follow-up transitions", () => {
+  assert.equal(
+    shouldAutoPromptForBoardProjection({ newStatus: "in_review", reason: "pr_opened" }),
+    true
+  );
+  assert.equal(
+    shouldAutoPromptForBoardProjection({ newStatus: "blocked", reason: "review_changes_requested" }),
+    true
+  );
+  assert.equal(
+    shouldAutoPromptForBoardProjection({ newStatus: "merged", reason: "pr_merged" }),
+    false
+  );
+  assert.equal(shouldAutoPromptForBoardProjection(null), false);
 });
 
 test("formatRepoPullRequestEventMessage formats GitHub pull request events", () => {
