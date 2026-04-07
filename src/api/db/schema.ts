@@ -387,9 +387,15 @@ export const github_room_events = pgTable(
     /** GitHub action: opened, closed, completed, created, etc. */
     action: text("action").notNull(),
     /**
-     * Dedup key derived from the most specific GitHub object identity per event class.
-     * Examples: "pr:42:opened", "comment:12345:created", "check_run:789:completed"
-     * Globally unique (not room-scoped) to handle installation events without rooms.
+     * Dedup key derived from repo identity + the most specific GitHub object identity.
+     * MUST include the repo full_name (or installation_id for installation events)
+     * to avoid cross-repo collisions (PR/issue numbers are repo-local).
+     *
+     * Examples:
+     *   "brosincode/letagents:pr:42:opened"
+     *   "brosincode/letagents:comment:12345:created"
+     *   "brosincode/letagents:check_run:789:completed"
+     *   "installation:98765:created"
      */
     idempotency_key: text("idempotency_key").notNull().unique(),
     /** Parent GitHub object ID for queryability (PR number, issue number, etc.) */
