@@ -35,7 +35,7 @@ export interface RoomTask {
   assignee: string | null
   created_by: string | null
   pr_url: string | null
-  workflow_artifacts: Array<{
+  workflow_artifacts: ReadonlyArray<{
     provider: string
     kind: string
     id?: string | null
@@ -45,7 +45,7 @@ export interface RoomTask {
     ref?: string | null
     state?: string | null
   }>
-  workflow_refs: Array<{
+  workflow_refs: ReadonlyArray<{
     provider: string
     kind: string
     label: string
