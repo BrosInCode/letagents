@@ -68,6 +68,7 @@ import {
 import {
   classifyPresenceStatusText,
   deriveTaskPresenceStatus,
+  getRoomIdentityPresenceCacheKey,
 } from "./agent-presence.js";
 import { buildRoomEventsQueryString } from "./room-events-query.js";
 import type { AgentPresenceStatus } from "../shared/agent-presence.js";
@@ -88,7 +89,10 @@ let currentRoom: RoomState | null = null;
 let currentAgentIdentityKey = "";
 let currentAgentIdentity: StoredAgentIdentityState | null = null;
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
-const roomPresenceByRoom = new Map<string, { status: AgentPresenceStatus; status_text: string | null }>();
+const roomPresenceByIdentity = new Map<
+  string,
+  { status: AgentPresenceStatus; status_text: string | null }
+>();
 
 // ---------------------------------------------------------------------------
 // Conversation-scoped identity (Option C: per-conversation hints)
@@ -1020,13 +1024,18 @@ function touchCurrentRoom(lastMessageId?: string): void {
 }
 
 function getRememberedRoomPresence(
-  roomId: string | null | undefined
+  roomId: string | null | undefined,
+  identity: StoredAgentIdentityState | null | undefined
 ): { status: AgentPresenceStatus; status_text: string | null } {
-  if (!roomId) {
+  if (!roomId || !identity) {
     return { status: "idle", status_text: null };
   }
 
-  return roomPresenceByRoom.get(roomId) ?? { status: "idle", status_text: null };
+  return (
+    roomPresenceByIdentity.get(
+      getRoomIdentityPresenceCacheKey(roomId, identity.actor_label)
+    ) ?? { status: "idle", status_text: null }
+  );
 }
 
 async function syncRoomPresence(
@@ -1038,7 +1047,10 @@ async function syncRoomPresence(
     return;
   }
 
-  roomPresenceByRoom.set(roomId, presence);
+  roomPresenceByIdentity.set(
+    getRoomIdentityPresenceCacheKey(roomId, identity.actor_label),
+    presence
+  );
 
   try {
     await apiCall(`/rooms/${encodeRoomIdPath(roomId)}/presence`, {
@@ -1066,7 +1078,7 @@ async function heartbeatRoomPresence(
   roomId: string | null | undefined,
   identity: StoredAgentIdentityState | null | undefined
 ): Promise<void> {
-  await syncRoomPresence(roomId, identity, getRememberedRoomPresence(roomId));
+  await syncRoomPresence(roomId, identity, getRememberedRoomPresence(roomId, identity));
 }
 
 function getTargetRoomId(roomId?: string): string | null {
@@ -1918,7 +1930,7 @@ server.tool(
     await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
       status: classifyPresenceStatusText(
         status,
-        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null).status
+        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
       ),
       status_text: status,
     });
@@ -2242,11 +2254,11 @@ server.tool(
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status: deriveTaskPresenceStatus(
           status ?? null,
-          getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null).status
+          getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
         ),
         status_text: status
           ? `${task_id} -> ${status}`
-          : getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null).status_text,
+          : getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status_text,
       });
 
       return {

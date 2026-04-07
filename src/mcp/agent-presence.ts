@@ -48,3 +48,7 @@ export function deriveTaskPresenceStatus(
       return fallback;
   }
 }
+
+export function getRoomIdentityPresenceCacheKey(roomId: string, actorLabel: string): string {
+  return JSON.stringify([roomId, actorLabel]);
+}
