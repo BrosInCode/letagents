@@ -61,6 +61,36 @@ export interface RoomTask {
   updated_at: string
 }
 
+export interface TaskGitHubArtifactStatus {
+  task_id: string
+  pr_state: string | null
+  pr_title: string | null
+  pr_url: string | null
+  pr_number: string | null
+  pr_actor: string | null
+  checks: ReadonlyArray<{
+    name: string
+    conclusion: string | null
+    state: string | null
+    actor: string | null
+  }>
+  reviews: ReadonlyArray<{
+    actor: string | null
+    state: string | null
+  }>
+  check_summary: {
+    total: number
+    success: number
+    failure: number
+    pending: number
+  }
+  review_summary: {
+    total: number
+    approved: number
+    changes_requested: number
+  }
+}
+
 export interface RoomInfo {
   projectId: string
   identifier: string
@@ -122,8 +152,9 @@ export interface RoomAgentPresence {
 
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
-const tasks = ref<RoomTask[]>([])
 const presence = ref<RoomAgentPresence[]>([])
+const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
+const tasks = ref<RoomTask[]>([])
 const githubEvents = ref<RoomGitHubEvent[]>([])
 const githubEventsAvailable = ref(false)
 const githubEventsHasMore = ref(false)
@@ -437,6 +468,21 @@ function scheduleGitHubEventsRefresh(roomIdentifier: string) {
   }, 350)
 }
 
+async function fetchTaskGithubStatus(roomIdentifier: string): Promise<Record<string, TaskGitHubArtifactStatus>> {
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks/github-status`)
+    return (data as { statuses?: Record<string, TaskGitHubArtifactStatus> }).statuses ?? {}
+  } catch {
+    return {}
+  }
+}
+
+async function refreshTaskGithubStatus(): Promise<boolean> {
+  if (!room.value) return false
+  taskGithubStatus.value = await fetchTaskGithubStatus(room.value.identifier)
+  return true
+}
+
 /** ── SSE Streaming ── */
 function startStreaming(roomIdentifier: string) {
   stopStreaming()
@@ -465,6 +511,10 @@ function startStreaming(roomIdentifier: string) {
         if ((msg.source || '').toLowerCase() === 'github' || (msg.sender || '').toLowerCase() === 'github') {
           if (room.value && githubEventsSupported.value) {
             scheduleGitHubEventsRefresh(room.value.identifier)
+          }
+          // Also refresh task github status when new github events arrive
+          if (room.value) {
+            void refreshTaskGithubStatus()
           }
         }
 
@@ -680,17 +730,19 @@ async function joinRoom(roomIdentifier: string) {
     persistSession()
 
     // Load existing room state in parallel
-    const [msgs, tsks, prs, gh] = await Promise.all([
+    const [msgs, tsks, prs, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchPresence(roomIdentifier),
       isRepoBackedRoomId(roomIdentifier)
         ? fetchGitHubEvents(roomIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
+      fetchTaskGithubStatus(roomIdentifier),
     ])
     messages.value = msgs
     tasks.value = tsks
     presence.value = prs
+    taskGithubStatus.value = ghStatus
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
     githubEventsHasMore.value = gh.hasMore
@@ -794,6 +846,7 @@ export function useRoom() {
     messages: readonly(messages),
     tasks: readonly(tasks),
     presence: readonly(presence),
+    taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
     githubEventsHasMore: readonly(githubEventsHasMore),
@@ -814,6 +867,7 @@ export function useRoom() {
     addTask,
     updateTask,
     refreshRoomPresence,
+    refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,
     restoreSession,

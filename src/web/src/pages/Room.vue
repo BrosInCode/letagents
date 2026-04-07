@@ -58,6 +58,7 @@
       v-show="activeTab === 'board' && isConnected"
       :tasks="tasks"
       :presence="presence"
+      :taskGithubStatus="taskGithubStatus"
       @addTask="handleAddTask"
       @updateTask="handleUpdateTask"
     />
@@ -91,6 +92,7 @@ const {
   messages,
   tasks,
   presence,
+  taskGithubStatus,
   githubEvents,
   githubEventsAvailable,
   githubEventsHasMore,
