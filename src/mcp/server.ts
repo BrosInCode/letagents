@@ -65,6 +65,7 @@ import {
   stopLocalCodexSession,
   toPublicCodexLiveSession,
 } from "./codex-session.js";
+import { buildRoomEventsQueryString } from "./room-events-query.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -2013,16 +2014,15 @@ server.tool(
       };
     }
 
-    const params = new URLSearchParams();
-    if (event_type) params.set("event_type", event_type);
-    if (object_id) params.set("object_id", object_id);
-    if (actor) params.set("actor", actor);
-    if (since) params.set("since", since);
-    if (until) params.set("until", until);
-    if (after) params.set("after", after);
-    if (limit) params.set("limit", String(limit));
-
-    const qs = params.toString();
+    const qs = buildRoomEventsQueryString({
+      event_type,
+      object_id,
+      actor,
+      since,
+      until,
+      after,
+      limit,
+    });
 
     const result = await roomScopedApiCall<{
       events?: Array<Record<string, unknown>>;

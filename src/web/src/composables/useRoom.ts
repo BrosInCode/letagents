@@ -1,4 +1,10 @@
 import { ref, readonly, onUnmounted, computed } from 'vue'
+import {
+  isRepoBackedRoomId,
+  mapGitHubEventsFetchError,
+  toAvailableGitHubEventsResult,
+  type RoomGitHubEventsError,
+} from './roomGitHubEvents'
 
 /** ── Types ── */
 export interface MessageReplyReference {
@@ -75,11 +81,6 @@ export interface RoomJoinError {
   deviceFlowUrl: string | null
 }
 
-export interface RoomGitHubEventsError {
-  status: number | null
-  message: string
-}
-
 export type RoomGitHubEventType =
   | 'pull_request'
   | 'issue'
@@ -122,8 +123,6 @@ let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1200
 let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
-
-const REPO_BACKED_ROOM_RE = /^github\.com\/[^/]+\/[^/]+$/i
 
 /** ── Color Palette ── */
 const OWNER_COLORS = [
@@ -291,11 +290,6 @@ function roomPath(identifier: string): string {
   return `/rooms/${encodeURIComponent(identifier)}`
 }
 
-function isRepoBackedRoomId(identifier: string | null | undefined): boolean {
-  const normalized = String(identifier || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
-  return REPO_BACKED_ROOM_RE.test(normalized)
-}
-
 const githubEventsSupported = computed(() =>
   room.value ? isRepoBackedRoomId(room.value.identifier || room.value.name || room.value.projectId) : false
 )
@@ -337,27 +331,9 @@ async function fetchGitHubEvents(roomIdentifier: string): Promise<{
 }> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/events?limit=100`)
-    return {
-      events: data.events || [],
-      available: Array.isArray(data.events),
-      hasMore: data.has_more === true,
-      error: null,
-    }
+    return toAvailableGitHubEventsResult<RoomGitHubEvent>(data)
   } catch (error) {
-    const roomError = error as { status?: number; message?: string }
-    const status = roomError.status
-    if (status === 404) {
-      return { events: [], available: false, hasMore: false, error: null }
-    }
-    return {
-      events: [],
-      available: true,
-      hasMore: false,
-      error: {
-        status: status ?? null,
-        message: roomError.message || 'Could not load GitHub events.',
-      },
-    }
+    return mapGitHubEventsFetchError<RoomGitHubEvent>(error as { status?: number; message?: string })
   }
 }
 
