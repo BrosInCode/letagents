@@ -20,6 +20,7 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createSession = dbModule?.createSession;
+const insertGitHubRoomEvent = dbModule?.insertGitHubRoomEvent;
 const upsertAccount = dbModule?.upsertAccount;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
@@ -277,6 +278,22 @@ async function fetchRoomMessages(input: {
   });
 }
 
+async function fetchRoomEvents(input: {
+  port: number;
+  roomName: string;
+  sessionToken?: string;
+  query?: string;
+}): Promise<Response> {
+  const suffix = input.query ? `?${input.query}` : "";
+  return fetch(`http://127.0.0.1:${input.port}/rooms/${encodeURIComponent(input.roomName)}/events${suffix}`, {
+    headers: input.sessionToken
+      ? {
+          Cookie: `letagents_session=${encodeURIComponent(input.sessionToken)}`,
+        }
+      : undefined,
+  });
+}
+
 test.beforeEach(async () => {
   if (!requiresDatabase) {
     await resetDatabase();
@@ -424,5 +441,160 @@ test(
     const payload = await response.json();
     assert.equal(payload.code, "PRIVATE_REPO_NO_ACCESS");
     assert.equal(payload.room_id, PRIVATE_ROOM);
+  }
+);
+
+test(
+  "room events route paginates newest-first with an after cursor",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !insertGitHubRoomEvent) {
+      throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
+    }
+
+    const githubApi = await startGitHubApiStub();
+    t.after(async () => {
+      await stopGitHubApiStub(githubApi.server);
+    });
+
+    const room = await createProjectWithName(PUBLIC_ROOM);
+
+    const first = await insertGitHubRoomEvent({
+      room_id: room.id,
+      event_type: "pull_request",
+      action: "opened",
+      idempotency_key: "events-page-1",
+      github_object_id: "141",
+      actor_login: "alice",
+      title: "First PR",
+    });
+    await sleep(5);
+
+    const second = await insertGitHubRoomEvent({
+      room_id: room.id,
+      event_type: "pull_request",
+      action: "opened",
+      idempotency_key: "events-page-2",
+      github_object_id: "142",
+      actor_login: "alice",
+      title: "Second PR",
+    });
+    await sleep(5);
+
+    const third = await insertGitHubRoomEvent({
+      room_id: room.id,
+      event_type: "pull_request",
+      action: "opened",
+      idempotency_key: "events-page-3",
+      github_object_id: "143",
+      actor_login: "alice",
+      title: "Third PR",
+    });
+
+    const { child, port } = await startApiServer(githubApi.baseUrl);
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const firstPage = await fetchRoomEvents({
+      port,
+      roomName: PUBLIC_ROOM,
+      query: "limit=2",
+    });
+
+    assert.equal(firstPage.status, 200);
+    const firstPayload = await firstPage.json();
+    assert.equal(firstPayload.has_more, true);
+    assert.deepEqual(
+      firstPayload.events.map((event: { id: string }) => event.id),
+      [third.event.id, second.event.id]
+    );
+
+    const nextPage = await fetchRoomEvents({
+      port,
+      roomName: PUBLIC_ROOM,
+      query: `limit=2&after=${encodeURIComponent(second.event.id)}`,
+    });
+
+    assert.equal(nextPage.status, 200);
+    const nextPayload = await nextPage.json();
+    assert.equal(nextPayload.has_more, false);
+    assert.deepEqual(
+      nextPayload.events.map((event: { id: string }) => event.id),
+      [first.event.id]
+    );
+  }
+);
+
+test(
+  "room events route filters by event_type and actor",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !insertGitHubRoomEvent) {
+      throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
+    }
+
+    const githubApi = await startGitHubApiStub();
+    t.after(async () => {
+      await stopGitHubApiStub(githubApi.server);
+    });
+
+    const room = await createProjectWithName(PUBLIC_ROOM);
+
+    await insertGitHubRoomEvent({
+      room_id: room.id,
+      event_type: "pull_request",
+      action: "opened",
+      idempotency_key: "events-filter-pr-alice",
+      github_object_id: "201",
+      actor_login: "alice",
+      title: "Alice PR",
+    });
+    await sleep(5);
+
+    await insertGitHubRoomEvent({
+      room_id: room.id,
+      event_type: "issue",
+      action: "opened",
+      idempotency_key: "events-filter-issue-alice",
+      github_object_id: "202",
+      actor_login: "alice",
+      title: "Alice issue",
+    });
+    await sleep(5);
+
+    await insertGitHubRoomEvent({
+      room_id: room.id,
+      event_type: "pull_request",
+      action: "opened",
+      idempotency_key: "events-filter-pr-bob",
+      github_object_id: "203",
+      actor_login: "bob",
+      title: "Bob PR",
+    });
+
+    const { child, port } = await startApiServer(githubApi.baseUrl);
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const response = await fetchRoomEvents({
+      port,
+      roomName: PUBLIC_ROOM,
+      query: "event_type=pull_request&actor=alice",
+    });
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.events.length, 1);
+    assert.equal(payload.events[0]?.event_type, "pull_request");
+    assert.equal(payload.events[0]?.actor_login, "alice");
+    assert.equal(payload.events[0]?.github_object_id, "201");
   }
 );
