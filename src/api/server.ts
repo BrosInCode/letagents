@@ -27,6 +27,7 @@ import {
   getOrCreateCanonicalRoom,
   getProjectByCode,
   getProjectById,
+  insertGitHubRoomEvent,
   getSessionAccountByToken,
   getTaskById,
   getTasks,
@@ -61,28 +62,25 @@ import { db } from "./db/client.js";
 import { system_github_app } from "./db/schema.js";
 import {
   buildGitHubRepoRoomId,
-  formatGitHubPullRequestEventMessage,
-  formatGitHubRepositoryEventMessage,
   getGitHubInstallationTarget,
   getGitHubRepositoryOwnerLogin,
   getGitHubWebhookMetadata,
   verifyGitHubWebhookSignature,
   type GitHubWebhookPayload,
-  type GitHubWebhookPullRequest,
   type GitHubWebhookRepository,
 } from "./github-app.js";
 import {
-  buildTaskWorkflowArtifactMatches,
+  materializeGitHubWebhookEvent,
+  type MaterializedGitHubRoomEvent,
+} from "./github-room-events.js";
+import {
+  buildRepoRoomEventArtifactMatches,
   extractReferencedTaskId,
-  formatRepoCheckRunEventMessage,
-  formatRepoIssueCommentEventMessage,
-  formatRepoIssueEventMessage,
-  formatRepoPullRequestReviewEventMessage,
-  projectIssueEvent,
-  projectPullRequestEvent,
-  projectPullRequestReviewEvent,
+  formatRepoRoomEventMessage,
+  getRepoRoomEventReferenceTexts,
+  projectRepoRoomEvent,
   validateTaskWorkflowArtifactsInput,
-  type RepoPullRequestRef,
+  type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
 import {
@@ -699,59 +697,6 @@ async function syncGitHubAppRepositoryFromPayload(
   };
 }
 
-async function maybeLinkPullRequestToTask(
-  project: Project,
-  pullRequest: RepoPullRequestRef,
-  action: string
-): Promise<string | null> {
-  let linkedTask =
-    (await findTaskByWorkflowArtifactMatches(
-      project.id,
-      buildTaskWorkflowArtifactMatches({
-        provider: "github",
-        kind: "pull_request",
-        url: pullRequest.url,
-        number: pullRequest.number,
-      })
-    )) ?? (await findTaskByPrUrl(project.id, pullRequest.url));
-
-  if (!linkedTask) {
-    const referencedTaskId = extractReferencedTaskId(pullRequest.title, pullRequest.body);
-    if (referencedTaskId) {
-      linkedTask = await getTaskById(project.id, referencedTaskId);
-    }
-  }
-
-  if (!linkedTask) {
-    return null;
-  }
-
-  if (linkedTask.pr_url !== pullRequest.url) {
-    linkedTask = (await updateTask(project.id, linkedTask.id, {
-      pr_url: pullRequest.url,
-    })) ?? linkedTask;
-  }
-
-  const projectedTaskState = projectPullRequestEvent({
-    action,
-    merged: Boolean(pullRequest.merged),
-    currentStatus: linkedTask.status,
-  });
-
-  if (projectedTaskState) {
-    const nextTask = await updateTask(project.id, linkedTask.id, {
-      status: projectedTaskState.newStatus as TaskStatus,
-      pr_url: pullRequest.url,
-    });
-    if (nextTask) {
-      linkedTask = nextTask;
-      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
-    }
-  }
-
-  return linkedTask.id;
-}
-
 async function resolveTaskByArtifactsOrReferences(
   project: Project,
   artifactMatches: TaskWorkflowArtifactMatch[],
@@ -770,118 +715,168 @@ async function resolveTaskByArtifactsOrReferences(
   return getTaskById(project.id, referencedTaskId);
 }
 
-function buildGitHubIssueArtifactMatches(input: {
-  issueNumber: number;
-  issueUrl: string;
-  isPullRequest?: boolean;
-}): TaskWorkflowArtifactMatch[] {
-  return buildTaskWorkflowArtifactMatches({
-    provider: "github",
-    kind: input.isPullRequest ? "pull_request" : "issue",
-    url: input.issueUrl,
-    number: input.issueNumber,
-  });
+async function resolveLinkedTaskForRepoRoomEvent(
+  project: Project,
+  event: RepoRoomEvent
+): Promise<Task | undefined> {
+  const artifactMatches = buildRepoRoomEventArtifactMatches(event);
+
+  if (event.kind === "pull_request") {
+    const artifactTask =
+      (await findTaskByWorkflowArtifactMatches(project.id, artifactMatches)) ??
+      (await findTaskByPrUrl(project.id, event.pullRequest.url));
+
+    if (artifactTask) {
+      return artifactTask;
+    }
+
+    const referencedTaskId = extractReferencedTaskId(...getRepoRoomEventReferenceTexts(event));
+    if (!referencedTaskId) {
+      return undefined;
+    }
+
+    return getTaskById(project.id, referencedTaskId);
+  }
+
+  return resolveTaskByArtifactsOrReferences(
+    project,
+    artifactMatches,
+    ...getRepoRoomEventReferenceTexts(event)
+  );
 }
 
-function buildGitHubPullRequestReviewArtifactMatches(input: {
-  pullRequestNumber: number;
-  pullRequestUrl: string;
-  reviewId: number;
-  reviewUrl: string;
-}): TaskWorkflowArtifactMatch[] {
-  return [
-    ...buildTaskWorkflowArtifactMatches({
-      provider: "github",
-      kind: "review",
-      id: String(input.reviewId),
-      url: input.reviewUrl,
-    }),
-    ...buildTaskWorkflowArtifactMatches({
-      provider: "github",
-      kind: "pull_request",
-      url: input.pullRequestUrl,
-      number: input.pullRequestNumber,
-    }),
-  ];
-}
-
-function buildGitHubCheckRunArtifactMatches(input: {
-  checkRunId: number;
-  checkRunName: string;
-  checkRunUrl: string;
-}): TaskWorkflowArtifactMatch[] {
-  return buildTaskWorkflowArtifactMatches({
-    provider: "github",
-    kind: "check_run",
-    id: String(input.checkRunId),
-    title: input.checkRunName,
-    url: input.checkRunUrl,
-  });
-}
-
-async function projectTaskStatusFromIssueEvent(
+async function applyRepoRoomEventToTask(
   project: Project,
   linkedTask: Task | undefined,
-  action: string
+  event: RepoRoomEvent
 ): Promise<Task | undefined> {
   if (!linkedTask) {
     return undefined;
   }
 
-  const projectedTaskState = projectIssueEvent({
-    action,
+  const updates: { status?: TaskStatus; pr_url?: string } = {};
+  if (event.kind === "pull_request" && linkedTask.pr_url !== event.pullRequest.url) {
+    updates.pr_url = event.pullRequest.url;
+  }
+
+  const projectedTaskState = projectRepoRoomEvent({
+    event,
     currentStatus: linkedTask.status,
   });
 
-  if (!projectedTaskState) {
+  if (projectedTaskState) {
+    updates.status = projectedTaskState.newStatus as TaskStatus;
+    if (event.kind === "pull_request") {
+      updates.pr_url = event.pullRequest.url;
+    }
+  }
+
+  if (!updates.status && !updates.pr_url) {
     return linkedTask;
   }
 
-  const nextTask = await updateTask(project.id, linkedTask.id, {
-    status: projectedTaskState.newStatus as TaskStatus,
-  });
+  const nextTask = await updateTask(project.id, linkedTask.id, updates);
   if (nextTask) {
-    await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
+    if (updates.status) {
+      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
+    }
     return nextTask;
   }
 
   return linkedTask;
 }
 
-async function projectTaskStatusFromPullRequestReviewEvent(
+async function persistMaterializedGitHubRoomEvent(
+  event: MaterializedGitHubRoomEvent,
+  input: {
+    deliveryId: string;
+    roomId?: string | null;
+    linkedTaskId?: string | null;
+  }
+): Promise<{ duplicate: boolean }> {
+  const { duplicate } = await insertGitHubRoomEvent({
+    room_id: input.roomId ?? null,
+    delivery_id: input.deliveryId,
+    event_type: event.event_type,
+    action: event.action,
+    idempotency_key: event.idempotency_key,
+    github_object_id: event.github_object_id,
+    github_object_url: event.github_object_url,
+    title: event.title,
+    state: event.state,
+    actor_login: event.actor_login,
+    metadata: event.metadata,
+    linked_task_id: input.linkedTaskId ?? null,
+  });
+
+  return { duplicate };
+}
+
+async function handleMaterializedGitHubRoomEvent(
   project: Project,
-  linkedTask: Task | undefined,
-  action: string,
-  reviewState: string
-): Promise<Task | undefined> {
-  if (!linkedTask) {
-    return undefined;
+  event: MaterializedGitHubRoomEvent,
+  input: {
+    deliveryId: string;
+    installationId: string | null;
+    githubRepoId: string | null;
   }
+): Promise<{
+  status: Exclude<GitHubWebhookDeliveryStatus, "received">;
+  installationId: string | null;
+  githubRepoId: string | null;
+  roomId: string | null;
+}> {
+  const roomEvent = event.roomEvent;
+  let linkedTask = roomEvent
+    ? await resolveLinkedTaskForRepoRoomEvent(project, roomEvent)
+    : undefined;
 
-  const projectedTaskState = projectPullRequestReviewEvent({
-    action,
-    reviewState,
-    currentStatus: linkedTask.status,
+  const persisted = await persistMaterializedGitHubRoomEvent(event, {
+    deliveryId: input.deliveryId,
+    roomId: project.id,
+    linkedTaskId: linkedTask?.id ?? null,
   });
 
-  if (!projectedTaskState) {
-    return linkedTask;
+  if (persisted.duplicate) {
+    return {
+      status: "processed",
+      installationId: input.installationId,
+      githubRepoId: input.githubRepoId,
+      roomId: project.id,
+    };
   }
 
-  const nextTask = await updateTask(project.id, linkedTask.id, {
-    status: projectedTaskState.newStatus as TaskStatus,
+  if (!roomEvent) {
+    return {
+      status: "processed",
+      installationId: input.installationId,
+      githubRepoId: input.githubRepoId,
+      roomId: project.id,
+    };
+  }
+
+  linkedTask = await applyRepoRoomEventToTask(project, linkedTask, roomEvent);
+
+  const message = formatRepoRoomEventMessage({
+    event: roomEvent,
+    linkedTaskId: linkedTask?.id ?? null,
   });
-  if (nextTask) {
-    await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(nextTask));
-    return nextTask;
+  if (message) {
+    await emitProjectMessage(project.id, "github", message, { source: "github" });
   }
 
-  return linkedTask;
+  return {
+    status: "processed",
+    installationId: input.installationId,
+    githubRepoId: input.githubRepoId,
+    roomId: project.id,
+  };
 }
 
 async function emitGitHubPullRequestEvent(
   project: Project,
-  payload: GitHubWebhookPayload
+  payload: GitHubWebhookPayload,
+  deliveryId: string
 ): Promise<{
   status: Exclude<GitHubWebhookDeliveryStatus, "received">;
   installationId: string | null;
@@ -903,28 +898,8 @@ async function emitGitHubPullRequestEvent(
     };
   }
 
-  const linkedTaskId = await maybeLinkPullRequestToTask(
-    project,
-    {
-      number: payload.pull_request.number,
-      title: payload.pull_request.title,
-      url: payload.pull_request.html_url,
-      body: payload.pull_request.body,
-      merged: payload.pull_request.merged,
-      authorLogin: payload.pull_request.user?.login,
-      mergedByLogin: payload.pull_request.merged_by?.login,
-    },
-    payload.action
-  );
-  const message = formatGitHubPullRequestEventMessage({
-    action: payload.action,
-    repositoryFullName: payload.repository.full_name,
-    pullRequest: payload.pull_request,
-    senderLogin: payload.sender?.login ?? null,
-    linkedTaskId,
-  });
-
-  if (!message) {
+  const materializedEvent = materializeGitHubWebhookEvent("pull_request", payload);
+  if (!materializedEvent) {
     return {
       status: "ignored",
       installationId: repositorySync.installationId,
@@ -933,21 +908,17 @@ async function emitGitHubPullRequestEvent(
     };
   }
 
-  await emitProjectMessage(project.id, "github", message, {
-    source: "github",
-  });
-
-  return {
-    status: "processed",
+  return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
+    deliveryId,
     installationId: repositorySync.installationId,
     githubRepoId: repositorySync.githubRepoId,
-    roomId: project.id,
-  };
+  });
 }
 
 async function handleGitHubWebhookEvent(
   eventName: string,
-  payload: GitHubWebhookPayload
+  payload: GitHubWebhookPayload,
+  deliveryId: string
 ): Promise<{
   status: Exclude<GitHubWebhookDeliveryStatus, "received">;
   installationId: string | null;
@@ -980,9 +951,15 @@ async function handleGitHubWebhookEvent(
         };
       }
 
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
       const now = new Date().toISOString();
       if (payload.action === "deleted") {
         await markGitHubAppInstallationUninstalled(installationId, now);
+        if (materializedEvent) {
+          await persistMaterializedGitHubRoomEvent(materializedEvent, {
+            deliveryId,
+          });
+        }
         return {
           status: "processed",
           installationId,
@@ -998,6 +975,11 @@ async function handleGitHubWebhookEvent(
         });
         if (!payload.installation?.account) {
           await setGitHubAppInstallationSuspended(installationId, now);
+        }
+        if (materializedEvent) {
+          await persistMaterializedGitHubRoomEvent(materializedEvent, {
+            deliveryId,
+          });
         }
         return {
           status: "processed",
@@ -1015,6 +997,11 @@ async function handleGitHubWebhookEvent(
         if (!payload.installation?.account) {
           await setGitHubAppInstallationSuspended(installationId, null);
         }
+        if (syncedInstallationId && materializedEvent) {
+          await persistMaterializedGitHubRoomEvent(materializedEvent, {
+            deliveryId,
+          });
+        }
         return {
           status: syncedInstallationId ? "processed" : "ignored",
           installationId: syncedInstallationId ?? installationId,
@@ -1027,6 +1014,11 @@ async function handleGitHubWebhookEvent(
         suspended_at: null,
         uninstalled_at: null,
       });
+      if (syncedInstallationId && materializedEvent) {
+        await persistMaterializedGitHubRoomEvent(materializedEvent, {
+          deliveryId,
+        });
+      }
       return {
         status: syncedInstallationId ? "processed" : "ignored",
         installationId: syncedInstallationId ?? installationId,
@@ -1084,6 +1076,13 @@ async function handleGitHubWebhookEvent(
         await markGitHubAppRepositoryRemoved(repositoryId);
       }
 
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      if (materializedEvent) {
+        await persistMaterializedGitHubRoomEvent(materializedEvent, {
+          deliveryId,
+        });
+      }
+
       return {
         status: "processed",
         installationId: syncedInstallationId,
@@ -1116,7 +1115,7 @@ async function handleGitHubWebhookEvent(
         };
       }
 
-      return emitGitHubPullRequestEvent(project, payload);
+      return emitGitHubPullRequestEvent(project, payload, deliveryId);
     }
 
     case "repository": {
@@ -1166,19 +1165,13 @@ async function handleGitHubWebhookEvent(
           syncedInstallationId
         );
 
-        // Emit a system event into the room if it exists
-        if (migratedRoom) {
-          const message = formatGitHubRepositoryEventMessage({
-            action: payload.action,
-            repositoryFullName: currentFullName,
-            oldFullName,
-            senderLogin: payload.sender?.login ?? null,
+        const repositoryEvent = materializeGitHubWebhookEvent("repository", payload);
+        if (migratedRoom && repositoryEvent) {
+          await handleMaterializedGitHubRoomEvent(migratedRoom, repositoryEvent, {
+            deliveryId,
+            installationId: syncedInstallationId,
+            githubRepoId: repositorySync.githubRepoId,
           });
-          if (message) {
-            await emitProjectMessage(migratedRoom.id, "github", message, {
-              source: "github",
-            });
-          }
         }
 
         return {
@@ -1204,172 +1197,67 @@ async function handleGitHubWebhookEvent(
     }
 
     case "issues": {
-      if (!payload.repository || !payload.issue || !payload.action) {
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
       const project = await getProjectById(roomId ?? "");
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
-      const linkedTask = await resolveTaskByArtifactsOrReferences(
-        project,
-        buildGitHubIssueArtifactMatches({
-          issueNumber: payload.issue.number,
-          issueUrl: payload.issue.html_url,
-          isPullRequest: Boolean(payload.issue.pull_request),
-        }),
-        payload.issue.title
-      );
-      const projectedTask = await projectTaskStatusFromIssueEvent(project, linkedTask, payload.action);
-      const linkedTaskId = projectedTask?.id ?? linkedTask?.id ?? null;
-
-      const message = formatRepoIssueEventMessage({
-        provider: "github",
-        action: payload.action,
-        repositoryFullName: payload.repository.full_name,
-        issue: {
-          number: payload.issue.number,
-          title: payload.issue.title,
-          url: payload.issue.html_url,
-        },
-        senderLogin: payload.sender?.login ?? null,
-        linkedTaskId,
+      return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
+        deliveryId,
+        installationId,
+        githubRepoId,
       });
-      if (!message) {
-        return { status: "ignored", installationId, githubRepoId, roomId };
-      }
-      await emitProjectMessage(project.id, "github", message, { source: "github" });
-      return { status: "processed", installationId, githubRepoId, roomId: project.id };
     }
 
     case "issue_comment": {
-      if (!payload.repository || !payload.issue || !payload.comment || !payload.action) {
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
       const project = await getProjectById(roomId ?? "");
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
-      // GitHub sends issue_comment for both real issues AND pull requests.
-      // When the issue is actually a PR, issue.pull_request is present.
-      const isPullRequest = !!payload.issue.pull_request;
-      const linkedTask = await resolveTaskByArtifactsOrReferences(
-        project,
-        buildGitHubIssueArtifactMatches({
-          issueNumber: payload.issue.number,
-          issueUrl: payload.issue.html_url,
-          isPullRequest,
-        }),
-        payload.issue.title,
-        payload.comment.body
-      );
-      const linkedTaskId = linkedTask?.id ?? null;
-      const message = formatRepoIssueCommentEventMessage({
-        provider: "github",
-        action: payload.action,
-        repositoryFullName: payload.repository.full_name,
-        issue: {
-          number: payload.issue.number,
-          title: payload.issue.title,
-        },
-        comment: {
-          body: payload.comment.body,
-          url: payload.comment.html_url,
-        },
-        senderLogin: payload.sender?.login ?? null,
-        linkedTaskId,
-        isPullRequest,
+      return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
+        deliveryId,
+        installationId,
+        githubRepoId,
       });
-      if (!message) {
-        return { status: "ignored", installationId, githubRepoId, roomId };
-      }
-      await emitProjectMessage(project.id, "github", message, { source: "github" });
-      return { status: "processed", installationId, githubRepoId, roomId: project.id };
     }
 
     case "pull_request_review": {
-      if (!payload.repository || !payload.pull_request || !payload.review || !payload.action) {
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
       const project = await getProjectById(roomId ?? "");
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
-      const linkedTask = await resolveTaskByArtifactsOrReferences(
-        project,
-        buildGitHubPullRequestReviewArtifactMatches({
-          pullRequestNumber: payload.pull_request.number,
-          pullRequestUrl: payload.pull_request.html_url,
-          reviewId: payload.review.id,
-          reviewUrl: payload.review.html_url,
-        }),
-        payload.pull_request.title,
-        payload.pull_request.body
-      );
-      const projectedTask = await projectTaskStatusFromPullRequestReviewEvent(
-        project,
-        linkedTask,
-        payload.action,
-        payload.review.state
-      );
-      const linkedTaskId = projectedTask?.id ?? linkedTask?.id ?? null;
-
-      const message = formatRepoPullRequestReviewEventMessage({
-        provider: "github",
-        action: payload.action,
-        repositoryFullName: payload.repository.full_name,
-        pullRequest: {
-          number: payload.pull_request.number,
-          title: payload.pull_request.title,
-        },
-        review: {
-          state: payload.review.state,
-          url: payload.review.html_url,
-        },
-        senderLogin: payload.sender?.login ?? null,
-        linkedTaskId,
+      return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
+        deliveryId,
+        installationId,
+        githubRepoId,
       });
-      if (!message) {
-        return { status: "ignored", installationId, githubRepoId, roomId };
-      }
-      await emitProjectMessage(project.id, "github", message, { source: "github" });
-      return { status: "processed", installationId, githubRepoId, roomId: project.id };
     }
 
     case "check_run": {
-      if (!payload.repository || !payload.check_run || !payload.action) {
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
       const project = await getProjectById(roomId ?? "");
       if (!project) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
-      const linkedTask = await findTaskByWorkflowArtifactMatches(
-        project.id,
-        buildGitHubCheckRunArtifactMatches({
-          checkRunId: payload.check_run.id,
-          checkRunName: payload.check_run.name,
-          checkRunUrl: payload.check_run.html_url,
-        })
-      );
-      const message = formatRepoCheckRunEventMessage({
-        provider: "github",
-        action: payload.action,
-        repositoryFullName: payload.repository.full_name,
-        checkRun: {
-          name: payload.check_run.name,
-          status: payload.check_run.status,
-          conclusion: payload.check_run.conclusion,
-          url: payload.check_run.html_url,
-          appName: payload.check_run.app?.name ?? null,
-        },
-        linkedTaskId: linkedTask?.id ?? null,
+      return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
+        deliveryId,
+        installationId,
+        githubRepoId,
       });
-      if (!message) {
-        return { status: "ignored", installationId, githubRepoId, roomId };
-      }
-      await emitProjectMessage(project.id, "github", message, { source: "github" });
-      return { status: "processed", installationId, githubRepoId, roomId: project.id };
     }
 
     default:
@@ -1782,7 +1670,11 @@ app.post("/webhooks/github", async (req: AuthenticatedRequest, res) => {
   }
 
   try {
-    const result = await handleGitHubWebhookEvent(metadata.eventName, payload);
+    const result = await handleGitHubWebhookEvent(
+      metadata.eventName,
+      payload,
+      metadata.deliveryId
+    );
     await markGitHubWebhookDeliveryProcessed(metadata.deliveryId, {
       status: result.status,
       installation_id: result.installationId,

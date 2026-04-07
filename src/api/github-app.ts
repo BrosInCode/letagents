@@ -37,6 +37,10 @@ export interface GitHubWebhookPullRequest {
   body?: string | null;
   draft?: boolean;
   merged?: boolean;
+  state?: string;
+  head?: {
+    sha?: string;
+  };
   user?: {
     login: string;
   };
