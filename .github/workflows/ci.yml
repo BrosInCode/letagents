@@ -103,8 +103,9 @@ jobs:
 
             cd ~/letagents
 
-            # Pull latest docker-compose.yml
-            git pull origin staging
+            # Fetch and checkout the exact commit that triggered this deploy
+            git fetch origin staging
+            git checkout ${{ github.sha }}
 
             # Pull the exact images built by this CI run
             docker pull "ghcr.io/brosincode/letagents:${IMAGE_TAG}"
