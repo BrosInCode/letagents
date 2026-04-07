@@ -2064,3 +2064,130 @@ export async function getGitHubRoomEvents(input: {
 
   return { events, has_more };
 }
+
+/**
+ * GitHub artifact status summary for a single task.
+ * Materialized from github_room_events linked to the task.
+ */
+export interface TaskGitHubArtifactStatus {
+  task_id: string;
+  pr_state: string | null;
+  pr_title: string | null;
+  pr_url: string | null;
+  pr_number: string | null;
+  pr_actor: string | null;
+  checks: Array<{
+    name: string;
+    conclusion: string | null;
+    state: string | null;
+    actor: string | null;
+  }>;
+  reviews: Array<{
+    actor: string | null;
+    state: string | null;
+  }>;
+  check_summary: {
+    total: number;
+    success: number;
+    failure: number;
+    pending: number;
+  };
+  review_summary: {
+    total: number;
+    approved: number;
+    changes_requested: number;
+  };
+}
+
+/**
+ * Get GitHub artifact status for all tasks in a room that have linked events.
+ * Uses linked_task_id from github_room_events to aggregate per task.
+ */
+export async function getTasksGitHubArtifactStatus(
+  roomId: string
+): Promise<Map<string, TaskGitHubArtifactStatus>> {
+  const events = await db
+    .select()
+    .from(github_room_events)
+    .where(
+      and(
+        eq(github_room_events.room_id, roomId),
+        sql`${github_room_events.linked_task_id} IS NOT NULL`
+      )
+    )
+    .orderBy(desc(github_room_events.created_at))
+    .limit(500);
+
+  const statusMap = new Map<string, TaskGitHubArtifactStatus>();
+
+  for (const event of events) {
+    const taskId = event.linked_task_id!;
+
+    if (!statusMap.has(taskId)) {
+      statusMap.set(taskId, {
+        task_id: taskId,
+        pr_state: null,
+        pr_title: null,
+        pr_url: null,
+        pr_number: null,
+        pr_actor: null,
+        checks: [],
+        reviews: [],
+        check_summary: { total: 0, success: 0, failure: 0, pending: 0 },
+        review_summary: { total: 0, approved: 0, changes_requested: 0 },
+      });
+    }
+
+    const status = statusMap.get(taskId)!;
+
+    if (event.event_type === "pull_request" && status.pr_state === null) {
+      status.pr_state = event.state;
+      status.pr_title = event.title;
+      status.pr_url = event.github_object_url;
+      status.pr_number = event.github_object_id;
+      status.pr_actor = event.actor_login;
+    }
+
+    if (event.event_type === "check_run") {
+      const checkName = event.title ?? event.github_object_id ?? "unknown";
+      if (!status.checks.some((c) => c.name === checkName)) {
+        const conclusion = event.state ?? (event.metadata as Record<string, unknown> | null)?.conclusion as string | null ?? null;
+        status.checks.push({
+          name: checkName,
+          conclusion,
+          state: event.action,
+          actor: event.actor_login,
+        });
+      }
+    }
+
+    if (event.event_type === "pull_request_review") {
+      const actor = event.actor_login;
+      if (!status.reviews.some((r) => r.actor === actor)) {
+        status.reviews.push({
+          actor,
+          state: event.state ?? event.action,
+        });
+      }
+    }
+  }
+
+  for (const status of statusMap.values()) {
+    status.check_summary.total = status.checks.length;
+    for (const check of status.checks) {
+      const conclusion = check.conclusion?.toLowerCase();
+      if (conclusion === "success") status.check_summary.success++;
+      else if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "cancelled") status.check_summary.failure++;
+      else status.check_summary.pending++;
+    }
+
+    status.review_summary.total = status.reviews.length;
+    for (const review of status.reviews) {
+      const state = review.state?.toLowerCase();
+      if (state === "approved") status.review_summary.approved++;
+      else if (state === "changes_requested") status.review_summary.changes_requested++;
+    }
+  }
+
+  return statusMap;
+}
