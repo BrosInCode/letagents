@@ -9,6 +9,7 @@ import {
   auth_states,
   github_app_installations,
   github_app_repositories,
+  github_room_events,
   github_webhook_deliveries,
   github_repositories,
   id_sequences,
@@ -19,6 +20,7 @@ import {
   rooms,
   tasks,
 } from "./db/schema.js";
+import type { GitHubRoomEventMetadata } from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomId, normalizeRoomName } from "./room-routing.js";
 import {
@@ -1809,4 +1811,111 @@ export async function updateTask(
     workflow_artifacts: newWorkflowArtifacts,
     updated_at: now,
   };
+}
+
+// ── GitHub Room Events ──────────────────────────────────────────────────────
+
+export interface GitHubRoomEvent {
+  id: string;
+  room_id: string;
+  delivery_id: string | null;
+  event_type: string;
+  action: string;
+  idempotency_key: string;
+  github_object_id: string | null;
+  github_object_url: string | null;
+  title: string | null;
+  state: string | null;
+  actor_login: string | null;
+  metadata: GitHubRoomEventMetadata | null;
+  linked_task_id: string | null;
+  created_at: string;
+}
+
+export async function insertGitHubRoomEvent(input: {
+  room_id: string;
+  delivery_id?: string | null;
+  event_type: string;
+  action: string;
+  idempotency_key: string;
+  github_object_id?: string | null;
+  github_object_url?: string | null;
+  title?: string | null;
+  state?: string | null;
+  actor_login?: string | null;
+  metadata?: GitHubRoomEventMetadata | null;
+  linked_task_id?: string | null;
+}): Promise<{ event: GitHubRoomEvent; duplicate: boolean }> {
+  const id = `gre_${crypto.randomUUID().replace(/-/g, "")}`;
+  const now = new Date().toISOString();
+
+  const [created] = await db
+    .insert(github_room_events)
+    .values({
+      id,
+      room_id: input.room_id,
+      delivery_id: input.delivery_id ?? null,
+      event_type: input.event_type,
+      action: input.action,
+      idempotency_key: input.idempotency_key,
+      github_object_id: input.github_object_id ?? null,
+      github_object_url: input.github_object_url ?? null,
+      title: input.title ?? null,
+      state: input.state ?? null,
+      actor_login: input.actor_login ?? null,
+      metadata: input.metadata ?? null,
+      linked_task_id: input.linked_task_id ?? null,
+      created_at: now,
+    })
+    .onConflictDoNothing()
+    .returning();
+
+  if (created) {
+    return { event: created as GitHubRoomEvent, duplicate: false };
+  }
+
+  // Idempotency key conflict — fetch the existing record
+  const [existing] = await db
+    .select()
+    .from(github_room_events)
+    .where(
+      and(
+        eq(github_room_events.room_id, input.room_id),
+        eq(github_room_events.idempotency_key, input.idempotency_key)
+      )
+    )
+    .limit(1);
+
+  if (!existing) {
+    throw new Error(
+      `GitHub room event with idempotency key '${input.idempotency_key}' could not be recorded`
+    );
+  }
+
+  return { event: existing as GitHubRoomEvent, duplicate: true };
+}
+
+export async function getGitHubRoomEvents(input: {
+  room_id: string;
+  event_type?: string;
+  github_object_id?: string;
+  limit?: number;
+}): Promise<GitHubRoomEvent[]> {
+  const conditions = [eq(github_room_events.room_id, input.room_id)];
+
+  if (input.event_type) {
+    conditions.push(eq(github_room_events.event_type, input.event_type));
+  }
+  if (input.github_object_id) {
+    conditions.push(eq(github_room_events.github_object_id, input.github_object_id));
+  }
+
+  const rows = await db
+    .select()
+    .from(github_room_events)
+    .where(and(...conditions))
+    .orderBy(desc(github_room_events.created_at))
+    .limit(input.limit ?? 50);
+
+  return rows as GitHubRoomEvent[];
 }

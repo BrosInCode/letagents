@@ -333,3 +333,72 @@ export const invites = pgTable(
     room_idx: index("invites_room_id_idx").on(table.room_id),
   })
 );
+
+/**
+ * Normalized GitHub room events.
+ *
+ * Each webhook delivery that produces a meaningful state change is recorded
+ * here as one canonical, structured event. The idempotency_key ensures
+ * duplicate deliveries never produce duplicate events.
+ *
+ * Agents and the API query this table instead of parsing room message text.
+ */
+export interface GitHubRoomEventMetadata {
+  /** PR body, review body, comment body, check conclusion, labels, etc. */
+  [key: string]: unknown;
+}
+
+export const github_room_events = pgTable(
+  "github_room_events",
+  {
+    id: text("id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    delivery_id: text("delivery_id")
+      .references(() => github_webhook_deliveries.delivery_id, {
+        onDelete: "set null",
+      }),
+    /** Normalized event type: pull_request, issue, check_run, review, comment, installation */
+    event_type: text("event_type").notNull(),
+    /** GitHub action: opened, closed, completed, created, etc. */
+    action: text("action").notNull(),
+    /**
+     * Dedup key derived from the most specific GitHub object identity per event class.
+     * Examples: "pr:42:opened", "comment:12345:created", "check_run:789:completed"
+     */
+    idempotency_key: text("idempotency_key").notNull(),
+    /** Parent GitHub object ID for queryability (PR number, issue number, etc.) */
+    github_object_id: text("github_object_id"),
+    /** html_url of the GitHub object */
+    github_object_url: text("github_object_url"),
+    /** PR/issue title or check name */
+    title: text("title"),
+    /** Current state: open, closed, merged, success, failure, etc. */
+    state: text("state"),
+    /** GitHub login of the actor who triggered the event */
+    actor_login: text("actor_login"),
+    /** Structured payload excerpt for richer queries */
+    metadata: jsonb("metadata").$type<GitHubRoomEventMetadata>(),
+    /** Linked task board task, if one was resolved */
+    linked_task_id: text("linked_task_id"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    room_idx: index("github_room_events_room_id_idx").on(table.room_id),
+    idempotency_idx: uniqueIndex("github_room_events_idempotency_idx").on(
+      table.room_id,
+      table.idempotency_key
+    ),
+    event_type_idx: index("github_room_events_event_type_idx").on(
+      table.room_id,
+      table.event_type
+    ),
+    object_idx: index("github_room_events_object_idx").on(
+      table.room_id,
+      table.event_type,
+      table.github_object_id
+    ),
+    delivery_idx: index("github_room_events_delivery_id_idx").on(table.delivery_id),
+  })
+);
