@@ -75,9 +75,37 @@ export interface RoomJoinError {
   deviceFlowUrl: string | null
 }
 
+export type RoomGitHubEventType =
+  | 'pull_request'
+  | 'issue'
+  | 'issue_comment'
+  | 'pull_request_review'
+  | 'check_run'
+  | 'installation'
+  | 'installation_repositories'
+  | 'repository'
+
+export interface RoomGitHubEvent {
+  id: string
+  event_type: RoomGitHubEventType
+  action: string
+  github_object_id: string | null
+  github_object_url: string | null
+  title: string | null
+  state: string | null
+  actor_login: string | null
+  metadata: Record<string, unknown> | null
+  linked_task_id: string | null
+  created_at: string
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const tasks = ref<RoomTask[]>([])
+const githubEvents = ref<RoomGitHubEvent[]>([])
+const githubEventsAvailable = ref(false)
+const githubEventsHasMore = ref(false)
+const githubEventsLoading = ref(false)
 const room = ref<RoomInfo | null>(null)
 const isConnected = ref(false)
 const isStreaming = ref(false)
@@ -87,6 +115,7 @@ const joinError = ref<RoomJoinError | null>(null)
 let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1200
+let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 /** ── Color Palette ── */
 const OWNER_COLORS = [
@@ -283,6 +312,53 @@ async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   }
 }
 
+async function fetchGitHubEvents(roomIdentifier: string): Promise<{
+  events: RoomGitHubEvent[]
+  available: boolean
+  hasMore: boolean
+}> {
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/events?limit=100`)
+    return {
+      events: data.events || [],
+      available: Array.isArray(data.events),
+      hasMore: data.has_more === true,
+    }
+  } catch (error) {
+    const status = (error as { status?: number }).status
+    if (status === 404) {
+      return { events: [], available: false, hasMore: false }
+    }
+    return { events: [], available: false, hasMore: false }
+  }
+}
+
+async function refreshGitHubEvents(roomIdentifier: string) {
+  githubEventsLoading.value = true
+  try {
+    const next = await fetchGitHubEvents(roomIdentifier)
+    githubEvents.value = next.events
+    githubEventsAvailable.value = next.available
+    githubEventsHasMore.value = next.hasMore
+  } finally {
+    githubEventsLoading.value = false
+  }
+}
+
+async function refreshRoomGitHubEvents(): Promise<boolean> {
+  if (!room.value) return false
+  await refreshGitHubEvents(room.value.identifier)
+  return true
+}
+
+function scheduleGitHubEventsRefresh(roomIdentifier: string) {
+  if (githubEventsRefreshTimer) return
+  githubEventsRefreshTimer = setTimeout(() => {
+    githubEventsRefreshTimer = null
+    void refreshGitHubEvents(roomIdentifier)
+  }, 350)
+}
+
 /** ── SSE Streaming ── */
 function startStreaming(roomIdentifier: string) {
   stopStreaming()
@@ -307,6 +383,12 @@ function startStreaming(roomIdentifier: string) {
       if (!exists) {
         messages.value = [...messages.value, msg]
         playNotificationSound()
+
+        if ((msg.source || '').toLowerCase() === 'github' || (msg.sender || '').toLowerCase() === 'github') {
+          if (room.value) {
+            scheduleGitHubEventsRefresh(room.value.identifier)
+          }
+        }
 
         // Auto-refresh board when task lifecycle messages arrive
         if (msg.sender === 'letagents' && msg.text?.includes('task_')) {
@@ -352,6 +434,10 @@ function stopStreaming() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
+  }
+  if (githubEventsRefreshTimer) {
+    clearTimeout(githubEventsRefreshTimer)
+    githubEventsRefreshTimer = null
   }
 }
 
@@ -482,6 +568,10 @@ async function joinRoom(roomIdentifier: string) {
   room.value = null
   messages.value = []
   tasks.value = []
+  githubEvents.value = []
+  githubEventsAvailable.value = false
+  githubEventsHasMore.value = false
+  githubEventsLoading.value = true
   isConnected.value = false
   connectionState.value = 'connecting'
   joinError.value = null
@@ -505,12 +595,17 @@ async function joinRoom(roomIdentifier: string) {
     persistSession()
 
     // Load existing messages and tasks in parallel
-    const [msgs, tsks] = await Promise.all([
+    const [msgs, tsks, gh] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
+      fetchGitHubEvents(roomIdentifier),
     ])
     messages.value = msgs
     tasks.value = tsks
+    githubEvents.value = gh.events
+    githubEventsAvailable.value = gh.available
+    githubEventsHasMore.value = gh.hasMore
+    githubEventsLoading.value = false
 
     // Start real-time streaming
     startStreaming(roomIdentifier)
@@ -551,6 +646,10 @@ function leaveRoom() {
   room.value = null
   messages.value = []
   tasks.value = []
+  githubEvents.value = []
+  githubEventsAvailable.value = false
+  githubEventsHasMore.value = false
+  githubEventsLoading.value = false
   isConnected.value = false
   connectionState.value = 'idle'
   joinError.value = null
@@ -601,6 +700,10 @@ export function useRoom() {
     // State
     messages: readonly(messages),
     tasks: readonly(tasks),
+    githubEvents: readonly(githubEvents),
+    githubEventsAvailable: readonly(githubEventsAvailable),
+    githubEventsHasMore: readonly(githubEventsHasMore),
+    githubEventsLoading: readonly(githubEventsLoading),
     room: readonly(room),
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
@@ -614,6 +717,7 @@ export function useRoom() {
     sendMessage,
     addTask,
     updateTask,
+    refreshRoomGitHubEvents,
     renameRoom,
     restoreSession,
     toggleSound,

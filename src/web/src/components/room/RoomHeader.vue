@@ -4,13 +4,13 @@
       <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
 
-    <div v-show="!searchActive" class="chat-title">
+    <div v-show="!searchActive || !canSearch" class="chat-title">
       <h2>{{ title }}</h2>
       <p>{{ subtitle }}</p>
     </div>
 
     <!-- Inline search bar -->
-    <div v-show="searchActive" class="header-search">
+    <div v-show="searchActive && canSearch" class="header-search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input
         ref="searchInputEl"
@@ -32,7 +32,7 @@
       </button>
 
       <!-- Search toggle -->
-      <button class="action-btn" @click="toggleSearch" type="button" aria-label="Search messages" title="Search messages">
+      <button v-if="canSearch" class="action-btn" @click="toggleSearch" type="button" aria-label="Search messages" title="Search messages">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
 
@@ -43,6 +43,12 @@
           @click="$emit('update:activeTab', 'chat')"
           type="button"
         >Chat</button>
+        <button
+          role="tab"
+          :aria-selected="activeTab === 'events'"
+          @click="$emit('update:activeTab', 'events')"
+          type="button"
+        >Events</button>
         <button
           role="tab"
           :aria-selected="activeTab === 'board'"
@@ -64,7 +70,7 @@ import { computed, ref, nextTick } from 'vue'
 const props = defineProps<{
   title: string
   subtitle: string
-  activeTab: 'chat' | 'board'
+  activeTab: 'chat' | 'events' | 'board'
   connectionState: 'idle' | 'connecting' | 'live' | 'error'
   searchQuery: string
   matchCount: number
@@ -73,13 +79,14 @@ const props = defineProps<{
 
 defineEmits<{
   toggleDrawer: []
-  'update:activeTab': [tab: 'chat' | 'board']
+  'update:activeTab': [tab: 'chat' | 'events' | 'board']
   'update:searchQuery': [query: string]
   rename: []
 }>()
 
 const searchActive = ref(false)
 const searchInputEl = ref<HTMLInputElement | null>(null)
+const canSearch = computed(() => props.activeTab === 'chat')
 
 const presenceLabel = computed(() => {
   switch (props.connectionState) {
@@ -91,6 +98,7 @@ const presenceLabel = computed(() => {
 })
 
 function toggleSearch() {
+  if (!canSearch.value) return
   searchActive.value = !searchActive.value
   if (searchActive.value) {
     nextTick(() => searchInputEl.value?.focus())
