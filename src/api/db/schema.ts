@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
+import { AGENT_PRESENCE_STATUSES } from "../../shared/agent-presence.js";
 
 export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
 export const taskStatusEnum = pgEnum("task_status", [
@@ -14,6 +15,7 @@ export const taskStatusEnum = pgEnum("task_status", [
   "done",
   "cancelled",
 ]);
+export const agentPresenceStatusEnum = pgEnum("agent_presence_status", AGENT_PRESENCE_STATUSES);
 
 export const id_sequences = pgTable("id_sequences", {
   name: text("name").primaryKey(),
@@ -243,6 +245,35 @@ export const agents = pgTable("agents", {
   owner_name_idx: uniqueIndex("agents_owner_name_idx").on(table.owner_account_id, table.name),
   owner_idx: index("agents_owner_account_id_idx").on(table.owner_account_id),
 }));
+
+export const room_agent_presence = pgTable(
+  "room_agent_presence",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    actor_label: text("actor_label").notNull(),
+    agent_key: text("agent_key"),
+    display_name: text("display_name").notNull(),
+    owner_label: text("owner_label"),
+    ide_label: text("ide_label"),
+    status: agentPresenceStatusEnum("status").notNull().default("idle"),
+    status_text: text("status_text"),
+    last_heartbeat_at: timestamp("last_heartbeat_at", { mode: "string", withTimezone: true }).notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "room_agent_presence_pk", columns: [table.room_id, table.actor_label] }),
+    room_idx: index("room_agent_presence_room_id_idx").on(table.room_id),
+    room_status_idx: index("room_agent_presence_room_status_idx").on(table.room_id, table.status),
+    room_heartbeat_idx: index("room_agent_presence_room_heartbeat_idx").on(
+      table.room_id,
+      table.last_heartbeat_at
+    ),
+    room_agent_key_idx: index("room_agent_presence_room_agent_key_idx").on(table.room_id, table.agent_key),
+  })
+);
 
 export const project_admins = pgTable(
   "project_admins",

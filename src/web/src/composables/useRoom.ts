@@ -105,9 +105,25 @@ export interface RoomGitHubEvent {
   created_at: string
 }
 
+export interface RoomAgentPresence {
+  room_id: string
+  actor_label: string
+  agent_key: string | null
+  display_name: string
+  owner_label: string | null
+  ide_label: string | null
+  status: 'idle' | 'working' | 'reviewing' | 'blocked'
+  status_text: string | null
+  last_heartbeat_at: string
+  created_at: string
+  updated_at: string
+  freshness: 'active' | 'stale'
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const tasks = ref<RoomTask[]>([])
+const presence = ref<RoomAgentPresence[]>([])
 const githubEvents = ref<RoomGitHubEvent[]>([])
 const githubEventsAvailable = ref(false)
 const githubEventsHasMore = ref(false)
@@ -123,6 +139,9 @@ let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1200
 let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null
+let presenceRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
+const PRESENCE_REFRESH_INTERVAL_MS = 30000
 
 /** ── Color Palette ── */
 const OWNER_COLORS = [
@@ -314,6 +333,15 @@ async function fetchMessages(roomIdentifier: string): Promise<RoomMessage[]> {
   return all
 }
 
+async function fetchPresence(roomIdentifier: string): Promise<RoomAgentPresence[]> {
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/presence`)
+    return data.presence || []
+  } catch {
+    return []
+  }
+}
+
 async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`)
@@ -334,6 +362,42 @@ async function fetchGitHubEvents(roomIdentifier: string): Promise<{
     return toAvailableGitHubEventsResult<RoomGitHubEvent>(data)
   } catch (error) {
     return mapGitHubEventsFetchError<RoomGitHubEvent>(error as { status?: number; message?: string })
+  }
+}
+
+async function refreshPresence(roomIdentifier: string) {
+  presence.value = await fetchPresence(roomIdentifier)
+}
+
+async function refreshRoomPresence(): Promise<boolean> {
+  if (!room.value) return false
+  await refreshPresence(room.value.identifier)
+  return true
+}
+
+function schedulePresenceRefresh(roomIdentifier: string) {
+  if (presenceRefreshDebounceTimer) return
+  presenceRefreshDebounceTimer = setTimeout(() => {
+    presenceRefreshDebounceTimer = null
+    void refreshPresence(roomIdentifier)
+  }, 350)
+}
+
+function startPresenceRefreshLoop(roomIdentifier: string) {
+  stopPresenceRefreshLoop()
+  presenceRefreshTimer = setInterval(() => {
+    void refreshPresence(roomIdentifier)
+  }, PRESENCE_REFRESH_INTERVAL_MS)
+}
+
+function stopPresenceRefreshLoop() {
+  if (presenceRefreshTimer) {
+    clearInterval(presenceRefreshTimer)
+    presenceRefreshTimer = null
+  }
+  if (presenceRefreshDebounceTimer) {
+    clearTimeout(presenceRefreshDebounceTimer)
+    presenceRefreshDebounceTimer = null
   }
 }
 
@@ -410,6 +474,10 @@ function startStreaming(roomIdentifier: string) {
             fetchTasks(room.value.identifier).then(t => { tasks.value = t })
           }
         }
+
+        if (room.value && ((msg.source || '').toLowerCase() === 'agent' || msg.sender === 'letagents')) {
+          schedulePresenceRefresh(room.value.identifier)
+        }
       }
     } catch { /* ignore parse errors */ }
   })
@@ -453,6 +521,7 @@ function stopStreaming() {
     clearTimeout(githubEventsRefreshTimer)
     githubEventsRefreshTimer = null
   }
+  stopPresenceRefreshLoop()
 }
 
 /** ── Session Persistence ── */
@@ -582,6 +651,7 @@ async function joinRoom(roomIdentifier: string) {
   room.value = null
   messages.value = []
   tasks.value = []
+  presence.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -609,16 +679,18 @@ async function joinRoom(roomIdentifier: string) {
     isConnected.value = true
     persistSession()
 
-    // Load existing messages and tasks in parallel
-    const [msgs, tsks, gh] = await Promise.all([
+    // Load existing room state in parallel
+    const [msgs, tsks, prs, gh] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
+      fetchPresence(roomIdentifier),
       isRepoBackedRoomId(roomIdentifier)
         ? fetchGitHubEvents(roomIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
     ])
     messages.value = msgs
     tasks.value = tsks
+    presence.value = prs
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
     githubEventsHasMore.value = gh.hasMore
@@ -626,6 +698,7 @@ async function joinRoom(roomIdentifier: string) {
     githubEventsLoading.value = false
 
     // Start real-time streaming
+    startPresenceRefreshLoop(roomIdentifier)
     startStreaming(roomIdentifier)
     connectionState.value = 'live'
     return true
@@ -664,6 +737,7 @@ function leaveRoom() {
   room.value = null
   messages.value = []
   tasks.value = []
+  presence.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -719,6 +793,7 @@ export function useRoom() {
     // State
     messages: readonly(messages),
     tasks: readonly(tasks),
+    presence: readonly(presence),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
     githubEventsHasMore: readonly(githubEventsHasMore),
@@ -738,6 +813,7 @@ export function useRoom() {
     sendMessage,
     addTask,
     updateTask,
+    refreshRoomPresence,
     refreshRoomGitHubEvents,
     renameRoom,
     restoreSession,

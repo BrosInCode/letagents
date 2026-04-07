@@ -16,6 +16,7 @@ import {
   messages,
   owner_tokens,
   project_admins,
+  room_agent_presence,
   room_aliases,
   rooms,
   tasks,
@@ -28,6 +29,11 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
+import {
+  getAgentPresenceFreshness,
+  type AgentPresenceFreshness,
+  type AgentPresenceStatus,
+} from "../shared/agent-presence.js";
 import {
   buildTaskWorkflowRefs,
   normalizeTaskWorkflowArtifacts,
@@ -169,6 +175,21 @@ export interface AgentIdentity {
   updated_at: string;
 }
 
+export interface RoomAgentPresence {
+  room_id: string;
+  actor_label: string;
+  agent_key: string | null;
+  display_name: string;
+  owner_label: string | null;
+  ide_label: string | null;
+  status: AgentPresenceStatus;
+  status_text: string | null;
+  last_heartbeat_at: string;
+  created_at: string;
+  updated_at: string;
+  freshness: AgentPresenceFreshness;
+}
+
 export interface Message {
   id: string;
   sender: string;
@@ -236,6 +257,20 @@ interface TaskRow {
   source_message_id: string | null;
   pr_url: string | null;
   workflow_artifacts: TaskWorkflowArtifact[];
+  created_at: string;
+  updated_at: string;
+}
+
+interface RoomAgentPresenceRow {
+  room_id: string;
+  actor_label: string;
+  agent_key: string | null;
+  display_name: string;
+  owner_label: string | null;
+  ide_label: string | null;
+  status: AgentPresenceStatus;
+  status_text: string | null;
+  last_heartbeat_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -435,6 +470,23 @@ function toTask(row: TaskRow): Task {
     }),
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
+  return {
+    room_id: row.room_id,
+    actor_label: row.actor_label,
+    agent_key: row.agent_key,
+    display_name: row.display_name,
+    owner_label: row.owner_label,
+    ide_label: row.ide_label,
+    status: row.status,
+    status_text: row.status_text,
+    last_heartbeat_at: row.last_heartbeat_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    freshness: getAgentPresenceFreshness(row.last_heartbeat_at),
   };
 }
 
@@ -1269,6 +1321,66 @@ export async function hasMessagesFromSender(roomId: string, sender: string): Pro
     .where(and(eq(messages.room_id, roomId), sql`LOWER(${messages.sender}) = LOWER(${sender})`));
 
   return (row?.count ?? 0) > 0;
+}
+
+export async function upsertRoomAgentPresence(input: {
+  room_id: string;
+  actor_label: string;
+  agent_key?: string | null;
+  display_name: string;
+  owner_label?: string | null;
+  ide_label?: string | null;
+  status: AgentPresenceStatus;
+  status_text?: string | null;
+}): Promise<RoomAgentPresence> {
+  const now = new Date().toISOString();
+
+  const [presence] = await db
+    .insert(room_agent_presence)
+    .values({
+      room_id: input.room_id,
+      actor_label: input.actor_label,
+      agent_key: input.agent_key ?? null,
+      display_name: input.display_name,
+      owner_label: input.owner_label ?? null,
+      ide_label: input.ide_label ?? null,
+      status: input.status,
+      status_text: input.status_text ?? null,
+      last_heartbeat_at: now,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [room_agent_presence.room_id, room_agent_presence.actor_label],
+      set: {
+        agent_key: input.agent_key ?? null,
+        display_name: input.display_name,
+        owner_label: input.owner_label ?? null,
+        ide_label: input.ide_label ?? null,
+        status: input.status,
+        status_text: input.status_text ?? null,
+        last_heartbeat_at: now,
+        updated_at: now,
+      },
+    })
+    .returning();
+
+  return toRoomAgentPresence(presence as RoomAgentPresenceRow);
+}
+
+export async function getRoomAgentPresence(
+  roomId: string,
+  options?: { limit?: number }
+): Promise<RoomAgentPresence[]> {
+  const limit = clampLimit(options?.limit, 50, 200);
+  const rows = await db
+    .select()
+    .from(room_agent_presence)
+    .where(eq(room_agent_presence.room_id, roomId))
+    .orderBy(desc(room_agent_presence.last_heartbeat_at), asc(room_agent_presence.display_name))
+    .limit(limit);
+
+  return (rows as RoomAgentPresenceRow[]).map(toRoomAgentPresence);
 }
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
