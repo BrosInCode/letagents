@@ -58,13 +58,18 @@ export function buildGitHubAppSetupRedirectPath(input: {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
-export function resolveGitHubAppRoomIntegrationStatus(input: {
+export interface GitHubAppRoomIntegrationStatusInputs {
   configured: boolean;
   appSlug?: string | null;
   setupUrl?: string | null;
   repository?: GitHubAppRepository | null;
   installation?: GitHubAppInstallation | null;
-}): GitHubAppRoomIntegrationStatus {
+  isPlatformAdmin?: boolean;
+}
+
+export function resolveGitHubAppRoomIntegrationStatus(
+  input: GitHubAppRoomIntegrationStatusInputs
+): Omit<GitHubAppRoomIntegrationStatus, "setup_manifest_available"> & { setup_manifest_available: boolean } {
   const repository = input.repository ?? null;
   const installation = input.installation ?? null;
   const connected = Boolean(
@@ -78,7 +83,7 @@ export function resolveGitHubAppRoomIntegrationStatus(input: {
   return {
     configured: input.configured,
     install_url_available: Boolean(input.configured && input.appSlug),
-    setup_manifest_available: !input.configured,
+    setup_manifest_available: !input.configured && (input.isPlatformAdmin ?? true),
     app_slug: input.appSlug?.trim() || null,
     setup_url: input.setupUrl?.trim() || null,
     connected,

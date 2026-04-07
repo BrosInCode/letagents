@@ -1624,6 +1624,11 @@ app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (re
     return;
   }
 
+  if (!isPlatformAdmin(req)) {
+    res.status(403).json({ error: "Platform admin privileges required to modify global configuration." });
+    return;
+  }
+
   const baseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL || "http://localhost:3001";
   const manifest = JSON.stringify({
     name: "letagents-app",
@@ -2035,7 +2040,18 @@ async function getGitHubRoomIntegrationProject(
   return project;
 }
 
-async function buildGitHubRoomIntegrationResponse(project: Project): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
+function isPlatformAdmin(req: AuthenticatedRequest): boolean {
+  const platformAdminsStr = process.env.LETAGENTS_PLATFORM_ADMINS;
+  if (!platformAdminsStr) return true; // Fallback to room admin if no platform admins defined
+  
+  const platformAdmins = platformAdminsStr.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (platformAdmins.length === 0) return true;
+
+  const userLogin = req.sessionAccount?.login?.toLowerCase();
+  return Boolean(userLogin && platformAdmins.includes(userLogin));
+}
+
+async function buildGitHubRoomIntegrationResponse(req: AuthenticatedRequest, project: Project): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
   const config = await getGitHubAppConfig();
   const repository = await getGitHubAppRepositoryByRoomId(project.id);
   const installation = repository
@@ -2046,6 +2062,7 @@ async function buildGitHubRoomIntegrationResponse(project: Project): Promise<Ret
     configured: await hasGitHubAppConfig(),
     appSlug: config.appSlug ?? null,
     setupUrl: config.setupUrl ?? null,
+    isPlatformAdmin: isPlatformAdmin(req),
     repository,
     installation,
   });
@@ -2060,7 +2077,7 @@ app.get(/^\/api\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedR
 
   res.json({
     room_id: project.id,
-    ...(await buildGitHubRoomIntegrationResponse(project)),
+    ...(await buildGitHubRoomIntegrationResponse(req, project)),
   });
 });
 
@@ -2073,7 +2090,7 @@ app.get(/^\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedReques
 
   res.json({
     room_id: project.id,
-    ...(await buildGitHubRoomIntegrationResponse(project)),
+    ...(await buildGitHubRoomIntegrationResponse(req, project)),
   });
 });
 
