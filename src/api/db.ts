@@ -2118,7 +2118,8 @@ export async function getTasksGitHubArtifactStatus(
         eq(tasks.room_id, roomId),
         or(
           eq(github_room_events.linked_task_id, sql`'task_' || ${tasks.number}`),
-          eq(github_room_events.github_object_url, tasks.pr_url)
+          eq(github_room_events.github_object_url, tasks.pr_url),
+          sql`${tasks.workflow_artifacts} @> jsonb_build_array(jsonb_build_object('url', ${github_room_events.github_object_url}))`
         )
       )
     )
