@@ -57,6 +57,8 @@ import {
   type TaskStatus,
 } from "./db.js";
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
+import { db } from "./db/client.js";
+import { system_github_app } from "./db/schema.js";
 import {
   buildGitHubRepoRoomId,
   formatGitHubPullRequestEventMessage,
@@ -1611,11 +1613,60 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   }
 });
 
+app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const project = await getGitHubRoomIntegrationProject(req, res, rawId);
+  if (!project) {
+    return;
+  }
+
+  if (!(await requireAdmin(req, res, project))) {
+    return;
+  }
+
+  if (!isPlatformAdmin(req)) {
+    res.status(403).json({ error: "Platform admin privileges required to modify global configuration." });
+    return;
+  }
+
+  const baseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL || "http://localhost:3001";
+  const manifest = JSON.stringify({
+    name: "letagents-app",
+    url: baseUrl,
+    hook_attributes: {
+      url: `${baseUrl}/webhooks/github`
+    },
+    redirect_url: `${baseUrl}/auth/github/app/callback`,
+    public: true,
+    default_permissions: {
+      pull_requests: "read",
+      issues: "read",
+      checks: "read",
+      contents: "read",
+      metadata: "read"
+    },
+    default_events: [
+      "pull_request",
+      "pull_request_review",
+      "issues",
+      "issue_comment",
+      "check_run"
+    ]
+  });
+
+  const state = crypto.randomBytes(24).toString("hex");
+  await createAuthState(state, `/in/${project.id}`);
+  const actionPath = `https://github.com/settings/apps/new?state=${state}`;
+
+  res.json({ action: actionPath, manifest });
+});
+
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
 });
 
 app.get("/auth/github/app/callback", async (req, res) => {
+  const code = typeof req.query.code === "string" ? req.query.code : undefined;
   const state = typeof req.query.state === "string" ? req.query.state : undefined;
   const setupAction = typeof req.query.setup_action === "string" ? req.query.setup_action : undefined;
 
@@ -1626,6 +1677,50 @@ app.get("/auth/github/app/callback", async (req, res) => {
     if (authState) {
       stateValid = true;
       redirectTo = authState.redirect_to || "/";
+    }
+  }
+  
+  if (code) {
+    if (!stateValid) {
+      res.status(401).send("<html><body><h2>Error: Invalid State</h2><p>Your session may have expired.</p></body></html>");
+      return;
+    }
+    // Handling Manifest Creation Callback
+    try {
+      const response = await fetch(`https://api.github.com/app-manifests/${code}/conversions`, {
+        method: "POST",
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        
+        await db.transaction(async (tx) => {
+          // Remove old configs (limit 1 logic)
+          await tx.delete(system_github_app);
+          
+          // Insert into system_github_app
+          await tx.insert(system_github_app).values({
+            app_id: String(data.id),
+            app_slug: data.slug,
+            client_id: data.client_id,
+            client_secret: data.client_secret,
+            private_key: data.pem,
+            webhook_secret: data.webhook_secret,
+          });
+        });
+        
+        res.send(`<html><body><h2>GitHub App Created Successfully</h2><p>You can close this window now.</p><script>setTimeout(() => window.location.href='${redirectTo}', 2000)</script></body></html>`);
+        return;
+      } else {
+        const err = await response.text();
+        res.status(500).send(`Failed to convert manifest code: ${err}`);
+        return;
+      }
+    } catch (e) {
+      res.status(500).send(`Exception converting manifest code: ${String(e)}`);
+      return;
     }
   }
 
@@ -1640,7 +1735,7 @@ app.get("/auth/github/app/callback", async (req, res) => {
 });
 
 app.post("/webhooks/github", async (req: AuthenticatedRequest, res) => {
-  const config = getGitHubAppConfig();
+  const config = await getGitHubAppConfig();
   if (!config.webhookSecret) {
     res.status(503).json({ error: "GitHub App webhook handling is not configured" });
     return;
@@ -1945,17 +2040,29 @@ async function getGitHubRoomIntegrationProject(
   return project;
 }
 
-async function buildGitHubRoomIntegrationResponse(project: Project): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
-  const config = getGitHubAppConfig();
+function isPlatformAdmin(req: AuthenticatedRequest): boolean {
+  const platformAdminsStr = process.env.LETAGENTS_PLATFORM_ADMINS;
+  if (!platformAdminsStr) return true; // Fallback to room admin if no platform admins defined
+  
+  const platformAdmins = platformAdminsStr.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (platformAdmins.length === 0) return true;
+
+  const userLogin = req.sessionAccount?.login?.toLowerCase();
+  return Boolean(userLogin && platformAdmins.includes(userLogin));
+}
+
+async function buildGitHubRoomIntegrationResponse(req: AuthenticatedRequest, project: Project): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
+  const config = await getGitHubAppConfig();
   const repository = await getGitHubAppRepositoryByRoomId(project.id);
   const installation = repository
     ? await getGitHubAppInstallationById(repository.installation_id)
     : null;
 
   return resolveGitHubAppRoomIntegrationStatus({
-    configured: hasGitHubAppConfig(),
+    configured: await hasGitHubAppConfig(),
     appSlug: config.appSlug ?? null,
     setupUrl: config.setupUrl ?? null,
+    isPlatformAdmin: isPlatformAdmin(req),
     repository,
     installation,
   });
@@ -1970,7 +2077,7 @@ app.get(/^\/api\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedR
 
   res.json({
     room_id: project.id,
-    ...(await buildGitHubRoomIntegrationResponse(project)),
+    ...(await buildGitHubRoomIntegrationResponse(req, project)),
   });
 });
 
@@ -1983,7 +2090,7 @@ app.get(/^\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedReques
 
   res.json({
     room_id: project.id,
-    ...(await buildGitHubRoomIntegrationResponse(project)),
+    ...(await buildGitHubRoomIntegrationResponse(req, project)),
   });
 });
 
@@ -1998,8 +2105,8 @@ app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/install-url$/, async (req: 
     return;
   }
 
-  const config = getGitHubAppConfig();
-  if (!hasGitHubAppConfig() || !config.appSlug) {
+  const config = await getGitHubAppConfig();
+  if (!(await hasGitHubAppConfig()) || !config.appSlug) {
     res.status(503).json({ error: "GitHub App install flow is not configured" });
     return;
   }
@@ -2029,8 +2136,8 @@ app.post(/^\/rooms\/(.+)\/integrations\/github\/install-url$/, async (req: Authe
     return;
   }
 
-  const config = getGitHubAppConfig();
-  if (!hasGitHubAppConfig() || !config.appSlug) {
+  const config = await getGitHubAppConfig();
+  if (!(await hasGitHubAppConfig()) || !config.appSlug) {
     res.status(503).json({ error: "GitHub App install flow is not configured" });
     return;
   }
