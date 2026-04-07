@@ -26,6 +26,8 @@ RUN npm ci
 COPY --from=builder /app/dist/ dist/
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
+COPY tsconfig.json ./
+COPY src/api/db/ src/api/db/
 CMD ["npx", "drizzle-kit", "push"]
 
 # ── Production stage ─────────────────────────────
