@@ -18,6 +18,16 @@ RUN npm run build
 # Build Vue SPA (src/web/ → src/web/dist/)
 RUN cd src/web && npm ci && npx vite build
 
+# ── Migration stage (includes devDeps for drizzle-kit) ──
+FROM node:22-alpine AS migrator
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY --from=builder /app/dist/ dist/
+COPY drizzle/ drizzle/
+COPY drizzle.config.ts ./
+CMD ["npx", "drizzle-kit", "push"]
+
 # ── Production stage ─────────────────────────────
 FROM node:22-alpine
 WORKDIR /app
@@ -35,7 +45,7 @@ COPY --from=builder /app/src/web/dist/ src/web/dist/
 # Copy legacy index.html fallback
 COPY src/web/index.html src/web/index.html
 
-# Copy drizzle migrations (needed for drizzle-kit push)
+# Copy drizzle migrations (for reference, not for runtime)
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
 
