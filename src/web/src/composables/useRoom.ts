@@ -1,4 +1,4 @@
-import { ref, readonly, onUnmounted } from 'vue'
+import { ref, readonly, onUnmounted, computed } from 'vue'
 
 /** ── Types ── */
 export interface MessageReplyReference {
@@ -75,6 +75,11 @@ export interface RoomJoinError {
   deviceFlowUrl: string | null
 }
 
+export interface RoomGitHubEventsError {
+  status: number | null
+  message: string
+}
+
 export type RoomGitHubEventType =
   | 'pull_request'
   | 'issue'
@@ -105,6 +110,7 @@ const tasks = ref<RoomTask[]>([])
 const githubEvents = ref<RoomGitHubEvent[]>([])
 const githubEventsAvailable = ref(false)
 const githubEventsHasMore = ref(false)
+const githubEventsError = ref<RoomGitHubEventsError | null>(null)
 const githubEventsLoading = ref(false)
 const room = ref<RoomInfo | null>(null)
 const isConnected = ref(false)
@@ -116,6 +122,8 @@ let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1200
 let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+const REPO_BACKED_ROOM_RE = /^github\.com\/[^/]+\/[^/]+$/i
 
 /** ── Color Palette ── */
 const OWNER_COLORS = [
@@ -283,6 +291,15 @@ function roomPath(identifier: string): string {
   return `/rooms/${encodeURIComponent(identifier)}`
 }
 
+function isRepoBackedRoomId(identifier: string | null | undefined): boolean {
+  const normalized = String(identifier || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+  return REPO_BACKED_ROOM_RE.test(normalized)
+}
+
+const githubEventsSupported = computed(() =>
+  room.value ? isRepoBackedRoomId(room.value.identifier || room.value.name || room.value.projectId) : false
+)
+
 async function fetchMessages(roomIdentifier: string): Promise<RoomMessage[]> {
   const all: RoomMessage[] = []
   let afterCursor = ''
@@ -316,6 +333,7 @@ async function fetchGitHubEvents(roomIdentifier: string): Promise<{
   events: RoomGitHubEvent[]
   available: boolean
   hasMore: boolean
+  error: RoomGitHubEventsError | null
 }> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/events?limit=100`)
@@ -323,23 +341,43 @@ async function fetchGitHubEvents(roomIdentifier: string): Promise<{
       events: data.events || [],
       available: Array.isArray(data.events),
       hasMore: data.has_more === true,
+      error: null,
     }
   } catch (error) {
-    const status = (error as { status?: number }).status
+    const roomError = error as { status?: number; message?: string }
+    const status = roomError.status
     if (status === 404) {
-      return { events: [], available: false, hasMore: false }
+      return { events: [], available: false, hasMore: false, error: null }
     }
-    return { events: [], available: false, hasMore: false }
+    return {
+      events: [],
+      available: true,
+      hasMore: false,
+      error: {
+        status: status ?? null,
+        message: roomError.message || 'Could not load GitHub events.',
+      },
+    }
   }
 }
 
 async function refreshGitHubEvents(roomIdentifier: string) {
+  if (!isRepoBackedRoomId(roomIdentifier)) {
+    githubEvents.value = []
+    githubEventsAvailable.value = false
+    githubEventsHasMore.value = false
+    githubEventsError.value = null
+    githubEventsLoading.value = false
+    return
+  }
+
   githubEventsLoading.value = true
   try {
     const next = await fetchGitHubEvents(roomIdentifier)
     githubEvents.value = next.events
     githubEventsAvailable.value = next.available
     githubEventsHasMore.value = next.hasMore
+    githubEventsError.value = next.error
   } finally {
     githubEventsLoading.value = false
   }
@@ -385,7 +423,7 @@ function startStreaming(roomIdentifier: string) {
         playNotificationSound()
 
         if ((msg.source || '').toLowerCase() === 'github' || (msg.sender || '').toLowerCase() === 'github') {
-          if (room.value) {
+          if (room.value && githubEventsSupported.value) {
             scheduleGitHubEventsRefresh(room.value.identifier)
           }
         }
@@ -571,6 +609,7 @@ async function joinRoom(roomIdentifier: string) {
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
+  githubEventsError.value = null
   githubEventsLoading.value = true
   isConnected.value = false
   connectionState.value = 'connecting'
@@ -598,13 +637,16 @@ async function joinRoom(roomIdentifier: string) {
     const [msgs, tsks, gh] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
-      fetchGitHubEvents(roomIdentifier),
+      isRepoBackedRoomId(roomIdentifier)
+        ? fetchGitHubEvents(roomIdentifier)
+        : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
     ])
     messages.value = msgs
     tasks.value = tsks
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
     githubEventsHasMore.value = gh.hasMore
+    githubEventsError.value = gh.error
     githubEventsLoading.value = false
 
     // Start real-time streaming
@@ -649,6 +691,7 @@ function leaveRoom() {
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
+  githubEventsError.value = null
   githubEventsLoading.value = false
   isConnected.value = false
   connectionState.value = 'idle'
@@ -703,6 +746,8 @@ export function useRoom() {
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
     githubEventsHasMore: readonly(githubEventsHasMore),
+    githubEventsError: readonly(githubEventsError),
+    githubEventsSupported,
     githubEventsLoading: readonly(githubEventsLoading),
     room: readonly(room),
     isConnected: readonly(isConnected),

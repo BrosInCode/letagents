@@ -44,6 +44,7 @@
           type="button"
         >Chat</button>
         <button
+          v-if="showEventsTab"
           role="tab"
           :aria-selected="activeTab === 'events'"
           @click="$emit('update:activeTab', 'events')"
@@ -75,6 +76,7 @@ const props = defineProps<{
   searchQuery: string
   matchCount: number
   canRename?: boolean
+  showEventsTab?: boolean
 }>()
 
 defineEmits<{

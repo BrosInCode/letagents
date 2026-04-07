@@ -51,6 +51,13 @@
       </div>
     </div>
 
+    <div v-else-if="errorMessage" class="event-feed-empty">
+      <div class="event-feed-empty-card error">
+        <h4>Could not load GitHub events</h4>
+        <p>{{ errorMessage }}</p>
+      </div>
+    </div>
+
     <div v-else-if="!isAvailable" class="event-feed-empty">
       <div class="event-feed-empty-card waiting">
         <h4>Waiting for the room event read API</h4>
@@ -116,6 +123,7 @@ const props = defineProps<{
   repository?: string | null
   isAvailable: boolean
   hasMore?: boolean
+  errorMessage?: string | null
   isLoading?: boolean
 }>()
 
@@ -363,6 +371,12 @@ function formatEventDay(timestamp: string): string {
 .event-feed-empty-card.waiting {
   border-style: solid;
   border-color: rgba(125, 211, 252, 0.2);
+}
+
+.event-feed-empty-card.error {
+  border-style: solid;
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(127, 29, 29, 0.22);
 }
 
 .event-feed-empty-card h4 {

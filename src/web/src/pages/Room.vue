@@ -18,6 +18,7 @@
       :searchQuery="searchQuery"
       :matchCount="matchCount"
       :canRename="room?.role === 'admin'"
+      :showEventsTab="githubEventsSupported"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="activeTab = $event"
       @update:searchQuery="searchQuery = $event"
@@ -44,11 +45,12 @@
     />
 
     <GitHubEventFeed
-      v-show="activeTab === 'events' && isConnected"
+      v-show="githubEventsSupported && activeTab === 'events' && isConnected"
       :events="githubEvents"
       :repository="room?.name || room?.identifier || null"
       :isAvailable="githubEventsAvailable"
       :hasMore="githubEventsHasMore"
+      :errorMessage="githubEventsError?.message || null"
       :isLoading="githubEventsLoading"
     />
 
@@ -90,6 +92,8 @@ const {
   githubEvents,
   githubEventsAvailable,
   githubEventsHasMore,
+  githubEventsError,
+  githubEventsSupported,
   githubEventsLoading,
   room,
   isConnected,
@@ -193,10 +197,16 @@ watch(() => route.params.roomId, async (newId) => {
 })
 
 watch(activeTab, async (tab) => {
-  if (tab === 'events' && isConnected.value) {
+  if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
   }
 })
+
+watch(githubEventsSupported, (supported) => {
+  if (!supported && activeTab.value === 'events') {
+    activeTab.value = 'chat'
+  }
+}, { immediate: true })
 </script>
 
 <style scoped>
