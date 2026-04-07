@@ -335,6 +335,26 @@ export const invites = pgTable(
 );
 
 /**
+ * Canonical event type vocabulary for github_room_events.
+ *
+ * Both the persistence layer (task_51) and the materialization layer (task_52)
+ * MUST use these values as event_type. Do not use GitHub-native webhook names
+ * (e.g. use "pull_request_review" not "review", "issue_comment" not "comment").
+ */
+export const GITHUB_ROOM_EVENT_TYPES = [
+  "pull_request",
+  "issue",
+  "issue_comment",
+  "pull_request_review",
+  "check_run",
+  "installation",
+  "installation_repositories",
+  "repository",
+] as const;
+
+export type GitHubRoomEventType = (typeof GITHUB_ROOM_EVENT_TYPES)[number];
+
+/**
  * Normalized GitHub room events.
  *
  * Each webhook delivery that produces a meaningful state change is recorded
@@ -342,6 +362,9 @@ export const invites = pgTable(
  * duplicate deliveries never produce duplicate events.
  *
  * Agents and the API query this table instead of parsing room message text.
+ *
+ * room_id is nullable because some events (installation, installation_repositories)
+ * are scoped to an installation, not a specific room/repository.
  */
 export interface GitHubRoomEventMetadata {
   /** PR body, review body, comment body, check conclusion, labels, etc. */
@@ -352,22 +375,23 @@ export const github_room_events = pgTable(
   "github_room_events",
   {
     id: text("id").primaryKey(),
+    /** Nullable: installation-scoped events may not map to a room yet */
     room_id: text("room_id")
-      .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     delivery_id: text("delivery_id")
       .references(() => github_webhook_deliveries.delivery_id, {
         onDelete: "set null",
       }),
-    /** Normalized event type: pull_request, issue, check_run, review, comment, installation */
+    /** Must be one of GITHUB_ROOM_EVENT_TYPES */
     event_type: text("event_type").notNull(),
     /** GitHub action: opened, closed, completed, created, etc. */
     action: text("action").notNull(),
     /**
      * Dedup key derived from the most specific GitHub object identity per event class.
      * Examples: "pr:42:opened", "comment:12345:created", "check_run:789:completed"
+     * Globally unique (not room-scoped) to handle installation events without rooms.
      */
-    idempotency_key: text("idempotency_key").notNull(),
+    idempotency_key: text("idempotency_key").notNull().unique(),
     /** Parent GitHub object ID for queryability (PR number, issue number, etc.) */
     github_object_id: text("github_object_id"),
     /** html_url of the GitHub object */
@@ -386,10 +410,6 @@ export const github_room_events = pgTable(
   },
   (table) => ({
     room_idx: index("github_room_events_room_id_idx").on(table.room_id),
-    idempotency_idx: uniqueIndex("github_room_events_idempotency_idx").on(
-      table.room_id,
-      table.idempotency_key
-    ),
     event_type_idx: index("github_room_events_event_type_idx").on(
       table.room_id,
       table.event_type

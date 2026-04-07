@@ -1,5 +1,5 @@
 {
-  "id": "640c0c6c-3e4b-48e0-8a3a-f0a1be70660d",
+  "id": "9057781f-018a-45bd-9fd4-be18fc4eda10",
   "prevId": "0c6a1a4e-99ea-4b0f-b2f9-08a8ac012879",
   "version": "7",
   "dialect": "postgresql",
@@ -732,7 +732,7 @@
           "name": "room_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "delivery_id": {
           "name": "delivery_id",
@@ -819,27 +819,6 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "github_room_events_idempotency_idx": {
-          "name": "github_room_events_idempotency_idx",
-          "columns": [
-            {
-              "expression": "room_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -937,7 +916,15 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "github_room_events_idempotency_key_unique": {
+          "name": "github_room_events_idempotency_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "idempotency_key"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

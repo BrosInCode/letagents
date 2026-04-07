@@ -20,7 +20,7 @@ import {
   rooms,
   tasks,
 } from "./db/schema.js";
-import type { GitHubRoomEventMetadata } from "./db/schema.js";
+import type { GitHubRoomEventMetadata, GitHubRoomEventType } from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomId, normalizeRoomName } from "./room-routing.js";
 import {
@@ -1817,9 +1817,9 @@ export async function updateTask(
 
 export interface GitHubRoomEvent {
   id: string;
-  room_id: string;
+  room_id: string | null;
   delivery_id: string | null;
-  event_type: string;
+  event_type: GitHubRoomEventType;
   action: string;
   idempotency_key: string;
   github_object_id: string | null;
@@ -1833,9 +1833,9 @@ export interface GitHubRoomEvent {
 }
 
 export async function insertGitHubRoomEvent(input: {
-  room_id: string;
+  room_id?: string | null;
   delivery_id?: string | null;
-  event_type: string;
+  event_type: GitHubRoomEventType;
   action: string;
   idempotency_key: string;
   github_object_id?: string | null;
@@ -1853,7 +1853,7 @@ export async function insertGitHubRoomEvent(input: {
     .insert(github_room_events)
     .values({
       id,
-      room_id: input.room_id,
+      room_id: input.room_id ?? null,
       delivery_id: input.delivery_id ?? null,
       event_type: input.event_type,
       action: input.action,
@@ -1874,16 +1874,11 @@ export async function insertGitHubRoomEvent(input: {
     return { event: created as GitHubRoomEvent, duplicate: false };
   }
 
-  // Idempotency key conflict — fetch the existing record
+  // Idempotency key conflict — fetch the existing record (key is globally unique)
   const [existing] = await db
     .select()
     .from(github_room_events)
-    .where(
-      and(
-        eq(github_room_events.room_id, input.room_id),
-        eq(github_room_events.idempotency_key, input.idempotency_key)
-      )
-    )
+    .where(eq(github_room_events.idempotency_key, input.idempotency_key))
     .limit(1);
 
   if (!existing) {
