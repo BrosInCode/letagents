@@ -33,6 +33,81 @@ export interface RepoPullRequestRef {
   mergedByLogin?: string | null;
 }
 
+export interface RepoIssueRef {
+  number: number;
+  title: string;
+  url: string;
+  isPullRequest?: boolean;
+}
+
+export interface RepoIssueCommentRef {
+  body: string;
+  url: string;
+}
+
+export interface RepoReviewRef {
+  id: string;
+  state: string;
+  url: string;
+  body?: string | null;
+}
+
+export interface RepoCheckRunRef {
+  id: string;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+  appName?: string | null;
+}
+
+interface RepoRoomEventBase {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  senderLogin?: string | null;
+}
+
+export interface RepoPullRequestEvent extends RepoRoomEventBase {
+  kind: "pull_request";
+  pullRequest: RepoPullRequestRef;
+}
+
+export interface RepoIssueEvent extends RepoRoomEventBase {
+  kind: "issue";
+  issue: RepoIssueRef;
+}
+
+export interface RepoIssueCommentEvent extends RepoRoomEventBase {
+  kind: "issue_comment";
+  issue: RepoIssueRef;
+  comment: RepoIssueCommentRef;
+}
+
+export interface RepoPullRequestReviewEvent extends RepoRoomEventBase {
+  kind: "pull_request_review";
+  pullRequest: RepoPullRequestRef;
+  review: RepoReviewRef;
+}
+
+export interface RepoCheckRunEvent extends RepoRoomEventBase {
+  kind: "check_run";
+  checkRun: RepoCheckRunRef;
+}
+
+export interface RepoRepositoryEvent extends RepoRoomEventBase {
+  kind: "repository";
+  oldFullName?: string | null;
+}
+
+export type RepoRoomEvent =
+  | RepoPullRequestEvent
+  | RepoIssueEvent
+  | RepoIssueCommentEvent
+  | RepoPullRequestReviewEvent
+  | RepoCheckRunEvent
+  | RepoRepositoryEvent;
+
 export type TaskWorkflowRefProvider = RepoWorkflowProvider | "unknown";
 export type TaskWorkflowArtifactKind =
   | "issue"
@@ -615,6 +690,147 @@ export function formatRepoCheckRunEventMessage(input: {
   return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName}${taskSuffix} ${input.checkRun.url}`;
 }
 
+export function buildRepoRoomEventArtifactMatches(event: RepoRoomEvent): TaskWorkflowArtifactMatch[] {
+  switch (event.kind) {
+    case "pull_request":
+      return buildTaskWorkflowArtifactMatches({
+        provider: event.provider,
+        kind: "pull_request",
+        url: event.pullRequest.url,
+        number: event.pullRequest.number,
+      });
+    case "issue":
+    case "issue_comment":
+      return buildTaskWorkflowArtifactMatches({
+        provider: event.provider,
+        kind: event.issue.isPullRequest ? "pull_request" : "issue",
+        url: event.issue.url,
+        number: event.issue.number,
+      });
+    case "pull_request_review":
+      return [
+        ...buildTaskWorkflowArtifactMatches({
+          provider: event.provider,
+          kind: "review",
+          id: event.review.id,
+          url: event.review.url,
+        }),
+        ...buildTaskWorkflowArtifactMatches({
+          provider: event.provider,
+          kind: "pull_request",
+          url: event.pullRequest.url,
+          number: event.pullRequest.number,
+        }),
+      ];
+    case "check_run":
+      return buildTaskWorkflowArtifactMatches({
+        provider: event.provider,
+        kind: "check_run",
+        id: event.checkRun.id,
+        title: event.checkRun.name,
+        url: event.checkRun.url,
+      });
+    case "repository":
+      return [];
+    default:
+      return [];
+  }
+}
+
+export function getRepoRoomEventReferenceTexts(
+  event: RepoRoomEvent
+): Array<string | null | undefined> {
+  switch (event.kind) {
+    case "pull_request":
+      return [event.pullRequest.title, event.pullRequest.body];
+    case "issue":
+      return [event.issue.title];
+    case "issue_comment":
+      return [event.issue.title, event.comment.body];
+    case "pull_request_review":
+      return [event.pullRequest.title, event.pullRequest.body, event.review.body];
+    case "check_run":
+    case "repository":
+      return [];
+    default:
+      return [];
+  }
+}
+
+export function formatRepoRoomEventMessage(input: {
+  event: RepoRoomEvent;
+  linkedTaskId?: string | null;
+}): string | null {
+  switch (input.event.kind) {
+    case "pull_request":
+      return formatRepoPullRequestEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        pullRequest: input.event.pullRequest,
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
+      });
+    case "issue":
+      return formatRepoIssueEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        issue: input.event.issue,
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
+      });
+    case "issue_comment":
+      return formatRepoIssueCommentEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        issue: {
+          number: input.event.issue.number,
+          title: input.event.issue.title,
+        },
+        comment: input.event.comment,
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
+        isPullRequest: Boolean(input.event.issue.isPullRequest),
+      });
+    case "pull_request_review":
+      return formatRepoPullRequestReviewEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        pullRequest: {
+          number: input.event.pullRequest.number,
+          title: input.event.pullRequest.title,
+        },
+        review: {
+          state: input.event.review.state,
+          url: input.event.review.url,
+        },
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
+      });
+    case "check_run":
+      return formatRepoCheckRunEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        checkRun: input.event.checkRun,
+        linkedTaskId: input.linkedTaskId,
+      });
+    case "repository":
+      return formatRepoRepositoryEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        oldFullName: input.event.oldFullName,
+        senderLogin: input.event.senderLogin,
+      });
+    default:
+      return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Board projection — pure functions to derive task status transitions from
 // provider events. These are intentionally side-effect-free so they can be
@@ -697,4 +913,35 @@ export function projectIssueEvent(input: {
   }
 
   return null;
+}
+
+export function projectRepoRoomEvent(input: {
+  event: RepoRoomEvent;
+  currentStatus: TaskStatusLike;
+}): BoardProjectionResult | null {
+  switch (input.event.kind) {
+    case "pull_request":
+      return projectPullRequestEvent({
+        action: input.event.action,
+        merged: Boolean(input.event.pullRequest.merged),
+        currentStatus: input.currentStatus,
+      });
+    case "pull_request_review":
+      return projectPullRequestReviewEvent({
+        action: input.event.action,
+        reviewState: input.event.review.state,
+        currentStatus: input.currentStatus,
+      });
+    case "issue":
+      return projectIssueEvent({
+        action: input.event.action,
+        currentStatus: input.currentStatus,
+      });
+    case "issue_comment":
+    case "check_run":
+    case "repository":
+      return null;
+    default:
+      return null;
+  }
 }

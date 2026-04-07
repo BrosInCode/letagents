@@ -387,15 +387,19 @@ export const github_room_events = pgTable(
     /** GitHub action: opened, closed, completed, created, etc. */
     action: text("action").notNull(),
     /**
-     * Dedup key derived from repo identity + the most specific GitHub object identity.
+     * Delivery-scoped dedup key derived from repo/object identity plus the
+     * `X-GitHub-Delivery` GUID for the specific webhook instance.
+     *
      * MUST include the repo full_name (or installation_id for installation events)
-     * to avoid cross-repo collisions (PR/issue numbers are repo-local).
+     * to avoid cross-repo collisions (PR/issue numbers are repo-local), and MUST
+     * include the delivery GUID so repeated real transitions do not collapse while
+     * GitHub redeliveries still reuse the same key.
      *
      * Examples:
-     *   "brosincode/letagents:pr:42:opened"
-     *   "brosincode/letagents:comment:12345:created"
-     *   "brosincode/letagents:check_run:789:completed"
-     *   "installation:98765:created"
+     *   "brosincode/letagents:pr:42:opened:delivery:8f5d..."
+     *   "brosincode/letagents:comment:12345:created:delivery:8f5d..."
+     *   "brosincode/letagents:check_run:789:completed:delivery:8f5d..."
+     *   "installation:98765:suspend:delivery:8f5d..."
      */
     idempotency_key: text("idempotency_key").notNull().unique(),
     /** Parent GitHub object ID for queryability (PR number, issue number, etc.) */
