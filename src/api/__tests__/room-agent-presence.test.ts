@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
-const testDatabaseUrl = process.env.TEST_DB_URL || process.env.DB_URL;
+const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) {
   process.env.DB_URL = testDatabaseUrl;
@@ -27,7 +27,7 @@ function sleep(ms: number): Promise<void> {
 
 async function waitForDatabaseReady(): Promise<void> {
   if (!pool) {
-    throw new Error("DB-backed room agent presence tests require TEST_DB_URL or DB_URL");
+    throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
   }
 
   let lastError: unknown;
@@ -46,7 +46,7 @@ async function waitForDatabaseReady(): Promise<void> {
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) {
-    throw new Error("DB-backed room agent presence tests require TEST_DB_URL or DB_URL");
+    throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
   }
 
   await waitForDatabaseReady();
@@ -70,11 +70,11 @@ test(
   "upsertRoomAgentPresence persists a room-scoped heartbeat record",
   {
     concurrency: false,
-    skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed room agent presence tests" : false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
   },
   async () => {
     if (!createProjectWithName || !getRoomAgentPresence || !upsertRoomAgentPresence) {
-      throw new Error("DB-backed room agent presence tests require TEST_DB_URL or DB_URL");
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
     }
 
     const room = await createProjectWithName("github.com/brosincode/letagents");
@@ -103,11 +103,11 @@ test(
   "upsertRoomAgentPresence updates an existing agent row instead of duplicating it",
   {
     concurrency: false,
-    skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed room agent presence tests" : false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
   },
   async () => {
     if (!createProjectWithName || !getRoomAgentPresence || !upsertRoomAgentPresence) {
-      throw new Error("DB-backed room agent presence tests require TEST_DB_URL or DB_URL");
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
     }
 
     const room = await createProjectWithName("github.com/brosincode/letagents");
