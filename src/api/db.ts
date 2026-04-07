@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, desc, eq, inArray, lte, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, notInArray, sql, or } from "drizzle-orm";
 
 import { db } from "./db/client.js";
 import {
@@ -2106,22 +2106,31 @@ export interface TaskGitHubArtifactStatus {
 export async function getTasksGitHubArtifactStatus(
   roomId: string
 ): Promise<Map<string, TaskGitHubArtifactStatus>> {
-  const events = await db
-    .select()
+  const queryResults = await db
+    .select({
+      event: github_room_events,
+      taskId: sql<string>`'task_' || ${tasks.number}`,
+    })
     .from(github_room_events)
-    .where(
+    .innerJoin(
+      tasks,
       and(
-        eq(github_room_events.room_id, roomId),
-        sql`${github_room_events.linked_task_id} IS NOT NULL`
+        eq(tasks.room_id, roomId),
+        or(
+          eq(github_room_events.linked_task_id, sql`'task_' || ${tasks.number}`),
+          eq(github_room_events.github_object_url, tasks.pr_url)
+        )
       )
     )
+    .where(eq(github_room_events.room_id, roomId))
     .orderBy(desc(github_room_events.created_at))
     .limit(500);
 
   const statusMap = new Map<string, TaskGitHubArtifactStatus>();
 
-  for (const event of events) {
-    const taskId = event.linked_task_id!;
+  for (const row of queryResults) {
+    const event = row.event;
+    const taskId = row.taskId;
 
     if (!statusMap.has(taskId)) {
       statusMap.set(taskId, {

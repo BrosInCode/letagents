@@ -3016,6 +3016,32 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   res.status(201).json({ ...acceptedTask, room_id: project.id });
 });
 
+/**
+ * GET /rooms/:room/tasks/github-status
+ * Returns GitHub artifact status for all tasks in a room that have linked events.
+ */
+app.get(/^(?:\/api)?\/rooms\/(.+)\/tasks\/github-status$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const statusMap = await getTasksGitHubArtifactStatus(project.id);
+
+  const statuses: Record<string, TaskGitHubArtifactStatus> = {};
+  for (const [taskId, status] of statusMap) {
+    statuses[taskId] = status;
+  }
+
+  res.json({
+    room_id: project.id,
+    statuses,
+  });
+});
+
 app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -3134,31 +3160,7 @@ app.get(/^(?:\/api)?\/rooms\/(.+)\/events$/, async (req: AuthenticatedRequest, r
   });
 });
 
-/**
- * GET /rooms/:room/tasks/github-status
- * Returns GitHub artifact status for all tasks in a room that have linked events.
- */
-app.get(/^(?:\/api)?\/rooms\/(.+)\/tasks\/github-status$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const statusMap = await getTasksGitHubArtifactStatus(project.id);
-
-  const statuses: Record<string, TaskGitHubArtifactStatus> = {};
-  for (const [taskId, status] of statusMap) {
-    statuses[taskId] = status;
-  }
-
-  res.json({
-    room_id: project.id,
-    statuses,
-  });
-});
 
 app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
