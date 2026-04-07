@@ -1894,8 +1894,14 @@ export async function getGitHubRoomEvents(input: {
   room_id: string;
   event_type?: string;
   github_object_id?: string;
+  actor_login?: string;
+  since?: string;
+  until?: string;
+  after?: string;
   limit?: number;
-}): Promise<GitHubRoomEvent[]> {
+}): Promise<{ events: GitHubRoomEvent[]; has_more: boolean }> {
+  const MAX_LIMIT = 100;
+  const limit = Math.min(input.limit ?? 50, MAX_LIMIT);
   const conditions = [eq(github_room_events.room_id, input.room_id)];
 
   if (input.event_type) {
@@ -1904,13 +1910,45 @@ export async function getGitHubRoomEvents(input: {
   if (input.github_object_id) {
     conditions.push(eq(github_room_events.github_object_id, input.github_object_id));
   }
+  if (input.actor_login) {
+    conditions.push(eq(github_room_events.actor_login, input.actor_login));
+  }
+  if (input.since) {
+    conditions.push(sql`${github_room_events.created_at} >= ${input.since}`);
+  }
+  if (input.until) {
+    conditions.push(sql`${github_room_events.created_at} <= ${input.until}`);
+  }
+  if (input.after) {
+    // Keyset cursor: fetch events strictly after the cursor using (created_at, id)
+    // to avoid skipping events with identical timestamps
+    const [cursorRow] = await db
+      .select({
+        created_at: github_room_events.created_at,
+        id: github_room_events.id,
+      })
+      .from(github_room_events)
+      .where(and(
+        eq(github_room_events.id, input.after),
+        eq(github_room_events.room_id, input.room_id),
+      ))
+      .limit(1);
+    if (cursorRow) {
+      conditions.push(
+        sql`(${github_room_events.created_at}, ${github_room_events.id}) < (${cursorRow.created_at}, ${cursorRow.id})`
+      );
+    }
+  }
 
   const rows = await db
     .select()
     .from(github_room_events)
     .where(and(...conditions))
-    .orderBy(desc(github_room_events.created_at))
-    .limit(input.limit ?? 50);
+    .orderBy(desc(github_room_events.created_at), desc(github_room_events.id))
+    .limit(limit + 1);
 
-  return rows as GitHubRoomEvent[];
+  const has_more = rows.length > limit;
+  const events = (has_more ? rows.slice(0, limit) : rows) as GitHubRoomEvent[];
+
+  return { events, has_more };
 }

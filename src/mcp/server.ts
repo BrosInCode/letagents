@@ -1988,6 +1988,59 @@ server.tool(
 );
 
 server.tool(
+  "get_room_events",
+  "Get GitHub events for the room (PRs, issues, reviews, check runs, etc.). " +
+    "Returns a paginated list of normalized GitHub events persisted from webhooks. " +
+    "Use this to check what happened in the repo without parsing chat messages.",
+  {
+    event_type: z.string().optional().describe(
+      "Filter by event type: pull_request, issue, issue_comment, pull_request_review, check_run, installation, installation_repositories, repository"
+    ),
+    object_id: z.string().optional().describe("Filter by GitHub object ID (e.g. PR number, issue number)"),
+    actor: z.string().optional().describe("Filter by GitHub login of the actor"),
+    since: z.string().optional().describe("ISO timestamp — only events after this time"),
+    until: z.string().optional().describe("ISO timestamp — only events before this time"),
+    after: z.string().optional().describe("Cursor event ID for pagination (from a previous response)"),
+    limit: z.number().int().min(1).max(100).optional().describe("Max events to return (default 50, max 100)"),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+  },
+  async ({ event_type, object_id, actor, since, until, after, limit, room_id }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    const targetProjectId = getFallbackProjectId();
+    if (!targetRoomId && !targetProjectId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a room. Join one first." }) }],
+      };
+    }
+
+    const params = new URLSearchParams();
+    if (event_type) params.set("event_type", event_type);
+    if (object_id) params.set("object_id", object_id);
+    if (actor) params.set("actor", actor);
+    if (since) params.set("since", since);
+    if (until) params.set("until", until);
+    if (after) params.set("after", after);
+    if (limit) params.set("limit", String(limit));
+
+    const qs = params.toString();
+
+    const result = await roomScopedApiCall<{
+      events?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+    }>({
+      room_id: targetRoomId,
+      project_id: targetProjectId,
+      room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/events${qs ? `?${qs}` : ""}`,
+      project_path: (targetProjectId) => `/rooms/${encodeURIComponent(targetProjectId)}/events${qs ? `?${qs}` : ""}`,
+    });
+
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ success: true, events: result.events ?? [], has_more: result.has_more ?? false }, null, 2) }],
+    };
+  }
+);
+
+server.tool(
   "claim_task",
   "Claim an accepted task. The task must be in 'accepted' " +
     "status. This sets the assignee to you and moves the status to 'assigned'. " +
