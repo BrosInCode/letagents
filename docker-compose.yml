@@ -1,6 +1,6 @@
 services:
   api:
-    build: .
+    image: ghcr.io/brosincode/letagents:latest
     container_name: letagents-api
     restart: unless-stopped
     ports:
@@ -9,8 +9,19 @@ services:
       - .env
     environment:
       - NODE_ENV=production
+      - LETAGENTS_WEB_MODE=vue
     networks:
       - pinflix-server_default
+
+  migrate:
+    image: ghcr.io/brosincode/letagents:latest-migrate
+    container_name: letagents-migrate
+    env_file:
+      - .env
+    networks:
+      - pinflix-server_default
+    profiles:
+      - migrate
 
 networks:
   pinflix-server_default:
