@@ -1928,7 +1928,10 @@ export async function getGitHubRoomEvents(input: {
         id: github_room_events.id,
       })
       .from(github_room_events)
-      .where(eq(github_room_events.id, input.after))
+      .where(and(
+        eq(github_room_events.id, input.after),
+        eq(github_room_events.room_id, input.room_id),
+      ))
       .limit(1);
     if (cursorRow) {
       conditions.push(
