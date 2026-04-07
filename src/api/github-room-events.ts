@@ -44,6 +44,14 @@ function toGitHubId(value: number | string | null | undefined): string | null {
   return normalized === "" ? null : normalized;
 }
 
+function normalizeDeliveryId(deliveryId: string | null | undefined): string | null {
+  return toGitHubId(deliveryId);
+}
+
+function buildDeliveryScopedKey(baseKey: string, deliveryId: string): string {
+  return `${baseKey}:delivery:${deliveryId}`;
+}
+
 function toRepoPullRequestRef(
   payload: GitHubWebhookPayload["pull_request"]
 ): RepoPullRequestRef | null {
@@ -149,10 +157,16 @@ function buildInstallationRepositoriesKey(
 
 export function materializeGitHubWebhookEvent(
   eventName: string,
-  payload: GitHubWebhookPayload
+  payload: GitHubWebhookPayload,
+  deliveryId: string
 ): MaterializedGitHubRoomEvent | null {
   const action = payload.action;
   if (!action) {
+    return null;
+  }
+
+  const normalizedDeliveryId = normalizeDeliveryId(deliveryId);
+  if (!normalizedDeliveryId) {
     return null;
   }
 
@@ -167,7 +181,10 @@ export function materializeGitHubWebhookEvent(
     return {
       event_type: "installation",
       action,
-      idempotency_key: `installation:${installationId}:${action}`,
+      idempotency_key: buildDeliveryScopedKey(
+        `installation:${installationId}:${action}`,
+        normalizedDeliveryId
+      ),
       github_object_id: installationId,
       github_object_url: null,
       title: payload.installation?.account?.login ?? payload.organization?.login ?? null,
@@ -202,7 +219,7 @@ export function materializeGitHubWebhookEvent(
     return {
       event_type: "installation_repositories",
       action,
-      idempotency_key: idempotencyKey,
+      idempotency_key: buildDeliveryScopedKey(idempotencyKey, normalizedDeliveryId),
       github_object_id: installationId,
       github_object_url: null,
       title: payload.installation?.account?.login ?? payload.organization?.login ?? null,
@@ -258,7 +275,7 @@ export function materializeGitHubWebhookEvent(
       return {
         event_type: "pull_request",
         action,
-        idempotency_key: idempotencyKey,
+        idempotency_key: buildDeliveryScopedKey(idempotencyKey, normalizedDeliveryId),
         github_object_id: String(pullRequest.number),
         github_object_url: pullRequest.url,
         title: pullRequest.title,
@@ -290,7 +307,10 @@ export function materializeGitHubWebhookEvent(
       return {
         event_type: "issue",
         action,
-        idempotency_key: `${repoIdentity}:issue:${issue.number}:${action}`,
+        idempotency_key: buildDeliveryScopedKey(
+          `${repoIdentity}:issue:${issue.number}:${action}`,
+          normalizedDeliveryId
+        ),
         github_object_id: String(issue.number),
         github_object_url: issue.url,
         title: issue.title,
@@ -320,7 +340,10 @@ export function materializeGitHubWebhookEvent(
       return {
         event_type: "issue_comment",
         action,
-        idempotency_key: `${repoIdentity}:comment:${payload.comment.id}:created`,
+        idempotency_key: buildDeliveryScopedKey(
+          `${repoIdentity}:comment:${payload.comment.id}:created`,
+          normalizedDeliveryId
+        ),
         github_object_id: String(issue.number),
         github_object_url: payload.comment.html_url,
         title: issue.title,
@@ -354,7 +377,10 @@ export function materializeGitHubWebhookEvent(
       return {
         event_type: "pull_request_review",
         action,
-        idempotency_key: `${repoIdentity}:review:${payload.review.id}:submitted`,
+        idempotency_key: buildDeliveryScopedKey(
+          `${repoIdentity}:review:${payload.review.id}:submitted`,
+          normalizedDeliveryId
+        ),
         github_object_id: String(pullRequest.number),
         github_object_url: payload.review.html_url,
         title: pullRequest.title,
@@ -384,7 +410,10 @@ export function materializeGitHubWebhookEvent(
       return {
         event_type: "check_run",
         action,
-        idempotency_key: `${repoIdentity}:check_run:${payload.check_run.id}:completed`,
+        idempotency_key: buildDeliveryScopedKey(
+          `${repoIdentity}:check_run:${payload.check_run.id}:completed`,
+          normalizedDeliveryId
+        ),
         github_object_id: String(payload.check_run.id),
         github_object_url: payload.check_run.html_url,
         title: payload.check_run.name,
@@ -424,7 +453,10 @@ export function materializeGitHubWebhookEvent(
       return {
         event_type: "repository",
         action,
-        idempotency_key: `${repoIdentity}:repository:${repositoryId ?? repoIdentity}:${action}:${oldFullName.toLowerCase()}`,
+        idempotency_key: buildDeliveryScopedKey(
+          `${repoIdentity}:repository:${repositoryId ?? repoIdentity}:${action}:${oldFullName.toLowerCase()}`,
+          normalizedDeliveryId
+        ),
         github_object_id: repositoryId,
         github_object_url: null,
         title: payload.repository.full_name,
@@ -447,7 +479,8 @@ export function materializeGitHubWebhookEvent(
 
 export function materializeGitHubRoomEvent(
   eventName: string,
-  payload: GitHubWebhookPayload
+  payload: GitHubWebhookPayload,
+  deliveryId = "legacy-room-event"
 ): RepoRoomEvent | null {
-  return materializeGitHubWebhookEvent(eventName, payload)?.roomEvent ?? null;
+  return materializeGitHubWebhookEvent(eventName, payload, deliveryId)?.roomEvent ?? null;
 }

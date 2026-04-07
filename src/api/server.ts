@@ -898,7 +898,7 @@ async function emitGitHubPullRequestEvent(
     };
   }
 
-  const materializedEvent = materializeGitHubWebhookEvent("pull_request", payload);
+  const materializedEvent = materializeGitHubWebhookEvent("pull_request", payload, deliveryId);
   if (!materializedEvent) {
     return {
       status: "ignored",
@@ -951,7 +951,7 @@ async function handleGitHubWebhookEvent(
         };
       }
 
-      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
       const now = new Date().toISOString();
       if (payload.action === "deleted") {
         await markGitHubAppInstallationUninstalled(installationId, now);
@@ -1076,7 +1076,7 @@ async function handleGitHubWebhookEvent(
         await markGitHubAppRepositoryRemoved(repositoryId);
       }
 
-      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
       if (materializedEvent) {
         await persistMaterializedGitHubRoomEvent(materializedEvent, {
           deliveryId,
@@ -1165,7 +1165,7 @@ async function handleGitHubWebhookEvent(
           syncedInstallationId
         );
 
-        const repositoryEvent = materializeGitHubWebhookEvent("repository", payload);
+        const repositoryEvent = materializeGitHubWebhookEvent("repository", payload, deliveryId);
         if (migratedRoom && repositoryEvent) {
           await handleMaterializedGitHubRoomEvent(migratedRoom, repositoryEvent, {
             deliveryId,
@@ -1197,7 +1197,7 @@ async function handleGitHubWebhookEvent(
     }
 
     case "issues": {
-      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
       if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
@@ -1213,7 +1213,7 @@ async function handleGitHubWebhookEvent(
     }
 
     case "issue_comment": {
-      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
       if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
@@ -1229,7 +1229,7 @@ async function handleGitHubWebhookEvent(
     }
 
     case "pull_request_review": {
-      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
       if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }
@@ -1245,7 +1245,7 @@ async function handleGitHubWebhookEvent(
     }
 
     case "check_run": {
-      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload);
+      const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
       if (!materializedEvent) {
         return { status: "ignored", installationId, githubRepoId, roomId };
       }

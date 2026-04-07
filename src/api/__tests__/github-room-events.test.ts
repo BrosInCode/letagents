@@ -12,34 +12,38 @@ import {
 } from "../repo-workflow.js";
 
 test("materializeGitHubWebhookEvent maps pull_request_review into a persisted room event", () => {
-  const event = materializeGitHubWebhookEvent("pull_request_review", {
-    action: "submitted",
-    repository: {
-      id: 1,
-      full_name: "BrosInCode/letagents",
-      name: "letagents",
-      owner: { login: "BrosInCode" },
+  const event = materializeGitHubWebhookEvent(
+    "pull_request_review",
+    {
+      action: "submitted",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "approver" },
+      pull_request: {
+        number: 42,
+        title: "task_7: add review handling",
+        body: "Review body fallback",
+        html_url: "https://github.com/BrosInCode/letagents/pull/42",
+      },
+      review: {
+        id: 9001,
+        state: "approved",
+        body: "Looks good",
+        html_url: "https://github.com/BrosInCode/letagents/pull/42#pullrequestreview-9001",
+      },
     },
-    sender: { login: "approver" },
-    pull_request: {
-      number: 42,
-      title: "task_7: add review handling",
-      body: "Review body fallback",
-      html_url: "https://github.com/BrosInCode/letagents/pull/42",
-    },
-    review: {
-      id: 9001,
-      state: "approved",
-      body: "Looks good",
-      html_url: "https://github.com/BrosInCode/letagents/pull/42#pullrequestreview-9001",
-    },
-  });
+    "delivery-review-1"
+  );
 
   assert.ok(event);
   assert.equal(event?.event_type, "pull_request_review");
   assert.equal(
     event?.idempotency_key,
-    "brosincode/letagents:review:9001:submitted"
+    "brosincode/letagents:review:9001:submitted:delivery:delivery-review-1"
   );
   assert.equal(event?.state, "approved");
   assert.equal(event?.roomEvent?.kind, "pull_request_review");
@@ -73,27 +77,34 @@ test("materializeGitHubWebhookEvent maps pull_request_review into a persisted ro
 });
 
 test("materializeGitHubWebhookEvent maps pull_request into a persisted room event", () => {
-  const event = materializeGitHubWebhookEvent("pull_request", {
-    action: "opened",
-    repository: {
-      id: 1,
-      full_name: "BrosInCode/letagents",
-      name: "letagents",
-      owner: { login: "BrosInCode" },
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    {
+      action: "opened",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "EmmyMay" },
+      pull_request: {
+        number: 98,
+        title: "task_22: add webhook ingestion",
+        body: "Follow-up details",
+        html_url: "https://github.com/BrosInCode/letagents/pull/98",
+        user: { login: "EmmyMay" },
+      },
     },
-    sender: { login: "EmmyMay" },
-    pull_request: {
-      number: 98,
-      title: "task_22: add webhook ingestion",
-      body: "Follow-up details",
-      html_url: "https://github.com/BrosInCode/letagents/pull/98",
-      user: { login: "EmmyMay" },
-    },
-  });
+    "delivery-pr-open-1"
+  );
 
   assert.ok(event);
   assert.equal(event?.event_type, "pull_request");
-  assert.equal(event?.idempotency_key, "brosincode/letagents:pr:98:opened");
+  assert.equal(
+    event?.idempotency_key,
+    "brosincode/letagents:pr:98:opened:delivery:delivery-pr-open-1"
+  );
   assert.equal(event?.state, "open");
   assert.equal(
     formatRepoRoomEventMessage({ event: event!.roomEvent!, linkedTaskId: "task_22" }),
@@ -102,62 +113,70 @@ test("materializeGitHubWebhookEvent maps pull_request into a persisted room even
 });
 
 test("materializeGitHubWebhookEvent uses head SHA for pull_request synchronize idempotency", () => {
-  const event = materializeGitHubWebhookEvent("pull_request", {
-    action: "synchronize",
-    repository: {
-      id: 1,
-      full_name: "BrosInCode/letagents",
-      name: "letagents",
-      owner: { login: "BrosInCode" },
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    {
+      action: "synchronize",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "EmmyMay" },
+      pull_request: {
+        number: 98,
+        title: "task_22: add webhook ingestion",
+        body: "Follow-up details",
+        html_url: "https://github.com/BrosInCode/letagents/pull/98",
+        head: { sha: "abc123def456" },
+        user: { login: "EmmyMay" },
+      },
     },
-    sender: { login: "EmmyMay" },
-    pull_request: {
-      number: 98,
-      title: "task_22: add webhook ingestion",
-      body: "Follow-up details",
-      html_url: "https://github.com/BrosInCode/letagents/pull/98",
-      head: { sha: "abc123def456" },
-      user: { login: "EmmyMay" },
-    },
-  });
+    "delivery-pr-sync-1"
+  );
 
   assert.ok(event);
   assert.equal(
     event?.idempotency_key,
-    "brosincode/letagents:pr:98:sync:abc123def456"
+    "brosincode/letagents:pr:98:sync:abc123def456:delivery:delivery-pr-sync-1"
   );
 });
 
 test("materializeGitHubWebhookEvent preserves pull request context for issue comments on PRs", () => {
-  const event = materializeGitHubWebhookEvent("issue_comment", {
-    action: "created",
-    repository: {
-      id: 1,
-      full_name: "BrosInCode/letagents",
-      name: "letagents",
-      owner: { login: "BrosInCode" },
-    },
-    sender: { login: "commenter" },
-    issue: {
-      number: 55,
-      title: "task_12: improve webhook routing",
-      html_url: "https://github.com/BrosInCode/letagents/issues/55",
-      pull_request: {
-        url: "https://api.github.com/repos/BrosInCode/letagents/pulls/55",
+  const event = materializeGitHubWebhookEvent(
+    "issue_comment",
+    {
+      action: "created",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "commenter" },
+      issue: {
+        number: 55,
+        title: "task_12: improve webhook routing",
+        html_url: "https://github.com/BrosInCode/letagents/issues/55",
+        pull_request: {
+          url: "https://api.github.com/repos/BrosInCode/letagents/pulls/55",
+        },
+      },
+      comment: {
+        id: 12,
+        body: "I can reproduce this",
+        html_url: "https://github.com/BrosInCode/letagents/issues/55#issuecomment-12",
       },
     },
-    comment: {
-      id: 12,
-      body: "I can reproduce this",
-      html_url: "https://github.com/BrosInCode/letagents/issues/55#issuecomment-12",
-    },
-  });
+    "delivery-comment-1"
+  );
 
   assert.ok(event);
   assert.equal(event?.event_type, "issue_comment");
   assert.equal(
     event?.idempotency_key,
-    "brosincode/letagents:comment:12:created"
+    "brosincode/letagents:comment:12:created:delivery:delivery-comment-1"
   );
   assert.equal(event?.roomEvent?.kind, "issue_comment");
   assert.equal(event?.roomEvent?.issue.isPullRequest, true);
@@ -168,21 +187,28 @@ test("materializeGitHubWebhookEvent preserves pull request context for issue com
 });
 
 test("materializeGitHubWebhookEvent materializes installation events without a room event", () => {
-  const event = materializeGitHubWebhookEvent("installation", {
-    action: "suspend",
-    installation: {
-      id: 77,
-      account: { id: 10, login: "BrosInCode" },
-      target_type: "Organization",
-      repository_selection: "selected",
-      permissions: { contents: "read" },
+  const event = materializeGitHubWebhookEvent(
+    "installation",
+    {
+      action: "suspend",
+      installation: {
+        id: 77,
+        account: { id: 10, login: "BrosInCode" },
+        target_type: "Organization",
+        repository_selection: "selected",
+        permissions: { contents: "read" },
+      },
+      sender: { login: "EmmyMay" },
     },
-    sender: { login: "EmmyMay" },
-  });
+    "delivery-installation-1"
+  );
 
   assert.ok(event);
   assert.equal(event?.event_type, "installation");
-  assert.equal(event?.idempotency_key, "installation:77:suspend");
+  assert.equal(
+    event?.idempotency_key,
+    "installation:77:suspend:delivery:delivery-installation-1"
+  );
   assert.equal(event?.state, "suspended");
   assert.equal(event?.roomEvent, null);
   assert.deepEqual(event?.metadata, {
@@ -194,29 +220,36 @@ test("materializeGitHubWebhookEvent materializes installation events without a r
 });
 
 test("materializeGitHubWebhookEvent materializes installation repository additions", () => {
-  const event = materializeGitHubWebhookEvent("installation_repositories", {
-    action: "added",
-    installation: {
-      id: 77,
-      account: { id: 10, login: "BrosInCode" },
+  const event = materializeGitHubWebhookEvent(
+    "installation_repositories",
+    {
+      action: "added",
+      installation: {
+        id: 77,
+        account: { id: 10, login: "BrosInCode" },
+      },
+      repositories_added: [
+        {
+          id: 12,
+          full_name: "BrosInCode/letagents",
+          name: "letagents",
+        },
+        {
+          id: 20,
+          full_name: "BrosInCode/other-repo",
+          name: "other-repo",
+        },
+      ],
     },
-    repositories_added: [
-      {
-        id: 12,
-        full_name: "BrosInCode/letagents",
-        name: "letagents",
-      },
-      {
-        id: 20,
-        full_name: "BrosInCode/other-repo",
-        name: "other-repo",
-      },
-    ],
-  });
+    "delivery-installation-repos-1"
+  );
 
   assert.ok(event);
   assert.equal(event?.event_type, "installation_repositories");
-  assert.equal(event?.idempotency_key, "installation_repositories:77:added:12,20");
+  assert.equal(
+    event?.idempotency_key,
+    "installation_repositories:77:added:12,20:delivery:delivery-installation-repos-1"
+  );
   assert.equal(event?.roomEvent, null);
   assert.deepEqual(event?.metadata, {
     target_login: "BrosInCode",
@@ -229,27 +262,31 @@ test("materializeGitHubWebhookEvent materializes installation repository additio
 });
 
 test("materializeGitHubWebhookEvent derives rename context for repository events", () => {
-  const event = materializeGitHubWebhookEvent("repository", {
-    action: "renamed",
-    repository: {
-      id: 1,
-      full_name: "BrosInCode/letagents",
-      name: "letagents",
-      owner: { login: "BrosInCode" },
-    },
-    sender: { login: "EmmyMay" },
-    changes: {
+  const event = materializeGitHubWebhookEvent(
+    "repository",
+    {
+      action: "renamed",
       repository: {
-        name: { from: "old-agents" },
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "EmmyMay" },
+      changes: {
+        repository: {
+          name: { from: "old-agents" },
+        },
       },
     },
-  });
+    "delivery-repository-1"
+  );
 
   assert.ok(event);
   assert.equal(event?.event_type, "repository");
   assert.equal(
     event?.idempotency_key,
-    "brosincode/letagents:repository:1:renamed:brosincode/old-agents"
+    "brosincode/letagents:repository:1:renamed:brosincode/old-agents:delivery:delivery-repository-1"
   );
   assert.equal(event?.roomEvent?.kind, "repository");
   assert.equal(event?.roomEvent?.oldFullName, "BrosInCode/old-agents");
@@ -279,4 +316,50 @@ test("materializeGitHubRoomEvent keeps the legacy room-event wrapper for room-sc
 
   assert.ok(event);
   assert.equal(event?.kind, "issue");
+});
+
+test("materializeGitHubWebhookEvent distinguishes repeated issue transitions by delivery id", () => {
+  const payload = {
+    action: "closed",
+    repository: {
+      id: 1,
+      full_name: "BrosInCode/letagents",
+      name: "letagents",
+      owner: { login: "BrosInCode" },
+    },
+    issue: {
+      number: 42,
+      title: "task_42: finish room events",
+      html_url: "https://github.com/BrosInCode/letagents/issues/42",
+      state: "closed",
+    },
+    sender: { login: "EmmyMay" },
+  } as const;
+
+  const first = materializeGitHubWebhookEvent("issues", payload, "delivery-issue-1");
+  const sameDelivery = materializeGitHubWebhookEvent("issues", payload, "delivery-issue-1");
+  const second = materializeGitHubWebhookEvent("issues", payload, "delivery-issue-2");
+
+  assert.ok(first);
+  assert.ok(sameDelivery);
+  assert.ok(second);
+  assert.equal(first?.idempotency_key, sameDelivery?.idempotency_key);
+  assert.notEqual(first?.idempotency_key, second?.idempotency_key);
+});
+
+test("materializeGitHubWebhookEvent distinguishes repeated installation actions by delivery id", () => {
+  const payload = {
+    action: "suspend",
+    installation: {
+      id: 77,
+      account: { id: 10, login: "BrosInCode" },
+    },
+  } as const;
+
+  const first = materializeGitHubWebhookEvent("installation", payload, "delivery-install-1");
+  const second = materializeGitHubWebhookEvent("installation", payload, "delivery-install-2");
+
+  assert.ok(first);
+  assert.ok(second);
+  assert.notEqual(first?.idempotency_key, second?.idempotency_key);
 });
