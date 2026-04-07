@@ -18,6 +18,7 @@
       :searchQuery="searchQuery"
       :matchCount="matchCount"
       :canRename="room?.role === 'admin'"
+      :showEventsTab="githubEventsSupported"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="activeTab = $event"
       @update:searchQuery="searchQuery = $event"
@@ -41,6 +42,16 @@
       :messages="messages"
       :searchQuery="searchQuery"
       @reply="selectedReply = $event"
+    />
+
+    <GitHubEventFeed
+      v-show="githubEventsSupported && activeTab === 'events' && isConnected"
+      :events="githubEvents"
+      :repository="room?.name || room?.identifier || null"
+      :isAvailable="githubEventsAvailable"
+      :hasMore="githubEventsHasMore"
+      :errorMessage="githubEventsError?.message || null"
+      :isLoading="githubEventsLoading"
     />
 
     <TaskBoard
@@ -69,15 +80,36 @@ import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import MessageList from '@/components/room/MessageList.vue'
+import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import type { RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
-const { messages, tasks, room, isConnected, connectionState, joinError, joinRoom, sendMessage, addTask, updateTask, restoreSession, renameRoom } = useRoom()
+const {
+  messages,
+  tasks,
+  githubEvents,
+  githubEventsAvailable,
+  githubEventsHasMore,
+  githubEventsError,
+  githubEventsSupported,
+  githubEventsLoading,
+  room,
+  isConnected,
+  connectionState,
+  joinError,
+  joinRoom,
+  sendMessage,
+  addTask,
+  updateTask,
+  restoreSession,
+  renameRoom,
+  refreshRoomGitHubEvents,
+} = useRoom()
 const auth = useAuth()
 
-const activeTab = ref<'chat' | 'board'>('chat')
+const activeTab = ref<'chat' | 'events' | 'board'>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
@@ -163,6 +195,18 @@ watch(() => route.params.roomId, async (newId) => {
     await joinRoom(newId as string)
   }
 })
+
+watch(activeTab, async (tab) => {
+  if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
+    await refreshRoomGitHubEvents()
+  }
+})
+
+watch(githubEventsSupported, (supported) => {
+  if (!supported && activeTab.value === 'events') {
+    activeTab.value = 'chat'
+  }
+}, { immediate: true })
 </script>
 
 <style scoped>
