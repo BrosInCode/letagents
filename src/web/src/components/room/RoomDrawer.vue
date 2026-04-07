@@ -332,10 +332,12 @@ async function installGitHubApp() {
 }
 
 async function setupGitHubAppManifest() {
+  const roomId = props.room?.projectId || props.room?.identifier
+  if (!roomId) return
   ghInstalling.value = true
   ghError.value = ''
   try {
-    const res = await fetch(`/api/system/integrations/github/setup-manifest`, {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/integrations/github/setup-manifest`, {
       method: 'POST',
       credentials: 'include',
     })

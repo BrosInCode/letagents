@@ -1613,12 +1613,14 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   }
 });
 
-app.post("/api/system/integrations/github/setup-manifest", async (req: AuthenticatedRequest, res) => {
-  // Only admins can set up the global app (for an MVP, we could just rely on frontend UI hiding it, 
-  // but to be safe, we should ideally restrict this. As this is global config, LetAgents may not have
-  // a global admin concept yet, so we will allow it if they are authenticated)
-  if (!req.sessionAccount) {
-    res.status(401).json({ error: "Unauthorized" });
+app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const project = await getGitHubRoomIntegrationProject(req, res, rawId);
+  if (!project) {
+    return;
+  }
+
+  if (!(await requireAdmin(req, res, project))) {
     return;
   }
 
@@ -1648,6 +1650,7 @@ app.post("/api/system/integrations/github/setup-manifest", async (req: Authentic
   });
 
   const state = crypto.randomBytes(24).toString("hex");
+  await createAuthState(state, `/in/${project.id}`);
   const actionPath = `https://github.com/settings/apps/new?state=${state}`;
 
   res.json({ actionUrl: actionPath, manifest });
@@ -1659,8 +1662,24 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/auth/github/app/callback", async (req, res) => {
   const code = typeof req.query.code === "string" ? req.query.code : undefined;
+  const state = typeof req.query.state === "string" ? req.query.state : undefined;
+  const setupAction = typeof req.query.setup_action === "string" ? req.query.setup_action : undefined;
+
+  let stateValid = false;
+  let redirectTo = "/";
+  if (state) {
+    const authState = await consumeAuthState(state);
+    if (authState) {
+      stateValid = true;
+      redirectTo = authState.redirect_to || "/";
+    }
+  }
   
   if (code) {
+    if (!stateValid) {
+      res.status(401).send("<html><body><h2>Error: Invalid State</h2><p>Your session may have expired.</p></body></html>");
+      return;
+    }
     // Handling Manifest Creation Callback
     try {
       const response = await fetch(`https://api.github.com/app-manifests/${code}/conversions`, {
@@ -1672,20 +1691,22 @@ app.get("/auth/github/app/callback", async (req, res) => {
       if (response.ok) {
         const data = await response.json();
         
-        // Remove old configs (limit 1 logic)
-        await db.delete(system_github_app);
-        
-        // Insert into system_github_app
-        await db.insert(system_github_app).values({
-          app_id: String(data.id),
-          app_slug: data.slug,
-          client_id: data.client_id,
-          client_secret: data.client_secret,
-          private_key: data.pem,
-          webhook_secret: data.webhook_secret,
+        await db.transaction(async (tx) => {
+          // Remove old configs (limit 1 logic)
+          await tx.delete(system_github_app);
+          
+          // Insert into system_github_app
+          await tx.insert(system_github_app).values({
+            app_id: String(data.id),
+            app_slug: data.slug,
+            client_id: data.client_id,
+            client_secret: data.client_secret,
+            private_key: data.pem,
+            webhook_secret: data.webhook_secret,
+          });
         });
         
-        res.send("<html><body><h2>GitHub App Created Successfully</h2><p>You can close this window now.</p><script>setTimeout(() => window.location.href='/', 2000)</script></body></html>");
+        res.send(`<html><body><h2>GitHub App Created Successfully</h2><p>You can close this window now.</p><script>setTimeout(() => window.location.href='${redirectTo}', 2000)</script></body></html>`);
         return;
       } else {
         const err = await response.text();
@@ -1695,19 +1716,6 @@ app.get("/auth/github/app/callback", async (req, res) => {
     } catch (e) {
       res.status(500).send(`Exception converting manifest code: ${String(e)}`);
       return;
-    }
-  }
-
-  const state = typeof req.query.state === "string" ? req.query.state : undefined;
-  const setupAction = typeof req.query.setup_action === "string" ? req.query.setup_action : undefined;
-
-  let stateValid = false;
-  let redirectTo = "/";
-  if (state) {
-    const authState = await consumeAuthState(state);
-    if (authState) {
-      stateValid = true;
-      redirectTo = authState.redirect_to || "/";
     }
   }
 
