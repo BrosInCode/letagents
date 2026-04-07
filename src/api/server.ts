@@ -20,6 +20,7 @@ import {
   getGitHubAppInstallationById,
   getGitHubAppRepositoryByFullName,
   getGitHubAppRepositoryByRoomId,
+  getGitHubRoomEvents,
   getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
@@ -2974,6 +2975,54 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       "Task update could not be completed."
     );
   }
+});
+
+// ── Room GitHub Events ──────────────────────────────────────────────
+app.get(/^(?:\/api)?\/rooms\/(.+)\/events$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const event_type = typeof req.query.event_type === "string" ? req.query.event_type : undefined;
+  const github_object_id = typeof req.query.object_id === "string" ? req.query.object_id : undefined;
+  const actor_login = typeof req.query.actor === "string" ? req.query.actor : undefined;
+  const since = typeof req.query.since === "string" ? req.query.since : undefined;
+  const until = typeof req.query.until === "string" ? req.query.until : undefined;
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+
+  const result = await getGitHubRoomEvents({
+    room_id: project.id,
+    event_type,
+    github_object_id,
+    actor_login,
+    since,
+    until,
+    after,
+    limit,
+  });
+
+  res.json({
+    room_id: project.id,
+    events: result.events.map((e) => ({
+      id: e.id,
+      event_type: e.event_type,
+      action: e.action,
+      github_object_id: e.github_object_id,
+      github_object_url: e.github_object_url,
+      title: e.title,
+      state: e.state,
+      actor_login: e.actor_login,
+      metadata: e.metadata,
+      linked_task_id: e.linked_task_id,
+      created_at: e.created_at,
+    })),
+    has_more: result.has_more,
+  });
 });
 
 app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
