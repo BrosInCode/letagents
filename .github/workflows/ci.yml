@@ -118,7 +118,14 @@ jobs:
             # Run database migrations using the baked-in drizzle-kit
             docker compose --profile migrate run --rm migrate
 
-            # Restart app with the new image
+            # Stop systemd service if it's still running (one-time migration)
+            sudo systemctl stop letagents 2>/dev/null || true
+            sudo systemctl disable letagents 2>/dev/null || true
+
+            # Stop any existing container before starting fresh
+            docker compose down 2>/dev/null || true
+
+            # Start app with the new image
             docker compose up -d
 
             # Wait for container to be healthy
