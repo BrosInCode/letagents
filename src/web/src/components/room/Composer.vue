@@ -267,6 +267,12 @@ watch(() => props.roomIdentifier, (newId) => {
     startKeepPollingLoop(false)
   }
 })
+
+watch(() => props.replyTo, (newVal) => {
+  if (newVal) {
+    textareaEl.value?.focus()
+  }
+})
 </script>
 
 <style scoped>
