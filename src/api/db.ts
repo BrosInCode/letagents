@@ -1900,7 +1900,8 @@ export async function getGitHubRoomEvents(input: {
   after?: string;
   limit?: number;
 }): Promise<{ events: GitHubRoomEvent[]; has_more: boolean }> {
-  const limit = input.limit ?? 50;
+  const MAX_LIMIT = 100;
+  const limit = Math.min(input.limit ?? 50, MAX_LIMIT);
   const conditions = [eq(github_room_events.room_id, input.room_id)];
 
   if (input.event_type) {
@@ -1919,14 +1920,20 @@ export async function getGitHubRoomEvents(input: {
     conditions.push(sql`${github_room_events.created_at} <= ${input.until}`);
   }
   if (input.after) {
-    // Cursor: fetch events older than the cursor event's created_at
+    // Keyset cursor: fetch events strictly after the cursor using (created_at, id)
+    // to avoid skipping events with identical timestamps
     const [cursorRow] = await db
-      .select({ created_at: github_room_events.created_at })
+      .select({
+        created_at: github_room_events.created_at,
+        id: github_room_events.id,
+      })
       .from(github_room_events)
       .where(eq(github_room_events.id, input.after))
       .limit(1);
     if (cursorRow) {
-      conditions.push(sql`${github_room_events.created_at} < ${cursorRow.created_at}`);
+      conditions.push(
+        sql`(${github_room_events.created_at}, ${github_room_events.id}) < (${cursorRow.created_at}, ${cursorRow.id})`
+      );
     }
   }
 
@@ -1934,7 +1941,7 @@ export async function getGitHubRoomEvents(input: {
     .select()
     .from(github_room_events)
     .where(and(...conditions))
-    .orderBy(desc(github_room_events.created_at))
+    .orderBy(desc(github_room_events.created_at), desc(github_room_events.id))
     .limit(limit + 1);
 
   const has_more = rows.length > limit;
