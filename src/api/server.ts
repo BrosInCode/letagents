@@ -47,13 +47,16 @@ import {
   upsertGitHubAppInstallation,
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
+  upsertRoomAgentPresence,
   upsertAccount,
   updateProjectDisplayName,
   updateTask,
+  getRoomAgentPresence,
   type GitHubWebhookDeliveryStatus,
   type Message,
   type OwnerTokenAccount,
   type Project,
+  type RoomAgentPresence,
   type SessionAccount,
   type Task,
   type TaskStatus,
@@ -111,6 +114,10 @@ import {
   resolveRoomIdentifier,
 } from "./room-routing.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
+import {
+  normalizeAgentPresenceStatus,
+  type AgentPresenceStatus,
+} from "../shared/agent-presence.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
@@ -273,6 +280,12 @@ function formatTaskLifecycleStatus(task: {
     default:
       return `[status] ${task.id} moved to ${task.status}: ${task.title}`;
   }
+}
+
+function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresence {
+  return {
+    ...presence,
+  };
 }
 
 async function emitTaskLifecycleStatusMessage(
@@ -2870,6 +2883,78 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
   req.on("close", () => {
     messageEvents.off("message:created", onMessageCreated);
     stopSseStream(res, heartbeat);
+  });
+});
+
+app.get(/^(?:\/api)?\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const presence = await getRoomAgentPresence(project.id, { limit });
+
+  res.json({
+    room_id: project.id,
+    presence: presence.map(toPublicRoomAgentPresence),
+  });
+});
+
+app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const {
+    actor_label,
+    agent_key,
+    display_name,
+    owner_label,
+    ide_label,
+    status,
+    status_text,
+  } = req.body as {
+    actor_label?: string;
+    agent_key?: string | null;
+    display_name?: string;
+    owner_label?: string | null;
+    ide_label?: string | null;
+    status?: string;
+    status_text?: string | null;
+  };
+
+  const actorLabel = typeof actor_label === "string" ? actor_label.trim() : "";
+  const displayName = typeof display_name === "string" ? display_name.trim() : "";
+  const normalizedStatus = normalizeAgentPresenceStatus(status);
+
+  if (!actorLabel || !displayName || !normalizedStatus) {
+    res.status(400).json({
+      error: "actor_label, display_name, and a valid status are required",
+    });
+    return;
+  }
+
+  const presence = await upsertRoomAgentPresence({
+    room_id: project.id,
+    actor_label: actorLabel,
+    agent_key: typeof agent_key === "string" ? agent_key.trim() || null : null,
+    display_name: displayName,
+    owner_label: typeof owner_label === "string" ? owner_label.trim() || null : null,
+    ide_label: typeof ide_label === "string" ? ide_label.trim() || null : null,
+    status: normalizedStatus as AgentPresenceStatus,
+    status_text: typeof status_text === "string" ? status_text.trim() || null : null,
+  });
+
+  res.status(200).json({
+    ...toPublicRoomAgentPresence(presence),
   });
 });
 

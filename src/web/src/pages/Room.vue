@@ -57,6 +57,7 @@
     <TaskBoard
       v-show="activeTab === 'board' && isConnected"
       :tasks="tasks"
+      :presence="presence"
       @addTask="handleAddTask"
       @updateTask="handleUpdateTask"
     />
@@ -89,6 +90,7 @@ const route = useRoute()
 const {
   messages,
   tasks,
+  presence,
   githubEvents,
   githubEventsAvailable,
   githubEventsHasMore,

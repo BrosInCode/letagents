@@ -65,7 +65,12 @@ import {
   stopLocalCodexSession,
   toPublicCodexLiveSession,
 } from "./codex-session.js";
+import {
+  classifyPresenceStatusText,
+  deriveTaskPresenceStatus,
+} from "./agent-presence.js";
 import { buildRoomEventsQueryString } from "./room-events-query.js";
+import type { AgentPresenceStatus } from "../shared/agent-presence.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -83,6 +88,7 @@ let currentRoom: RoomState | null = null;
 let currentAgentIdentityKey = "";
 let currentAgentIdentity: StoredAgentIdentityState | null = null;
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
+const roomPresenceByRoom = new Map<string, { status: AgentPresenceStatus; status_text: string | null }>();
 
 // ---------------------------------------------------------------------------
 // Conversation-scoped identity (Option C: per-conversation hints)
@@ -1013,6 +1019,56 @@ function touchCurrentRoom(lastMessageId?: string): void {
   touchRoomSession(currentRoom.room_id, lastMessageId);
 }
 
+function getRememberedRoomPresence(
+  roomId: string | null | undefined
+): { status: AgentPresenceStatus; status_text: string | null } {
+  if (!roomId) {
+    return { status: "idle", status_text: null };
+  }
+
+  return roomPresenceByRoom.get(roomId) ?? { status: "idle", status_text: null };
+}
+
+async function syncRoomPresence(
+  roomId: string | null | undefined,
+  identity: StoredAgentIdentityState | null | undefined,
+  presence: { status: AgentPresenceStatus; status_text: string | null }
+): Promise<void> {
+  if (!roomId || !identity) {
+    return;
+  }
+
+  roomPresenceByRoom.set(roomId, presence);
+
+  try {
+    await apiCall(`/rooms/${encodeRoomIdPath(roomId)}/presence`, {
+      method: "POST",
+      body: JSON.stringify({
+        actor_label: identity.actor_label,
+        agent_key: identity.canonical_key,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label,
+        status: presence.status,
+        status_text: presence.status_text,
+      }),
+    });
+    touchRoomSession(roomId);
+  } catch (error) {
+    if (isMissingRouteError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function heartbeatRoomPresence(
+  roomId: string | null | undefined,
+  identity: StoredAgentIdentityState | null | undefined
+): Promise<void> {
+  await syncRoomPresence(roomId, identity, getRememberedRoomPresence(roomId));
+}
+
 function getTargetRoomId(roomId?: string): string | null {
   return roomId || currentRoom?.room_id || null;
 }
@@ -1140,6 +1196,10 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       })
     );
     const agentIdentity = await ensureAgentIdentity();
+    await syncRoomPresence(room.room_id, agentIdentity, {
+      status: "idle",
+      status_text: "online in room",
+    });
     return {
       room,
       response: {
@@ -1173,6 +1233,10 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       })
     );
     const agentIdentity = await ensureAgentIdentity();
+    await syncRoomPresence(room.room_id, agentIdentity, {
+      status: "idle",
+      status_text: "online in room",
+    });
     return {
       room,
       response: {
@@ -1209,6 +1273,10 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
     })
   );
   const agentIdentity = await ensureAgentIdentity();
+  await syncRoomPresence(room.room_id, agentIdentity, {
+    status: "idle",
+    status_text: "online in room",
+  });
   return {
     room,
     response: {
@@ -1242,6 +1310,10 @@ async function createInviteRoom(): Promise<{
     })
   );
   const agentIdentity = await ensureAgentIdentity();
+  await syncRoomPresence(room.room_id, agentIdentity, {
+    status: "idle",
+    status_text: "online in room",
+  });
 
   return {
     room,
@@ -1843,6 +1915,13 @@ server.tool(
       },
     });
     touchCurrentRoom(typeof message.id === "string" ? message.id : undefined);
+    await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+      status: classifyPresenceStatusText(
+        status,
+        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null).status
+      ),
+      status_text: status,
+    });
 
     return {
       content: [
@@ -1915,6 +1994,7 @@ server.tool(
         }),
       },
     });
+    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
 
     return {
       content: [
@@ -1981,6 +2061,7 @@ server.tool(
       if (!lastTask?.id) break;
       afterCursor = lastTask.id;
     }
+    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, await ensureAgentIdentity());
 
     return {
       content: [{ type: "text" as const, text: JSON.stringify({ success: true, tasks: allTasks }, null, 2) }],
@@ -2075,6 +2156,10 @@ server.tool(
           body: JSON.stringify({ status: "assigned", assignee: identity.actor_label }),
         },
       });
+      await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+        status: "working",
+        status_text: `claimed ${task_id}`,
+      });
 
       return {
         content: [
@@ -2138,10 +2223,7 @@ server.tool(
     }
 
     try {
-      const identity =
-        status === "assigned" && !assignee
-          ? (getConversationIdentity(conversation_id) ?? await ensureAgentIdentity())
-          : null;
+      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -2151,11 +2233,20 @@ server.tool(
           method: "PATCH",
           body: JSON.stringify({
             status,
-            assignee: assignee ?? identity?.actor_label,
+            assignee: status === "assigned" && !assignee ? identity.actor_label : assignee,
             pr_url,
             workflow_artifacts,
           }),
         },
+      });
+      await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+        status: deriveTaskPresenceStatus(
+          status ?? null,
+          getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null).status
+        ),
+        status_text: status
+          ? `${task_id} -> ${status}`
+          : getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null).status_text,
       });
 
       return {
@@ -2166,7 +2257,7 @@ server.tool(
               {
                 success: true,
                 task: updated,
-                agent_identity: identity ? toPublicAgentIdentity(identity) : null,
+                agent_identity: toPublicAgentIdentity(identity),
               },
               null,
               2
@@ -2454,6 +2545,7 @@ server.tool(
       },
     });
     touchCurrentRoom(typeof (message as { id?: string }).id === "string" ? (message as { id: string }).id : undefined);
+    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
     return {
       content: [
         {
@@ -2519,6 +2611,7 @@ server.tool(
       if (!lastMsg?.id) break;
       afterCursor = lastMsg.id;
     }
+    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, await ensureAgentIdentity());
 
     const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages) };
     if (roomIdFromResponse) {
@@ -2558,6 +2651,8 @@ server.tool(
   async ({ room_id, after_message_id, timeout }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
+    const identity = await ensureAgentIdentity();
+    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
     const serverTimeout = Math.min(
       Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
       MAX_POLL_TIMEOUT_MS
@@ -2625,6 +2720,7 @@ server.tool(
     if (targetRoomId) {
       touchRoomSession(targetRoomId, getLastMessageId(output));
     }
+    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
     return {
       content: [
         {

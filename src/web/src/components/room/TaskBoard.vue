@@ -1,5 +1,39 @@
 <template>
   <div class="board-panel">
+    <div v-if="presence.length > 0" class="presence-panel">
+      <div class="presence-panel-header">
+        <h3>Agent Presence</h3>
+        <span>{{ presence.length }} tracked</span>
+      </div>
+      <div class="presence-grid">
+        <article
+          v-for="agent in presence"
+          :key="`${agent.room_id}:${agent.actor_label}`"
+          class="presence-card"
+          :data-status="agent.status"
+          :data-freshness="agent.freshness"
+        >
+          <div class="presence-card-header">
+            <div>
+              <div class="presence-name">{{ agent.display_name }}</div>
+              <div class="presence-meta-line">
+                {{ agent.owner_label || agent.ide_label || 'Agent' }}
+              </div>
+            </div>
+            <span class="presence-freshness-badge" :data-freshness="agent.freshness">
+              {{ agent.freshness }}
+            </span>
+          </div>
+          <div class="presence-status-row">
+            <span class="presence-status-dot" :data-status="agent.status" />
+            <span class="presence-status-text">{{ PRESENCE_STATUS_LABELS[agent.status] || agent.status }}</span>
+            <span class="presence-heartbeat">{{ formatHeartbeat(agent.last_heartbeat_at) }}</span>
+          </div>
+          <p v-if="agent.status_text" class="presence-description">{{ agent.status_text }}</p>
+        </article>
+      </div>
+    </div>
+
     <div class="add-task-form">
       <input
         class="input"
@@ -75,11 +109,12 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { type RoomTask } from '@/composables/useRoom'
+import { type RoomAgentPresence, type RoomTask } from '@/composables/useRoom'
 import TaskPersonChip from './TaskPersonChip.vue'
 
 const props = defineProps<{
   tasks: readonly RoomTask[]
+  presence: readonly RoomAgentPresence[]
 }>()
 
 const emit = defineEmits<{
@@ -129,6 +164,13 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: 'Cancelled',
 }
 
+const PRESENCE_STATUS_LABELS: Record<string, string> = {
+  idle: 'Idle',
+  working: 'Working',
+  reviewing: 'Reviewing',
+  blocked: 'Blocked',
+}
+
 interface TaskAction {
   label: string
   cls: string
@@ -171,6 +213,19 @@ function formatTimestamp(timestamp: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
+function formatHeartbeat(timestamp: string): string {
+  if (!timestamp) return 'unknown'
+  const d = new Date(timestamp)
+  const diff = Date.now() - d.getTime()
+  const secs = Math.max(0, Math.floor(diff / 1000))
+  if (secs < 60) return `${secs}s ago`
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 function getTaskWorkflowRefs(task: RoomTask) {
   return task.workflow_refs?.length
     ? task.workflow_refs
@@ -198,6 +253,129 @@ const groupedTasks = computed(() => {
 
 <style scoped>
 .board-panel { height: 100%; overflow-y: auto; padding: 16px 20px; }
+
+.presence-panel {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line, #27272a);
+  background:
+    linear-gradient(180deg, rgba(24, 24, 27, 0.96), rgba(15, 15, 17, 0.96));
+  margin-bottom: 12px;
+}
+
+.presence-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.presence-panel-header h3 {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.presence-panel-header span {
+  color: var(--muted, #71717a);
+  font-size: 0.72rem;
+}
+
+.presence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.presence-card {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line, #27272a);
+  background: rgba(9, 9, 11, 0.72);
+}
+
+.presence-card[data-freshness="stale"] {
+  opacity: 0.78;
+}
+
+.presence-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.presence-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text, #fafafa);
+}
+
+.presence-meta-line {
+  color: var(--muted, #71717a);
+  font-size: 0.68rem;
+}
+
+.presence-freshness-badge {
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.presence-freshness-badge[data-freshness="active"] {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.presence-freshness-badge[data-freshness="stale"] {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.presence-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted, #a1a1aa);
+  font-size: 0.72rem;
+  margin-bottom: 6px;
+}
+
+.presence-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #71717a;
+}
+
+.presence-status-dot[data-status="idle"] { background: #60a5fa; }
+.presence-status-dot[data-status="working"] { background: #fbbf24; }
+.presence-status-dot[data-status="reviewing"] { background: #38bdf8; }
+.presence-status-dot[data-status="blocked"] { background: #f87171; }
+
+.presence-status-text {
+  font-weight: 600;
+  color: var(--text, #fafafa);
+}
+
+.presence-heartbeat {
+  margin-left: auto;
+  color: var(--muted, #71717a);
+  white-space: nowrap;
+}
+
+.presence-description {
+  margin: 0;
+  color: var(--muted, #a1a1aa);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
 
 .add-task-form {
   display: flex; gap: 6px;
