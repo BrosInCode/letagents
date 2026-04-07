@@ -528,6 +528,19 @@ watch(() => props.open, (isOpen) => {
   background: var(--surface, #18181b); color: var(--text, #fafafa);
   max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.gh-setup-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 8px;
+  font-size: 0.82rem; font-weight: 600;
+  background: #22c55e; color: #fff;
+  border: 1px solid #16a34a;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms;
+}
+.gh-setup-btn:hover:not(:disabled) {
+  background: #16a34a; border-color: #15803d;
+}
+.gh-setup-btn:disabled { opacity: 0.5; cursor: wait; }
 .gh-install-btn {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 8px 14px; border-radius: 8px;
