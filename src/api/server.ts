@@ -2795,7 +2795,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       actorLabel,
       actorKey: verifiedActorKey,
     });
-    if (ownership.error) {
+    if (ownership.kind === "deny") {
       res.status(409).json({ error: ownership.error });
       return;
     }
@@ -3374,7 +3374,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       actorLabel,
       actorKey: verifiedActorKey,
     });
-    if (ownership.error) {
+    if (ownership.kind === "deny") {
       res.status(409).json({ error: ownership.error });
       return;
     }

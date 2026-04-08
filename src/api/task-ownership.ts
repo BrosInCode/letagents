@@ -122,10 +122,15 @@ export function evaluateTaskOwnership(input: {
   requestedAssigneeAgentKey?: string | null;
   actorLabel?: string | null;
   actorKey?: string | null;
-}): {
-  error: string | null;
-  assigneeAgentKey?: string | null;
-} {
+}):
+  | {
+      kind: "allow";
+      assigneeAgentKey?: string | null;
+    }
+  | {
+      kind: "deny";
+      error: string;
+    } {
   const {
     authKind,
     currentAssignee,
@@ -145,17 +150,17 @@ export function evaluateTaskOwnership(input: {
       requestedAssigneeAgentKey,
     })
   ) {
-    return { error: null };
+    return { kind: "allow" };
   }
 
   const normalizedActorLabel = normalizeTaskActorLabel(actorLabel);
   if (!normalizedActorLabel) {
-    return { error: "actor_label is required for agent-owned task transitions" };
+    return { kind: "deny", error: "actor_label is required for agent-owned task transitions" };
   }
 
   const normalizedActorKey = normalizeTaskActorKey(actorKey);
   if (!normalizedActorKey) {
-    return { error: "actor_key is required for agent-owned task transitions" };
+    return { kind: "deny", error: "actor_key is required for agent-owned task transitions" };
   }
 
   if (requestedStatus === "assigned") {
@@ -164,24 +169,26 @@ export function evaluateTaskOwnership(input: {
       normalizeTaskActorKey(requestedAssigneeAgentKey) !== normalizedActorKey
     ) {
       return {
+        kind: "deny",
         error: "Agents can only claim tasks for themselves",
       };
     }
 
     return {
-      error: null,
+      kind: "allow",
       assigneeAgentKey: normalizedActorKey,
     };
   }
 
   if (requestedAssignee !== undefined || requestedAssigneeAgentKey !== undefined) {
     return {
+      kind: "deny",
       error: "Agents cannot reassign a task after claim",
     };
   }
 
   if (normalizeTaskActorKey(currentAssigneeAgentKey) === normalizedActorKey) {
-    return { error: null };
+    return { kind: "allow" };
   }
 
   if (
@@ -189,12 +196,13 @@ export function evaluateTaskOwnership(input: {
     normalizeTaskActorLabel(currentAssignee) === normalizedActorLabel
   ) {
     return {
-      error: null,
+      kind: "allow",
       assigneeAgentKey: normalizedActorKey,
     };
   }
 
   return {
+    kind: "deny",
     error: `Only the assigned agent can move this task to ${requestedStatus}`,
   };
 }
@@ -202,5 +210,6 @@ export function evaluateTaskOwnership(input: {
 export function getTaskOwnershipError(
   input: Parameters<typeof evaluateTaskOwnership>[0]
 ): string | null {
-  return evaluateTaskOwnership(input).error;
+  const decision = evaluateTaskOwnership(input);
+  return decision.kind === "deny" ? decision.error : null;
 }

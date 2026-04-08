@@ -161,7 +161,7 @@ test("evaluateTaskOwnership backfills missing assignee agent keys for existing t
       actorKey: "EmmyMay/gardenfern",
     }),
     {
-      error: null,
+      kind: "allow",
       assigneeAgentKey: "EmmyMay/gardenfern",
     }
   );
@@ -179,7 +179,7 @@ test("evaluateTaskOwnership allows the assigned agent to advance its task by key
       actorKey: "EmmyMay/gardenfern",
     }),
     {
-      error: null,
+      kind: "allow",
     }
   );
 });
