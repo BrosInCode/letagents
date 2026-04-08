@@ -773,4 +773,17 @@ watch(filteredMentionCandidates, (candidates) => {
   color: var(--muted, #71717a);
   opacity: 0.7;
 }
+
+@media (max-width: 768px) {
+  .composer { padding: 8px 12px 12px; }
+  .composer-card { border-radius: 12px; }
+  .message-textarea { padding: 12px 14px 6px; font-size: 0.88rem; min-height: 44px; max-height: 120px; }
+  .composer-pills-row { padding: 0 2px 4px; }
+  .composer-toolbar { padding: 0 4px 4px; }
+  .composer-mention-panel { padding: 0 6px 6px; }
+  .composer-mention-option { padding: 8px 10px; }
+  .prompt-panel { width: 220px; }
+  .send-btn { width: 34px; height: 34px; }
+  .reply-draft { padding: 8px 10px 6px; }
+}
 </style>

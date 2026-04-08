@@ -397,4 +397,16 @@ const renderedContent = computed(() => {
 
 .system-message .message-avatar::before { opacity: 0.4; }
 .system-message .message-bubble { opacity: 0.6; border-left-color: var(--line, #27272a); }
+
+@media (max-width: 768px) {
+  .message { gap: 8px; padding: 8px 0; }
+  .message-meta { gap: 4px; }
+  .message-meta strong { font-size: 0.78rem; }
+  .message-meta time { font-size: 0.62rem; }
+  .message-bubble { max-width: 100%; padding-left: 10px; }
+  .message-bubble :deep(.md-content) { font-size: 0.84rem; }
+  .provenance-badge { padding: 2px 6px; font-size: 0.58rem; }
+  .prompt-injection-badge { font-size: 0.58rem; padding: 2px 8px; }
+  .reply-preview { padding: 6px 8px; margin-bottom: 6px; }
+}
 </style>
