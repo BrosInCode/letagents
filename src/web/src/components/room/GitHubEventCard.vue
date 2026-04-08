@@ -69,18 +69,17 @@ defineProps<{
 
 <style scoped>
 .github-event-card {
-  --event-accent: #94a3b8;
-  --event-accent-soft: rgba(148, 163, 184, 0.18);
+  --event-accent: var(--text-tertiary, #71717a);
+  --event-accent-soft: var(--accent-dim, rgba(255, 255, 255, 0.04));
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);
   gap: 12px;
   padding: 14px 15px;
   border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--event-accent) 28%, rgba(15, 23, 42, 0.95));
-  background:
-    linear-gradient(155deg, color-mix(in srgb, var(--event-accent) 11%, rgba(15, 23, 42, 0.96)) 0%, rgba(15, 23, 42, 0.96) 58%, rgba(2, 6, 23, 0.98) 100%);
+  border: 1px solid color-mix(in srgb, var(--event-accent) 28%, var(--border, rgba(255, 255, 255, 0.06)));
+  background: var(--bg-card, #141414);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 1px 0 var(--accent-dim, rgba(255, 255, 255, 0.04)),
     0 18px 40px -34px var(--event-accent-soft);
 }
 
@@ -92,8 +91,8 @@ defineProps<{
   height: 36px;
   border-radius: 12px;
   color: var(--event-accent);
-  background: color-mix(in srgb, var(--event-accent) 18%, rgba(15, 23, 42, 0.92));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--event-accent) 28%, transparent);
+  background: color-mix(in srgb, var(--event-accent) 14%, var(--bg-subtle, #111111));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--event-accent) 24%, transparent);
 }
 
 .github-event-icon svg {
@@ -119,9 +118,9 @@ defineProps<{
   min-height: 24px;
   padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.04);
-  color: #dbe4f3;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
+  background: var(--accent-dim, rgba(255, 255, 255, 0.04));
+  color: var(--text-secondary, #a1a1aa);
   font-size: 0.67rem;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -131,22 +130,22 @@ defineProps<{
 
 .github-chip-brand {
   color: var(--event-accent);
-  border-color: color-mix(in srgb, var(--event-accent) 32%, transparent);
-  background: color-mix(in srgb, var(--event-accent) 14%, rgba(15, 23, 42, 0.9));
+  border-color: color-mix(in srgb, var(--event-accent) 28%, transparent);
+  background: color-mix(in srgb, var(--event-accent) 10%, var(--bg-subtle, #111111));
 }
 
 .github-chip-status {
-  background: color-mix(in srgb, var(--event-accent) 16%, rgba(255, 255, 255, 0.05));
+  background: color-mix(in srgb, var(--event-accent) 12%, var(--accent-dim, rgba(255, 255, 255, 0.04)));
 }
 
 .github-chip-task {
-  color: #fde68a;
-  border-color: rgba(253, 230, 138, 0.2);
+  color: var(--amber, #f59e0b);
+  border-color: var(--amber-dim, rgba(245, 158, 11, 0.1));
 }
 
 .github-event-headline {
   margin: 0;
-  color: #f8fafc;
+  color: var(--text, #fafafa);
   font-size: 0.95rem;
   font-weight: 700;
   line-height: 1.35;
@@ -154,7 +153,7 @@ defineProps<{
 
 .github-event-detail {
   margin: 0;
-  color: #cbd5e1;
+  color: var(--text-secondary, #a1a1aa);
   font-size: 0.82rem;
   line-height: 1.55;
   word-break: break-word;
@@ -168,9 +167,9 @@ defineProps<{
   min-height: 30px;
   padding: 0 12px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--event-accent) 34%, transparent);
-  background: color-mix(in srgb, var(--event-accent) 15%, rgba(15, 23, 42, 0.88));
-  color: #f8fafc;
+  border: 1px solid color-mix(in srgb, var(--event-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--event-accent) 10%, var(--bg-subtle, #111111));
+  color: var(--text, #fafafa);
   font-size: 0.78rem;
   font-weight: 700;
   text-decoration: none;
@@ -181,6 +180,7 @@ defineProps<{
   filter: brightness(1.06);
 }
 
+/* ─── Tone accents (color-coded status, preserved across themes) ─── */
 .tone-violet {
   --event-accent: #a78bfa;
   --event-accent-soft: rgba(167, 139, 250, 0.26);
@@ -207,8 +207,8 @@ defineProps<{
 }
 
 .tone-slate {
-  --event-accent: #94a3b8;
-  --event-accent-soft: rgba(148, 163, 184, 0.24);
+  --event-accent: var(--text-tertiary, #71717a);
+  --event-accent-soft: var(--accent-dim, rgba(255, 255, 255, 0.04));
 }
 
 @media (max-width: 640px) {
