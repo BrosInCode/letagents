@@ -56,6 +56,12 @@
           @click="$emit('update:activeTab', 'board')"
           type="button"
         >Board</button>
+        <button
+          role="tab"
+          :aria-selected="activeTab === 'activity'"
+          @click="$emit('update:activeTab', 'activity')"
+          type="button"
+        >Activity</button>
       </div>
 
       <div class="presence" :data-state="connectionState">
@@ -68,12 +74,10 @@
 <script setup lang="ts">
 import { computed, ref, nextTick } from 'vue'
 
-type ViewTab = 'chat' | 'events' | 'board'
-
 const props = defineProps<{
   title: string
   subtitle: string
-  activeTab: ViewTab
+  activeTab: 'chat' | 'events' | 'board' | 'activity'
   connectionState: 'idle' | 'connecting' | 'live' | 'error'
   searchQuery: string
   matchCount: number
@@ -83,7 +87,7 @@ const props = defineProps<{
 
 defineEmits<{
   toggleDrawer: []
-  'update:activeTab': [tab: ViewTab]
+  'update:activeTab': [tab: 'chat' | 'events' | 'board' | 'activity']
   'update:searchQuery': [query: string]
   rename: []
 }>()
