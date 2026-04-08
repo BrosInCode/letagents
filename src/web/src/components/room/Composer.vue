@@ -233,9 +233,14 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
 
 const filteredMentionCandidates = computed(() => {
   const query = mentionQuery.value.trim().toLowerCase()
-  return mentionCandidates.value
+  const filtered = mentionCandidates.value
     .filter((candidate) => !query || candidate.search.includes(query))
-    .slice(0, 6)
+
+  // Guarantee humans (priority >= 2) are never pushed off by a flood of agents
+  const agents = filtered.filter((c) => c.priority < 2)
+  const humans = filtered.filter((c) => c.priority >= 2)
+  const maxAgents = Math.max(0, 8 - humans.length)
+  return [...agents.slice(0, maxAgents), ...humans].slice(0, 8)
 })
 
 const mentionMenuOpen = computed(() =>
