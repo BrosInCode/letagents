@@ -389,12 +389,16 @@ watch(githubEventsSupported, (supported) => {
 }
 
 @media (max-width: 768px) {
+  .room-shell { height: 100dvh; }
+  .room-error { padding: 24px 16px; }
+  .room-error-body { font-size: 0.85rem; }
+
   .mobile-bottom-nav {
     display: flex;
     align-items: center;
     justify-content: space-around;
-    height: 56px;
-    padding: 0 4px;
+    height: calc(56px + env(safe-area-inset-bottom, 0px));
+    padding: 0 4px env(safe-area-inset-bottom, 0px);
     background: var(--bg-0, #09090b);
     border-top: 1px solid var(--line, #27272a);
     position: sticky;
