@@ -20,7 +20,7 @@
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
       @toggleDrawer="drawerOpen = !drawerOpen"
-      @update:activeTab="activeTab = $event"
+      @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
       @rename="handleRename"
     />
@@ -57,10 +57,16 @@
     <TaskBoard
       v-show="activeTab === 'board' && isConnected"
       :tasks="tasks"
-      :presence="presence"
       :taskGithubStatus="taskGithubStatus"
       @addTask="handleAddTask"
       @updateTask="handleUpdateTask"
+    />
+
+    <ActivityView
+      v-show="activeTab === 'activity' && isConnected"
+      :presence="presence"
+      :tasks="tasks"
+      :taskGithubStatus="taskGithubStatus"
     />
 
     <Composer
@@ -87,6 +93,7 @@ import MessageList from '@/components/room/MessageList.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
+import ActivityView from '@/components/room/ActivityView.vue'
 import type { RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
@@ -116,18 +123,9 @@ const {
 } = useRoom()
 const auth = useAuth()
 
-type ViewTab = 'chat' | 'events' | 'board'
-const VALID_TABS: ViewTab[] = ['chat', 'events', 'board']
-
-function readTabFromQuery(): ViewTab {
-  const q = route.query.view
-  if (typeof q === 'string' && VALID_TABS.includes(q as ViewTab)) {
-    return q as ViewTab
-  }
-  return 'chat'
-}
-
-const activeTab = ref<ViewTab>(readTabFromQuery())
+type RoomTab = 'chat' | 'events' | 'board' | 'activity'
+const VALID_TABS: RoomTab[] = ['chat', 'events', 'board', 'activity']
+const activeTab = ref<RoomTab>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
@@ -197,6 +195,50 @@ async function handleSignIn() {
   await auth.signIn(roomId ? `/in/${roomId}` : '/')
 }
 
+function normalizeRoomTab(rawValue: unknown): RoomTab {
+  const requested = typeof rawValue === 'string' ? rawValue : ''
+  if (!VALID_TABS.includes(requested as RoomTab)) {
+    return 'chat'
+  }
+
+  if (requested === 'events' && !githubEventsSupported.value) {
+    return 'chat'
+  }
+
+  return requested as RoomTab
+}
+
+function syncViewQuery(tab: RoomTab, mode: 'push' | 'replace' = 'replace') {
+  const current = typeof route.query.view === 'string' ? route.query.view : ''
+  if (current === tab) {
+    return
+  }
+
+  const navigate = mode === 'push' ? router.push : router.replace
+  void navigate({
+    query: {
+      ...route.query,
+      view: tab,
+    },
+  })
+}
+
+function applyRouteTab(rawValue: unknown) {
+  const nextTab = normalizeRoomTab(rawValue)
+  if (activeTab.value !== nextTab) {
+    activeTab.value = nextTab
+  }
+  syncViewQuery(nextTab, 'replace')
+}
+
+function handleActiveTabChange(rawValue: RoomTab) {
+  const nextTab = normalizeRoomTab(rawValue)
+  if (activeTab.value !== nextTab) {
+    activeTab.value = nextTab
+  }
+  syncViewQuery(nextTab, 'push')
+}
+
 onMounted(async () => {
   await auth.checkSession()
   const roomId = route.params.roomId as string
@@ -205,6 +247,8 @@ onMounted(async () => {
   } else {
     await restoreSession()
   }
+
+  applyRouteTab(route.query.view)
 })
 
 watch(() => route.params.roomId, async (newId) => {
@@ -212,25 +256,17 @@ watch(() => route.params.roomId, async (newId) => {
   if (newId) {
     await joinRoom(newId as string)
   }
+
+  applyRouteTab(route.query.view)
+})
+
+watch(() => route.query.view, (newView) => {
+  applyRouteTab(newView)
 })
 
 watch(activeTab, async (tab) => {
-  // Sync tab to URL query — use push so back/forward steps through views
-  const currentView = route.query.view
-  if (currentView !== tab) {
-    const query = { ...route.query, view: tab === 'chat' ? undefined : tab }
-    router.push({ query })
-  }
   if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
-  }
-})
-
-// When URL query changes externally (e.g. back/forward), sync tab
-watch(() => route.query.view, (newView) => {
-  const tab = readTabFromQuery()
-  if (activeTab.value !== tab) {
-    activeTab.value = tab
   }
 })
 
@@ -238,6 +274,7 @@ watch(githubEventsSupported, (supported) => {
   // Only reset away from events after we've connected and confirmed no support
   if (!supported && activeTab.value === 'events' && isConnected.value) {
     activeTab.value = 'chat'
+    syncViewQuery('chat', 'replace')
   }
 })
 </script>
