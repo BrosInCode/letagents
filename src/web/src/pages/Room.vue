@@ -233,10 +233,11 @@ watch(() => route.query.view, (newView) => {
 })
 
 watch(githubEventsSupported, (supported) => {
-  if (!supported && activeTab.value === 'events') {
+  // Only reset away from events after we've connected and confirmed no support
+  if (!supported && activeTab.value === 'events' && isConnected.value) {
     activeTab.value = 'chat'
   }
-}, { immediate: true })
+})
 </script>
 
 <style scoped>
