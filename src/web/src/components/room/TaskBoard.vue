@@ -468,4 +468,20 @@ const groupedTasks = computed(() => {
 .board-empty code {
   background: var(--surface, #18181b); padding: 1px 5px; border-radius: 4px; font-size: 0.78rem;
 }
+
+@media (max-width: 768px) {
+  .board-panel { padding: 12px 12px; }
+  .add-task-form { flex-direction: column; gap: 8px; padding: 8px; }
+  .add-task-form .input { font-size: 0.82rem; padding: 10px; }
+  .btn { width: 100%; text-align: center; padding: 10px; }
+  .task-card { padding: 10px; }
+  .task-card-header { flex-direction: column; gap: 4px; }
+  .task-card-title { font-size: 0.8rem; }
+  .task-meta { font-size: 0.68rem; gap: 6px; }
+  .task-description { font-size: 0.78rem; }
+  .task-actions { flex-wrap: wrap; }
+  .task-action-btn { flex: 1; text-align: center; min-width: 60px; }
+  .gh-status-section { padding: 6px 8px; }
+  .gh-pr-state { flex-wrap: wrap; }
+}
 </style>

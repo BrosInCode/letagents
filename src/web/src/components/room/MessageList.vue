@@ -185,3 +185,11 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   transition: all 0.2s;
 }
 </style>
+
+<style scoped>
+@media (max-width: 768px) {
+  .messages { padding: 12px 12px; }
+  .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
+  .empty-state { padding: 24px 16px; }
+}
+</style>
