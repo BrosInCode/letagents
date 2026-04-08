@@ -29,6 +29,7 @@ import {
   getOrCreateCanonicalRoom,
   getProjectByCode,
   getProjectById,
+  getRoomParticipants,
   insertGitHubRoomEvent,
   getSessionAccountByToken,
   getTaskById,
@@ -51,6 +52,7 @@ import {
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
   upsertRoomAgentPresence,
+  upsertRoomParticipant,
   upsertAccount,
   updateProjectDisplayName,
   updateTask,
@@ -60,6 +62,7 @@ import {
   type OwnerTokenAccount,
   type Project,
   type RoomAgentPresence,
+  type RoomParticipant,
   type SessionAccount,
   type Task,
   type TaskGitHubArtifactStatus,
@@ -131,11 +134,15 @@ import {
   evaluateTaskOwnership,
   requiresTaskOwnershipGuard,
 } from "./task-ownership.js";
-import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
+import { getAgentPrimaryLabel, parseAgentActorLabel } from "../shared/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
   type AgentPresenceStatus,
 } from "../shared/agent-presence.js";
+import {
+  buildAgentRoomParticipantKey,
+  buildHumanRoomParticipantKey,
+} from "../shared/room-participant.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
@@ -145,6 +152,7 @@ import {
   buildFallbackPresenceFromMessages,
   buildSyntheticPresenceEntry,
 } from "./presence-fallback.js";
+import { buildFallbackRoomParticipants } from "./room-participant-fallback.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -319,6 +327,126 @@ function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresen
   return {
     ...presence,
   };
+}
+
+function toPublicRoomParticipant(participant: RoomParticipant): RoomParticipant {
+  return {
+    ...participant,
+  };
+}
+
+function normalizeParticipantValue(value: string | null | undefined): string {
+  return String(value ?? "").trim();
+}
+
+function getOwnerLabelFromAttribution(ownerAttribution: string | null | undefined): string | null {
+  const normalized = normalizeParticipantValue(ownerAttribution);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/^(.+?)(?:'s|s')?\s+agent$/i);
+  return match?.[1]?.trim() || normalized;
+}
+
+function isAgentIdentityValue(value: string | null | undefined): boolean {
+  const parsed = parseAgentActorLabel(value);
+  return Boolean(parsed && (parsed.structured || parsed.owner_attribution || parsed.ide_label));
+}
+
+async function rememberHumanRoomParticipant(input: {
+  projectId: string;
+  sender?: string | null;
+  sessionAccount?: SessionAccount | OwnerTokenAccount | null | undefined;
+  lastSeenAt?: string | null;
+}): Promise<void> {
+  const githubLogin = normalizeParticipantValue(input.sessionAccount?.login ?? input.sender);
+  const displayName = githubLogin || normalizeParticipantValue(input.sender);
+  const participantKey = buildHumanRoomParticipantKey({
+    github_login: githubLogin || null,
+    display_name: displayName || null,
+  });
+
+  if (!participantKey || !displayName) {
+    return;
+  }
+
+  await upsertRoomParticipant({
+    room_id: input.projectId,
+    participant_key: participantKey,
+    kind: "human",
+    github_login: githubLogin || null,
+    display_name: displayName,
+    last_seen_at: input.lastSeenAt ?? null,
+  });
+}
+
+async function rememberAgentRoomParticipant(input: {
+  projectId: string;
+  actorLabel?: string | null;
+  agentKey?: string | null;
+  displayName?: string | null;
+  ownerLabel?: string | null;
+  ideLabel?: string | null;
+  lastSeenAt?: string | null;
+}): Promise<void> {
+  const actorLabel = normalizeParticipantValue(input.actorLabel);
+  const participantKey = buildAgentRoomParticipantKey(actorLabel);
+  if (!actorLabel || !participantKey) {
+    return;
+  }
+
+  const parsed = parseAgentActorLabel(actorLabel);
+  const displayName = normalizeParticipantValue(input.displayName)
+    || parsed?.display_name
+    || actorLabel;
+
+  await upsertRoomParticipant({
+    room_id: input.projectId,
+    participant_key: participantKey,
+    kind: "agent",
+    actor_label: actorLabel,
+    agent_key: normalizeParticipantValue(input.agentKey) || null,
+    display_name: displayName,
+    owner_label: normalizeParticipantValue(input.ownerLabel) || getOwnerLabelFromAttribution(parsed?.owner_attribution),
+    ide_label: normalizeParticipantValue(input.ideLabel) || parsed?.ide_label || null,
+    last_seen_at: input.lastSeenAt ?? null,
+  });
+}
+
+async function rememberRoomParticipantFromMessage(input: {
+  projectId: string;
+  sender: string;
+  source: string | undefined;
+  sessionAccount?: SessionAccount | OwnerTokenAccount | null | undefined;
+  timestamp: string;
+}): Promise<void> {
+  const normalizedSender = normalizeParticipantValue(input.sender);
+  const normalizedSource = normalizeParticipantValue(input.source).toLowerCase();
+  if (!normalizedSender) {
+    return;
+  }
+
+  if (normalizedSource === "agent" || isAgentIdentityValue(normalizedSender)) {
+    await rememberAgentRoomParticipant({
+      projectId: input.projectId,
+      actorLabel: normalizedSender,
+      lastSeenAt: input.timestamp,
+    });
+    return;
+  }
+
+  const lowerSender = normalizedSender.toLowerCase();
+  if (lowerSender === "letagents" || lowerSender === "system" || lowerSender === "github") {
+    return;
+  }
+
+  await rememberHumanRoomParticipant({
+    projectId: input.projectId,
+    sender: normalizedSender,
+    sessionAccount: input.sessionAccount,
+    lastSeenAt: input.timestamp,
+  });
 }
 
 async function emitTaskLifecycleStatusMessage(
@@ -2345,6 +2473,13 @@ app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
     }
   }
 
+  if (req.sessionAccount) {
+    await rememberHumanRoomParticipant({
+      projectId: project.id,
+      sessionAccount: req.sessionAccount,
+    });
+  }
+
   res.status(created ? 201 : 200).json({
     id: project.id,
     code: project.code,
@@ -2489,6 +2624,13 @@ app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
       source,
       agent_prompt_kind: promptKind,
       reply_to: replyToMessageId,
+    });
+    await rememberRoomParticipantFromMessage({
+      projectId,
+      sender: normalizedSender,
+      source,
+      sessionAccount: req.sessionAccount,
+      timestamp: message.timestamp,
     });
     res.status(201).json(message);
   } catch (error) {
@@ -2919,6 +3061,13 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
 
   const role = await resolveProjectRole(project, req.sessionAccount);
 
+  if (req.sessionAccount) {
+    await rememberHumanRoomParticipant({
+      projectId: project.id,
+      sessionAccount: req.sessionAccount,
+    });
+  }
+
   res.status(200).json({
     room_id: project.id,
     name: project.name ?? null,
@@ -2962,6 +3111,13 @@ app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => 
       source,
       agent_prompt_kind: promptKind,
       reply_to: replyToMessageId,
+    });
+    await rememberRoomParticipantFromMessage({
+      projectId: project.id,
+      sender: normalizedSender,
+      source,
+      sessionAccount: req.sessionAccount,
+      timestamp: message.timestamp,
     });
     res.status(201).json({
       ...message,
@@ -3127,6 +3283,54 @@ app.get(/^(?:\/api)?\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest,
   }
 });
 
+app.get(/^\/rooms\/(.+)\/participants$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined) ?? 100;
+
+  try {
+    const participants = await getRoomParticipants(project.id, { limit });
+    if (participants.length > 0) {
+      res.json({
+        room_id: project.id,
+        participants: participants.map(toPublicRoomParticipant),
+      });
+      return;
+    }
+
+    const fallbackMessageLimit = Math.min(Math.max(limit * 4, 100), 200);
+    const [messagesResult, presence] = await Promise.all([
+      getMessages(project.id, { limit: fallbackMessageLimit }),
+      getRoomAgentPresence(project.id, { limit }),
+    ]);
+
+    const participantsFromHistory = buildFallbackRoomParticipants({
+      roomId: project.id,
+      messages: messagesResult.messages,
+      presence,
+    }).slice(0, limit);
+
+    res.json({
+      room_id: project.id,
+      participants: participantsFromHistory.map(toPublicRoomParticipant),
+      fallback: "room_history",
+    });
+  } catch (error) {
+    respondWithInternalError(
+      res,
+      "GET /rooms/:room_id/participants",
+      error,
+      "Room participants could not be loaded."
+    );
+  }
+});
+
 app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -3179,6 +3383,15 @@ app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => 
       ide_label: ideLabel,
       status: normalizedStatus as AgentPresenceStatus,
       status_text: statusText,
+    });
+    await rememberAgentRoomParticipant({
+      projectId: project.id,
+      actorLabel: presence.actor_label,
+      agentKey: presence.agent_key,
+      displayName: presence.display_name,
+      ownerLabel: presence.owner_label,
+      ideLabel: presence.ide_label,
+      lastSeenAt: presence.last_heartbeat_at,
     });
 
     await maybeEmitStaleWorkPrompt(project.id);

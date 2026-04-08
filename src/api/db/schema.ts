@@ -2,8 +2,10 @@ import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 import { AGENT_PRESENCE_STATUSES } from "../../shared/agent-presence.js";
+import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
 
 export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
+export const roomParticipantKindEnum = pgEnum("room_participant_kind", ROOM_PARTICIPANT_KINDS);
 export const taskStatusEnum = pgEnum("task_status", [
   "proposed",
   "accepted",
@@ -272,6 +274,34 @@ export const room_agent_presence = pgTable(
       table.last_heartbeat_at
     ),
     room_agent_key_idx: index("room_agent_presence_room_agent_key_idx").on(table.room_id, table.agent_key),
+  })
+);
+
+export const room_participants = pgTable(
+  "room_participants",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    participant_key: text("participant_key").notNull(),
+    kind: roomParticipantKindEnum("kind").notNull(),
+    actor_label: text("actor_label"),
+    agent_key: text("agent_key"),
+    github_login: text("github_login"),
+    display_name: text("display_name").notNull(),
+    owner_label: text("owner_label"),
+    ide_label: text("ide_label"),
+    last_seen_at: timestamp("last_seen_at", { mode: "string", withTimezone: true }).notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "room_participants_pk", columns: [table.room_id, table.participant_key] }),
+    room_idx: index("room_participants_room_id_idx").on(table.room_id),
+    room_kind_idx: index("room_participants_room_kind_idx").on(table.room_id, table.kind),
+    room_last_seen_idx: index("room_participants_room_last_seen_idx").on(table.room_id, table.last_seen_at),
+    room_actor_idx: index("room_participants_room_actor_idx").on(table.room_id, table.actor_label),
+    room_login_idx: index("room_participants_room_login_idx").on(table.room_id, table.github_login),
   })
 );
 

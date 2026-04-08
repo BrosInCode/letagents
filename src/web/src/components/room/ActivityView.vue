@@ -336,6 +336,7 @@ import {
   parseAgentIdentity,
   type RoomAgentPresence,
   type RoomMessage,
+  type RoomParticipant,
   type RoomTask,
   type TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
@@ -363,6 +364,7 @@ interface ActivityParticipant {
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
+  participants: readonly RoomParticipant[]
   presence: readonly RoomAgentPresence[]
   tasks: readonly RoomTask[]
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
@@ -456,19 +458,18 @@ const agentMessagesByActor = computed(() => {
   return grouped
 })
 
-const humanMessagesBySender = computed(() => {
-  const grouped = new Map<string, RoomMessage[]>()
-  for (const message of props.messages) {
-    const sender = String(message.sender || '').trim()
-    if (!sender || !isHumanSender(sender, message.source)) continue
-    pushMapValue(grouped, sender, message)
-  }
-  return grouped
-})
-
 const presenceByActor = computed(() =>
   new Map(props.presence.map((entry) => [entry.actor_label, entry]))
 )
+
+function participantMatchesHuman(participant: RoomParticipant, value: string | null): boolean {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return false
+
+  const githubLogin = String(participant.github_login || '').trim().toLowerCase()
+  const displayName = String(participant.display_name || '').trim().toLowerCase()
+  return normalized === githubLogin || normalized === displayName
+}
 
 function participantMatchesActor(participant: ActivityParticipant, value: string | null): boolean {
   const normalized = String(value || '').trim()
@@ -482,21 +483,23 @@ function participantMatchesActor(participant: ActivityParticipant, value: string
   return false
 }
 
-function buildAgentParticipant(actorLabel: string): ActivityParticipant {
-  const presenceEntry = presenceByActor.value.get(actorLabel) || null
-  const messages = agentMessagesByActor.value.get(actorLabel) || []
+function buildAgentParticipant(participant: RoomParticipant): ActivityParticipant {
+  const actorLabel = String(participant.actor_label || participant.display_name || '').trim()
+  const presenceEntry = actorLabel ? (presenceByActor.value.get(actorLabel) || null) : null
+  const messages = actorLabel ? (agentMessagesByActor.value.get(actorLabel) || []) : []
   const latestMessage = messages[messages.length - 1] || null
   const latestStatusMessage = [...messages].reverse().find((message) => extractStatusText(message.text)) || null
   const parsed = parseAgentIdentity(actorLabel)
-  const label = presenceEntry?.display_name || latestMessage?.agent_identity?.display_name || parsed.displayName || actorLabel
-  const ownerLabel = presenceEntry?.owner_label
+  const label = participant.display_name || presenceEntry?.display_name || latestMessage?.agent_identity?.display_name || parsed.displayName || actorLabel
+  const ownerLabel = participant.owner_label
+    || presenceEntry?.owner_label
     || latestMessage?.agent_identity?.owner_label
     || parsed.ownerAttribution
     || null
-  const ideLabel = presenceEntry?.ide_label || latestMessage?.agent_identity?.ide_label || parsed.ideLabel || null
+  const ideLabel = participant.ide_label || presenceEntry?.ide_label || latestMessage?.agent_identity?.ide_label || parsed.ideLabel || null
 
   const assignedTasks = props.tasks.filter((task) => participantMatchesActor({
-    key: `agent:${actorLabel}`,
+    key: participant.participant_key,
     kind: 'agent',
     label,
     actorLabel,
@@ -518,7 +521,7 @@ function buildAgentParticipant(actorLabel: string): ActivityParticipant {
   ).slice(0, 8)
   const createdTasks = sortTasksByUpdated(
     props.tasks.filter((task) => participantMatchesActor({
-      key: `agent:${actorLabel}`,
+      key: participant.participant_key,
       kind: 'agent',
       label,
       actorLabel,
@@ -537,7 +540,7 @@ function buildAgentParticipant(actorLabel: string): ActivityParticipant {
   ).slice(0, 8)
 
   return {
-    key: `agent:${actorLabel}`,
+    key: participant.participant_key,
     kind: 'agent',
     label,
     actorLabel,
@@ -547,6 +550,7 @@ function buildAgentParticipant(actorLabel: string): ActivityParticipant {
     status: presenceEntry?.status || null,
     statusText: presenceEntry?.status_text || extractStatusText(latestStatusMessage?.text) || null,
     lastSeenAt: latestTimestamp(
+      participant.last_seen_at,
       presenceEntry?.last_heartbeat_at,
       latestMessage?.timestamp,
       latestTaskTimestamp(currentTasks),
@@ -561,11 +565,14 @@ function buildAgentParticipant(actorLabel: string): ActivityParticipant {
   }
 }
 
-function buildHumanParticipant(sender: string): ActivityParticipant {
-  const messages = humanMessagesBySender.value.get(sender) || []
-  const assignedTasks = props.tasks.filter((task) => String(task.assignee || '').trim() === sender)
+function buildHumanParticipant(participant: RoomParticipant): ActivityParticipant {
+  const label = participant.display_name || participant.github_login || 'Unknown human'
+  const messages = props.messages.filter((message) =>
+    isHumanSender(message.sender, message.source) && participantMatchesHuman(participant, message.sender)
+  )
+  const assignedTasks = props.tasks.filter((task) => participantMatchesHuman(participant, task.assignee))
   const createdTasks = sortTasksByUpdated(
-    props.tasks.filter((task) => String(task.created_by || '').trim() === sender)
+    props.tasks.filter((task) => participantMatchesHuman(participant, task.created_by))
   ).slice(0, 8)
   const currentTasks = sortTasksByUpdated(assignedTasks.filter((task) => OPEN_TASK_STATUSES.has(task.status)))
   const completedTasks = sortTasksByUpdated(
@@ -574,16 +581,17 @@ function buildHumanParticipant(sender: string): ActivityParticipant {
   const latestMessage = messages[messages.length - 1] || null
 
   return {
-    key: `human:${sender}`,
+    key: participant.participant_key,
     kind: 'human',
-    label: sender,
-    actorLabel: sender,
+    label,
+    actorLabel: participant.github_login || label,
     ownerLabel: null,
     ideLabel: null,
     connection: null,
     status: null,
     statusText: latestMessage ? previewMessage(latestMessage.text) : null,
     lastSeenAt: latestTimestamp(
+      participant.last_seen_at,
       latestMessage?.timestamp,
       latestTaskTimestamp(currentTasks),
       latestTaskTimestamp(completedTasks),
@@ -613,44 +621,16 @@ function compareParticipants(left: ActivityParticipant, right: ActivityParticipa
 }
 
 const agentParticipants = computed(() => {
-  const actors = new Set<string>()
-
-  for (const entry of props.presence) {
-    if (isAgentIdentityValue(entry.actor_label)) {
-      actors.add(entry.actor_label)
-    }
-  }
-
-  for (const actorLabel of agentMessagesByActor.value.keys()) {
-    actors.add(actorLabel)
-  }
-
-  for (const task of props.tasks) {
-    if (isAgentIdentityValue(task.assignee)) actors.add(String(task.assignee))
-    if (isAgentIdentityValue(task.created_by)) actors.add(String(task.created_by))
-  }
-
-  return Array.from(actors)
-    .map((actorLabel) => buildAgentParticipant(actorLabel))
+  return props.participants
+    .filter((participant) => participant.kind === 'agent')
+    .map((participant) => buildAgentParticipant(participant))
     .sort(compareParticipants)
 })
 
 const humanParticipants = computed(() => {
-  const humans = new Set<string>()
-
-  for (const sender of humanMessagesBySender.value.keys()) {
-    humans.add(sender)
-  }
-
-  for (const task of props.tasks) {
-    const assignee = String(task.assignee || '').trim()
-    const creator = String(task.created_by || '').trim()
-    if (assignee && !isAgentIdentityValue(assignee)) humans.add(assignee)
-    if (creator && !isAgentIdentityValue(creator)) humans.add(creator)
-  }
-
-  return Array.from(humans)
-    .map((sender) => buildHumanParticipant(sender))
+  return props.participants
+    .filter((participant) => participant.kind === 'human')
+    .map((participant) => buildHumanParticipant(participant))
     .sort(compareParticipants)
 })
 

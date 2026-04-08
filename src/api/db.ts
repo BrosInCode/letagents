@@ -17,6 +17,7 @@ import {
   owner_tokens,
   project_admins,
   room_agent_presence,
+  room_participants,
   room_aliases,
   rooms,
   tasks,
@@ -190,6 +191,21 @@ export interface RoomAgentPresence {
   freshness: AgentPresenceFreshness;
 }
 
+export interface RoomParticipant {
+  room_id: string;
+  participant_key: string;
+  kind: "human" | "agent";
+  actor_label: string | null;
+  agent_key: string | null;
+  github_login: string | null;
+  display_name: string;
+  owner_label: string | null;
+  ide_label: string | null;
+  last_seen_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Message {
   id: string;
   sender: string;
@@ -278,6 +294,21 @@ interface RoomAgentPresenceRow {
   status: AgentPresenceStatus;
   status_text: string | null;
   last_heartbeat_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RoomParticipantRow {
+  room_id: string;
+  participant_key: string;
+  kind: "human" | "agent";
+  actor_label: string | null;
+  agent_key: string | null;
+  github_login: string | null;
+  display_name: string;
+  owner_label: string | null;
+  ide_label: string | null;
+  last_seen_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -494,6 +525,23 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     created_at: row.created_at,
     updated_at: row.updated_at,
     freshness: getAgentPresenceFreshness(row.last_heartbeat_at),
+  };
+}
+
+function toRoomParticipant(row: RoomParticipantRow): RoomParticipant {
+  return {
+    room_id: row.room_id,
+    participant_key: row.participant_key,
+    kind: row.kind,
+    actor_label: row.actor_label,
+    agent_key: row.agent_key,
+    github_login: row.github_login,
+    display_name: row.display_name,
+    owner_label: row.owner_label,
+    ide_label: row.ide_label,
+    last_seen_at: row.last_seen_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -1388,6 +1436,71 @@ export async function getRoomAgentPresence(
     .limit(limit);
 
   return (rows as RoomAgentPresenceRow[]).map(toRoomAgentPresence);
+}
+
+export async function upsertRoomParticipant(input: {
+  room_id: string;
+  participant_key: string;
+  kind: "human" | "agent";
+  actor_label?: string | null;
+  agent_key?: string | null;
+  github_login?: string | null;
+  display_name: string;
+  owner_label?: string | null;
+  ide_label?: string | null;
+  last_seen_at?: string | null;
+}): Promise<RoomParticipant> {
+  const now = new Date().toISOString();
+  const lastSeenAt = input.last_seen_at ?? now;
+
+  const [participant] = await db
+    .insert(room_participants)
+    .values({
+      room_id: input.room_id,
+      participant_key: input.participant_key,
+      kind: input.kind,
+      actor_label: input.actor_label ?? null,
+      agent_key: input.agent_key ?? null,
+      github_login: input.github_login ?? null,
+      display_name: input.display_name,
+      owner_label: input.owner_label ?? null,
+      ide_label: input.ide_label ?? null,
+      last_seen_at: lastSeenAt,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [room_participants.room_id, room_participants.participant_key],
+      set: {
+        kind: input.kind,
+        actor_label: input.actor_label ?? null,
+        agent_key: input.agent_key ?? null,
+        github_login: input.github_login ?? null,
+        display_name: input.display_name,
+        owner_label: input.owner_label ?? null,
+        ide_label: input.ide_label ?? null,
+        last_seen_at: lastSeenAt,
+        updated_at: now,
+      },
+    })
+    .returning();
+
+  return toRoomParticipant(participant as RoomParticipantRow);
+}
+
+export async function getRoomParticipants(
+  roomId: string,
+  options?: { limit?: number }
+): Promise<RoomParticipant[]> {
+  const limit = clampLimit(options?.limit, 50, 200);
+  const rows = await db
+    .select()
+    .from(room_participants)
+    .where(eq(room_participants.room_id, roomId))
+    .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name))
+    .limit(limit);
+
+  return (rows as RoomParticipantRow[]).map(toRoomParticipant);
 }
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {

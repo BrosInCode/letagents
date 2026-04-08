@@ -150,9 +150,25 @@ export interface RoomAgentPresence {
   freshness: 'active' | 'stale'
 }
 
+export interface RoomParticipant {
+  room_id: string
+  participant_key: string
+  kind: 'human' | 'agent'
+  actor_label: string | null
+  agent_key: string | null
+  github_login: string | null
+  display_name: string
+  owner_label: string | null
+  ide_label: string | null
+  last_seen_at: string
+  created_at: string
+  updated_at: string
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const presence = ref<RoomAgentPresence[]>([])
+const participants = ref<RoomParticipant[]>([])
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
 const tasks = ref<RoomTask[]>([])
 const githubEvents = ref<RoomGitHubEvent[]>([])
@@ -172,6 +188,8 @@ let reconnectDelay = 1200
 let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null
 let presenceRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let participantRefreshTimer: ReturnType<typeof setInterval> | null = null
+let participantRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
 
 /** ── Color Palette ── */
@@ -373,6 +391,15 @@ async function fetchPresence(roomIdentifier: string): Promise<RoomAgentPresence[
   }
 }
 
+async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipant[]> {
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/participants`)
+    return data.participants || []
+  } catch {
+    return []
+  }
+}
+
 async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`)
@@ -400,6 +427,10 @@ async function refreshPresence(roomIdentifier: string) {
   presence.value = await fetchPresence(roomIdentifier)
 }
 
+async function refreshParticipants(roomIdentifier: string) {
+  participants.value = await fetchParticipants(roomIdentifier)
+}
+
 async function refreshRoomPresence(): Promise<boolean> {
   if (!room.value) return false
   await refreshPresence(room.value.identifier)
@@ -414,10 +445,25 @@ function schedulePresenceRefresh(roomIdentifier: string) {
   }, 350)
 }
 
+function scheduleParticipantRefresh(roomIdentifier: string) {
+  if (participantRefreshDebounceTimer) return
+  participantRefreshDebounceTimer = setTimeout(() => {
+    participantRefreshDebounceTimer = null
+    void refreshParticipants(roomIdentifier)
+  }, 350)
+}
+
 function startPresenceRefreshLoop(roomIdentifier: string) {
   stopPresenceRefreshLoop()
   presenceRefreshTimer = setInterval(() => {
     void refreshPresence(roomIdentifier)
+  }, PRESENCE_REFRESH_INTERVAL_MS)
+}
+
+function startParticipantRefreshLoop(roomIdentifier: string) {
+  stopParticipantRefreshLoop()
+  participantRefreshTimer = setInterval(() => {
+    void refreshParticipants(roomIdentifier)
   }, PRESENCE_REFRESH_INTERVAL_MS)
 }
 
@@ -429,6 +475,17 @@ function stopPresenceRefreshLoop() {
   if (presenceRefreshDebounceTimer) {
     clearTimeout(presenceRefreshDebounceTimer)
     presenceRefreshDebounceTimer = null
+  }
+}
+
+function stopParticipantRefreshLoop() {
+  if (participantRefreshTimer) {
+    clearInterval(participantRefreshTimer)
+    participantRefreshTimer = null
+  }
+  if (participantRefreshDebounceTimer) {
+    clearTimeout(participantRefreshDebounceTimer)
+    participantRefreshDebounceTimer = null
   }
 }
 
@@ -528,6 +585,10 @@ function startStreaming(roomIdentifier: string) {
         if (room.value && ((msg.source || '').toLowerCase() === 'agent' || msg.sender === 'letagents')) {
           schedulePresenceRefresh(room.value.identifier)
         }
+
+        if (room.value && ((msg.source || '').toLowerCase() === 'agent' || (msg.source || '').toLowerCase() === 'browser')) {
+          scheduleParticipantRefresh(room.value.identifier)
+        }
       }
     } catch { /* ignore parse errors */ }
   })
@@ -572,6 +633,7 @@ function stopStreaming() {
     githubEventsRefreshTimer = null
   }
   stopPresenceRefreshLoop()
+  stopParticipantRefreshLoop()
 }
 
 /** ── Session Persistence ── */
@@ -702,6 +764,7 @@ async function joinRoom(roomIdentifier: string) {
   messages.value = []
   tasks.value = []
   presence.value = []
+  participants.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -730,10 +793,11 @@ async function joinRoom(roomIdentifier: string) {
     persistSession()
 
     // Load existing room state in parallel
-    const [msgs, tsks, prs, gh, ghStatus] = await Promise.all([
+    const [msgs, tsks, prs, roomParticipants, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchPresence(roomIdentifier),
+      fetchParticipants(roomIdentifier),
       isRepoBackedRoomId(roomIdentifier)
         ? fetchGitHubEvents(roomIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
@@ -742,6 +806,7 @@ async function joinRoom(roomIdentifier: string) {
     messages.value = msgs
     tasks.value = tsks
     presence.value = prs
+    participants.value = roomParticipants
     taskGithubStatus.value = ghStatus
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
@@ -751,6 +816,7 @@ async function joinRoom(roomIdentifier: string) {
 
     // Start real-time streaming
     startPresenceRefreshLoop(roomIdentifier)
+    startParticipantRefreshLoop(roomIdentifier)
     startStreaming(roomIdentifier)
     connectionState.value = 'live'
     return true
@@ -790,6 +856,7 @@ function leaveRoom() {
   messages.value = []
   tasks.value = []
   presence.value = []
+  participants.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -846,6 +913,7 @@ export function useRoom() {
     messages: readonly(messages),
     tasks: readonly(tasks),
     presence: readonly(presence),
+    participants: readonly(participants),
     taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),

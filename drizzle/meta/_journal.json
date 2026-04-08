@@ -134,6 +134,13 @@
       "when": 1775602800000,
       "tag": "0018_brisk_lockjaw",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1775661822391,
+      "tag": "0019_silver_roster",
+      "breakpoints": true
     }
   ]
 }
