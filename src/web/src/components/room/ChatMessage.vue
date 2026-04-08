@@ -155,6 +155,7 @@ const renderedContent = computed(() => {
       const safeHref = escapeAttr(url)
       return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${url}</a>`
     })
+    .replace(/(^|[\s(])@([A-Za-z0-9._-]+)/g, '$1<span class="mention-token">@$2</span>')
     .replace(/\n/g, '<br>')
 })
 </script>
@@ -348,6 +349,15 @@ const renderedContent = computed(() => {
 }
 .message-bubble :deep(.md-content) a:hover {
   text-decoration: underline;
+}
+.message-bubble :deep(.md-content) .mention-token {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.14);
+  color: #7dd3fc;
+  font-weight: 600;
 }
 
 .provenance-badge {

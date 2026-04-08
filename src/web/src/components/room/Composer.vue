@@ -67,9 +67,29 @@
         class="message-textarea"
         placeholder="Write a message…"
         v-model="text"
+        @input="syncMentionContext"
+        @click="syncMentionContext"
+        @select="syncMentionContext"
         @keydown="handleKeyDown"
+        @keyup="handleKeyUp"
         rows="1"
       />
+      <div v-if="mentionMenuOpen" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
+        <button
+          v-for="(candidate, index) in filteredMentionCandidates"
+          :key="candidate.key"
+          class="composer-mention-option"
+          type="button"
+          :data-active="index === mentionActiveIndex"
+          :aria-selected="index === mentionActiveIndex"
+          @mousedown.prevent="selectMention(candidate)"
+        >
+          <span class="composer-mention-copy">
+            <strong>{{ candidate.label }}</strong>
+            <span>{{ candidate.meta }}</span>
+          </span>
+        </button>
+      </div>
       <div class="composer-toolbar">
         <button class="send-btn" type="submit" :disabled="!text.trim()" aria-label="Send message">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
@@ -80,8 +100,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { type RoomMessage, parseAgentIdentity, getReplyPreviewText } from '@/composables/useRoom'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { type RoomAgentPresence, type RoomMessage, parseAgentIdentity, getReplyPreviewText, isHumanSender } from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
 const PREFS_KEY = 'lac-prompt-prefs'
@@ -91,11 +111,15 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   roomIdentifier?: string
   replyTo?: RoomMessage | null
+  messages?: readonly RoomMessage[]
+  presence?: readonly RoomAgentPresence[]
 }>(), {
   senderName: 'anonymous',
   disabled: false,
   roomIdentifier: '',
   replyTo: null,
+  messages: () => [],
+  presence: () => [],
 })
 
 const emit = defineEmits<{
@@ -109,6 +133,10 @@ const menuEl = ref<HTMLDivElement | null>(null)
 const menuOpen = ref(false)
 const autoKeepPolling = ref(false)
 const injectPrompt = ref(false)
+const mentionQuery = ref('')
+const mentionStart = ref(-1)
+const mentionEnd = ref(-1)
+const mentionActiveIndex = ref(0)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
 let keepPollingInFlight = false
@@ -120,6 +148,79 @@ const replyDisplayName = computed(() => {
 })
 
 const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
+
+interface MentionCandidate {
+  key: string
+  label: string
+  mention: string
+  meta: string
+  search: string
+  priority: number
+}
+
+const mentionCandidates = computed<MentionCandidate[]>(() => {
+  const seen = new Set<string>()
+  const candidates: MentionCandidate[] = []
+
+  const pushCandidate = (
+    rawMention: string,
+    label: string,
+    meta: string,
+    priority: number,
+    searchParts: Array<string | null | undefined>
+  ) => {
+    const mention = normalizeMentionToken(rawMention)
+    if (!mention) return
+    const key = mention.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    candidates.push({
+      key,
+      label: `@${mention}`,
+      mention,
+      meta,
+      priority,
+      search: [mention, label, meta, ...searchParts]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase(),
+    })
+  }
+
+  for (const agent of props.presence) {
+    const parsed = parseAgentIdentity(agent.actor_label)
+    const label = agent.display_name || parsed.displayName || agent.actor_label
+    const meta = [agent.owner_label, agent.ide_label].filter(Boolean).join(' · ') || 'Agent'
+    pushCandidate(label, label, meta, agent.freshness === 'active' ? 0 : 1, [
+      agent.actor_label,
+      agent.owner_label,
+      agent.ide_label,
+      agent.status,
+    ])
+  }
+
+  pushCandidate(props.senderName, props.senderName, 'You', 2, ['you'])
+
+  for (const message of props.messages) {
+    if (!isHumanSender(message.sender, message.source)) continue
+    pushCandidate(message.sender, message.sender, 'User', 2, [])
+  }
+
+  return candidates.sort((left, right) =>
+    left.priority - right.priority || left.label.localeCompare(right.label)
+  )
+})
+
+const filteredMentionCandidates = computed(() => {
+  const query = mentionQuery.value.trim().toLowerCase()
+  return mentionCandidates.value
+    .filter((candidate) => !query || candidate.search.includes(query))
+    .slice(0, 6)
+})
+
+const mentionMenuOpen = computed(() =>
+  mentionStart.value >= 0 && filteredMentionCandidates.value.length > 0
+)
 
 // ── Prompt mode label ──
 const promptMode = computed(() => {
@@ -222,6 +323,65 @@ function handleDocClick(e: MouseEvent) {
   }
 }
 
+function normalizeMentionToken(value: string): string {
+  return (value || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/\s+/g, '')
+    .replace(/[^A-Za-z0-9._-]/g, '')
+}
+
+function resetMentionContext() {
+  mentionQuery.value = ''
+  mentionStart.value = -1
+  mentionEnd.value = -1
+  mentionActiveIndex.value = 0
+}
+
+function syncMentionContext() {
+  const textarea = textareaEl.value
+  if (!textarea) {
+    resetMentionContext()
+    return
+  }
+
+  const cursor = textarea.selectionStart ?? text.value.length
+  const beforeCursor = text.value.slice(0, cursor)
+  const match = beforeCursor.match(/(^|[\s(])@([A-Za-z0-9._-]*)$/)
+  if (!match) {
+    resetMentionContext()
+    return
+  }
+
+  mentionQuery.value = (match[2] || '').toLowerCase()
+  mentionStart.value = cursor - mentionQuery.value.length - 1
+  mentionEnd.value = cursor
+  mentionActiveIndex.value = 0
+}
+
+function moveMentionSelection(direction: number) {
+  if (!filteredMentionCandidates.value.length) return
+  const size = filteredMentionCandidates.value.length
+  mentionActiveIndex.value = (mentionActiveIndex.value + direction + size) % size
+}
+
+function selectMention(candidate: MentionCandidate) {
+  if (mentionStart.value < 0 || mentionEnd.value < 0) return
+
+  const nextChar = text.value.slice(mentionEnd.value, mentionEnd.value + 1)
+  const suffix = nextChar && /\s/.test(nextChar) ? '' : ' '
+  const insertion = `@${candidate.mention}${suffix}`
+  const newCursor = mentionStart.value + insertion.length
+
+  text.value = `${text.value.slice(0, mentionStart.value)}${insertion}${text.value.slice(mentionEnd.value)}`
+  resetMentionContext()
+
+  nextTick(() => {
+    textareaEl.value?.focus()
+    textareaEl.value?.setSelectionRange(newCursor, newCursor)
+  })
+}
+
 // ── Send ──
 function handleSend() {
   const trimmed = text.value.trim()
@@ -231,15 +391,48 @@ function handleSend() {
   const kind = injectPrompt.value ? 'inline' : null
   emit('send', trimmed, kind, props.replyTo?.id || null)
   text.value = ''
+  resetMentionContext()
   if (textareaEl.value) {
     textareaEl.value.style.height = 'auto'
   }
 }
 
 function handleKeyDown(e: KeyboardEvent) {
+  if (mentionMenuOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      moveMentionSelection(1)
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      moveMentionSelection(-1)
+      return
+    }
+    if ((e.key === 'Enter' || e.key === 'Tab') && filteredMentionCandidates.value.length > 0) {
+      e.preventDefault()
+      selectMention(filteredMentionCandidates.value[mentionActiveIndex.value])
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      resetMentionContext()
+      return
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault()
     handleSend()
+  }
+}
+
+function handleKeyUp(e: KeyboardEvent) {
+  if (mentionMenuOpen.value && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    return
+  }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
+    syncMentionContext()
   }
 }
 
@@ -271,6 +464,12 @@ watch(() => props.roomIdentifier, (newId) => {
 watch(() => props.replyTo, (newVal) => {
   if (newVal) {
     textareaEl.value?.focus()
+  }
+})
+
+watch(filteredMentionCandidates, (candidates) => {
+  if (mentionActiveIndex.value >= candidates.length) {
+    mentionActiveIndex.value = 0
   }
 })
 </script>
@@ -351,6 +550,43 @@ watch(() => props.replyTo, (newVal) => {
 .message-textarea::placeholder {
   color: var(--muted, #71717a);
   opacity: 0.6;
+}
+.composer-mention-panel {
+  display: grid;
+  gap: 4px;
+  padding: 0 8px 8px;
+}
+.composer-mention-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface, #18181b) 82%, transparent);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 150ms ease, background 150ms ease;
+  font-family: inherit;
+}
+.composer-mention-option[data-active="true"],
+.composer-mention-option:hover {
+  border-color: color-mix(in srgb, var(--line-strong, #3f3f46) 75%, #7dd3fc 25%);
+  background: color-mix(in srgb, var(--surface, #18181b) 92%, #7dd3fc 8%);
+}
+.composer-mention-copy {
+  display: grid;
+  gap: 3px;
+}
+.composer-mention-copy strong {
+  font-size: 0.8rem;
+  color: var(--text, #fafafa);
+}
+.composer-mention-copy span {
+  font-size: 0.72rem;
+  color: var(--muted, #71717a);
 }
 .composer-pills-row {
   display: flex;

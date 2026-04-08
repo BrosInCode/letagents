@@ -68,6 +68,8 @@
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
       :replyTo="selectedReply"
+      :messages="messages"
+      :presence="presence"
       @send="handleSend"
       @clearReply="selectedReply = null"
     />
