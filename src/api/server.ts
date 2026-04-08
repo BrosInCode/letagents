@@ -134,6 +134,10 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
+import {
+  buildFallbackPresenceFromMessages,
+  buildSyntheticPresenceEntry,
+} from "./presence-fallback.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -3018,13 +3022,33 @@ app.get(/^(?:\/api)?\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest,
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const presence = await getRoomAgentPresence(project.id, { limit });
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined) ?? 50;
+  try {
+    const presence = await getRoomAgentPresence(project.id, { limit });
 
-  res.json({
-    room_id: project.id,
-    presence: presence.map(toPublicRoomAgentPresence),
-  });
+    res.json({
+      room_id: project.id,
+      presence: presence.map(toPublicRoomAgentPresence),
+    });
+  } catch (error) {
+    console.error(
+      `[presence] failed to read stored room presence for ${project.id}; falling back to recent agent messages`,
+      error
+    );
+
+    const fallbackMessageLimit = Math.min(Math.max(limit * 4, 100), 200);
+    const fallbackMessages = await getMessages(project.id, { limit: fallbackMessageLimit });
+    const presence = buildFallbackPresenceFromMessages({
+      roomId: project.id,
+      messages: fallbackMessages.messages,
+    }).slice(0, limit);
+
+    res.json({
+      room_id: project.id,
+      presence: presence.map(toPublicRoomAgentPresence),
+      fallback: "recent_agent_messages",
+    });
+  }
 });
 
 app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
@@ -3056,6 +3080,10 @@ app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => 
 
   const actorLabel = typeof actor_label === "string" ? actor_label.trim() : "";
   const displayName = typeof display_name === "string" ? display_name.trim() : "";
+  const agentKey = typeof agent_key === "string" ? agent_key.trim() || null : null;
+  const ownerLabel = typeof owner_label === "string" ? owner_label.trim() || null : null;
+  const ideLabel = typeof ide_label === "string" ? ide_label.trim() || null : null;
+  const statusText = typeof status_text === "string" ? status_text.trim() || null : null;
   const normalizedStatus = normalizeAgentPresenceStatus(status);
 
   if (!actorLabel || !displayName || !normalizedStatus) {
@@ -3065,22 +3093,45 @@ app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => 
     return;
   }
 
-  const presence = await upsertRoomAgentPresence({
-    room_id: project.id,
-    actor_label: actorLabel,
-    agent_key: typeof agent_key === "string" ? agent_key.trim() || null : null,
-    display_name: displayName,
-    owner_label: typeof owner_label === "string" ? owner_label.trim() || null : null,
-    ide_label: typeof ide_label === "string" ? ide_label.trim() || null : null,
-    status: normalizedStatus as AgentPresenceStatus,
-    status_text: typeof status_text === "string" ? status_text.trim() || null : null,
-  });
+  try {
+    const presence = await upsertRoomAgentPresence({
+      room_id: project.id,
+      actor_label: actorLabel,
+      agent_key: agentKey,
+      display_name: displayName,
+      owner_label: ownerLabel,
+      ide_label: ideLabel,
+      status: normalizedStatus as AgentPresenceStatus,
+      status_text: statusText,
+    });
 
-  await maybeEmitStaleWorkPrompt(project.id);
+    await maybeEmitStaleWorkPrompt(project.id);
 
-  res.status(200).json({
-    ...toPublicRoomAgentPresence(presence),
-  });
+    res.status(200).json({
+      ...toPublicRoomAgentPresence(presence),
+    });
+  } catch (error) {
+    console.error(
+      `[presence] failed to persist room presence for ${project.id}; returning a synthetic presence response`,
+      error
+    );
+
+    const presence = buildSyntheticPresenceEntry({
+      roomId: project.id,
+      actorLabel,
+      agentKey,
+      displayName,
+      ownerLabel,
+      ideLabel,
+      status: normalizedStatus as AgentPresenceStatus,
+      statusText,
+    });
+
+    res.status(200).json({
+      ...toPublicRoomAgentPresence(presence),
+      fallback: "synthetic_response",
+    });
+  }
 });
 
 app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
