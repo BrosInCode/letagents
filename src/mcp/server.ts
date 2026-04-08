@@ -2169,6 +2169,8 @@ server.tool(
             status: "assigned",
             assignee: identity.actor_label,
             actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
+            assignee_agent_key: identity.canonical_key,
           }),
         },
       });
@@ -2240,6 +2242,9 @@ server.tool(
 
     try {
       const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const nextAssignee = status === "assigned" && !assignee ? identity.actor_label : assignee;
+      const nextAssigneeAgentKey =
+        nextAssignee === identity.actor_label ? identity.canonical_key : undefined;
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -2249,10 +2254,12 @@ server.tool(
           method: "PATCH",
           body: JSON.stringify({
             status,
-            assignee: status === "assigned" && !assignee ? identity.actor_label : assignee,
+            assignee: nextAssignee,
+            assignee_agent_key: nextAssigneeAgentKey,
             pr_url,
             workflow_artifacts,
             actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
           }),
         },
       });
@@ -2323,6 +2330,7 @@ server.tool(
             status: "in_review",
             pr_url,
             actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
           }),
         },
       });

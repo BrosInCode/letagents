@@ -331,6 +331,7 @@ export const tasks = pgTable(
     description: text("description"),
     status: taskStatusEnum("status").notNull().default("proposed"),
     assignee: text("assignee"),
+    assignee_agent_key: text("assignee_agent_key"),
     created_by: text("created_by").notNull(),
     source_message_id: text("source_message_id"),
     pr_url: text("pr_url"),
@@ -345,6 +346,10 @@ export const tasks = pgTable(
     pk: primaryKey({ name: "tasks_pk", columns: [table.room_id, table.number] }),
     room_idx: index("tasks_room_id_idx").on(table.room_id),
     status_idx: index("tasks_status_idx").on(table.status),
+    room_assignee_key_idx: index("tasks_room_assignee_agent_key_idx").on(
+      table.room_id,
+      table.assignee_agent_key
+    ),
   })
 );
 

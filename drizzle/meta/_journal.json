@@ -127,6 +127,13 @@
       "when": 1775595600000,
       "tag": "0017_restless_signal",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1775602800000,
+      "tag": "0018_brisk_lockjaw",
+      "breakpoints": true
     }
   ]
 }
