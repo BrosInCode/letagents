@@ -65,6 +65,7 @@
     <ActivityView
       v-show="activeTab === 'activity' && isConnected"
       :messages="messages"
+      :participants="participants"
       :presence="presence"
       :tasks="tasks"
       :taskGithubStatus="taskGithubStatus"
@@ -148,6 +149,7 @@ const {
   messages,
   tasks,
   presence,
+  participants,
   taskGithubStatus,
   githubEvents,
   githubEventsAvailable,
