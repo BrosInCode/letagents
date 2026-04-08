@@ -19,6 +19,15 @@ export function normalizeTaskActorLabel(value: unknown): string | null {
   return trimmed || null;
 }
 
+export function normalizeTaskActorKey(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 export function buildTaskUpdatePatch(input: {
   body: Record<string, unknown>;
   workflowArtifacts?: TaskWorkflowArtifact[];
@@ -26,15 +35,18 @@ export function buildTaskUpdatePatch(input: {
   updates: {
     status?: TaskStatus;
     assignee?: string | null;
+    assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
   };
   actorLabel: string | null;
+  actorKey: string | null;
 } {
   const { body, workflowArtifacts } = input;
   const updates: {
     status?: TaskStatus;
     assignee?: string | null;
+    assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
   } = {};
@@ -53,6 +65,20 @@ export function buildTaskUpdatePatch(input: {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(body, "assignee_agent_key")) {
+    if (
+      body.assignee_agent_key === null ||
+      body.assignee_agent_key === undefined ||
+      body.assignee_agent_key === ""
+    ) {
+      updates.assignee_agent_key = null;
+    } else if (typeof body.assignee_agent_key === "string") {
+      updates.assignee_agent_key = body.assignee_agent_key.trim() || null;
+    } else {
+      throw new Error("assignee_agent_key must be a string or null");
+    }
+  }
+
   if (typeof body.pr_url === "string") {
     updates.pr_url = body.pr_url;
   }
@@ -64,49 +90,117 @@ export function buildTaskUpdatePatch(input: {
   return {
     updates,
     actorLabel: normalizeTaskActorLabel(body.actor_label),
+    actorKey: normalizeTaskActorKey(body.actor_key),
   };
 }
 
-export function getTaskOwnershipError(input: {
+export function requiresTaskOwnershipGuard(input: {
+  authKind: RequestAuthKind;
+  requestedStatus?: TaskStatus;
+  requestedAssignee?: string | null;
+  requestedAssigneeAgentKey?: string | null;
+}): boolean {
+  const { authKind, requestedStatus, requestedAssignee, requestedAssigneeAgentKey } = input;
+  if (authKind !== "owner_token") {
+    return false;
+  }
+
+  return Boolean(
+    (requestedStatus && AGENT_OWNED_TASK_STATUSES.has(requestedStatus)) ||
+      requestedAssignee !== undefined ||
+      requestedAssigneeAgentKey !== undefined
+  );
+}
+
+export function evaluateTaskOwnership(input: {
   authKind: RequestAuthKind;
   currentStatus: TaskStatus;
   currentAssignee: string | null;
+  currentAssigneeAgentKey: string | null;
   requestedStatus?: TaskStatus;
   requestedAssignee?: string | null;
+  requestedAssigneeAgentKey?: string | null;
   actorLabel?: string | null;
-}): string | null {
+  actorKey?: string | null;
+}): {
+  error: string | null;
+  assigneeAgentKey?: string | null;
+} {
   const {
     authKind,
     currentAssignee,
+    currentAssigneeAgentKey,
     requestedStatus,
     requestedAssignee,
+    requestedAssigneeAgentKey,
     actorLabel,
+    actorKey,
   } = input;
 
-  if (authKind !== "owner_token" || !requestedStatus || !AGENT_OWNED_TASK_STATUSES.has(requestedStatus)) {
-    return null;
+  if (
+    !requiresTaskOwnershipGuard({
+      authKind,
+      requestedStatus,
+      requestedAssignee,
+      requestedAssigneeAgentKey,
+    })
+  ) {
+    return { error: null };
   }
 
   const normalizedActorLabel = normalizeTaskActorLabel(actorLabel);
   if (!normalizedActorLabel) {
-    return "actor_label is required for agent-owned task transitions";
+    return { error: "actor_label is required for agent-owned task transitions" };
+  }
+
+  const normalizedActorKey = normalizeTaskActorKey(actorKey);
+  if (!normalizedActorKey) {
+    return { error: "actor_key is required for agent-owned task transitions" };
   }
 
   if (requestedStatus === "assigned") {
-    if (normalizeTaskActorLabel(requestedAssignee) !== normalizedActorLabel) {
-      return "Agents can only claim tasks for themselves";
+    if (
+      normalizeTaskActorLabel(requestedAssignee) !== normalizedActorLabel ||
+      normalizeTaskActorKey(requestedAssigneeAgentKey) !== normalizedActorKey
+    ) {
+      return {
+        error: "Agents can only claim tasks for themselves",
+      };
     }
-    return null;
+
+    return {
+      error: null,
+      assigneeAgentKey: normalizedActorKey,
+    };
   }
 
-  if (normalizeTaskActorLabel(currentAssignee) !== normalizedActorLabel) {
-    return `Only the assigned agent can move this task to ${requestedStatus}`;
+  if (requestedAssignee !== undefined || requestedAssigneeAgentKey !== undefined) {
+    return {
+      error: "Agents cannot reassign a task after claim",
+    };
   }
 
-  const normalizedRequestedAssignee = normalizeTaskActorLabel(requestedAssignee);
-  if (normalizedRequestedAssignee && normalizedRequestedAssignee !== normalizedActorLabel) {
-    return `Agents cannot reassign a task while moving it to ${requestedStatus}`;
+  if (normalizeTaskActorKey(currentAssigneeAgentKey) === normalizedActorKey) {
+    return { error: null };
   }
 
-  return null;
+  if (
+    !currentAssigneeAgentKey &&
+    normalizeTaskActorLabel(currentAssignee) === normalizedActorLabel
+  ) {
+    return {
+      error: null,
+      assigneeAgentKey: normalizedActorKey,
+    };
+  }
+
+  return {
+    error: `Only the assigned agent can move this task to ${requestedStatus}`,
+  };
+}
+
+export function getTaskOwnershipError(
+  input: Parameters<typeof evaluateTaskOwnership>[0]
+): string | null {
+  return evaluateTaskOwnership(input).error;
 }

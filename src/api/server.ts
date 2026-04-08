@@ -16,6 +16,7 @@ import {
   findTaskByPrUrl,
   findTaskByWorkflowArtifactMatches,
   getAllProjects,
+  getAgentIdentityByCanonicalKey,
   getAgentIdentitiesForOwner,
   getGitHubAppInstallationById,
   getGitHubAppRepositoryByFullName,
@@ -31,6 +32,7 @@ import {
   insertGitHubRoomEvent,
   getSessionAccountByToken,
   getTaskById,
+  getTaskOwnershipState,
   getTasks,
   hasMessagesFromSender,
   isProjectAdmin,
@@ -126,7 +128,8 @@ import {
 } from "./room-routing.js";
 import {
   buildTaskUpdatePatch,
-  getTaskOwnershipError,
+  evaluateTaskOwnership,
+  requiresTaskOwnershipGuard,
 } from "./task-ownership.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 import {
@@ -333,6 +336,40 @@ async function emitTaskLifecycleStatusMessage(
   return emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(task), {
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
   });
+}
+
+async function validateOwnerTokenTaskActorKey(input: {
+  req: AuthenticatedRequest;
+  actorKey: string | null;
+}): Promise<{ actorKey: string | null; error: string | null }> {
+  const { req, actorKey } = input;
+
+  if (req.authKind !== "owner_token") {
+    return {
+      actorKey,
+      error: null,
+    };
+  }
+
+  if (!actorKey) {
+    return {
+      actorKey: null,
+      error: "actor_key is required for agent-owned task transitions",
+    };
+  }
+
+  const actorIdentity = await getAgentIdentityByCanonicalKey(actorKey);
+  if (!actorIdentity || actorIdentity.owner_account_id !== req.sessionAccount?.account_id) {
+    return {
+      actorKey: null,
+      error: "actor_key must belong to the authenticated agent owner",
+    };
+  }
+
+  return {
+    actorKey: actorIdentity.canonical_key,
+    error: null,
+  };
 }
 
 async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
@@ -2693,8 +2730,9 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
   const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
   const taskId = String(req.params.taskId);
   const task = await getTaskById(projectId, taskId);
+  const taskOwnership = await getTaskOwnershipState(projectId, taskId);
 
-  if (!task) {
+  if (!task || !taskOwnership) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -2713,7 +2751,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
   const workflow_artifacts = validateTaskWorkflowArtifactsInput(
     requestBody.workflow_artifacts
   );
-  const { updates, actorLabel } = buildTaskUpdatePatch({
+  const { updates, actorLabel, actorKey } = buildTaskUpdatePatch({
     body: requestBody,
     workflowArtifacts: workflow_artifacts,
   });
@@ -2726,17 +2764,43 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       }
     }
 
-    const ownershipError = getTaskOwnershipError({
+    let verifiedActorKey = actorKey;
+    if (
+      requiresTaskOwnershipGuard({
+        authKind: req.authKind,
+        requestedStatus: updates.status,
+        requestedAssignee: updates.assignee,
+        requestedAssigneeAgentKey: updates.assignee_agent_key,
+      })
+    ) {
+      const actorValidation = await validateOwnerTokenTaskActorKey({
+        req,
+        actorKey,
+      });
+      if (actorValidation.error) {
+        res.status(409).json({ error: actorValidation.error });
+        return;
+      }
+      verifiedActorKey = actorValidation.actorKey;
+    }
+
+    const ownership = evaluateTaskOwnership({
       authKind: req.authKind,
-      currentStatus: task.status,
-      currentAssignee: task.assignee,
+      currentStatus: taskOwnership.status,
+      currentAssignee: taskOwnership.assignee,
+      currentAssigneeAgentKey: taskOwnership.assignee_agent_key,
       requestedStatus: updates.status,
       requestedAssignee: updates.assignee,
+      requestedAssigneeAgentKey: updates.assignee_agent_key,
       actorLabel,
+      actorKey: verifiedActorKey,
     });
-    if (ownershipError) {
-      res.status(409).json({ error: ownershipError });
+    if (ownership.error) {
+      res.status(409).json({ error: ownership.error });
       return;
+    }
+    if (Object.prototype.hasOwnProperty.call(ownership, "assigneeAgentKey")) {
+      updates.assignee_agent_key = ownership.assigneeAgentKey;
     }
 
     const updated = await updateTask(projectId, taskId, updates);
@@ -3258,7 +3322,8 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
   if (!(await requireParticipant(req, res, project))) return;
 
   const task = await getTaskById(project.id, taskId);
-  if (!task) {
+  const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+  if (!task || !taskOwnership) {
     res.status(404).json({ error: "Task not found" });
     return;
   }
@@ -3267,7 +3332,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
   const workflow_artifacts = validateTaskWorkflowArtifactsInput(
     requestBody.workflow_artifacts
   );
-  const { updates, actorLabel } = buildTaskUpdatePatch({
+  const { updates, actorLabel, actorKey } = buildTaskUpdatePatch({
     body: requestBody,
     workflowArtifacts: workflow_artifacts,
   });
@@ -3278,17 +3343,43 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       if (!(await requireAdmin(req, res, project))) return;
     }
 
-    const ownershipError = getTaskOwnershipError({
+    let verifiedActorKey = actorKey;
+    if (
+      requiresTaskOwnershipGuard({
+        authKind: req.authKind,
+        requestedStatus: updates.status,
+        requestedAssignee: updates.assignee,
+        requestedAssigneeAgentKey: updates.assignee_agent_key,
+      })
+    ) {
+      const actorValidation = await validateOwnerTokenTaskActorKey({
+        req,
+        actorKey,
+      });
+      if (actorValidation.error) {
+        res.status(409).json({ error: actorValidation.error });
+        return;
+      }
+      verifiedActorKey = actorValidation.actorKey;
+    }
+
+    const ownership = evaluateTaskOwnership({
       authKind: req.authKind,
-      currentStatus: task.status,
-      currentAssignee: task.assignee,
+      currentStatus: taskOwnership.status,
+      currentAssignee: taskOwnership.assignee,
+      currentAssigneeAgentKey: taskOwnership.assignee_agent_key,
       requestedStatus: updates.status,
       requestedAssignee: updates.assignee,
+      requestedAssigneeAgentKey: updates.assignee_agent_key,
       actorLabel,
+      actorKey: verifiedActorKey,
     });
-    if (ownershipError) {
-      res.status(409).json({ error: ownershipError });
+    if (ownership.error) {
+      res.status(409).json({ error: ownership.error });
       return;
+    }
+    if (Object.prototype.hasOwnProperty.call(ownership, "assigneeAgentKey")) {
+      updates.assignee_agent_key = ownership.assigneeAgentKey;
     }
 
     const updated = await updateTask(project.id, taskId, updates);

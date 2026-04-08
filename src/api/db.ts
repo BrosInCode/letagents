@@ -235,6 +235,12 @@ export interface Task {
   updated_at: string;
 }
 
+export interface TaskOwnershipState {
+  status: TaskStatus;
+  assignee: string | null;
+  assignee_agent_key: string | null;
+}
+
 interface MessageRow {
   room_id: string;
   number: number;
@@ -253,6 +259,7 @@ interface TaskRow {
   description: string | null;
   status: TaskStatus;
   assignee: string | null;
+  assignee_agent_key: string | null;
   created_by: string;
   source_message_id: string | null;
   pr_url: string | null;
@@ -1660,6 +1667,18 @@ export async function registerAgentIdentity(input: {
   return agent;
 }
 
+export async function getAgentIdentityByCanonicalKey(
+  canonicalKey: string
+): Promise<AgentIdentity | null> {
+  const [agent] = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.canonical_key, canonicalKey))
+    .limit(1);
+
+  return agent ?? null;
+}
+
 export async function getAgentIdentitiesForOwner(ownerAccountId: string): Promise<AgentIdentity[]> {
   return db
     .select()
@@ -1707,6 +1726,7 @@ export async function createTask(
     description: description ?? null,
     status: "proposed",
     assignee: null,
+    assignee_agent_key: null,
     created_by: createdBy,
     source_message_id: sourceMessageId ?? null,
     pr_url: null,
@@ -1770,7 +1790,7 @@ export async function getOpenTasks(
   return { tasks: bounded.map(toTask), has_more };
 }
 
-export async function getTaskById(roomId: string, taskId: string): Promise<Task | undefined> {
+async function getTaskRowById(roomId: string, taskId: string): Promise<TaskRow | undefined> {
   const taskNumber = parseScopedId(taskId, "task");
   if (!taskNumber) {
     return undefined;
@@ -1782,7 +1802,28 @@ export async function getTaskById(roomId: string, taskId: string): Promise<Task 
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)))
     .limit(1);
 
-  return task ? toTask(task as TaskRow) : undefined;
+  return task as TaskRow | undefined;
+}
+
+export async function getTaskById(roomId: string, taskId: string): Promise<Task | undefined> {
+  const task = await getTaskRowById(roomId, taskId);
+  return task ? toTask(task) : undefined;
+}
+
+export async function getTaskOwnershipState(
+  roomId: string,
+  taskId: string
+): Promise<TaskOwnershipState | undefined> {
+  const task = await getTaskRowById(roomId, taskId);
+  if (!task) {
+    return undefined;
+  }
+
+  return {
+    status: task.status,
+    assignee: task.assignee,
+    assignee_agent_key: task.assignee_agent_key,
+  };
 }
 
 export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Task | undefined> {
@@ -1870,11 +1911,12 @@ export async function updateTask(
   updates: {
     status?: TaskStatus;
     assignee?: string | null;
+    assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
   }
 ): Promise<Task | null> {
-  const task = await getTaskById(roomId, taskId);
+  const task = await getTaskRowById(roomId, taskId);
   if (!task) return null;
 
   if (updates.status && !isValidTransition(task.status, updates.status)) {
@@ -1890,9 +1932,21 @@ export async function updateTask(
   }
 
   const newStatus = updates.status ?? task.status;
-  const newAssignee = Object.prototype.hasOwnProperty.call(updates, "assignee")
+  const hasAssigneeUpdate = Object.prototype.hasOwnProperty.call(updates, "assignee");
+  const hasAssigneeAgentKeyUpdate = Object.prototype.hasOwnProperty.call(
+    updates,
+    "assignee_agent_key"
+  );
+  const newAssignee = hasAssigneeUpdate
     ? updates.assignee ?? null
     : task.assignee;
+  const newAssigneeAgentKey = hasAssigneeUpdate
+    ? hasAssigneeAgentKeyUpdate
+      ? updates.assignee_agent_key ?? null
+      : null
+    : hasAssigneeAgentKeyUpdate
+      ? updates.assignee_agent_key ?? null
+      : task.assignee_agent_key;
   const newPrUrl = updates.pr_url ?? task.pr_url;
   const newWorkflowArtifacts = updates.workflow_artifacts
     ? normalizeTaskWorkflowArtifacts({
@@ -1911,20 +1965,22 @@ export async function updateTask(
     .set({
       status: newStatus,
       assignee: newAssignee,
+      assignee_agent_key: newAssigneeAgentKey,
       pr_url: newPrUrl,
       workflow_artifacts: newWorkflowArtifacts,
       updated_at: now,
     })
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
 
-  return {
+  return toTask({
     ...task,
     status: newStatus,
     assignee: newAssignee,
+    assignee_agent_key: newAssigneeAgentKey,
     pr_url: newPrUrl,
     workflow_artifacts: newWorkflowArtifacts,
     updated_at: now,
-  };
+  });
 }
 
 // ── GitHub Room Events ──────────────────────────────────────────────────────
