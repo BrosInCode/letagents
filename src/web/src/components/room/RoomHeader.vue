@@ -68,10 +68,12 @@
 <script setup lang="ts">
 import { computed, ref, nextTick } from 'vue'
 
+type ViewTab = 'chat' | 'events' | 'board'
+
 const props = defineProps<{
   title: string
   subtitle: string
-  activeTab: 'chat' | 'events' | 'board'
+  activeTab: ViewTab
   connectionState: 'idle' | 'connecting' | 'live' | 'error'
   searchQuery: string
   matchCount: number
@@ -81,7 +83,7 @@ const props = defineProps<{
 
 defineEmits<{
   toggleDrawer: []
-  'update:activeTab': [tab: 'chat' | 'events' | 'board']
+  'update:activeTab': [tab: ViewTab]
   'update:searchQuery': [query: string]
   rename: []
 }>()

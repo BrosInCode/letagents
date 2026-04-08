@@ -76,7 +76,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
@@ -88,6 +88,7 @@ import TaskBoard from '@/components/room/TaskBoard.vue'
 import type { RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
+const router = useRouter()
 const {
   messages,
   tasks,
@@ -113,7 +114,18 @@ const {
 } = useRoom()
 const auth = useAuth()
 
-const activeTab = ref<'chat' | 'events' | 'board'>('chat')
+type ViewTab = 'chat' | 'events' | 'board'
+const VALID_TABS: ViewTab[] = ['chat', 'events', 'board']
+
+function readTabFromQuery(): ViewTab {
+  const q = route.query.view
+  if (typeof q === 'string' && VALID_TABS.includes(q as ViewTab)) {
+    return q as ViewTab
+  }
+  return 'chat'
+}
+
+const activeTab = ref<ViewTab>(readTabFromQuery())
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
@@ -201,8 +213,22 @@ watch(() => route.params.roomId, async (newId) => {
 })
 
 watch(activeTab, async (tab) => {
+  // Sync tab to URL query — use push so back/forward steps through views
+  const currentView = route.query.view
+  if (currentView !== tab) {
+    const query = { ...route.query, view: tab === 'chat' ? undefined : tab }
+    router.push({ query })
+  }
   if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
+  }
+})
+
+// When URL query changes externally (e.g. back/forward), sync tab
+watch(() => route.query.view, (newView) => {
+  const tab = readTabFromQuery()
+  if (activeTab.value !== tab) {
+    activeTab.value = tab
   }
 })
 

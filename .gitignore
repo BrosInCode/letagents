@@ -6,3 +6,4 @@ SCR-*.png
 data/
 .npmrc
 .env
+.review-worktrees/
