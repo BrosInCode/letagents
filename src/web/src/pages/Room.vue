@@ -213,10 +213,11 @@ watch(() => route.params.roomId, async (newId) => {
 })
 
 watch(activeTab, async (tab) => {
-  // Sync tab to URL query without triggering a full navigation
+  // Sync tab to URL query — use push so back/forward steps through views
   const currentView = route.query.view
   if (currentView !== tab) {
-    router.replace({ query: { ...route.query, view: tab === 'chat' ? undefined : tab } })
+    const query = { ...route.query, view: tab === 'chat' ? undefined : tab }
+    router.push({ query })
   }
   if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
