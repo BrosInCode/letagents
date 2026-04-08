@@ -227,8 +227,8 @@ function formatEventDay(timestamp: string): string {
   overflow-y: auto;
   padding: 18px 20px 22px;
   background:
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.08), transparent 28%),
-    linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(9, 9, 11, 1) 100%);
+    radial-gradient(circle at top right, var(--event-glow) 0%, transparent 28%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-subtle) 70%, var(--bg) 30%) 0%, var(--bg) 100%);
 }
 
 .event-feed-hero {
@@ -237,10 +237,10 @@ function formatEventDay(timestamp: string): string {
   gap: 14px;
   padding: 18px;
   border-radius: 20px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid var(--border-strong);
   background:
-    linear-gradient(145deg, rgba(15, 23, 42, 0.96) 0%, rgba(9, 9, 11, 0.98) 52%, rgba(15, 23, 42, 0.94) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    linear-gradient(145deg, color-mix(in srgb, var(--event-brand) 6%, var(--bg-card)) 0%, var(--bg-card) 52%, color-mix(in srgb, var(--event-brand) 4%, var(--bg-subtle)) 100%);
+  box-shadow: inset 0 1px 0 var(--accent-dim);
 }
 
 .event-feed-copy {
@@ -250,7 +250,7 @@ function formatEventDay(timestamp: string): string {
 
 .event-feed-eyebrow {
   margin: 0;
-  color: #7dd3fc;
+  color: var(--event-brand);
   font-size: 0.7rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -259,7 +259,7 @@ function formatEventDay(timestamp: string): string {
 
 .event-feed-copy h3 {
   margin: 0;
-  color: #f8fafc;
+  color: var(--text);
   font-size: 1.25rem;
   font-weight: 800;
   letter-spacing: -0.03em;
@@ -268,7 +268,7 @@ function formatEventDay(timestamp: string): string {
 .event-feed-copy p {
   margin: 0;
   max-width: 54ch;
-  color: #cbd5e1;
+  color: var(--text-secondary);
   line-height: 1.65;
 }
 
@@ -282,12 +282,12 @@ function formatEventDay(timestamp: string): string {
   gap: 4px;
   padding: 14px 15px;
   border-radius: 16px;
-  border: 1px solid rgba(125, 211, 252, 0.14);
-  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid color-mix(in srgb, var(--event-brand) 18%, var(--border));
+  background: color-mix(in srgb, var(--event-brand) 6%, var(--bg-subtle));
 }
 
 .summary-label {
-  color: #94a3b8;
+  color: var(--text-tertiary);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -295,7 +295,7 @@ function formatEventDay(timestamp: string): string {
 }
 
 .summary-pill strong {
-  color: #f8fafc;
+  color: var(--text);
   font-size: 1.25rem;
   font-weight: 800;
 }
@@ -311,9 +311,9 @@ function formatEventDay(timestamp: string): string {
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid rgba(125, 211, 252, 0.18);
-  background: rgba(14, 116, 144, 0.14);
-  color: #bae6fd;
+  border: 1px solid var(--blue-dim);
+  background: color-mix(in srgb, var(--blue) 12%, var(--accent-dim));
+  color: var(--blue);
   font-size: 0.78rem;
   line-height: 1.5;
 }
@@ -325,22 +325,22 @@ function formatEventDay(timestamp: string): string {
   min-height: 34px;
   padding: 0 12px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(15, 23, 42, 0.6);
-  color: #cbd5e1;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: transform 160ms ease, border-color 160ms ease, color 160ms ease;
 }
 
 .filter-chip strong {
-  color: #f8fafc;
+  color: var(--text);
   font-size: 0.74rem;
 }
 
 .filter-chip[aria-selected='true'] {
-  color: #0f172a;
+  color: var(--event-gradient-text);
   border-color: transparent;
-  background: linear-gradient(135deg, #7dd3fc 0%, #c4b5fd 100%);
+  background: linear-gradient(135deg, var(--event-gradient-start) 0%, var(--event-gradient-end) 100%);
 }
 
 .filter-chip[aria-selected='true'] strong {
@@ -349,7 +349,7 @@ function formatEventDay(timestamp: string): string {
 
 .filter-chip:hover {
   transform: translateY(-1px);
-  border-color: rgba(125, 211, 252, 0.34);
+  border-color: var(--border-accent);
 }
 
 .event-feed-empty {
@@ -363,32 +363,32 @@ function formatEventDay(timestamp: string): string {
   max-width: 420px;
   padding: 26px 24px;
   border-radius: 18px;
-  border: 1px dashed rgba(148, 163, 184, 0.24);
-  background: rgba(15, 23, 42, 0.48);
+  border: 1px dashed var(--border-strong);
+  background: color-mix(in srgb, var(--bg-card) 90%, transparent);
   text-align: center;
 }
 
 .event-feed-empty-card.waiting {
   border-style: solid;
-  border-color: rgba(125, 211, 252, 0.2);
+  border-color: var(--blue-dim);
 }
 
 .event-feed-empty-card.error {
   border-style: solid;
-  border-color: rgba(248, 113, 113, 0.28);
-  background: rgba(127, 29, 29, 0.22);
+  border-color: var(--red-dim);
+  background: color-mix(in srgb, var(--red) 14%, var(--bg-card));
 }
 
 .event-feed-empty-card h4 {
   margin: 0 0 8px;
-  color: #f8fafc;
+  color: var(--text);
   font-size: 0.98rem;
   font-weight: 700;
 }
 
 .event-feed-empty-card p {
   margin: 0;
-  color: #94a3b8;
+  color: var(--text-tertiary);
   line-height: 1.6;
 }
 
@@ -411,7 +411,7 @@ function formatEventDay(timestamp: string): string {
 }
 
 .event-day-label {
-  color: #e2e8f0;
+  color: var(--text);
   font-size: 0.74rem;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -421,8 +421,8 @@ function formatEventDay(timestamp: string): string {
 .event-day-count {
   padding: 3px 8px;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.12);
-  color: #94a3b8;
+  background: var(--accent-dim);
+  color: var(--text-tertiary);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -447,7 +447,7 @@ function formatEventDay(timestamp: string): string {
   top: 0;
   bottom: -18px;
   width: 1px;
-  background: linear-gradient(180deg, rgba(125, 211, 252, 0.26), rgba(148, 163, 184, 0.05));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--event-brand) 35%, transparent), var(--accent-dim));
 }
 
 .event-day-group:last-child .event-row:last-child .event-rail::before {
@@ -460,20 +460,20 @@ function formatEventDay(timestamp: string): string {
   width: 9px;
   height: 9px;
   border-radius: 999px;
-  background: linear-gradient(135deg, #7dd3fc 0%, #c4b5fd 100%);
-  box-shadow: 0 0 0 4px rgba(125, 211, 252, 0.12);
+  background: linear-gradient(135deg, var(--event-gradient-start) 0%, var(--event-gradient-end) 100%);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--event-brand) 16%, transparent);
 }
 
 .event-meta {
   display: grid;
   gap: 6px;
   padding-top: 10px;
-  color: #94a3b8;
+  color: var(--text-tertiary);
   font-size: 0.74rem;
 }
 
 .event-time {
-  color: #f8fafc;
+  color: var(--text);
   font-weight: 700;
 }
 
@@ -483,7 +483,7 @@ function formatEventDay(timestamp: string): string {
   width: fit-content;
   padding: 3px 8px;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.08);
+  background: var(--accent-dim);
 }
 
 @media (max-width: 900px) {

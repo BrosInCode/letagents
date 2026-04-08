@@ -69,18 +69,18 @@ defineProps<{
 
 <style scoped>
 .github-event-card {
-  --event-accent: #94a3b8;
-  --event-accent-soft: rgba(148, 163, 184, 0.18);
+  --event-accent: var(--text-tertiary);
+  --event-accent-soft: color-mix(in srgb, var(--event-accent) 18%, transparent);
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);
   gap: 12px;
   padding: 14px 15px;
   border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--event-accent) 28%, rgba(15, 23, 42, 0.95));
+  border: 1px solid color-mix(in srgb, var(--event-accent) 28%, var(--border));
   background:
-    linear-gradient(155deg, color-mix(in srgb, var(--event-accent) 11%, rgba(15, 23, 42, 0.96)) 0%, rgba(15, 23, 42, 0.96) 58%, rgba(2, 6, 23, 0.98) 100%);
+    linear-gradient(155deg, color-mix(in srgb, var(--event-accent) 11%, var(--bg-card)) 0%, var(--bg-card) 58%, var(--bg-subtle) 100%);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 1px 0 var(--accent-dim),
     0 18px 40px -34px var(--event-accent-soft);
 }
 
@@ -92,7 +92,7 @@ defineProps<{
   height: 36px;
   border-radius: 12px;
   color: var(--event-accent);
-  background: color-mix(in srgb, var(--event-accent) 18%, rgba(15, 23, 42, 0.92));
+  background: color-mix(in srgb, var(--event-accent) 18%, var(--bg-subtle));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--event-accent) 28%, transparent);
 }
 
@@ -119,9 +119,9 @@ defineProps<{
   min-height: 24px;
   padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.04);
-  color: #dbe4f3;
+  border: 1px solid var(--border);
+  background: var(--accent-dim);
+  color: var(--text-secondary);
   font-size: 0.67rem;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -132,21 +132,21 @@ defineProps<{
 .github-chip-brand {
   color: var(--event-accent);
   border-color: color-mix(in srgb, var(--event-accent) 32%, transparent);
-  background: color-mix(in srgb, var(--event-accent) 14%, rgba(15, 23, 42, 0.9));
+  background: color-mix(in srgb, var(--event-accent) 14%, var(--bg-subtle));
 }
 
 .github-chip-status {
-  background: color-mix(in srgb, var(--event-accent) 16%, rgba(255, 255, 255, 0.05));
+  background: color-mix(in srgb, var(--event-accent) 16%, var(--accent-dim));
 }
 
 .github-chip-task {
-  color: #fde68a;
-  border-color: rgba(253, 230, 138, 0.2);
+  color: var(--amber);
+  border-color: var(--amber-dim);
 }
 
 .github-event-headline {
   margin: 0;
-  color: #f8fafc;
+  color: var(--text);
   font-size: 0.95rem;
   font-weight: 700;
   line-height: 1.35;
@@ -154,7 +154,7 @@ defineProps<{
 
 .github-event-detail {
   margin: 0;
-  color: #cbd5e1;
+  color: var(--text-secondary);
   font-size: 0.82rem;
   line-height: 1.55;
   word-break: break-word;
@@ -169,8 +169,8 @@ defineProps<{
   padding: 0 12px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--event-accent) 34%, transparent);
-  background: color-mix(in srgb, var(--event-accent) 15%, rgba(15, 23, 42, 0.88));
-  color: #f8fafc;
+  background: color-mix(in srgb, var(--event-accent) 15%, var(--bg-subtle));
+  color: var(--text);
   font-size: 0.78rem;
   font-weight: 700;
   text-decoration: none;
@@ -207,8 +207,8 @@ defineProps<{
 }
 
 .tone-slate {
-  --event-accent: #94a3b8;
-  --event-accent-soft: rgba(148, 163, 184, 0.24);
+  --event-accent: var(--text-tertiary);
+  --event-accent-soft: color-mix(in srgb, var(--event-accent) 24%, transparent);
 }
 
 @media (max-width: 640px) {
