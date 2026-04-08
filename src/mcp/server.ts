@@ -2165,7 +2165,11 @@ server.tool(
         project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         options: {
           method: "PATCH",
-          body: JSON.stringify({ status: "assigned", assignee: identity.actor_label }),
+          body: JSON.stringify({
+            status: "assigned",
+            assignee: identity.actor_label,
+            actor_label: identity.actor_label,
+          }),
         },
       });
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
@@ -2248,6 +2252,7 @@ server.tool(
             assignee: status === "assigned" && !assignee ? identity.actor_label : assignee,
             pr_url,
             workflow_artifacts,
+            actor_label: identity.actor_label,
           }),
         },
       });
@@ -2296,7 +2301,7 @@ server.tool(
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
   },
-  async ({ task_id, pr_url, room_id, conversation_id: _conversationId }) => {
+  async ({ task_id, pr_url, room_id, conversation_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2306,6 +2311,7 @@ server.tool(
     }
 
     try {
+      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -2313,12 +2319,31 @@ server.tool(
         project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/tasks/${encodeURIComponent(task_id)}`,
         options: {
           method: "PATCH",
-          body: JSON.stringify({ status: "in_review", pr_url }),
+          body: JSON.stringify({
+            status: "in_review",
+            pr_url,
+            actor_label: identity.actor_label,
+          }),
         },
+      });
+      await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+        status: "reviewing",
+        status_text: `${task_id} -> in_review`,
       });
 
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ success: true, task: updated }, null, 2) }],
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              task: updated,
+              agent_identity: toPublicAgentIdentity(identity),
+            },
+            null,
+            2
+          ),
+        }],
       };
     } catch (error) {
       return {

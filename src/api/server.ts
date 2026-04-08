@@ -124,6 +124,10 @@ import {
   normalizeRoomName,
   resolveRoomIdentifier,
 } from "./room-routing.js";
+import {
+  buildTaskUpdatePatch,
+  getTaskOwnershipError,
+} from "./task-ownership.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
@@ -2701,30 +2705,38 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     return;
   }
 
-  const { status, assignee, pr_url } = req.body as {
-    status?: TaskStatus;
-    assignee?: string;
-    pr_url?: string;
-  };
+  const requestBody = (req.body ?? {}) as Record<string, unknown>;
   const workflow_artifacts = validateTaskWorkflowArtifactsInput(
-    (req.body as { workflow_artifacts?: unknown }).workflow_artifacts
+    requestBody.workflow_artifacts
   );
+  const { updates, actorLabel } = buildTaskUpdatePatch({
+    body: requestBody,
+    workflowArtifacts: workflow_artifacts,
+  });
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
-    if (status && adminOnlyStatuses.has(status)) {
+    if (updates.status && adminOnlyStatuses.has(updates.status)) {
       if (!(await requireAdmin(req, res, project))) {
         return;
       }
     }
 
-    const updated = await updateTask(projectId, taskId, {
-      status,
-      assignee,
-      pr_url,
-      workflow_artifacts,
+    const ownershipError = getTaskOwnershipError({
+      authKind: req.authKind,
+      currentStatus: task.status,
+      currentAssignee: task.assignee,
+      requestedStatus: updates.status,
+      requestedAssignee: updates.assignee,
+      actorLabel,
     });
-    if (updated && status && status !== task.status) {
+    if (ownershipError) {
+      res.status(409).json({ error: ownershipError });
+      return;
+    }
+
+    const updated = await updateTask(projectId, taskId, updates);
+    if (updated && updates.status && updates.status !== task.status) {
       await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
     }
     res.json(updated);
@@ -3200,28 +3212,36 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     return;
   }
 
-  const { status, assignee, pr_url } = req.body as {
-    status?: TaskStatus;
-    assignee?: string;
-    pr_url?: string;
-  };
+  const requestBody = (req.body ?? {}) as Record<string, unknown>;
   const workflow_artifacts = validateTaskWorkflowArtifactsInput(
-    (req.body as { workflow_artifacts?: unknown }).workflow_artifacts
+    requestBody.workflow_artifacts
   );
+  const { updates, actorLabel } = buildTaskUpdatePatch({
+    body: requestBody,
+    workflowArtifacts: workflow_artifacts,
+  });
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
-    if (status && adminOnlyStatuses.has(status)) {
+    if (updates.status && adminOnlyStatuses.has(updates.status)) {
       if (!(await requireAdmin(req, res, project))) return;
     }
 
-    const updated = await updateTask(project.id, taskId, {
-      status,
-      assignee,
-      pr_url,
-      workflow_artifacts,
+    const ownershipError = getTaskOwnershipError({
+      authKind: req.authKind,
+      currentStatus: task.status,
+      currentAssignee: task.assignee,
+      requestedStatus: updates.status,
+      requestedAssignee: updates.assignee,
+      actorLabel,
     });
-    if (updated && status && status !== task.status) {
+    if (ownershipError) {
+      res.status(409).json({ error: ownershipError });
+      return;
+    }
+
+    const updated = await updateTask(project.id, taskId, updates);
+    if (updated && updates.status && updates.status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }
     res.json({ ...updated, room_id: project.id });

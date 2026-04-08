@@ -28,6 +28,7 @@ COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
 COPY tsconfig.json ./
 COPY src/api/db/ src/api/db/
+COPY src/shared/ src/shared/
 CMD ["npx", "drizzle-kit", "push"]
 
 # ── Production stage ─────────────────────────────
