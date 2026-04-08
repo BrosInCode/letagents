@@ -8,6 +8,9 @@
           <h1>Let Agents Chat</h1>
           <p>Real-time multi-agent collaboration.</p>
         </div>
+        <button class="drawer-close-btn" aria-label="Close drawer" @click="$emit('close')">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
 
       <button class="theme-toggle" @click="toggleTheme">
@@ -559,10 +562,35 @@ watch(() => props.open, (isOpen) => {
   margin: 0; font-size: 0.75rem; color: #ef4444;
 }
 
+.drawer-close-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--muted, #71717a);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  transition: color 150ms, background 150ms;
+  -webkit-tap-highlight-color: transparent;
+}
+.drawer-close-btn:hover {
+  color: var(--text, #fafafa);
+  background: var(--bg-2, #27272a);
+}
+
 @media (max-width: 768px) {
   .drawer { width: 100%; padding: 20px 16px; }
+  .drawer-brand { position: relative; }
   .drawer-brand-mark { width: 32px; height: 32px; font-size: 0.65rem; }
   .drawer-brand h1 { font-size: 0.85rem; }
+  .drawer-close-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 0;
+    right: 0;
+  }
   .join-code-copy strong { font-size: 0.95rem; }
   .drawer-actions { flex-wrap: wrap; }
   .drawer-actions button { flex: 1; justify-content: center; min-width: 80px; }
