@@ -242,6 +242,7 @@ test("buildTaskWorkflowArtifactMatches prioritizes stable artifact lookup fields
     buildTaskWorkflowArtifactMatches({
       provider: "github",
       kind: "check_run",
+      number: 77,
       id: "9001",
       title: "ci / build",
       url: "https://github.com/BrosInCode/letagents/actions/runs/9001",
@@ -255,11 +256,45 @@ test("buildTaskWorkflowArtifactMatches prioritizes stable artifact lookup fields
       {
         provider: "github",
         kind: "check_run",
+        number: 77,
+      },
+      {
+        provider: "github",
+        kind: "check_run",
         id: "9001",
       },
       {
         provider: "github",
         kind: "check_run",
+        title: "ci / build",
+      },
+    ]
+  );
+});
+
+test("normalizeTaskWorkflowArtifacts deduplicates repeated persisted artifacts", () => {
+  assert.deepEqual(
+    normalizeTaskWorkflowArtifacts({
+      artifacts: [
+        {
+          provider: "github",
+          kind: "check_run",
+          number: 77,
+          title: "ci / build",
+        },
+        {
+          provider: "github",
+          kind: "check_run",
+          number: 77,
+          title: "ci / build",
+        },
+      ],
+    }),
+    [
+      {
+        provider: "github",
+        kind: "check_run",
+        number: 77,
         title: "ci / build",
       },
     ]
