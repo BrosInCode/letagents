@@ -199,6 +199,26 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
     ])
   }
 
+  for (const message of props.messages) {
+    const sender = String(message.sender || '').trim()
+    const normalizedSender = sender.toLowerCase()
+    if (!sender || normalizedSender === 'letagents' || normalizedSender === 'system') continue
+    if (isHumanSender(sender, message.source)) continue
+
+    const parsed = parseAgentIdentity(sender)
+    const label = message.agent_identity?.display_name || parsed.displayName || sender
+    const ownerLabel = message.agent_identity?.owner_label || parsed.ownerAttribution || null
+    const ideLabel = message.agent_identity?.ide_label || parsed.ideLabel || null
+    const meta = [ownerLabel, ideLabel].filter(Boolean).join(' · ') || 'Agent'
+
+    pushCandidate(label, label, meta, 1, [
+      sender,
+      ownerLabel,
+      ideLabel,
+      message.source,
+    ])
+  }
+
   pushCandidate(props.senderName, props.senderName, 'You', 2, ['you'])
 
   for (const message of props.messages) {
