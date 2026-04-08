@@ -54,6 +54,7 @@ export interface RepoReviewRef {
 
 export interface RepoCheckRunRef {
   id: string;
+  suiteId?: number | null;
   name: string;
   status: string;
   conclusion: string | null;
@@ -444,11 +445,14 @@ export function normalizeTaskWorkflowArtifacts(input: {
   const persisted = input.artifacts ?? [];
   const legacy = buildLegacyTaskWorkflowArtifacts({ prUrl: input.prUrl });
 
-  if (!persisted.length) {
-    return legacy;
-  }
+  const merged: TaskWorkflowArtifact[] = [];
 
-  const merged = [...persisted];
+  for (const artifact of persisted) {
+    const alreadyPresent = merged.some((existing) => areSameTaskWorkflowArtifact(existing, artifact));
+    if (!alreadyPresent) {
+      merged.push(artifact);
+    }
+  }
 
   for (const artifact of legacy) {
     const alreadyPresent = merged.some((existing) => areSameTaskWorkflowArtifact(existing, artifact));
@@ -726,6 +730,7 @@ export function buildRepoRoomEventArtifactMatches(event: RepoRoomEvent): TaskWor
       return buildTaskWorkflowArtifactMatches({
         provider: event.provider,
         kind: "check_run",
+        number: event.checkRun.suiteId,
         id: event.checkRun.id,
         title: event.checkRun.name,
         url: event.checkRun.url,

@@ -282,9 +282,9 @@ const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   in_progress: ["blocked", "in_review", "done", "cancelled"],
   blocked: ["in_progress", "in_review", "cancelled"],
   in_review: ["merged", "in_progress", "blocked", "done", "cancelled"],
-  merged: ["done"],
-  done: [],
-  cancelled: [],
+  merged: ["done", "accepted"],
+  done: ["accepted"],
+  cancelled: ["accepted"],
 };
 
 const DEFAULT_LIST_LIMIT = 200;
@@ -1869,7 +1869,7 @@ export async function updateTask(
   taskId: string,
   updates: {
     status?: TaskStatus;
-    assignee?: string;
+    assignee?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
   }
@@ -1890,7 +1890,9 @@ export async function updateTask(
   }
 
   const newStatus = updates.status ?? task.status;
-  const newAssignee = updates.assignee ?? task.assignee;
+  const newAssignee = Object.prototype.hasOwnProperty.call(updates, "assignee")
+    ? updates.assignee ?? null
+    : task.assignee;
   const newPrUrl = updates.pr_url ?? task.pr_url;
   const newWorkflowArtifacts = updates.workflow_artifacts
     ? normalizeTaskWorkflowArtifacts({
@@ -2000,6 +2002,18 @@ export async function insertGitHubRoomEvent(input: {
   }
 
   return { event: existing as GitHubRoomEvent, duplicate: true };
+}
+
+export async function updateGitHubRoomEventLinkedTaskId(
+  idempotencyKey: string,
+  linkedTaskId: string | null
+): Promise<void> {
+  await db
+    .update(github_room_events)
+    .set({
+      linked_task_id: linkedTaskId,
+    })
+    .where(eq(github_room_events.idempotency_key, idempotencyKey));
 }
 
 export async function getGitHubRoomEvents(input: {

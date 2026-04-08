@@ -423,12 +423,18 @@ export function materializeGitHubWebhookEvent(
           status: payload.check_run.status,
           conclusion: payload.check_run.conclusion,
           app_name: payload.check_run.app?.name ?? null,
+          suite_id: payload.check_run.check_suite?.id ?? null,
         },
         roomEvent: {
           ...base,
           kind: "check_run",
           checkRun: {
             id: String(payload.check_run.id),
+            suiteId:
+              payload.check_run.check_suite?.id !== undefined &&
+              payload.check_run.check_suite?.id !== null
+                ? Number(payload.check_run.check_suite.id)
+                : null,
             name: payload.check_run.name,
             status: payload.check_run.status,
             conclusion: payload.check_run.conclusion,

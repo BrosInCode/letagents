@@ -20,6 +20,7 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createTask = dbModule?.createTask;
+const getTasks = dbModule?.getTasks;
 const getMessages = dbModule?.getMessages;
 const getTaskById = dbModule?.getTaskById;
 const updateTask = dbModule?.updateTask;
@@ -183,6 +184,132 @@ if (!requiresDatabase) {
     await pool?.end();
   });
 }
+
+test(
+  "failed check_run auto-creates and reopens a deduplicated CI task through the real webhook route",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !getMessages || !getTaskById || !getTasks || !updateTask) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+
+    const firstResult = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-check-run-failure-1",
+      eventName: "check_run",
+      payload: {
+        action: "completed",
+        repository: buildRepositoryPayload(),
+        sender: { login: "github-actions[bot]" },
+        check_run: {
+          id: 901,
+          name: "ci / build",
+          status: "completed",
+          conclusion: "failure",
+          html_url: "https://github.com/BrosInCode/letagents/actions/runs/901",
+          app: { name: "GitHub Actions" },
+          check_suite: { id: 77 },
+        },
+      },
+    });
+
+    assert.equal(firstResult.status, "processed");
+
+    const firstTaskList = await getTasks(room.id);
+    assert.equal(firstTaskList.tasks.length, 1);
+    const [createdTask] = firstTaskList.tasks;
+    assert.equal(createdTask?.title, "Fix CI: ci / build");
+    assert.equal(createdTask?.status, "accepted");
+    assert.equal(createdTask?.created_by, "letagents");
+    assert.deepEqual(createdTask?.workflow_artifacts, [
+      {
+        provider: "github",
+        kind: "check_run",
+        number: 77,
+        title: "ci / build",
+        state: "failure",
+      },
+      {
+        provider: "github",
+        kind: "check_run",
+        id: "901",
+        title: "ci / build",
+        url: "https://github.com/BrosInCode/letagents/actions/runs/901",
+        state: "failure",
+      },
+    ]);
+
+    const firstMessages = (await getMessages(room.id)).messages;
+    assert.ok(firstMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes(createdTask.id) &&
+      message.text.includes("accepted")
+    ));
+    assert.ok(firstMessages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes(createdTask.id) &&
+      message.text.includes("ci / build")
+    ));
+
+    await updateTask(room.id, createdTask.id, { status: "assigned", assignee: "OliveWolf" });
+    await updateTask(room.id, createdTask.id, { status: "in_progress" });
+    await updateTask(room.id, createdTask.id, { status: "done" });
+
+    const secondResult = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-check-run-failure-2",
+      eventName: "check_run",
+      payload: {
+        action: "completed",
+        repository: buildRepositoryPayload(),
+        sender: { login: "github-actions[bot]" },
+        check_run: {
+          id: 902,
+          name: "ci / build",
+          status: "completed",
+          conclusion: "failure",
+          html_url: "https://github.com/BrosInCode/letagents/actions/runs/902",
+          app: { name: "GitHub Actions" },
+          check_suite: { id: 77 },
+        },
+      },
+    });
+
+    assert.equal(secondResult.status, "processed");
+
+    const secondTaskList = await getTasks(room.id);
+    assert.equal(secondTaskList.tasks.length, 1);
+
+    const reopenedTask = await getTaskById(room.id, createdTask.id);
+    assert.equal(reopenedTask?.status, "accepted");
+    assert.equal(reopenedTask?.assignee, null);
+    assert.ok(reopenedTask?.workflow_artifacts.some((artifact) =>
+      artifact.kind === "check_run" && artifact.number === 77
+    ));
+    assert.ok(reopenedTask?.workflow_artifacts.some((artifact) =>
+      artifact.kind === "check_run" &&
+      artifact.id === "902" &&
+      artifact.url === "https://github.com/BrosInCode/letagents/actions/runs/902"
+    ));
+
+    const finalMessages = (await getMessages(room.id)).messages;
+    assert.ok(finalMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes(createdTask.id) &&
+      message.text.includes("accepted")
+    ));
+  }
+);
 
 test(
   "pull_request opened transitions an assigned task to in_review through the real webhook route",
