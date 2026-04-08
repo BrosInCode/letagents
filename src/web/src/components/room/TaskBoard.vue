@@ -623,7 +623,7 @@ const groupedTasks = computed(() => {
 .gh-review-chip[data-state="changes_requested"] { color: #f87171; background: rgba(248, 113, 113, 0.1); }
 .gh-review-chip[data-state="commented"] { color: #60a5fa; background: rgba(96, 165, 250, 0.1); }
 
-.task-actions { display: flex; gap: 4px; }
+.task-actions { display: flex; gap: 4px; margin-top: 8px; }
 .task-action-btn {
   padding: 3px 8px; border-radius: 6px;
   background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
