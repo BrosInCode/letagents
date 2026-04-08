@@ -64,6 +64,7 @@
 
     <ActivityView
       v-show="activeTab === 'activity' && isConnected"
+      :messages="messages"
       :presence="presence"
       :tasks="tasks"
       :taskGithubStatus="taskGithubStatus"

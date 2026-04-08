@@ -10,11 +10,15 @@ import {
 test("classifyPresenceStatusText recognizes idle states", () => {
   assert.equal(classifyPresenceStatusText("online and polling the room"), "idle");
   assert.equal(classifyPresenceStatusText("available for review"), "idle");
+  assert.equal(classifyPresenceStatusText("back to room watch"), "idle");
+  assert.equal(classifyPresenceStatusText("waiting for tasks"), "idle");
+  assert.equal(classifyPresenceStatusText("awaiting instruction"), "idle");
 });
 
 test("classifyPresenceStatusText recognizes review and blocked states before generic work", () => {
   assert.equal(classifyPresenceStatusText("reviewing PR #146"), "reviewing");
   assert.equal(classifyPresenceStatusText("blocked on CI"), "blocked");
+  assert.equal(classifyPresenceStatusText("waiting on CI"), "blocked");
 });
 
 test("classifyPresenceStatusText falls back to working for implementation-like updates", () => {

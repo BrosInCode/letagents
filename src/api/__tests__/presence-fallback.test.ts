@@ -80,6 +80,38 @@ test("buildFallbackPresenceFromMessages marks older activity as stale", () => {
   assert.equal(presence[0]?.freshness, "stale");
 });
 
+test("buildFallbackPresenceFromMessages treats watch-mode and task-waiting updates as idle", () => {
+  const presence = buildFallbackPresenceFromMessages({
+    roomId: "github.com/brosincode/letagents",
+    messages: [
+      makeMessage({
+        id: "msg_1",
+        sender: "CrestPine | EmmyMay's agent | Agent",
+        text: "[status] waiting for tasks",
+        timestamp: "2026-04-08T14:38:00.000Z",
+      }),
+      makeMessage({
+        id: "msg_2",
+        sender: "SolarVista | EmmyMay's agent | Agent",
+        text: "[status] back to room watch",
+        timestamp: "2026-04-08T14:38:30.000Z",
+      }),
+      makeMessage({
+        id: "msg_3",
+        sender: "GardenFern | EmmyMay's agent | Agent",
+        text: "[status] waiting on CI",
+        timestamp: "2026-04-08T14:39:00.000Z",
+      }),
+    ],
+    now: Date.parse("2026-04-08T14:39:30.000Z"),
+  });
+
+  const byActor = new Map(presence.map((entry) => [entry.actor_label, entry]));
+  assert.equal(byActor.get("CrestPine | EmmyMay's agent | Agent")?.status, "idle");
+  assert.equal(byActor.get("SolarVista | EmmyMay's agent | Agent")?.status, "idle");
+  assert.equal(byActor.get("GardenFern | EmmyMay's agent | Agent")?.status, "blocked");
+});
+
 test("buildSyntheticPresenceEntry returns an active room presence record", () => {
   const presence = buildSyntheticPresenceEntry({
     roomId: "github.com/brosincode/letagents",
