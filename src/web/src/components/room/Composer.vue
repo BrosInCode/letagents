@@ -219,10 +219,9 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
     ])
   }
 
-  pushCandidate(props.senderName, props.senderName, 'You', 2, ['you'])
-
   for (const message of props.messages) {
     if (!isHumanSender(message.sender, message.source)) continue
+    if (message.sender === props.senderName) continue
     pushCandidate(message.sender, message.sender, 'User', 2, [])
   }
 
