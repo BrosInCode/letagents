@@ -5,7 +5,8 @@ import {
   type AgentPresenceStatus,
 } from "../shared/agent-presence.js";
 
-const IDLE_STATUS_RE = /\b(idle|available|online|polling|monitoring|watching|ready)\b/i;
+const IDLE_STATUS_RE = /\b(idle|available|online|polling|monitoring|watch(?:ing)?|ready|standby)\b/i;
+const IDLE_WAITING_STATUS_RE = /\b(?:awaiting|waiting)\s+(?:for\s+)?(?:tasks?|work|instructions?|direction|assignment|assignments|next(?:\s+task)?|queue)\b/i;
 const REVIEWING_STATUS_RE = /\b(review|reviewing|approve|approval|approving)\b/i;
 const BLOCKED_STATUS_RE = /\b(blocked|waiting|stuck)\b/i;
 
@@ -16,6 +17,10 @@ function extractStatusText(text: string): string {
 function classifyPresenceStatusText(statusText: string): AgentPresenceStatus {
   if (!statusText) {
     return "working";
+  }
+
+  if (IDLE_WAITING_STATUS_RE.test(statusText)) {
+    return "idle";
   }
 
   if (BLOCKED_STATUS_RE.test(statusText)) {
