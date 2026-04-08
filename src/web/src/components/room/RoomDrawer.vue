@@ -558,4 +558,14 @@ watch(() => props.open, (isOpen) => {
 .gh-error {
   margin: 0; font-size: 0.75rem; color: #ef4444;
 }
+
+@media (max-width: 768px) {
+  .drawer { width: 100%; padding: 20px 16px; }
+  .drawer-brand-mark { width: 32px; height: 32px; font-size: 0.65rem; }
+  .drawer-brand h1 { font-size: 0.85rem; }
+  .join-code-copy strong { font-size: 0.95rem; }
+  .drawer-actions { flex-wrap: wrap; }
+  .drawer-actions button { flex: 1; justify-content: center; min-width: 80px; }
+  .gh-setup-btn, .gh-install-btn { width: 100%; justify-content: center; }
+}
 </style>

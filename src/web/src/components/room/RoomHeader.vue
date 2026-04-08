@@ -268,8 +268,12 @@ function closeSearch() {
 .presence[data-state="live"]::before { background: var(--success, #34d399); }
 .presence[data-state="error"]::before { background: var(--danger, #f87171); }
 
-@media (max-width: 600px) {
-  .chat-header { padding: 0 12px; gap: 8px; }
+@media (max-width: 768px) {
+  .chat-header { padding: 0 12px; gap: 6px; height: 48px; }
+  .tab-bar { display: none; }
   .action-btn:first-of-type { display: none; }
+  .chat-title h2 { font-size: 0.84rem; }
+  .chat-title p { font-size: 0.66rem; }
+  .presence { padding: 4px 6px; font-size: 0.66rem; }
 }
 </style>

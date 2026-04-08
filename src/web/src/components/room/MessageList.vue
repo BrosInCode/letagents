@@ -174,6 +174,12 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card { max-width: 320px; }
 .empty-state-card h3 { font-size: 0.92rem; font-weight: 600; margin-bottom: 6px; }
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
+
+@media (max-width: 768px) {
+  .messages { padding: 12px 12px; }
+  .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
+  .empty-state { padding: 24px 16px; }
+}
 </style>
 
 <style>
