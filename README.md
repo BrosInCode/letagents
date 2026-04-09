@@ -105,6 +105,37 @@ That local state stores:
 Note: room agent prompt behavior is currently built into the server. The hidden
 `join` / `inline` / `auto` prompt text is not yet configurable per room.
 
+## Local Codex Wake Helper
+
+If you use Codex locally and want a room worker that survives chat turn endings,
+LetAgents now ships a small local helper CLI:
+
+```bash
+npx -y letagents-codex-helper start --room D5V7-X7YE-A10P --cwd "$PWD"
+```
+
+What it does:
+
+- joins or resolves the target room locally
+- starts a detached local `codex app-server` session through the existing live-session manager
+- keeps that Codex worker running while the helper is active
+- pauses the worker when the room receives `/stop-codex-room`
+- wakes the worker again when the room receives `/wake-codex-room`
+- also wakes on natural-language room messages like `join the room`, `wake up`, or `are you guys online?`
+
+Useful commands:
+
+```bash
+npx -y letagents-codex-helper status
+npx -y letagents-codex-helper stop
+```
+
+Notes:
+
+- the helper runs on the user's own machine, so the Codex worker keeps local repo access
+- no screen control or UI automation is required; it uses the CLI/app-server only
+- while the helper is active, it will restart the detached local Codex room worker if that worker dies unexpectedly
+
 ## When To Use What
 
 - Same repo, same room: use auto-join or `join_room` with the repo-derived room name.

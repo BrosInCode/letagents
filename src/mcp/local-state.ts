@@ -58,6 +58,15 @@ export type CodexLiveSessionStatus =
   | "failed"
   | "unknown";
 
+export type CodexWakeHelperMode = "active" | "paused";
+
+export type CodexWakeHelperStatus =
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
 export interface CodexLiveSessionState {
   session_id: string;
   room_id: string;
@@ -77,6 +86,29 @@ export interface CodexLiveSessionState {
   launched_server: boolean;
   codex_bin: string;
   status: CodexLiveSessionStatus;
+  last_error?: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
+export interface CodexWakeHelperState {
+  helper_id: string;
+  room_id: string;
+  room_identifier: string;
+  room_code?: string | null;
+  room_display_name?: string | null;
+  joined_via: JoinedVia;
+  cwd: string;
+  wake_phrase: string;
+  stop_phrase: string;
+  poll_timeout_ms: number;
+  max_minutes: number;
+  codex_bin: string;
+  mode: CodexWakeHelperMode;
+  status: CodexWakeHelperStatus;
+  pid?: number | null;
+  session_id?: string | null;
+  last_message_id?: string | null;
   last_error?: string | null;
   started_at: string;
   updated_at: string;
@@ -112,6 +144,8 @@ export interface LetagentsLocalState {
   room_sessions?: Record<string, RoomSessionState>;
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, CodexLiveSessionState>;
+  current_codex_wake_helper_ids?: Record<string, string>;
+  codex_wake_helpers?: Record<string, CodexWakeHelperState>;
 }
 
 const DEFAULT_STATE_PATH = join(homedir(), ".letagents", "mcp-state.json");
@@ -461,4 +495,86 @@ export function updateCodexLiveSession(
   });
 
   return updatedSession;
+}
+
+export function getCodexWakeHelperKey(roomId: string, cwd: string): string {
+  return `${roomId}::${cwd}`;
+}
+
+export function getCurrentCodexWakeHelper(roomId?: string, cwd?: string): CodexWakeHelperState | null {
+  const state = readLocalState();
+  const helperIds = state.current_codex_wake_helper_ids;
+  if (!helperIds) {
+    return null;
+  }
+
+  if (roomId && cwd) {
+    const helperId = helperIds[getCodexWakeHelperKey(roomId, cwd)];
+    return helperId ? (state.codex_wake_helpers?.[helperId] ?? null) : null;
+  }
+
+  let best: CodexWakeHelperState | null = null;
+  for (const id of Object.values(helperIds)) {
+    const helper = state.codex_wake_helpers?.[id];
+    if (helper && (!best || helper.updated_at > best.updated_at)) {
+      best = helper;
+    }
+  }
+  return best;
+}
+
+export function getStoredCodexWakeHelper(helperId: string): CodexWakeHelperState | null {
+  const state = readLocalState();
+  return state.codex_wake_helpers?.[helperId] ?? null;
+}
+
+export function listStoredCodexWakeHelpers(): CodexWakeHelperState[] {
+  const state = readLocalState();
+  return Object.values(state.codex_wake_helpers ?? {}).sort((left, right) =>
+    right.updated_at.localeCompare(left.updated_at)
+  );
+}
+
+export function saveCodexWakeHelper(
+  helper: CodexWakeHelperState,
+  makeCurrent = true
+): CodexWakeHelperState {
+  updateLocalState((state) => {
+    state.codex_wake_helpers = state.codex_wake_helpers ?? {};
+    state.codex_wake_helpers[helper.helper_id] = helper;
+    if (makeCurrent) {
+      state.current_codex_wake_helper_ids = state.current_codex_wake_helper_ids ?? {};
+      state.current_codex_wake_helper_ids[getCodexWakeHelperKey(helper.room_id, helper.cwd)] = helper.helper_id;
+    }
+    return state;
+  });
+
+  return helper;
+}
+
+export function updateCodexWakeHelper(
+  helperId: string,
+  updater: (helper: CodexWakeHelperState) => CodexWakeHelperState
+): CodexWakeHelperState | null {
+  let updatedHelper: CodexWakeHelperState | null = null;
+
+  updateLocalState((state) => {
+    const existing = state.codex_wake_helpers?.[helperId];
+    if (!existing) {
+      return state;
+    }
+
+    const updated = updater(existing);
+    state.codex_wake_helpers = state.codex_wake_helpers ?? {};
+    state.codex_wake_helpers[helperId] = updated;
+    state.current_codex_wake_helper_ids = state.current_codex_wake_helper_ids ?? {};
+    const currentKey = getCodexWakeHelperKey(updated.room_id, updated.cwd);
+    if (!state.current_codex_wake_helper_ids[currentKey]) {
+      state.current_codex_wake_helper_ids[currentKey] = helperId;
+    }
+    updatedHelper = updated;
+    return state;
+  });
+
+  return updatedHelper;
 }

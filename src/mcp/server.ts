@@ -66,6 +66,13 @@ import {
   toPublicCodexLiveSession,
 } from "./codex-session.js";
 import {
+  createCodexWakeHelper,
+  inspectCodexWakeHelper,
+  launchCodexWakeHelperProcess,
+  stopCodexWakeHelper,
+  toPublicCodexWakeHelper,
+} from "./codex-wake-helper.js";
+import {
   classifyPresenceStatusText,
   deriveTaskPresenceStatus,
   getRoomIdentityPresenceCacheKey,
@@ -1864,6 +1871,149 @@ server.tool(
             {
               success: true,
               session: toPublicCodexLiveSession(stopped),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "start_local_codex_wake_helper",
+  "Start or reuse a local helper that keeps a detached Codex room worker alive, pauses on a stop phrase, and wakes again from room messages.",
+  {
+    room: z
+      .string()
+      .describe("Invite code or room name to watch and wake locally."),
+    cwd: z
+      .string()
+      .optional()
+      .describe("Working directory for repo work. Defaults to the current process directory."),
+    wake_phrase: z
+      .string()
+      .optional()
+      .describe("Exact room message text that wakes a paused worker. Defaults to /wake-codex-room."),
+    stop_phrase: z
+      .string()
+      .optional()
+      .describe("Exact room message text that pauses the worker. Defaults to /stop-codex-room."),
+    max_minutes: z
+      .number()
+      .optional()
+      .describe("Optional hard stop in minutes for spawned worker sessions. Defaults to 0, which means run until stopped."),
+    poll_timeout_ms: z
+      .number()
+      .optional()
+      .describe("Room poll timeout for the helper loop. Defaults to 30000."),
+  },
+  async ({ room, cwd, wake_phrase, stop_phrase, max_minutes, poll_timeout_ms }) => {
+    const started = await createCodexWakeHelper({
+      room,
+      cwd: cwd || process.cwd(),
+      wake_phrase,
+      stop_phrase,
+      max_minutes,
+      poll_timeout_ms,
+    });
+    const helper = started.reused
+      ? started.helper
+      : launchCodexWakeHelperProcess(started.helper.helper_id);
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              helper: toPublicCodexWakeHelper(helper),
+              helper_started: !started.reused,
+              helper_reused: started.reused,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "status_local_codex_wake_helper",
+  "Inspect the current local Codex wake helper, or a specific one by helper_id.",
+  {
+    helper_id: z
+      .string()
+      .optional()
+      .describe("Optional helper id. Defaults to the latest known local Codex wake helper."),
+  },
+  async ({ helper_id }) => {
+    const status = await inspectCodexWakeHelper(helper_id);
+    if (!status) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: false, error: "No local Codex wake helper found." }, null, 2),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              helper: toPublicCodexWakeHelper(status.helper),
+              pid_running: status.pid_running,
+              session_status: status.session_status ?? null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "stop_local_codex_wake_helper",
+  "Stop the current local Codex wake helper, or a specific one by helper_id.",
+  {
+    helper_id: z
+      .string()
+      .optional()
+      .describe("Optional helper id. Defaults to the latest known local Codex wake helper."),
+  },
+  async ({ helper_id }) => {
+    const stopped = await stopCodexWakeHelper({ helper_id });
+    if (!stopped) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: false, error: "No local Codex wake helper found." }, null, 2),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              helper: toPublicCodexWakeHelper(stopped),
             },
             null,
             2
