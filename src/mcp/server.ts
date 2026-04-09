@@ -1124,10 +1124,17 @@ function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Record<strin
   };
 }
 
-type JoinSessionMode = "live" | "current";
+type JoinSessionMode = "live" | "current" | "wake_helper";
 
 function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
-  return String(value || "").trim().toLowerCase() === "live" ? "live" : "current";
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "live") {
+    return "live";
+  }
+  if (normalized === "wake_helper" || normalized === "wake-helper" || normalized === "helper") {
+    return "wake_helper";
+  }
+  return "current";
 }
 
 function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {
@@ -1367,6 +1374,23 @@ async function buildJoinResponse(input: {
 
   if (input.session_mode === "current") {
     return withJoinRoomAgentPrompt(basePayload);
+  }
+
+  if (input.session_mode === "wake_helper") {
+    const helper = await createCodexWakeHelper({
+      room: input.room_identifier,
+      cwd: process.cwd(),
+    });
+    const launchedHelper = helper.reused
+      ? helper.helper
+      : launchCodexWakeHelperProcess(helper.helper.helper_id);
+
+    return withJoinRoomAgentPrompt({
+      ...basePayload,
+      local_codex_wake_helper: toPublicCodexWakeHelper(launchedHelper),
+      local_codex_wake_helper_started: !helper.reused,
+      local_codex_wake_helper_reused: helper.reused,
+    });
   }
 
   const liveSession = await startLocalCodexSession({
@@ -1636,9 +1660,9 @@ server.tool(
   {
     code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
     session_mode: z
-      .enum(["live", "current"])
+      .enum(["live", "current", "wake_helper"])
       .optional()
-      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker. Use 'wake_helper' to start/reuse the local Codex wake helper for this room."),
   },
   async ({ code, session_mode }) => {
     return {
@@ -1660,9 +1684,9 @@ server.tool(
   {
     code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
     session_mode: z
-      .enum(["live", "current"])
+      .enum(["live", "current", "wake_helper"])
       .optional()
-      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker. Use 'wake_helper' to start/reuse the local Codex wake helper for this room."),
   },
   async ({ code, session_mode }) => {
     return {
@@ -1684,9 +1708,9 @@ server.tool(
   {
     name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
     session_mode: z
-      .enum(["live", "current"])
+      .enum(["live", "current", "wake_helper"])
       .optional()
-      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker."),
+      .describe("Use 'current' (default) for a normal inline join. Use 'live' to start/reuse a detached local Codex room worker. Use 'wake_helper' to start/reuse the local Codex wake helper for this room."),
   },
   async ({ name, session_mode }) => {
     try {

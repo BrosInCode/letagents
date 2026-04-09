@@ -130,6 +130,10 @@ npx -y letagents-codex-helper status
 npx -y letagents-codex-helper stop
 ```
 
+If you're already inside Codex using the LetAgents MCP, you can also start the
+same helper through the join tools by using `session_mode: "wake_helper"` on
+`join_room` or `join_code`.
+
 Notes:
 
 - the helper runs on the user's own machine, so the Codex worker keeps local repo access
