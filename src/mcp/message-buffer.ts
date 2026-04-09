@@ -79,6 +79,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
   private readonly buffer: TMessage[] = [];
   private readonly bufferedIds = new Set<string>();
   private readonly waiters = new Set<Waiter<TMessage>>();
+  private droppedMessages = 0;
 
   constructor(options: MessageBufferOptions<TMessage>) {
     this.pollMessages = options.pollMessages;
@@ -123,6 +124,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
     this.retryDelayMs = this.minRetryDelayMs;
     this.buffer.length = 0;
     this.bufferedIds.clear();
+    this.droppedMessages = 0;
     this.flushWaiters([]);
   }
 
@@ -141,6 +143,32 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
     }
 
     return this.buffer.filter((message) => compareMessageIds(message.id, afterMessageId) > 0);
+  }
+
+  canServeCursor(afterMessageId?: string): boolean {
+    if (!afterMessageId || this.buffer.length === 0) {
+      return true;
+    }
+
+    if (this.buffer.some((message) => message.id === afterMessageId)) {
+      return true;
+    }
+
+    const newestBufferedId = this.buffer.at(-1)?.id;
+    if (newestBufferedId && compareMessageIds(afterMessageId, newestBufferedId) >= 0) {
+      return true;
+    }
+
+    const oldestBufferedId = this.buffer[0]?.id;
+    if (
+      this.droppedMessages > 0 &&
+      oldestBufferedId &&
+      compareMessageIds(afterMessageId, oldestBufferedId) < 0
+    ) {
+      return false;
+    }
+
+    return true;
   }
 
   async waitForMessages(afterMessageId: string | undefined, timeoutMs: number): Promise<TMessage[]> {
@@ -189,6 +217,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
       const removed = this.buffer.shift();
       if (removed) {
         this.bufferedIds.delete(removed.id);
+        this.droppedMessages += 1;
       }
     }
 

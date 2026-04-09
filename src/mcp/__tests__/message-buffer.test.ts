@@ -58,6 +58,20 @@ test("waitForMessages returns an empty array on timeout", async () => {
   assert.deepEqual(messages, []);
 });
 
+test("canServeCursor returns false once the requested cursor has fallen behind eviction", () => {
+  const buffer = new MessageBuffer<TestMessage>({
+    maxSize: 2,
+    pollMessages: async () => ({ messages: [] }),
+    fetchMessagesPage: async () => ({ messages: [] }),
+  });
+
+  buffer.recordMessages([makeMessage("msg_2"), makeMessage("msg_3"), makeMessage("msg_4")]);
+
+  assert.equal(buffer.canServeCursor("msg_1"), false);
+  assert.equal(buffer.canServeCursor("msg_3"), true);
+  assert.equal(buffer.canServeCursor("msg_4"), true);
+});
+
 test("activate starts the background poller and paginates additional pages", async () => {
   let pollCount = 0;
 

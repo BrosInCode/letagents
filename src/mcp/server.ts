@@ -2822,7 +2822,7 @@ server.tool(
       };
     }
 
-    if (messageBuffer.isActiveForRoom(targetRoomId)) {
+    if (messageBuffer.isActiveForRoom(targetRoomId) && messageBuffer.canServeCursor(after_message_id)) {
       const bufferedMessages = await messageBuffer.waitForMessages(after_message_id, serverTimeout);
       const output: Record<string, unknown> = {
         messages: toAgentReadableMessages(bufferedMessages as unknown[]),
