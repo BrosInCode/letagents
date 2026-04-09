@@ -72,6 +72,24 @@ test("canServeCursor returns false once the requested cursor has fallen behind e
   assert.equal(buffer.canServeCursor("msg_4"), true);
 });
 
+test("canServeCursor returns false for cursors older than the activation seed", async () => {
+  const buffer = new MessageBuffer<TestMessage>({
+    pollMessages: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { messages: [] };
+    },
+    fetchMessagesPage: async () => ({ messages: [] }),
+  });
+
+  buffer.activate({ roomId: "room-1" }, "msg_100");
+  buffer.recordMessages([makeMessage("msg_101"), makeMessage("msg_102")]);
+
+  assert.equal(buffer.canServeCursor("msg_99"), false);
+  assert.equal(buffer.canServeCursor("msg_100"), true);
+
+  buffer.deactivate();
+});
+
 test("activate starts the background poller and paginates additional pages", async () => {
   let pollCount = 0;
 

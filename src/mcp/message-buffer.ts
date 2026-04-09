@@ -75,6 +75,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
   private currentTarget: MessageBufferTarget | null = null;
   private generation = 0;
   private lastSeenMessageId: string | undefined;
+  private coverageFloorMessageId: string | undefined;
   private retryDelayMs: number;
   private readonly buffer: TMessage[] = [];
   private readonly bufferedIds = new Set<string>();
@@ -112,6 +113,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
     this.deactivate();
     this.currentTarget = target;
     this.lastSeenMessageId = initialAfterMessageId ?? undefined;
+    this.coverageFloorMessageId = initialAfterMessageId ?? undefined;
     this.retryDelayMs = this.minRetryDelayMs;
     const generation = ++this.generation;
     void this.pollLoop(generation);
@@ -121,6 +123,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
     this.generation += 1;
     this.currentTarget = null;
     this.lastSeenMessageId = undefined;
+    this.coverageFloorMessageId = undefined;
     this.retryDelayMs = this.minRetryDelayMs;
     this.buffer.length = 0;
     this.bufferedIds.clear();
@@ -152,6 +155,13 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
 
     if (this.buffer.some((message) => message.id === afterMessageId)) {
       return true;
+    }
+
+    if (
+      this.coverageFloorMessageId &&
+      compareMessageIds(afterMessageId, this.coverageFloorMessageId) < 0
+    ) {
+      return false;
     }
 
     const newestBufferedId = this.buffer.at(-1)?.id;
