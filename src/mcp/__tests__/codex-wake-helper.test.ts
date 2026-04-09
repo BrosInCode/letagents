@@ -13,6 +13,9 @@ test("matchesWakeIntent recognizes online-check wakeups", () => {
   assert.equal(matchesWakeIntent("are you guys online?"), true);
   assert.equal(matchesWakeIntent("come back"), true);
   assert.equal(matchesWakeIntent("back on room watch"), true);
+  assert.equal(matchesWakeIntent("where are you"), true);
+  assert.equal(matchesWakeIntent("reef crisp?"), true);
+  assert.equal(matchesWakeIntent("hello"), true);
 });
 
 test("matchesWakeIntent ignores regular work requests", () => {

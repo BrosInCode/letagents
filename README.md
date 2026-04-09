@@ -121,7 +121,8 @@ What it does:
 - keeps that Codex worker running while the helper is active
 - pauses the worker when the room receives `/stop-codex-room`
 - wakes the worker again when the room receives `/wake-codex-room`
-- also wakes on natural-language room messages like `join the room`, `wake up`, or `are you guys online?`
+- also wakes on later room traffic automatically, so users do not have to rely on exact trigger words
+- still recognizes natural-language wakeups like `join the room`, `wake up`, `where are you`, or `are you guys online?`
 
 Useful commands:
 

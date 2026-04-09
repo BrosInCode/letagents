@@ -101,8 +101,16 @@ export function matchesWakeIntent(text: string): boolean {
     /\bcome\s+back\b/,
     /\breturn(?:\s+to)?(?:\s+the)?\s+room\b/,
     /\bare you(?:\s+guys)?\s+online\b/,
+    /\bare you there\b/,
+    /\bwhere are you\b/,
+    /\banyone (?:here|online)\b/,
+    /\bwho(?:'s| is)\s+here\b/,
+    /\bhello\b/,
+    /\bhey\b/,
+    /\bhi\b/,
     /\bback\s+online\b/,
     /\bback\s+on\s+room\s+watch\b/,
+    /\?$/,
   ];
 
   return patterns.some((pattern) => pattern.test(normalized));
@@ -338,7 +346,14 @@ async function processMessages(
       continue;
     }
 
-    if (current.mode === "paused" && (text === current.wake_phrase || matchesWakeIntent(text))) {
+    // When the helper is paused, any new room traffic is enough to revive the
+    // worker. That keeps wake behavior flexible without depending on a fixed
+    // phrase list or a specific worker codename.
+    if (
+      current.mode === "paused" &&
+      text !== current.stop_phrase &&
+      (text === current.wake_phrase || matchesWakeIntent(text) || text.length > 0)
+    ) {
       current = await ensureLiveSession(updateCodexWakeHelper(current.helper_id, (existing) => ({
         ...existing,
         mode: "active",
