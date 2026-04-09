@@ -149,11 +149,7 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
   }
 
   canServeCursor(afterMessageId?: string): boolean {
-    if (!afterMessageId || this.buffer.length === 0) {
-      return true;
-    }
-
-    if (this.buffer.some((message) => message.id === afterMessageId)) {
+    if (!afterMessageId) {
       return true;
     }
 
@@ -162,6 +158,14 @@ export class MessageBuffer<TMessage extends BufferedMessage> {
       compareMessageIds(afterMessageId, this.coverageFloorMessageId) < 0
     ) {
       return false;
+    }
+
+    if (this.buffer.length === 0) {
+      return true;
+    }
+
+    if (this.buffer.some((message) => message.id === afterMessageId)) {
+      return true;
     }
 
     const newestBufferedId = this.buffer.at(-1)?.id;
