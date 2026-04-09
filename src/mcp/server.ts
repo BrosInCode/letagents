@@ -7,9 +7,9 @@ import { writeFileSync, existsSync } from "fs";
 import { userInfo } from "os";
 import { join, dirname } from "path";
 import { execSync } from "child_process";
-import { SseClient, type Message } from "./sse-client.js";
 import { getRoomFromConfig } from "./config-reader.js";
 import { getGitRemoteIdentity } from "./git-remote.js";
+import { MessageBuffer } from "./message-buffer.js";
 import {
   AGENT_CODENAMES,
   AGENT_CODENAME_SPACE,
@@ -992,6 +992,8 @@ async function withAgentIdentity(
 }
 
 function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
+  const storedSession = getStoredRoomSession(state.room_id);
+  const seedMessageId = lastMessageId ?? storedSession?.last_message_id;
   currentRoom = state;
   saveRoomSession({
     room_id: state.room_id,
@@ -1001,16 +1003,12 @@ function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
     joined_via: state.joined_via,
     last_message_id: lastMessageId,
   });
-  sseClient.unsubscribeAll();
-  sseClient.subscribe(
+  messageBuffer.activate(
     {
       roomId: state.room_id,
       projectId: state.project_id ?? null,
     },
-    (_message: Message) => {
-      touchRoomSession(state.room_id);
-      server.server.sendResourceListChanged();
-    }
+    seedMessageId
   );
   return state;
 }
@@ -1087,6 +1085,18 @@ function getTargetRoomId(roomId?: string): string | null {
 
 function getFallbackProjectId(): string | null {
   return currentRoom?.project_id ?? null;
+}
+
+function getTargetProjectId(roomId?: string): string | null {
+  if (!roomId) {
+    return getFallbackProjectId();
+  }
+
+  if (currentRoom?.room_id === roomId) {
+    return currentRoom.project_id ?? null;
+  }
+
+  return getStoredRoomSession(roomId)?.project_id ?? null;
 }
 
 function getLastMessageId(payload: unknown): string | undefined {
@@ -1404,7 +1414,117 @@ const server = new McpServer({
   version: "0.2.0",
 });
 
-const sseClient = new SseClient(API_URL, () => getLetagentsToken());
+type RoomMessagesPage = {
+  messages?: Array<{ id?: string }>;
+  has_more?: boolean;
+  room_id?: string;
+  project_id?: string;
+};
+
+async function fetchRoomMessagesPage(
+  targetRoomId: string | null,
+  targetProjectId: string | null,
+  afterCursor?: string
+): Promise<RoomMessagesPage> {
+  const query = new URLSearchParams();
+  if (afterCursor) {
+    query.set("after", afterCursor);
+  }
+
+  const qs = query.toString();
+  return roomScopedApiCall<RoomMessagesPage>({
+    room_id: targetRoomId,
+    project_id: targetProjectId,
+    room_path: (resolvedRoomId) =>
+      appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(resolvedRoomId)}/messages${qs ? `?${qs}` : ""}`),
+    project_path: (projectId) =>
+      appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages${qs ? `?${qs}` : ""}`),
+  });
+}
+
+async function fetchRoomMessagesPollPage(
+  targetRoomId: string | null,
+  targetProjectId: string | null,
+  afterMessageId: string | undefined,
+  timeoutMs: number
+): Promise<RoomMessagesPage> {
+  const params = new URLSearchParams();
+  if (afterMessageId) {
+    params.set("after", afterMessageId);
+  }
+  params.set("timeout", String(timeoutMs));
+
+  const queryString = params.toString();
+  return roomScopedApiCall<RoomMessagesPage>({
+    room_id: targetRoomId,
+    project_id: targetProjectId,
+    room_path: (resolvedRoomId) =>
+      appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(resolvedRoomId)}/messages/poll?${queryString}`),
+    project_path: (projectId) =>
+      appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages/poll?${queryString}`),
+    options: { signal: AbortSignal.timeout(timeoutMs + 5000) },
+  });
+}
+
+async function collectRoomMessages(
+  targetRoomId: string | null,
+  targetProjectId: string | null,
+  firstPage?: RoomMessagesPage
+): Promise<{ messages: unknown[]; roomIdFromResponse?: string }> {
+  const initialPage = firstPage ?? (await fetchRoomMessagesPage(targetRoomId, targetProjectId));
+  const collected: unknown[] = [...(initialPage.messages ?? [])];
+  const roomIdFromResponse = initialPage.room_id || initialPage.project_id;
+  let afterCursor =
+    collected.length > 0
+      ? (collected[collected.length - 1] as { id?: string })?.id
+      : undefined;
+  let hasMore = Boolean(initialPage.has_more && collected.length > 0);
+
+  while (hasMore && afterCursor) {
+    const page = await fetchRoomMessagesPage(targetRoomId, targetProjectId, afterCursor);
+    const messages = page.messages ?? [];
+    collected.push(...messages);
+
+    if (!page.has_more || messages.length === 0) {
+      break;
+    }
+
+    afterCursor = (messages[messages.length - 1] as { id?: string })?.id;
+    if (!afterCursor) {
+      break;
+    }
+  }
+
+  return { messages: collected, roomIdFromResponse };
+}
+
+const messageBuffer = new MessageBuffer<{ id: string }>({
+  pollMessages: async (target, afterMessageId, timeoutMs) => {
+    return (await fetchRoomMessagesPollPage(
+      target.roomId,
+      target.projectId ?? null,
+      afterMessageId,
+      timeoutMs
+    )) as RoomMessagesPage & { messages?: Array<{ id: string }> };
+  },
+  fetchMessagesPage: async (target, afterMessageId) => {
+    return (await fetchRoomMessagesPage(
+      target.roomId,
+      target.projectId ?? null,
+      afterMessageId
+    )) as RoomMessagesPage & { messages?: Array<{ id: string }> };
+  },
+  onMessages: () => {
+    touchCurrentRoom();
+    server.server.sendResourceListChanged();
+  },
+  onError: (error) => {
+    console.error(
+      "Background room polling failed:",
+      error instanceof Error ? error.message : error
+    );
+  },
+});
 
 // ---------------------------------------------------------------------------
 // MCP Resources
@@ -2619,44 +2739,15 @@ server.tool(
   },
   async ({ room_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getFallbackProjectId();
-
-    // Paginate through all pages to honor the "read all messages" contract
-    const allMessages: unknown[] = [];
-    let afterCursor: string | undefined;
-    let roomIdFromResponse: string | undefined;
-
-    for (;;) {
-      const query = new URLSearchParams();
-      if (afterCursor) query.set("after", afterCursor);
-
-      const qs = query.toString();
-      const result = await roomScopedApiCall<{
-        messages?: Array<{ id?: string }>;
-        has_more?: boolean;
-        room_id?: string;
-        project_id?: string;
-      }>({
-        room_id: targetRoomId,
-        project_id: targetProjectId,
-        room_path: (targetRoomId) =>
-          appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages${qs ? `?${qs}` : ""}`),
-        project_path: (targetProjectId) =>
-          appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages${qs ? `?${qs}` : ""}`),
-      });
-
-      roomIdFromResponse = roomIdFromResponse || result.room_id || result.project_id;
-      const msgs = result.messages ?? [];
-      allMessages.push(...msgs);
-
-      if (!result.has_more || msgs.length === 0) break;
-
-      // Use the last message ID as the cursor for the next page
-      const lastMsg = msgs[msgs.length - 1];
-      if (!lastMsg?.id) break;
-      afterCursor = lastMsg.id;
-    }
-    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, await ensureAgentIdentity());
+    const targetProjectId = getTargetProjectId(room_id);
+    const { messages: allMessages, roomIdFromResponse } = await collectRoomMessages(
+      targetRoomId,
+      targetProjectId
+    );
+    await heartbeatRoomPresence(
+      targetRoomId ?? currentRoom?.room_id ?? null,
+      await ensureAgentIdentity()
+    );
 
     const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages) };
     if (roomIdFromResponse) {
@@ -2695,69 +2786,82 @@ server.tool(
   },
   async ({ room_id, after_message_id, timeout }) => {
     const targetRoomId = getTargetRoomId(room_id);
-    const targetProjectId = getFallbackProjectId();
     const identity = await ensureAgentIdentity();
     await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    const targetProjectId = getTargetProjectId(room_id);
     const serverTimeout = Math.min(
       Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
       MAX_POLL_TIMEOUT_MS
     );
-    const clientTimeout = serverTimeout + 5000; // 5s buffer over server timeout
 
-    const params = new URLSearchParams();
-    if (after_message_id) params.set("after", after_message_id);
-    params.set("timeout", String(serverTimeout));
+    if (!after_message_id) {
+      const { messages: allMessages, roomIdFromResponse } = await collectRoomMessages(
+        targetRoomId,
+        targetProjectId
+      );
 
-    const queryString = params.toString();
-    const firstResult = await roomScopedApiCall<{
-      messages?: Array<{ id?: string }>;
-      has_more?: boolean;
-      room_id?: string;
-      project_id?: string;
-    }>({
-      room_id: targetRoomId,
-      project_id: targetProjectId,
-      room_path: (targetRoomId) =>
-        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
-      project_path: (targetProjectId) =>
-        appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
-      options: { signal: AbortSignal.timeout(clientTimeout) },
-    });
-
-    const allMessages: unknown[] = [...(firstResult.messages ?? [])];
-    const roomIdFromResponse = firstResult.room_id || firstResult.project_id;
-
-    // If the immediate response has more pages, paginate through them
-    if (firstResult.has_more && allMessages.length > 0) {
-      let afterCursor = (allMessages[allMessages.length - 1] as { id?: string })?.id;
-
-      while (afterCursor) {
-        const pageParams = new URLSearchParams();
-        pageParams.set("after", afterCursor);
-        const qs = pageParams.toString();
-
-        const page = await roomScopedApiCall<{
-          messages?: Array<{ id?: string }>;
-          has_more?: boolean;
-        }>({
-          room_id: targetRoomId,
-          project_id: targetProjectId,
-          room_path: (targetRoomId) =>
-            appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`),
-          project_path: (targetProjectId) =>
-            appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`),
-        });
-
-        const msgs = page.messages ?? [];
-        allMessages.push(...msgs);
-
-        if (!page.has_more || msgs.length === 0) break;
-        afterCursor = (msgs[msgs.length - 1] as { id?: string })?.id;
-        if (!afterCursor) break;
+      const output: Record<string, unknown> = {
+        messages: toAgentReadableMessages(allMessages),
+        buffered: false,
+      };
+      if (roomIdFromResponse) {
+        output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
       }
+
+      if (targetRoomId) {
+        touchRoomSession(targetRoomId, getLastMessageId(output));
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(output, null, 2),
+          },
+        ],
+      };
     }
 
-    const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages) };
+    if (messageBuffer.isActiveForRoom(targetRoomId)) {
+      const bufferedMessages = await messageBuffer.waitForMessages(after_message_id, serverTimeout);
+      const output: Record<string, unknown> = {
+        messages: toAgentReadableMessages(bufferedMessages as unknown[]),
+        buffered: true,
+      };
+      if (targetRoomId) {
+        output.room_id = targetRoomId;
+      }
+
+      if (targetRoomId) {
+        touchRoomSession(targetRoomId, getLastMessageId(output));
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(output, null, 2),
+          },
+        ],
+      };
+    }
+
+    const firstResult = await fetchRoomMessagesPollPage(
+      targetRoomId,
+      targetProjectId,
+      after_message_id,
+      serverTimeout
+    );
+    const { messages: allMessages, roomIdFromResponse } = await collectRoomMessages(
+      targetRoomId,
+      targetProjectId,
+      firstResult
+    );
+
+    const output: Record<string, unknown> = {
+      messages: toAgentReadableMessages(allMessages),
+      buffered: false,
+    };
     if (roomIdFromResponse) {
       output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
     }
@@ -2765,7 +2869,6 @@ server.tool(
     if (targetRoomId) {
       touchRoomSession(targetRoomId, getLastMessageId(output));
     }
-    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
     return {
       content: [
         {
@@ -3402,12 +3505,12 @@ async function main() {
 
 // Cleanup on exit
 process.on("SIGINT", () => {
-  sseClient.unsubscribeAll();
+  messageBuffer.deactivate();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  sseClient.unsubscribeAll();
+  messageBuffer.deactivate();
   process.exit(0);
 });
 
