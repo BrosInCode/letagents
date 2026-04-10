@@ -143,6 +143,7 @@ export interface LetagentsLocalState {
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
   current_codex_live_session_ids?: Record<string, string>;
+  codex_live_session_ids_by_room?: Record<string, string[]>;
   codex_live_sessions?: Record<string, CodexLiveSessionState>;
   current_codex_wake_helper_ids?: Record<string, string>;
   codex_wake_helpers?: Record<string, CodexWakeHelperState>;
@@ -447,6 +448,15 @@ export function getStoredCodexLiveSession(sessionId: string): CodexLiveSessionSt
   return state.codex_live_sessions?.[sessionId] ?? null;
 }
 
+export function listStoredCodexLiveSessionsForRoom(roomId: string): CodexLiveSessionState[] {
+  const state = readLocalState();
+  const ids = state.codex_live_session_ids_by_room?.[roomId] ?? [];
+  const sessions = ids
+    .map((id) => state.codex_live_sessions?.[id] ?? null)
+    .filter((session): session is CodexLiveSessionState => Boolean(session));
+  return sessions.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+}
+
 export function listStoredCodexLiveSessions(): CodexLiveSessionState[] {
   const state = readLocalState();
   return Object.values(state.codex_live_sessions ?? {}).sort((left, right) =>
@@ -461,6 +471,11 @@ export function saveCodexLiveSession(
   updateLocalState((state) => {
     state.codex_live_sessions = state.codex_live_sessions ?? {};
     state.codex_live_sessions[session.session_id] = session;
+    state.codex_live_session_ids_by_room = state.codex_live_session_ids_by_room ?? {};
+    const roomSessionIds = state.codex_live_session_ids_by_room[session.room_id] ?? [];
+    if (!roomSessionIds.includes(session.session_id)) {
+      state.codex_live_session_ids_by_room[session.room_id] = [session.session_id, ...roomSessionIds];
+    }
     if (makeCurrent) {
       state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
       state.current_codex_live_session_ids[session.room_id] = session.session_id;
@@ -486,6 +501,11 @@ export function updateCodexLiveSession(
     const updated = updater(existing);
     state.codex_live_sessions = state.codex_live_sessions ?? {};
     state.codex_live_sessions[sessionId] = updated;
+    state.codex_live_session_ids_by_room = state.codex_live_session_ids_by_room ?? {};
+    const roomSessionIds = state.codex_live_session_ids_by_room[updated.room_id] ?? [];
+    if (!roomSessionIds.includes(sessionId)) {
+      state.codex_live_session_ids_by_room[updated.room_id] = [sessionId, ...roomSessionIds];
+    }
     state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
     if (!state.current_codex_live_session_ids[updated.room_id]) {
       state.current_codex_live_session_ids[updated.room_id] = sessionId;

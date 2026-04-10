@@ -6,6 +6,7 @@ import {
   getCurrentCodexWakeHelper,
   getStoredAuth,
   getStoredCodexWakeHelper,
+  listStoredCodexLiveSessionsForRoom,
   saveCodexWakeHelper,
   saveRoomSession,
   updateCodexWakeHelper,
@@ -275,22 +276,33 @@ async function fetchRoomMessagesPollPage(
 }
 
 async function ensureLiveSession(helper: CodexWakeHelperState): Promise<CodexWakeHelperState> {
-  const status = helper.session_id
-    ? await inspectLocalCodexSession(helper.session_id, helper.room_id)
-    : await inspectLocalCodexSession(undefined, helper.room_id);
+  const candidateSessions = [
+    ...(helper.session_id ? [helper.session_id] : []),
+    ...listStoredCodexLiveSessionsForRoom(helper.room_id)
+      .filter((session) => resolve(session.cwd) === resolve(helper.cwd))
+      .map((session) => session.session_id),
+  ];
 
-  if (
-    status &&
-    resolve(status.session.cwd) === resolve(helper.cwd) &&
-    (status.session.status === "running" || status.session.status === "starting")
-  ) {
-    return updateCodexWakeHelper(helper.helper_id, (current) => ({
-      ...current,
-      session_id: status.session.session_id,
-      status: "running",
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    })) ?? helper;
+  const seen = new Set<string>();
+  for (const sessionId of candidateSessions) {
+    if (!sessionId || seen.has(sessionId)) {
+      continue;
+    }
+    seen.add(sessionId);
+    const status = await inspectLocalCodexSession(sessionId, helper.room_id);
+    if (
+      status &&
+      resolve(status.session.cwd) === resolve(helper.cwd) &&
+      (status.session.status === "running" || status.session.status === "starting")
+    ) {
+      return updateCodexWakeHelper(helper.helper_id, (current) => ({
+        ...current,
+        session_id: status.session.session_id,
+        status: "running",
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      })) ?? helper;
+    }
   }
 
   const started = await startLocalCodexSession({
@@ -315,10 +327,22 @@ async function ensureLiveSession(helper: CodexWakeHelperState): Promise<CodexWak
 }
 
 async function pauseLiveSession(helper: CodexWakeHelperState): Promise<CodexWakeHelperState> {
-  await stopLocalCodexSession({
-    session_id: helper.session_id ?? undefined,
-    room_id: helper.room_id,
-  });
+  const sessions = listStoredCodexLiveSessionsForRoom(helper.room_id)
+    .filter((session) => resolve(session.cwd) === resolve(helper.cwd));
+
+  if (sessions.length === 0 && helper.session_id) {
+    await stopLocalCodexSession({
+      session_id: helper.session_id,
+      room_id: helper.room_id,
+    });
+  } else {
+    for (const session of sessions) {
+      await stopLocalCodexSession({
+        session_id: session.session_id,
+        room_id: helper.room_id,
+      });
+    }
+  }
 
   return updateCodexWakeHelper(helper.helper_id, (current) => ({
     ...current,
