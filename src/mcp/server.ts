@@ -2722,9 +2722,9 @@ server.tool(
       room_id: targetRoomId,
       project_id: targetProjectId,
       room_path: (targetRoomId) =>
-        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
+        `/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`,
       project_path: (targetProjectId) =>
-        appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
+        `/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`,
       options: { signal: AbortSignal.timeout(clientTimeout) },
     });
 
@@ -2747,9 +2747,9 @@ server.tool(
           room_id: targetRoomId,
           project_id: targetProjectId,
           room_path: (targetRoomId) =>
-            appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`),
+            `/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`,
           project_path: (targetProjectId) =>
-            appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`),
+            `/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`,
         });
 
         const msgs = page.messages ?? [];
