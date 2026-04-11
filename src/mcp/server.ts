@@ -72,6 +72,7 @@ import {
 } from "./agent-presence.js";
 import { buildRoomEventsQueryString } from "./room-events-query.js";
 import type { AgentPresenceStatus } from "../shared/agent-presence.js";
+import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -2554,7 +2555,7 @@ server.tool(
 
 server.tool(
   "send_message",
-  "Send a message to a Let Agents Chat room.",
+  "Send a message to a Let Agents Chat room. Use a short nudge (e.g. continue the plan) if another participant stopped after a closing message — silence does not always mean work is finished.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
     sender: z
@@ -2613,7 +2614,7 @@ server.tool(
 
 server.tool(
   "read_messages",
-  "Read all messages from a Let Agents Chat room.",
+  "Read all messages from a Let Agents Chat room. For long-running work, prefer wait_for_messages with after_message_id so you only process new lines and do not treat an empty poll as the end of the mission.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
   },
@@ -2676,12 +2677,11 @@ server.tool(
 
 // -- wait_for_messages ------------------------------------------------------
 
-const MAX_POLL_TIMEOUT_MS = 180000; // 3 minutes
 const DEFAULT_POLL_TIMEOUT_MS = 30000; // 30 seconds
 
 server.tool(
   "wait_for_messages",
-  "Wait for new messages in a Let Agents Chat room. Blocks until new messages arrive or 30 seconds elapse. Use the after_message_id parameter to only receive messages newer than a specific message.",
+  "Wait for new messages in a Let Agents Chat room (HTTP long-poll). For multi-hour runs, call in a loop: always pass after_message_id from the last message you processed so an empty result means 'nothing new yet', not 'stop working'. If someone posted a premature 'I will wait' closing line, use send_message with a brief continue instruction. Per-call wait is capped (default max 180s unless LETAGENTS_POLL_MAX_MS is set on API and MCP).",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
     after_message_id: z
@@ -2691,18 +2691,22 @@ server.tool(
     timeout: z
       .number()
       .optional()
-      .describe("Maximum wait time in milliseconds. If set to 0, the default timeout will be used."),
+      .describe(
+        "Maximum wait time in milliseconds (min 1000, capped by LETAGENTS_POLL_MAX_MS / server). If set to 0, the default timeout will be used."
+      ),
   },
   async ({ room_id, after_message_id, timeout }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     const identity = await ensureAgentIdentity();
     await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    const maxPollMs = getPollTimeoutCapMs();
     const serverTimeout = Math.min(
       Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
-      MAX_POLL_TIMEOUT_MS
+      maxPollMs
     );
-    const clientTimeout = serverTimeout + 5000; // 5s buffer over server timeout
+    const clientTimeout =
+      serverTimeout + (serverTimeout > 120_000 ? 120_000 : 5_000);
 
     const params = new URLSearchParams();
     if (after_message_id) params.set("after", after_message_id);
