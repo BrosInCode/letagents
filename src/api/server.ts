@@ -4,6 +4,7 @@ import fs from "fs";
 import express, { type Response } from "express";
 import path from "path";
 
+import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
   addMessage,
   assignProjectAdmin,
@@ -549,7 +550,8 @@ function parsePollTimeout(timeoutValue: string | undefined): number {
     return 30000;
   }
 
-  return Math.min(parsed, 180000);
+  const cap = getPollTimeoutCapMs();
+  return Math.min(parsed, cap);
 }
 
 function parseLimit(value: string | undefined): number | undefined {

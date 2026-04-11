@@ -7,3 +7,14 @@ data/
 .npmrc
 .env
 .review-worktrees/
+mitm_capture.jsonl
+
+# Headless Antigravity debug/test scripts (local development only)
+antigravity_ls_sniffer.mjs
+antigravity_mitm_proxy.mjs
+capture_antigravity_mitm.mjs
+cascade_stream_probe.js
+headless_antigravity_test.txt
+headless_cascade_test.mjs
+headless_opus_test.mjs
+headless_via_debugger.mjs
