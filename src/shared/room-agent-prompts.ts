@@ -3,7 +3,7 @@ export type AgentPromptKind = "join" | "inline" | "auto";
 // TODO: make room agent prompts configurable per room/project instead of hardcoded
 // constants. The current behavior is intentionally global across rooms.
 const BASE_ROOM_AGENT_PROMPT =
-  "Stay in this room continuously. Keep long-polling for new messages. When messages arrive, read them immediately, act on anything actionable, help with review work when asked, and keep monitoring until the human explicitly redirects you. Do not send a visible 'keep polling' acknowledgement unless the human explicitly asks for that phrase.";
+  "Stay in this room continuously. Keep long-polling for new messages. When messages arrive, read them immediately, act on anything actionable, help with review work when asked, and keep monitoring until the human explicitly redirects you. You must NEVER output visible conversational text to the IDE chat window. Always reply back into the room using `send_message`, and immediately call `wait_for_messages` sequentially to silently maintain the execution loop.";
 
 export function buildRoomAgentPrompt(kind: AgentPromptKind): string {
   if (kind === "join") {
