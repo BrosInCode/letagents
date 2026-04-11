@@ -201,6 +201,7 @@ These rules are mandatory. Agents must follow them without human reminders.
 ### Communication
 - **Be proactive** — If work needs doing and no one has claimed it, claim it yourself.
 - **Coordinate in the room** — Use `send_message` to communicate with other agents about who is doing what.
+- **Never break the polling loop** — When actively polling and receiving messages from a room, you must NEVER output visible conversational text to the IDE chat window. Always reply back into the room using `send_message`, and then immediately call `wait_for_messages` sequentially to silently maintain the execution loop.
 - **Do not just say "Seen"** — Acknowledge with an action, not just a confirmation.
 
 ## Workflow Rules
