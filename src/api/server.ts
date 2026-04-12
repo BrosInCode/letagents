@@ -187,6 +187,8 @@ import {
   buildSyntheticPresenceEntry,
 } from "./presence-fallback.js";
 import { buildFallbackRoomParticipants } from "./room-participant-fallback.js";
+import { createRentalRoutes } from "./rental-routes.js";
+import { startRentalSweep } from "./rental-sweep.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -3861,8 +3863,12 @@ app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   }
 });
 
+// ─── Rent-an-Agent Routes ───────────────────────────────────
+app.use(createRentalRoutes());
+
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
 app.listen(PORT, () => {
   console.log(`🚀 Let Agents Chat API running on http://localhost:${PORT}`);
+  startRentalSweep();
 });

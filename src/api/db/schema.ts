@@ -498,3 +498,175 @@ export const github_room_events = pgTable(
     delivery_idx: index("github_room_events_delivery_id_idx").on(table.delivery_id),
   })
 );
+
+// ─── Rent-an-Agent Tables ───────────────────────────────────
+
+import { RENTAL_LISTING_STATUSES, RENTAL_SESSION_STATUSES, RENTAL_OUTPUT_TYPES, RENTAL_IDE_LABELS } from "../../shared/rental.js";
+
+export const rentalListingStatusEnum = pgEnum("rental_listing_status", RENTAL_LISTING_STATUSES);
+export const rentalSessionStatusEnum = pgEnum("rental_session_status", RENTAL_SESSION_STATUSES);
+export const rentalOutputTypeEnum = pgEnum("rental_output_type", RENTAL_OUTPUT_TYPES);
+export const rentalIdeLabelEnum = pgEnum("rental_ide_label", RENTAL_IDE_LABELS);
+
+/**
+ * Provider advertisements — "my agent is available for rent."
+ * CU = Compute Units (normalized cross-model token denomination).
+ */
+export const rental_listings = pgTable(
+  "rental_listings",
+  {
+    id: text("id").primaryKey(),
+    provider_account_id: text("provider_account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+
+    // Agent identity (verified via fingerprinting)
+    agent_display_name: text("agent_display_name").notNull(),
+    agent_model: text("agent_model").notNull(),
+    agent_ide: text("agent_ide").notNull(),
+    agent_description: text("agent_description"),
+
+    // Agent fingerprint (platform-verified)
+    agent_model_verified: text("agent_model_verified"),
+    agent_ide_verified: text("agent_ide_verified"),
+    fingerprint_verified_at: timestamp("fingerprint_verified_at", { mode: "string", withTimezone: true }),
+
+    // CU budget
+    cu_budget_total: integer("cu_budget_total").notNull(),
+    cu_budget_used: integer("cu_budget_used").notNull().default(0),
+    cu_budget_per_session: integer("cu_budget_per_session"),
+
+    // Availability
+    status: rentalListingStatusEnum("status").notNull().default("active"),
+    available_from: timestamp("available_from", { mode: "string", withTimezone: true }),
+    available_until: timestamp("available_until", { mode: "string", withTimezone: true }),
+    max_concurrent_sessions: integer("max_concurrent_sessions").notNull().default(1),
+
+    // Pricing (v1: always free)
+    price_per_1k_cu: integer("price_per_1k_cu").notNull().default(0),
+    currency: text("currency").notNull().default("usd"),
+
+    // Capabilities
+    supported_output_types: jsonb("supported_output_types")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'["research_note","comment","draft_pr"]'::jsonb`),
+
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    provider_idx: index("rental_listings_provider_idx").on(table.provider_account_id),
+    status_idx: index("rental_listings_status_idx").on(table.status),
+    model_idx: index("rental_listings_model_idx").on(table.agent_model),
+  })
+);
+
+/**
+ * An active or completed rental between a provider and a renter.
+ * Manual accept only in v1 — always passes through requested → accepted → active.
+ */
+export const rental_sessions = pgTable(
+  "rental_sessions",
+  {
+    id: text("id").primaryKey(),
+    listing_id: text("listing_id")
+      .notNull()
+      .references(() => rental_listings.id, { onDelete: "cascade" }),
+    provider_account_id: text("provider_account_id")
+      .notNull()
+      .references(() => accounts.id),
+    renter_account_id: text("renter_account_id")
+      .notNull()
+      .references(() => accounts.id),
+
+    // Task definition
+    task_title: text("task_title").notNull(),
+    task_description: text("task_description").notNull(),
+    task_acceptance_criteria: text("task_acceptance_criteria"),
+
+    // Repo context
+    repo_scope: text("repo_scope").notNull(),
+    target_branch: text("target_branch").notNull(),
+    expected_outcome: text("expected_outcome").notNull(),
+
+    // Sandbox
+    sandbox_room_id: text("sandbox_room_id")
+      .references(() => rooms.id, { onDelete: "set null" }),
+
+    // CU metering
+    cu_budget: integer("cu_budget").notNull(),
+    cu_used: integer("cu_used").notNull().default(0),
+
+    // Lifecycle
+    status: rentalSessionStatusEnum("status").notNull().default("requested"),
+    started_at: timestamp("started_at", { mode: "string", withTimezone: true }),
+    ended_at: timestamp("ended_at", { mode: "string", withTimezone: true }),
+    last_heartbeat_at: timestamp("last_heartbeat_at", { mode: "string", withTimezone: true }),
+    max_duration_minutes: integer("max_duration_minutes").notNull().default(240),
+
+    // Outcome
+    result_pr_url: text("result_pr_url"),
+    result_summary: text("result_summary"),
+
+    // Pricing (v1: always 0/free)
+    total_cost_cents: integer("total_cost_cents").notNull().default(0),
+    payment_status: text("payment_status").notNull().default("free"),
+    payment_intent_id: text("payment_intent_id"),
+
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    listing_idx: index("rental_sessions_listing_idx").on(table.listing_id),
+    provider_idx: index("rental_sessions_provider_idx").on(table.provider_account_id),
+    renter_idx: index("rental_sessions_renter_idx").on(table.renter_account_id),
+    status_idx: index("rental_sessions_status_idx").on(table.status),
+    room_idx: index("rental_sessions_room_idx").on(table.sandbox_room_id),
+  })
+);
+
+/**
+ * Granular CU usage log — every heartbeat records consumption.
+ * Used for billing reconciliation and burn-rate estimation.
+ */
+export const rental_token_events = pgTable(
+  "rental_token_events",
+  {
+    id: text("id").primaryKey(),
+    session_id: text("session_id")
+      .notNull()
+      .references(() => rental_sessions.id, { onDelete: "cascade" }),
+    tokens_input: integer("tokens_input").notNull().default(0),
+    tokens_output: integer("tokens_output").notNull().default(0),
+    cu_delta: integer("cu_delta").notNull(),
+    event_type: text("event_type").notNull(), // "heartbeat" | "completion" | "adjustment"
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    session_idx: index("rental_token_events_session_idx").on(table.session_id),
+    created_idx: index("rental_token_events_created_idx").on(table.created_at),
+  })
+);
+
+/**
+ * Provider notification preferences — multi-channel delivery.
+ * Stores which channels a provider wants notifications on.
+ */
+export const provider_notification_prefs = pgTable(
+  "provider_notification_prefs",
+  {
+    account_id: text("account_id")
+      .primaryKey()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    email_enabled: integer("email_enabled").notNull().default(1),
+    email_address: text("email_address"),
+    telegram_enabled: integer("telegram_enabled").notNull().default(0),
+    telegram_chat_id: text("telegram_chat_id"),
+    whatsapp_enabled: integer("whatsapp_enabled").notNull().default(0),
+    whatsapp_number: text("whatsapp_number"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  }
+);

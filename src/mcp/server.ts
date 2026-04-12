@@ -3352,6 +3352,149 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Rent-an-Agent MCP tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+  "browse_rental_agents",
+  "Browse available agents for rent on the marketplace. Returns active listings " +
+    "with agent model, IDE, CU budget, and pricing information. " +
+    "Filter by model or IDE to find specific agent types.",
+  {
+    model: z.string().optional().describe("Filter by model (e.g. 'claude-opus-4-6', 'gpt-4o')"),
+    ide: z.string().optional().describe("Filter by IDE (e.g. 'antigravity', 'cursor', 'codex')"),
+    page: z.number().int().optional().describe("Page number (default 1)"),
+    limit: z.number().int().optional().describe("Results per page (default 20, max 50)"),
+  },
+  async ({ model, ide, page, limit }) => {
+    try {
+      const params = new URLSearchParams();
+      if (model) params.set("model", model);
+      if (ide) params.set("ide", ide);
+      if (page) params.set("page", String(page));
+      if (limit) params.set("limit", String(limit));
+      const qs = params.toString();
+
+      const result = await apiCall<Record<string, unknown>>(
+        `/api/rental/listings${qs ? `?${qs}` : ""}`,
+        { method: "GET" }
+      );
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "request_rental",
+  "Request to rent an agent from a marketplace listing. Creates a rental session " +
+    "in 'requested' status. The provider must manually accept before work begins. " +
+    "You must specify the repo, branch, task details, and expected output type.",
+  {
+    listing_id: z.string().describe("The listing ID to rent from (e.g. 'lst_abc123')"),
+    task_title: z.string().describe("Short title for the task (2+ characters)"),
+    task_description: z.string().describe("Detailed description of what needs to be done (10+ characters)"),
+    task_acceptance_criteria: z.string().optional().describe("Optional acceptance criteria"),
+    repo_scope: z.string().describe("GitHub repo in owner/repo format (e.g. 'kdnotfound/myproject')"),
+    target_branch: z.string().describe("Branch to work on (e.g. 'fix/auth-bug')"),
+    expected_outcome: z.enum(["research_note", "comment", "draft_pr"]).describe("Expected output type"),
+    max_duration_minutes: z.number().int().optional().describe("Max session duration in minutes (15-1440, default 240)"),
+  },
+  async ({ listing_id, task_title, task_description, task_acceptance_criteria, repo_scope, target_branch, expected_outcome, max_duration_minutes }) => {
+    try {
+      const result = await apiCall<Record<string, unknown>>("/api/rental/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          listing_id,
+          task_title,
+          task_description,
+          task_acceptance_criteria,
+          repo_scope,
+          target_branch,
+          expected_outcome,
+          max_duration_minutes,
+        }),
+      });
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, ...result }, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "rental_heartbeat",
+  "Report token usage for an active rental session. Must be called every 60 seconds " +
+    "during active work. Returns CU usage totals and budget warnings. " +
+    "If the budget is exhausted, the session will be auto-expired.",
+  {
+    session_id: z.string().describe("The rental session ID (e.g. 'rses_abc123')"),
+    tokens_input: z.number().int().describe("Number of input tokens consumed since last heartbeat"),
+    tokens_output: z.number().int().describe("Number of output tokens consumed since last heartbeat"),
+  },
+  async ({ session_id, tokens_input, tokens_output }) => {
+    try {
+      const result = await apiCall<Record<string, unknown>>(
+        `/api/rental/sessions/${encodeURIComponent(session_id)}/heartbeat`,
+        {
+          method: "POST",
+          body: JSON.stringify({ tokens_input, tokens_output }),
+        }
+      );
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, ...result }, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "rental_complete",
+  "Mark a rental session as completed. Can be called by either the provider or renter. " +
+    "Optionally attach a summary and PR URL as deliverables.",
+  {
+    session_id: z.string().describe("The rental session ID to complete"),
+    summary: z.string().optional().describe("Summary of work done"),
+    pr_url: z.string().optional().describe("GitHub PR URL if a draft PR was created"),
+  },
+  async ({ session_id, summary, pr_url }) => {
+    try {
+      const result = await apiCall<Record<string, unknown>>(
+        `/api/rental/sessions/${encodeURIComponent(session_id)}/complete`,
+        {
+          method: "POST",
+          body: JSON.stringify({ summary, pr_url }),
+        }
+      );
+
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: true, ...result }, null, 2) }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 

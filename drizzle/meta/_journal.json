@@ -124,22 +124,8 @@
     {
       "idx": 17,
       "version": "7",
-      "when": 1775595600000,
-      "tag": "0017_restless_signal",
-      "breakpoints": true
-    },
-    {
-      "idx": 18,
-      "version": "7",
-      "when": 1775602800000,
-      "tag": "0018_brisk_lockjaw",
-      "breakpoints": true
-    },
-    {
-      "idx": 19,
-      "version": "7",
-      "when": 1775661822391,
-      "tag": "0019_silver_roster",
+      "when": 1776034520317,
+      "tag": "0017_stormy_rage",
       "breakpoints": true
     }
   ]
