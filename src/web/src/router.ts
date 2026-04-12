@@ -17,6 +17,11 @@ const routes = [
     component: () => import('./pages/Room.vue'),
     props: true,
   },
+  {
+    path: '/handoff',
+    name: 'handoff',
+    component: () => import('./pages/HandoffView.vue'),
+  },
 ]
 
 export const router = createRouter({
