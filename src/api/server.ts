@@ -1927,7 +1927,12 @@ app.post("/api/handoff/sessions", (req, res) => {
     targetBranch?: string;
     expectedOutcome?: string;
     repoScope?: string;
+    parentSessionId?: string | null;
   };
+
+  const parentSessionIdRaw =
+    typeof body.parentSessionId === "string" ? body.parentSessionId.trim() : "";
+  const parentSessionId = parentSessionIdRaw ? parentSessionIdRaw : undefined;
 
   const outputType = normalizeHandoffOutputType(body.expectedOutcome);
   if (!outputType) {
@@ -1949,6 +1954,7 @@ app.post("/api/handoff/sessions", (req, res) => {
     outputType,
     repoScope,
     targetBranch,
+    parentSessionId,
   });
 
   if (!out.ok) {
