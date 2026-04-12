@@ -1,24 +1,27 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import { AppButton } from '@/components/ui';
 
 const title = ref('');
 const acceptanceCriteria = ref('');
+const repoScope = ref('');
 const targetBranch = ref('main');
 const expectedOutcome = ref('draft_pr');
 
 const isSubmitting = ref(false);
 
 const emit = defineEmits<{
-  (e: 'submit', payload: { title: string, acceptanceCriteria: string, targetBranch: string, expectedOutcome: string }): void
+  (e: 'submit', payload: unknown): void
 }>();
 
 async function handleSubmit() {
   const cleanTitle = title.value.trim();
   const cleanAC = acceptanceCriteria.value.trim();
+  const cleanRepo = repoScope.value.trim();
   const cleanBranch = targetBranch.value.trim();
 
-  if (!cleanTitle || !cleanAC || !cleanBranch) {
-    alert("Title, Acceptance Criteria, and Target Branch cannot be blank.");
+  if (!cleanTitle || !cleanAC || !cleanRepo || !cleanBranch) {
+    alert("Title, Acceptance Criteria, Repo scope, and Target Branch cannot be blank.");
     return;
   }
   
@@ -31,6 +34,7 @@ async function handleSubmit() {
       body: JSON.stringify({
         title: cleanTitle,
         acceptanceCriteria: cleanAC,
+        repoScope: cleanRepo,
         targetBranch: cleanBranch,
         expectedOutcome: expectedOutcome.value
       })
@@ -64,6 +68,18 @@ async function handleSubmit() {
       <div class="form-group">
         <label for="ac">Acceptance Criteria</label>
         <textarea id="ac" v-model="acceptanceCriteria" rows="4" placeholder="What must be true for this to be considered done?..." required></textarea>
+      </div>
+
+      <div class="form-group">
+        <label for="repo-scope">Repo scope</label>
+        <input
+          id="repo-scope"
+          v-model="repoScope"
+          type="text"
+          placeholder="e.g. owner/repo"
+          required
+        />
+        <p class="outcome-hint">Grant scope for capability manifests (owner/name).</p>
       </div>
 
       <div class="form-group">

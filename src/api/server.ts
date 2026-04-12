@@ -6,6 +6,10 @@ import path from "path";
 
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
+  evaluateHandoffPolicy,
+  normalizeHandoffOutputType,
+} from "../shared/handoff.js";
+import {
   addMessage,
   assignProjectAdmin,
   consumeAuthState,
@@ -1885,6 +1889,53 @@ app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (re
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
+});
+
+app.post("/api/handoff/sessions", (req, res) => {
+  const body = req.body as {
+    title?: string;
+    acceptanceCriteria?: string;
+    targetBranch?: string;
+    expectedOutcome?: string;
+    repoScope?: string;
+  };
+
+  const outputType = normalizeHandoffOutputType(body.expectedOutcome);
+  if (!outputType) {
+    res.status(400).json({ error: "Invalid expectedOutcome", code: "invalid_output_type" });
+    return;
+  }
+
+  const repoScope = typeof body.repoScope === "string" ? body.repoScope.trim() : "";
+  const targetBranch = typeof body.targetBranch === "string" ? body.targetBranch.trim() : "";
+  if (!repoScope || !targetBranch) {
+    res.status(400).json({
+      error: "repoScope and targetBranch must be non-empty",
+      code: "invalid_scope_or_branch",
+    });
+    return;
+  }
+
+  const out = evaluateHandoffPolicy({
+    outputType,
+    repoScope,
+    targetBranch,
+  });
+
+  if (!out.ok) {
+    res.status(400).json({ error: out.message, code: out.code });
+    return;
+  }
+
+  res.status(200).json({
+    ok: true,
+    capability_manifest: out.manifest,
+    preview: {
+      title: typeof body.title === "string" ? body.title.trim() : "",
+      acceptanceCriteria:
+        typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "",
+    },
+  });
 });
 
 app.get("/auth/github/app/callback", async (req, res) => {
