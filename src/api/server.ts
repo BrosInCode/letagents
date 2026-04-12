@@ -1950,6 +1950,17 @@ app.post("/api/handoff/sessions", (req, res) => {
     return;
   }
 
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const acceptanceCriteria =
+    typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "";
+  if (!title || !acceptanceCriteria) {
+    res.status(400).json({
+      error: "title and acceptanceCriteria must be non-empty",
+      code: "invalid_handoff_task_fields",
+    });
+    return;
+  }
+
   const out = evaluateHandoffPolicy({
     outputType,
     repoScope,
@@ -1983,9 +1994,8 @@ app.post("/api/handoff/sessions", (req, res) => {
     expires_at_ms,
     capability_manifest: out.manifest,
     preview: {
-      title: typeof body.title === "string" ? body.title.trim() : "",
-      acceptanceCriteria:
-        typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "",
+      title,
+      acceptanceCriteria,
     },
   });
 });

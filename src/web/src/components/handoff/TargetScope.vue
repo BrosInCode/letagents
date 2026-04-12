@@ -32,11 +32,11 @@ function updateState() {
       
       <div v-if="expectedOutcome === 'research_note'" class="outcome-detail">
         <span class="badge badge-read-only">Read-Only</span>
-        <p>Worker gets read access to the repo. Token expires after 2 hours.</p>
+        <p>Worker gets read access to the repo. Token expires after 4 hours.</p>
       </div>
       <div v-else-if="expectedOutcome === 'comment'" class="outcome-detail">
         <span class="badge badge-comment">Comment Access</span>
-        <p>Worker gets read access + ability to comment on issues. Expires in 12 hours.</p>
+        <p>Worker gets read access + ability to comment on issues. Expires in 8 hours.</p>
       </div>
       <div v-else-if="expectedOutcome === 'draft_pr'" class="outcome-detail">
         <span class="badge badge-write">Branch Write Access</span>
