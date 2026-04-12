@@ -103,6 +103,26 @@ test("evaluateHandoffPolicy rejects permission profile mismatched to output", ()
   assert.equal(bad.code, "permission_profile_mismatch");
 });
 
+test("evaluateHandoffPolicy rejects blank repoScope or targetBranch after trim", () => {
+  const blankScope = evaluateHandoffPolicy({
+    outputType: "draft_pr",
+    repoScope: "   ",
+    targetBranch: "main",
+  });
+  assert.equal(blankScope.ok, false);
+  if (blankScope.ok) throw new Error("expected failure");
+  assert.equal(blankScope.code, "invalid_scope_or_branch");
+
+  const blankBranch = evaluateHandoffPolicy({
+    outputType: "draft_pr",
+    repoScope: "acme/app",
+    targetBranch: "\t\n",
+  });
+  assert.equal(blankBranch.ok, false);
+  if (blankBranch.ok) throw new Error("expected failure");
+  assert.equal(blankBranch.code, "invalid_scope_or_branch");
+});
+
 test("buildHandoffCapabilityManifest scopes branch_write to target branch", () => {
   const manifest = buildHandoffCapabilityManifest({
     outputType: "draft_pr",
