@@ -1,9 +1,10 @@
-CREATE TYPE "public"."agent_presence_status" AS ENUM('idle', 'working', 'reviewing', 'blocked');--> statement-breakpoint
-CREATE TYPE "public"."rental_ide_label" AS ENUM('antigravity', 'codex', 'cursor', 'claude-code', 'windsurf');--> statement-breakpoint
-CREATE TYPE "public"."rental_listing_status" AS ENUM('active', 'paused', 'exhausted', 'retired');--> statement-breakpoint
-CREATE TYPE "public"."rental_output_type" AS ENUM('research_note', 'comment', 'draft_pr');--> statement-breakpoint
-CREATE TYPE "public"."rental_session_status" AS ENUM('requested', 'accepted', 'active', 'paused', 'completed', 'cancelled', 'expired', 'disputed');--> statement-breakpoint
-CREATE TYPE "public"."room_participant_kind" AS ENUM('human', 'agent');--> statement-breakpoint
+-- Migration 0020: Rent-an-Agent Marketplace tables
+-- Only creates genuinely new tables; does NOT touch room_agent_presence,
+-- room_participants, or tasks.assignee_agent_key (already in 0017-0019).
+
+CREATE TYPE "rental_listing_status" AS ENUM('active', 'paused', 'retired');--> statement-breakpoint
+CREATE TYPE "rental_session_status" AS ENUM('requested', 'accepted', 'active', 'paused', 'completed', 'cancelled', 'expired', 'disputed');--> statement-breakpoint
+
 CREATE TABLE "provider_notification_prefs" (
 	"account_id" text PRIMARY KEY NOT NULL,
 	"email_enabled" integer DEFAULT 1 NOT NULL,
@@ -14,8 +15,8 @@ CREATE TABLE "provider_notification_prefs" (
 	"whatsapp_number" text,
 	"created_at" timestamp with time zone NOT NULL,
 	"updated_at" timestamp with time zone NOT NULL
-);
---> statement-breakpoint
+);--> statement-breakpoint
+
 CREATE TABLE "rental_listings" (
 	"id" text PRIMARY KEY NOT NULL,
 	"provider_account_id" text NOT NULL,
@@ -38,8 +39,8 @@ CREATE TABLE "rental_listings" (
 	"supported_output_types" jsonb DEFAULT '["research_note","comment","draft_pr"]'::jsonb NOT NULL,
 	"created_at" timestamp with time zone NOT NULL,
 	"updated_at" timestamp with time zone NOT NULL
-);
---> statement-breakpoint
+);--> statement-breakpoint
+
 CREATE TABLE "rental_sessions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"listing_id" text NOT NULL,
@@ -66,8 +67,8 @@ CREATE TABLE "rental_sessions" (
 	"payment_intent_id" text,
 	"created_at" timestamp with time zone NOT NULL,
 	"updated_at" timestamp with time zone NOT NULL
-);
---> statement-breakpoint
+);--> statement-breakpoint
+
 CREATE TABLE "rental_token_events" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
@@ -77,40 +78,9 @@ CREATE TABLE "rental_token_events" (
 	"event_type" text NOT NULL,
 	"metadata" jsonb,
 	"created_at" timestamp with time zone NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "room_agent_presence" (
-	"room_id" text NOT NULL,
-	"actor_label" text NOT NULL,
-	"agent_key" text,
-	"display_name" text NOT NULL,
-	"owner_label" text,
-	"ide_label" text,
-	"status" "agent_presence_status" DEFAULT 'idle' NOT NULL,
-	"status_text" text,
-	"last_heartbeat_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone NOT NULL,
-	"updated_at" timestamp with time zone NOT NULL,
-	CONSTRAINT "room_agent_presence_pk" PRIMARY KEY("room_id","actor_label")
-);
---> statement-breakpoint
-CREATE TABLE "room_participants" (
-	"room_id" text NOT NULL,
-	"participant_key" text NOT NULL,
-	"kind" "room_participant_kind" NOT NULL,
-	"actor_label" text,
-	"agent_key" text,
-	"github_login" text,
-	"display_name" text NOT NULL,
-	"owner_label" text,
-	"ide_label" text,
-	"last_seen_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone NOT NULL,
-	"updated_at" timestamp with time zone NOT NULL,
-	CONSTRAINT "room_participants_pk" PRIMARY KEY("room_id","participant_key")
-);
---> statement-breakpoint
-ALTER TABLE "tasks" ADD COLUMN "assignee_agent_key" text;--> statement-breakpoint
+);--> statement-breakpoint
+
+-- Foreign keys
 ALTER TABLE "provider_notification_prefs" ADD CONSTRAINT "provider_notification_prefs_account_id_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "rental_listings" ADD CONSTRAINT "rental_listings_provider_account_id_accounts_id_fk" FOREIGN KEY ("provider_account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "rental_sessions" ADD CONSTRAINT "rental_sessions_listing_id_rental_listings_id_fk" FOREIGN KEY ("listing_id") REFERENCES "public"."rental_listings"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -118,8 +88,8 @@ ALTER TABLE "rental_sessions" ADD CONSTRAINT "rental_sessions_provider_account_i
 ALTER TABLE "rental_sessions" ADD CONSTRAINT "rental_sessions_renter_account_id_accounts_id_fk" FOREIGN KEY ("renter_account_id") REFERENCES "public"."accounts"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "rental_sessions" ADD CONSTRAINT "rental_sessions_sandbox_room_id_rooms_id_fk" FOREIGN KEY ("sandbox_room_id") REFERENCES "public"."rooms"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "rental_token_events" ADD CONSTRAINT "rental_token_events_session_id_rental_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."rental_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "room_agent_presence" ADD CONSTRAINT "room_agent_presence_room_id_rooms_id_fk" FOREIGN KEY ("room_id") REFERENCES "public"."rooms"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
-ALTER TABLE "room_participants" ADD CONSTRAINT "room_participants_room_id_rooms_id_fk" FOREIGN KEY ("room_id") REFERENCES "public"."rooms"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
+
+-- Indexes
 CREATE INDEX "rental_listings_provider_idx" ON "rental_listings" USING btree ("provider_account_id");--> statement-breakpoint
 CREATE INDEX "rental_listings_status_idx" ON "rental_listings" USING btree ("status");--> statement-breakpoint
 CREATE INDEX "rental_listings_model_idx" ON "rental_listings" USING btree ("agent_model");--> statement-breakpoint
@@ -129,14 +99,4 @@ CREATE INDEX "rental_sessions_renter_idx" ON "rental_sessions" USING btree ("ren
 CREATE INDEX "rental_sessions_status_idx" ON "rental_sessions" USING btree ("status");--> statement-breakpoint
 CREATE INDEX "rental_sessions_room_idx" ON "rental_sessions" USING btree ("sandbox_room_id");--> statement-breakpoint
 CREATE INDEX "rental_token_events_session_idx" ON "rental_token_events" USING btree ("session_id");--> statement-breakpoint
-CREATE INDEX "rental_token_events_created_idx" ON "rental_token_events" USING btree ("created_at");--> statement-breakpoint
-CREATE INDEX "room_agent_presence_room_id_idx" ON "room_agent_presence" USING btree ("room_id");--> statement-breakpoint
-CREATE INDEX "room_agent_presence_room_status_idx" ON "room_agent_presence" USING btree ("room_id","status");--> statement-breakpoint
-CREATE INDEX "room_agent_presence_room_heartbeat_idx" ON "room_agent_presence" USING btree ("room_id","last_heartbeat_at");--> statement-breakpoint
-CREATE INDEX "room_agent_presence_room_agent_key_idx" ON "room_agent_presence" USING btree ("room_id","agent_key");--> statement-breakpoint
-CREATE INDEX "room_participants_room_id_idx" ON "room_participants" USING btree ("room_id");--> statement-breakpoint
-CREATE INDEX "room_participants_room_kind_idx" ON "room_participants" USING btree ("room_id","kind");--> statement-breakpoint
-CREATE INDEX "room_participants_room_last_seen_idx" ON "room_participants" USING btree ("room_id","last_seen_at");--> statement-breakpoint
-CREATE INDEX "room_participants_room_actor_idx" ON "room_participants" USING btree ("room_id","actor_label");--> statement-breakpoint
-CREATE INDEX "room_participants_room_login_idx" ON "room_participants" USING btree ("room_id","github_login");--> statement-breakpoint
-CREATE INDEX "tasks_room_assignee_agent_key_idx" ON "tasks" USING btree ("room_id","assignee_agent_key");
+CREATE INDEX "rental_token_events_created_idx" ON "rental_token_events" USING btree ("created_at");
