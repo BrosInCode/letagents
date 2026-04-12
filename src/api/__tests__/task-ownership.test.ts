@@ -5,6 +5,7 @@ import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
   getTaskOwnershipError,
+  inferTaskActorKeyFromOwnerAgents,
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
@@ -60,6 +61,46 @@ test("normalizeTaskActorLabel trims valid actor labels", () => {
     "GardenFern | EmmyMay's agent | Agent"
   );
   assert.equal(normalizeTaskActorLabel("   "), null);
+});
+
+test("inferTaskActorKeyFromOwnerAgents resolves a unique actor label match", () => {
+  assert.equal(
+    inferTaskActorKeyFromOwnerAgents({
+      actorLabel: "Garden Fern | EmmyMay's agent | Agent",
+      ownerAgents: [
+        {
+          canonical_key: "EmmyMay/garden-fern",
+          name: "garden-fern",
+          display_name: "Garden Fern",
+          owner_label: "EmmyMay",
+        },
+      ],
+    }),
+    "EmmyMay/garden-fern"
+  );
+});
+
+test("inferTaskActorKeyFromOwnerAgents returns null for ambiguous actor labels", () => {
+  assert.equal(
+    inferTaskActorKeyFromOwnerAgents({
+      actorLabel: "Garden Fern | EmmyMay's agent | Agent",
+      ownerAgents: [
+        {
+          canonical_key: "EmmyMay/garden-fern",
+          name: "garden-fern",
+          display_name: "Garden Fern",
+          owner_label: "EmmyMay",
+        },
+        {
+          canonical_key: "EmmyMay/garden-fern-2",
+          name: "garden-fern-2",
+          display_name: "Garden Fern",
+          owner_label: "EmmyMay",
+        },
+      ],
+    }),
+    null
+  );
 });
 
 test("requiresTaskOwnershipGuard covers agent claim and reassignment paths", () => {

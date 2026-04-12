@@ -1,4 +1,5 @@
-import type { TaskStatus } from "./db.js";
+import { parseAgentActorLabel } from "../shared/agent-identity.js";
+import type { AgentIdentity, TaskStatus } from "./db.js";
 import type { TaskWorkflowArtifact } from "./repo-workflow.js";
 
 type RequestAuthKind = "session" | "owner_token" | null | undefined;
@@ -26,6 +27,79 @@ export function normalizeTaskActorKey(value: unknown): string | null {
 
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function normalizeTaskIdentityPart(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalized || null;
+}
+
+function getOwnerLabelFromAttribution(ownerAttribution: string | null | undefined): string | null {
+  const normalized = normalizeTaskIdentityPart(ownerAttribution);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/^(.+?)(?:'s|s')?\s+agent$/i);
+  return match?.[1]?.trim() || normalized;
+}
+
+function filterOwnerAgentMatches(input: {
+  ownerAgents: Array<Pick<AgentIdentity, "canonical_key" | "name" | "display_name" | "owner_label">>;
+  matchField: "display_name" | "name";
+  actorDisplayName: string;
+  ownerLabel: string | null;
+}): Array<Pick<AgentIdentity, "canonical_key" | "name" | "display_name" | "owner_label">> {
+  const { ownerAgents, matchField, actorDisplayName, ownerLabel } = input;
+
+  return ownerAgents.filter((agent) => {
+    if (normalizeTaskIdentityPart(agent[matchField]) !== actorDisplayName) {
+      return false;
+    }
+
+    if (!ownerLabel) {
+      return true;
+    }
+
+    return normalizeTaskIdentityPart(agent.owner_label) === ownerLabel;
+  });
+}
+
+export function inferTaskActorKeyFromOwnerAgents(input: {
+  actorLabel?: string | null;
+  ownerAgents: Array<Pick<AgentIdentity, "canonical_key" | "name" | "display_name" | "owner_label">>;
+}): string | null {
+  const parsed = parseAgentActorLabel(input.actorLabel);
+  const actorDisplayName = normalizeTaskIdentityPart(parsed?.display_name);
+  if (!actorDisplayName) {
+    return null;
+  }
+
+  const ownerLabel = getOwnerLabelFromAttribution(parsed?.owner_attribution);
+  const displayNameMatches = filterOwnerAgentMatches({
+    ownerAgents: input.ownerAgents,
+    matchField: "display_name",
+    actorDisplayName,
+    ownerLabel,
+  });
+  if (displayNameMatches.length === 1) {
+    return displayNameMatches[0].canonical_key;
+  }
+  if (displayNameMatches.length > 1) {
+    return null;
+  }
+
+  const nameMatches = filterOwnerAgentMatches({
+    ownerAgents: input.ownerAgents,
+    matchField: "name",
+    actorDisplayName,
+    ownerLabel,
+  });
+  return nameMatches.length === 1 ? nameMatches[0].canonical_key : null;
 }
 
 export function buildTaskUpdatePatch(input: {

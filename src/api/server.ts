@@ -133,6 +133,7 @@ import {
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
+  inferTaskActorKeyFromOwnerAgents,
   requiresTaskOwnershipGuard,
 } from "./task-ownership.js";
 import { getAgentPrimaryLabel, parseAgentActorLabel } from "../shared/agent-identity.js";
@@ -470,8 +471,9 @@ async function emitTaskLifecycleStatusMessage(
 async function validateOwnerTokenTaskActorKey(input: {
   req: AuthenticatedRequest;
   actorKey: string | null;
+  actorLabel: string | null;
 }): Promise<{ actorKey: string | null; error: string | null }> {
-  const { req, actorKey } = input;
+  const { req, actorKey, actorLabel } = input;
 
   if (req.authKind !== "owner_token") {
     return {
@@ -481,6 +483,21 @@ async function validateOwnerTokenTaskActorKey(input: {
   }
 
   if (!actorKey) {
+    const ownerAccountId = req.sessionAccount?.account_id;
+    const inferredActorKey = ownerAccountId
+      ? inferTaskActorKeyFromOwnerAgents({
+          actorLabel,
+          ownerAgents: await getAgentIdentitiesForOwner(ownerAccountId),
+        })
+      : null;
+
+    if (inferredActorKey) {
+      return {
+        actorKey: inferredActorKey,
+        error: null,
+      };
+    }
+
     return {
       actorKey: null,
       error: "actor_key is required for agent-owned task transitions",
@@ -2920,6 +2937,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
       const actorValidation = await validateOwnerTokenTaskActorKey({
         req,
         actorKey,
+        actorLabel,
       });
       if (actorValidation.error) {
         res.status(409).json({ error: actorValidation.error });
@@ -3570,6 +3588,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       const actorValidation = await validateOwnerTokenTaskActorKey({
         req,
         actorKey,
+        actorLabel,
       });
       if (actorValidation.error) {
         res.status(409).json({ error: actorValidation.error });
