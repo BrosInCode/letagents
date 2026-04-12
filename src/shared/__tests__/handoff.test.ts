@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   buildHandoffCapabilityManifest,
+  computeHandoffGrantExpiry,
   evaluateHandoffPolicy,
   getDefaultHandoffGrantTypes,
   getDefaultHandoffPermissionProfile,
+  HANDOFF_DEFAULT_GRANT_TTL_MS,
   isSupportedHandoffExecutionMode,
   normalizeHandoffExecutionMode,
   normalizeHandoffGrantStatus,
@@ -47,6 +49,13 @@ test("normalizeHandoff* helpers reject invalid enum values", () => {
 test("isSupportedHandoffExecutionMode only allows the contracted v1 lane", () => {
   assert.equal(isSupportedHandoffExecutionMode("hosted_isolated"), true);
   assert.equal(isSupportedHandoffExecutionMode("supplier_local"), false);
+});
+
+test("computeHandoffGrantExpiry uses pillar TTL table", () => {
+  const t0 = 1_000_000;
+  const r = computeHandoffGrantExpiry("research_note", t0);
+  assert.equal(r.grant_ttl_ms, HANDOFF_DEFAULT_GRANT_TTL_MS.research_note);
+  assert.equal(r.expires_at_ms, t0 + HANDOFF_DEFAULT_GRANT_TTL_MS.research_note);
 });
 
 test("evaluateHandoffPolicy builds manifest and enforces v1 gates", () => {

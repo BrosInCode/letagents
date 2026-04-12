@@ -6,9 +6,38 @@ import path from "path";
 
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
+  computeHandoffGrantExpiry,
   evaluateHandoffPolicy,
   normalizeHandoffOutputType,
+  type HandoffCapabilityManifest,
+  type HandoffOutputType,
 } from "../shared/handoff.js";
+
+/** Ephemeral handoff sessions (in-memory until DB groundwork lands). */
+type EphemeralHandoffSession = {
+  id: string;
+  status: "active" | "revoked" | "expired";
+  output_type: HandoffOutputType;
+  grant_ttl_ms: number;
+  expires_at_ms: number;
+  created_at_ms: number;
+  capability_manifest: HandoffCapabilityManifest;
+};
+
+const ephemeralHandoffSessions = new Map<string, EphemeralHandoffSession>();
+
+function effectiveHandoffSessionStatus(
+  row: EphemeralHandoffSession,
+  nowMs: number
+): EphemeralHandoffSession["status"] {
+  if (row.status === "revoked") {
+    return "revoked";
+  }
+  if (nowMs >= row.expires_at_ms) {
+    return "expired";
+  }
+  return "active";
+}
 import {
   addMessage,
   assignProjectAdmin,
@@ -1927,14 +1956,75 @@ app.post("/api/handoff/sessions", (req, res) => {
     return;
   }
 
+  const nowMs = Date.now();
+  const { grant_ttl_ms, expires_at_ms } = computeHandoffGrantExpiry(outputType, nowMs);
+  const sessionId = crypto.randomUUID();
+  ephemeralHandoffSessions.set(sessionId, {
+    id: sessionId,
+    status: "active",
+    output_type: outputType,
+    grant_ttl_ms,
+    expires_at_ms,
+    created_at_ms: nowMs,
+    capability_manifest: out.manifest,
+  });
+
   res.status(200).json({
     ok: true,
+    session_id: sessionId,
+    session_status: "active",
+    grant_ttl_ms,
+    expires_at_ms,
     capability_manifest: out.manifest,
     preview: {
       title: typeof body.title === "string" ? body.title.trim() : "",
       acceptanceCriteria:
         typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "",
     },
+  });
+});
+
+app.get("/api/handoff/sessions/:sessionId", (req, res) => {
+  const sessionId = req.params.sessionId;
+  const row = ephemeralHandoffSessions.get(sessionId);
+  if (!row) {
+    res.status(404).json({ error: "Unknown session", code: "handoff_session_not_found" });
+    return;
+  }
+  const nowMs = Date.now();
+  const session_status = effectiveHandoffSessionStatus(row, nowMs);
+  res.status(200).json({
+    session_id: row.id,
+    session_status,
+    grant_ttl_ms: row.grant_ttl_ms,
+    expires_at_ms: row.expires_at_ms,
+    created_at_ms: row.created_at_ms,
+    capability_manifest: row.capability_manifest,
+  });
+});
+
+app.post("/api/handoff/sessions/:sessionId/revoke", (req, res) => {
+  const sessionId = req.params.sessionId;
+  const row = ephemeralHandoffSessions.get(sessionId);
+  if (!row) {
+    res.status(404).json({ error: "Unknown session", code: "handoff_session_not_found" });
+    return;
+  }
+  const nowMs = Date.now();
+  const session_status = effectiveHandoffSessionStatus(row, nowMs);
+  if (session_status !== "active") {
+    res.status(409).json({
+      error: "Session cannot be revoked",
+      code: "handoff_session_not_revokable",
+      session_status,
+    });
+    return;
+  }
+  row.status = "revoked";
+  res.status(200).json({
+    ok: true,
+    session_id: sessionId,
+    session_status: "revoked",
   });
 });
 
