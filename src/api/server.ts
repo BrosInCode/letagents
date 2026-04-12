@@ -6,6 +6,39 @@ import path from "path";
 
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
+  computeHandoffGrantExpiry,
+  evaluateHandoffPolicy,
+  normalizeHandoffOutputType,
+  type HandoffCapabilityManifest,
+  type HandoffOutputType,
+} from "../shared/handoff.js";
+
+/** Ephemeral handoff sessions (in-memory until DB groundwork lands). */
+type EphemeralHandoffSession = {
+  id: string;
+  status: "active" | "revoked" | "expired";
+  output_type: HandoffOutputType;
+  grant_ttl_ms: number;
+  expires_at_ms: number;
+  created_at_ms: number;
+  capability_manifest: HandoffCapabilityManifest;
+};
+
+const ephemeralHandoffSessions = new Map<string, EphemeralHandoffSession>();
+
+function effectiveHandoffSessionStatus(
+  row: EphemeralHandoffSession,
+  nowMs: number
+): EphemeralHandoffSession["status"] {
+  if (row.status === "revoked") {
+    return "revoked";
+  }
+  if (nowMs >= row.expires_at_ms) {
+    return "expired";
+  }
+  return "active";
+}
+import {
   addMessage,
   assignProjectAdmin,
   consumeAuthState,
@@ -154,6 +187,8 @@ import {
   buildSyntheticPresenceEntry,
 } from "./presence-fallback.js";
 import { buildFallbackRoomParticipants } from "./room-participant-fallback.js";
+import { createRentalRoutes } from "./rental-routes.js";
+import { startRentalSweep } from "./rental-sweep.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -1885,6 +1920,130 @@ app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (re
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "letagents-api" });
+});
+
+app.post("/api/handoff/sessions", (req, res) => {
+  const body = req.body as {
+    title?: string;
+    acceptanceCriteria?: string;
+    targetBranch?: string;
+    expectedOutcome?: string;
+    repoScope?: string;
+    parentSessionId?: string | null;
+  };
+
+  const parentSessionIdRaw =
+    typeof body.parentSessionId === "string" ? body.parentSessionId.trim() : "";
+  const parentSessionId = parentSessionIdRaw ? parentSessionIdRaw : undefined;
+
+  const outputType = normalizeHandoffOutputType(body.expectedOutcome);
+  if (!outputType) {
+    res.status(400).json({ error: "Invalid expectedOutcome", code: "invalid_output_type" });
+    return;
+  }
+
+  const repoScope = typeof body.repoScope === "string" ? body.repoScope.trim() : "";
+  const targetBranch = typeof body.targetBranch === "string" ? body.targetBranch.trim() : "";
+  if (!repoScope || !targetBranch) {
+    res.status(400).json({
+      error: "repoScope and targetBranch must be non-empty",
+      code: "invalid_scope_or_branch",
+    });
+    return;
+  }
+
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const acceptanceCriteria =
+    typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria.trim() : "";
+  if (!title || !acceptanceCriteria) {
+    res.status(400).json({
+      error: "title and acceptanceCriteria must be non-empty",
+      code: "invalid_handoff_task_fields",
+    });
+    return;
+  }
+
+  const out = evaluateHandoffPolicy({
+    outputType,
+    repoScope,
+    targetBranch,
+    parentSessionId,
+  });
+
+  if (!out.ok) {
+    res.status(400).json({ error: out.message, code: out.code });
+    return;
+  }
+
+  const nowMs = Date.now();
+  const { grant_ttl_ms, expires_at_ms } = computeHandoffGrantExpiry(outputType, nowMs);
+  const sessionId = crypto.randomUUID();
+  ephemeralHandoffSessions.set(sessionId, {
+    id: sessionId,
+    status: "active",
+    output_type: outputType,
+    grant_ttl_ms,
+    expires_at_ms,
+    created_at_ms: nowMs,
+    capability_manifest: out.manifest,
+  });
+
+  res.status(200).json({
+    ok: true,
+    session_id: sessionId,
+    session_status: "active",
+    grant_ttl_ms,
+    expires_at_ms,
+    capability_manifest: out.manifest,
+    preview: {
+      title,
+      acceptanceCriteria,
+    },
+  });
+});
+
+app.get("/api/handoff/sessions/:sessionId", (req, res) => {
+  const sessionId = req.params.sessionId;
+  const row = ephemeralHandoffSessions.get(sessionId);
+  if (!row) {
+    res.status(404).json({ error: "Unknown session", code: "handoff_session_not_found" });
+    return;
+  }
+  const nowMs = Date.now();
+  const session_status = effectiveHandoffSessionStatus(row, nowMs);
+  res.status(200).json({
+    session_id: row.id,
+    session_status,
+    grant_ttl_ms: row.grant_ttl_ms,
+    expires_at_ms: row.expires_at_ms,
+    created_at_ms: row.created_at_ms,
+    capability_manifest: row.capability_manifest,
+  });
+});
+
+app.post("/api/handoff/sessions/:sessionId/revoke", (req, res) => {
+  const sessionId = req.params.sessionId;
+  const row = ephemeralHandoffSessions.get(sessionId);
+  if (!row) {
+    res.status(404).json({ error: "Unknown session", code: "handoff_session_not_found" });
+    return;
+  }
+  const nowMs = Date.now();
+  const session_status = effectiveHandoffSessionStatus(row, nowMs);
+  if (session_status !== "active") {
+    res.status(409).json({
+      error: "Session cannot be revoked",
+      code: "handoff_session_not_revokable",
+      session_status,
+    });
+    return;
+  }
+  row.status = "revoked";
+  res.status(200).json({
+    ok: true,
+    session_id: sessionId,
+    session_status: "revoked",
+  });
 });
 
 app.get("/auth/github/app/callback", async (req, res) => {
@@ -3704,8 +3863,12 @@ app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   }
 });
 
+// ─── Rent-an-Agent Routes ───────────────────────────────────
+app.use(createRentalRoutes());
+
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
 app.listen(PORT, () => {
   console.log(`🚀 Let Agents Chat API running on http://localhost:${PORT}`);
+  startRentalSweep();
 });

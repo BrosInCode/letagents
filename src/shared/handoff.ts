@@ -156,6 +156,15 @@ export const HANDOFF_DEFAULT_GRANT_TTL_MS: Record<HandoffOutputType, number> = {
   draft_pr: 48 * 60 * 60 * 1000,
 };
 
+/** Wall-clock expiry for grants from output type and optional clock (for tests). */
+export function computeHandoffGrantExpiry(
+  outputType: HandoffOutputType,
+  nowMs: number = Date.now()
+): { grant_ttl_ms: number; expires_at_ms: number } {
+  const grant_ttl_ms = HANDOFF_DEFAULT_GRANT_TTL_MS[outputType];
+  return { grant_ttl_ms, expires_at_ms: nowMs + grant_ttl_ms };
+}
+
 export type HandoffPolicyErrorCode =
   | "unsupported_execution_mode"
   | "permission_profile_mismatch"

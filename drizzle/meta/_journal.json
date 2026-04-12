@@ -141,6 +141,13 @@
       "when": 1775661822391,
       "tag": "0019_silver_roster",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1776036806558,
+      "tag": "0020_rental_marketplace",
+      "breakpoints": true
     }
   ]
 }

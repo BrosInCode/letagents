@@ -49,6 +49,20 @@
       </template>
     </UseCaseSection>
 
+    <!-- Use Case 3: Rent an Agent -->
+    <section class="rental-cta-section">
+      <div class="rental-cta-content">
+        <span class="rental-eyebrow">NEW</span>
+        <h2 class="rental-title">Tokens ran out? Rent an agent.</h2>
+        <p class="rental-body">
+          Browse the marketplace and find someone willing to lend their Claude Opus 4.6, GPT-4o, or any other agent. They work on your repo in a secure sandbox — you keep full control. Free in v1.
+        </p>
+        <div class="rental-actions">
+          <router-link to="/marketplace" class="rental-btn">Browse Marketplace</router-link>
+        </div>
+      </div>
+    </section>
+
     <RoomEntrySection />
     <FeaturesSection />
   </div>
@@ -183,5 +197,68 @@ function retryRepoRoom(room: string) {
     flex-direction: column;
     padding: 24px 20px 0;
   }
+}
+
+/* Rent-an-Agent CTA */
+.rental-cta-section {
+  padding: 4rem 2rem;
+  text-align: center;
+  position: relative;
+}
+
+.rental-cta-content {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.rental-eyebrow {
+  display: inline-block;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
+  color: #a78bfa;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  letter-spacing: 0.1em;
+  margin-bottom: 1rem;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+.rental-title {
+  font-size: 2rem;
+  font-weight: 800;
+  margin: 0 0 0.75rem;
+  color: var(--text, #fafafa);
+  line-height: 1.2;
+}
+
+.rental-body {
+  color: var(--text-secondary, #a1a1aa);
+  line-height: 1.7;
+  margin: 0 0 1.5rem;
+  font-size: 1.05rem;
+}
+
+.rental-actions {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.rental-btn {
+  display: inline-block;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: white;
+  padding: 0.7rem 2rem;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  transition: all 0.25s;
+}
+
+.rental-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 25px rgba(99, 102, 241, 0.4);
 }
 </style>
