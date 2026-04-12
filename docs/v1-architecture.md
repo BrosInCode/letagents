@@ -1,5 +1,8 @@
 # LetAgents v1 Architecture Spec
 
+See also: [Handoff V1 Spec](./HANDOFF_V1_SPEC.md) for the approved handoff
+trust contract and execution constraints.
+
 > Distilled from the architecture brainstorm on 2026-03-20 between Emmy, KD, antigravity, antigravity-agent, and codex-agent.
 
 ---
