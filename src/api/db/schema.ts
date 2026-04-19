@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 import { AGENT_PRESENCE_STATUSES } from "../../shared/agent-presence.js";
 import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
@@ -24,11 +24,60 @@ export const id_sequences = pgTable("id_sequences", {
   value: integer("value").notNull(),
 });
 
-export const rooms = pgTable("rooms", {
-  id: text("id").primaryKey(),
-  display_name: text("display_name").notNull(),
-  created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
-});
+export const rooms = pgTable(
+  "rooms",
+  {
+    id: text("id").primaryKey(),
+    display_name: text("display_name").notNull(),
+    kind: text("kind").notNull().default("main"),
+    parent_room_id: text("parent_room_id").references((): AnyPgColumn => rooms.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+    focus_key: text("focus_key"),
+    source_task_id: text("source_task_id"),
+    focus_status: text("focus_status"),
+    concluded_at: timestamp("concluded_at", { mode: "string", withTimezone: true }),
+    conclusion_summary: text("conclusion_summary"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    parent_idx: index("rooms_parent_room_id_idx").on(table.parent_room_id),
+    parent_source_task_idx: index("rooms_parent_source_task_idx").on(
+      table.parent_room_id,
+      table.source_task_id
+    ),
+    parent_focus_key_idx: uniqueIndex("rooms_parent_focus_key_idx")
+      .on(table.parent_room_id, table.focus_key)
+      .where(sql`${table.kind} = 'focus'`),
+    active_focus_task_idx: uniqueIndex("rooms_active_focus_task_idx")
+      .on(table.parent_room_id, table.source_task_id)
+      .where(sql`${table.kind} = 'focus' AND ${table.focus_status} = 'active'`),
+    kind_check: check("rooms_kind_check", sql`${table.kind} IN ('main', 'focus')`),
+    focus_status_check: check(
+      "rooms_focus_status_check",
+      sql`${table.focus_status} IS NULL OR ${table.focus_status} IN ('active', 'concluded')`
+    ),
+    focus_lineage_check: check(
+      "rooms_focus_lineage_check",
+      sql`(
+        ${table.kind} = 'main'
+        AND ${table.parent_room_id} IS NULL
+        AND ${table.focus_key} IS NULL
+        AND ${table.source_task_id} IS NULL
+        AND ${table.focus_status} IS NULL
+        AND ${table.concluded_at} IS NULL
+        AND ${table.conclusion_summary} IS NULL
+      ) OR (
+        ${table.kind} = 'focus'
+        AND ${table.parent_room_id} IS NOT NULL
+        AND ${table.focus_key} IS NOT NULL
+        AND ${table.source_task_id} IS NOT NULL
+        AND ${table.focus_status} IS NOT NULL
+      )`
+    ),
+  })
+);
 
 export const room_aliases = pgTable(
   "room_aliases",

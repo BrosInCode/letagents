@@ -44,11 +44,21 @@ import {
   type TaskWorkflowRef,
 } from "./repo-workflow.js";
 
+export type RoomKind = "main" | "focus";
+export type FocusRoomStatus = "active" | "concluded";
+
 export interface Project {
   id: string;
   code: string | null;
   display_name: string;
   name?: string;
+  kind: RoomKind;
+  parent_room_id: string | null;
+  focus_key: string | null;
+  source_task_id: string | null;
+  focus_status: FocusRoomStatus | null;
+  concluded_at: string | null;
+  conclusion_summary: string | null;
   created_at: string;
 }
 
@@ -354,6 +364,13 @@ function toProject(row: typeof rooms.$inferSelect): Project {
     code: inviteRoom ? row.id : null,
     display_name: row.display_name,
     name: inviteRoom ? undefined : row.id,
+    kind: row.kind as RoomKind,
+    parent_room_id: row.parent_room_id,
+    focus_key: row.focus_key,
+    source_task_id: row.source_task_id,
+    focus_status: row.focus_status as FocusRoomStatus | null,
+    concluded_at: row.concluded_at,
+    conclusion_summary: row.conclusion_summary,
     created_at: row.created_at,
   };
 }
@@ -613,6 +630,13 @@ export async function createProject(): Promise<Project> {
         id: roomId,
         code: roomId,
         display_name,
+        kind: "main",
+        parent_room_id: null,
+        focus_key: null,
+        source_task_id: null,
+        focus_status: null,
+        concluded_at: null,
+        conclusion_summary: null,
         created_at,
       };
     } catch (error) {
@@ -663,6 +687,13 @@ export async function getOrCreateCanonicalRoom(
         code: null,
         display_name,
         name: canonicalId,
+        kind: "main",
+        parent_room_id: null,
+        focus_key: null,
+        source_task_id: null,
+        focus_status: null,
+        concluded_at: null,
+        conclusion_summary: null,
         created_at,
       },
       created: true,
@@ -683,7 +714,11 @@ export async function getProjectByName(name: string): Promise<Project | undefine
 }
 
 export async function getAllProjects(): Promise<Pick<Project, "id" | "code" | "display_name">[]> {
-  const rows = await db.select().from(rooms).orderBy(asc(rooms.created_at));
+  const rows = await db
+    .select()
+    .from(rooms)
+    .where(eq(rooms.kind, "main"))
+    .orderBy(asc(rooms.created_at));
   return rows.map((row) => {
     const project = toProject(row);
     return { id: project.id, code: project.code, display_name: project.display_name };
@@ -771,6 +806,13 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
         id: nextCode,
         code: nextCode,
         display_name: project.display_name,
+        kind: project.kind,
+        parent_room_id: project.parent_room_id,
+        focus_key: project.focus_key,
+        source_task_id: project.source_task_id,
+        focus_status: project.focus_status,
+        concluded_at: project.concluded_at,
+        conclusion_summary: project.conclusion_summary,
         created_at: project.created_at,
       };
     } catch (error) {
@@ -794,6 +836,145 @@ export async function updateProjectDisplayName(
     .returning();
 
   return updated ? toProject(updated) : null;
+}
+
+async function buildFocusRoomId(): Promise<string> {
+  return nextPrefixedId("focus_rooms", "focus");
+}
+
+function truncateDisplayName(value: string): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (normalized.length <= 64) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 61).trimEnd()}...`;
+}
+
+function buildFocusRoomDisplayName(task: Task, displayName?: string): string {
+  if (displayName?.trim()) {
+    return normalizeRoomDisplayName(displayName);
+  }
+
+  return normalizeRoomDisplayName(truncateDisplayName(`Focus: ${task.title}`));
+}
+
+export async function getFocusRoomsForParent(parentRoomId: string): Promise<Project[]> {
+  const rows = await db
+    .select()
+    .from(rooms)
+    .where(and(eq(rooms.parent_room_id, parentRoomId), eq(rooms.kind, "focus")))
+    .orderBy(asc(rooms.created_at));
+
+  return rows.map(toProject);
+}
+
+export async function getActiveFocusRoomForTask(
+  parentRoomId: string,
+  taskId: string
+): Promise<Project | undefined> {
+  const [focusRoom] = await db
+    .select()
+    .from(rooms)
+    .where(
+      and(
+        eq(rooms.parent_room_id, parentRoomId),
+        eq(rooms.source_task_id, taskId),
+        eq(rooms.kind, "focus"),
+        eq(rooms.focus_status, "active")
+      )
+    )
+    .limit(1);
+
+  return focusRoom ? toProject(focusRoom) : undefined;
+}
+
+export async function getFocusRoomByKey(
+  parentRoomId: string,
+  focusKey: string
+): Promise<Project | undefined> {
+  const [focusRoom] = await db
+    .select()
+    .from(rooms)
+    .where(
+      and(
+        eq(rooms.parent_room_id, parentRoomId),
+        eq(rooms.focus_key, focusKey),
+        eq(rooms.kind, "focus")
+      )
+    )
+    .limit(1);
+
+  return focusRoom ? toProject(focusRoom) : undefined;
+}
+
+export async function createFocusRoomForTask(
+  parentRoomId: string,
+  taskId: string,
+  options?: { displayName?: string }
+): Promise<{ room: Project; task: Task; created: boolean } | null> {
+  const parent = await getProjectById(parentRoomId);
+  if (!parent) {
+    return null;
+  }
+  if (parent.kind === "focus") {
+    throw new Error("Focus rooms can only be opened from a main room");
+  }
+
+  const task = await getTaskById(parent.id, taskId);
+  if (!task) {
+    return null;
+  }
+
+  const existing = await getActiveFocusRoomForTask(parent.id, task.id);
+  if (existing) {
+    return { room: existing, task, created: false };
+  }
+
+  const display_name = buildFocusRoomDisplayName(task, options?.displayName);
+
+  while (true) {
+    const id = await buildFocusRoomId();
+    const created_at = new Date().toISOString();
+
+    try {
+      await db.transaction(async (tx) => {
+        await tx.insert(rooms).values({
+          id,
+          display_name,
+          kind: "focus",
+          parent_room_id: parent.id,
+          focus_key: task.id,
+          source_task_id: task.id,
+          focus_status: "active",
+          created_at,
+        });
+        await tx
+          .delete(id_sequences)
+          .where(inArray(id_sequences.name, getRoomScopedSequenceNames(id)));
+      });
+
+      const room = await getProjectById(id);
+      if (!room) {
+        throw new Error("Focus room was created but could not be loaded");
+      }
+
+      return { room, task, created: true };
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+
+      const retried = await getActiveFocusRoomForTask(parent.id, task.id);
+      if (retried) {
+        return { room: retried, task, created: false };
+      }
+      const keyed = await getFocusRoomByKey(parent.id, task.id);
+      if (keyed) {
+        return { room: keyed, task, created: false };
+      }
+    }
+  }
 }
 
 function serializeGitHubPermissions(

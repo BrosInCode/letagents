@@ -10,6 +10,7 @@ import {
   assignProjectAdmin,
   consumeAuthState,
   createAuthState,
+  createFocusRoomForTask,
   createProject,
   createSession,
   createTask,
@@ -26,6 +27,8 @@ import {
   getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
+  getFocusRoomByKey,
+  getFocusRoomsForParent,
   getOpenTasks,
   getOrCreateCanonicalRoom,
   getProjectByCode,
@@ -324,6 +327,31 @@ function formatTaskLifecycleStatus(task: {
   }
 }
 
+function toRoomResponse(
+  project: Project,
+  options?: {
+    role?: "admin" | "participant" | "anonymous";
+    authenticated?: boolean;
+  }
+): Record<string, unknown> {
+  return {
+    room_id: project.id,
+    name: project.name ?? null,
+    display_name: project.display_name,
+    code: project.code,
+    kind: project.kind,
+    parent_room_id: project.parent_room_id,
+    focus_key: project.focus_key,
+    source_task_id: project.source_task_id,
+    focus_status: project.focus_status,
+    concluded_at: project.concluded_at,
+    conclusion_summary: project.conclusion_summary,
+    created_at: project.created_at,
+    ...(options?.role ? { role: options.role } : {}),
+    ...(options ? { authenticated: Boolean(options.authenticated) } : {}),
+  };
+}
+
 function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresence {
   return {
     ...presence,
@@ -600,6 +628,32 @@ function isRepoBackedRoomId(roomId: string): boolean {
   return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(roomId);
 }
 
+function getProjectAccessRoomId(project: Project): string {
+  return project.parent_room_id ?? project.id;
+}
+
+function parseFocusRoomLocator(
+  roomId: string
+): { parentRoomId: string; focusKey: string } | null {
+  const marker = "/focus/";
+  const index = roomId.lastIndexOf(marker);
+  if (index < 0) {
+    return null;
+  }
+
+  const parentRoomId = roomId.slice(0, index);
+  const focusKey = roomId.slice(index + marker.length);
+  if (!parentRoomId || !focusKey || focusKey.includes("/")) {
+    return null;
+  }
+
+  return { parentRoomId, focusKey };
+}
+
+function isReservedRoomId(roomId: string): boolean {
+  return /^focus_\d+$/.test(roomId);
+}
+
 function sanitizeRedirectPath(pathValue: string | null | undefined, fallback = "/"): string {
   const trimmed = pathValue?.trim();
   if (!trimmed || !trimmed.startsWith("/") || trimmed.startsWith("//")) {
@@ -632,7 +686,7 @@ function buildLandingRedirect(input: {
 }
 
 function isRepoBackedProject(project: Project): boolean {
-  return isRepoBackedRoomId(project.id);
+  return isRepoBackedRoomId(getProjectAccessRoomId(project));
 }
 
 function getPublicBaseUrl(): string {
@@ -695,17 +749,21 @@ async function resolveProjectRole(
   project: Project,
   sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined
 ): Promise<"admin" | "participant" | "anonymous"> {
+  const accessRoomId = getProjectAccessRoomId(project);
   if (!sessionAccount) {
     return isRepoBackedProject(project) ? "anonymous" : "participant";
   }
 
-  if (await isProjectAdmin(project.id, sessionAccount.account_id)) {
+  if (
+    (await isProjectAdmin(project.id, sessionAccount.account_id)) ||
+    (accessRoomId !== project.id && (await isProjectAdmin(accessRoomId, sessionAccount.account_id)))
+  ) {
     return "admin";
   }
 
-  if (parseGitHubRepoName(project.id) && sessionAccount.provider === "github") {
+  if (parseGitHubRepoName(accessRoomId) && sessionAccount.provider === "github") {
     const eligible = await isGitHubRepoAdmin({
-      roomName: project.id,
+      roomName: accessRoomId,
       login: sessionAccount.login,
       accessToken: sessionAccount.provider_access_token ?? "",
     });
@@ -748,7 +806,7 @@ async function requireParticipant(
   }
 
   const decision = await resolveRepoRoomAccessDecision({
-    roomName: project.id,
+    roomName: getProjectAccessRoomId(project),
     sessionAccount: req.sessionAccount,
   });
 
@@ -756,7 +814,7 @@ async function requireParticipant(
     return true;
   }
 
-  return replyRepoRoomAccessDecision(res, project.id, decision);
+  return replyRepoRoomAccessDecision(res, getProjectAccessRoomId(project), decision);
 }
 
 async function resolveGitHubRoomEntryDecision(input: {
@@ -834,6 +892,25 @@ async function resolveRoomOrReply(
   res: express.Response,
   { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
 ): Promise<Project | null> {
+  const focusLocator = parseFocusRoomLocator(roomId);
+  if (focusLocator) {
+    const parentRoomId = await resolveCanonicalRoomRequestId(
+      normalizeRoomId(focusLocator.parentRoomId)
+    );
+    const parent = await getProjectById(parentRoomId);
+    if (!parent) {
+      res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+      return null;
+    }
+
+    const focusRoom = await getFocusRoomByKey(parent.id, focusLocator.focusKey);
+    if (!focusRoom) {
+      res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+      return null;
+    }
+    return focusRoom;
+  }
+
   // Handle invite codes (e.g., JA0E-4NYO or JA0E-4NYO-L2QP)
   if (isInviteCode(roomId)) {
     const project = await getProjectByCode(roomId);
@@ -845,6 +922,15 @@ async function resolveRoomOrReply(
   }
 
   if (allowCreate) {
+    if (isReservedRoomId(roomId)) {
+      const found = await getProjectById(roomId);
+      if (!found) {
+        res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+        return null;
+      }
+      return found;
+    }
+
     const { room } = await getOrCreateCanonicalRoom(roomId);
     return room;
   }
@@ -3053,6 +3139,18 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
   const project = await resolveRoomOrReply(roomId, res, { allowCreate: true });
   if (!project) return;
 
+  const accessRoomId = getProjectAccessRoomId(project);
+  if (accessRoomId !== roomId && isRepoBackedRoomId(accessRoomId)) {
+    const decision = await resolveRepoRoomAccessDecision({
+      roomName: accessRoomId,
+      sessionAccount: req.sessionAccount,
+    });
+    if (decision.kind !== "allow") {
+      replyRepoRoomAccessDecision(res, accessRoomId, decision);
+      return;
+    }
+  }
+
   if (req.sessionAccount) {
     if (isRepoBackedProject(project)) {
       await resolveProjectRole(project, req.sessionAccount);
@@ -3071,13 +3169,10 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
   }
 
   res.status(200).json({
-    room_id: project.id,
-    name: project.name ?? null,
-    display_name: project.display_name,
-    code: project.code,
-    created_at: project.created_at,
-    role,
-    authenticated: Boolean(req.sessionAccount),
+    ...toRoomResponse(project, {
+      role,
+      authenticated: Boolean(req.sessionAccount),
+    }),
   });
 });
 
@@ -3425,6 +3520,47 @@ app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => 
   }
 });
 
+app.get(/^\/rooms\/(.+)\/focus\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const focusRoom = await getFocusRoomByKey(project.id, focusKey);
+  if (!focusRoom) {
+    res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
+    return;
+  }
+
+  const role = await resolveProjectRole(focusRoom, req.sessionAccount);
+  res.json({
+    ...toRoomResponse(focusRoom, {
+      role,
+      authenticated: Boolean(req.sessionAccount),
+    }),
+  });
+});
+
+app.get(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res);
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const focusRooms = await getFocusRoomsForParent(project.id);
+  res.json({
+    room_id: project.id,
+    focus_rooms: focusRooms.map((focusRoom) => toRoomResponse(focusRoom)),
+  });
+});
+
 app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -3479,6 +3615,58 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
 
   await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
   res.status(201).json({ ...acceptedTask, room_id: project.id });
+});
+
+app.post(/^\/rooms\/(.+)\/tasks\/([^/]+)\/focus-room$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+  const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const { display_name } = req.body as { display_name?: string };
+  try {
+    const result = await createFocusRoomForTask(project.id, taskId, {
+      displayName: display_name,
+    });
+    if (!result) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+
+    if (result.created && req.sessionAccount) {
+      await assignProjectAdmin(result.room.id, req.sessionAccount.account_id);
+    }
+
+    if (result.created) {
+      await emitProjectMessage(
+        project.id,
+        "letagents",
+        `[status] Focus Room opened for ${result.task.id}: ${result.task.title}`
+      );
+    }
+
+    const role = await resolveProjectRole(result.room, req.sessionAccount);
+    res.status(result.created ? 201 : 200).json({
+      room_id: project.id,
+      task_id: result.task.id,
+      created: result.created,
+      focus_room: toRoomResponse(result.room, {
+        role,
+        authenticated: Boolean(req.sessionAccount),
+      }),
+    });
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /rooms/:room_id/tasks/:task_id/focus-room",
+      error,
+      "Focus Room could not be opened."
+    );
+  }
 });
 
 /**
@@ -3686,13 +3874,10 @@ app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
 
     const role = await resolveProjectRole(updated, req.sessionAccount);
     res.json({
-      room_id: updated.id,
-      name: updated.name ?? null,
-      display_name: updated.display_name,
-      code: updated.code,
-      created_at: updated.created_at,
-      role,
-      authenticated: Boolean(req.sessionAccount),
+      ...toRoomResponse(updated, {
+        role,
+        authenticated: Boolean(req.sessionAccount),
+      }),
     });
   } catch (error) {
     respondWithBadRequest(
