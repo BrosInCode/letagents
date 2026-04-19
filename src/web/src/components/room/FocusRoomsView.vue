@@ -633,7 +633,7 @@ function taskStatusLabel(status: string): string {
 .focus-detail {
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: var(--bg-card, #131316);
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 .focus-hero-copy {
@@ -655,7 +655,6 @@ function taskStatusLabel(status: string): string {
   color: var(--text-primary, #ffffff);
   font-weight: 800;
   font-size: 1.45rem;
-  letter-spacing: -0.02em;
 }
 
 .focus-context h4,
@@ -665,7 +664,6 @@ function taskStatusLabel(status: string): string {
   margin: 0;
   color: var(--text-primary, #ffffff);
   font-weight: 700;
-  letter-spacing: -0.01em;
 }
 
 .focus-hero p,
@@ -940,7 +938,7 @@ function taskStatusLabel(status: string): string {
   margin-bottom: 10px;
   border: 1px solid rgba(255, 255, 255, 0.04);
   background: rgba(255, 255, 255, 0.02);
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--text-secondary, #d4d4d8);
   cursor: pointer;
   text-align: left;
