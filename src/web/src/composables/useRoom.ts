@@ -833,6 +833,27 @@ async function createFocusRoom(taskId: string): Promise<FocusRoomInfo | null> {
   }
 }
 
+async function createAdHocFocusRoom(title: string): Promise<FocusRoomInfo | null> {
+  if (!room.value) return null
+  const trimmedTitle = title.trim()
+  if (!trimmedTitle) return null
+
+  try {
+    const data = await apiFetch(`${roomPath(room.value.identifier)}/focus-rooms`, {
+      method: 'POST',
+      body: JSON.stringify({ title: trimmedTitle }),
+    })
+    const focusRoom = data.focus_room as FocusRoomInfo | undefined
+    if (!focusRoom?.room_id) return null
+
+    upsertFocusRoom(focusRoom)
+
+    return focusRoom
+  } catch {
+    return null
+  }
+}
+
 async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: FocusRoomInfo; parentMessagePosted: boolean } | null> {
   if (!room.value || room.value.kind !== 'focus') return null
   const trimmedSummary = summary.trim()
@@ -1152,6 +1173,7 @@ export function useRoom() {
     addTask,
     updateTask,
     createFocusRoom,
+    createAdHocFocusRoom,
     shareFocusRoomResult,
     updateFocusRoomSettings,
     refreshFocusRooms,
