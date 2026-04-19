@@ -4,6 +4,10 @@ import type {
   TaskLockReason,
   TaskLockScope,
 } from "./db.js";
+import {
+  normalizeTaskWorkflowArtifacts,
+  type TaskWorkflowArtifact,
+} from "./repo-workflow.js";
 
 export interface CoordinationActor {
   actorLabel: string | null;
@@ -20,6 +24,9 @@ export interface CoordinationLeaseLike {
   agent_key: string;
   agent_instance_id: string | null;
   actor_label: string;
+  branch_ref?: string | null;
+  pr_url?: string | null;
+  output_intent?: string | null;
   expires_at: string | null;
 }
 
@@ -32,6 +39,75 @@ export interface CoordinationLockLike {
   message: string | null;
   cleared_at: string | null;
 }
+
+export interface CoordinationTaskLike {
+  id: string;
+  room_id: string;
+  status?: string | null;
+  source_message_id?: string | null;
+  pr_url?: string | null;
+  workflow_artifacts?: readonly TaskWorkflowArtifact[] | null;
+}
+
+export interface CoordinationFocusRoomLike {
+  room_id: string;
+  focus_key: string | null;
+  source_task_id: string | null;
+  focus_status: string | null;
+}
+
+export interface CoordinationWorkIntent {
+  sourceMessageId?: string | null;
+  sourceTaskId?: string | null;
+  branchRef?: string | null;
+  prUrl?: string | null;
+  outputIntent?: string | null;
+  workflowArtifacts?: readonly TaskWorkflowArtifact[] | null;
+}
+
+export type CoordinationDuplicateReason =
+  | "source_message"
+  | "source_task"
+  | "focus_room"
+  | "pr_url"
+  | "workflow_artifact"
+  | "lease_branch_ref"
+  | "lease_pr_url"
+  | "lease_output_intent";
+
+export interface CoordinationDuplicateMatch {
+  reason: CoordinationDuplicateReason;
+  taskId: string;
+  value: string;
+  task?: CoordinationTaskLike;
+  lease?: CoordinationLeaseLike;
+  focusRoom?: CoordinationFocusRoomLike;
+  artifact?: TaskWorkflowArtifact;
+}
+
+export type CoordinationAdmissionResult =
+  | {
+      kind: "allow";
+      reason: "no_duplicate";
+    }
+  | {
+      kind: "route_to_review";
+      reason: string;
+      duplicate: CoordinationDuplicateMatch;
+    };
+
+export type ReviewLeaseRoutingResult =
+  | {
+      kind: "allow";
+      activeWorkLease: CoordinationLeaseLike | null;
+      existingReviewLease: CoordinationLeaseLike | null;
+    }
+  | {
+      kind: "deny";
+      code: "missing_actor" | "unassigned_reviewer" | "work_lease_holder";
+      reason: string;
+      lease?: CoordinationLeaseLike;
+    };
 
 export type CoordinationMutationKind =
   | "task_admit"
@@ -60,6 +136,69 @@ export type CoordinationDecisionResult =
       lock?: CoordinationLockLike;
       lease?: CoordinationLeaseLike;
     };
+
+function normalizeIdentity(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeUrlIdentity(value: string | null | undefined): string | null {
+  const normalized = normalizeIdentity(value);
+  return normalized ? normalized.replace(/\/+$/, "") : null;
+}
+
+function isOpenCoordinationTask(task: CoordinationTaskLike): boolean {
+  return task.status !== "done" && task.status !== "cancelled";
+}
+
+function taskWorkflowArtifacts(
+  task: CoordinationTaskLike
+): TaskWorkflowArtifact[] {
+  return normalizeTaskWorkflowArtifacts({
+    artifacts: task.workflow_artifacts ? [...task.workflow_artifacts] : [],
+    prUrl: task.pr_url ?? null,
+  });
+}
+
+function intentWorkflowArtifacts(intent: CoordinationWorkIntent): TaskWorkflowArtifact[] {
+  return normalizeTaskWorkflowArtifacts({
+    artifacts: intent.workflowArtifacts ? [...intent.workflowArtifacts] : [],
+    prUrl: intent.prUrl ?? null,
+  });
+}
+
+function leaseWorkflowArtifacts(lease: CoordinationLeaseLike): TaskWorkflowArtifact[] {
+  return normalizeTaskWorkflowArtifacts({
+    artifacts: [],
+    prUrl: lease.pr_url ?? null,
+  });
+}
+
+function artifactIdentityValues(artifact: TaskWorkflowArtifact): string[] {
+  const values: string[] = [];
+  const url = normalizeUrlIdentity(artifact.url);
+  if (url) {
+    values.push(`url:${url}`);
+  }
+  if (artifact.id) {
+    values.push(`${artifact.provider}:${artifact.kind}:id:${artifact.id}`);
+  }
+  if (artifact.number !== undefined && artifact.number !== null) {
+    values.push(`${artifact.provider}:${artifact.kind}:number:${artifact.number}`);
+  }
+  if (artifact.ref) {
+    values.push(`${artifact.provider}:${artifact.kind}:ref:${artifact.ref}`);
+  }
+  return values;
+}
+
+function artifactsShareIdentity(
+  left: TaskWorkflowArtifact,
+  right: TaskWorkflowArtifact
+): string | null {
+  const rightValues = new Set(artifactIdentityValues(right));
+  return artifactIdentityValues(left).find((value) => rightValues.has(value)) ?? null;
+}
 
 export function isActiveCoordinationLease(
   lease: CoordinationLeaseLike,
@@ -125,6 +264,247 @@ export function findActorLease(input: {
     isActiveCoordinationLease(lease, now) &&
     leaseMatchesActor(lease, input.actor)
   ) ?? null;
+}
+
+export function findDuplicateCoordinationIntent(input: {
+  intent: CoordinationWorkIntent;
+  tasks: readonly CoordinationTaskLike[];
+  focusRooms?: readonly CoordinationFocusRoomLike[];
+  leases?: readonly CoordinationLeaseLike[];
+  now?: Date;
+}): CoordinationDuplicateMatch | null {
+  const openTasks = input.tasks.filter(isOpenCoordinationTask);
+  const taskById = new Map(openTasks.map((task) => [task.id, task]));
+  const sourceMessageId = normalizeIdentity(input.intent.sourceMessageId);
+  if (sourceMessageId) {
+    const task = openTasks.find(
+      (candidate) => normalizeIdentity(candidate.source_message_id) === sourceMessageId
+    );
+    if (task) {
+      return {
+        reason: "source_message",
+        taskId: task.id,
+        value: sourceMessageId,
+        task,
+      };
+    }
+  }
+
+  const sourceTaskId = normalizeIdentity(input.intent.sourceTaskId);
+  if (sourceTaskId && taskById.has(sourceTaskId)) {
+    return {
+      reason: "source_task",
+      taskId: sourceTaskId,
+      value: sourceTaskId,
+      task: taskById.get(sourceTaskId),
+    };
+  }
+
+  if (sourceTaskId) {
+    const focusRoom = input.focusRooms?.find(
+      (room) =>
+        room.focus_status !== "concluded" &&
+        normalizeIdentity(room.source_task_id) === sourceTaskId
+    );
+    if (focusRoom) {
+      return {
+        reason: "focus_room",
+        taskId: sourceTaskId,
+        value: focusRoom.room_id,
+        task: taskById.get(sourceTaskId),
+        focusRoom,
+      };
+    }
+  }
+
+  const prUrl = normalizeUrlIdentity(input.intent.prUrl);
+  if (prUrl) {
+    for (const task of openTasks) {
+      if (normalizeUrlIdentity(task.pr_url) === prUrl) {
+        return {
+          reason: "pr_url",
+          taskId: task.id,
+          value: prUrl,
+          task,
+        };
+      }
+    }
+  }
+
+  const intentArtifacts = intentWorkflowArtifacts(input.intent);
+  if (intentArtifacts.length > 0) {
+    for (const task of openTasks) {
+      for (const taskArtifact of taskWorkflowArtifacts(task)) {
+        for (const intentArtifact of intentArtifacts) {
+          const value = artifactsShareIdentity(intentArtifact, taskArtifact);
+          if (value) {
+            return {
+              reason: "workflow_artifact",
+              taskId: task.id,
+              value,
+              task,
+              artifact: taskArtifact,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  const now = input.now ?? new Date();
+  const activeLeases = (input.leases ?? []).filter((lease) =>
+    isActiveCoordinationLease(lease, now)
+  );
+  const branchRef = normalizeIdentity(input.intent.branchRef);
+  if (branchRef) {
+    const lease = activeLeases.find(
+      (candidate) => normalizeIdentity(candidate.branch_ref) === branchRef
+    );
+    if (lease) {
+      return {
+        reason: "lease_branch_ref",
+        taskId: lease.task_id,
+        value: branchRef,
+        lease,
+        task: taskById.get(lease.task_id),
+      };
+    }
+  }
+
+  if (prUrl) {
+    const lease = activeLeases.find(
+      (candidate) => normalizeUrlIdentity(candidate.pr_url) === prUrl
+    );
+    if (lease) {
+      return {
+        reason: "lease_pr_url",
+        taskId: lease.task_id,
+        value: prUrl,
+        lease,
+        task: taskById.get(lease.task_id),
+      };
+    }
+  }
+
+  if (intentArtifacts.length > 0) {
+    for (const lease of activeLeases) {
+      for (const leaseArtifact of leaseWorkflowArtifacts(lease)) {
+        for (const intentArtifact of intentArtifacts) {
+          const value = artifactsShareIdentity(intentArtifact, leaseArtifact);
+          if (value) {
+            return {
+              reason: "lease_pr_url",
+              taskId: lease.task_id,
+              value,
+              lease,
+              task: taskById.get(lease.task_id),
+              artifact: leaseArtifact,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  const outputIntent = normalizeIdentity(input.intent.outputIntent);
+  if (outputIntent) {
+    const lease = activeLeases.find(
+      (candidate) => normalizeIdentity(candidate.output_intent) === outputIntent
+    );
+    if (lease) {
+      return {
+        reason: "lease_output_intent",
+        taskId: lease.task_id,
+        value: outputIntent,
+        lease,
+        task: taskById.get(lease.task_id),
+      };
+    }
+  }
+
+  return null;
+}
+
+export function evaluateTaskAdmission(input: {
+  intent: CoordinationWorkIntent;
+  tasks: readonly CoordinationTaskLike[];
+  focusRooms?: readonly CoordinationFocusRoomLike[];
+  leases?: readonly CoordinationLeaseLike[];
+  now?: Date;
+}): CoordinationAdmissionResult {
+  const duplicate = findDuplicateCoordinationIntent(input);
+  if (!duplicate) {
+    return {
+      kind: "allow",
+      reason: "no_duplicate",
+    };
+  }
+
+  return {
+    kind: "route_to_review",
+    duplicate,
+    reason:
+      `Duplicate work intent matched ${duplicate.reason} on ${duplicate.taskId}; ` +
+      "route the actor to review the existing work instead of creating a new implementation lane.",
+  };
+}
+
+export function evaluateReviewLeaseRouting(input: {
+  taskId: string;
+  actor: CoordinationActor;
+  leases: readonly CoordinationLeaseLike[];
+  reviewerAgentKeys?: readonly string[];
+  now?: Date;
+}): ReviewLeaseRoutingResult {
+  if (!input.actor.agentKey) {
+    return {
+      kind: "deny",
+      code: "missing_actor",
+      reason: "Review lease routing requires an authenticated agent key.",
+    };
+  }
+
+  if (
+    input.reviewerAgentKeys &&
+    !input.reviewerAgentKeys.includes(input.actor.agentKey)
+  ) {
+    return {
+      kind: "deny",
+      code: "unassigned_reviewer",
+      reason: `Agent ${input.actor.agentKey} is not assigned to review ${input.taskId}.`,
+    };
+  }
+
+  const now = input.now ?? new Date();
+  const activeTaskLeases = input.leases.filter((lease) =>
+    lease.task_id === input.taskId && isActiveCoordinationLease(lease, now)
+  );
+  const activeWorkLease =
+    activeTaskLeases.find((lease) => lease.kind === "work") ?? null;
+  if (activeWorkLease?.agent_key === input.actor.agentKey) {
+    return {
+      kind: "deny",
+      code: "work_lease_holder",
+      reason:
+        `Agent ${input.actor.agentKey} holds work lease ${activeWorkLease.id} ` +
+        `and cannot review ${input.taskId}.`,
+      lease: activeWorkLease,
+    };
+  }
+
+  const existingReviewLease = findActorLease({
+    leases: activeTaskLeases,
+    taskId: input.taskId,
+    kind: "review",
+    actor: input.actor,
+    now,
+  });
+
+  return {
+    kind: "allow",
+    activeWorkLease,
+    existingReviewLease,
+  };
 }
 
 export function evaluateCoordinationMutation(input: {
