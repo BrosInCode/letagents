@@ -5,7 +5,9 @@ import {
   evaluateCoordinationMutation,
   evaluateReviewLeaseRouting,
   evaluateTaskAdmission,
+  evaluateWorkflowArtifactMutation,
   findApplicableLock,
+  findWorkflowArtifactLease,
   isActiveCoordinationLease,
   leaseMatchesActor,
   type CoordinationLeaseLike,
@@ -331,6 +333,77 @@ test("evaluateTaskAdmission routes duplicate output intent from an active lease 
     result.kind === "route_to_review" ? result.duplicate.reason : null,
     "lease_output_intent"
   );
+});
+
+test("findWorkflowArtifactLease matches active work leases by PR URL or branch ref", () => {
+  const now = new Date("2026-04-19T19:00:00.000Z");
+  const leases = [
+    lease({
+      id: "tl_review",
+      kind: "review",
+      pr_url: "https://github.com/BrosInCode/letagents/pull/99",
+    }),
+    lease({
+      id: "tl_work",
+      pr_url: "https://github.com/BrosInCode/letagents/pull/201",
+      branch_ref: "foxsage/task-95-artifact-enforcement",
+    }),
+  ];
+
+  assert.equal(
+    findWorkflowArtifactLease({
+      leases,
+      taskId: "task_90",
+      prUrl: "https://github.com/BrosInCode/letagents/pull/201",
+      now,
+    })?.id,
+    "tl_work"
+  );
+  assert.equal(
+    findWorkflowArtifactLease({
+      leases,
+      taskId: "task_90",
+      branchRef: "refs/heads/foxsage/task-95-artifact-enforcement",
+      now,
+    })?.id,
+    "tl_work"
+  );
+});
+
+test("evaluateWorkflowArtifactMutation denies referenced PRs that do not match the active work lease", () => {
+  const result = evaluateWorkflowArtifactMutation({
+    mutation: "webhook_projection",
+    taskId: "task_90",
+    prUrl: "https://github.com/BrosInCode/letagents/pull/202",
+    leases: [
+      lease({
+        pr_url: "https://github.com/BrosInCode/letagents/pull/201",
+      }),
+    ],
+    locks: [],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "deny");
+  assert.equal(result.kind === "deny" ? result.code : null, "wrong_workflow_artifact");
+});
+
+test("evaluateWorkflowArtifactMutation denies before projection when a stop lock exists", () => {
+  const result = evaluateWorkflowArtifactMutation({
+    mutation: "webhook_projection",
+    taskId: "task_90",
+    prUrl: "https://github.com/BrosInCode/letagents/pull/201",
+    leases: [
+      lease({
+        pr_url: "https://github.com/BrosInCode/letagents/pull/201",
+      }),
+    ],
+    locks: [lock()],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "deny");
+  assert.equal(result.kind === "deny" ? result.code : null, "active_lock");
 });
 
 test("evaluateReviewLeaseRouting rejects the active work lease holder", () => {

@@ -64,6 +64,8 @@ function toRepoPullRequestRef(
     title: payload.title,
     url: payload.html_url,
     body: payload.body,
+    headRef: payload.head?.ref,
+    headSha: payload.head?.sha,
     merged: payload.merged,
     authorLogin: payload.user?.login,
     mergedByLogin: payload.merged_by?.login,
@@ -285,6 +287,7 @@ export function materializeGitHubWebhookEvent(
           body: pullRequest.body ?? null,
           draft: payload.pull_request?.draft ?? null,
           merged: payload.pull_request?.merged ?? null,
+          head_ref: payload.pull_request?.head?.ref ?? null,
           head_sha: payload.pull_request?.head?.sha ?? null,
         },
         roomEvent: {

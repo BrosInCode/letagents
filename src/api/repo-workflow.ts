@@ -28,6 +28,8 @@ export interface RepoPullRequestRef {
   title: string;
   url: string;
   body?: string | null;
+  headRef?: string | null;
+  headSha?: string | null;
   merged?: boolean;
   authorLogin?: string | null;
   mergedByLogin?: string | null;

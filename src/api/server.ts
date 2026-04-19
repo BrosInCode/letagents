@@ -57,6 +57,7 @@ import {
   setGitHubAppInstallationSuspended,
   createOwnerToken,
   updateGitHubRoomEventLinkedTaskId,
+  updateTaskLeaseWorkflowRefs,
   upsertGitHubAppInstallation,
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
@@ -103,6 +104,7 @@ import {
   projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,
   validateTaskWorkflowArtifactsInput,
+  type RepoPullRequestRef,
   type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
@@ -149,6 +151,7 @@ import {
 import {
   evaluateTaskAdmission,
   evaluateCoordinationMutation,
+  evaluateWorkflowArtifactMutation,
   findApplicableLock,
   type CoordinationMutationKind,
 } from "./coordination-policy.js";
@@ -590,6 +593,27 @@ function classifyTaskCoordinationMutation(
   return null;
 }
 
+function getTaskUpdatePrUrlBinding(updates: TaskUpdatePatch): string | null | undefined {
+  if (!Object.prototype.hasOwnProperty.call(updates, "pr_url")) {
+    return undefined;
+  }
+
+  return updates.pr_url ?? null;
+}
+
+async function bindWorkflowArtifactPrUrlIfPresent(
+  roomId: string,
+  leaseId: string,
+  updates: TaskUpdatePatch
+): Promise<void> {
+  const prUrl = getTaskUpdatePrUrlBinding(updates);
+  if (prUrl === undefined) {
+    return;
+  }
+
+  await updateTaskLeaseWorkflowRefs(roomId, leaseId, { pr_url: prUrl });
+}
+
 async function recordCoordinationDecision(input: {
   roomId: string;
   taskId: string | null;
@@ -813,12 +837,15 @@ async function enforceTaskCoordinationMutation(input: {
       leaseId: decision.lease.id,
       reason: `Allowed ${classified.mutation} with lease ${decision.lease.id}.`,
     });
+    if (classified.mutation === "workflow_artifact_attach") {
+      await bindWorkflowArtifactPrUrlIfPresent(input.projectId, decision.lease.id, input.updates);
+    }
     return { kind: "allow" };
   }
 
   if (decision.code === "missing_lease") {
     if (classified.claim && input.task.status === "accepted") {
-      await issueWorkLeaseForActor({
+      const lease = await issueWorkLeaseForActor({
         roomId: input.projectId,
         taskId: input.task.id,
         actorLabel,
@@ -827,6 +854,9 @@ async function enforceTaskCoordinationMutation(input: {
         mutation: classified.mutation,
         outputIntent: input.task.title,
       });
+      if (classified.mutation === "workflow_artifact_attach") {
+        await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
+      }
       return { kind: "allow" };
     }
 
@@ -838,7 +868,7 @@ async function enforceTaskCoordinationMutation(input: {
         actorKey,
       })
     ) {
-      await issueWorkLeaseForActor({
+      const lease = await issueWorkLeaseForActor({
         roomId: input.projectId,
         taskId: input.task.id,
         actorLabel,
@@ -847,6 +877,9 @@ async function enforceTaskCoordinationMutation(input: {
         mutation: classified.mutation,
         outputIntent: input.task.title,
       });
+      if (classified.mutation === "workflow_artifact_attach") {
+        await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
+      }
       return { kind: "allow" };
     }
   }
@@ -1431,13 +1464,73 @@ async function resolveLinkedTaskForRepoRoomEvent(
   );
 }
 
+function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequestRef | null {
+  switch (event.kind) {
+    case "pull_request":
+    case "pull_request_review":
+      return event.pullRequest;
+    default:
+      return null;
+  }
+}
+
 async function applyRepoRoomEventToTask(
   project: Project,
   linkedTask: Task | undefined,
   event: RepoRoomEvent
-): Promise<Task | undefined> {
+): Promise<{
+  task: Task | undefined;
+  authoritative: boolean;
+}> {
   if (!linkedTask) {
-    return undefined;
+    return { task: undefined, authoritative: false };
+  }
+
+  const pullRequest = getPullRequestWorkflowRef(event);
+  if (pullRequest) {
+    const [leases, locks] = await Promise.all([
+      getActiveTaskLeases(project.id, linkedTask.id),
+      getActiveTaskLocks(project.id, linkedTask.id),
+    ]);
+    const decision = evaluateWorkflowArtifactMutation({
+      mutation: "webhook_projection",
+      taskId: linkedTask.id,
+      prUrl: pullRequest.url,
+      branchRef: pullRequest.headRef,
+      leases,
+      locks,
+    });
+
+    await recordCoordinationDecision({
+      roomId: project.id,
+      taskId: linkedTask.id,
+      mutation: "webhook_projection",
+      decision: decision.kind,
+      actorLabel: event.senderLogin ? `github:${event.senderLogin}` : "github",
+      actorKey: null,
+      actorInstanceId: null,
+      reason: decision.kind === "deny"
+        ? decision.reason
+        : `Allowed webhook_projection with lease ${decision.lease.id}.`,
+      leaseId: decision.kind === "allow"
+        ? decision.lease.id
+        : decision.lease?.id ?? null,
+      lockId: decision.kind === "deny" ? decision.lock?.id ?? null : null,
+    });
+
+    if (decision.kind === "deny") {
+      await emitProjectMessage(
+        project.id,
+        "letagents",
+        `[status] Ignored unleased GitHub ${event.kind} projection for ${linkedTask.id}: ${decision.reason}`
+      );
+      return { task: linkedTask, authoritative: false };
+    }
+
+    await updateTaskLeaseWorkflowRefs(project.id, decision.lease.id, {
+      pr_url: pullRequest.url,
+      ...(pullRequest.headRef ? { branch_ref: pullRequest.headRef } : {}),
+    });
   }
 
   const updates: { status?: TaskStatus; pr_url?: string } = {};
@@ -1458,7 +1551,7 @@ async function applyRepoRoomEventToTask(
   }
 
   if (!updates.status && !updates.pr_url) {
-    return linkedTask;
+    return { task: linkedTask, authoritative: true };
   }
 
   const nextTask = await updateTask(project.id, linkedTask.id, updates);
@@ -1470,10 +1563,10 @@ async function applyRepoRoomEventToTask(
           : null,
       });
     }
-    return nextTask;
+    return { task: nextTask, authoritative: true };
   }
 
-  return linkedTask;
+  return { task: linkedTask, authoritative: true };
 }
 
 async function persistMaterializedGitHubRoomEvent(
@@ -1552,11 +1645,16 @@ async function handleMaterializedGitHubRoomEvent(
     }
   }
 
-  linkedTask = await applyRepoRoomEventToTask(project, linkedTask, roomEvent);
+  const taskProjection = await applyRepoRoomEventToTask(project, linkedTask, roomEvent);
+  if (!taskProjection.authoritative && linkedTask) {
+    await updateGitHubRoomEventLinkedTaskId(event.idempotency_key, null);
+  }
+  linkedTask = taskProjection.task;
 
   const message = formatRepoRoomEventMessage({
     event: roomEvent,
-    linkedTaskId: linkedTask?.id ?? null,
+    linkedTaskId: taskProjection.authoritative ? linkedTask?.id ?? null : null,
+    redactUntrustedTaskReference: !taskProjection.authoritative && Boolean(linkedTask),
   });
   if (message) {
     await emitProjectMessage(project.id, "github", message, { source: "github" });

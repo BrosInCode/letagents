@@ -2599,6 +2599,43 @@ export async function revokeTaskLease(
   return row ? toTaskLease(row) : null;
 }
 
+export async function updateTaskLeaseWorkflowRefs(
+  roomId: string,
+  leaseId: string,
+  updates: {
+    branch_ref?: string | null;
+    pr_url?: string | null;
+  }
+): Promise<TaskLease | null> {
+  const now = new Date().toISOString();
+  const patch: {
+    branch_ref?: string | null;
+    pr_url?: string | null;
+    updated_at: string;
+  } = {
+    updated_at: now,
+  };
+  if (Object.prototype.hasOwnProperty.call(updates, "branch_ref")) {
+    patch.branch_ref = updates.branch_ref ?? null;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, "pr_url")) {
+    patch.pr_url = updates.pr_url ?? null;
+  }
+
+  await db
+    .update(task_leases)
+    .set(patch)
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)));
+
+  const [row] = (await db
+    .select()
+    .from(task_leases)
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)))
+    .limit(1)) as TaskLeaseRow[];
+
+  return row ? toTaskLease(row) : null;
+}
+
 export async function createTaskLock(input: {
   room_id: string;
   scope: TaskLockScope;
