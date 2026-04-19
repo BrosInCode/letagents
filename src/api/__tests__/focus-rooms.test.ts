@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { once } from "node:events";
 import path from "node:path";
 import test from "node:test";
 
@@ -15,13 +17,21 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
+const concludeFocusRoom = dbModule?.concludeFocusRoom;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createTask = dbModule?.createTask;
 const createFocusRoomForTask = dbModule?.createFocusRoomForTask;
 const getFocusRoomByKey = dbModule?.getFocusRoomByKey;
 const getFocusRoomsForParent = dbModule?.getFocusRoomsForParent;
+const getMessages = dbModule?.getMessages;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
+const tsxBinary = path.resolve(
+  process.cwd(),
+  "node_modules",
+  ".bin",
+  process.platform === "win32" ? "tsx.cmd" : "tsx"
+);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,6 +66,74 @@ async function resetDatabase(): Promise<void> {
   await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
   await pool.query("CREATE SCHEMA public");
   await migrate(db, { migrationsFolder });
+}
+
+async function waitForServer(
+  port: number,
+  child: ChildProcessWithoutNullStreams,
+  stderrBuffer: () => string
+): Promise<void> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (child.exitCode !== null) {
+      throw new Error(`focus room test server exited early: ${stderrBuffer()}`.trim());
+    }
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+      if (response.ok) {
+        return;
+      }
+    } catch {
+      // keep polling until ready
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error(`focus room test server did not become ready: ${stderrBuffer()}`.trim());
+}
+
+async function startApiServer(): Promise<{ child: ChildProcessWithoutNullStreams; port: number }> {
+  if (!testDatabaseUrl) {
+    throw new Error("DB-backed focus room tests require TEST_DB_URL");
+  }
+
+  const port = 4100 + Math.floor(Math.random() * 500);
+  let stderr = "";
+
+  const child = spawn(tsxBinary, ["src/api/server.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      DB_URL: testDatabaseUrl,
+      PORT: String(port),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  child.stderr.on("data", (chunk: Buffer | string) => {
+    stderr += chunk.toString();
+  });
+
+  await waitForServer(port, child, () => stderr);
+  return { child, port };
+}
+
+async function stopChildProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null) {
+    return;
+  }
+
+  child.kill("SIGTERM");
+  await Promise.race([
+    once(child, "exit"),
+    sleep(5000),
+  ]);
+
+  if (child.exitCode === null) {
+    child.kill("SIGKILL");
+    await once(child, "exit");
+  }
 }
 
 if (!requiresDatabase) {
@@ -109,6 +187,106 @@ test(
 
     const byKey = await getFocusRoomByKey(parent.id, task.id);
     assert.equal(byKey?.id, first.room.id);
+  }
+);
+
+test(
+  "concludeFocusRoom persists summary and is idempotent",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async () => {
+    if (!createProjectWithName || !createTask || !createFocusRoomForTask || !concludeFocusRoom || !getFocusRoomByKey) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-results-db");
+    const task = await createTask(parent.id, "Share Focus Room results", "FoxSage");
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+
+    const concluded = await concludeFocusRoom(parent.id, task.id, "Result summary");
+    assert.ok(concluded);
+    assert.equal(concluded.updated, true);
+    assert.equal(concluded.task?.id, task.id);
+    assert.equal(concluded.room.focus_status, "concluded");
+    assert.equal(concluded.room.conclusion_summary, "Result summary");
+    assert.ok(concluded.room.concluded_at);
+
+    const stored = await getFocusRoomByKey(parent.id, task.id);
+    assert.equal(stored?.focus_status, "concluded");
+    assert.equal(stored?.conclusion_summary, "Result summary");
+
+    const repeated = await concludeFocusRoom(parent.id, task.id, "Different summary");
+    assert.ok(repeated);
+    assert.equal(repeated.updated, false);
+    assert.equal(repeated.room.conclusion_summary, "Result summary");
+  }
+);
+
+test(
+  "focus room conclude route emits one parent result message",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !createTask || !createFocusRoomForTask || !getMessages) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-results-api");
+    const task = await createTask(parent.id, "Share Focus Room results", "FoxSage");
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+
+    const { child, port } = await startApiServer();
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary: "Result summary" }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.shared, true);
+    assert.equal(payload.focus_room.focus_status, "concluded");
+    assert.equal(payload.focus_room.conclusion_summary, "Result summary");
+    assert.equal(payload.message.text, `[status] Focus Room concluded for ${task.id}: ${task.title}. Result: Result summary`);
+
+    const messages = (await getMessages(parent.id)).messages;
+    assert.equal(
+      messages.filter((message) => message.text.includes("Focus Room concluded")).length,
+      1
+    );
+
+    const repeated = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary: "Result summary again" }),
+      }
+    );
+
+    assert.equal(repeated.status, 200);
+    const repeatedPayload = await repeated.json();
+    assert.equal(repeatedPayload.shared, false);
+    assert.equal(repeatedPayload.message, null);
+
+    const messagesAfterRepeat = (await getMessages(parent.id)).messages;
+    assert.equal(
+      messagesAfterRepeat.filter((message) => message.text.includes("Focus Room concluded")).length,
+      1
+    );
   }
 );
 

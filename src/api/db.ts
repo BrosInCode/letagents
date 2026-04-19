@@ -908,6 +908,47 @@ export async function getFocusRoomByKey(
   return focusRoom ? toProject(focusRoom) : undefined;
 }
 
+export async function concludeFocusRoom(
+  parentRoomId: string,
+  focusKey: string,
+  summary: string
+): Promise<{ room: Project; task: Task | undefined; updated: boolean } | null> {
+  const normalizedSummary = summary.trim();
+  if (!normalizedSummary) {
+    throw new Error("conclusion summary is required");
+  }
+
+  const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey);
+  if (!focusRoom) {
+    return null;
+  }
+
+  const task = focusRoom.source_task_id
+    ? await getTaskById(parentRoomId, focusRoom.source_task_id)
+    : undefined;
+
+  if (focusRoom.focus_status === "concluded") {
+    return { room: focusRoom, task, updated: false };
+  }
+
+  const [updated] = await db
+    .update(rooms)
+    .set({
+      focus_status: "concluded",
+      concluded_at: new Date().toISOString(),
+      conclusion_summary: normalizedSummary,
+    })
+    .where(and(eq(rooms.id, focusRoom.id), eq(rooms.focus_status, "active")))
+    .returning();
+
+  if (updated) {
+    return { room: toProject(updated), task, updated: true };
+  }
+
+  const current = await getFocusRoomByKey(parentRoomId, focusKey);
+  return current ? { room: current, task, updated: false } : null;
+}
+
 export async function createFocusRoomForTask(
   parentRoomId: string,
   taskId: string,
