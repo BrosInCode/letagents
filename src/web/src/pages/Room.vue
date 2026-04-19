@@ -36,40 +36,65 @@
       </div>
     </div>
 
-    <MessageList
-      v-show="activeTab === 'chat' && isConnected"
-      ref="messageListRef"
-      :messages="messages"
-      :searchQuery="searchQuery"
-      @reply="selectedReply = $event"
-    />
+    <div v-if="isConnected" class="room-view-viewport">
+      <Transition :name="tabTransitionName">
+        <MessageList
+          v-if="activeTab === 'chat'"
+          key="chat"
+          ref="messageListRef"
+          class="room-tab-panel"
+          :messages="messages"
+          :searchQuery="searchQuery"
+          @reply="selectedReply = $event"
+        />
 
-    <GitHubEventFeed
-      v-show="githubEventsSupported && activeTab === 'events' && isConnected"
-      :events="githubEvents"
-      :repository="room?.name || room?.identifier || null"
-      :isAvailable="githubEventsAvailable"
-      :hasMore="githubEventsHasMore"
-      :errorMessage="githubEventsError?.message || null"
-      :isLoading="githubEventsLoading"
-    />
+        <GitHubEventFeed
+          v-else-if="githubEventsSupported && activeTab === 'events'"
+          key="events"
+          class="room-tab-panel"
+          :events="githubEvents"
+          :repository="room?.name || room?.identifier || null"
+          :isAvailable="githubEventsAvailable"
+          :hasMore="githubEventsHasMore"
+          :errorMessage="githubEventsError?.message || null"
+          :isLoading="githubEventsLoading"
+        />
 
-    <TaskBoard
-      v-show="activeTab === 'board' && isConnected"
-      :tasks="tasks"
-      :taskGithubStatus="taskGithubStatus"
-      @addTask="handleAddTask"
-      @updateTask="handleUpdateTask"
-    />
+        <TaskBoard
+          v-else-if="activeTab === 'board'"
+          key="board"
+          class="room-tab-panel"
+          :tasks="tasks"
+          :taskGithubStatus="taskGithubStatus"
+          @addTask="handleAddTask"
+          @updateTask="handleUpdateTask"
+          @focusTask="handleFocusTask"
+        />
 
-    <ActivityView
-      v-show="activeTab === 'activity' && isConnected"
-      :messages="messages"
-      :participants="participants"
-      :presence="presence"
-      :tasks="tasks"
-      :taskGithubStatus="taskGithubStatus"
-    />
+        <ActivityView
+          v-else-if="activeTab === 'activity'"
+          key="activity"
+          class="room-tab-panel"
+          :messages="messages"
+          :participants="participants"
+          :presence="presence"
+          :tasks="tasks"
+          :taskGithubStatus="taskGithubStatus"
+        />
+
+        <FocusRoomsView
+          v-else
+          key="rooms"
+          class="room-tab-panel"
+          :tasks="tasks"
+          :selectedTaskId="focusDraftTaskId"
+          :roomLabel="roomTitle"
+          :roomAddress="room?.identifier || room?.name || ''"
+          @selectTask="focusDraftTaskId = $event"
+          @createFocusRoom="handleFocusTask"
+        />
+      </Transition>
+    </div>
 
     <Composer
       v-if="activeTab === 'chat' && isConnected"
@@ -125,6 +150,16 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         <span>Activity</span>
       </button>
+      <button
+        role="tab"
+        :aria-selected="activeTab === 'rooms'"
+        :class="{ active: activeTab === 'rooms' }"
+        @click="handleActiveTabChange('rooms')"
+        type="button"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="7"/><rect x="13" y="4" width="8" height="7"/><rect x="8" y="13" width="8" height="7"/></svg>
+        <span>Rooms</span>
+      </button>
     </nav>
   </div>
 </template>
@@ -141,6 +176,8 @@ import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
+import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
+import { useToast } from '@/composables/useToast'
 import type { RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
@@ -170,15 +207,19 @@ const {
   refreshRoomGitHubEvents,
 } = useRoom()
 const auth = useAuth()
+const toast = useToast()
 
-type RoomTab = 'chat' | 'events' | 'board' | 'activity'
-const VALID_TABS: RoomTab[] = ['chat', 'events', 'board', 'activity']
+type RoomTab = 'chat' | 'events' | 'board' | 'activity' | 'rooms'
+const VALID_TABS: RoomTab[] = ['chat', 'events', 'board', 'activity', 'rooms']
+const TAB_ORDER: RoomTab[] = ['chat', 'events', 'board', 'activity', 'rooms']
 const activeTab = ref<RoomTab>('chat')
 const drawerOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
+const focusDraftTaskId = ref<string | null>(null)
+const tabTransitionDirection = ref<'forward' | 'back'>('forward')
 
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const senderName = computed(() => auth.user.value?.login || 'anonymous')
@@ -189,6 +230,10 @@ const roomSubtitle = computed(() =>
     : connectionState.value === 'connecting' ? 'Joining room...' : 'Create a new room or join one.'
 )
 const showGitHubSignIn = computed(() => joinError.value?.code === 'NOT_AUTHENTICATED')
+const visibleTabOrder = computed(() => TAB_ORDER.filter(tab => tab !== 'events' || githubEventsSupported.value))
+const tabTransitionName = computed(() =>
+  tabTransitionDirection.value === 'forward' ? 'tab-slide-forward' : 'tab-slide-back'
+)
 const joinErrorTitle = computed(() => {
   if (joinError.value?.code === 'NOT_AUTHENTICATED') {
     return 'GitHub sign-in required'
@@ -224,6 +269,13 @@ async function handleAddTask(title: string) {
 
 async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
+}
+
+function handleFocusTask(taskId: string) {
+  focusDraftTaskId.value = taskId
+  setActiveTab('rooms')
+  syncViewQuery('rooms', 'push')
+  toast.info('Focus Room creation needs the room-lineage backend before it can open a real room.')
 }
 
 async function handleRename() {
@@ -273,18 +325,26 @@ function syncViewQuery(tab: RoomTab, mode: 'push' | 'replace' = 'replace') {
 
 function applyRouteTab(rawValue: unknown) {
   const nextTab = normalizeRoomTab(rawValue)
-  if (activeTab.value !== nextTab) {
-    activeTab.value = nextTab
-  }
+  setActiveTab(nextTab)
   syncViewQuery(nextTab, 'replace')
 }
 
 function handleActiveTabChange(rawValue: RoomTab) {
   const nextTab = normalizeRoomTab(rawValue)
-  if (activeTab.value !== nextTab) {
-    activeTab.value = nextTab
-  }
+  setActiveTab(nextTab)
   syncViewQuery(nextTab, 'push')
+}
+
+function setActiveTab(nextTab: RoomTab) {
+  if (activeTab.value === nextTab) return
+
+  const order = visibleTabOrder.value
+  const currentIndex = order.indexOf(activeTab.value)
+  const nextIndex = order.indexOf(nextTab)
+  if (currentIndex >= 0 && nextIndex >= 0) {
+    tabTransitionDirection.value = nextIndex > currentIndex ? 'forward' : 'back'
+  }
+  activeTab.value = nextTab
 }
 
 onMounted(async () => {
@@ -334,6 +394,43 @@ watch(githubEventsSupported, (supported) => {
   height: 100vh;
   background: var(--bg-0, #09090b);
   color: var(--text, #fafafa);
+}
+
+.room-view-viewport {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.room-tab-panel {
+  height: 100%;
+  min-height: 0;
+}
+
+.tab-slide-forward-enter-active,
+.tab-slide-forward-leave-active,
+.tab-slide-back-enter-active,
+.tab-slide-back-leave-active {
+  transition: transform 240ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)), opacity 200ms ease;
+}
+
+.tab-slide-forward-leave-active,
+.tab-slide-back-leave-active {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+}
+
+.tab-slide-forward-enter-from,
+.tab-slide-back-leave-to {
+  opacity: 0;
+  transform: translateX(28px);
+}
+
+.tab-slide-forward-leave-to,
+.tab-slide-back-enter-from {
+  opacity: 0;
+  transform: translateX(-28px);
 }
 
 .room-error {
@@ -426,12 +523,12 @@ watch(githubEventsSupported, (supported) => {
   }
 
   .mobile-bottom-nav button svg {
-    width: 20px;
-    height: 20px;
+    width: 19px;
+    height: 19px;
   }
 
   .mobile-bottom-nav button span {
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 600;
     letter-spacing: 0.02em;
   }

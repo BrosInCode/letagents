@@ -36,32 +36,19 @@
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
 
-      <div class="tab-bar" role="tablist">
+      <div
+        class="tab-bar"
+        role="tablist"
+        :style="tabBarStyle"
+      >
         <button
+          v-for="tab in visibleTabs"
+          :key="tab.id"
           role="tab"
-          :aria-selected="activeTab === 'chat'"
-          @click="$emit('update:activeTab', 'chat')"
+          :aria-selected="activeTab === tab.id"
+          @click="$emit('update:activeTab', tab.id)"
           type="button"
-        >Chat</button>
-        <button
-          v-if="showEventsTab"
-          role="tab"
-          :aria-selected="activeTab === 'events'"
-          @click="$emit('update:activeTab', 'events')"
-          type="button"
-        >Events</button>
-        <button
-          role="tab"
-          :aria-selected="activeTab === 'board'"
-          @click="$emit('update:activeTab', 'board')"
-          type="button"
-        >Board</button>
-        <button
-          role="tab"
-          :aria-selected="activeTab === 'activity'"
-          @click="$emit('update:activeTab', 'activity')"
-          type="button"
-        >Activity</button>
+        >{{ tab.label }}</button>
       </div>
 
       <div class="presence" :data-state="connectionState">
@@ -74,10 +61,20 @@
 <script setup lang="ts">
 import { computed, ref, nextTick } from 'vue'
 
+type RoomTab = 'chat' | 'events' | 'board' | 'activity' | 'rooms'
+
+const BASE_TABS: ReadonlyArray<{ id: RoomTab; label: string; requiresEvents?: boolean }> = [
+  { id: 'chat', label: 'Chat' },
+  { id: 'events', label: 'Events', requiresEvents: true },
+  { id: 'board', label: 'Board' },
+  { id: 'activity', label: 'Activity' },
+  { id: 'rooms', label: 'Rooms' },
+]
+
 const props = defineProps<{
   title: string
   subtitle: string
-  activeTab: 'chat' | 'events' | 'board' | 'activity'
+  activeTab: RoomTab
   connectionState: 'idle' | 'connecting' | 'live' | 'error'
   searchQuery: string
   matchCount: number
@@ -87,7 +84,7 @@ const props = defineProps<{
 
 defineEmits<{
   toggleDrawer: []
-  'update:activeTab': [tab: 'chat' | 'events' | 'board' | 'activity']
+  'update:activeTab': [tab: RoomTab]
   'update:searchQuery': [query: string]
   rename: []
 }>()
@@ -95,6 +92,14 @@ defineEmits<{
 const searchActive = ref(false)
 const searchInputEl = ref<HTMLInputElement | null>(null)
 const canSearch = computed(() => props.activeTab === 'chat')
+const visibleTabs = computed(() =>
+  BASE_TABS.filter(tab => !tab.requiresEvents || props.showEventsTab)
+)
+const activeTabIndex = computed(() => Math.max(0, visibleTabs.value.findIndex(tab => tab.id === props.activeTab)))
+const tabBarStyle = computed(() => ({
+  '--tab-count': String(visibleTabs.value.length),
+  '--tab-index': String(activeTabIndex.value),
+}))
 
 const presenceLabel = computed(() => {
   switch (props.connectionState) {
@@ -224,11 +229,27 @@ function closeSearch() {
 .action-btn:hover { background: var(--surface, #18181b); color: var(--text, #fafafa); }
 
 .tab-bar {
-  display: flex;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: repeat(var(--tab-count), minmax(0, 1fr));
   padding: 3px;
   border-radius: 8px;
   background: var(--surface, #18181b);
+  position: relative;
+  isolation: isolate;
+  min-width: min(560px, 44vw);
+}
+.tab-bar::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / var(--tab-count));
+  border-radius: 6px;
+  background: var(--bg-0, #09090b);
+  transform: translateX(calc(var(--tab-index) * 100%));
+  transition: transform 220ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  z-index: 0;
 }
 .tab-bar button {
   padding: 5px 14px;
@@ -239,10 +260,12 @@ function closeSearch() {
   background: none;
   border: none;
   cursor: pointer;
-  transition: all 150ms;
+  transition: color 150ms;
+  white-space: nowrap;
+  position: relative;
+  z-index: 1;
 }
 .tab-bar button[aria-selected="true"] {
-  background: var(--bg-0, #09090b);
   color: var(--text, #fafafa);
 }
 .tab-bar button:hover:not([aria-selected="true"]) { color: var(--text, #fafafa); }
