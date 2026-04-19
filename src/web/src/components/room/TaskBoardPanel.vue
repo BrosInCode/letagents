@@ -48,7 +48,7 @@
               <a :href="workflowRef.url" target="_blank" class="task-person-name" style="color: #60a5fa; text-decoration: none;">{{ workflowRef.label }}</a>
             </div>
           </div>
-          
+
           <!-- Leases and Locks Coordination Data -->
           <div v-if="task.active_leases?.length || task.active_locks?.length" class="task-coordination">
             <div v-for="lease in task.active_leases" :key="lease.id" class="coordination-badge lease">
@@ -119,11 +119,12 @@ export interface TaskData {
   active_locks?: ReadonlyArray<{
     id: string
     room_id: string
-    task_id: string
-    kind: string
-    status: string
-    actor_label: string
+    task_id: string | null
+    scope: "room" | "task"
     reason: string | null
+    message: string | null
+    created_by: string
+    cleared_at: string | null
   }>
 }
 

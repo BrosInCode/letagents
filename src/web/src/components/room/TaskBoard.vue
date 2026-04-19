@@ -46,7 +46,7 @@
             <span>{{ formatTimestamp(task.created_at) }}</span>
           </div>
           <p v-if="task.description" class="task-description">{{ task.description }}</p>
-          
+
           <!-- Leases and Locks Coordination Data -->
           <div v-if="task.active_leases?.length || task.active_locks?.length" class="task-coordination">
             <div v-for="lease in task.active_leases" :key="lease.id" class="coordination-badge lease">
