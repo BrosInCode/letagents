@@ -55,7 +55,7 @@
             </div>
             <div v-for="lock in task.active_locks" :key="lock.id" class="coordination-badge lock">
               <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-              <span>{{ lock.kind }} locked: {{ lock.reason || lock.actor_label }}</span>
+              <span>{{ lock.scope }} lock: {{ lock.reason }}{{ lock.message ? ' - ' + lock.message : '' }}</span>
             </div>
           </div>
           <div

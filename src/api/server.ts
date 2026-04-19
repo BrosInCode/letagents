@@ -4072,7 +4072,7 @@ app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const tasksWithDetails = result.tasks.map(t => ({
     ...t,
     active_leases: leases.filter(l => l.task_id === t.id),
-    active_locks: locks.filter(l => l.task_id === t.id)
+    active_locks: locks.filter(l => l.task_id === t.id || l.scope === "room")
   }));
 
   res.json({ room_id: project.id, tasks: tasksWithDetails, has_more: result.has_more });
@@ -4153,7 +4153,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const taskWithDetails = {
     ...acceptedTask,
     active_leases: leases.filter(l => l.task_id === acceptedTask.id),
-    active_locks: locks.filter(l => l.task_id === acceptedTask.id)
+    active_locks: locks.filter(l => l.task_id === acceptedTask.id || l.scope === "room")
   };
 
   taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
@@ -4285,7 +4285,7 @@ app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res
   const taskWithDetails = {
     ...task,
     active_leases: leases.filter(l => l.task_id === task.id),
-    active_locks: locks.filter(l => l.task_id === task.id)
+    active_locks: locks.filter(l => l.task_id === task.id || l.scope === "room")
   };
 
   res.json({ ...taskWithDetails, room_id: project.id });
@@ -4391,12 +4391,12 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
       const taskWithDetails = {
         ...updated,
         active_leases: leases.filter(l => l.task_id === updated.id),
-        active_locks: locks.filter(l => l.task_id === updated.id)
+        active_locks: locks.filter(l => l.task_id === updated.id || l.scope === "room")
       };
       taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
       res.json({ ...taskWithDetails, room_id: project.id });
     } else {
-      res.json({ ...updated, room_id: project.id });
+      res.status(404).json({ error: "Task not found" });
     }
   } catch (error) {
     respondWithBadRequest(

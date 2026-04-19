@@ -72,11 +72,12 @@ export interface RoomTask {
   active_locks?: ReadonlyArray<{
     id: string
     room_id: string
-    task_id: string
-    kind: "pause" | "stop"
-    status: "active" | "released"
-    actor_label: string
+    task_id: string | null
+    scope: "room" | "task"
     reason: string | null
+    message: string | null
+    created_by: string
+    cleared_at: string | null
   }>
 }
 
