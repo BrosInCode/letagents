@@ -43,6 +43,17 @@
         </div>
       </div>
 
+      <div v-if="parentRoomUrl" class="drawer-section parent-room-section">
+        <div class="drawer-section-title">
+          <h2>Parent Room</h2>
+          <span>focus</span>
+        </div>
+        <a class="parent-room-link" :href="parentRoomUrl" @click="$emit('close')">
+          <span>{{ parentRoomDisplay }}</span>
+          <strong>Open parent room</strong>
+        </a>
+      </div>
+
       <!-- Sender Palette -->
       <div class="drawer-section">
         <div class="drawer-section-title">
@@ -189,6 +200,16 @@ const shareDisplayValue = computed(() => {
   }
 })
 
+const parentRoomIdentifier = computed(() =>
+  props.room?.kind === 'focus' && props.room.parentRoomId ? props.room.parentRoomId : ''
+)
+
+const parentRoomUrl = computed(() =>
+  parentRoomIdentifier.value ? `/in/${encodeRoomPathIdentifier(parentRoomIdentifier.value)}` : ''
+)
+
+const parentRoomDisplay = computed(() => parentRoomIdentifier.value || 'Parent room')
+
 function encodeRoomPathIdentifier(identifier: string): string {
   return String(identifier)
     .split('/')
@@ -289,7 +310,7 @@ const ghInstalling = ref(false)
 const ghError = ref('')
 
 async function fetchGitHubStatus() {
-  const roomId = props.room?.projectId || props.room?.identifier
+  const roomId = githubIntegrationRoomId.value
   if (!roomId) return
   ghLoading.value = true
   ghError.value = ''
@@ -308,7 +329,7 @@ async function fetchGitHubStatus() {
 }
 
 async function installGitHubApp() {
-  const roomId = props.room?.projectId || props.room?.identifier
+  const roomId = githubIntegrationRoomId.value
   if (!roomId) return
   ghInstalling.value = true
   ghError.value = ''
@@ -335,7 +356,7 @@ async function installGitHubApp() {
 }
 
 async function setupGitHubAppManifest() {
-  const roomId = props.room?.projectId || props.room?.identifier
+  const roomId = githubIntegrationRoomId.value
   if (!roomId) return
   ghInstalling.value = true
   ghError.value = ''
@@ -373,7 +394,15 @@ async function setupGitHubAppManifest() {
   }
 }
 
-watch(() => props.room?.projectId, (newId) => {
+const githubIntegrationRoomId = computed(() => {
+  if (!props.room) return ''
+  if (props.room.kind === 'focus' && props.room.parentRoomId) {
+    return props.room.parentRoomId
+  }
+  return props.room.projectId || props.room.identifier
+})
+
+watch(githubIntegrationRoomId, (newId) => {
   if (newId) fetchGitHubStatus()
 }, { immediate: true })
 
@@ -470,6 +499,38 @@ watch(() => props.open, (isOpen) => {
   color: var(--text, #fafafa); transition: background 150ms;
 }
 .join-code-copy:hover .copy-pill { background: var(--surface-hover, #27272a); }
+
+.parent-room-section {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface, #18181b);
+  border: 1px solid var(--line, #27272a);
+}
+
+.parent-room-link {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text, #fafafa);
+  text-decoration: none;
+}
+
+.parent-room-link span {
+  color: var(--muted, #71717a);
+  font-size: 0.74rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parent-room-link strong {
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.parent-room-link:hover strong {
+  text-decoration: underline;
+}
 
 /* ── Sender legend (compact dot chips) ── */
 .legend { display: flex; flex-wrap: wrap; gap: 4px; }

@@ -2377,7 +2377,7 @@ function isPlatformAdmin(req: AuthenticatedRequest): boolean {
 
 async function buildGitHubRoomIntegrationResponse(req: AuthenticatedRequest, project: Project): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
   const config = await getGitHubAppConfig();
-  const repository = await getGitHubAppRepositoryByRoomId(project.id);
+  const repository = await getGitHubAppRepositoryByRoomId(getProjectAccessRoomId(project));
   const installation = repository
     ? await getGitHubAppInstallationById(repository.installation_id)
     : null;
@@ -2401,6 +2401,7 @@ app.get(/^\/api\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedR
 
   res.json({
     room_id: project.id,
+    access_room_id: getProjectAccessRoomId(project),
     ...(await buildGitHubRoomIntegrationResponse(req, project)),
   });
 });
@@ -2414,6 +2415,7 @@ app.get(/^\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedReques
 
   res.json({
     room_id: project.id,
+    access_room_id: getProjectAccessRoomId(project),
     ...(await buildGitHubRoomIntegrationResponse(req, project)),
   });
 });
@@ -3886,8 +3888,9 @@ app.get(/^(?:\/api)?\/rooms\/(.+)\/events$/, async (req: AuthenticatedRequest, r
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
 
+  const githubRoomId = getProjectAccessRoomId(project);
   const result = await getGitHubRoomEvents({
-    room_id: project.id,
+    room_id: githubRoomId,
     event_type,
     github_object_id,
     actor_login,
@@ -3899,6 +3902,7 @@ app.get(/^(?:\/api)?\/rooms\/(.+)\/events$/, async (req: AuthenticatedRequest, r
 
   res.json({
     room_id: project.id,
+    github_room_id: githubRoomId,
     events: result.events.map((e) => ({
       id: e.id,
       event_type: e.event_type,

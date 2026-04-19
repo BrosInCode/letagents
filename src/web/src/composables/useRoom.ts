@@ -383,8 +383,16 @@ function roomPath(identifier: string): string {
   return `/rooms/${encodeURIComponent(identifier)}`
 }
 
+function getGitHubAccessIdentifier(roomInfo: RoomInfo | null): string {
+  if (!roomInfo) return ''
+  if (roomInfo.kind === 'focus' && roomInfo.parentRoomId) {
+    return roomInfo.parentRoomId
+  }
+  return roomInfo.identifier || roomInfo.name || roomInfo.projectId
+}
+
 const githubEventsSupported = computed(() =>
-  room.value ? isRepoBackedRoomId(room.value.identifier || room.value.name || room.value.projectId) : false
+  isRepoBackedRoomId(getGitHubAccessIdentifier(room.value))
 )
 
 async function fetchMessages(roomIdentifier: string): Promise<RoomMessage[]> {
@@ -547,7 +555,7 @@ async function refreshGitHubEvents(roomIdentifier: string) {
 
 async function refreshRoomGitHubEvents(): Promise<boolean> {
   if (!room.value) return false
-  await refreshGitHubEvents(room.value.identifier)
+  await refreshGitHubEvents(getGitHubAccessIdentifier(room.value))
   return true
 }
 
@@ -618,7 +626,7 @@ function startStreaming(roomIdentifier: string) {
 
         if ((msg.source || '').toLowerCase() === 'github' || (msg.sender || '').toLowerCase() === 'github') {
           if (room.value && githubEventsSupported.value) {
-            scheduleGitHubEventsRefresh(room.value.identifier)
+            scheduleGitHubEventsRefresh(getGitHubAccessIdentifier(room.value))
           }
           // Also refresh task github status when new github events arrive
           if (room.value) {
@@ -886,7 +894,7 @@ async function joinRoom(roomIdentifier: string) {
       method: 'POST',
     })
 
-    room.value = {
+    const joinedRoom: RoomInfo = {
       projectId: project.room_id || roomIdentifier,
       identifier: roomIdentifier,
       code: project.code || '',
@@ -902,18 +910,20 @@ async function joinRoom(roomIdentifier: string) {
       concludedAt: project.concluded_at || null,
       conclusionSummary: project.conclusion_summary || null,
     }
+    room.value = joinedRoom
     isConnected.value = true
     persistSession()
 
     // Load existing room state in parallel
+    const githubAccessIdentifier = getGitHubAccessIdentifier(joinedRoom)
     const [msgs, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
-      isRepoBackedRoomId(roomIdentifier)
-        ? fetchGitHubEvents(roomIdentifier)
+      isRepoBackedRoomId(githubAccessIdentifier)
+        ? fetchGitHubEvents(githubAccessIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
       fetchTaskGithubStatus(roomIdentifier),
     ])
