@@ -1,6 +1,6 @@
 <template>
   <div class="messages-wrap">
-    <div class="messages" ref="messagesEl">
+    <div class="messages scroll-fade-y" ref="messagesEl">
       <ChatMessage
         v-for="msg in messages"
         :key="msg.id"
@@ -12,11 +12,12 @@
       />
     </div>
     <button
-      v-if="unreadCount > 0"
+      v-if="unreadCount > 0 || isScrolledFarUp"
       class="new-messages-pill visible"
       @click="scrollToBottom"
     >
-      ↓ {{ unreadCount }} new messages
+      <span v-if="unreadCount > 0">↓ {{ unreadCount }} new messages</span>
+      <span v-else>↓ Scroll to latest</span>
     </button>
     <div v-if="messages.length === 0" class="empty-state">
       <div class="empty-state-card">
@@ -42,6 +43,7 @@ const emit = defineEmits<{
 
 const messagesEl = ref<HTMLElement | null>(null)
 const unreadCount = ref(0)
+const isScrolledFarUp = ref(false)
 let isScrolledToBottom = true
 
 const matchedIds = computed(() => {
@@ -69,7 +71,12 @@ function searchClasses(msg: RoomMessage): Record<string, boolean> {
 function checkScroll() {
   if (!messagesEl.value) return
   const el = messagesEl.value
-  isScrolledToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  isScrolledToBottom = distanceToBottom < 60
+  
+  /* Show a scroll-to-bottom prompt if user scrolls quite far up */
+  isScrolledFarUp.value = distanceToBottom > 1500
+  
   if (isScrolledToBottom && unreadCount.value > 0) {
     unreadCount.value = 0
   }
@@ -79,6 +86,7 @@ function scrollToBottom() {
   if (!messagesEl.value) return
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
   unreadCount.value = 0
+  isScrolledFarUp.value = false
 }
 
 function scrollToMessage(messageId: string) {
@@ -132,16 +140,6 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   overflow-y: auto;
   padding: 16px 20px;
   scroll-behavior: smooth;
-}
-.messages::before {
-  content: '';
-  position: sticky;
-  top: 0;
-  display: block;
-  height: 12px;
-  background: linear-gradient(var(--bg-0, #09090b), transparent);
-  pointer-events: none;
-  z-index: 1;
 }
 
 .new-messages-pill {

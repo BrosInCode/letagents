@@ -223,3 +223,96 @@ code, pre {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-accent);
 }
+
+/* ─── Scroll Fade Mask ─── */
+@property --fade-top {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@supports (mask-image: linear-gradient(black, black)) and (animation-timeline: scroll()) {
+  .scroll-fade-y {
+    --fade-size: 24px;
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      black var(--fade-top),
+      black calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
+    animation: scroll-fade-mask both linear;
+    animation-timeline: scroll(self block);
+  }
+
+  @keyframes scroll-fade-mask {
+    0% {
+      --fade-top: 0px;
+      --fade-bottom: var(--fade-size);
+    }
+    1% {
+      --fade-top: var(--fade-size);
+      --fade-bottom: var(--fade-size);
+    }
+    99% {
+      --fade-top: var(--fade-size);
+      --fade-bottom: var(--fade-size);
+    }
+    100% {
+      --fade-top: var(--fade-size);
+      --fade-bottom: 0px;
+    }
+  }
+}
+/* ─── Scroll Fade Mask ─── */
+@property --fade-top {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@supports (mask-image: linear-gradient(black, black)) and (animation-timeline: scroll()) {
+  .scroll-fade-y {
+    --fade-size: 24px;
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0,
+      black var(--fade-top),
+      black calc(100% - var(--fade-bottom)),
+      transparent 100%
+    );
+    animation: scroll-fade-mask both linear;
+    animation-timeline: scroll(self block);
+  }
+
+  @keyframes scroll-fade-mask {
+    0% {
+      --fade-top: 0px;
+      --fade-bottom: var(--fade-size);
+    }
+    1% {
+      --fade-top: var(--fade-size);
+      --fade-bottom: var(--fade-size);
+    }
+    99% {
+      --fade-top: var(--fade-size);
+      --fade-bottom: var(--fade-size);
+    }
+    100% {
+      --fade-top: var(--fade-size);
+      --fade-bottom: 0px;
+    }
+  }
+}
