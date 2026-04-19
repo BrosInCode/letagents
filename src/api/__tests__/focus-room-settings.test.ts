@@ -5,6 +5,7 @@ import {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   normalizeFocusRoomSettings,
   shouldPostFocusRoomEventToParent,
+  shouldRouteTaskGitHubEventToFocusRoom,
   validateFocusRoomSettingsPatch,
 } from "../focus-room-settings.js";
 
@@ -63,6 +64,21 @@ test("shouldPostFocusRoomEventToParent follows parent visibility policy", () => 
   );
   assert.equal(
     shouldPostFocusRoomEventToParent({ ...DEFAULT_FOCUS_ROOM_SETTINGS, parent_visibility: "silent" }, "result_summary"),
+    false
+  );
+});
+
+test("shouldRouteTaskGitHubEventToFocusRoom follows GitHub routing policy", () => {
+  assert.equal(
+    shouldRouteTaskGitHubEventToFocusRoom({ ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "task_and_branch" }),
+    true
+  );
+  assert.equal(
+    shouldRouteTaskGitHubEventToFocusRoom({ ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "task_only" }),
+    true
+  );
+  assert.equal(
+    shouldRouteTaskGitHubEventToFocusRoom({ ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "off" }),
     false
   );
 });

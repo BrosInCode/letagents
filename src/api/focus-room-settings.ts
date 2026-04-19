@@ -120,3 +120,10 @@ export function shouldPostFocusRoomEventToParent(
       return eventKind === "result_summary";
   }
 }
+
+export function shouldRouteTaskGitHubEventToFocusRoom(
+  settingsInput: FocusRoomSettings | null | undefined
+): boolean {
+  const settings = normalizeFocusRoomSettings(settingsInput);
+  return settings.github_event_routing !== "off";
+}

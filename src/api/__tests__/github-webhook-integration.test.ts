@@ -25,6 +25,8 @@ const getMessages = dbModule?.getMessages;
 const getTaskById = dbModule?.getTaskById;
 const updateTask = dbModule?.updateTask;
 const createTaskLease = dbModule?.createTaskLease;
+const createFocusRoomForTask = dbModule?.createFocusRoomForTask;
+const updateFocusRoomSettings = dbModule?.updateFocusRoomSettings;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 const webhookSecret = "test-webhook-secret";
@@ -404,6 +406,110 @@ test(
       message.text.includes("PR #201 opened by octocat") &&
       message.text.includes(task.id)
     ));
+  }
+);
+
+test(
+  "pull_request opened for a focused task is announced in the focus room with parent linkbacks",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (
+      !createProjectWithName ||
+      !createTask ||
+      !getMessages ||
+      !getTaskById ||
+      !updateTask ||
+      !createTaskLease ||
+      !createFocusRoomForTask ||
+      !updateFocusRoomSettings
+    ) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const task = await createTask(room.id, "Focused webhook coverage", "OliveWolf");
+    await updateTask(room.id, task.id, { status: "accepted" });
+    await updateTask(room.id, task.id, { status: "assigned" });
+    const focus = await createFocusRoomForTask(room.id, task.id);
+    assert.ok(focus);
+    await updateFocusRoomSettings(room.id, task.id, {
+      parent_visibility: "major_activity",
+    });
+
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/202";
+    await createWorkLeaseForPr({
+      roomId: room.id,
+      taskId: task.id,
+      prUrl: pullRequestUrl,
+      branchRef: "olive/focused-webhook-coverage",
+    });
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-opened-focused",
+      eventName: "pull_request",
+      payload: {
+        action: "opened",
+        repository: buildRepositoryPayload(),
+        sender: { login: "octocat" },
+        pull_request: {
+          number: 202,
+          title: `${task.id}: focused webhook integration coverage`,
+          body: "covers the focus room routing path",
+          html_url: pullRequestUrl,
+          head: {
+            ref: "olive/focused-webhook-coverage",
+            sha: "abc202",
+          },
+          merged: false,
+          user: { login: "octocat" },
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const updatedTask = await getTaskById(room.id, task.id);
+    assert.equal(updatedTask?.status, "in_review");
+    assert.equal(updatedTask?.pr_url, pullRequestUrl);
+
+    const parentMessages = (await getMessages(room.id)).messages;
+    const focusMessages = (await getMessages(focus.room.id)).messages;
+    const focusLifecycleMessage = focusMessages.find((message) =>
+      message.sender === "letagents" &&
+      message.text.includes(`${task.id}`) &&
+      message.text.includes("in review")
+    );
+    assert.ok(focusLifecycleMessage);
+    assert.equal(focusLifecycleMessage?.agent_prompt_kind, "auto");
+    assert.ok(focusMessages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #202 opened by octocat") &&
+      message.text.includes(task.id)
+    ));
+    assert.ok(parentMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes("Task status") &&
+      message.text.includes("Focus Room") &&
+      message.text.includes(task.id)
+    ));
+    assert.ok(parentMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes("GitHub activity") &&
+      message.text.includes("Focus Room") &&
+      message.text.includes(task.id)
+    ));
+    assert.equal(parentMessages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #202 opened by octocat")
+    ), false);
   }
 );
 

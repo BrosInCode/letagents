@@ -31,6 +31,7 @@ import {
   getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
+  getActiveFocusRoomForTask,
   getFocusRoomByKey,
   getFocusRoomsForParent,
   getOpenTasks,
@@ -113,7 +114,9 @@ import {
 import {
   normalizeFocusRoomSettings,
   shouldPostFocusRoomEventToParent,
+  shouldRouteTaskGitHubEventToFocusRoom,
   validateFocusRoomSettingsPatch,
+  type FocusParentEventKind,
 } from "./focus-room-settings.js";
 import { selectStaleTaskAutoPrompt } from "./stale-work.js";
 import {
@@ -405,6 +408,91 @@ function formatFocusRoomConclusionMessage(input: {
   return `[status] Focus Room concluded for ${taskLabel}. Result: ${input.summary}`;
 }
 
+function formatFocusRoomReference(focusRoom: Project): string {
+  const key = focusRoom.focus_key || focusRoom.source_task_id || focusRoom.id;
+  return focusRoom.display_name
+    ? `${focusRoom.display_name} (${key})`
+    : key;
+}
+
+function formatFocusRoomAnchorMessage(input: {
+  task: { id: string; title: string };
+  focusRoom: Project;
+  activity: string;
+}): string {
+  return `[status] ${input.activity} for ${input.task.id}: ${input.task.title} is in Focus Room ${formatFocusRoomReference(input.focusRoom)}.`;
+}
+
+function getFocusRoomSettings(focusRoom: Project) {
+  return normalizeFocusRoomSettings({
+    parent_visibility: focusRoom.focus_parent_visibility,
+    activity_scope: focusRoom.focus_activity_scope,
+    github_event_routing: focusRoom.focus_github_event_routing,
+  });
+}
+
+async function getActiveTaskFocusRoom(projectId: string, taskId: string): Promise<Project | null> {
+  const project = await getProjectById(projectId);
+  if (!project || project.kind === "focus") {
+    return null;
+  }
+
+  return (await getActiveFocusRoomForTask(project.id, taskId)) ?? null;
+}
+
+async function emitTaskAnchoredMessage(
+  projectId: string,
+  sender: string,
+  text: string,
+  task: { id: string; title: string },
+  options?: {
+    source?: string;
+    agent_prompt_kind?: AgentPromptKind | null;
+    parent_activity?: string;
+    parent_event_kind?: FocusParentEventKind;
+    event_kind?: "github";
+  }
+): Promise<Message> {
+  const focusRoom = await getActiveTaskFocusRoom(projectId, task.id);
+  if (!focusRoom) {
+    return emitProjectMessage(projectId, sender, text, {
+      source: options?.source,
+      agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    });
+  }
+
+  const focusSettings = getFocusRoomSettings(focusRoom);
+  if (options?.event_kind === "github" && !shouldRouteTaskGitHubEventToFocusRoom(focusSettings)) {
+    return emitProjectMessage(projectId, sender, text, {
+      source: options?.source,
+      agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    });
+  }
+
+  const focusMessage = await emitProjectMessage(focusRoom.id, sender, text, {
+    source: options?.source,
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+  });
+  if (
+    shouldPostFocusRoomEventToParent(
+      focusSettings,
+      options?.parent_event_kind ?? "major_activity"
+    )
+  ) {
+    await emitProjectMessage(
+      projectId,
+      "letagents",
+      formatFocusRoomAnchorMessage({
+        task,
+        focusRoom,
+        activity: options?.parent_activity ?? "Activity",
+      })
+    );
+  }
+
+  return focusMessage;
+}
+
 function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresence {
   return {
     ...presence,
@@ -543,8 +631,10 @@ async function emitTaskLifecycleStatusMessage(
     agent_prompt_kind?: AgentPromptKind | null;
   }
 ): Promise<Message> {
-  return emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(task), {
+  return emitTaskAnchoredMessage(projectId, "letagents", formatTaskLifecycleStatus(task), task, {
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    parent_activity: "Task status",
+    parent_event_kind: "major_activity",
   });
 }
 
@@ -951,8 +1041,10 @@ async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | nu
     return null;
   }
 
-  const message = await emitProjectMessage(projectId, "letagents", prompt.prompt_text, {
+  const message = await emitTaskAnchoredMessage(projectId, "letagents", prompt.prompt_text, prompt.task, {
     agent_prompt_kind: "auto",
+    parent_activity: "Stale-work prompt",
+    parent_event_kind: "all_activity",
   });
   staleWorkPromptTimestamps.set(cacheKey, now);
   return message;
@@ -1682,7 +1774,16 @@ async function handleMaterializedGitHubRoomEvent(
     redactUntrustedTaskReference: !taskProjection.authoritative && Boolean(linkedTask),
   });
   if (message) {
-    await emitProjectMessage(project.id, "github", message, { source: "github" });
+    if (taskProjection.authoritative && linkedTask) {
+      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+        source: "github",
+        parent_activity: "GitHub activity",
+        parent_event_kind: "major_activity",
+        event_kind: "github",
+      });
+    } else {
+      await emitProjectMessage(project.id, "github", message, { source: "github" });
+    }
   }
 
   return {
@@ -3405,7 +3506,7 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  await emitTaskLifecycleStatusMessage(projectId, acceptedTask);
   res.status(201).json(acceptedTask);
 });
 
@@ -3549,7 +3650,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
 
     const updated = await updateTask(projectId, taskId, updates);
     if (updated && updates.status && updates.status !== task.status) {
-      await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
+      await emitTaskLifecycleStatusMessage(projectId, updated);
     }
     res.json(updated);
   } catch (error) {
@@ -4359,7 +4460,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  await emitTaskLifecycleStatusMessage(project.id, acceptedTask);
 
   const [leases, locks] = await Promise.all([
     getActiveTaskLeases(project.id),
@@ -4595,7 +4696,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
 
     const updated = await updateTask(project.id, taskId, updates);
     if (updated && updates.status && updates.status !== task.status) {
-      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
+      await emitTaskLifecycleStatusMessage(project.id, updated);
     }
 
     if (updated) {
