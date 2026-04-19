@@ -8,6 +8,7 @@ import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
   addMessage,
   assignProjectAdmin,
+  concludeFocusRoom,
   consumeAuthState,
   createAuthState,
   createFocusRoomForTask,
@@ -350,6 +351,17 @@ function toRoomResponse(
     ...(options?.role ? { role: options.role } : {}),
     ...(options ? { authenticated: Boolean(options.authenticated) } : {}),
   };
+}
+
+function formatFocusRoomConclusionMessage(input: {
+  focusRoom: Project;
+  task?: Task;
+  summary: string;
+}): string {
+  const taskLabel = input.task
+    ? `${input.task.id}: ${input.task.title}`
+    : input.focusRoom.source_task_id || input.focusRoom.focus_key || input.focusRoom.id;
+  return `[status] Focus Room concluded for ${taskLabel}. Result: ${input.summary}`;
 }
 
 function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresence {
@@ -3559,6 +3571,62 @@ app.get(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) =
     room_id: project.id,
     focus_rooms: focusRooms.map((focusRoom) => toRoomResponse(focusRoom)),
   });
+});
+
+app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const { summary } = (req.body ?? {}) as { summary?: unknown };
+  if (typeof summary !== "string" || !summary.trim()) {
+    res.status(400).json({ error: "summary is required" });
+    return;
+  }
+
+  try {
+    const result = await concludeFocusRoom(project.id, focusKey, summary);
+    if (!result) {
+      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
+      return;
+    }
+
+    const message = result.updated
+      ? await emitProjectMessage(
+          project.id,
+          "letagents",
+          formatFocusRoomConclusionMessage({
+            focusRoom: result.room,
+            task: result.task,
+            summary: result.room.conclusion_summary || summary.trim(),
+          })
+        )
+      : null;
+
+    const role = await resolveProjectRole(result.room, req.sessionAccount);
+    res.json({
+      room_id: project.id,
+      focus_key: focusKey,
+      shared: result.updated,
+      message,
+      focus_room: toRoomResponse(result.room, {
+        role,
+        authenticated: Boolean(req.sessionAccount),
+      }),
+    });
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /rooms/:room_id/focus/:focus_key/conclude",
+      error,
+      "Focus Room result could not be shared."
+    );
+  }
 });
 
 app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
