@@ -87,11 +87,17 @@
           key="rooms"
           class="room-tab-panel"
           :tasks="tasks"
+          :focusRooms="focusRooms"
           :selectedTaskId="focusDraftTaskId"
           :roomLabel="roomTitle"
-          :roomAddress="room?.identifier || room?.name || ''"
+          :roomAddress="focusParentAddress"
+          :isFocusRoom="room?.kind === 'focus'"
+          :sourceTaskId="room?.sourceTaskId || null"
+          :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
           @selectTask="focusDraftTaskId = $event"
           @createFocusRoom="handleFocusTask"
+          @openFocusRoom="handleOpenFocusRoom"
+          @openParentRoom="handleOpenParentRoom"
         />
       </Transition>
     </div>
@@ -185,6 +191,7 @@ const router = useRouter()
 const {
   messages,
   tasks,
+  focusRooms,
   presence,
   participants,
   taskGithubStatus,
@@ -202,6 +209,7 @@ const {
   sendMessage,
   addTask,
   updateTask,
+  createFocusRoom,
   restoreSession,
   renameRoom,
   refreshRoomGitHubEvents,
@@ -219,15 +227,23 @@ const searchQuery = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const focusDraftTaskId = ref<string | null>(null)
+const creatingFocusRoomTaskId = ref<string | null>(null)
 const tabTransitionDirection = ref<'forward' | 'back'>('forward')
 
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const senderName = computed(() => auth.user.value?.login || 'anonymous')
 const roomTitle = computed(() => room.value?.displayName || 'Connecting...')
 const roomSubtitle = computed(() =>
-  room.value
+  room.value?.kind === 'focus'
+    ? `Focus Room: ${room.value.parentRoomId || 'parent'}${room.value.sourceTaskId ? ` / ${room.value.sourceTaskId}` : ''}`
+    : room.value
     ? `Room: ${room.value.name}`
     : connectionState.value === 'connecting' ? 'Joining room...' : 'Create a new room or join one.'
+)
+const focusParentAddress = computed(() =>
+  room.value?.kind === 'focus' && room.value.parentRoomId
+    ? room.value.parentRoomId
+    : room.value?.identifier || room.value?.name || ''
 )
 const showGitHubSignIn = computed(() => joinError.value?.code === 'NOT_AUTHENTICATED')
 const visibleTabOrder = computed(() => TAB_ORDER.filter(tab => tab !== 'events' || githubEventsSupported.value))
@@ -271,11 +287,48 @@ async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
 }
 
-function handleFocusTask(taskId: string) {
+function roomRoutePath(identifier: string): string {
+  return identifier
+    .split('/')
+    .filter(Boolean)
+    .map(part => encodeURIComponent(part))
+    .join('/')
+}
+
+async function handleOpenFocusRoom(focusKey: string) {
+  const parent = focusParentAddress.value
+  if (!parent || !focusKey) return
+  await router.push(`/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`)
+}
+
+async function handleOpenParentRoom() {
+  const parent = focusParentAddress.value
+  if (!parent) return
+  await router.push(`/in/${roomRoutePath(parent)}`)
+}
+
+async function handleFocusTask(taskId: string) {
   focusDraftTaskId.value = taskId
-  setActiveTab('rooms')
-  syncViewQuery('rooms', 'push')
-  toast.info('Focus Room creation needs the room-lineage backend before it can open a real room.')
+  if (room.value?.kind === 'focus') {
+    toast.info('Open new Focus Rooms from the parent room.')
+    return
+  }
+
+  creatingFocusRoomTaskId.value = taskId
+  try {
+    const focusRoom = await createFocusRoom(taskId)
+    if (!focusRoom) {
+      setActiveTab('rooms')
+      syncViewQuery('rooms', 'push')
+      toast.error('Focus Room could not be opened.')
+      return
+    }
+
+    const focusKey = focusRoom.focus_key || focusRoom.source_task_id || taskId
+    await handleOpenFocusRoom(focusKey)
+  } finally {
+    creatingFocusRoomTaskId.value = null
+  }
 }
 
 async function handleRename() {
