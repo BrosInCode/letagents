@@ -82,9 +82,9 @@ function checkScroll() {
   }
 }
 
-function scrollToBottom() {
+function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   if (!messagesEl.value) return
-  messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
+  messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior })
   unreadCount.value = 0
   isScrolledFarUp.value = false
 }
@@ -122,7 +122,8 @@ watch(() => props.messages.length, async (newLen, oldLen) => {
 
 onMounted(() => {
   messagesEl.value?.addEventListener('scroll', checkScroll)
-  nextTick(scrollToBottom)
+  /* Use 'instant' so re-entering the chat tab doesn't visibly scroll from top */
+  nextTick(() => scrollToBottom('instant'))
 })
 
 onUnmounted(() => {
