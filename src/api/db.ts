@@ -50,6 +50,13 @@ import {
   type TaskWorkflowArtifactMatch,
   type TaskWorkflowRef,
 } from "./repo-workflow.js";
+import {
+  DEFAULT_FOCUS_ROOM_SETTINGS,
+  type FocusActivityScope,
+  type FocusGitHubEventRouting,
+  type FocusParentVisibility,
+  type FocusRoomSettingsPatch,
+} from "./focus-room-settings.js";
 
 export type RoomKind = "main" | "focus";
 export type FocusRoomStatus = "active" | "concluded";
@@ -64,6 +71,9 @@ export interface Project {
   focus_key: string | null;
   source_task_id: string | null;
   focus_status: FocusRoomStatus | null;
+  focus_parent_visibility: FocusParentVisibility | null;
+  focus_activity_scope: FocusActivityScope | null;
+  focus_github_event_routing: FocusGitHubEventRouting | null;
   concluded_at: string | null;
   conclusion_summary: string | null;
   created_at: string;
@@ -480,6 +490,9 @@ function toProject(row: typeof rooms.$inferSelect): Project {
     focus_key: row.focus_key,
     source_task_id: row.source_task_id,
     focus_status: row.focus_status as FocusRoomStatus | null,
+    focus_parent_visibility: row.focus_parent_visibility,
+    focus_activity_scope: row.focus_activity_scope,
+    focus_github_event_routing: row.focus_github_event_routing,
     concluded_at: row.concluded_at,
     conclusion_summary: row.conclusion_summary,
     created_at: row.created_at,
@@ -801,6 +814,9 @@ export async function createProject(): Promise<Project> {
         focus_key: null,
         source_task_id: null,
         focus_status: null,
+        focus_parent_visibility: null,
+        focus_activity_scope: null,
+        focus_github_event_routing: null,
         concluded_at: null,
         conclusion_summary: null,
         created_at,
@@ -858,6 +874,9 @@ export async function getOrCreateCanonicalRoom(
         focus_key: null,
         source_task_id: null,
         focus_status: null,
+        focus_parent_visibility: null,
+        focus_activity_scope: null,
+        focus_github_event_routing: null,
         concluded_at: null,
         conclusion_summary: null,
         created_at,
@@ -977,6 +996,9 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
         focus_key: project.focus_key,
         source_task_id: project.source_task_id,
         focus_status: project.focus_status,
+        focus_parent_visibility: project.focus_parent_visibility,
+        focus_activity_scope: project.focus_activity_scope,
+        focus_github_event_routing: project.focus_github_event_routing,
         concluded_at: project.concluded_at,
         conclusion_summary: project.conclusion_summary,
         created_at: project.created_at,
@@ -1115,6 +1137,45 @@ export async function concludeFocusRoom(
   return current ? { room: current, task, updated: false } : null;
 }
 
+export async function updateFocusRoomSettings(
+  parentRoomId: string,
+  focusKey: string,
+  settings: FocusRoomSettingsPatch
+): Promise<Project | null> {
+  const patch: Partial<Pick<
+    typeof rooms.$inferInsert,
+    "focus_parent_visibility" | "focus_activity_scope" | "focus_github_event_routing"
+  >> = {};
+
+  if (Object.prototype.hasOwnProperty.call(settings, "parent_visibility")) {
+    patch.focus_parent_visibility = settings.parent_visibility;
+  }
+  if (Object.prototype.hasOwnProperty.call(settings, "activity_scope")) {
+    patch.focus_activity_scope = settings.activity_scope;
+  }
+  if (Object.prototype.hasOwnProperty.call(settings, "github_event_routing")) {
+    patch.focus_github_event_routing = settings.github_event_routing;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return (await getFocusRoomByKey(parentRoomId, focusKey)) ?? null;
+  }
+
+  const [updated] = await db
+    .update(rooms)
+    .set(patch)
+    .where(
+      and(
+        eq(rooms.parent_room_id, parentRoomId),
+        eq(rooms.focus_key, focusKey),
+        eq(rooms.kind, "focus")
+      )
+    )
+    .returning();
+
+  return updated ? toProject(updated) : null;
+}
+
 export async function createFocusRoomForTask(
   parentRoomId: string,
   taskId: string,
@@ -1154,6 +1215,9 @@ export async function createFocusRoomForTask(
           focus_key: task.id,
           source_task_id: task.id,
           focus_status: "active",
+          focus_parent_visibility: DEFAULT_FOCUS_ROOM_SETTINGS.parent_visibility,
+          focus_activity_scope: DEFAULT_FOCUS_ROOM_SETTINGS.activity_scope,
+          focus_github_event_routing: DEFAULT_FOCUS_ROOM_SETTINGS.github_event_routing,
           created_at,
         });
         await tx

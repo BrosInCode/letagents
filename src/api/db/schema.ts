@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
+import type {
+  FocusActivityScope,
+  FocusGitHubEventRouting,
+  FocusParentVisibility,
+} from "../focus-room-settings.js";
 import { AGENT_PRESENCE_STATUSES } from "../../shared/agent-presence.js";
 import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
 
@@ -57,6 +62,9 @@ export const rooms = pgTable(
     focus_key: text("focus_key"),
     source_task_id: text("source_task_id"),
     focus_status: text("focus_status"),
+    focus_parent_visibility: text("focus_parent_visibility").$type<FocusParentVisibility>(),
+    focus_activity_scope: text("focus_activity_scope").$type<FocusActivityScope>(),
+    focus_github_event_routing: text("focus_github_event_routing").$type<FocusGitHubEventRouting>(),
     concluded_at: timestamp("concluded_at", { mode: "string", withTimezone: true }),
     conclusion_summary: text("conclusion_summary"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
@@ -77,6 +85,19 @@ export const rooms = pgTable(
     focus_status_check: check(
       "rooms_focus_status_check",
       sql`${table.focus_status} IS NULL OR ${table.focus_status} IN ('active', 'concluded')`
+    ),
+    focus_settings_check: check(
+      "rooms_focus_settings_check",
+      sql`(
+        ${table.focus_parent_visibility} IS NULL
+        OR ${table.focus_parent_visibility} IN ('summary_only', 'major_activity', 'all_activity', 'silent')
+      ) AND (
+        ${table.focus_activity_scope} IS NULL
+        OR ${table.focus_activity_scope} IN ('task_and_branch', 'task_only', 'room')
+      ) AND (
+        ${table.focus_github_event_routing} IS NULL
+        OR ${table.focus_github_event_routing} IN ('task_and_branch', 'task_only', 'all_parent_repo', 'off')
+      )`
     ),
     focus_lineage_check: check(
       "rooms_focus_lineage_check",

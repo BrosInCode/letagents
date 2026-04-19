@@ -65,6 +65,7 @@ import {
   upsertRoomParticipant,
   upsertAccount,
   updateProjectDisplayName,
+  updateFocusRoomSettings,
   updateTask,
   getRoomAgentPresence,
   type GitHubWebhookDeliveryStatus,
@@ -108,6 +109,11 @@ import {
   type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
+import {
+  normalizeFocusRoomSettings,
+  shouldPostFocusRoomEventToParent,
+  validateFocusRoomSettingsPatch,
+} from "./focus-room-settings.js";
 import { selectStaleTaskAutoPrompt } from "./stale-work.js";
 import {
   buildFailedCheckRunTaskDescription,
@@ -351,6 +357,14 @@ function toRoomResponse(
     authenticated?: boolean;
   }
 ): Record<string, unknown> {
+  const focusSettings = project.kind === "focus"
+    ? normalizeFocusRoomSettings({
+        parent_visibility: project.focus_parent_visibility,
+        activity_scope: project.focus_activity_scope,
+        github_event_routing: project.focus_github_event_routing,
+      })
+    : null;
+
   return {
     room_id: project.id,
     name: project.name ?? null,
@@ -361,6 +375,10 @@ function toRoomResponse(
     focus_key: project.focus_key,
     source_task_id: project.source_task_id,
     focus_status: project.focus_status,
+    focus_parent_visibility: focusSettings?.parent_visibility ?? null,
+    focus_activity_scope: focusSettings?.activity_scope ?? null,
+    focus_github_event_routing: focusSettings?.github_event_routing ?? null,
+    focus_settings: focusSettings,
     concluded_at: project.concluded_at,
     conclusion_summary: project.conclusion_summary,
     created_at: project.created_at,
@@ -4034,6 +4052,43 @@ app.get(/^\/rooms\/(.+)\/focus\/([^/]+)$/, async (req: AuthenticatedRequest, res
   });
 });
 
+app.patch(/^\/rooms\/(.+)\/focus\/([^/]+)\/settings$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  try {
+    const settings = validateFocusRoomSettingsPatch(req.body ?? {});
+    const focusRoom = await updateFocusRoomSettings(project.id, focusKey, settings);
+    if (!focusRoom) {
+      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
+      return;
+    }
+
+    const role = await resolveProjectRole(focusRoom, req.sessionAccount);
+    res.json({
+      room_id: project.id,
+      focus_key: focusKey,
+      focus_room: toRoomResponse(focusRoom, {
+        role,
+        authenticated: Boolean(req.sessionAccount),
+      }),
+    });
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "PATCH /rooms/:room_id/focus/:focus_key/settings",
+      error,
+      "Focus Room settings could not be updated."
+    );
+  }
+});
+
 app.get(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -4102,7 +4157,15 @@ app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedR
       return;
     }
 
-    const message = result.updated
+    const shouldPostResultToParent = shouldPostFocusRoomEventToParent(
+      normalizeFocusRoomSettings({
+        parent_visibility: result.room.focus_parent_visibility,
+        activity_scope: result.room.focus_activity_scope,
+        github_event_routing: result.room.focus_github_event_routing,
+      }),
+      "result_summary"
+    );
+    const message = result.updated && shouldPostResultToParent
       ? await emitProjectMessage(
           project.id,
           "letagents",
