@@ -28,6 +28,15 @@ export function normalizeTaskActorKey(value: unknown): string | null {
   return trimmed || null;
 }
 
+export function normalizeTaskActorInstanceId(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 export function buildTaskUpdatePatch(input: {
   body: Record<string, unknown>;
   workflowArtifacts?: TaskWorkflowArtifact[];

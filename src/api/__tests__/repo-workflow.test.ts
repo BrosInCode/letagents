@@ -117,6 +117,26 @@ test("formatRepoPullRequestEventMessage formats GitLab merge request events", ()
   );
 });
 
+test("formatRepoPullRequestEventMessage redacts untrusted task-reference titles", () => {
+  const message = formatRepoPullRequestEventMessage({
+    provider: "github",
+    action: "opened",
+    repositoryFullName: "brosincode/letagents",
+    senderLogin: "octocat",
+    redactTitle: true,
+    pullRequest: {
+      number: 299,
+      title: "task_95: unauthorized work should not project",
+      url: "https://github.com/BrosInCode/letagents/pull/299",
+    },
+  });
+
+  assert.equal(
+    message,
+    "PR #299 opened by octocat in brosincode/letagents https://github.com/BrosInCode/letagents/pull/299"
+  );
+});
+
 test("formatRepoRepositoryEventMessage formats repository transfers", () => {
   const message = formatRepoRepositoryEventMessage({
     provider: "bitbucket",

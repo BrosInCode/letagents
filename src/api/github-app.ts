@@ -39,6 +39,7 @@ export interface GitHubWebhookPullRequest {
   merged?: boolean;
   state?: string;
   head?: {
+    ref?: string;
     sha?: string;
   };
   user?: {
@@ -184,6 +185,8 @@ function toRepoPullRequestRef(pullRequest: GitHubWebhookPullRequest): RepoPullRe
     title: pullRequest.title,
     url: pullRequest.html_url,
     body: pullRequest.body,
+    headRef: pullRequest.head?.ref,
+    headSha: pullRequest.head?.sha,
     merged: pullRequest.merged,
     authorLogin: pullRequest.user?.login,
     mergedByLogin: pullRequest.merged_by?.login,

@@ -24,6 +24,7 @@ const getTasks = dbModule?.getTasks;
 const getMessages = dbModule?.getMessages;
 const getTaskById = dbModule?.getTaskById;
 const updateTask = dbModule?.updateTask;
+const createTaskLease = dbModule?.createTaskLease;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 const webhookSecret = "test-webhook-secret";
@@ -173,6 +174,28 @@ function buildRepositoryPayload() {
   };
 }
 
+async function createWorkLeaseForPr(input: {
+  roomId: string;
+  taskId: string;
+  prUrl: string;
+  branchRef?: string;
+}) {
+  if (!createTaskLease) {
+    throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+  }
+
+  return createTaskLease({
+    room_id: input.roomId,
+    task_id: input.taskId,
+    kind: "work",
+    agent_key: "EmmyMay/olivewolf",
+    actor_label: "OliveWolf | EmmyMay's agent | Agent",
+    created_by: "test",
+    pr_url: input.prUrl,
+    branch_ref: input.branchRef ?? null,
+  });
+}
+
 test.beforeEach(async () => {
   if (!requiresDatabase) {
     await resetDatabase();
@@ -318,7 +341,7 @@ test(
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
   },
   async (t) => {
-    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
+    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask || !createTaskLease) {
       throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
     }
 
@@ -333,6 +356,12 @@ test(
     await updateTask(room.id, task.id, { status: "assigned" });
 
     const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/201";
+    await createWorkLeaseForPr({
+      roomId: room.id,
+      taskId: task.id,
+      prUrl: pullRequestUrl,
+      branchRef: "olive/webhook-coverage",
+    });
     const result = await postGitHubWebhook({
       port,
       deliveryId: "delivery-pr-opened",
@@ -346,6 +375,10 @@ test(
           title: `${task.id}: add webhook integration coverage`,
           body: "covers the end-to-end route",
           html_url: pullRequestUrl,
+          head: {
+            ref: "olive/webhook-coverage",
+            sha: "abc123",
+          },
           merged: false,
           user: { login: "octocat" },
         },
@@ -375,13 +408,79 @@ test(
 );
 
 test(
+  "pull_request opened with only a task reference is recorded but not projected without a matching lease",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask || !createTaskLease) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const task = await createTask(room.id, "Unleased PR coverage", "OliveWolf");
+    await updateTask(room.id, task.id, { status: "accepted" });
+    await updateTask(room.id, task.id, { status: "assigned" });
+
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/299";
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-opened-unleased",
+      eventName: "pull_request",
+      payload: {
+        action: "opened",
+        repository: buildRepositoryPayload(),
+        sender: { login: "octocat" },
+        pull_request: {
+          number: 299,
+          title: `${task.id}: unauthorized work should not project`,
+          body: "mentions the task id but has no active work lease",
+          html_url: pullRequestUrl,
+          head: {
+            ref: "octocat/unleased-work",
+            sha: "def456",
+          },
+          merged: false,
+          user: { login: "octocat" },
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const unchangedTask = await getTaskById(room.id, task.id);
+    assert.equal(unchangedTask?.status, "assigned");
+    assert.equal(unchangedTask?.pr_url, null);
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes("Ignored unleased GitHub pull_request projection") &&
+      message.text.includes(task.id)
+    ));
+    const githubMessage = messages.find((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #299 opened by octocat")
+    );
+    assert.ok(githubMessage);
+    assert.equal(githubMessage?.text.includes(task.id), false);
+  }
+);
+
+test(
   "pull_request_review changes_requested transitions an in_review task to blocked through the real webhook route",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
   },
   async (t) => {
-    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
+    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask || !createTaskLease) {
       throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
     }
 
@@ -400,6 +499,12 @@ test(
       status: "in_review",
       pr_url: pullRequestUrl,
     });
+    await createWorkLeaseForPr({
+      roomId: room.id,
+      taskId: task.id,
+      prUrl: pullRequestUrl,
+      branchRef: "olive/review-transition",
+    });
 
     const result = await postGitHubWebhook({
       port,
@@ -414,6 +519,10 @@ test(
           title: `${task.id}: review integration coverage`,
           body: "exercise real review transitions",
           html_url: pullRequestUrl,
+          head: {
+            ref: "olive/review-transition",
+            sha: "abc789",
+          },
         },
         review: {
           id: 88,
@@ -451,7 +560,7 @@ test(
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
   },
   async (t) => {
-    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask) {
+    if (!createProjectWithName || !createTask || !getMessages || !getTaskById || !updateTask || !createTaskLease) {
       throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
     }
 
@@ -470,6 +579,12 @@ test(
       status: "in_review",
       pr_url: pullRequestUrl,
     });
+    await createWorkLeaseForPr({
+      roomId: room.id,
+      taskId: task.id,
+      prUrl: pullRequestUrl,
+      branchRef: "olive/merge-transition",
+    });
 
     const result = await postGitHubWebhook({
       port,
@@ -484,6 +599,10 @@ test(
           title: `${task.id}: merge integration coverage`,
           body: "exercise real merge transitions",
           html_url: pullRequestUrl,
+          head: {
+            ref: "olive/merge-transition",
+            sha: "abc999",
+          },
           merged: true,
           merged_by: { login: "octomerger" },
           user: { login: "octocat" },
