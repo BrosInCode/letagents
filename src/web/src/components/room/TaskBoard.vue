@@ -46,6 +46,18 @@
             <span>{{ formatTimestamp(task.created_at) }}</span>
           </div>
           <p v-if="task.description" class="task-description">{{ task.description }}</p>
+          
+          <!-- Leases and Locks Coordination Data -->
+          <div v-if="task.active_leases?.length || task.active_locks?.length" class="task-coordination">
+            <div v-for="lease in task.active_leases" :key="lease.id" class="coordination-badge lease">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+              <span>{{ lease.kind }} lease: {{ lease.actor_label }}</span>
+            </div>
+            <div v-for="lock in task.active_locks" :key="lock.id" class="coordination-badge lock">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+              <span>{{ lock.kind }} locked: {{ lock.reason || lock.actor_label }}</span>
+            </div>
+          </div>
           <div
             v-for="workflowRef in getTaskWorkflowRefs(task)"
             :key="workflowRef.url"
@@ -349,6 +361,26 @@ const groupedTasks = computed(() => {
 
 .task-description {
   margin: 0 0 10px; color: var(--muted, #71717a); font-size: 0.82rem; line-height: 1.5;
+}
+
+.task-coordination {
+  display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;
+}
+.coordination-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 6px;
+  font-size: 0.68rem; font-weight: 600;
+  border: 1px solid var(--line, #27272a);
+}
+.coordination-badge.lease {
+  background: rgba(168, 85, 247, 0.08);
+  border-color: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+}
+.coordination-badge.lock {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: #f87171;
 }
 
 .task-pr-link { margin-bottom: 8px; }
