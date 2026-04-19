@@ -33,7 +33,13 @@
         <div v-for="task in group.tasks" :key="task.id" class="task-card">
           <div class="task-card-header">
             <div class="task-heading">
-              <span class="task-id-badge">{{ task.id }}</span>
+              <span
+                class="task-id-badge"
+                :title="`Task ${formatTaskShortId(task.id)}`"
+                :aria-label="`Task ${formatTaskShortId(task.id)}`"
+              >
+                {{ formatTaskShortId(task.id) }}
+              </span>
               <h4 class="task-card-title">{{ task.title }}</h4>
             </div>
             <span class="task-status-badge" :data-status="task.status">
@@ -235,6 +241,12 @@ function formatTimestamp(timestamp: string): string {
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days}d ago`
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+function formatTaskShortId(taskId: string): string {
+  const match = /^task_(\d+)$/i.exec(taskId.trim())
+  if (match) return `T${match[1]}`
+  return taskId.replace(/^task_/i, 'T')
 }
 
 function getTaskWorkflowRefs(task: RoomTask) {
