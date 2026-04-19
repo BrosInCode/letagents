@@ -18,6 +18,26 @@ export const taskStatusEnum = pgEnum("task_status", [
   "cancelled",
 ]);
 export const agentPresenceStatusEnum = pgEnum("agent_presence_status", AGENT_PRESENCE_STATUSES);
+export const taskLeaseKindEnum = pgEnum("task_lease_kind", ["work", "review"]);
+export const taskLeaseStatusEnum = pgEnum("task_lease_status", [
+  "active",
+  "released",
+  "revoked",
+  "expired",
+]);
+export const taskLockScopeEnum = pgEnum("task_lock_scope", ["room", "task"]);
+export const taskLockReasonEnum = pgEnum("task_lock_reason", [
+  "human_stop",
+  "duplicate",
+  "manager_pause",
+  "revoked",
+  "policy",
+]);
+export const coordinationDecisionEnum = pgEnum("coordination_decision", [
+  "allow",
+  "deny",
+  "record",
+]);
 
 export const id_sequences = pgTable("id_sequences", {
   name: text("name").primaryKey(),
@@ -429,6 +449,115 @@ export const tasks = pgTable(
       table.room_id,
       table.assignee_agent_key
     ),
+  })
+);
+
+export const task_leases = pgTable(
+  "task_leases",
+  {
+    id: text("id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_id: text("task_id").notNull(),
+    kind: taskLeaseKindEnum("kind").notNull(),
+    status: taskLeaseStatusEnum("status").notNull().default("active"),
+    agent_key: text("agent_key").notNull(),
+    agent_instance_id: text("agent_instance_id"),
+    actor_label: text("actor_label").notNull(),
+    branch_ref: text("branch_ref"),
+    pr_url: text("pr_url"),
+    output_intent: text("output_intent"),
+    expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }),
+    last_heartbeat_at: timestamp("last_heartbeat_at", { mode: "string", withTimezone: true }),
+    revoked_reason: text("revoked_reason"),
+    created_by: text("created_by").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    room_task_idx: index("task_leases_room_task_idx").on(table.room_id, table.task_id),
+    room_agent_idx: index("task_leases_room_agent_idx").on(table.room_id, table.agent_key),
+    active_work_task_idx: uniqueIndex("task_leases_active_work_task_idx")
+      .on(table.room_id, table.task_id)
+      .where(sql`${table.kind} = 'work' AND ${table.status} = 'active'`),
+    active_review_agent_idx: uniqueIndex("task_leases_active_review_agent_idx")
+      .on(table.room_id, table.task_id, table.agent_key)
+      .where(sql`${table.kind} = 'review' AND ${table.status} = 'active'`),
+  })
+);
+
+export const task_locks = pgTable(
+  "task_locks",
+  {
+    id: text("id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_id: text("task_id"),
+    scope: taskLockScopeEnum("scope").notNull(),
+    reason: taskLockReasonEnum("reason").notNull(),
+    message: text("message"),
+    created_by: text("created_by").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    cleared_by: text("cleared_by"),
+    cleared_at: timestamp("cleared_at", { mode: "string", withTimezone: true }),
+  },
+  (table) => ({
+    room_scope_idx: index("task_locks_room_scope_idx").on(table.room_id, table.scope),
+    room_task_idx: index("task_locks_room_task_idx").on(table.room_id, table.task_id),
+    active_room_idx: index("task_locks_active_room_idx")
+      .on(table.room_id)
+      .where(sql`${table.scope} = 'room' AND ${table.cleared_at} IS NULL`),
+    active_task_idx: index("task_locks_active_task_idx")
+      .on(table.room_id, table.task_id)
+      .where(sql`${table.scope} = 'task' AND ${table.cleared_at} IS NULL`),
+    scope_task_check: check(
+      "task_locks_scope_task_check",
+      sql`(
+        ${table.scope} = 'room'
+        AND ${table.task_id} IS NULL
+      ) OR (
+        ${table.scope} = 'task'
+        AND ${table.task_id} IS NOT NULL
+      )`
+    ),
+  })
+);
+
+export interface CoordinationEventMetadata {
+  [key: string]: unknown;
+}
+
+export const coordination_events = pgTable(
+  "coordination_events",
+  {
+    id: text("id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_id: text("task_id"),
+    lease_id: text("lease_id")
+      .references(() => task_leases.id, { onDelete: "set null", onUpdate: "cascade" }),
+    lock_id: text("lock_id")
+      .references(() => task_locks.id, { onDelete: "set null", onUpdate: "cascade" }),
+    event_type: text("event_type").notNull(),
+    decision: coordinationDecisionEnum("decision").notNull().default("record"),
+    actor_label: text("actor_label"),
+    actor_key: text("actor_key"),
+    actor_instance_id: text("actor_instance_id"),
+    reason: text("reason"),
+    metadata: jsonb("metadata").$type<CoordinationEventMetadata>(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    room_task_idx: index("coordination_events_room_task_idx").on(table.room_id, table.task_id),
+    room_created_idx: index("coordination_events_room_created_idx").on(
+      table.room_id,
+      table.created_at
+    ),
+    lease_idx: index("coordination_events_lease_idx").on(table.lease_id),
+    lock_idx: index("coordination_events_lock_idx").on(table.lock_id),
   })
 );
 
