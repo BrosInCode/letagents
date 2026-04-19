@@ -7,6 +7,7 @@ import {
   agents,
   auth_sessions,
   auth_states,
+  coordination_events,
   github_app_installations,
   github_app_repositories,
   github_room_events,
@@ -20,9 +21,15 @@ import {
   room_participants,
   room_aliases,
   rooms,
+  task_leases,
+  task_locks,
   tasks,
 } from "./db/schema.js";
-import type { GitHubRoomEventMetadata, GitHubRoomEventType } from "./db/schema.js";
+import type {
+  CoordinationEventMetadata,
+  GitHubRoomEventMetadata,
+  GitHubRoomEventType,
+} from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomId, normalizeRoomName } from "./room-routing.js";
 import {
@@ -245,6 +252,12 @@ export type TaskStatus =
   | "done"
   | "cancelled";
 
+export type TaskLeaseKind = "work" | "review";
+export type TaskLeaseStatus = "active" | "released" | "revoked" | "expired";
+export type TaskLockScope = "room" | "task";
+export type TaskLockReason = "human_stop" | "duplicate" | "manager_pause" | "revoked" | "policy";
+export type CoordinationDecision = "allow" | "deny" | "record";
+
 export interface Task {
   id: string;
   room_id: string;
@@ -259,6 +272,55 @@ export interface Task {
   workflow_refs: TaskWorkflowRef[];
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskLease {
+  id: string;
+  room_id: string;
+  task_id: string;
+  kind: TaskLeaseKind;
+  status: TaskLeaseStatus;
+  agent_key: string;
+  agent_instance_id: string | null;
+  actor_label: string;
+  branch_ref: string | null;
+  pr_url: string | null;
+  output_intent: string | null;
+  expires_at: string | null;
+  last_heartbeat_at: string | null;
+  revoked_reason: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskLock {
+  id: string;
+  room_id: string;
+  task_id: string | null;
+  scope: TaskLockScope;
+  reason: TaskLockReason;
+  message: string | null;
+  created_by: string;
+  created_at: string;
+  cleared_by: string | null;
+  cleared_at: string | null;
+}
+
+export interface CoordinationEvent {
+  id: string;
+  room_id: string;
+  task_id: string | null;
+  lease_id: string | null;
+  lock_id: string | null;
+  event_type: string;
+  decision: CoordinationDecision;
+  actor_label: string | null;
+  actor_key: string | null;
+  actor_instance_id: string | null;
+  reason: string | null;
+  metadata: CoordinationEventMetadata | null;
+  created_at: string;
 }
 
 export interface TaskOwnershipState {
@@ -292,6 +354,55 @@ interface TaskRow {
   workflow_artifacts: TaskWorkflowArtifact[];
   created_at: string;
   updated_at: string;
+}
+
+interface TaskLeaseRow {
+  id: string;
+  room_id: string;
+  task_id: string;
+  kind: TaskLeaseKind;
+  status: TaskLeaseStatus;
+  agent_key: string;
+  agent_instance_id: string | null;
+  actor_label: string;
+  branch_ref: string | null;
+  pr_url: string | null;
+  output_intent: string | null;
+  expires_at: string | null;
+  last_heartbeat_at: string | null;
+  revoked_reason: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TaskLockRow {
+  id: string;
+  room_id: string;
+  task_id: string | null;
+  scope: TaskLockScope;
+  reason: TaskLockReason;
+  message: string | null;
+  created_by: string;
+  created_at: string;
+  cleared_by: string | null;
+  cleared_at: string | null;
+}
+
+interface CoordinationEventRow {
+  id: string;
+  room_id: string;
+  task_id: string | null;
+  lease_id: string | null;
+  lock_id: string | null;
+  event_type: string;
+  decision: CoordinationDecision;
+  actor_label: string | null;
+  actor_key: string | null;
+  actor_instance_id: string | null;
+  reason: string | null;
+  metadata: CoordinationEventMetadata | null;
+  created_at: string;
 }
 
 interface RoomAgentPresenceRow {
@@ -525,6 +636,61 @@ function toTask(row: TaskRow): Task {
     }),
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function toTaskLease(row: TaskLeaseRow): TaskLease {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    task_id: row.task_id,
+    kind: row.kind,
+    status: row.status,
+    agent_key: row.agent_key,
+    agent_instance_id: row.agent_instance_id,
+    actor_label: row.actor_label,
+    branch_ref: row.branch_ref,
+    pr_url: row.pr_url,
+    output_intent: row.output_intent,
+    expires_at: row.expires_at,
+    last_heartbeat_at: row.last_heartbeat_at,
+    revoked_reason: row.revoked_reason,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toTaskLock(row: TaskLockRow): TaskLock {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    task_id: row.task_id,
+    scope: row.scope,
+    reason: row.reason,
+    message: row.message,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    cleared_by: row.cleared_by,
+    cleared_at: row.cleared_at,
+  };
+}
+
+function toCoordinationEvent(row: CoordinationEventRow): CoordinationEvent {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    task_id: row.task_id,
+    lease_id: row.lease_id,
+    lock_id: row.lock_id,
+    event_type: row.event_type,
+    decision: row.decision,
+    actor_label: row.actor_label,
+    actor_key: row.actor_key,
+    actor_instance_id: row.actor_instance_id,
+    reason: row.reason,
+    metadata: row.metadata,
+    created_at: row.created_at,
   };
 }
 
@@ -2316,6 +2482,229 @@ export async function updateTask(
     workflow_artifacts: newWorkflowArtifacts,
     updated_at: now,
   });
+}
+
+function coordinationId(prefix: "tl" | "lock" | "ce"): string {
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+export async function expireStaleTaskLeases(
+  roomId: string,
+  at: Date = new Date()
+): Promise<number> {
+  const now = at.toISOString();
+  const expired = await db
+    .update(task_leases)
+    .set({
+      status: "expired",
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(task_leases.room_id, roomId),
+        eq(task_leases.status, "active" as TaskLeaseStatus),
+        sql`${task_leases.expires_at} IS NOT NULL`,
+        lte(task_leases.expires_at, now)
+      )
+    )
+    .returning({ id: task_leases.id });
+
+  return expired.length;
+}
+
+export async function createTaskLease(input: {
+  room_id: string;
+  task_id: string;
+  kind: TaskLeaseKind;
+  agent_key: string;
+  actor_label: string;
+  created_by: string;
+  agent_instance_id?: string | null;
+  branch_ref?: string | null;
+  pr_url?: string | null;
+  output_intent?: string | null;
+  expires_at?: string | null;
+}): Promise<TaskLease> {
+  const now = new Date().toISOString();
+  await expireStaleTaskLeases(input.room_id, new Date(now));
+  const row: TaskLeaseRow = {
+    id: coordinationId("tl"),
+    room_id: input.room_id,
+    task_id: input.task_id,
+    kind: input.kind,
+    status: "active",
+    agent_key: input.agent_key,
+    agent_instance_id: input.agent_instance_id ?? null,
+    actor_label: input.actor_label,
+    branch_ref: input.branch_ref ?? null,
+    pr_url: input.pr_url ?? null,
+    output_intent: input.output_intent ?? null,
+    expires_at: input.expires_at ?? null,
+    last_heartbeat_at: now,
+    revoked_reason: null,
+    created_by: input.created_by,
+    created_at: now,
+    updated_at: now,
+  };
+
+  await db.insert(task_leases).values(row);
+  return toTaskLease(row);
+}
+
+export async function getActiveTaskLeases(
+  roomId: string,
+  taskId?: string
+): Promise<TaskLease[]> {
+  const now = new Date().toISOString();
+  await expireStaleTaskLeases(roomId, new Date(now));
+  const conditions = [
+    eq(task_leases.room_id, roomId),
+    eq(task_leases.status, "active" as TaskLeaseStatus),
+    sql`(${task_leases.expires_at} IS NULL OR ${task_leases.expires_at} > ${now})`,
+  ];
+  if (taskId) {
+    conditions.push(eq(task_leases.task_id, taskId));
+  }
+
+  const rows = (await db
+    .select()
+    .from(task_leases)
+    .where(and(...conditions))
+    .orderBy(asc(task_leases.created_at))) as TaskLeaseRow[];
+
+  return rows.map(toTaskLease);
+}
+
+export async function revokeTaskLease(
+  roomId: string,
+  leaseId: string,
+  revokedReason: string
+): Promise<TaskLease | null> {
+  const now = new Date().toISOString();
+  await db
+    .update(task_leases)
+    .set({
+      status: "revoked",
+      revoked_reason: revokedReason,
+      updated_at: now,
+    })
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)));
+
+  const [row] = (await db
+    .select()
+    .from(task_leases)
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)))
+    .limit(1)) as TaskLeaseRow[];
+
+  return row ? toTaskLease(row) : null;
+}
+
+export async function createTaskLock(input: {
+  room_id: string;
+  scope: TaskLockScope;
+  reason: TaskLockReason;
+  created_by: string;
+  task_id?: string | null;
+  message?: string | null;
+}): Promise<TaskLock> {
+  const now = new Date().toISOString();
+  const row: TaskLockRow = {
+    id: coordinationId("lock"),
+    room_id: input.room_id,
+    task_id: input.task_id ?? null,
+    scope: input.scope,
+    reason: input.reason,
+    message: input.message ?? null,
+    created_by: input.created_by,
+    created_at: now,
+    cleared_by: null,
+    cleared_at: null,
+  };
+
+  await db.insert(task_locks).values(row);
+  return toTaskLock(row);
+}
+
+export async function getActiveTaskLocks(
+  roomId: string,
+  taskId?: string
+): Promise<TaskLock[]> {
+  const conditions = [
+    eq(task_locks.room_id, roomId),
+    sql`${task_locks.cleared_at} IS NULL`,
+  ];
+  if (taskId) {
+    conditions.push(
+      or(
+        eq(task_locks.scope, "room" as TaskLockScope),
+        and(eq(task_locks.scope, "task" as TaskLockScope), eq(task_locks.task_id, taskId))
+      )!
+    );
+  }
+
+  const rows = (await db
+    .select()
+    .from(task_locks)
+    .where(and(...conditions))
+    .orderBy(asc(task_locks.created_at))) as TaskLockRow[];
+
+  return rows.map(toTaskLock);
+}
+
+export async function clearTaskLock(
+  roomId: string,
+  lockId: string,
+  clearedBy: string
+): Promise<TaskLock | null> {
+  const now = new Date().toISOString();
+  await db
+    .update(task_locks)
+    .set({
+      cleared_by: clearedBy,
+      cleared_at: now,
+    })
+    .where(and(eq(task_locks.room_id, roomId), eq(task_locks.id, lockId)));
+
+  const [row] = (await db
+    .select()
+    .from(task_locks)
+    .where(and(eq(task_locks.room_id, roomId), eq(task_locks.id, lockId)))
+    .limit(1)) as TaskLockRow[];
+
+  return row ? toTaskLock(row) : null;
+}
+
+export async function createCoordinationEvent(input: {
+  room_id: string;
+  event_type: string;
+  decision?: CoordinationDecision;
+  task_id?: string | null;
+  lease_id?: string | null;
+  lock_id?: string | null;
+  actor_label?: string | null;
+  actor_key?: string | null;
+  actor_instance_id?: string | null;
+  reason?: string | null;
+  metadata?: CoordinationEventMetadata | null;
+}): Promise<CoordinationEvent> {
+  const row: CoordinationEventRow = {
+    id: coordinationId("ce"),
+    room_id: input.room_id,
+    task_id: input.task_id ?? null,
+    lease_id: input.lease_id ?? null,
+    lock_id: input.lock_id ?? null,
+    event_type: input.event_type,
+    decision: input.decision ?? "record",
+    actor_label: input.actor_label ?? null,
+    actor_key: input.actor_key ?? null,
+    actor_instance_id: input.actor_instance_id ?? null,
+    reason: input.reason ?? null,
+    metadata: input.metadata ?? null,
+    created_at: new Date().toISOString(),
+  };
+
+  await db.insert(coordination_events).values(row);
+  return toCoordinationEvent(row);
 }
 
 // ── GitHub Room Events ──────────────────────────────────────────────────────
