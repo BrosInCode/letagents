@@ -12,8 +12,65 @@
       </div>
     </section>
 
+    <section v-if="isFocusRoom" class="focus-context">
+      <div>
+        <p class="focus-eyebrow">Current Focus Room</p>
+        <h4>{{ sourceTaskId || 'Task room' }}</h4>
+        <p>Keep task-specific work here, then bring the outcome back to the parent room.</p>
+      </div>
+      <dl class="focus-facts compact">
+        <div>
+          <dt>Parent</dt>
+          <dd>{{ roomAddress }}</dd>
+        </div>
+        <div>
+          <dt>Source task</dt>
+          <dd>{{ sourceTaskId || 'Not linked' }}</dd>
+        </div>
+        <div>
+          <dt>Share results</dt>
+          <dd>Coming next</dd>
+        </div>
+      </dl>
+      <div class="focus-context-actions">
+        <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
+          Back to parent room
+        </button>
+        <button class="focus-secondary" type="button" disabled>
+          Share results later
+        </button>
+      </div>
+    </section>
+
     <div class="focus-layout">
       <section class="focus-list">
+        <div v-if="!isFocusRoom" class="focus-section-header">
+          <div>
+            <h4>Open Focus Rooms</h4>
+            <p>Active task rooms ready to enter.</p>
+          </div>
+          <span>{{ openFocusRooms.length }}</span>
+        </div>
+
+        <div v-if="!isFocusRoom && openFocusRooms.length === 0" class="focus-empty compact">
+          <h4>No Focus Rooms yet</h4>
+          <p>Open one from a task when the work needs a dedicated room.</p>
+        </div>
+
+        <button
+          v-for="focusRoom in openFocusRooms"
+          :key="focusRoom.room_id"
+          class="focus-task focus-room-link"
+          type="button"
+          @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+        >
+          <div>
+            <strong>{{ focusRoom.display_name }}</strong>
+            <span>{{ focusRoom.source_task_id || focusRoom.room_id }}</span>
+          </div>
+          <small>{{ focusRoom.focus_status || 'active' }}</small>
+        </button>
+
         <div class="focus-section-header">
           <div>
             <h4>Focus candidates</h4>
@@ -62,15 +119,20 @@
             </div>
             <div>
               <dt>Share back</dt>
-              <dd>Outcome summary</dd>
+              <dd>{{ currentFocusRoom ? 'Ready later' : 'Outcome summary' }}</dd>
             </div>
           </dl>
 
-          <button class="focus-primary" type="button" @click="emit('createFocusRoom', currentTask.id)">
-            Focus on this
+          <button
+            class="focus-primary"
+            type="button"
+            :disabled="isFocusRoom || isCreatingFocusRoom"
+            @click="currentFocusRoom ? emit('openFocusRoom', currentFocusRoom.focus_key || currentTask.id) : emit('createFocusRoom', currentTask.id)"
+          >
+            {{ actionLabel }}
           </button>
           <p class="focus-note">
-            This prepares the Focus Room path. Server-side room creation still needs to land.
+            {{ actionNote }}
           </p>
         </template>
 
@@ -88,23 +150,40 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { type RoomTask } from '@/composables/useRoom'
+import { type FocusRoomInfo, type RoomTask } from '@/composables/useRoom'
 
 const props = defineProps<{
   tasks: readonly RoomTask[]
+  focusRooms: readonly FocusRoomInfo[]
   selectedTaskId: string | null
   roomLabel: string
   roomAddress: string
+  isFocusRoom: boolean
+  sourceTaskId: string | null
+  isCreatingFocusRoom: boolean
 }>()
 
 const emit = defineEmits<{
   selectTask: [taskId: string]
   createFocusRoom: [taskId: string]
+  openFocusRoom: [focusKey: string]
+  openParentRoom: []
 }>()
 
 const candidateTasks = computed(() =>
   props.tasks.filter(task => !['done', 'cancelled'].includes(task.status))
 )
+
+const openFocusRooms = computed(() =>
+  props.focusRooms.filter(room => room.kind === 'focus' && room.focus_status !== 'concluded')
+)
+
+const focusRoomByTask = computed(() => {
+  const entries = openFocusRooms.value
+    .filter(room => room.source_task_id)
+    .map(room => [room.source_task_id as string, room] as const)
+  return new Map(entries)
+})
 
 const currentTask = computed(() => {
   const selected = props.selectedTaskId
@@ -113,10 +192,30 @@ const currentTask = computed(() => {
   return selected ?? candidateTasks.value[0] ?? null
 })
 
+const currentFocusRoom = computed(() => {
+  const taskId = currentTask.value?.id
+  return taskId ? focusRoomByTask.value.get(taskId) ?? null : null
+})
+
 const previewRoute = computed(() => {
   const base = props.roomAddress || 'room'
-  const taskId = currentTask.value?.id || 'task'
-  return `/in/${base}/focus/${taskId}`
+  const focusKey = props.isFocusRoom
+    ? props.sourceTaskId || currentTask.value?.id || 'task'
+    : currentFocusRoom.value?.focus_key || currentTask.value?.id || 'task'
+  return `/in/${base}/focus/${focusKey}`
+})
+
+const actionLabel = computed(() => {
+  if (props.isFocusRoom) return 'Focus Room active'
+  if (currentFocusRoom.value) return 'Open Focus Room'
+  if (props.isCreatingFocusRoom) return 'Opening...'
+  return 'Focus on this'
+})
+
+const actionNote = computed(() => {
+  if (props.isFocusRoom) return 'Open new Focus Rooms from the parent room.'
+  if (currentFocusRoom.value) return 'This task already has a Focus Room.'
+  return 'This opens a dedicated room for task-level execution.'
 })
 
 function taskStatusLabel(status: string): string {
@@ -164,6 +263,7 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-hero h3,
+.focus-context h4,
 .focus-detail h4,
 .focus-empty h4 {
   margin: 0;
@@ -177,6 +277,7 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-hero p,
+.focus-context p,
 .focus-section-header p,
 .focus-detail-copy,
 .focus-note,
@@ -222,6 +323,27 @@ function taskStatusLabel(status: string): string {
 .focus-list,
 .focus-detail {
   padding: 14px;
+}
+
+.focus-context {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.8fr) auto;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: var(--bg-1, #0f0f11);
+}
+
+.focus-context h4 {
+  font-size: 1rem;
+}
+
+.focus-context-actions {
+  display: grid;
+  gap: 8px;
 }
 
 .focus-section-header {
@@ -314,6 +436,11 @@ function taskStatusLabel(status: string): string {
   margin: 14px 0;
 }
 
+.focus-facts.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
 .focus-facts div {
   display: grid;
   gap: 4px;
@@ -343,8 +470,29 @@ function taskStatusLabel(status: string): string {
   transition: opacity 150ms;
 }
 
+.focus-secondary {
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #27272a);
+  background: var(--bg-0, #09090b);
+  color: var(--text, #fafafa);
+  font-size: 0.76rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.focus-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .focus-primary:hover {
   opacity: 0.9;
+}
+
+.focus-primary:disabled {
+  cursor: progress;
+  opacity: 0.7;
 }
 
 .focus-note {
@@ -357,8 +505,16 @@ function taskStatusLabel(status: string): string {
   color: var(--muted, #71717a);
 }
 
+.focus-empty.compact {
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px dashed var(--line, #27272a);
+  border-radius: 8px;
+}
+
 @media (max-width: 860px) {
   .focus-hero,
+  .focus-context,
   .focus-layout {
     grid-template-columns: 1fr;
   }
@@ -383,6 +539,10 @@ function taskStatusLabel(status: string): string {
   .focus-task {
     flex-direction: column;
     gap: 8px;
+  }
+
+  .focus-facts.compact {
+    grid-template-columns: 1fr;
   }
 }
 </style>

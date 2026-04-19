@@ -99,6 +99,30 @@ export interface RoomInfo {
   displayName: string
   role: string
   authenticated: boolean
+  kind: 'main' | 'focus'
+  parentRoomId: string | null
+  focusKey: string | null
+  sourceTaskId: string | null
+  focusStatus: 'active' | 'concluded' | null
+  concludedAt: string | null
+  conclusionSummary: string | null
+}
+
+export interface FocusRoomInfo {
+  room_id: string
+  name: string | null
+  display_name: string
+  code: string | null
+  kind: 'main' | 'focus'
+  parent_room_id: string | null
+  focus_key: string | null
+  source_task_id: string | null
+  focus_status: 'active' | 'concluded' | null
+  concluded_at: string | null
+  conclusion_summary: string | null
+  created_at: string
+  role?: string
+  authenticated?: boolean
 }
 
 export type RoomAgentPromptKind = 'join' | 'inline' | 'auto'
@@ -171,6 +195,7 @@ const presence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
 const tasks = ref<RoomTask[]>([])
+const focusRooms = ref<FocusRoomInfo[]>([])
 const githubEvents = ref<RoomGitHubEvent[]>([])
 const githubEventsAvailable = ref(false)
 const githubEventsHasMore = ref(false)
@@ -409,6 +434,15 @@ async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   }
 }
 
+async function fetchFocusRooms(roomIdentifier: string): Promise<FocusRoomInfo[]> {
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/focus-rooms`)
+    return data.focus_rooms || []
+  } catch {
+    return []
+  }
+}
+
 async function fetchGitHubEvents(roomIdentifier: string): Promise<{
   events: RoomGitHubEvent[]
   available: boolean
@@ -537,6 +571,12 @@ async function fetchTaskGithubStatus(roomIdentifier: string): Promise<Record<str
 async function refreshTaskGithubStatus(): Promise<boolean> {
   if (!room.value) return false
   taskGithubStatus.value = await fetchTaskGithubStatus(room.value.identifier)
+  return true
+}
+
+async function refreshFocusRooms(): Promise<boolean> {
+  if (!room.value) return false
+  focusRooms.value = await fetchFocusRooms(room.value.identifier)
   return true
 }
 
@@ -709,6 +749,34 @@ async function addTask(title: string): Promise<boolean> {
   }
 }
 
+async function createFocusRoom(taskId: string): Promise<FocusRoomInfo | null> {
+  if (!room.value) return null
+  try {
+    const data = await apiFetch(
+      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/focus-room`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    )
+    const focusRoom = data.focus_room as FocusRoomInfo | undefined
+    if (!focusRoom?.room_id) return null
+
+    const idx = focusRooms.value.findIndex(item => item.room_id === focusRoom.room_id)
+    if (idx >= 0) {
+      const updated = [...focusRooms.value]
+      updated[idx] = focusRoom
+      focusRooms.value = updated
+    } else {
+      focusRooms.value = [...focusRooms.value, focusRoom]
+    }
+
+    return focusRoom
+  } catch {
+    return null
+  }
+}
+
 async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<boolean> {
   if (!room.value) return false
   try {
@@ -763,6 +831,7 @@ async function joinRoom(roomIdentifier: string) {
   room.value = null
   messages.value = []
   tasks.value = []
+  focusRooms.value = []
   presence.value = []
   participants.value = []
   githubEvents.value = []
@@ -788,14 +857,22 @@ async function joinRoom(roomIdentifier: string) {
       displayName: project.display_name || project.name || roomIdentifier,
       role: project.role || 'participant',
       authenticated: !!project.authenticated,
+      kind: project.kind || 'main',
+      parentRoomId: project.parent_room_id || null,
+      focusKey: project.focus_key || null,
+      sourceTaskId: project.source_task_id || null,
+      focusStatus: project.focus_status || null,
+      concludedAt: project.concluded_at || null,
+      conclusionSummary: project.conclusion_summary || null,
     }
     isConnected.value = true
     persistSession()
 
     // Load existing room state in parallel
-    const [msgs, tsks, prs, roomParticipants, gh, ghStatus] = await Promise.all([
+    const [msgs, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
+      fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
       isRepoBackedRoomId(roomIdentifier)
@@ -805,6 +882,7 @@ async function joinRoom(roomIdentifier: string) {
     ])
     messages.value = msgs
     tasks.value = tsks
+    focusRooms.value = focused
     presence.value = prs
     participants.value = roomParticipants
     taskGithubStatus.value = ghStatus
@@ -855,6 +933,7 @@ function leaveRoom() {
   room.value = null
   messages.value = []
   tasks.value = []
+  focusRooms.value = []
   presence.value = []
   participants.value = []
   githubEvents.value = []
@@ -912,6 +991,7 @@ export function useRoom() {
     // State
     messages: readonly(messages),
     tasks: readonly(tasks),
+    focusRooms: readonly(focusRooms),
     presence: readonly(presence),
     participants: readonly(participants),
     taskGithubStatus: readonly(taskGithubStatus),
@@ -934,6 +1014,8 @@ export function useRoom() {
     sendMessage,
     addTask,
     updateTask,
+    createFocusRoom,
+    refreshFocusRooms,
     refreshRoomPresence,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
