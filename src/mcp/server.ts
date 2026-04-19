@@ -1968,8 +1968,8 @@ const TASK_STATUSES = [
 server.tool(
   "add_task",
   "Add a new task to the room board. Tasks normally start as 'proposed' and must be " +
-    "accepted before an agent can claim them, but tasks created by trusted agents already " +
-    "active in the room may be auto-accepted. Use this when a human or agent identifies " +
+    "accepted before an agent can claim them. Agent-created tasks require coordinator " +
+    "acceptance before they become claimable. Use this when a human or agent identifies " +
     "work that needs to be done.",
   {
     title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
@@ -2003,6 +2003,9 @@ server.tool(
           title,
           description,
           created_by: identity.actor_label,
+          actor_label: identity.actor_label,
+          actor_key: identity.canonical_key,
+          actor_instance_id: AGENT_INSTANCE_UUID,
           source_message_id,
         }),
       },
@@ -2171,6 +2174,7 @@ server.tool(
             assignee: identity.actor_label,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
+            actor_instance_id: AGENT_INSTANCE_UUID,
             assignee_agent_key: identity.canonical_key,
           }),
         },
@@ -2261,6 +2265,7 @@ server.tool(
             workflow_artifacts,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
+            actor_instance_id: AGENT_INSTANCE_UUID,
           }),
         },
       });
@@ -2332,6 +2337,7 @@ server.tool(
             pr_url,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
+            actor_instance_id: AGENT_INSTANCE_UUID,
           }),
         },
       });

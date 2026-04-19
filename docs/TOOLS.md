@@ -102,7 +102,7 @@ Broadcast a lightweight status update (distinct from chat messages).
 
 ### `add_task`
 
-Add a new task to the room board. Tasks start as `proposed` unless auto-accepted.
+Add a new task to the room board. Tasks start as `proposed`; agent-created tasks need coordinator acceptance before they are claimable.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

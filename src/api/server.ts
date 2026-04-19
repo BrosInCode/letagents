@@ -14,7 +14,9 @@ import {
   createFocusRoomForTask,
   createProject,
   createSession,
+  createCoordinationEvent,
   createTask,
+  createTaskLease,
   deleteSessionByToken,
   findTaskByPrUrl,
   findTaskByWorkflowArtifactMatches,
@@ -37,6 +39,8 @@ import {
   getRoomParticipants,
   insertGitHubRoomEvent,
   getSessionAccountByToken,
+  getActiveTaskLeases,
+  getActiveTaskLocks,
   getTaskById,
   getTaskOwnershipState,
   getTasks,
@@ -71,6 +75,7 @@ import {
   type SessionAccount,
   type Task,
   type TaskGitHubArtifactStatus,
+  type TaskLeaseKind,
   type TaskStatus,
   getTasksGitHubArtifactStatus,
 } from "./db.js";
@@ -137,8 +142,16 @@ import {
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
+  normalizeTaskActorKey,
+  normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
 } from "./task-ownership.js";
+import {
+  evaluateTaskAdmission,
+  evaluateCoordinationMutation,
+  findApplicableLock,
+  type CoordinationMutationKind,
+} from "./coordination-policy.js";
 import { getAgentPrimaryLabel, parseAgentActorLabel } from "../shared/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
@@ -538,6 +551,322 @@ async function validateOwnerTokenTaskActorKey(input: {
   return {
     actorKey: actorIdentity.canonical_key,
     error: null,
+  };
+}
+
+type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
+
+type TaskCoordinationGuardDecision =
+  | { kind: "allow" }
+  | { kind: "deny"; code: string; error: string };
+
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function classifyTaskCoordinationMutation(
+  updates: TaskUpdatePatch
+): { mutation: CoordinationMutationKind; leaseKind: TaskLeaseKind; claim: boolean } | null {
+  if (updates.status === "assigned") {
+    return { mutation: "task_claim", leaseKind: "work", claim: true };
+  }
+
+  if (updates.status === "in_review") {
+    return { mutation: "task_complete", leaseKind: "work", claim: false };
+  }
+
+  if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined) {
+    return { mutation: "workflow_artifact_attach", leaseKind: "work", claim: false };
+  }
+
+  if (updates.status === "in_progress" || updates.status === "blocked") {
+    return { mutation: "task_update", leaseKind: "work", claim: false };
+  }
+
+  return null;
+}
+
+async function recordCoordinationDecision(input: {
+  roomId: string;
+  taskId: string | null;
+  mutation: CoordinationMutationKind;
+  decision: "allow" | "deny";
+  actorLabel: string | null;
+  actorKey: string | null;
+  actorInstanceId: string | null;
+  reason?: string | null;
+  leaseId?: string | null;
+  lockId?: string | null;
+}): Promise<void> {
+  await createCoordinationEvent({
+    room_id: input.roomId,
+    task_id: input.taskId,
+    event_type: input.mutation,
+    decision: input.decision,
+    actor_label: input.actorLabel,
+    actor_key: input.actorKey,
+    actor_instance_id: input.actorInstanceId,
+    reason: input.reason ?? null,
+    lease_id: input.leaseId ?? null,
+    lock_id: input.lockId ?? null,
+  });
+}
+
+async function enforceTaskAdmissionCoordination(input: {
+  req: AuthenticatedRequest;
+  projectId: string;
+  title: string;
+  sourceMessageId?: string | null;
+  actorLabel: string | null;
+  actorKey: string | null;
+  actorInstanceId: string | null;
+}): Promise<TaskCoordinationGuardDecision> {
+  if (input.req.authKind !== "owner_token") {
+    return { kind: "allow" };
+  }
+
+  const actorLabel = normalizeTaskActorLabel(input.actorLabel);
+  const actorKey = normalizeTaskActorKey(input.actorKey);
+
+  const locks = await getActiveTaskLocks(input.projectId);
+  const lock = findApplicableLock({ locks, taskId: null });
+  if (lock) {
+    await recordCoordinationDecision({
+      roomId: input.projectId,
+      taskId: null,
+      mutation: "task_admit",
+      decision: "deny",
+      actorLabel,
+      actorKey,
+      actorInstanceId: input.actorInstanceId,
+      reason: `Task admission is blocked by ${lock.reason} lock ${lock.id}.`,
+      lockId: lock.id,
+    });
+    return {
+      kind: "deny",
+      code: "coordination_active_lock",
+      error: `Task admission is blocked by ${lock.reason} lock ${lock.id}.`,
+    };
+  }
+
+  const [tasks, focusRooms, leases] = await Promise.all([
+    getTasks(input.projectId, undefined, { limit: 500 }),
+    getFocusRoomsForParent(input.projectId),
+    getActiveTaskLeases(input.projectId),
+  ]);
+  const admission = evaluateTaskAdmission({
+    intent: {
+      sourceMessageId: input.sourceMessageId,
+      outputIntent: input.title,
+    },
+    tasks: tasks.tasks,
+    focusRooms: focusRooms.map((focusRoom) => ({
+      room_id: focusRoom.id,
+      focus_key: focusRoom.focus_key,
+      source_task_id: focusRoom.source_task_id,
+      focus_status: focusRoom.focus_status,
+    })),
+    leases,
+  });
+  if (admission.kind === "route_to_review") {
+    await recordCoordinationDecision({
+      roomId: input.projectId,
+      taskId: null,
+      mutation: "task_admit",
+      decision: "deny",
+      actorLabel,
+      actorKey,
+      actorInstanceId: input.actorInstanceId,
+      reason: admission.reason,
+      leaseId: admission.duplicate.lease?.id ?? null,
+    });
+    return {
+      kind: "deny",
+      code: "coordination_duplicate_work",
+      error: admission.reason,
+    };
+  }
+
+  return { kind: "allow" };
+}
+
+async function issueWorkLeaseForActor(input: {
+  roomId: string;
+  taskId: string;
+  actorLabel: string;
+  actorKey: string;
+  actorInstanceId: string | null;
+  mutation: CoordinationMutationKind;
+  outputIntent?: string | null;
+}) {
+  const lease = await createTaskLease({
+    room_id: input.roomId,
+    task_id: input.taskId,
+    kind: "work",
+    agent_key: input.actorKey,
+    agent_instance_id: input.actorInstanceId,
+    actor_label: input.actorLabel,
+    created_by: input.actorLabel,
+    output_intent: input.outputIntent ?? input.mutation,
+  });
+  await recordCoordinationDecision({
+    roomId: input.roomId,
+    taskId: input.taskId,
+    mutation: input.mutation,
+    decision: "allow",
+    actorLabel: input.actorLabel,
+    actorKey: input.actorKey,
+    actorInstanceId: input.actorInstanceId,
+    leaseId: lease.id,
+    reason: `Issued ${lease.kind} lease ${lease.id} for ${input.mutation}.`,
+  });
+  return lease;
+}
+
+function taskIsAssignedToActor(input: {
+  taskOwnership: NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
+  actorLabel: string;
+  actorKey: string;
+}): boolean {
+  const assignedKey = normalizeTaskActorKey(input.taskOwnership.assignee_agent_key);
+  if (assignedKey) {
+    return assignedKey === input.actorKey;
+  }
+
+  return normalizeTaskActorLabel(input.taskOwnership.assignee) === input.actorLabel;
+}
+
+async function enforceTaskCoordinationMutation(input: {
+  req: AuthenticatedRequest;
+  projectId: string;
+  task: Task;
+  taskOwnership: NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
+  updates: TaskUpdatePatch;
+  forcedMutation?: { mutation: CoordinationMutationKind; leaseKind: TaskLeaseKind };
+  actorLabel: string | null;
+  actorKey: string | null;
+  actorInstanceId: string | null;
+}): Promise<TaskCoordinationGuardDecision> {
+  if (input.req.authKind !== "owner_token") {
+    return { kind: "allow" };
+  }
+
+  const classified = input.forcedMutation
+    ? { ...input.forcedMutation, claim: false }
+    : classifyTaskCoordinationMutation(input.updates);
+  if (!classified) {
+    return { kind: "allow" };
+  }
+
+  const actorLabel = normalizeTaskActorLabel(input.actorLabel);
+  const requestedActorKey = normalizeTaskActorKey(input.actorKey);
+  if (!actorLabel || !requestedActorKey) {
+    return {
+      kind: "deny",
+      code: "coordination_missing_actor",
+      error: "actor_label and actor_key are required for coordinated task mutations",
+    };
+  }
+  const verified = await validateOwnerTokenTaskActorKey({
+    req: input.req,
+    actorKey: requestedActorKey,
+  });
+  if (verified.error || !verified.actorKey) {
+    return {
+      kind: "deny",
+      code: "coordination_invalid_actor",
+      error: verified.error ?? "actor_key must belong to the authenticated agent owner",
+    };
+  }
+  const actorKey = verified.actorKey;
+
+  const [leases, locks] = await Promise.all([
+    getActiveTaskLeases(input.projectId, input.task.id),
+    getActiveTaskLocks(input.projectId, input.task.id),
+  ]);
+  const decision = evaluateCoordinationMutation({
+    mutation: classified.mutation,
+    taskId: input.task.id,
+    requiredLeaseKind: classified.leaseKind,
+    actor: {
+      actorLabel,
+      agentKey: actorKey,
+      agentInstanceId: input.actorInstanceId,
+    },
+    leases,
+    locks,
+  });
+
+  if (decision.kind === "allow") {
+    await recordCoordinationDecision({
+      roomId: input.projectId,
+      taskId: input.task.id,
+      mutation: classified.mutation,
+      decision: "allow",
+      actorLabel,
+      actorKey,
+      actorInstanceId: input.actorInstanceId,
+      leaseId: decision.lease.id,
+      reason: `Allowed ${classified.mutation} with lease ${decision.lease.id}.`,
+    });
+    return { kind: "allow" };
+  }
+
+  if (decision.code === "missing_lease") {
+    if (classified.claim && input.task.status === "accepted") {
+      await issueWorkLeaseForActor({
+        roomId: input.projectId,
+        taskId: input.task.id,
+        actorLabel,
+        actorKey,
+        actorInstanceId: input.actorInstanceId,
+        mutation: classified.mutation,
+        outputIntent: input.task.title,
+      });
+      return { kind: "allow" };
+    }
+
+    if (
+      !classified.claim &&
+      taskIsAssignedToActor({
+        taskOwnership: input.taskOwnership,
+        actorLabel,
+        actorKey,
+      })
+    ) {
+      await issueWorkLeaseForActor({
+        roomId: input.projectId,
+        taskId: input.task.id,
+        actorLabel,
+        actorKey,
+        actorInstanceId: input.actorInstanceId,
+        mutation: classified.mutation,
+        outputIntent: input.task.title,
+      });
+      return { kind: "allow" };
+    }
+  }
+
+  await recordCoordinationDecision({
+    roomId: input.projectId,
+    taskId: input.task.id,
+    mutation: classified.mutation,
+    decision: "deny",
+    actorLabel,
+    actorKey,
+    actorInstanceId: input.actorInstanceId,
+    reason: decision.reason,
+    leaseId: decision.lease?.id ?? null,
+    lockId: decision.lock?.id ?? null,
+  });
+  return {
+    kind: "deny",
+    code: `coordination_${decision.code}`,
+    error: decision.reason,
   };
 }
 
@@ -2892,11 +3221,14 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  const { title, description, created_by, source_message_id } = req.body as {
+  const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = req.body as {
     title?: string;
     description?: string;
     created_by?: string;
     source_message_id?: string;
+    actor_label?: string;
+    actor_key?: string;
+    actor_instance_id?: string;
   };
 
   if (!title || !created_by) {
@@ -2908,7 +3240,36 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
+  const admission = await enforceTaskAdmissionCoordination({
+    req,
+    projectId,
+    title,
+    sourceMessageId: source_message_id ?? null,
+    actorLabel: actor_label ?? created_by,
+    actorKey: actor_key ?? null,
+    actorInstanceId: normalizeOptionalString(actor_instance_id),
+  });
+  if (admission.kind === "deny") {
+    res.status(409).json({ error: admission.error, code: admission.code });
+    return;
+  }
+
   const task = await createTask(projectId, title, created_by, description, source_message_id);
+
+  if (req.authKind === "owner_token") {
+    await createCoordinationEvent({
+      room_id: projectId,
+      task_id: task.id,
+      event_type: "task_admit",
+      decision: "record",
+      actor_label: created_by,
+      actor_key: normalizeTaskActorKey(actor_key),
+      actor_instance_id: normalizeOptionalString(actor_instance_id),
+      reason: "Agent-created task requires coordinator acceptance before it is claimable.",
+    });
+    res.status(201).json(task);
+    return;
+  }
 
   if (!(await isTrustedAgentCreator(projectId, created_by))) {
     res.status(201).json(task);
@@ -2999,6 +3360,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     body: requestBody,
     workflowArtifacts: workflow_artifacts,
   });
+  const actorInstanceId = normalizeOptionalString(requestBody.actor_instance_id);
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
@@ -3045,6 +3407,21 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
     }
     if (Object.prototype.hasOwnProperty.call(ownership, "assigneeAgentKey")) {
       updates.assignee_agent_key = ownership.assigneeAgentKey;
+    }
+
+    const coordination = await enforceTaskCoordinationMutation({
+      req,
+      projectId,
+      task,
+      taskOwnership,
+      updates,
+      actorLabel,
+      actorKey: verifiedActorKey,
+      actorInstanceId,
+    });
+    if (coordination.kind === "deny") {
+      res.status(409).json({ error: coordination.error, code: coordination.code });
+      return;
     }
 
     const updated = await updateTask(projectId, taskId, updates);
@@ -3585,13 +3962,42 @@ app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedR
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { summary } = (req.body ?? {}) as { summary?: unknown };
+  const requestBody = (req.body ?? {}) as Record<string, unknown>;
+  const { summary } = requestBody as { summary?: unknown };
   if (typeof summary !== "string" || !summary.trim()) {
     res.status(400).json({ error: "summary is required" });
     return;
   }
 
   try {
+    const focusRoom = await getFocusRoomByKey(project.id, focusKey);
+    if (!focusRoom) {
+      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
+      return;
+    }
+
+    if (focusRoom.source_task_id) {
+      const task = await getTaskById(project.id, focusRoom.source_task_id);
+      const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
+      if (task && taskOwnership) {
+        const coordination = await enforceTaskCoordinationMutation({
+          req,
+          projectId: project.id,
+          task,
+          taskOwnership,
+          updates: {},
+          forcedMutation: { mutation: "focus_room_conclude", leaseKind: "work" },
+          actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
+          actorKey: normalizeTaskActorKey(requestBody.actor_key),
+          actorInstanceId: normalizeOptionalString(requestBody.actor_instance_id),
+        });
+        if (coordination.kind === "deny") {
+          res.status(409).json({ error: coordination.error, code: coordination.code });
+          return;
+        }
+      }
+    }
+
     const result = await concludeFocusRoom(project.id, focusKey, summary);
     if (!result) {
       res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
@@ -3658,11 +4064,14 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { title, description, created_by, source_message_id } = req.body as {
+  const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = req.body as {
     title?: string;
     description?: string;
     created_by?: string;
     source_message_id?: string;
+    actor_label?: string;
+    actor_key?: string;
+    actor_instance_id?: string;
   };
 
   if (!title || !created_by) {
@@ -3670,7 +4079,36 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
     return;
   }
 
+  const admission = await enforceTaskAdmissionCoordination({
+    req,
+    projectId: project.id,
+    title,
+    sourceMessageId: source_message_id ?? null,
+    actorLabel: actor_label ?? created_by,
+    actorKey: actor_key ?? null,
+    actorInstanceId: normalizeOptionalString(actor_instance_id),
+  });
+  if (admission.kind === "deny") {
+    res.status(409).json({ error: admission.error, code: admission.code });
+    return;
+  }
+
   const task = await createTask(project.id, title, created_by, description, source_message_id);
+
+  if (req.authKind === "owner_token") {
+    await createCoordinationEvent({
+      room_id: project.id,
+      task_id: task.id,
+      event_type: "task_admit",
+      decision: "record",
+      actor_label: created_by,
+      actor_key: normalizeTaskActorKey(actor_key),
+      actor_instance_id: normalizeOptionalString(actor_instance_id),
+      reason: "Agent-created task requires coordinator acceptance before it is claimable.",
+    });
+    res.status(201).json({ ...task, room_id: project.id });
+    return;
+  }
 
   if (!(await isTrustedAgentCreator(project.id, created_by))) {
     res.status(201).json({ ...task, room_id: project.id });
@@ -3697,8 +4135,32 @@ app.post(/^\/rooms\/(.+)\/tasks\/([^/]+)\/focus-room$/, async (req: Authenticate
 
   if (!(await requireParticipant(req, res, project))) return;
 
-  const { display_name } = req.body as { display_name?: string };
+  const requestBody = (req.body ?? {}) as Record<string, unknown>;
+  const { display_name } = requestBody as { display_name?: string };
   try {
+    const task = await getTaskById(project.id, taskId);
+    const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+    if (!task || !taskOwnership) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+
+    const coordination = await enforceTaskCoordinationMutation({
+      req,
+      projectId: project.id,
+      task,
+      taskOwnership,
+      updates: {},
+      forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
+      actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
+      actorKey: normalizeTaskActorKey(requestBody.actor_key),
+      actorInstanceId: normalizeOptionalString(requestBody.actor_instance_id),
+    });
+    if (coordination.kind === "deny") {
+      res.status(409).json({ error: coordination.error, code: coordination.code });
+      return;
+    }
+
     const result = await createFocusRoomForTask(project.id, taskId, {
       displayName: display_name,
     });
@@ -3809,6 +4271,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     body: requestBody,
     workflowArtifacts: workflow_artifacts,
   });
+  const actorInstanceId = normalizeOptionalString(requestBody.actor_instance_id);
 
   try {
     const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
@@ -3853,6 +4316,21 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     }
     if (Object.prototype.hasOwnProperty.call(ownership, "assigneeAgentKey")) {
       updates.assignee_agent_key = ownership.assigneeAgentKey;
+    }
+
+    const coordination = await enforceTaskCoordinationMutation({
+      req,
+      projectId: project.id,
+      task,
+      taskOwnership,
+      updates,
+      actorLabel,
+      actorKey: verifiedActorKey,
+      actorInstanceId,
+    });
+    if (coordination.kind === "deny") {
+      res.status(409).json({ error: coordination.error, code: coordination.code });
+      return;
     }
 
     const updated = await updateTask(project.id, taskId, updates);
