@@ -38,6 +38,12 @@ export const DEFAULT_FOCUS_ROOM_SETTINGS: FocusRoomSettings = {
 
 export type FocusParentEventKind = "result_summary" | "major_activity" | "all_activity";
 
+export interface FocusGitHubRoutingContext {
+  matched_task_reference?: boolean;
+  matched_workflow_artifact?: boolean;
+  parent_repo_event?: boolean;
+}
+
 function isOneOf<T extends readonly string[]>(values: T, value: unknown): value is T[number] {
   return typeof value === "string" && values.includes(value);
 }
@@ -121,9 +127,25 @@ export function shouldPostFocusRoomEventToParent(
   }
 }
 
-export function shouldRouteTaskGitHubEventToFocusRoom(
-  settingsInput: FocusRoomSettings | null | undefined
+export function shouldRouteGitHubEventToFocusRoom(
+  settingsInput: FocusRoomSettings | null | undefined,
+  context: FocusGitHubRoutingContext
 ): boolean {
   const settings = normalizeFocusRoomSettings(settingsInput);
-  return settings.github_event_routing !== "off";
+
+  switch (settings.github_event_routing) {
+    case "off":
+      return false;
+    case "all_parent_repo":
+      return Boolean(
+        context.parent_repo_event ||
+        context.matched_task_reference ||
+        context.matched_workflow_artifact
+      );
+    case "task_only":
+      return Boolean(context.matched_task_reference);
+    case "task_and_branch":
+    default:
+      return Boolean(context.matched_task_reference || context.matched_workflow_artifact);
+  }
 }
