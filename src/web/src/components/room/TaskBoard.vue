@@ -56,6 +56,15 @@
               View {{ workflowRef.label }}
             </a>
           </div>
+          <div v-if="canFocusTask(task)" class="task-focus-row">
+            <button
+              class="task-focus-btn"
+              type="button"
+              @click="emit('focusTask', task.id)"
+            >
+              Focus on this
+            </button>
+          </div>
           <!-- GitHub Artifact Status -->
           <div v-if="getGithubStatus(task.id)" class="gh-status-section">
             <div class="gh-status-header">
@@ -122,6 +131,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   addTask: [title: string]
   updateTask: [taskId: string, updates: { status: string }]
+  focusTask: [taskId: string]
 }>()
 
 const newTaskTitle = ref('')
@@ -191,6 +201,10 @@ function getTaskActions(task: RoomTask): TaskAction[] {
       break
   }
   return actions
+}
+
+function canFocusTask(task: RoomTask): boolean {
+  return !['done', 'cancelled'].includes(task.status)
 }
 
 function formatTimestamp(timestamp: string): string {
@@ -344,6 +358,28 @@ const groupedTasks = computed(() => {
   text-decoration: none; transition: color 150ms;
 }
 .task-pr-link a:hover { color: #93c5fd; }
+
+.task-focus-row { margin-bottom: 8px; }
+.task-focus-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background: rgba(96, 165, 250, 0.08);
+  color: #93c5fd;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms, color 150ms;
+  font-family: inherit;
+}
+.task-focus-btn:hover {
+  border-color: rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--text, #fafafa);
+}
 
 /* — GitHub Artifact Status — */
 .gh-status-section {
