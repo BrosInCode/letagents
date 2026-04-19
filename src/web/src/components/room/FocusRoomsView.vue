@@ -713,10 +713,6 @@ function taskStatusLabel(status: string): string {
 .focus-adhoc {
   display: grid;
   gap: 10px;
-  margin-bottom: 14px;
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--bg-0, #09090b);
 }
 
 .focus-adhoc h4 {
@@ -1103,8 +1099,7 @@ function taskStatusLabel(status: string): string {
   }
 
   .focus-hero-copy,
-  .focus-route,
-  .focus-list,
+  .focus-section-card,
   .focus-detail {
     padding: 12px;
   }
