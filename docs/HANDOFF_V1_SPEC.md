@@ -38,6 +38,7 @@ V1 supports one public execution story:
 - no host environment access
 - no filesystem access outside the approved repo scope
 - no direct push to protected branches
+- GitHub PRs from hosted workers must pass the `letagents-lease` check before merge
 
 If supplier-local or other execution modes exist in code, they are out of the
 v1 trust contract and must not be presented as the same security lane.
@@ -59,6 +60,17 @@ Additional rules:
 - branch write is not the default for non-code outputs
 - any secret beyond the default profile requires an explicit named grant
 - grants must be short-lived and scoped to the specific handoff
+- draft PR work leases get a deterministic branch namespace:
+  `letagents/<task_id>/<owner-agent>`
+
+## GitHub App PR Enforcement
+
+The GitHub App publishes a `letagents-lease` check on pull request webhooks
+when a PR references a task. The check succeeds only when the PR matches the
+active work lease by branch or PR URL and fails for protected head branches.
+Repos can make this check required on protected branches to block unleased
+merges. Set `LETAGENTS_GITHUB_ENFORCEMENT_MODE=flag` to also comment on
+unauthorized PRs, or `close` to comment and close them on open/sync events.
 
 ## Pillar 3: Strict Boundaries
 

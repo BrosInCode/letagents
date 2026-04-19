@@ -84,6 +84,12 @@ import {
   getTasksGitHubArtifactStatus,
 } from "./db.js";
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
+import {
+  buildGitHubLeaseEnforcementPlan,
+  buildLeasedBranchRef,
+  publishGitHubLeaseEnforcement,
+  resolveGitHubLeaseEnforcementMode,
+} from "./github-lease-enforcement.js";
 import { db } from "./db/client.js";
 import { system_github_app } from "./db/schema.js";
 import {
@@ -164,6 +170,7 @@ import {
   evaluateCoordinationMutation,
   evaluateWorkflowArtifactMutation,
   findApplicableLock,
+  type CoordinationDecisionResult,
   type CoordinationMutationKind,
 } from "./coordination-policy.js";
 import { getAgentPrimaryLabel, parseAgentActorLabel } from "../shared/agent-identity.js";
@@ -878,6 +885,10 @@ async function issueWorkLeaseForActor(input: {
     agent_key: input.actorKey,
     agent_instance_id: input.actorInstanceId,
     actor_label: input.actorLabel,
+    branch_ref: buildLeasedBranchRef({
+      taskId: input.taskId,
+      agentKey: input.actorKey,
+    }),
     created_by: input.actorLabel,
     output_intent: input.outputIntent ?? input.mutation,
   });
@@ -1656,10 +1667,53 @@ function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequestRef | n
   }
 }
 
+async function maybePublishGitHubLeaseEnforcement(input: {
+  project: Project;
+  event: RepoRoomEvent;
+  linkedTask: Task;
+  decision: CoordinationDecisionResult;
+  installationId: string | null;
+}): Promise<void> {
+  if (input.event.provider !== "github" || input.event.kind !== "pull_request") {
+    return;
+  }
+
+  const plan = buildGitHubLeaseEnforcementPlan({
+    action: input.event.action,
+    linkedTaskId: input.linkedTask.id,
+    pullRequest: input.event.pullRequest,
+    decision: input.decision,
+    mode: resolveGitHubLeaseEnforcementMode(),
+  });
+  if (!plan) {
+    return;
+  }
+
+  try {
+    const config = await getGitHubAppConfig();
+    await publishGitHubLeaseEnforcement({
+      config,
+      installationId: input.installationId,
+      repositoryFullName: input.event.repositoryFullName,
+      pullRequestNumber: input.event.pullRequest.number,
+      plan,
+      detailsUrl: `${config.baseUrl}/in/${input.project.id}`,
+    });
+  } catch (error) {
+    console.warn(
+      "[github] failed to publish letagents-lease enforcement",
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
 async function applyRepoRoomEventToTask(
   project: Project,
   linkedTask: Task | undefined,
-  event: RepoRoomEvent
+  event: RepoRoomEvent,
+  input: {
+    installationId: string | null;
+  }
 ): Promise<{
   task: Task | undefined;
   authoritative: boolean;
@@ -1698,6 +1752,14 @@ async function applyRepoRoomEventToTask(
         ? decision.lease.id
         : decision.lease?.id ?? null,
       lockId: decision.kind === "deny" ? decision.lock?.id ?? null : null,
+    });
+
+    await maybePublishGitHubLeaseEnforcement({
+      project,
+      event,
+      linkedTask,
+      decision,
+      installationId: input.installationId,
     });
 
     if (decision.kind === "deny") {
@@ -1832,7 +1894,9 @@ async function handleMaterializedGitHubRoomEvent(
     }
   }
 
-  const taskProjection = await applyRepoRoomEventToTask(project, linkedTask, roomEvent);
+  const taskProjection = await applyRepoRoomEventToTask(project, linkedTask, roomEvent, {
+    installationId: input.installationId,
+  });
   if (!taskProjection.authoritative && linkedTask) {
     await updateGitHubRoomEventLinkedTaskId(event.idempotency_key, null);
   }
@@ -2592,9 +2656,9 @@ app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (re
     redirect_url: `${baseUrl}/auth/github/app/callback`,
     public: true,
     default_permissions: {
-      pull_requests: "read",
-      issues: "read",
-      checks: "read",
+      pull_requests: "write",
+      issues: "write",
+      checks: "write",
       contents: "read",
       metadata: "read"
     },
