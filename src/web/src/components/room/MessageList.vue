@@ -14,7 +14,7 @@
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
       class="new-messages-pill visible"
-      @click="scrollToBottom"
+      @click="scrollToBottom()"
     >
       <span v-if="unreadCount > 0">↓ {{ unreadCount }} new messages</span>
       <span v-else>↓ Scroll to latest</span>
@@ -82,9 +82,13 @@ function checkScroll() {
   }
 }
 
-function scrollToBottom() {
+function scrollToBottom(behavior: 'smooth' | 'instant' = 'smooth') {
   if (!messagesEl.value) return
-  messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
+  if (behavior === 'instant') {
+    messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+  } else {
+    messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
+  }
   unreadCount.value = 0
   isScrolledFarUp.value = false
 }
@@ -122,7 +126,7 @@ watch(() => props.messages.length, async (newLen, oldLen) => {
 
 onMounted(() => {
   messagesEl.value?.addEventListener('scroll', checkScroll)
-  nextTick(scrollToBottom)
+  nextTick(() => scrollToBottom('instant'))
 })
 
 onUnmounted(() => {
