@@ -7,6 +7,43 @@ import {
 } from './roomGitHubEvents'
 
 /** ── Types ── */
+export type FocusParentVisibility = 'summary_only' | 'major_activity' | 'all_activity' | 'silent'
+export type FocusActivityScope = 'task_and_branch' | 'task_only' | 'room'
+export type FocusGitHubEventRouting = 'task_and_branch' | 'task_only' | 'all_parent_repo' | 'off'
+
+export interface FocusRoomSettings {
+  parent_visibility: FocusParentVisibility
+  activity_scope: FocusActivityScope
+  github_event_routing: FocusGitHubEventRouting
+}
+
+export type FocusRoomSettingsPatch = Partial<FocusRoomSettings>
+
+export const DEFAULT_FOCUS_ROOM_SETTINGS: FocusRoomSettings = {
+  parent_visibility: 'summary_only',
+  activity_scope: 'task_and_branch',
+  github_event_routing: 'task_and_branch',
+}
+
+export function focusRoomSettingsFrom(value: {
+  focus_settings?: FocusRoomSettings | null
+  focus_parent_visibility?: FocusParentVisibility | null
+  focus_activity_scope?: FocusActivityScope | null
+  focus_github_event_routing?: FocusGitHubEventRouting | null
+} | null | undefined): FocusRoomSettings {
+  return {
+    parent_visibility: value?.focus_settings?.parent_visibility
+      || value?.focus_parent_visibility
+      || DEFAULT_FOCUS_ROOM_SETTINGS.parent_visibility,
+    activity_scope: value?.focus_settings?.activity_scope
+      || value?.focus_activity_scope
+      || DEFAULT_FOCUS_ROOM_SETTINGS.activity_scope,
+    github_event_routing: value?.focus_settings?.github_event_routing
+      || value?.focus_github_event_routing
+      || DEFAULT_FOCUS_ROOM_SETTINGS.github_event_routing,
+  }
+}
+
 export interface MessageReplyReference {
   id: string
   sender: string
@@ -104,6 +141,9 @@ export interface RoomInfo {
   focusKey: string | null
   sourceTaskId: string | null
   focusStatus: 'active' | 'concluded' | null
+  focusParentVisibility: FocusParentVisibility | null
+  focusActivityScope: FocusActivityScope | null
+  focusGitHubEventRouting: FocusGitHubEventRouting | null
   concludedAt: string | null
   conclusionSummary: string | null
 }
@@ -118,6 +158,10 @@ export interface FocusRoomInfo {
   focus_key: string | null
   source_task_id: string | null
   focus_status: 'active' | 'concluded' | null
+  focus_parent_visibility: FocusParentVisibility | null
+  focus_activity_scope: FocusActivityScope | null
+  focus_github_event_routing: FocusGitHubEventRouting | null
+  focus_settings?: FocusRoomSettings | null
   concluded_at: string | null
   conclusion_summary: string | null
   created_at: string
@@ -789,7 +833,7 @@ async function createFocusRoom(taskId: string): Promise<FocusRoomInfo | null> {
   }
 }
 
-async function shareFocusRoomResult(summary: string): Promise<FocusRoomInfo | null> {
+async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: FocusRoomInfo; parentMessagePosted: boolean } | null> {
   if (!room.value || room.value.kind !== 'focus') return null
   const trimmedSummary = summary.trim()
   const parentRoomId = room.value.parentRoomId
@@ -812,8 +856,51 @@ async function shareFocusRoomResult(summary: string): Promise<FocusRoomInfo | nu
       ...room.value,
       displayName: focusRoom.display_name || room.value.displayName,
       focusStatus: focusRoom.focus_status || room.value.focusStatus,
+      focusParentVisibility: focusRoom.focus_parent_visibility || room.value.focusParentVisibility,
+      focusActivityScope: focusRoom.focus_activity_scope || room.value.focusActivityScope,
+      focusGitHubEventRouting: focusRoom.focus_github_event_routing || room.value.focusGitHubEventRouting,
       concludedAt: focusRoom.concluded_at || room.value.concludedAt,
       conclusionSummary: focusRoom.conclusion_summary || trimmedSummary,
+    }
+
+    return {
+      focusRoom,
+      parentMessagePosted: Boolean(data.message),
+    }
+  } catch {
+    return null
+  }
+}
+
+async function updateFocusRoomSettings(
+  focusKey: string,
+  settings: FocusRoomSettingsPatch
+): Promise<FocusRoomInfo | null> {
+  if (!room.value) return null
+  const parentRoomId = room.value.kind === 'focus'
+    ? room.value.parentRoomId
+    : room.value.identifier
+  if (!parentRoomId || !focusKey) return null
+
+  try {
+    const data = await apiFetch(
+      `${roomPath(parentRoomId)}/focus/${encodeURIComponent(focusKey)}/settings`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }
+    )
+    const focusRoom = data.focus_room as FocusRoomInfo | undefined
+    if (!focusRoom?.room_id) return null
+
+    upsertFocusRoom(focusRoom)
+    if (room.value.kind === 'focus' && room.value.projectId === focusRoom.room_id) {
+      room.value = {
+        ...room.value,
+        focusParentVisibility: focusRoom.focus_parent_visibility,
+        focusActivityScope: focusRoom.focus_activity_scope,
+        focusGitHubEventRouting: focusRoom.focus_github_event_routing,
+      }
     }
 
     return focusRoom
@@ -907,6 +994,9 @@ async function joinRoom(roomIdentifier: string) {
       focusKey: project.focus_key || null,
       sourceTaskId: project.source_task_id || null,
       focusStatus: project.focus_status || null,
+      focusParentVisibility: project.focus_parent_visibility || project.focus_settings?.parent_visibility || null,
+      focusActivityScope: project.focus_activity_scope || project.focus_settings?.activity_scope || null,
+      focusGitHubEventRouting: project.focus_github_event_routing || project.focus_settings?.github_event_routing || null,
       concludedAt: project.concluded_at || null,
       conclusionSummary: project.conclusion_summary || null,
     }
@@ -1063,6 +1153,7 @@ export function useRoom() {
     updateTask,
     createFocusRoom,
     shareFocusRoomResult,
+    updateFocusRoomSettings,
     refreshFocusRooms,
     refreshRoomPresence,
     refreshTaskGithubStatus,

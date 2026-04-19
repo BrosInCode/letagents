@@ -93,15 +93,23 @@
           :roomAddress="focusParentAddress"
           :isFocusRoom="room?.kind === 'focus'"
           :sourceTaskId="room?.sourceTaskId || null"
+          :focusKey="room?.focusKey || null"
           :focusStatus="room?.focusStatus || null"
+          :focusSettings="{
+            parent_visibility: room?.focusParentVisibility || 'summary_only',
+            activity_scope: room?.focusActivityScope || 'task_and_branch',
+            github_event_routing: room?.focusGitHubEventRouting || 'task_and_branch',
+          }"
           :conclusionSummary="room?.conclusionSummary || null"
           :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
           :isSharingFocusResult="sharingFocusResult"
+          :isUpdatingFocusSettings="updatingFocusSettings"
           @selectTask="focusDraftTaskId = $event"
           @createFocusRoom="handleFocusTask"
           @openFocusRoom="handleOpenFocusRoom"
           @openParentRoom="handleOpenParentRoom"
           @shareResults="handleShareFocusResults"
+          @updateFocusSettings="handleUpdateFocusSettings"
         />
       </Transition>
     </div>
@@ -188,7 +196,7 @@ import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import { useToast } from '@/composables/useToast'
-import type { RoomMessage } from '@/composables/useRoom'
+import type { FocusRoomSettingsPatch, RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
 const router = useRouter()
@@ -215,6 +223,7 @@ const {
   updateTask,
   createFocusRoom,
   shareFocusRoomResult,
+  updateFocusRoomSettings,
   restoreSession,
   renameRoom,
   refreshRoomGitHubEvents,
@@ -234,6 +243,7 @@ const selectedReply = ref<RoomMessage | null>(null)
 const focusDraftTaskId = ref<string | null>(null)
 const creatingFocusRoomTaskId = ref<string | null>(null)
 const sharingFocusResult = ref(false)
+const updatingFocusSettings = ref(false)
 const tabTransitionDirection = ref<'forward' | 'back'>('forward')
 
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
@@ -391,14 +401,33 @@ async function handleShareFocusResults(summary: string) {
 
   sharingFocusResult.value = true
   try {
-    const focusRoom = await shareFocusRoomResult(trimmedSummary)
-    if (!focusRoom) {
+    const result = await shareFocusRoomResult(trimmedSummary)
+    if (!result) {
       toast.error('Result could not be shared.')
       return
     }
-    toast.success('Result shared with the parent room.')
+    toast.success(result.parentMessagePosted ? 'Result shared with the parent room.' : 'Focus Room result saved.')
   } finally {
     sharingFocusResult.value = false
+  }
+}
+
+async function handleUpdateFocusSettings(focusKey: string, settings: FocusRoomSettingsPatch) {
+  if (!focusKey) {
+    toast.error('Focus Room settings could not be saved.')
+    return
+  }
+
+  updatingFocusSettings.value = true
+  try {
+    const focusRoom = await updateFocusRoomSettings(focusKey, settings)
+    if (!focusRoom) {
+      toast.error('Focus Room settings could not be saved.')
+      return
+    }
+    toast.success('Focus Room settings saved.')
+  } finally {
+    updatingFocusSettings.value = false
   }
 }
 

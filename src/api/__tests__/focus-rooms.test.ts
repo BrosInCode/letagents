@@ -24,6 +24,7 @@ const createFocusRoomForTask = dbModule?.createFocusRoomForTask;
 const getFocusRoomByKey = dbModule?.getFocusRoomByKey;
 const getFocusRoomsForParent = dbModule?.getFocusRoomsForParent;
 const getMessages = dbModule?.getMessages;
+const updateFocusRoomSettings = dbModule?.updateFocusRoomSettings;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 const tsxBinary = path.resolve(
@@ -174,6 +175,9 @@ test(
     assert.equal(first.room.focus_key, task.id);
     assert.equal(first.room.source_task_id, task.id);
     assert.equal(first.room.focus_status, "active");
+    assert.equal(first.room.focus_parent_visibility, "summary_only");
+    assert.equal(first.room.focus_activity_scope, "task_and_branch");
+    assert.equal(first.room.focus_github_event_routing, "task_and_branch");
     assert.match(first.room.id, /^focus_\d+$/);
 
     const second = await createFocusRoomForTask(parent.id, task.id);
@@ -187,6 +191,34 @@ test(
 
     const byKey = await getFocusRoomByKey(parent.id, task.id);
     assert.equal(byKey?.id, first.room.id);
+  }
+);
+
+test(
+  "updateFocusRoomSettings persists focus visibility controls",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async () => {
+    if (!createProjectWithName || !createTask || !createFocusRoomForTask || !updateFocusRoomSettings) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-settings-db");
+    const task = await createTask(parent.id, "Tune Focus Room settings", "ThicketOlive");
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+
+    const updated = await updateFocusRoomSettings(parent.id, task.id, {
+      parent_visibility: "major_activity",
+      activity_scope: "task_only",
+      github_event_routing: "off",
+    });
+
+    assert.equal(updated?.focus_parent_visibility, "major_activity");
+    assert.equal(updated?.focus_activity_scope, "task_only");
+    assert.equal(updated?.focus_github_event_routing, "off");
   }
 );
 
@@ -286,6 +318,52 @@ test(
     assert.equal(
       messagesAfterRepeat.filter((message) => message.text.includes("Focus Room concluded")).length,
       1
+    );
+  }
+);
+
+test(
+  "focus room conclude route respects silent parent visibility",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !createTask || !createFocusRoomForTask || !getMessages || !updateFocusRoomSettings) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-silent-result-api");
+    const task = await createTask(parent.id, "Keep result in Focus Room", "ThicketOlive");
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+    await updateFocusRoomSettings(parent.id, task.id, {
+      parent_visibility: "silent",
+    });
+
+    const { child, port } = await startApiServer();
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary: "Private result" }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.shared, true);
+    assert.equal(payload.message, null);
+
+    const messages = (await getMessages(parent.id)).messages;
+    assert.equal(
+      messages.filter((message) => message.text.includes("Focus Room concluded")).length,
+      0
     );
   }
 );

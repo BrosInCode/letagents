@@ -31,12 +31,72 @@
           <dt>Status</dt>
           <dd>{{ focusStatusLabel }}</dd>
         </div>
+        <div>
+          <dt>Parent chat</dt>
+          <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
+        </div>
       </dl>
       <div class="focus-context-actions">
         <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
           Back to parent room
         </button>
       </div>
+      <form v-if="settingsTarget" class="focus-settings-form" @submit.prevent="submitFocusSettings">
+        <div class="focus-settings-heading">
+          <div>
+            <p class="focus-eyebrow">Visibility settings</p>
+            <h4>Choose what leaves this room.</h4>
+          </div>
+          <button
+            class="focus-secondary"
+            type="submit"
+            :disabled="!canSaveSettings"
+          >
+            {{ settingsButtonLabel }}
+          </button>
+        </div>
+        <div class="focus-settings-grid">
+          <label>
+            <span>Parent chat</span>
+            <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
+              <option
+                v-for="option in parentVisibilityOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+            <small>{{ parentVisibilityDescription }}</small>
+          </label>
+          <label>
+            <span>Activity scope</span>
+            <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
+              <option
+                v-for="option in activityScopeOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+            <small>{{ activityScopeDescription }}</small>
+          </label>
+          <label>
+            <span>GitHub events</span>
+            <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
+              <option
+                v-for="option in githubEventRoutingOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+            <small>{{ githubEventRoutingDescription }}</small>
+          </label>
+        </div>
+      </form>
       <form class="focus-share-form" @submit.prevent="submitShareResults">
         <label class="focus-share-label" for="focus-result-summary">Result summary</label>
         <textarea
@@ -163,7 +223,72 @@
               <dt>Share back</dt>
               <dd>{{ shareBackLabel }}</dd>
             </div>
+            <div v-if="currentFocusRoom">
+              <dt>Parent chat</dt>
+              <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
+            </div>
           </dl>
+
+          <form
+            v-if="settingsTarget"
+            class="focus-settings-form compact"
+            @submit.prevent="submitFocusSettings"
+          >
+            <div class="focus-settings-heading">
+              <div>
+                <p class="focus-eyebrow">Visibility settings</p>
+                <h4>Parent visibility</h4>
+              </div>
+              <button
+                class="focus-secondary"
+                type="submit"
+                :disabled="!canSaveSettings"
+              >
+                {{ settingsButtonLabel }}
+              </button>
+            </div>
+            <div class="focus-settings-grid compact">
+              <label>
+                <span>Parent chat</span>
+                <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
+                  <option
+                    v-for="option in parentVisibilityOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <small>{{ parentVisibilityDescription }}</small>
+              </label>
+              <label>
+                <span>Activity scope</span>
+                <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
+                  <option
+                    v-for="option in activityScopeOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <small>{{ activityScopeDescription }}</small>
+              </label>
+              <label>
+                <span>GitHub events</span>
+                <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
+                  <option
+                    v-for="option in githubEventRoutingOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <small>{{ githubEventRoutingDescription }}</small>
+              </label>
+            </div>
+          </form>
 
           <button
             class="focus-primary"
@@ -192,7 +317,16 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { type FocusRoomInfo, type RoomTask } from '@/composables/useRoom'
+import {
+  DEFAULT_FOCUS_ROOM_SETTINGS,
+  focusRoomSettingsFrom,
+  type FocusActivityScope,
+  type FocusGitHubEventRouting,
+  type FocusParentVisibility,
+  type FocusRoomInfo,
+  type FocusRoomSettings,
+  type RoomTask,
+} from '@/composables/useRoom'
 
 const props = defineProps<{
   tasks: readonly RoomTask[]
@@ -202,10 +336,13 @@ const props = defineProps<{
   roomAddress: string
   isFocusRoom: boolean
   sourceTaskId: string | null
+  focusKey: string | null
   focusStatus: 'active' | 'concluded' | null
+  focusSettings: FocusRoomSettings
   conclusionSummary: string | null
   isCreatingFocusRoom: boolean
   isSharingFocusResult: boolean
+  isUpdatingFocusSettings: boolean
 }>()
 
 const emit = defineEmits<{
@@ -214,10 +351,30 @@ const emit = defineEmits<{
   openFocusRoom: [focusKey: string]
   openParentRoom: []
   shareResults: [summary: string]
+  updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
 }>()
 
 const resultSummary = ref('')
 const shareAttempted = ref(false)
+const settingsDraft = ref<FocusRoomSettings>({ ...DEFAULT_FOCUS_ROOM_SETTINGS })
+
+const parentVisibilityOptions: Array<{ value: FocusParentVisibility; label: string }> = [
+  { value: 'summary_only', label: 'Result summaries only' },
+  { value: 'major_activity', label: 'Major activity' },
+  { value: 'all_activity', label: 'All activity' },
+  { value: 'silent', label: 'Keep parent quiet' },
+]
+const activityScopeOptions: Array<{ value: FocusActivityScope; label: string }> = [
+  { value: 'task_and_branch', label: 'Task and branch' },
+  { value: 'task_only', label: 'Task only' },
+  { value: 'room', label: 'Whole Focus Room' },
+]
+const githubEventRoutingOptions: Array<{ value: FocusGitHubEventRouting; label: string }> = [
+  { value: 'task_and_branch', label: 'Matching task/branch' },
+  { value: 'task_only', label: 'Task-linked only' },
+  { value: 'all_parent_repo', label: 'All parent repo events' },
+  { value: 'off', label: 'Do not route' },
+]
 
 const candidateTasks = computed(() =>
   props.tasks.filter(task => !['done', 'cancelled'].includes(task.status))
@@ -250,6 +407,20 @@ const currentFocusRoom = computed(() => {
   return taskId ? focusRoomByTask.value.get(taskId) ?? null : null
 })
 
+const settingsTarget = computed(() => {
+  if (props.isFocusRoom) {
+    return {
+      focusKey: props.focusKey || props.sourceTaskId,
+      settings: props.focusSettings,
+    }
+  }
+  if (!currentFocusRoom.value) return null
+  return {
+    focusKey: currentFocusRoom.value.focus_key || currentFocusRoom.value.source_task_id,
+    settings: focusRoomSettingsFrom(currentFocusRoom.value),
+  }
+})
+
 const isConcluded = computed(() => props.focusStatus === 'concluded')
 const conclusionSummaryText = computed(() => props.conclusionSummary?.trim() || '')
 const focusStatusLabel = computed(() => props.focusStatus ? taskStatusLabel(props.focusStatus) : 'active')
@@ -269,6 +440,7 @@ const canShareResults = computed(() =>
 const shareButtonLabel = computed(() => {
   if (isConcluded.value) return 'Results shared'
   if (props.isSharingFocusResult) return 'Sharing...'
+  if (settingsDraft.value.parent_visibility === 'silent') return 'Save result'
   return 'Share results'
 })
 const shareHelpText = computed(() => {
@@ -277,6 +449,9 @@ const shareHelpText = computed(() => {
   }
   if (shareAttempted.value && !resultSummary.value.trim()) {
     return 'Write a short outcome before sharing.'
+  }
+  if (settingsDraft.value.parent_visibility === 'silent') {
+    return 'Conclude this Focus Room without posting the summary into parent chat.'
   }
   return 'Send a concise outcome to the parent room.'
 })
@@ -308,6 +483,62 @@ const actionNote = computed(() => {
   return 'This opens a dedicated room for task-level execution.'
 })
 
+const hasSettingsChanges = computed(() => {
+  const target = settingsTarget.value
+  if (!target) return false
+  const current = target.settings
+  return (
+    settingsDraft.value.parent_visibility !== current.parent_visibility ||
+    settingsDraft.value.activity_scope !== current.activity_scope ||
+    settingsDraft.value.github_event_routing !== current.github_event_routing
+  )
+})
+const canSaveSettings = computed(() =>
+  Boolean(settingsTarget.value?.focusKey) &&
+  hasSettingsChanges.value &&
+  !props.isUpdatingFocusSettings
+)
+const settingsButtonLabel = computed(() =>
+  props.isUpdatingFocusSettings ? 'Saving...' : hasSettingsChanges.value ? 'Save settings' : 'Saved'
+)
+const parentVisibilityDescription = computed(() => {
+  switch (settingsDraft.value.parent_visibility) {
+    case 'silent':
+      return 'No task activity or result summaries are posted to parent chat.'
+    case 'all_activity':
+      return 'Every routed Focus Room event may appear in parent chat.'
+    case 'major_activity':
+      return 'Only major task, PR, and conclusion updates appear in parent chat.'
+    case 'summary_only':
+    default:
+      return 'Only explicit result summaries appear in parent chat.'
+  }
+})
+const activityScopeDescription = computed(() => {
+  switch (settingsDraft.value.activity_scope) {
+    case 'room':
+      return 'Activity can include the whole Focus Room thread.'
+    case 'task_only':
+      return 'Activity is limited to the linked source task.'
+    case 'task_and_branch':
+    default:
+      return 'Activity is scoped to the linked task and its branch/artifacts.'
+  }
+})
+const githubEventRoutingDescription = computed(() => {
+  switch (settingsDraft.value.github_event_routing) {
+    case 'off':
+      return 'GitHub events stay out of this Focus Room routing lane.'
+    case 'all_parent_repo':
+      return 'Parent repo GitHub events can be surfaced here.'
+    case 'task_only':
+      return 'Only GitHub events explicitly linked to the task are routed.'
+    case 'task_and_branch':
+    default:
+      return 'GitHub events must match the task, branch, or workflow artifact.'
+  }
+})
+
 watch(
   conclusionSummaryText,
   (summary) => {
@@ -318,11 +549,31 @@ watch(
   { immediate: true }
 )
 
+watch(
+  settingsTarget,
+  (target) => {
+    settingsDraft.value = target
+      ? { ...target.settings }
+      : { ...DEFAULT_FOCUS_ROOM_SETTINGS }
+  },
+  { immediate: true }
+)
+
 function submitShareResults() {
   shareAttempted.value = true
   const trimmedSummary = resultSummary.value.trim()
   if (!trimmedSummary || isConcluded.value || props.isSharingFocusResult) return
   emit('shareResults', trimmedSummary)
+}
+
+function submitFocusSettings() {
+  const target = settingsTarget.value
+  if (!target?.focusKey || !canSaveSettings.value) return
+  emit('updateFocusSettings', target.focusKey, { ...settingsDraft.value })
+}
+
+function parentVisibilityLabel(value: FocusParentVisibility): string {
+  return parentVisibilityOptions.find(option => option.value === value)?.label || 'Result summaries only'
 }
 
 function taskStatusLabel(status: string): string {
@@ -462,6 +713,86 @@ function taskStatusLabel(status: string): string {
   display: grid;
   gap: 8px;
   padding-top: 4px;
+}
+
+.focus-settings-form {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.08), rgba(20, 184, 166, 0.05));
+}
+
+.focus-settings-form.compact {
+  margin: 10px 0 14px;
+  background: rgba(96, 165, 250, 0.06);
+}
+
+.focus-settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.focus-settings-heading h4 {
+  margin: 0;
+  color: var(--text, #fafafa);
+  font-size: 0.92rem;
+}
+
+.focus-settings-heading .focus-eyebrow {
+  margin-bottom: 4px;
+}
+
+.focus-settings-heading .focus-secondary {
+  flex-shrink: 0;
+}
+
+.focus-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.focus-settings-grid.compact {
+  grid-template-columns: 1fr;
+}
+
+.focus-settings-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.focus-settings-grid span {
+  color: var(--text, #fafafa);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.focus-settings-grid select {
+  min-width: 0;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: var(--bg-0, #09090b);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.focus-settings-grid select:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.focus-settings-grid small {
+  color: var(--muted, #71717a);
+  font-size: 0.68rem;
+  line-height: 1.42;
 }
 
 .focus-share-label {
@@ -718,6 +1049,15 @@ function taskStatusLabel(status: string): string {
   .focus-share-footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .focus-settings-heading,
+  .focus-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-settings-heading {
+    align-items: stretch;
   }
 
   .focus-share-footer .focus-primary {
