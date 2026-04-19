@@ -738,37 +738,51 @@ function formatLastSeen(value: string | null): string {
 
 <style scoped>
 .activity-panel {
+  --activity-border: var(--border, rgba(255, 255, 255, 0.06));
+  --activity-border-strong: var(--border-strong, rgba(255, 255, 255, 0.12));
+  --activity-surface: var(--bg-card, #141414);
+  --activity-surface-soft: var(--accent-dim, rgba(255, 255, 255, 0.04));
+  --activity-surface-hover: var(--accent-hover, rgba(255, 255, 255, 0.08));
+  --activity-text-secondary: var(--text-secondary, #a1a1aa);
+  --activity-text-tertiary: var(--text-tertiary, #71717a);
+  --activity-blue: var(--blue, #3b82f6);
+  --activity-blue-dim: var(--blue-dim, rgba(59, 130, 246, 0.1));
+  --activity-green: var(--green, #22c55e);
+  --activity-green-dim: var(--green-dim, rgba(34, 197, 94, 0.1));
+  --activity-amber: var(--amber, #f59e0b);
+  --activity-amber-dim: var(--amber-dim, rgba(245, 158, 11, 0.1));
+  --activity-red: var(--red, #ef4444);
+  --activity-red-dim: var(--red-dim, rgba(239, 68, 68, 0.1));
   height: 100%;
   overflow-y: auto;
-  padding: 18px 20px 24px;
+  padding: var(--space-lg, 24px);
 }
 
 .activity-summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 12px;
-  margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-sm, 8px);
+  margin-bottom: var(--space-lg, 24px);
 }
 
 .summary-card {
   display: grid;
-  gap: 4px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  border: 1px solid var(--line, #27272a);
-  background:
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.12), transparent 45%),
-    var(--surface, #18181b);
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
 }
 
 .summary-card strong {
-  font-size: 1.2rem;
+  font-size: 1.08rem;
   color: var(--text, #fafafa);
+  line-height: 1.2;
 }
 
 .summary-card span {
   font-size: 0.76rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-empty {
@@ -787,26 +801,28 @@ function formatLastSeen(value: string | null): string {
 
 .activity-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
-  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.76fr);
+  gap: var(--space-lg, 24px);
   align-items: start;
 }
 
 .activity-groups {
   display: grid;
-  gap: 16px;
+  gap: var(--space-lg, 24px);
 }
 
-.activity-group,
+.activity-group {
+  display: grid;
+  gap: 10px;
+}
+
 .activity-detail {
   display: grid;
-  gap: 14px;
-  padding: 16px;
-  border-radius: 16px;
-  border: 1px solid var(--line, #27272a);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%),
-    var(--surface, #18181b);
+  gap: 12px;
+  padding: var(--space-md, 16px);
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface);
 }
 
 .activity-group-header,
@@ -817,10 +833,15 @@ function formatLastSeen(value: string | null): string {
   gap: 12px;
 }
 
+.activity-group-header {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--activity-border);
+}
+
 .activity-group-header h3,
 .activity-detail-header h3 {
   margin: 0;
-  font-size: 0.96rem;
+  font-size: 0.92rem;
   color: var(--text, #fafafa);
 }
 
@@ -828,7 +849,7 @@ function formatLastSeen(value: string | null): string {
 .activity-detail-header p {
   margin: 4px 0 0;
   font-size: 0.78rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
   line-height: 1.45;
 }
 
@@ -841,46 +862,47 @@ function formatLastSeen(value: string | null): string {
   justify-content: center;
   min-width: 54px;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 .activity-group-count,
 .activity-kind-pill {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text, #fafafa);
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
+  color: var(--activity-text-secondary);
 }
 
 .activity-connection-pill[data-connection='online'] {
-  background: rgba(52, 211, 153, 0.12);
-  color: #34d399;
+  background: var(--activity-green-dim);
+  color: var(--activity-green);
 }
 
 .activity-connection-pill[data-connection='disconnected'] {
-  background: rgba(244, 63, 94, 0.12);
-  color: #fb7185;
+  background: var(--activity-red-dim);
+  color: var(--activity-red);
 }
 
-.activity-status-pill[data-status='idle'] { background: rgba(163, 163, 163, 0.16); color: #d4d4d8; }
-.activity-status-pill[data-status='working'] { background: rgba(56, 189, 248, 0.16); color: #7dd3fc; }
-.activity-status-pill[data-status='reviewing'] { background: rgba(245, 158, 11, 0.16); color: #fbbf24; }
-.activity-status-pill[data-status='blocked'] { background: rgba(239, 68, 68, 0.16); color: #f87171; }
+.activity-status-pill[data-status='idle'] { background: var(--activity-surface-hover); color: var(--activity-text-secondary); }
+.activity-status-pill[data-status='working'] { background: var(--activity-blue-dim); color: var(--activity-blue); }
+.activity-status-pill[data-status='reviewing'] { background: var(--activity-amber-dim); color: var(--activity-amber); }
+.activity-status-pill[data-status='blocked'] { background: var(--activity-red-dim); color: var(--activity-red); }
 
 .activity-roster {
   display: grid;
-  gap: 10px;
+  gap: var(--space-sm, 8px);
 }
 
 .activity-roster-item {
   display: grid;
-  gap: 10px;
-  padding: 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.03);
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
   text-align: left;
   cursor: pointer;
   transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
@@ -888,8 +910,8 @@ function formatLastSeen(value: string | null): string {
 
 .activity-roster-item:hover,
 .activity-roster-item[data-selected='true'] {
-  border-color: rgba(56, 189, 248, 0.35);
-  background: rgba(56, 189, 248, 0.08);
+  border-color: color-mix(in srgb, var(--activity-blue) 42%, transparent);
+  background: var(--activity-blue-dim);
   transform: translateY(-1px);
 }
 
@@ -901,15 +923,16 @@ function formatLastSeen(value: string | null): string {
 }
 
 .activity-roster-name {
-  font-size: 0.92rem;
+  font-size: 0.88rem;
   font-weight: 700;
   color: var(--text, #fafafa);
+  line-height: 1.35;
 }
 
 .activity-roster-meta {
   margin-top: 3px;
   font-size: 0.74rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-roster-status {
@@ -918,7 +941,7 @@ function formatLastSeen(value: string | null): string {
   gap: 8px;
   min-width: 0;
   font-size: 0.78rem;
-  color: var(--muted, #a1a1aa);
+  color: var(--activity-text-secondary);
 }
 
 .activity-roster-status span:first-of-type:not(.activity-status-dot) {
@@ -930,7 +953,7 @@ function formatLastSeen(value: string | null): string {
 .activity-roster-seen {
   margin-left: auto;
   flex-shrink: 0;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-status-dot {
@@ -941,26 +964,26 @@ function formatLastSeen(value: string | null): string {
   flex-shrink: 0;
 }
 
-.activity-status-dot[data-status='idle'] { background: #a3a3a3; }
-.activity-status-dot[data-status='working'] { background: #38bdf8; }
-.activity-status-dot[data-status='reviewing'] { background: #f59e0b; }
-.activity-status-dot[data-status='blocked'] { background: #ef4444; }
+.activity-status-dot[data-status='idle'] { background: var(--activity-text-tertiary); }
+.activity-status-dot[data-status='working'] { background: var(--activity-blue); }
+.activity-status-dot[data-status='reviewing'] { background: var(--activity-amber); }
+.activity-status-dot[data-status='blocked'] { background: var(--activity-red); }
 
 .activity-group-empty,
 .activity-detail-empty {
-  padding: 14px;
-  border-radius: 12px;
-  border: 1px dashed rgba(255, 255, 255, 0.08);
-  color: var(--muted, #71717a);
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px dashed var(--activity-border-strong);
+  color: var(--activity-text-tertiary);
   font-size: 0.8rem;
 }
 
 .activity-detail-kicker {
   font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   text-transform: uppercase;
-  color: #7dd3fc;
+  color: var(--activity-blue);
 }
 
 .activity-detail-badges {
@@ -972,16 +995,16 @@ function formatLastSeen(value: string | null): string {
 .activity-detail-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 10px;
+  gap: var(--space-sm, 8px);
 }
 
 .detail-stat {
   display: grid;
   gap: 4px;
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--activity-surface-soft);
+  border: 1px solid var(--activity-border);
 }
 
 .detail-stat strong {
@@ -991,14 +1014,14 @@ function formatLastSeen(value: string | null): string {
 
 .detail-stat span {
   font-size: 0.72rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-detail-description {
   margin: 0;
   font-size: 0.82rem;
   line-height: 1.55;
-  color: var(--muted, #a1a1aa);
+  color: var(--activity-text-secondary);
 }
 
 .activity-detail-section {
@@ -1017,20 +1040,20 @@ function formatLastSeen(value: string | null): string {
   margin: 0;
   font-size: 0.78rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   text-transform: uppercase;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-detail-section-header span {
   font-size: 0.74rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-task-list,
 .activity-message-list {
   display: grid;
-  gap: 8px;
+  gap: var(--space-sm, 8px);
 }
 
 .activity-task-card,
@@ -1040,8 +1063,9 @@ function formatLastSeen(value: string | null): string {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
 }
 
 .activity-task-copy {
@@ -1057,14 +1081,14 @@ function formatLastSeen(value: string | null): string {
 
 .activity-task-copy span {
   font-size: 0.72rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-task-link {
   flex-shrink: 0;
   font-size: 0.72rem;
   font-weight: 600;
-  color: #7dd3fc;
+  color: var(--activity-blue);
   text-decoration: none;
 }
 
@@ -1082,7 +1106,7 @@ function formatLastSeen(value: string | null): string {
   justify-content: space-between;
   gap: 12px;
   font-size: 0.72rem;
-  color: var(--muted, #71717a);
+  color: var(--activity-text-tertiary);
 }
 
 .activity-message-card p {
@@ -1105,6 +1129,7 @@ function formatLastSeen(value: string | null): string {
 
   .activity-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-bottom: var(--space-md, 16px);
   }
 
   .activity-roster-header,
