@@ -25,14 +25,14 @@ const parsed = computed(() => parseAgentIdentity(props.sender))
 <style scoped>
 .task-person-chip {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 6px; border-radius: 6px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
+  padding: 2px 4px; border-radius: 6px;
+  background: transparent; border: none;
 }
 .task-person-copy { display: flex; flex-direction: column; gap: 0; }
 .task-person-role {
-  font-size: 0.58rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--muted, #71717a);
+  font-size: 0.55rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-tertiary, #a1a1aa);
 }
-.task-person-name { font-size: 0.72rem; font-weight: 700; color: var(--text, #fafafa); }
-.task-person-subtitle { font-size: 0.62rem; color: var(--muted, #71717a); }
+.task-person-name { font-size: 0.72rem; font-weight: 600; color: var(--text-secondary, #d4d4d8); }
+.task-person-subtitle { font-size: 0.6rem; color: var(--text-tertiary, #a1a1aa); }
 </style>
