@@ -68,6 +68,10 @@ test("isFailedCheckRunEvent is narrow to completed failures", () => {
     isFailedCheckRunEvent(buildCheckRunEvent({ status: "queued", conclusion: null })),
     false
   );
+  assert.equal(
+    isFailedCheckRunEvent(buildCheckRunEvent({ name: "letagents-lease" })),
+    false
+  );
 });
 
 test("buildFailedCheckRunTaskTitle and description describe the failing check", () => {

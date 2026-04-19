@@ -1,4 +1,5 @@
 import type { Task, TaskStatus } from "./db.js";
+import { LETAGENTS_LEASE_CHECK_NAME } from "./github-lease-enforcement.js";
 import {
   normalizeTaskWorkflowArtifacts,
   type RepoCheckRunEvent,
@@ -12,7 +13,11 @@ const REOPENABLE_FAILED_CHECK_RUN_TASK_STATUSES = new Set<TaskStatus>([
 ]);
 
 export function isFailedCheckRunEvent(event: RepoCheckRunEvent): boolean {
-  return event.action === "completed" && event.checkRun.conclusion === "failure";
+  return (
+    event.action === "completed" &&
+    event.checkRun.conclusion === "failure" &&
+    event.checkRun.name.trim().toLowerCase() !== LETAGENTS_LEASE_CHECK_NAME
+  );
 }
 
 export function buildFailedCheckRunTaskTitle(event: RepoCheckRunEvent): string {
