@@ -102,10 +102,12 @@
           }"
           :conclusionSummary="room?.conclusionSummary || null"
           :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
+          :isCreatingAdHocFocusRoom="creatingAdHocFocusRoom"
           :isSharingFocusResult="sharingFocusResult"
           :isUpdatingFocusSettings="updatingFocusSettings"
           @selectTask="focusDraftTaskId = $event"
           @createFocusRoom="handleFocusTask"
+          @createAdHocFocusRoom="handleCreateAdHocFocusRoom"
           @openFocusRoom="handleOpenFocusRoom"
           @openParentRoom="handleOpenParentRoom"
           @shareResults="handleShareFocusResults"
@@ -222,6 +224,7 @@ const {
   addTask,
   updateTask,
   createFocusRoom,
+  createAdHocFocusRoom,
   shareFocusRoomResult,
   updateFocusRoomSettings,
   restoreSession,
@@ -242,6 +245,7 @@ const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const focusDraftTaskId = ref<string | null>(null)
 const creatingFocusRoomTaskId = ref<string | null>(null)
+const creatingAdHocFocusRoom = ref(false)
 const sharingFocusResult = ref(false)
 const updatingFocusSettings = ref(false)
 const tabTransitionDirection = ref<'forward' | 'back'>('forward')
@@ -389,6 +393,38 @@ async function handleFocusTask(taskId: string) {
     handleOpenFocusRoom(focusKey, focusWindow)
   } finally {
     creatingFocusRoomTaskId.value = null
+  }
+}
+
+async function handleCreateAdHocFocusRoom(title: string) {
+  const trimmedTitle = title.trim()
+  if (!trimmedTitle) {
+    toast.error('Name the Focus Room first.')
+    return
+  }
+  if (room.value?.kind === 'focus') {
+    toast.info('Open new Focus Rooms from the parent room.')
+    return
+  }
+
+  const focusWindow = openBlankFocusRoomTab()
+  creatingAdHocFocusRoom.value = true
+  try {
+    const focusRoom = await createAdHocFocusRoom(trimmedTitle)
+    if (!focusRoom) {
+      if (focusWindow && !focusWindow.closed) {
+        focusWindow.close()
+      }
+      setActiveTab('rooms')
+      syncViewQuery('rooms', 'push')
+      toast.error('Focus Room could not be opened.')
+      return
+    }
+
+    const focusKey = focusRoom.focus_key || focusRoom.room_id
+    handleOpenFocusRoom(focusKey, focusWindow)
+  } finally {
+    creatingAdHocFocusRoom.value = false
   }
 }
 

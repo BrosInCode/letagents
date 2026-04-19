@@ -1047,6 +1047,33 @@ function buildFocusRoomDisplayName(task: Task, displayName?: string): string {
   return normalizeRoomDisplayName(truncateDisplayName(`Focus: ${task.title}`));
 }
 
+function buildFocusRoomDisplayNameFromIntent(intentTitle: string, displayName?: string): string {
+  if (displayName?.trim()) {
+    return normalizeRoomDisplayName(displayName);
+  }
+
+  return normalizeRoomDisplayName(truncateDisplayName(`Focus: ${intentTitle}`));
+}
+
+function normalizeFocusIntentTitle(value: string): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    throw new Error("focus intent title is required");
+  }
+  return truncateDisplayName(normalized);
+}
+
+function buildAdHocFocusKey(intentTitle: string): string {
+  const slug = intentTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 36)
+    .replace(/-+$/g, "");
+  const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  return `focus-${slug || "room"}-${suffix}`;
+}
+
 export async function getFocusRoomsForParent(parentRoomId: string): Promise<Project[]> {
   const rows = await db
     .select()
@@ -1174,6 +1201,61 @@ export async function updateFocusRoomSettings(
     .returning();
 
   return updated ? toProject(updated) : null;
+}
+
+export async function createFocusRoomFromIntent(
+  parentRoomId: string,
+  intentTitle: string,
+  options?: { displayName?: string }
+): Promise<{ room: Project; created: true }> {
+  const parent = await getProjectById(parentRoomId);
+  if (!parent) {
+    throw new Error("Parent room not found");
+  }
+  if (parent.kind === "focus") {
+    throw new Error("Focus rooms can only be opened from a main room");
+  }
+
+  const normalizedTitle = normalizeFocusIntentTitle(intentTitle);
+  const display_name = buildFocusRoomDisplayNameFromIntent(normalizedTitle, options?.displayName);
+
+  while (true) {
+    const id = await buildFocusRoomId();
+    const focus_key = buildAdHocFocusKey(normalizedTitle);
+    const created_at = new Date().toISOString();
+
+    try {
+      await db.transaction(async (tx) => {
+        await tx.insert(rooms).values({
+          id,
+          display_name,
+          kind: "focus",
+          parent_room_id: parent.id,
+          focus_key,
+          source_task_id: null,
+          focus_status: "active",
+          focus_parent_visibility: DEFAULT_FOCUS_ROOM_SETTINGS.parent_visibility,
+          focus_activity_scope: DEFAULT_FOCUS_ROOM_SETTINGS.activity_scope,
+          focus_github_event_routing: DEFAULT_FOCUS_ROOM_SETTINGS.github_event_routing,
+          created_at,
+        });
+        await tx
+          .delete(id_sequences)
+          .where(inArray(id_sequences.name, getRoomScopedSequenceNames(id)));
+      });
+
+      const room = await getProjectById(id);
+      if (!room) {
+        throw new Error("Focus room was created but could not be loaded");
+      }
+
+      return { room, created: true };
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+    }
+  }
 }
 
 export async function createFocusRoomForTask(

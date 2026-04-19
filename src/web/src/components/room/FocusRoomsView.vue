@@ -15,7 +15,7 @@
     <section v-if="isFocusRoom" class="focus-context" :data-concluded="isConcluded">
       <div>
         <p class="focus-eyebrow">Current Focus Room</p>
-        <h4>{{ sourceTaskId || 'Task room' }}</h4>
+        <h4>{{ sourceTaskId || 'Ad-hoc room' }}</h4>
         <p>{{ focusContextCopy }}</p>
       </div>
       <dl class="focus-facts compact">
@@ -25,7 +25,7 @@
         </div>
         <div>
           <dt>Source task</dt>
-          <dd>{{ sourceTaskId || 'Not linked' }}</dd>
+          <dd>{{ sourceTaskId || 'Not linked yet' }}</dd>
         </div>
         <div>
           <dt>Status</dt>
@@ -121,6 +121,33 @@
 
     <div class="focus-layout">
       <section class="focus-list">
+        <form v-if="!isFocusRoom" class="focus-adhoc" @submit.prevent="submitAdHocFocusRoom">
+          <div>
+            <p class="focus-eyebrow">Branch from an idea</p>
+            <h4>Start with a room, not a task.</h4>
+            <p>Give the work a short intent. A task can be linked when execution starts.</p>
+          </div>
+          <div class="focus-adhoc-controls">
+            <label class="sr-only" for="adhoc-focus-title">Focus Room intent</label>
+            <input
+              id="adhoc-focus-title"
+              v-model="adHocTitle"
+              :disabled="isCreatingAdHocFocusRoom"
+              placeholder="Investigate Focus Room flow"
+            />
+            <button
+              class="focus-primary"
+              type="submit"
+              :disabled="!canCreateAdHocFocusRoom"
+            >
+              {{ adHocButtonLabel }}
+            </button>
+          </div>
+          <p v-if="adHocAttempted && !adHocTitle.trim()" class="focus-adhoc-error">
+            Name the room first.
+          </p>
+        </form>
+
         <div v-if="!isFocusRoom" class="focus-section-header">
           <div>
             <h4>Open Focus Rooms</h4>
@@ -143,7 +170,7 @@
         >
           <div>
             <strong>{{ focusRoom.display_name }}</strong>
-            <span>{{ focusRoom.source_task_id || focusRoom.room_id }}</span>
+            <span>{{ focusRoom.source_task_id || 'No linked task yet' }}</span>
           </div>
           <small>{{ focusRoom.focus_status || 'active' }}</small>
         </button>
@@ -183,7 +210,7 @@
 
         <div v-if="candidateTasks.length === 0" class="focus-empty">
           <h4>No open tasks yet</h4>
-          <p>Add a task first, then focus it into a room.</p>
+          <p>Add a task or branch a room from an idea.</p>
         </div>
 
         <button
@@ -341,6 +368,7 @@ const props = defineProps<{
   focusSettings: FocusRoomSettings
   conclusionSummary: string | null
   isCreatingFocusRoom: boolean
+  isCreatingAdHocFocusRoom: boolean
   isSharingFocusResult: boolean
   isUpdatingFocusSettings: boolean
 }>()
@@ -348,6 +376,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectTask: [taskId: string]
   createFocusRoom: [taskId: string]
+  createAdHocFocusRoom: [title: string]
   openFocusRoom: [focusKey: string]
   openParentRoom: []
   shareResults: [summary: string]
@@ -357,6 +386,8 @@ const emit = defineEmits<{
 const resultSummary = ref('')
 const shareAttempted = ref(false)
 const settingsDraft = ref<FocusRoomSettings>({ ...DEFAULT_FOCUS_ROOM_SETTINGS })
+const adHocTitle = ref('')
+const adHocAttempted = ref(false)
 
 const parentVisibilityOptions: Array<{ value: FocusParentVisibility; label: string }> = [
   { value: 'summary_only', label: 'Result summaries only' },
@@ -455,6 +486,12 @@ const shareHelpText = computed(() => {
   }
   return 'Send a concise outcome to the parent room.'
 })
+const canCreateAdHocFocusRoom = computed(() =>
+  !props.isCreatingAdHocFocusRoom && adHocTitle.value.trim().length > 0
+)
+const adHocButtonLabel = computed(() =>
+  props.isCreatingAdHocFocusRoom ? 'Opening...' : 'Branch room'
+)
 const shareBackLabel = computed(() => {
   if (!currentFocusRoom.value) return 'Outcome summary'
   return currentFocusRoom.value.focus_status === 'concluded' ? 'Shared' : 'Ready'
@@ -576,6 +613,13 @@ function parentVisibilityLabel(value: FocusParentVisibility): string {
   return parentVisibilityOptions.find(option => option.value === value)?.label || 'Result summaries only'
 }
 
+function submitAdHocFocusRoom() {
+  adHocAttempted.value = true
+  const trimmedTitle = adHocTitle.value.trim()
+  if (!trimmedTitle || props.isCreatingAdHocFocusRoom) return
+  emit('createAdHocFocusRoom', trimmedTitle)
+}
+
 function taskStatusLabel(status: string): string {
   return status.replace(/_/g, ' ')
 }
@@ -616,18 +660,18 @@ function taskStatusLabel(status: string): string {
   color: #93c5fd;
   font-size: 0.7rem;
   font-weight: 800;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
 .focus-hero h3,
 .focus-context h4,
+.focus-adhoc h4,
 .focus-detail h4,
 .focus-empty h4 {
   margin: 0;
   color: var(--text, #fafafa);
   font-weight: 800;
-  letter-spacing: -0.02em;
 }
 
 .focus-hero h3 {
@@ -636,6 +680,7 @@ function taskStatusLabel(status: string): string {
 
 .focus-hero p,
 .focus-context p,
+.focus-adhoc p,
 .focus-section-header p,
 .focus-detail-copy,
 .focus-note,
@@ -658,7 +703,7 @@ function taskStatusLabel(status: string): string {
   color: var(--muted, #71717a);
   font-size: 0.68rem;
   font-weight: 800;
-  letter-spacing: 0.06em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -681,6 +726,46 @@ function taskStatusLabel(status: string): string {
 .focus-list,
 .focus-detail {
   padding: 14px;
+}
+
+.focus-adhoc {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-0, #09090b);
+}
+
+.focus-adhoc h4 {
+  font-size: 0.92rem;
+}
+
+.focus-adhoc-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.focus-adhoc input {
+  width: 100%;
+  min-height: 38px;
+  padding: 9px 10px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: var(--bg-1, #0f0f11);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.focus-adhoc .focus-primary {
+  width: auto;
+  min-width: 112px;
+}
+
+.focus-adhoc-error {
+  color: #fca5a5;
 }
 
 .focus-context {
@@ -1040,6 +1125,14 @@ function taskStatusLabel(status: string): string {
   .focus-task {
     flex-direction: column;
     gap: 8px;
+  }
+
+  .focus-adhoc-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-adhoc .focus-primary {
+    width: 100%;
   }
 
   .focus-facts.compact {

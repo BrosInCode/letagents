@@ -113,7 +113,6 @@ export const rooms = pgTable(
         ${table.kind} = 'focus'
         AND ${table.parent_room_id} IS NOT NULL
         AND ${table.focus_key} IS NOT NULL
-        AND ${table.source_task_id} IS NOT NULL
         AND ${table.focus_status} IS NOT NULL
       )`
     ),

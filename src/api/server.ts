@@ -11,6 +11,7 @@ import {
   concludeFocusRoom,
   consumeAuthState,
   createAuthState,
+  createFocusRoomFromIntent,
   createFocusRoomForTask,
   createProject,
   createSession,
@@ -4103,6 +4104,59 @@ app.get(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) =
     room_id: project.id,
     focus_rooms: focusRooms.map((focusRoom) => toRoomResponse(focusRoom)),
   });
+});
+
+app.post(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
+  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
+  if (!project) return;
+
+  if (!(await requireParticipant(req, res, project))) return;
+
+  const requestBody = (req.body ?? {}) as Record<string, unknown>;
+  const { title, display_name } = requestBody as {
+    title?: unknown;
+    display_name?: string;
+  };
+  if (typeof title !== "string" || !title.trim()) {
+    res.status(400).json({ error: "title is required" });
+    return;
+  }
+
+  try {
+    const result = await createFocusRoomFromIntent(project.id, title, {
+      displayName: display_name,
+    });
+
+    if (req.sessionAccount) {
+      await assignProjectAdmin(result.room.id, req.sessionAccount.account_id);
+    }
+
+    await emitProjectMessage(
+      project.id,
+      "letagents",
+      `[status] Focus Room opened: ${result.room.display_name}`
+    );
+
+    const role = await resolveProjectRole(result.room, req.sessionAccount);
+    res.status(201).json({
+      room_id: project.id,
+      created: result.created,
+      focus_room: toRoomResponse(result.room, {
+        role,
+        authenticated: Boolean(req.sessionAccount),
+      }),
+    });
+  } catch (error) {
+    respondWithBadRequest(
+      res,
+      "POST /rooms/:room_id/focus-rooms",
+      error,
+      "Focus Room could not be opened."
+    );
+  }
 });
 
 app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedRequest, res) => {
