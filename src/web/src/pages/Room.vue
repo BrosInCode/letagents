@@ -53,7 +53,7 @@
           key="events"
           class="room-tab-panel"
           :events="githubEvents"
-          :repository="room?.name || room?.identifier || null"
+          :repository="githubEventsRepository"
           :isAvailable="githubEventsAvailable"
           :hasMore="githubEventsHasMore"
           :errorMessage="githubEventsError?.message || null"
@@ -251,6 +251,11 @@ const focusParentAddress = computed(() =>
     ? room.value.parentRoomId
     : room.value?.identifier || room.value?.name || ''
 )
+const githubEventsRepository = computed(() =>
+  room.value?.kind === 'focus' && room.value.parentRoomId
+    ? room.value.parentRoomId
+    : room.value?.name || room.value?.identifier || null
+)
 const showGitHubSignIn = computed(() => joinError.value?.code === 'NOT_AUTHENTICATED')
 const visibleTabOrder = computed(() => TAB_ORDER.filter(tab => tab !== 'events' || githubEventsSupported.value))
 const tabTransitionName = computed(() =>
@@ -301,10 +306,46 @@ function roomRoutePath(identifier: string): string {
     .join('/')
 }
 
-async function handleOpenFocusRoom(focusKey: string) {
+function buildFocusRoomPath(focusKey: string): string {
   const parent = focusParentAddress.value
-  if (!parent || !focusKey) return
-  await router.push(`/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`)
+  if (!parent || !focusKey) return ''
+  return `/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`
+}
+
+function openBlankFocusRoomTab(): Window | null {
+  try {
+    const target = window.open('about:blank', '_blank')
+    if (target) {
+      target.opener = null
+    }
+    return target
+  } catch {
+    return null
+  }
+}
+
+function openFocusRoomPath(path: string, targetWindow?: Window | null) {
+  if (!path) return
+  const absoluteUrl = new URL(path, window.location.origin).toString()
+
+  if (targetWindow && !targetWindow.closed) {
+    targetWindow.location.replace(absoluteUrl)
+    targetWindow.focus()
+    return
+  }
+
+  window.open(absoluteUrl, '_blank', 'noopener,noreferrer')
+}
+
+function handleOpenFocusRoom(focusKey: string, targetWindow?: Window | null) {
+  const path = buildFocusRoomPath(focusKey)
+  if (!path) {
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.close()
+    }
+    return
+  }
+  openFocusRoomPath(path, targetWindow)
 }
 
 async function handleOpenParentRoom() {
@@ -320,10 +361,14 @@ async function handleFocusTask(taskId: string) {
     return
   }
 
+  const focusWindow = openBlankFocusRoomTab()
   creatingFocusRoomTaskId.value = taskId
   try {
     const focusRoom = await createFocusRoom(taskId)
     if (!focusRoom) {
+      if (focusWindow && !focusWindow.closed) {
+        focusWindow.close()
+      }
       setActiveTab('rooms')
       syncViewQuery('rooms', 'push')
       toast.error('Focus Room could not be opened.')
@@ -331,7 +376,7 @@ async function handleFocusTask(taskId: string) {
     }
 
     const focusKey = focusRoom.focus_key || focusRoom.source_task_id || taskId
-    await handleOpenFocusRoom(focusKey)
+    handleOpenFocusRoom(focusKey, focusWindow)
   } finally {
     creatingFocusRoomTaskId.value = null
   }
