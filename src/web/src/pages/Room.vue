@@ -19,10 +19,19 @@
       :matchCount="matchCount"
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
+      :showRulesButton="rulesBoardAvailable"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
       @rename="handleRename"
+      @openRules="rulesBoardOpen = true"
+    />
+
+    <RoomRulesBoard
+      v-if="rulesBoardAvailable"
+      :open="rulesBoardOpen"
+      :tasks="tasks"
+      @close="rulesBoardOpen = false"
     />
 
     <div v-if="connectionState === 'error' && !isConnected" class="room-error">
@@ -191,6 +200,7 @@ import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
+import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import MessageList from '@/components/room/MessageList.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import Composer from '@/components/room/Composer.vue'
@@ -239,6 +249,7 @@ const VALID_TABS: RoomTab[] = ['chat', 'events', 'board', 'activity', 'rooms']
 const TAB_ORDER: RoomTab[] = ['chat', 'events', 'board', 'activity', 'rooms']
 const activeTab = ref<RoomTab>('chat')
 const drawerOpen = ref(false)
+const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
@@ -253,6 +264,14 @@ const tabTransitionDirection = ref<'forward' | 'back'>('forward')
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const senderName = computed(() => auth.user.value?.login || 'anonymous')
 const roomTitle = computed(() => room.value?.displayName || 'Connecting...')
+const rulesBoardAvailable = computed(() => {
+  const identifiers = [
+    room.value?.projectId,
+    room.value?.name,
+    room.value?.parentRoomId,
+  ]
+  return identifiers.some(value => value?.startsWith('github.com/'))
+})
 const roomSubtitle = computed(() =>
   room.value?.kind === 'focus'
     ? `Focus Room: ${room.value.parentRoomId || 'parent'}${room.value.sourceTaskId ? ` / ${room.value.sourceTaskId}` : ''}`
