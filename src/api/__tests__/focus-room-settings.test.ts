@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   normalizeFocusRoomSettings,
+  shouldRouteGitHubEventToFocusRoom,
   shouldPostFocusRoomEventToParent,
   validateFocusRoomSettingsPatch,
 } from "../focus-room-settings.js";
@@ -63,6 +64,44 @@ test("shouldPostFocusRoomEventToParent follows parent visibility policy", () => 
   );
   assert.equal(
     shouldPostFocusRoomEventToParent({ ...DEFAULT_FOCUS_ROOM_SETTINGS, parent_visibility: "silent" }, "result_summary"),
+    false
+  );
+});
+
+test("shouldRouteGitHubEventToFocusRoom follows GitHub routing policy", () => {
+  assert.equal(
+    shouldRouteGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "task_and_branch" },
+      { matched_workflow_artifact: true }
+    ),
+    true
+  );
+  assert.equal(
+    shouldRouteGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "task_only" },
+      { matched_workflow_artifact: true }
+    ),
+    false
+  );
+  assert.equal(
+    shouldRouteGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "task_only" },
+      { matched_task_reference: true }
+    ),
+    true
+  );
+  assert.equal(
+    shouldRouteGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "all_parent_repo" },
+      { parent_repo_event: true }
+    ),
+    true
+  );
+  assert.equal(
+    shouldRouteGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "off" },
+      { matched_task_reference: true }
+    ),
     false
   );
 });

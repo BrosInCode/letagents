@@ -31,6 +31,7 @@ import {
   getOwnerTokenAccountByToken,
   getMessages,
   getMessagesAfter,
+  getActiveFocusRoomForTask,
   getFocusRoomByKey,
   getFocusRoomsForParent,
   getOpenTasks,
@@ -113,7 +114,10 @@ import {
 import {
   normalizeFocusRoomSettings,
   shouldPostFocusRoomEventToParent,
+  shouldRouteGitHubEventToFocusRoom,
   validateFocusRoomSettingsPatch,
+  type FocusGitHubRoutingContext,
+  type FocusParentEventKind,
 } from "./focus-room-settings.js";
 import { selectStaleTaskAutoPrompt } from "./stale-work.js";
 import {
@@ -405,6 +409,119 @@ function formatFocusRoomConclusionMessage(input: {
   return `[status] Focus Room concluded for ${taskLabel}. Result: ${input.summary}`;
 }
 
+function formatFocusRoomReference(focusRoom: Project): string {
+  const key = focusRoom.focus_key || focusRoom.source_task_id || focusRoom.id;
+  return focusRoom.display_name
+    ? `${focusRoom.display_name} (${key})`
+    : key;
+}
+
+function formatFocusRoomAnchorMessage(input: {
+  task: { id: string; title: string };
+  focusRoom: Project;
+  activity: string;
+}): string {
+  return `[status] ${input.activity} for ${input.task.id}: ${input.task.title} is in Focus Room ${formatFocusRoomReference(input.focusRoom)}.`;
+}
+
+function getFocusRoomSettings(focusRoom: Project) {
+  return normalizeFocusRoomSettings({
+    parent_visibility: focusRoom.focus_parent_visibility,
+    activity_scope: focusRoom.focus_activity_scope,
+    github_event_routing: focusRoom.focus_github_event_routing,
+  });
+}
+
+async function getActiveTaskFocusRoom(projectId: string, taskId: string): Promise<Project | null> {
+  const project = await getProjectById(projectId);
+  if (!project || project.kind === "focus") {
+    return null;
+  }
+
+  return (await getActiveFocusRoomForTask(project.id, taskId)) ?? null;
+}
+
+async function emitTaskAnchoredMessage(
+  projectId: string,
+  sender: string,
+  text: string,
+  task: { id: string; title: string },
+  options?: {
+    source?: string;
+    agent_prompt_kind?: AgentPromptKind | null;
+    parent_activity?: string;
+    parent_event_kind?: FocusParentEventKind;
+    event_kind?: "github";
+    github_routing_context?: FocusGitHubRoutingContext;
+  }
+): Promise<Message> {
+  const focusRoom = await getActiveTaskFocusRoom(projectId, task.id);
+  if (!focusRoom) {
+    return emitProjectMessage(projectId, sender, text, {
+      source: options?.source,
+      agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    });
+  }
+
+  const focusSettings = getFocusRoomSettings(focusRoom);
+  if (
+    options?.event_kind === "github" &&
+    !shouldRouteGitHubEventToFocusRoom(focusSettings, options.github_routing_context ?? {})
+  ) {
+    return emitProjectMessage(projectId, sender, text, {
+      source: options?.source,
+      agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    });
+  }
+
+  const focusMessage = await emitProjectMessage(focusRoom.id, sender, text, {
+    source: options?.source,
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+  });
+  if (
+    shouldPostFocusRoomEventToParent(
+      focusSettings,
+      options?.parent_event_kind ?? "major_activity"
+    )
+  ) {
+    await emitProjectMessage(
+      projectId,
+      "letagents",
+      formatFocusRoomAnchorMessage({
+        task,
+        focusRoom,
+        activity: options?.parent_activity ?? "Activity",
+      })
+    );
+  }
+
+  return focusMessage;
+}
+
+async function emitGitHubEventToAllParentRepoFocusRooms(
+  projectId: string,
+  sender: string,
+  text: string,
+  options?: {
+    excludeRoomIds?: Set<string>;
+  }
+): Promise<void> {
+  const focusRooms = await getFocusRoomsForParent(projectId);
+  const targetFocusRooms = focusRooms.filter((focusRoom) =>
+    focusRoom.focus_status !== "concluded" &&
+    !options?.excludeRoomIds?.has(focusRoom.id) &&
+    shouldRouteGitHubEventToFocusRoom(getFocusRoomSettings(focusRoom), {
+      parent_repo_event: true,
+    })
+  );
+
+  await Promise.all(
+    targetFocusRooms.map((focusRoom) =>
+      emitProjectMessage(focusRoom.id, sender, text, { source: "github" })
+    )
+  );
+}
+
 function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresence {
   return {
     ...presence,
@@ -543,8 +660,10 @@ async function emitTaskLifecycleStatusMessage(
     agent_prompt_kind?: AgentPromptKind | null;
   }
 ): Promise<Message> {
-  return emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(task), {
+  return emitTaskAnchoredMessage(projectId, "letagents", formatTaskLifecycleStatus(task), task, {
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    parent_activity: "Task status",
+    parent_event_kind: "major_activity",
   });
 }
 
@@ -951,8 +1070,10 @@ async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | nu
     return null;
   }
 
-  const message = await emitProjectMessage(projectId, "letagents", prompt.prompt_text, {
+  const message = await emitTaskAnchoredMessage(projectId, "letagents", prompt.prompt_text, prompt.task, {
     agent_prompt_kind: "auto",
+    parent_activity: "Stale-work prompt",
+    parent_event_kind: "all_activity",
   });
   staleWorkPromptTimestamps.set(cacheKey, now);
   return message;
@@ -1441,29 +1562,57 @@ async function syncGitHubAppRepositoryFromPayload(
   };
 }
 
+interface RepoRoomEventTaskResolution {
+  task: Task | undefined;
+  matchedByTaskReference: boolean;
+  matchedByWorkflowArtifact: boolean;
+}
+
+function emptyRepoRoomEventTaskResolution(): RepoRoomEventTaskResolution {
+  return {
+    task: undefined,
+    matchedByTaskReference: false,
+    matchedByWorkflowArtifact: false,
+  };
+}
+
+function taskIdsMatch(left: string | null | undefined, right: string): boolean {
+  return Boolean(left && left.toLowerCase() === right.toLowerCase());
+}
+
 async function resolveTaskByArtifactsOrReferences(
   project: Project,
   artifactMatches: TaskWorkflowArtifactMatch[],
   ...fallbackTexts: Array<string | null | undefined>
-): Promise<Task | undefined> {
+): Promise<RepoRoomEventTaskResolution> {
+  const referencedTaskId = extractReferencedTaskId(...fallbackTexts);
   const artifactTask = await findTaskByWorkflowArtifactMatches(project.id, artifactMatches);
   if (artifactTask) {
-    return artifactTask;
+    return {
+      task: artifactTask,
+      matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
+      matchedByWorkflowArtifact: true,
+    };
   }
 
-  const referencedTaskId = extractReferencedTaskId(...fallbackTexts);
   if (!referencedTaskId) {
-    return undefined;
+    return emptyRepoRoomEventTaskResolution();
   }
 
-  return getTaskById(project.id, referencedTaskId);
+  const task = await getTaskById(project.id, referencedTaskId);
+  return {
+    task: task ?? undefined,
+    matchedByTaskReference: Boolean(task),
+    matchedByWorkflowArtifact: false,
+  };
 }
 
 async function resolveLinkedTaskForRepoRoomEvent(
   project: Project,
   event: RepoRoomEvent
-): Promise<Task | undefined> {
+): Promise<RepoRoomEventTaskResolution> {
   const artifactMatches = buildRepoRoomEventArtifactMatches(event);
+  const referencedTaskId = extractReferencedTaskId(...getRepoRoomEventReferenceTexts(event));
 
   if (event.kind === "pull_request") {
     const artifactTask =
@@ -1471,15 +1620,23 @@ async function resolveLinkedTaskForRepoRoomEvent(
       (await findTaskByPrUrl(project.id, event.pullRequest.url));
 
     if (artifactTask) {
-      return artifactTask;
+      return {
+        task: artifactTask,
+        matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
+        matchedByWorkflowArtifact: true,
+      };
     }
 
-    const referencedTaskId = extractReferencedTaskId(...getRepoRoomEventReferenceTexts(event));
     if (!referencedTaskId) {
-      return undefined;
+      return emptyRepoRoomEventTaskResolution();
     }
 
-    return getTaskById(project.id, referencedTaskId);
+    const task = await getTaskById(project.id, referencedTaskId);
+    return {
+      task: task ?? undefined,
+      matchedByTaskReference: Boolean(task),
+      matchedByWorkflowArtifact: false,
+    };
   }
 
   return resolveTaskByArtifactsOrReferences(
@@ -1635,9 +1792,10 @@ async function handleMaterializedGitHubRoomEvent(
   roomId: string | null;
 }> {
   const roomEvent = event.roomEvent;
-  let linkedTask = roomEvent
+  let taskResolution = roomEvent
     ? await resolveLinkedTaskForRepoRoomEvent(project, roomEvent)
-    : undefined;
+    : emptyRepoRoomEventTaskResolution();
+  let linkedTask = taskResolution.task;
 
   const persisted = await persistMaterializedGitHubRoomEvent(event, {
     deliveryId: input.deliveryId,
@@ -1666,6 +1824,10 @@ async function handleMaterializedGitHubRoomEvent(
   if (roomEvent.kind === "check_run") {
     linkedTask = await maybeAutoCreateTaskForFailedCheckRun(project, linkedTask, roomEvent);
     if (linkedTask) {
+      taskResolution = {
+        ...taskResolution,
+        task: linkedTask,
+      };
       await updateGitHubRoomEventLinkedTaskId(event.idempotency_key, linkedTask.id);
     }
   }
@@ -1682,7 +1844,26 @@ async function handleMaterializedGitHubRoomEvent(
     redactUntrustedTaskReference: !taskProjection.authoritative && Boolean(linkedTask),
   });
   if (message) {
-    await emitProjectMessage(project.id, "github", message, { source: "github" });
+    const linkedFocusRoom = taskProjection.authoritative && linkedTask
+      ? await getActiveTaskFocusRoom(project.id, linkedTask.id)
+      : null;
+    if (taskProjection.authoritative && linkedTask) {
+      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+        source: "github",
+        parent_activity: "GitHub activity",
+        parent_event_kind: "major_activity",
+        event_kind: "github",
+        github_routing_context: {
+          matched_task_reference: taskResolution.matchedByTaskReference,
+          matched_workflow_artifact: taskResolution.matchedByWorkflowArtifact,
+        },
+      });
+    } else {
+      await emitProjectMessage(project.id, "github", message, { source: "github" });
+    }
+    await emitGitHubEventToAllParentRepoFocusRooms(project.id, "github", message, {
+      excludeRoomIds: linkedFocusRoom ? new Set([linkedFocusRoom.id]) : undefined,
+    });
   }
 
   return {
@@ -3405,7 +3586,7 @@ app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  await emitTaskLifecycleStatusMessage(projectId, acceptedTask);
   res.status(201).json(acceptedTask);
 });
 
@@ -3549,7 +3730,7 @@ app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) 
 
     const updated = await updateTask(projectId, taskId, updates);
     if (updated && updates.status && updates.status !== task.status) {
-      await emitProjectMessage(projectId, "letagents", formatTaskLifecycleStatus(updated));
+      await emitTaskLifecycleStatusMessage(projectId, updated);
     }
     res.json(updated);
   } catch (error) {
@@ -4359,7 +4540,7 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
     return;
   }
 
-  await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
+  await emitTaskLifecycleStatusMessage(project.id, acceptedTask);
 
   const [leases, locks] = await Promise.all([
     getActiveTaskLeases(project.id),
@@ -4595,7 +4776,7 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
 
     const updated = await updateTask(project.id, taskId, updates);
     if (updated && updates.status && updates.status !== task.status) {
-      await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
+      await emitTaskLifecycleStatusMessage(project.id, updated);
     }
 
     if (updated) {

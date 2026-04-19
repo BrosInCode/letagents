@@ -25,6 +25,7 @@ const getFocusRoomByKey = dbModule?.getFocusRoomByKey;
 const getFocusRoomsForParent = dbModule?.getFocusRoomsForParent;
 const getMessages = dbModule?.getMessages;
 const updateFocusRoomSettings = dbModule?.updateFocusRoomSettings;
+const updateTask = dbModule?.updateTask;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 const tsxBinary = path.resolve(
@@ -365,6 +366,69 @@ test(
       messages.filter((message) => message.text.includes("Focus Room concluded")).length,
       0
     );
+  }
+);
+
+test(
+  "parent task lifecycle status is anchored in the active focus room",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async (t) => {
+    if (
+      !createProjectWithName ||
+      !createTask ||
+      !createFocusRoomForTask ||
+      !getMessages ||
+      !updateFocusRoomSettings ||
+      !updateTask
+    ) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-lifecycle-route-api");
+    const task = await createTask(parent.id, "Route task lifecycle", "StoneCloud");
+    await updateTask(parent.id, task.id, { status: "accepted" });
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+    await updateFocusRoomSettings(parent.id, task.id, {
+      parent_visibility: "major_activity",
+    });
+
+    const { child, port } = await startApiServer();
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/tasks/${encodeURIComponent(task.id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "in_progress" }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+
+    const parentMessages = (await getMessages(parent.id)).messages;
+    const focusMessages = (await getMessages(focus.room.id)).messages;
+    assert.ok(focusMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes(task.id) &&
+      message.text.includes("in progress")
+    ));
+    assert.ok(parentMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes("Task status") &&
+      message.text.includes("Focus Room") &&
+      message.text.includes(task.id)
+    ));
+    assert.equal(parentMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes(`${task.id} is in progress`)
+    ), false);
   }
 );
 
