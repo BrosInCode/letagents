@@ -272,29 +272,30 @@ const groupedTasks = computed(() => {
 </script>
 
 <style scoped>
-.board-panel { height: 100%; overflow-y: auto; padding: 16px 20px; }
+.board-panel { height: 100%; overflow-y: auto; padding: var(--space-xl) var(--space-lg); }
 
 .add-task-form {
   display: flex; gap: 6px;
-  padding: 10px; border-radius: 8px;
-  border: 1px dashed var(--line-strong, #3f3f46); margin-bottom: 12px;
+  padding: var(--space-xs); border-radius: 8px;
+  border: none; background: rgba(255, 255, 255, 0.03); margin-bottom: var(--space-lg);
 }
 .add-task-form .input {
-  flex: 1; padding: 10px 12px; border-radius: 8px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
-  font-size: 0.85rem; outline: none; color: var(--text, #fafafa);
-  font-family: inherit;
+  flex: 1; padding: 10px 12px; border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.85rem; outline: none; color: var(--text-primary, #ffffff);
+  font-family: inherit; transition: border-color 150ms;
 }
-.add-task-form .input::placeholder { color: var(--muted, #71717a); }
+.add-task-form .input:focus { border-color: rgba(255, 255, 255, 0.2); }
+.add-task-form .input::placeholder { color: var(--text-tertiary, #a1a1aa); }
 .btn {
-  padding: 10px 14px; border-radius: 8px;
+  padding: 10px 14px; border-radius: 6px;
   font-weight: 600; font-size: 0.82rem;
   transition: background 150ms;
   border: none; cursor: pointer;
   font-family: inherit;
 }
-.btn-primary { background: var(--text, #fafafa); color: var(--bg-0, #09090b); }
-.btn-primary:hover { opacity: 0.9; }
+.btn-primary { background: rgba(255, 255, 255, 0.1); color: var(--text-secondary, #d4d4d8); border: 1px solid rgba(255, 255, 255, 0.1); }
+.btn-primary:hover { background: rgba(255, 255, 255, 0.15); color: var(--text-primary, #ffffff); }
 
 .board-group { margin-bottom: 16px; }
 .board-group-title {
@@ -316,48 +317,49 @@ const groupedTasks = computed(() => {
 }
 
 .task-card {
-  padding: 10px 12px; border-radius: 8px;
-  border: 1px solid var(--line, #27272a); background: var(--bg-1, #0f0f11);
+  padding: var(--space-md) var(--space-lg); border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06); background: var(--bg-card, #131316);
   margin-bottom: 6px; transition: border-color 150ms;
 }
-.task-card:hover { border-color: var(--line-strong, #3f3f46); }
+.task-card:hover { border-color: rgba(255, 255, 255, 0.12); }
 .task-card-header {
   display: flex; align-items: flex-start; justify-content: space-between;
   gap: 8px; margin-bottom: 4px;
 }
-.task-card-title { font-size: 0.82rem; font-weight: 600; line-height: 1.4; }
+.task-card-title { font-size: 0.82rem; font-weight: 600; line-height: 1.4; color: var(--text-primary, #ffffff); }
 
 .task-status-badge {
-  padding: 2px 6px; border-radius: 4px;
-  font-size: 0.62rem; font-weight: 700; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.04em; white-space: nowrap; flex-shrink: 0;
+  border: 1px solid currentColor; background: transparent;
 }
-.task-status-badge[data-status="proposed"] { background: rgba(113,113,122,0.15); color: #71717a; }
-.task-status-badge[data-status="accepted"] { background: rgba(96,165,250,0.12); color: #60a5fa; }
-.task-status-badge[data-status="assigned"] { background: rgba(168,85,247,0.12); color: #a855f7; }
-.task-status-badge[data-status="in_progress"] { background: rgba(251,191,36,0.12); color: #fbbf24; }
-.task-status-badge[data-status="blocked"] { background: rgba(248,113,113,0.12); color: #f87171; }
-.task-status-badge[data-status="in_review"] { background: rgba(56,189,248,0.12); color: #38bdf8; }
-.task-status-badge[data-status="merged"] { background: rgba(52,211,153,0.12); color: #34d399; }
-.task-status-badge[data-status="done"] { background: rgba(34,197,94,0.12); color: #22c55e; }
-.task-status-badge[data-status="cancelled"] { background: rgba(100,116,139,0.12); color: #64748b; }
+.task-status-badge[data-status="proposed"] { color: #71717a; border-color: rgba(113, 113, 122, 0.4); }
+.task-status-badge[data-status="accepted"] { color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); }
+.task-status-badge[data-status="assigned"] { color: #a855f7; border-color: rgba(168, 85, 247, 0.4); }
+.task-status-badge[data-status="in_progress"] { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); }
+.task-status-badge[data-status="blocked"] { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
+.task-status-badge[data-status="in_review"] { color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); }
+.task-status-badge[data-status="merged"] { color: #34d399; border-color: rgba(52, 211, 153, 0.4); }
+.task-status-badge[data-status="done"] { color: #22c55e; border-color: rgba(34, 197, 94, 0.4); }
+.task-status-badge[data-status="cancelled"] { color: #64748b; border-color: rgba(100, 116, 139, 0.4); }
 
 .task-meta {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  color: var(--muted, #71717a); font-size: 0.72rem; margin-bottom: 6px;
+  color: var(--text-tertiary, #a1a1aa); font-size: 0.72rem; margin-bottom: 6px;
 }
 
 .task-description {
-  margin: 0 0 10px; color: var(--muted, #71717a); font-size: 0.82rem; line-height: 1.5;
+  margin: 0 0 10px; color: var(--text-secondary, #d4d4d8); font-size: 0.82rem; line-height: 1.5;
 }
 
 .task-pr-link { margin-bottom: 8px; }
 .task-pr-link a {
   display: inline-flex; align-items: center; gap: 4px;
-  font-size: 0.72rem; font-weight: 600; color: #60a5fa;
+  font-size: 0.72rem; font-weight: 600; color: var(--text-secondary, #d4d4d8);
   text-decoration: none; transition: color 150ms;
 }
-.task-pr-link a:hover { color: #93c5fd; }
+.task-pr-link a:hover { color: var(--text-primary, #ffffff); }
 
 .task-focus-row { margin-bottom: 8px; }
 .task-focus-btn {
@@ -366,19 +368,19 @@ const groupedTasks = computed(() => {
   justify-content: center;
   padding: 5px 9px;
   border-radius: 6px;
-  border: 1px solid rgba(96, 165, 250, 0.2);
-  background: rgba(96, 165, 250, 0.08);
-  color: #93c5fd;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: var(--text-tertiary, #a1a1aa);
   font-size: 0.7rem;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   transition: background 150ms, border-color 150ms, color 150ms;
   font-family: inherit;
 }
 .task-focus-btn:hover {
-  border-color: rgba(96, 165, 250, 0.35);
-  background: rgba(96, 165, 250, 0.14);
-  color: var(--text, #fafafa);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary, #d4d4d8);
 }
 
 /* — GitHub Artifact Status — */
@@ -484,16 +486,17 @@ const groupedTasks = computed(() => {
 .task-actions { display: flex; gap: 4px; margin-top: 8px; }
 .task-action-btn {
   padding: 3px 8px; border-radius: 6px;
-  background: var(--surface, #18181b); border: 1px solid var(--line, #27272a);
+  background: transparent; border: 1px solid rgba(255, 255, 255, 0.1);
   font-size: 0.7rem; font-weight: 600; cursor: pointer;
-  transition: background 150ms; color: var(--text, #fafafa);
+  transition: background 150ms, color 150ms, border-color 150ms;
+  color: var(--text-tertiary, #a1a1aa);
   font-family: inherit;
 }
-.task-action-btn:hover { background: var(--surface-hover, #27272a); }
+.task-action-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--text-secondary, #d4d4d8); border-color: rgba(255, 255, 255, 0.2); }
 .task-action-btn:disabled { opacity: 0.4; cursor: wait; }
-.task-action-btn.accept { color: #60a5fa; }
-.task-action-btn.cancel { color: #f87171; }
-.task-action-btn.merge { color: #34d399; }
+.task-action-btn.accept { color: #60a5fa; border-color: rgba(96, 165, 250, 0.3); }
+.task-action-btn.cancel { color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
+.task-action-btn.merge { color: #34d399; border-color: rgba(52, 211, 153, 0.3); }
 
 .board-empty {
   display: grid; place-items: center; text-align: center;
