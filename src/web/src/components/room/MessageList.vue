@@ -14,7 +14,7 @@
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
       class="new-messages-pill visible"
-      @click="scrollToBottom"
+      @click="() => scrollToBottom()"
     >
       <span v-if="unreadCount > 0">↓ {{ unreadCount }} new messages</span>
       <span v-else>↓ Scroll to latest</span>
