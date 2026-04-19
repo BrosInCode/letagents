@@ -2295,8 +2295,12 @@ async function handleGitHubWebhookEvent(
         );
 
         const repositoryEvent = materializeGitHubWebhookEvent("repository", payload, deliveryId);
-        if (migratedRoom && repositoryEvent) {
-          await handleMaterializedGitHubRoomEvent(migratedRoom, repositoryEvent, {
+        const fallbackRoom =
+          migratedRoom ??
+          (repositorySync.roomId ? await getProjectById(repositorySync.roomId) : null) ??
+          (oldFullName ? await getProjectById(buildGitHubRepoRoomId(oldFullName)) : null);
+        if (fallbackRoom && repositoryEvent) {
+          await handleMaterializedGitHubRoomEvent(fallbackRoom, repositoryEvent, {
             deliveryId,
             installationId: syncedInstallationId,
             githubRepoId: repositorySync.githubRepoId,
