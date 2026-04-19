@@ -32,7 +32,10 @@
       <template v-if="!collapsedGroups.has(group.status)">
         <div v-for="task in group.tasks" :key="task.id" class="task-card">
           <div class="task-card-header">
-            <h4 class="task-card-title">{{ task.title }}</h4>
+            <div class="task-heading">
+              <span class="task-id-badge">{{ task.id }}</span>
+              <h4 class="task-card-title">{{ task.title }}</h4>
+            </div>
             <span class="task-status-badge" :data-status="task.status">
               {{ STATUS_LABELS[task.status] || task.status }}
             </span>
@@ -338,7 +341,22 @@ const groupedTasks = computed(() => {
   display: flex; align-items: flex-start; justify-content: space-between;
   gap: 8px; margin-bottom: 4px;
 }
-.task-card-title { font-size: 0.82rem; font-weight: 600; line-height: 1.4; color: var(--text-primary, #ffffff); }
+.task-heading {
+  display: flex; flex-wrap: wrap; align-items: flex-start;
+  gap: 6px 8px; min-width: 0; flex: 1;
+}
+.task-id-badge {
+  flex-shrink: 0; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid rgba(147, 197, 253, 0.42);
+  color: #93c5fd; background: rgba(147, 197, 253, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem; font-weight: 700; line-height: 1.45;
+}
+.task-card-title {
+  margin: 0; min-width: min(100%, 12rem); flex: 1;
+  font-size: 0.82rem; font-weight: 600; line-height: 1.4;
+  color: var(--text-primary, #ffffff); overflow-wrap: anywhere;
+}
 
 .task-status-badge {
   padding: 1px 6px; border-radius: 4px;
@@ -547,6 +565,7 @@ const groupedTasks = computed(() => {
   .btn { width: 100%; text-align: center; padding: 10px; }
   .task-card { padding: 10px; }
   .task-card-header { flex-direction: column; gap: 4px; }
+  .task-heading { width: 100%; }
   .task-card-title { font-size: 0.8rem; }
   .task-meta { font-size: 0.68rem; gap: 6px; }
   .task-description { font-size: 0.78rem; }
