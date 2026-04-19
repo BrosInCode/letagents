@@ -398,6 +398,7 @@ watch(githubEventsSupported, (supported) => {
 
 .room-view-viewport {
   position: relative;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
 }
