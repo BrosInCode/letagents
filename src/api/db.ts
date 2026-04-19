@@ -272,6 +272,8 @@ export interface Task {
   workflow_refs: TaskWorkflowRef[];
   created_at: string;
   updated_at: string;
+  active_leases?: TaskLease[];
+  active_locks?: TaskLock[];
 }
 
 export interface TaskLease {

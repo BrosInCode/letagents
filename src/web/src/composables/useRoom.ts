@@ -59,6 +59,25 @@ export interface RoomTask {
   }>
   created_at: string
   updated_at: string
+  active_leases?: ReadonlyArray<{
+    id: string
+    room_id: string
+    task_id: string
+    kind: "work" | "review" | "coordination"
+    status: "active" | "released" | "expired"
+    agent_key: string
+    agent_instance_id: string | null
+    actor_label: string
+  }>
+  active_locks?: ReadonlyArray<{
+    id: string
+    room_id: string
+    task_id: string
+    kind: "pause" | "stop"
+    status: "active" | "released"
+    actor_label: string
+    reason: string | null
+  }>
 }
 
 export interface TaskGitHubArtifactStatus {

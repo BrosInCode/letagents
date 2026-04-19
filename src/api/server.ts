@@ -200,6 +200,12 @@ function pruneStaleWorkPromptTimestamps(now: number): void {
 }
 
 const messageEvents = new EventEmitter();
+const taskEvents = new EventEmitter();
+
+interface TaskUpdatedEvent {
+  projectId: string;
+  task: import('./db.js').Task;
+}
 
 interface PendingDeviceAuth {
   deviceCode: string;
@@ -3725,10 +3731,17 @@ app.get(/^\/rooms\/(.+)\/messages\/stream$/, async (req: AuthenticatedRequest, r
     res.write(`data: ${JSON.stringify({ ...message, room_id: project.id })}\n\n`);
   };
 
+  const onTaskUpdated = (event: TaskUpdatedEvent) => {
+    if (event.projectId !== projectId) return;
+    res.write(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
+  };
+
   messageEvents.on("message:created", onMessageCreated);
+  taskEvents.on("task:updated", onTaskUpdated);
 
   req.on("close", () => {
     messageEvents.off("message:created", onMessageCreated);
+    taskEvents.off("task:updated", onTaskUpdated);
     stopSseStream(res, heartbeat);
   });
 });
@@ -4052,7 +4065,17 @@ app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const after = typeof req.query.after === "string" ? req.query.after : undefined;
   const result = open ? await getOpenTasks(project.id, { limit, after }) : await getTasks(project.id, status, { limit, after });
 
-  res.json({ room_id: project.id, tasks: result.tasks, has_more: result.has_more });
+  const [leases, locks] = await Promise.all([
+    getActiveTaskLeases(project.id),
+    getActiveTaskLocks(project.id)
+  ]);
+  const tasksWithDetails = result.tasks.map(t => ({
+    ...t,
+    active_leases: leases.filter(l => l.task_id === t.id),
+    active_locks: locks.filter(l => l.task_id === t.id)
+  }));
+
+  res.json({ room_id: project.id, tasks: tasksWithDetails, has_more: result.has_more });
 });
 
 app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
@@ -4122,7 +4145,19 @@ app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   }
 
   await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(acceptedTask));
-  res.status(201).json({ ...acceptedTask, room_id: project.id });
+
+  const [leases, locks] = await Promise.all([
+    getActiveTaskLeases(project.id),
+    getActiveTaskLocks(project.id)
+  ]);
+  const taskWithDetails = {
+    ...acceptedTask,
+    active_leases: leases.filter(l => l.task_id === acceptedTask.id),
+    active_locks: locks.filter(l => l.task_id === acceptedTask.id)
+  };
+
+  taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+  res.status(201).json({ ...taskWithDetails, room_id: project.id });
 });
 
 app.post(/^\/rooms\/(.+)\/tasks\/([^/]+)\/focus-room$/, async (req: AuthenticatedRequest, res) => {
@@ -4243,7 +4278,17 @@ app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res
     return;
   }
 
-  res.json({ ...task, room_id: project.id });
+  const [leases, locks] = await Promise.all([
+    getActiveTaskLeases(project.id),
+    getActiveTaskLocks(project.id)
+  ]);
+  const taskWithDetails = {
+    ...task,
+    active_leases: leases.filter(l => l.task_id === task.id),
+    active_locks: locks.filter(l => l.task_id === task.id)
+  };
+
+  res.json({ ...taskWithDetails, room_id: project.id });
 });
 
 app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
@@ -4337,7 +4382,22 @@ app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, r
     if (updated && updates.status && updates.status !== task.status) {
       await emitProjectMessage(project.id, "letagents", formatTaskLifecycleStatus(updated));
     }
-    res.json({ ...updated, room_id: project.id });
+
+    if (updated) {
+      const [leases, locks] = await Promise.all([
+        getActiveTaskLeases(project.id),
+        getActiveTaskLocks(project.id)
+      ]);
+      const taskWithDetails = {
+        ...updated,
+        active_leases: leases.filter(l => l.task_id === updated.id),
+        active_locks: locks.filter(l => l.task_id === updated.id)
+      };
+      taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+      res.json({ ...taskWithDetails, room_id: project.id });
+    } else {
+      res.json({ ...updated, room_id: project.id });
+    }
   } catch (error) {
     respondWithBadRequest(
       res,
