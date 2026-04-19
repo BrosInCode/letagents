@@ -311,19 +311,21 @@ export function formatRepoPullRequestEventMessage(input: {
   pullRequest: RepoPullRequestRef;
   senderLogin?: string | null;
   linkedTaskId?: string | null;
+  redactTitle?: boolean;
 }): string | null {
   const actor = input.senderLogin || input.pullRequest.authorLogin || input.provider;
   const prLabel = getPullRequestLabel(input.provider, input.pullRequest.number);
   const title = input.pullRequest.title.trim();
+  const titleSegment = input.redactTitle || !title ? "" : `: ${title}`;
   const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
 
   switch (input.action) {
     case "opened":
-      return `${prLabel} opened by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.url}`;
+      return `${prLabel} opened by ${actor} in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
     case "reopened":
-      return `${prLabel} reopened by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.url}`;
+      return `${prLabel} reopened by ${actor} in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
     case "ready_for_review":
-      return `${prLabel} is ready for review in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.url}`;
+      return `${prLabel} is ready for review in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
     case "synchronize":
       return `${prLabel} received new commits from ${actor} in ${input.repositoryFullName}${taskSuffix}: ${input.pullRequest.url}`;
     case "converted_to_draft":
@@ -331,9 +333,9 @@ export function formatRepoPullRequestEventMessage(input: {
     case "closed":
       if (input.pullRequest.merged) {
         const merger = input.pullRequest.mergedByLogin || actor;
-        return `${prLabel} was merged by ${merger} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.url}`;
+        return `${prLabel} was merged by ${merger} in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
       }
-      return `${prLabel} was closed by ${actor} in ${input.repositoryFullName}${taskSuffix}: ${title} ${input.pullRequest.url}`;
+      return `${prLabel} was closed by ${actor} in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
     default:
       return null;
   }
@@ -767,6 +769,7 @@ export function getRepoRoomEventReferenceTexts(
 export function formatRepoRoomEventMessage(input: {
   event: RepoRoomEvent;
   linkedTaskId?: string | null;
+  redactUntrustedTaskReference?: boolean;
 }): string | null {
   switch (input.event.kind) {
     case "pull_request":
@@ -777,6 +780,7 @@ export function formatRepoRoomEventMessage(input: {
         pullRequest: input.event.pullRequest,
         senderLogin: input.event.senderLogin,
         linkedTaskId: input.linkedTaskId,
+        redactTitle: input.redactUntrustedTaskReference,
       });
     case "issue":
       return formatRepoIssueEventMessage({
