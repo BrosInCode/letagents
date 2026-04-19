@@ -117,62 +117,66 @@
 
     <div class="focus-layout">
       <section class="focus-list">
-        <form v-if="!isFocusRoom" class="focus-adhoc" @submit.prevent="submitAdHocFocusRoom">
-          <div>
-            <p class="focus-eyebrow">Branch from an idea</p>
-            <h4>Start with a room, not a task.</h4>
-            <p>Give the work a short intent. A task can be linked when execution starts.</p>
-          </div>
-          <div class="focus-adhoc-controls">
-            <label class="sr-only" for="adhoc-focus-title">Focus Room intent</label>
-            <input
-              id="adhoc-focus-title"
-              v-model="adHocTitle"
-              :disabled="isCreatingAdHocFocusRoom"
-              placeholder="Investigate Focus Room flow"
-            />
-            <button
-              class="focus-primary"
-              type="submit"
-              :disabled="!canCreateAdHocFocusRoom"
-            >
-              {{ adHocButtonLabel }}
-            </button>
-          </div>
-          <p v-if="adHocAttempted && !adHocTitle.trim()" class="focus-adhoc-error">
-            Name the room first.
-          </p>
-        </form>
-
-        <div v-if="!isFocusRoom" class="focus-section-header">
-          <div>
-            <h3>Open Focus Rooms</h3>
-            <p>Active task rooms ready to enter.</p>
-          </div>
-          <span>{{ openFocusRooms.length }}</span>
+        <div v-if="!isFocusRoom" class="focus-section-card">
+          <form class="focus-adhoc" @submit.prevent="submitAdHocFocusRoom">
+            <div>
+              <p class="focus-eyebrow">Branch from an idea</p>
+              <h4>Start with a room, not a task.</h4>
+              <p>Give the work a short intent. A task can be linked when execution starts.</p>
+            </div>
+            <div class="focus-adhoc-controls">
+              <label class="sr-only" for="adhoc-focus-title">Focus Room intent</label>
+              <input
+                id="adhoc-focus-title"
+                v-model="adHocTitle"
+                :disabled="isCreatingAdHocFocusRoom"
+                placeholder="Investigate Focus Room flow"
+              />
+              <button
+                class="focus-primary"
+                type="submit"
+                :disabled="!canCreateAdHocFocusRoom"
+              >
+                {{ adHocButtonLabel }}
+              </button>
+            </div>
+            <p v-if="adHocAttempted && !adHocTitle.trim()" class="focus-adhoc-error">
+              Name the room first.
+            </p>
+          </form>
         </div>
 
-        <div v-if="!isFocusRoom && openFocusRooms.length === 0" class="focus-empty compact">
-          <h4>No open Focus Rooms</h4>
-          <p>Open one from a task when the work needs a dedicated room.</p>
+        <div v-if="!isFocusRoom" class="focus-section-card">
+          <div class="focus-section-header">
+            <div>
+              <h3>Open Focus Rooms</h3>
+              <p>Active task rooms ready to enter.</p>
+            </div>
+            <span>{{ openFocusRooms.length }}</span>
+          </div>
+
+          <div v-if="openFocusRooms.length === 0" class="focus-empty compact">
+            <h4>No open Focus Rooms</h4>
+            <p>Open one from a task when the work needs a dedicated room.</p>
+          </div>
+
+          <button
+            v-for="focusRoom in openFocusRooms"
+            :key="focusRoom.room_id"
+            class="focus-task focus-room-link"
+            type="button"
+            @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+          >
+            <div>
+              <strong>{{ focusRoom.display_name }}</strong>
+              <span>{{ focusRoom.source_task_id || 'No linked task yet' }}</span>
+            </div>
+            <small>{{ focusRoom.focus_status || 'active' }}</small>
+          </button>
         </div>
 
-        <button
-          v-for="focusRoom in openFocusRooms"
-          :key="focusRoom.room_id"
-          class="focus-task focus-room-link"
-          type="button"
-          @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
-        >
-          <div>
-            <strong>{{ focusRoom.display_name }}</strong>
-            <span>{{ focusRoom.source_task_id || 'No linked task yet' }}</span>
-          </div>
-          <small>{{ focusRoom.focus_status || 'active' }}</small>
-        </button>
-
-        <template v-if="!isFocusRoom && concludedFocusRooms.length > 0">
-          <div class="focus-section-header concluded">
+        <div v-if="!isFocusRoom && concludedFocusRooms.length > 0" class="focus-section-card">
+          <div class="focus-section-header">
             <div>
               <h3>Shared results</h3>
               <p>Concluded task rooms with outcomes in the parent room.</p>
@@ -194,35 +198,37 @@
             </div>
             <small>concluded</small>
           </button>
-        </template>
-
-        <div class="focus-section-header">
-          <div>
-            <h3>Focus candidates</h3>
-            <p>Large, noisy, or multi-agent work belongs here.</p>
-          </div>
-          <span>{{ candidateTasks.length }}</span>
         </div>
 
-        <div v-if="candidateTasks.length === 0" class="focus-empty">
-          <h4>No open tasks yet</h4>
-          <p>Add a task or branch a room from an idea.</p>
-        </div>
-
-        <button
-          v-for="task in candidateTasks"
-          :key="task.id"
-          class="focus-task"
-          :data-selected="task.id === currentTask?.id"
-          type="button"
-          @click="emit('selectTask', task.id)"
-        >
-          <div>
-            <strong>{{ task.title }}</strong>
-            <span>{{ task.description || task.id }}</span>
+        <div class="focus-section-card">
+          <div class="focus-section-header">
+            <div>
+              <h3>Focus candidates</h3>
+              <p>Large, noisy, or multi-agent work belongs here.</p>
+            </div>
+            <span>{{ candidateTasks.length }}</span>
           </div>
-          <small>{{ taskStatusLabel(task.status) }}</small>
-        </button>
+
+          <div v-if="candidateTasks.length === 0" class="focus-empty">
+            <h4>No open tasks yet</h4>
+            <p>Add a task or branch a room from an idea.</p>
+          </div>
+
+          <button
+            v-for="task in candidateTasks"
+            :key="task.id"
+            class="focus-task"
+            :data-selected="task.id === currentTask?.id"
+            type="button"
+            @click="emit('selectTask', task.id)"
+          >
+            <div>
+              <strong>{{ task.title }}</strong>
+              <span>{{ task.description || task.id }}</span>
+            </div>
+            <small>{{ taskStatusLabel(task.status) }}</small>
+          </button>
+        </div>
       </section>
 
       <aside class="focus-detail">
@@ -624,12 +630,11 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-hero {
-  display: flex;
-  margin-bottom: 24px;
+  margin-bottom: 14px;
 }
 
 .focus-hero-copy,
-.focus-list,
+.focus-section-card,
 .focus-detail {
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: var(--bg-card, #131316);
@@ -694,9 +699,15 @@ function taskStatusLabel(status: string): string {
   min-height: 0;
 }
 
-.focus-list,
+.focus-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.focus-section-card,
 .focus-detail {
-  padding: 20px;
+  padding: 14px;
 }
 
 .focus-adhoc {
@@ -897,15 +908,10 @@ function taskStatusLabel(status: string): string {
 
 .focus-section-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 8px;
-  margin-bottom: 16px;
-}
-
-.focus-section-header.concluded {
-  margin-top: 32px;
+  margin-bottom: 10px;
 }
 
 .focus-section-header h3 {
@@ -1081,7 +1087,6 @@ function taskStatusLabel(status: string): string {
 }
 
 @media (max-width: 860px) {
-  .focus-hero,
   .focus-context,
   .focus-layout {
     grid-template-columns: 1fr;
