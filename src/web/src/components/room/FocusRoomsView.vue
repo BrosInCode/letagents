@@ -3,12 +3,8 @@
     <section class="focus-hero">
       <div class="focus-hero-copy">
         <p class="focus-eyebrow">Rooms</p>
-        <h3>Give bigger work a quieter room.</h3>
+        <h2>Give bigger work a quieter room.</h2>
         <p>Keep the main room clear while agents go deep on one task.</p>
-      </div>
-      <div class="focus-route">
-        <span>Route</span>
-        <strong>{{ previewRoute }}</strong>
       </div>
     </section>
 
@@ -150,7 +146,7 @@
 
         <div v-if="!isFocusRoom" class="focus-section-header">
           <div>
-            <h4>Open Focus Rooms</h4>
+            <h3>Open Focus Rooms</h3>
             <p>Active task rooms ready to enter.</p>
           </div>
           <span>{{ openFocusRooms.length }}</span>
@@ -178,7 +174,7 @@
         <template v-if="!isFocusRoom && concludedFocusRooms.length > 0">
           <div class="focus-section-header concluded">
             <div>
-              <h4>Shared results</h4>
+              <h3>Shared results</h3>
               <p>Concluded task rooms with outcomes in the parent room.</p>
             </div>
             <span>{{ concludedFocusRooms.length }}</span>
@@ -202,7 +198,7 @@
 
         <div class="focus-section-header">
           <div>
-            <h4>Focus candidates</h4>
+            <h3>Focus candidates</h3>
             <p>Large, noisy, or multi-agent work belongs here.</p>
           </div>
           <span>{{ candidateTasks.length }}</span>
@@ -497,13 +493,6 @@ const shareBackLabel = computed(() => {
   return currentFocusRoom.value.focus_status === 'concluded' ? 'Shared' : 'Ready'
 })
 
-const previewRoute = computed(() => {
-  const base = props.roomAddress || 'room'
-  const focusKey = props.isFocusRoom
-    ? props.sourceTaskId || currentTask.value?.id || 'task'
-    : currentFocusRoom.value?.focus_key || currentTask.value?.id || 'task'
-  return `/in/${base}/focus/${focusKey}`
-})
 
 const actionLabel = computed(() => {
   if (props.isFocusRoom) return 'Focus Room active'
@@ -635,47 +624,46 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.72fr);
-  gap: 14px;
-  align-items: stretch;
-  margin-bottom: 14px;
+  display: flex;
+  margin-bottom: 24px;
 }
 
 .focus-hero-copy,
-.focus-route,
 .focus-list,
 .focus-detail {
-  border: 1px solid var(--line, #27272a);
-  background: var(--bg-1, #0f0f11);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--bg-card, #131316);
   border-radius: 8px;
 }
 
 .focus-hero-copy {
-  padding: 18px;
+  padding: var(--space-xl);
+  width: 100%;
 }
 
 .focus-eyebrow {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   color: #93c5fd;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   font-weight: 800;
   letter-spacing: 0;
   text-transform: uppercase;
 }
 
-.focus-hero h3,
+.focus-hero h2 {
+  margin: 0;
+  color: var(--text-primary, #ffffff);
+  font-weight: 800;
+  font-size: 1.45rem;
+}
+
 .focus-context h4,
 .focus-adhoc h4,
 .focus-detail h4,
 .focus-empty h4 {
   margin: 0;
-  color: var(--text, #fafafa);
-  font-weight: 800;
-}
-
-.focus-hero h3 {
-  font-size: 1.28rem;
+  color: var(--text-primary, #ffffff);
+  font-weight: 700;
 }
 
 .focus-hero p,
@@ -686,46 +674,29 @@ function taskStatusLabel(status: string): string {
 .focus-note,
 .focus-empty p {
   margin: 6px 0 0;
-  color: var(--muted, #71717a);
+  color: var(--text-tertiary, #a1a1aa);
   line-height: 1.55;
-  font-size: 0.82rem;
+  font-size: 0.85rem;
 }
 
-.focus-route {
-  display: grid;
-  align-content: center;
-  gap: 6px;
-  padding: 18px;
-}
-
-.focus-route span,
 .focus-facts dt {
-  color: var(--muted, #71717a);
+  color: var(--text-tertiary, #a1a1aa);
   font-size: 0.68rem;
   font-weight: 800;
   letter-spacing: 0;
   text-transform: uppercase;
 }
 
-.focus-route strong {
-  display: block;
-  color: var(--text, #fafafa);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.76rem;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
 .focus-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 0.52fr);
-  gap: 14px;
+  gap: 16px;
   min-height: 0;
 }
 
 .focus-list,
 .focus-detail {
-  padding: 14px;
+  padding: 20px;
 }
 
 .focus-adhoc {
@@ -926,32 +897,34 @@ function taskStatusLabel(status: string): string {
 
 .focus-section-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-top: 8px;
+  margin-bottom: 16px;
 }
 
 .focus-section-header.concluded {
-  margin-top: 16px;
+  margin-top: 32px;
 }
 
-.focus-section-header h4 {
+.focus-section-header h3 {
   margin: 0;
-  color: var(--text, #fafafa);
-  font-size: 0.86rem;
+  color: var(--text-primary, #ffffff);
+  font-size: 1.15rem;
+  font-weight: 700;
 }
 
 .focus-section-header span {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: var(--surface, #18181b);
-  color: var(--text, #fafafa);
-  font-size: 0.72rem;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary, #ffffff);
+  font-size: 0.78rem;
   font-weight: 800;
 }
 
@@ -961,21 +934,23 @@ function taskStatusLabel(status: string): string {
   justify-content: space-between;
   gap: 12px;
   width: 100%;
-  padding: 11px 12px;
-  margin-bottom: 7px;
-  border: 1px solid var(--line, #27272a);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.02);
   border-radius: 8px;
-  background: var(--bg-0, #09090b);
-  color: var(--text, #fafafa);
+  color: var(--text-secondary, #d4d4d8);
   cursor: pointer;
   text-align: left;
-  transition: border-color 150ms, background 150ms;
+  transition: all 250ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .focus-task:hover,
 .focus-task[data-selected="true"] {
   border-color: rgba(96, 165, 250, 0.45);
-  background: rgba(96, 165, 250, 0.08);
+  background: rgba(96, 165, 250, 0.06);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .focus-task[data-concluded="true"] small {
@@ -988,14 +963,21 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-task strong {
-  font-size: 0.82rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary, #ffffff);
   line-height: 1.4;
+  transition: color 150ms;
+}
+
+.focus-task:hover strong {
+  color: #93c5fd;
 }
 
 .focus-task span {
-  margin-top: 3px;
-  color: var(--muted, #71717a);
-  font-size: 0.74rem;
+  margin-top: 4px;
+  color: var(--text-tertiary, #a1a1aa);
+  font-size: 0.76rem;
   line-height: 1.45;
 }
 
