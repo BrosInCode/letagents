@@ -93,11 +93,15 @@
           :roomAddress="focusParentAddress"
           :isFocusRoom="room?.kind === 'focus'"
           :sourceTaskId="room?.sourceTaskId || null"
+          :focusStatus="room?.focusStatus || null"
+          :conclusionSummary="room?.conclusionSummary || null"
           :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
+          :isSharingFocusResult="sharingFocusResult"
           @selectTask="focusDraftTaskId = $event"
           @createFocusRoom="handleFocusTask"
           @openFocusRoom="handleOpenFocusRoom"
           @openParentRoom="handleOpenParentRoom"
+          @shareResults="handleShareFocusResults"
         />
       </Transition>
     </div>
@@ -210,6 +214,7 @@ const {
   addTask,
   updateTask,
   createFocusRoom,
+  shareFocusRoomResult,
   restoreSession,
   renameRoom,
   refreshRoomGitHubEvents,
@@ -228,6 +233,7 @@ const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const focusDraftTaskId = ref<string | null>(null)
 const creatingFocusRoomTaskId = ref<string | null>(null)
+const sharingFocusResult = ref(false)
 const tabTransitionDirection = ref<'forward' | 'back'>('forward')
 
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
@@ -328,6 +334,26 @@ async function handleFocusTask(taskId: string) {
     await handleOpenFocusRoom(focusKey)
   } finally {
     creatingFocusRoomTaskId.value = null
+  }
+}
+
+async function handleShareFocusResults(summary: string) {
+  const trimmedSummary = summary.trim()
+  if (!trimmedSummary) {
+    toast.error('Write a result summary first.')
+    return
+  }
+
+  sharingFocusResult.value = true
+  try {
+    const focusRoom = await shareFocusRoomResult(trimmedSummary)
+    if (!focusRoom) {
+      toast.error('Result could not be shared.')
+      return
+    }
+    toast.success('Result shared with the parent room.')
+  } finally {
+    sharingFocusResult.value = false
   }
 }
 

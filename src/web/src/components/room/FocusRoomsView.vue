@@ -12,11 +12,11 @@
       </div>
     </section>
 
-    <section v-if="isFocusRoom" class="focus-context">
+    <section v-if="isFocusRoom" class="focus-context" :data-concluded="isConcluded">
       <div>
         <p class="focus-eyebrow">Current Focus Room</p>
         <h4>{{ sourceTaskId || 'Task room' }}</h4>
-        <p>Keep task-specific work here, then bring the outcome back to the parent room.</p>
+        <p>{{ focusContextCopy }}</p>
       </div>
       <dl class="focus-facts compact">
         <div>
@@ -28,18 +28,35 @@
           <dd>{{ sourceTaskId || 'Not linked' }}</dd>
         </div>
         <div>
-          <dt>Share results</dt>
-          <dd>Coming next</dd>
+          <dt>Status</dt>
+          <dd>{{ focusStatusLabel }}</dd>
         </div>
       </dl>
       <div class="focus-context-actions">
         <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
           Back to parent room
         </button>
-        <button class="focus-secondary" type="button" disabled>
-          Share results later
-        </button>
       </div>
+      <form class="focus-share-form" @submit.prevent="submitShareResults">
+        <label class="focus-share-label" for="focus-result-summary">Result summary</label>
+        <textarea
+          id="focus-result-summary"
+          v-model="resultSummary"
+          :disabled="isConcluded || isSharingFocusResult"
+          :placeholder="sharePlaceholder"
+          rows="4"
+        />
+        <div class="focus-share-footer">
+          <p>{{ shareHelpText }}</p>
+          <button
+            class="focus-primary"
+            type="submit"
+            :disabled="!canShareResults"
+          >
+            {{ shareButtonLabel }}
+          </button>
+        </div>
+      </form>
     </section>
 
     <div class="focus-layout">
@@ -53,7 +70,7 @@
         </div>
 
         <div v-if="!isFocusRoom && openFocusRooms.length === 0" class="focus-empty compact">
-          <h4>No Focus Rooms yet</h4>
+          <h4>No open Focus Rooms</h4>
           <p>Open one from a task when the work needs a dedicated room.</p>
         </div>
 
@@ -70,6 +87,31 @@
           </div>
           <small>{{ focusRoom.focus_status || 'active' }}</small>
         </button>
+
+        <template v-if="!isFocusRoom && concludedFocusRooms.length > 0">
+          <div class="focus-section-header concluded">
+            <div>
+              <h4>Shared results</h4>
+              <p>Concluded task rooms with outcomes in the parent room.</p>
+            </div>
+            <span>{{ concludedFocusRooms.length }}</span>
+          </div>
+
+          <button
+            v-for="focusRoom in concludedFocusRooms"
+            :key="focusRoom.room_id"
+            class="focus-task focus-room-link"
+            data-concluded="true"
+            type="button"
+            @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+          >
+            <div>
+              <strong>{{ focusRoom.display_name }}</strong>
+              <span>{{ focusRoom.conclusion_summary || focusRoom.source_task_id || focusRoom.room_id }}</span>
+            </div>
+            <small>concluded</small>
+          </button>
+        </template>
 
         <div class="focus-section-header">
           <div>
@@ -119,7 +161,7 @@
             </div>
             <div>
               <dt>Share back</dt>
-              <dd>{{ currentFocusRoom ? 'Ready later' : 'Outcome summary' }}</dd>
+              <dd>{{ shareBackLabel }}</dd>
             </div>
           </dl>
 
@@ -149,7 +191,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { type FocusRoomInfo, type RoomTask } from '@/composables/useRoom'
 
 const props = defineProps<{
@@ -160,7 +202,10 @@ const props = defineProps<{
   roomAddress: string
   isFocusRoom: boolean
   sourceTaskId: string | null
+  focusStatus: 'active' | 'concluded' | null
+  conclusionSummary: string | null
   isCreatingFocusRoom: boolean
+  isSharingFocusResult: boolean
 }>()
 
 const emit = defineEmits<{
@@ -168,7 +213,11 @@ const emit = defineEmits<{
   createFocusRoom: [taskId: string]
   openFocusRoom: [focusKey: string]
   openParentRoom: []
+  shareResults: [summary: string]
 }>()
+
+const resultSummary = ref('')
+const shareAttempted = ref(false)
 
 const candidateTasks = computed(() =>
   props.tasks.filter(task => !['done', 'cancelled'].includes(task.status))
@@ -178,8 +227,12 @@ const openFocusRooms = computed(() =>
   props.focusRooms.filter(room => room.kind === 'focus' && room.focus_status !== 'concluded')
 )
 
+const concludedFocusRooms = computed(() =>
+  props.focusRooms.filter(room => room.kind === 'focus' && room.focus_status === 'concluded')
+)
+
 const focusRoomByTask = computed(() => {
-  const entries = openFocusRooms.value
+  const entries = props.focusRooms
     .filter(room => room.source_task_id)
     .map(room => [room.source_task_id as string, room] as const)
   return new Map(entries)
@@ -197,6 +250,41 @@ const currentFocusRoom = computed(() => {
   return taskId ? focusRoomByTask.value.get(taskId) ?? null : null
 })
 
+const isConcluded = computed(() => props.focusStatus === 'concluded')
+const conclusionSummaryText = computed(() => props.conclusionSummary?.trim() || '')
+const focusStatusLabel = computed(() => props.focusStatus ? taskStatusLabel(props.focusStatus) : 'active')
+const focusContextCopy = computed(() =>
+  isConcluded.value
+    ? 'Result shared with the parent room.'
+    : 'Keep task-specific work here, then bring the outcome back to the parent room.'
+)
+const sharePlaceholder = computed(() =>
+  isConcluded.value
+    ? 'Result already shared.'
+    : 'Summarize the decision, implementation, blocker, or next action for the parent room.'
+)
+const canShareResults = computed(() =>
+  !isConcluded.value && !props.isSharingFocusResult && resultSummary.value.trim().length > 0
+)
+const shareButtonLabel = computed(() => {
+  if (isConcluded.value) return 'Results shared'
+  if (props.isSharingFocusResult) return 'Sharing...'
+  return 'Share results'
+})
+const shareHelpText = computed(() => {
+  if (isConcluded.value) {
+    return conclusionSummaryText.value || 'The parent room has the outcome.'
+  }
+  if (shareAttempted.value && !resultSummary.value.trim()) {
+    return 'Write a short outcome before sharing.'
+  }
+  return 'Send a concise outcome to the parent room.'
+})
+const shareBackLabel = computed(() => {
+  if (!currentFocusRoom.value) return 'Outcome summary'
+  return currentFocusRoom.value.focus_status === 'concluded' ? 'Shared' : 'Ready'
+})
+
 const previewRoute = computed(() => {
   const base = props.roomAddress || 'room'
   const focusKey = props.isFocusRoom
@@ -207,6 +295,7 @@ const previewRoute = computed(() => {
 
 const actionLabel = computed(() => {
   if (props.isFocusRoom) return 'Focus Room active'
+  if (currentFocusRoom.value?.focus_status === 'concluded') return 'View shared result'
   if (currentFocusRoom.value) return 'Open Focus Room'
   if (props.isCreatingFocusRoom) return 'Opening...'
   return 'Focus on this'
@@ -214,9 +303,27 @@ const actionLabel = computed(() => {
 
 const actionNote = computed(() => {
   if (props.isFocusRoom) return 'Open new Focus Rooms from the parent room.'
+  if (currentFocusRoom.value?.focus_status === 'concluded') return 'This task already has a shared result.'
   if (currentFocusRoom.value) return 'This task already has a Focus Room.'
   return 'This opens a dedicated room for task-level execution.'
 })
+
+watch(
+  conclusionSummaryText,
+  (summary) => {
+    if (summary) {
+      resultSummary.value = summary
+    }
+  },
+  { immediate: true }
+)
+
+function submitShareResults() {
+  shareAttempted.value = true
+  const trimmedSummary = resultSummary.value.trim()
+  if (!trimmedSummary || isConcluded.value || props.isSharingFocusResult) return
+  emit('shareResults', trimmedSummary)
+}
 
 function taskStatusLabel(status: string): string {
   return status.replace(/_/g, ' ')
@@ -346,12 +453,71 @@ function taskStatusLabel(status: string): string {
   gap: 8px;
 }
 
+.focus-context[data-concluded="true"] {
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.focus-share-form {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.focus-share-label {
+  color: var(--text, #fafafa);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.focus-share-form textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  padding: 10px 11px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: var(--bg-0, #09090b);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.focus-share-form textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.focus-share-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.focus-share-footer p {
+  margin: 0;
+  color: var(--muted, #71717a);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.focus-share-footer .focus-primary {
+  width: auto;
+  min-width: 136px;
+}
+
 .focus-section-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.focus-section-header.concluded {
+  margin-top: 16px;
 }
 
 .focus-section-header h4 {
@@ -394,6 +560,10 @@ function taskStatusLabel(status: string): string {
 .focus-task[data-selected="true"] {
   border-color: rgba(96, 165, 250, 0.45);
   background: rgba(96, 165, 250, 0.08);
+}
+
+.focus-task[data-concluded="true"] small {
+  color: #86efac;
 }
 
 .focus-task strong,
@@ -543,6 +713,15 @@ function taskStatusLabel(status: string): string {
 
   .focus-facts.compact {
     grid-template-columns: 1fr;
+  }
+
+  .focus-share-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .focus-share-footer .focus-primary {
+    width: 100%;
   }
 }
 </style>

@@ -580,6 +580,17 @@ async function refreshFocusRooms(): Promise<boolean> {
   return true
 }
 
+function upsertFocusRoom(focusRoom: FocusRoomInfo) {
+  const idx = focusRooms.value.findIndex(item => item.room_id === focusRoom.room_id)
+  if (idx >= 0) {
+    const updated = [...focusRooms.value]
+    updated[idx] = focusRoom
+    focusRooms.value = updated
+  } else {
+    focusRooms.value = [...focusRooms.value, focusRoom]
+  }
+}
+
 /** ── SSE Streaming ── */
 function startStreaming(roomIdentifier: string) {
   stopStreaming()
@@ -762,13 +773,39 @@ async function createFocusRoom(taskId: string): Promise<FocusRoomInfo | null> {
     const focusRoom = data.focus_room as FocusRoomInfo | undefined
     if (!focusRoom?.room_id) return null
 
-    const idx = focusRooms.value.findIndex(item => item.room_id === focusRoom.room_id)
-    if (idx >= 0) {
-      const updated = [...focusRooms.value]
-      updated[idx] = focusRoom
-      focusRooms.value = updated
-    } else {
-      focusRooms.value = [...focusRooms.value, focusRoom]
+    upsertFocusRoom(focusRoom)
+
+    return focusRoom
+  } catch {
+    return null
+  }
+}
+
+async function shareFocusRoomResult(summary: string): Promise<FocusRoomInfo | null> {
+  if (!room.value || room.value.kind !== 'focus') return null
+  const trimmedSummary = summary.trim()
+  const parentRoomId = room.value.parentRoomId
+  const focusKey = room.value.focusKey || room.value.sourceTaskId
+  if (!trimmedSummary || !parentRoomId || !focusKey) return null
+
+  try {
+    const data = await apiFetch(
+      `${roomPath(parentRoomId)}/focus/${encodeURIComponent(focusKey)}/conclude`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ summary: trimmedSummary }),
+      }
+    )
+    const focusRoom = (data.focus_room || data.room) as FocusRoomInfo | undefined
+    if (!focusRoom?.room_id) return null
+
+    upsertFocusRoom(focusRoom)
+    room.value = {
+      ...room.value,
+      displayName: focusRoom.display_name || room.value.displayName,
+      focusStatus: focusRoom.focus_status || room.value.focusStatus,
+      concludedAt: focusRoom.concluded_at || room.value.concludedAt,
+      conclusionSummary: focusRoom.conclusion_summary || trimmedSummary,
     }
 
     return focusRoom
@@ -1015,6 +1052,7 @@ export function useRoom() {
     addTask,
     updateTask,
     createFocusRoom,
+    shareFocusRoomResult,
     refreshFocusRooms,
     refreshRoomPresence,
     refreshTaskGithubStatus,
