@@ -48,6 +48,18 @@
               <a :href="workflowRef.url" target="_blank" class="task-person-name" style="color: #60a5fa; text-decoration: none;">{{ workflowRef.label }}</a>
             </div>
           </div>
+
+          <!-- Leases and Locks Coordination Data -->
+          <div v-if="task.active_leases?.length || task.active_locks?.length" class="task-coordination">
+            <div v-for="lease in task.active_leases" :key="lease.id" class="coordination-badge lease">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+              <span>{{ lease.kind }} lease: {{ truncateName(lease.actor_label) }}</span>
+            </div>
+            <div v-for="lock in task.active_locks" :key="lock.id" class="coordination-badge lock">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+              <span>{{ lock.scope }} lock: {{ lock.reason }}{{ lock.message ? ' - ' + lock.message : '' }}</span>
+            </div>
+          </div>
           <div class="task-actions">
             <button
               v-if="task.status === 'proposed'"
@@ -64,6 +76,13 @@
               class="task-action-btn cancel"
               @click="$emit('cancelTask', task.id)"
             >Cancel</button>
+
+            <!-- Jump to Focus Room Affordance -->
+            <button
+              v-if="!['done', 'cancelled'].includes(task.status)"
+              class="task-action-btn focus"
+              @click="$emit('focusTask', task.id)"
+            >Focus ↗</button>
           </div>
         </div>
       </div>
@@ -87,6 +106,26 @@ export interface TaskData {
     label: string
     url: string
   }>
+  active_leases?: ReadonlyArray<{
+    id: string
+    room_id: string
+    task_id: string
+    kind: string
+    status: string
+    agent_key: string
+    agent_instance_id: string | null
+    actor_label: string
+  }>
+  active_locks?: ReadonlyArray<{
+    id: string
+    room_id: string
+    task_id: string | null
+    scope: "room" | "task"
+    reason: string | null
+    message: string | null
+    created_by: string
+    cleared_at: string | null
+  }>
 }
 
 const props = defineProps<{
@@ -98,6 +137,7 @@ defineEmits<{
   claimTask: [taskId: string]
   cancelTask: [taskId: string]
   addTask: [title: string]
+  focusTask: [taskId: string]
 }>()
 
 const newTaskTitle = ref('')
@@ -204,6 +244,28 @@ function getTaskWorkflowRefs(task: TaskData) {
 .task-action-btn:hover { background: var(--surface-hover, #1f1f23); }
 .task-action-btn.accept { color: #60a5fa; }
 .task-action-btn.cancel { color: #f87171; }
+.task-action-btn.focus { color: #a855f7; border-color: rgba(168, 85, 247, 0.2); }
+.task-action-btn.focus:hover { background: rgba(168, 85, 247, 0.1); }
+
+.task-coordination {
+  display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;
+}
+.coordination-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 6px;
+  font-size: 0.68rem; font-weight: 600;
+  border: 1px solid var(--line, #27272a);
+}
+.coordination-badge.lease {
+  background: rgba(168, 85, 247, 0.08);
+  border-color: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+}
+.coordination-badge.lock {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+}
 
 .add-task-form {
   display: flex; gap: 6px;
