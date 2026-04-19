@@ -97,6 +97,13 @@ jobs:
           --test
           src/api/__tests__/repo-workflow-lookup.test.ts
 
+      - name: Run focus room tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/focus-rooms.test.ts
+
   # ── Build and push Docker images to GHCR ──
   docker:
     needs: [build, integration-tests]
