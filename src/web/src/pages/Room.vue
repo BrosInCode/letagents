@@ -362,28 +362,52 @@ function openBlankFocusRoomTab(): Window | null {
   }
 }
 
-function openFocusRoomPath(path: string, targetWindow?: Window | null) {
-  if (!path) return
+function closeFocusTargetWindow(targetWindow?: Window | null) {
+  if (targetWindow && !targetWindow.closed) {
+    targetWindow.close()
+  }
+}
+
+async function openFocusRoomPath(path: string, targetWindow?: Window | null): Promise<boolean> {
+  if (!path) return false
   const absoluteUrl = new URL(path, window.location.origin).toString()
 
   if (targetWindow && !targetWindow.closed) {
-    targetWindow.location.replace(absoluteUrl)
-    targetWindow.focus()
-    return
+    try {
+      targetWindow.location.replace(absoluteUrl)
+      targetWindow.focus()
+      return true
+    } catch {
+      closeFocusTargetWindow(targetWindow)
+    }
+  } else {
+    const openedWindow = openBlankFocusRoomTab()
+    if (openedWindow && !openedWindow.closed) {
+      try {
+        openedWindow.location.replace(absoluteUrl)
+        openedWindow.focus()
+        return true
+      } catch {
+        closeFocusTargetWindow(openedWindow)
+      }
+    }
   }
 
-  window.open(absoluteUrl, '_blank', 'noopener,noreferrer')
+  try {
+    await router.push(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
-function handleOpenFocusRoom(focusKey: string, targetWindow?: Window | null) {
+async function handleOpenFocusRoom(focusKey: string, targetWindow?: Window | null): Promise<boolean> {
   const path = buildFocusRoomPath(focusKey)
   if (!path) {
-    if (targetWindow && !targetWindow.closed) {
-      targetWindow.close()
-    }
-    return
+    closeFocusTargetWindow(targetWindow)
+    return false
   }
-  openFocusRoomPath(path, targetWindow)
+  return openFocusRoomPath(path, targetWindow)
 }
 
 async function handleOpenParentRoom() {
@@ -404,9 +428,7 @@ async function handleFocusTask(taskId: string) {
   try {
     const focusRoom = await createFocusRoom(taskId)
     if (!focusRoom) {
-      if (focusWindow && !focusWindow.closed) {
-        focusWindow.close()
-      }
+      closeFocusTargetWindow(focusWindow)
       setActiveTab('rooms')
       syncViewQuery('rooms', 'push')
       toast.error('Focus Room could not be opened.')
@@ -414,7 +436,10 @@ async function handleFocusTask(taskId: string) {
     }
 
     const focusKey = focusRoom.focus_key || focusRoom.source_task_id || taskId
-    handleOpenFocusRoom(focusKey, focusWindow)
+    const opened = await handleOpenFocusRoom(focusKey, focusWindow)
+    if (!opened) {
+      toast.error('Focus Room could not be opened.')
+    }
   } finally {
     creatingFocusRoomTaskId.value = null
   }
@@ -436,9 +461,7 @@ async function handleCreateAdHocFocusRoom(title: string) {
   try {
     const focusRoom = await createAdHocFocusRoom(trimmedTitle)
     if (!focusRoom) {
-      if (focusWindow && !focusWindow.closed) {
-        focusWindow.close()
-      }
+      closeFocusTargetWindow(focusWindow)
       setActiveTab('rooms')
       syncViewQuery('rooms', 'push')
       toast.error('Focus Room could not be opened.')
@@ -446,7 +469,10 @@ async function handleCreateAdHocFocusRoom(title: string) {
     }
 
     const focusKey = focusRoom.focus_key || focusRoom.room_id
-    handleOpenFocusRoom(focusKey, focusWindow)
+    const opened = await handleOpenFocusRoom(focusKey, focusWindow)
+    if (!opened) {
+      toast.error('Focus Room could not be opened.')
+    }
   } finally {
     creatingAdHocFocusRoom.value = false
   }
