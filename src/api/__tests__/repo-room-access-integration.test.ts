@@ -113,6 +113,7 @@ async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildP
   child.stderr.on("data", (chunk: Buffer | string) => {
     stderr += chunk.toString();
   });
+  child.stdout.resume();
 
   await waitForServer(port, child, () => stderr);
   return { child, port };
@@ -219,13 +220,33 @@ async function startGitHubApiStub(): Promise<{ server: ReturnType<typeof createS
 
 async function stopGitHubApiStub(server: ReturnType<typeof createServer>): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
+    let settled = false;
+    const finish = (error?: Error | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(closeIdleTimer);
+      clearTimeout(forceCloseTimer);
       if (error) {
         reject(error);
         return;
       }
       resolve();
+    };
+    const closeIdleTimer = setTimeout(() => {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+    }, 250);
+    closeIdleTimer.unref();
+    const forceCloseTimer = setTimeout(() => {
+      server.closeAllConnections?.();
+      finish();
+    }, 5000);
+    forceCloseTimer.unref();
+
+    server.close((error) => {
+      finish(error);
     });
+    server.closeIdleConnections?.();
   });
 }
 

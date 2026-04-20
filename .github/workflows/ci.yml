@@ -41,6 +41,7 @@ jobs:
   # ── DB-backed integration tests ──
   integration-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -51,7 +52,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U test"
+          --health-cmd "pg_isready -U test -d letagents_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -77,6 +78,7 @@ jobs:
           src/api/__tests__/github-webhook-integration.test.ts
 
       - name: Run repo room access integration tests
+        timeout-minutes: 5
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
