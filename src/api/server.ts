@@ -7,15 +7,12 @@ import {
   concludeFocusRoom,
   createFocusRoomFromIntent,
   createFocusRoomForTask,
-  createProject,
   createCoordinationEvent,
   createTask,
   createTaskLease,
   findTaskByPrUrl,
   findTaskByWorkflowArtifactMatches,
-  getAllProjects,
   getAgentIdentityByCanonicalKey,
-  getAgentIdentitiesForOwner,
   getGitHubAppRepositoryByFullName,
   getGitHubRoomEvents,
   getOwnerTokenAccountByToken,
@@ -43,8 +40,6 @@ import {
   markGitHubWebhookDeliveryProcessed,
   migrateGitHubRepositoryCanonicalRoom,
   recordGitHubWebhookDelivery,
-  registerAgentIdentity,
-  rotateProjectCode,
   setGitHubAppInstallationSuspended,
   updateGitHubRoomEventLinkedTaskId,
   updateTaskLeaseWorkflowRefs,
@@ -185,6 +180,10 @@ import {
   registerGitHubIntegrationRoutes,
   registerGitHubIntegrationSetupRoute,
 } from "./routes/github-integration.js";
+import {
+  registerLegacyProjectRoutes,
+  type LegacyProjectRouteDeps,
+} from "./routes/legacy-projects.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2386,6 +2385,18 @@ const githubIntegrationRouteDeps = {
   isRepoBackedProject,
 };
 
+const legacyProjectRouteDeps = {
+  resolveRequestAuth,
+  resolveCanonicalRoomRequestId,
+  isRepoBackedRoomId,
+  isRepoBackedProject,
+  resolveRepoRoomAccessDecision,
+  replyRepoRoomAccessDecision,
+  resolveProjectRole,
+  requireAdmin,
+  rememberHumanRoomParticipant,
+} satisfies LegacyProjectRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2481,184 +2492,7 @@ registerAuthRoutes(app);
 
 registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
 
-app.get("/projects", async (req: AuthenticatedRequest, res) => {
-  const { account } = await resolveRequestAuth(req);
-  if (!account) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
-  }
-  const projects = await getAllProjects();
-  // Exclude invite-only rooms — their IDs ARE their join codes
-  const safeProjects = projects
-    .filter(({ id }) => !isInviteCode(id))
-    .map(({ id, display_name }) => ({ id, display_name }));
-  res.json({ projects: safeProjects });
-});
-
-app.post("/projects", async (req: AuthenticatedRequest, res) => {
-  const project = await createProject();
-  if (req.sessionAccount) {
-    await assignProjectAdmin(project.id, req.sessionAccount.account_id);
-  }
-  res.status(201).json(project);
-});
-
-app.get("/projects/join/:code", async (req, res) => {
-  const code = normalizeRoomId(req.params.code);
-  const project = await getProjectByCode(code);
-
-  if (!project) {
-    res.status(404).json({ error: "Project not found for the given code" });
-    return;
-  }
-
-  res.json({
-    id: project.id,
-    code: project.code,
-    name: project.name,
-    display_name: project.display_name,
-  });
-});
-
-app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
-  const name = decodeURIComponent(String(req.params.name));
-  const requestedRoomId = normalizeRoomId(name);
-  const roomId = await resolveCanonicalRoomRequestId(requestedRoomId);
-
-  if (isRepoBackedRoomId(roomId)) {
-    const decision = await resolveRepoRoomAccessDecision({
-      roomName: roomId,
-      sessionAccount: req.sessionAccount,
-    });
-    if (decision.kind !== "allow") {
-      replyRepoRoomAccessDecision(res, roomId, decision);
-      return;
-    }
-  }
-
-  const { room: project, created } = await getOrCreateCanonicalRoom(roomId);
-
-  if (req.sessionAccount && created) {
-    if (isRepoBackedProject(project)) {
-      await resolveProjectRole(project, req.sessionAccount);
-    } else {
-      await assignProjectAdmin(project.id, req.sessionAccount.account_id);
-    }
-  }
-
-  if (req.sessionAccount) {
-    await rememberHumanRoomParticipant({
-      projectId: project.id,
-      sessionAccount: req.sessionAccount,
-    });
-  }
-
-  res.status(created ? 201 : 200).json({
-    id: project.id,
-    code: project.code,
-    name: project.name,
-    display_name: project.display_name,
-  });
-});
-
-app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
-  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-  const project = await getProjectById(projectId);
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  const role = await resolveProjectRole(project, req.sessionAccount);
-  res.json({
-    project_id: project.id,
-    room_type: isRepoBackedProject(project) ? "discoverable" : "invite",
-    authenticated: Boolean(req.sessionAccount),
-    role,
-    account: req.sessionAccount
-      ? {
-          id: req.sessionAccount.account_id,
-          login: req.sessionAccount.login,
-          provider: req.sessionAccount.provider,
-        }
-      : null,
-  });
-});
-
-app.post("/projects/:id/code/rotate", async (req: AuthenticatedRequest, res) => {
-  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-  const project = await getProjectById(projectId);
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  if (!(await requireAdmin(req, res, project))) {
-    return;
-  }
-
-  if (!project.code) {
-    res.status(400).json({ error: "Only invite rooms can rotate codes" });
-    return;
-  }
-
-  const rotated = await rotateProjectCode(project.id);
-  if (!rotated) {
-    res.status(500).json({ error: "Failed to rotate invite code" });
-    return;
-  }
-
-  res.json({
-    id: rotated.id,
-    code: rotated.code,
-    name: rotated.name,
-    display_name: rotated.display_name,
-  });
-});
-
-app.get("/agents/me", async (req: AuthenticatedRequest, res) => {
-  if (!req.sessionAccount) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
-  }
-
-  res.json({
-    account: {
-      id: req.sessionAccount.account_id,
-      login: req.sessionAccount.login,
-      display_name: req.sessionAccount.display_name ?? null,
-    },
-    agents: await getAgentIdentitiesForOwner(req.sessionAccount.account_id),
-  });
-});
-
-app.post("/agents", async (req: AuthenticatedRequest, res) => {
-  if (!req.sessionAccount) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
-  }
-
-  const { name, display_name, owner_label } = req.body as {
-    name?: string;
-    display_name?: string;
-    owner_label?: string;
-  };
-
-  if (!name?.trim()) {
-    res.status(400).json({ error: "name is required" });
-    return;
-  }
-
-  const identity = await registerAgentIdentity({
-    owner_account_id: req.sessionAccount.account_id,
-    owner_login: req.sessionAccount.login,
-    owner_label: owner_label?.trim() || req.sessionAccount.display_name || req.sessionAccount.login,
-    name: name.trim(),
-    display_name: display_name?.trim(),
-  });
-
-  res.status(201).json(identity);
-});
+registerLegacyProjectRoutes(app, legacyProjectRouteDeps);
 
 app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
   const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
