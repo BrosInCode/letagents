@@ -207,19 +207,50 @@ const {
   findTaskByWorkflowArtifactMatches,
   findTaskByPrUrl,
   findTaskByActiveWorkflowLease: async (projectId, workflow) => {
-    const leases = await getActiveTaskLeases(projectId);
-    const lease = leases.find((candidate) =>
-      candidate.kind === "work" &&
-      leaseMatchesWorkflowArtifact({
-        lease: candidate,
-        prUrl: workflow.prUrl,
-        branchRef: workflow.branchRef,
-      })
-    );
-    return lease ? getTaskById(projectId, lease.task_id) : undefined;
+    const findTaskInRoom = async (roomId: string): Promise<Task | undefined> => {
+      const leases = await getActiveTaskLeases(roomId);
+      const lease = leases.find((candidate) =>
+        candidate.kind === "work" &&
+        leaseMatchesWorkflowArtifact({
+          lease: candidate,
+          prUrl: workflow.prUrl,
+          branchRef: workflow.branchRef,
+        })
+      );
+      return lease ? getTaskById(roomId, lease.task_id) : undefined;
+    };
+
+    const parentTask = await findTaskInRoom(projectId);
+    if (parentTask) {
+      return parentTask;
+    }
+
+    const focusRooms = await getFocusRoomsForParent(projectId);
+    for (const focusRoom of focusRooms) {
+      if (focusRoom.focus_status === "concluded") {
+        continue;
+      }
+      const focusTask = await findTaskInRoom(focusRoom.id);
+      if (focusTask) {
+        return focusTask;
+      }
+    }
+
+    return undefined;
   },
   getTaskById,
 });
+
+async function getProjectForResolvedTask(
+  fallbackProject: Project,
+  linkedTask: Pick<Task, "room_id"> | undefined
+): Promise<Project> {
+  if (!linkedTask || linkedTask.room_id === fallbackProject.id) {
+    return fallbackProject;
+  }
+
+  return (await getProjectById(linkedTask.room_id)) ?? fallbackProject;
+}
 
 async function emitProjectMessage(
   projectId: string,
@@ -253,8 +284,12 @@ const {
   emitProjectMessage,
 });
 const {
+  getFocusRoomForGitHubEventTask,
   getHardIsolatedFocusRoomForGitHubEvent,
-} = createGitHubFocusIsolationResolver({ getActiveTaskFocusRoom });
+} = createGitHubFocusIsolationResolver({
+  getActiveTaskFocusRoom,
+  getProjectById: async (projectId) => (await getProjectById(projectId)) ?? null,
+});
 const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
   getOpenTasks,
   getRoomAgentPresence,
@@ -526,7 +561,8 @@ async function handleMaterializedGitHubRoomEvent(
   }
 
   if (roomEvent.kind === "check_run") {
-    linkedTask = await maybeAutoCreateTaskForFailedCheckRun(project, linkedTask, roomEvent, {
+    const taskProject = await getProjectForResolvedTask(project, linkedTask);
+    linkedTask = await maybeAutoCreateTaskForFailedCheckRun(taskProject, linkedTask, roomEvent, {
       githubRoutingContext,
     });
     if (linkedTask) {
@@ -538,7 +574,8 @@ async function handleMaterializedGitHubRoomEvent(
     }
   }
 
-  const taskProjection = await applyRepoRoomEventToTask(project, linkedTask, roomEvent, {
+  const taskProject = await getProjectForResolvedTask(project, linkedTask);
+  const taskProjection = await applyRepoRoomEventToTask(taskProject, linkedTask, roomEvent, {
     installationId: input.installationId,
     githubRoutingContext,
   });
@@ -554,10 +591,11 @@ async function handleMaterializedGitHubRoomEvent(
   });
   if (message) {
     const linkedFocusRoom = taskProjection.authoritative && linkedTask
-      ? await getActiveTaskFocusRoom(project.id, linkedTask.id)
+      ? await getFocusRoomForGitHubEventTask(project.id, linkedTask)
       : null;
+    const linkedTaskProject = await getProjectForResolvedTask(project, linkedTask);
     if (taskProjection.authoritative && linkedTask) {
-      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+      await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
         source: "github",
         parent_activity: "GitHub activity",
         parent_event_kind: "major_activity",
@@ -565,7 +603,7 @@ async function handleMaterializedGitHubRoomEvent(
         github_routing_context: githubRoutingContext,
       });
     } else if (linkedTask && isolatedFocusRoom) {
-      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+      await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
         source: "github",
         parent_activity: "GitHub activity",
         parent_event_kind: "major_activity",
