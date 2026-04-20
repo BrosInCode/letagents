@@ -4,8 +4,6 @@ import express from "express";
 import {
   addMessage,
   assignProjectAdmin,
-  concludeFocusRoom,
-  createFocusRoomFromIntent,
   createFocusRoomForTask,
   createCoordinationEvent,
   createTask,
@@ -45,7 +43,6 @@ import {
   upsertGitHubRepositoryLink,
   upsertRoomParticipant,
   updateProjectDisplayName,
-  updateFocusRoomSettings,
   updateTask,
   getRoomAgentPresence,
   type GitHubWebhookDeliveryStatus,
@@ -95,7 +92,6 @@ import {
   normalizeFocusRoomSettings,
   shouldPostFocusRoomEventToParent,
   shouldRouteGitHubEventToFocusRoom,
-  validateFocusRoomSettingsPatch,
   type FocusGitHubRoutingContext,
   type FocusParentEventKind,
 } from "./focus-room-settings.js";
@@ -182,6 +178,10 @@ import {
   registerRoomPresenceRoutes,
   type RoomPresenceRouteDeps,
 } from "./routes/room-presence.js";
+import {
+  registerRoomFocusRoutes,
+  type RoomFocusRouteDeps,
+} from "./routes/room-focus.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2422,6 +2422,22 @@ const roomPresenceRouteDeps = {
   maybeEmitStaleWorkPrompt,
 } satisfies RoomPresenceRouteDeps;
 
+const roomFocusRouteDeps = {
+  resolveCanonicalRoomRequestId,
+  resolveRoomOrReply,
+  requireParticipant,
+  resolveProjectRole,
+  toRoomResponse,
+  normalizeOptionalString,
+  enforceFocusRoomConclusion: (input) => enforceTaskCoordinationMutation({
+    ...input,
+    updates: {},
+    forcedMutation: { mutation: "focus_room_conclude", leaseKind: "work" },
+  }),
+  emitProjectMessage,
+  formatFocusRoomConclusionMessage,
+} satisfies RoomFocusRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2653,230 +2669,7 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
 
 registerRoomMessageRoutes(app, roomMessageRouteDeps);
 registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
-
-app.get(/^\/rooms\/(.+)\/focus\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const focusRoom = await getFocusRoomByKey(project.id, focusKey);
-  if (!focusRoom) {
-    res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
-    return;
-  }
-
-  const role = await resolveProjectRole(focusRoom, req.sessionAccount);
-  res.json({
-    ...toRoomResponse(focusRoom, {
-      role,
-      authenticated: Boolean(req.sessionAccount),
-    }),
-  });
-});
-
-app.patch(/^\/rooms\/(.+)\/focus\/([^/]+)\/settings$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  try {
-    const settings = validateFocusRoomSettingsPatch(req.body ?? {});
-    const focusRoom = await updateFocusRoomSettings(project.id, focusKey, settings);
-    if (!focusRoom) {
-      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
-      return;
-    }
-
-    const role = await resolveProjectRole(focusRoom, req.sessionAccount);
-    res.json({
-      room_id: project.id,
-      focus_key: focusKey,
-      focus_room: toRoomResponse(focusRoom, {
-        role,
-        authenticated: Boolean(req.sessionAccount),
-      }),
-    });
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "PATCH /rooms/:room_id/focus/:focus_key/settings",
-      error,
-      "Focus Room settings could not be updated."
-    );
-  }
-});
-
-app.get(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const focusRooms = await getFocusRoomsForParent(project.id);
-  res.json({
-    room_id: project.id,
-    focus_rooms: focusRooms.map((focusRoom) => toRoomResponse(focusRoom)),
-  });
-});
-
-app.post(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const requestBody = (req.body ?? {}) as Record<string, unknown>;
-  const { title, display_name } = requestBody as {
-    title?: unknown;
-    display_name?: string;
-  };
-  if (typeof title !== "string" || !title.trim()) {
-    res.status(400).json({ error: "title is required" });
-    return;
-  }
-
-  try {
-    const result = await createFocusRoomFromIntent(project.id, title, {
-      displayName: display_name,
-    });
-
-    if (req.sessionAccount) {
-      await assignProjectAdmin(result.room.id, req.sessionAccount.account_id);
-    }
-
-    await emitProjectMessage(
-      project.id,
-      "letagents",
-      `[status] Focus Room opened: ${result.room.display_name}`
-    );
-
-    const role = await resolveProjectRole(result.room, req.sessionAccount);
-    res.status(201).json({
-      room_id: project.id,
-      created: result.created,
-      focus_room: toRoomResponse(result.room, {
-        role,
-        authenticated: Boolean(req.sessionAccount),
-      }),
-    });
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "POST /rooms/:room_id/focus-rooms",
-      error,
-      "Focus Room could not be opened."
-    );
-  }
-});
-
-app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const requestBody = (req.body ?? {}) as Record<string, unknown>;
-  const { summary } = requestBody as { summary?: unknown };
-  if (typeof summary !== "string" || !summary.trim()) {
-    res.status(400).json({ error: "summary is required" });
-    return;
-  }
-
-  try {
-    const focusRoom = await getFocusRoomByKey(project.id, focusKey);
-    if (!focusRoom) {
-      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
-      return;
-    }
-
-    if (focusRoom.source_task_id) {
-      const task = await getTaskById(project.id, focusRoom.source_task_id);
-      const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
-      if (task && taskOwnership) {
-        const coordination = await enforceTaskCoordinationMutation({
-          req,
-          projectId: project.id,
-          task,
-          taskOwnership,
-          updates: {},
-          forcedMutation: { mutation: "focus_room_conclude", leaseKind: "work" },
-          actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
-          actorKey: normalizeTaskActorKey(requestBody.actor_key),
-          actorInstanceId: normalizeOptionalString(requestBody.actor_instance_id),
-        });
-        if (coordination.kind === "deny") {
-          res.status(409).json({ error: coordination.error, code: coordination.code });
-          return;
-        }
-      }
-    }
-
-    const result = await concludeFocusRoom(project.id, focusKey, summary);
-    if (!result) {
-      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
-      return;
-    }
-
-    const shouldPostResultToParent = shouldPostFocusRoomEventToParent(
-      normalizeFocusRoomSettings({
-        parent_visibility: result.room.focus_parent_visibility,
-        activity_scope: result.room.focus_activity_scope,
-        github_event_routing: result.room.focus_github_event_routing,
-      }),
-      "result_summary"
-    );
-    const message = result.updated && shouldPostResultToParent
-      ? await emitProjectMessage(
-          project.id,
-          "letagents",
-          formatFocusRoomConclusionMessage({
-            focusRoom: result.room,
-            task: result.task,
-            summary: result.room.conclusion_summary || summary.trim(),
-          })
-        )
-      : null;
-
-    const role = await resolveProjectRole(result.room, req.sessionAccount);
-    res.json({
-      room_id: project.id,
-      focus_key: focusKey,
-      shared: result.updated,
-      message,
-      focus_room: toRoomResponse(result.room, {
-        role,
-        authenticated: Boolean(req.sessionAccount),
-      }),
-    });
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "POST /rooms/:room_id/focus/:focus_key/conclude",
-      error,
-      "Focus Room result could not be shared."
-    );
-  }
-});
+registerRoomFocusRoutes(app, roomFocusRouteDeps);
 
 app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
