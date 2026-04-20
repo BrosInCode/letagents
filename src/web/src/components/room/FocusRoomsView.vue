@@ -108,6 +108,7 @@
           <textarea
             id="focus-result-summary"
             v-model="resultSummary"
+            aria-label="Result summary"
             :disabled="isConcluded || isSharingFocusResult"
             :placeholder="sharePlaceholder"
             rows="3"
