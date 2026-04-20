@@ -325,6 +325,63 @@ test(
 );
 
 test(
+  "ad-hoc focus room route opens a room from an intent title",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !getFocusRoomByKey || !getMessages) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-adhoc-route-api");
+
+    const { child, port } = await startApiServer();
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus-rooms`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Investigate branch room flow" }),
+      }
+    );
+
+    assert.equal(response.status, 201);
+    const payload = await response.json();
+    assert.equal(payload.room_id, parent.id);
+    assert.equal(payload.created, true);
+    assert.equal(payload.focus_room.kind, "focus");
+    assert.equal(payload.focus_room.parent_room_id, parent.id);
+    assert.equal(payload.focus_room.source_task_id, null);
+    assert.equal(payload.focus_room.display_name, "Focus: Investigate branch room flow");
+    assert.match(payload.focus_room.focus_key, /^focus-investigate-branch-room-flow-[a-f0-9]{8}$/);
+
+    const stored = await getFocusRoomByKey(parent.id, payload.focus_room.focus_key);
+    assert.equal(stored?.id, payload.focus_room.room_id);
+
+    const joinResponse = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(`${parent.id}/focus/${payload.focus_room.focus_key}`)}/join`,
+      { method: "POST" }
+    );
+    assert.equal(joinResponse.status, 200);
+    const joined = await joinResponse.json();
+    assert.equal(joined.room_id, payload.focus_room.room_id);
+    assert.equal(joined.kind, "focus");
+
+    const messages = (await getMessages(parent.id)).messages;
+    assert.ok(messages.some((message) =>
+      message.sender === "letagents" &&
+      message.text === "[status] Focus Room opened: Focus: Investigate branch room flow"
+    ));
+  }
+);
+
+test(
   "focus room conclude route respects silent parent visibility",
   {
     concurrency: false,
