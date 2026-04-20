@@ -11,7 +11,6 @@ import {
   findTaskByWorkflowArtifactMatches,
   getAgentIdentityByCanonicalKey,
   getGitHubAppRepositoryByFullName,
-  getGitHubRoomEvents,
   getOwnerTokenAccountByToken,
   getActiveFocusRoomForTask,
   getFocusRoomByKey,
@@ -135,7 +134,6 @@ import {
 } from "../shared/room-agent-prompts.js";
 import {
   parseCookies,
-  parseLimit,
   respondWithBadRequest,
   respondWithError,
   respondWithInternalError,
@@ -180,6 +178,10 @@ import {
   registerRoomTaskRoutes,
   type RoomTaskRouteDeps,
 } from "./routes/room-tasks.js";
+import {
+  registerRoomEventRoutes,
+  type RoomEventRouteDeps,
+} from "./routes/room-events.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2453,6 +2455,13 @@ const roomTaskRouteDeps = {
   emitProjectMessage,
 } satisfies RoomTaskRouteDeps;
 
+const roomEventRouteDeps = {
+  resolveCanonicalRoomRequestId,
+  resolveRoomOrReply,
+  requireParticipant,
+  getProjectAccessRoomId,
+} satisfies RoomEventRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2686,58 +2695,7 @@ registerRoomMessageRoutes(app, roomMessageRouteDeps);
 registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
 registerRoomFocusRoutes(app, roomFocusRouteDeps);
 registerRoomTaskRoutes(app, roomTaskRouteDeps);
-
-// ── Room GitHub Events ──────────────────────────────────────────────
-app.get(/^(?:\/api)?\/rooms\/(.+)\/events$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const event_type = typeof req.query.event_type === "string" ? req.query.event_type : undefined;
-  const github_object_id = typeof req.query.object_id === "string" ? req.query.object_id : undefined;
-  const actor_login = typeof req.query.actor === "string" ? req.query.actor : undefined;
-  const since = typeof req.query.since === "string" ? req.query.since : undefined;
-  const until = typeof req.query.until === "string" ? req.query.until : undefined;
-  const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-
-  const githubRoomId = getProjectAccessRoomId(project);
-  const result = await getGitHubRoomEvents({
-    room_id: githubRoomId,
-    event_type,
-    github_object_id,
-    actor_login,
-    since,
-    until,
-    after,
-    limit,
-  });
-
-  res.json({
-    room_id: project.id,
-    github_room_id: githubRoomId,
-    events: result.events.map((e) => ({
-      id: e.id,
-      event_type: e.event_type,
-      action: e.action,
-      github_object_id: e.github_object_id,
-      github_object_url: e.github_object_url,
-      title: e.title,
-      state: e.state,
-      actor_login: e.actor_login,
-      metadata: e.metadata,
-      linked_task_id: e.linked_task_id,
-      created_at: e.created_at,
-    })),
-    has_more: result.has_more,
-  });
-});
-
-
+registerRoomEventRoutes(app, roomEventRouteDeps);
 
 app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
