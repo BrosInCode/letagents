@@ -1,10 +1,7 @@
 import { EventEmitter } from "events";
 import crypto from "crypto";
-import fs from "fs";
 import express, { type Response } from "express";
-import path from "path";
 
-import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
   addMessage,
   assignProjectAdmin,
@@ -192,21 +189,24 @@ import {
   buildSyntheticPresenceEntry,
 } from "./presence-fallback.js";
 import { buildFallbackRoomParticipants } from "./room-participant-fallback.js";
+import {
+  clearSessionCookie,
+  parseCookies,
+  parseLimit,
+  parsePollTimeout,
+  respondWithBadRequest,
+  respondWithError,
+  respondWithInternalError,
+  setSessionCookie,
+  type AuthenticatedRequest,
+  type ResolvedRequestAuth,
+} from "./http-helpers.js";
+import { startSseStream, stopSseStream } from "./sse.js";
+import { registerWebRoutes, sendAppPage } from "./web-routes.js";
 
 interface MessageCreatedEvent {
   projectId: string;
   message: Message;
-}
-
-interface AuthenticatedRequest extends express.Request {
-  sessionAccount?: SessionAccount | OwnerTokenAccount | null;
-  authKind?: "session" | "owner_token" | null;
-  rawBody?: Buffer;
-}
-
-interface ResolvedRequestAuth {
-  account: SessionAccount | OwnerTokenAccount | null;
-  authKind: "session" | "owner_token" | null;
 }
 
 const STALE_WORK_PROMPT_COOLDOWN_MS = 15 * 60 * 1000;
@@ -238,7 +238,6 @@ interface PendingDeviceAuth {
 }
 
 const pendingDeviceAuths = new Map<string, PendingDeviceAuth>();
-const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 
 function cleanupExpiredDeviceAuths(): void {
   const now = Date.now();
@@ -310,31 +309,6 @@ function shouldIncludePromptOnlyMessages(req: express.Request): boolean {
   }
 
   return value === "1" || value.toLowerCase() === "true";
-}
-
-function startSseStream(res: Response): NodeJS.Timeout {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  // nginx will otherwise buffer SSE in front of staging/production.
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders();
-  res.socket?.setKeepAlive(true, SSE_HEARTBEAT_INTERVAL_MS);
-  res.write(": connected\n\n");
-
-  return setInterval(() => {
-    if (res.writableEnded) {
-      return;
-    }
-    res.write(": heartbeat\n\n");
-  }, SSE_HEARTBEAT_INTERVAL_MS);
-}
-
-function stopSseStream(res: Response, heartbeat: NodeJS.Timeout): void {
-  clearInterval(heartbeat);
-  if (!res.writableEnded) {
-    res.end();
-  }
 }
 
 function formatTaskLifecycleStatus(task: {
@@ -1097,62 +1071,6 @@ async function isTrustedAgentCreator(projectId: string, createdBy: string): Prom
   }
 
   return hasMessagesFromSender(projectId, createdBy);
-}
-
-function parsePollTimeout(timeoutValue: string | undefined): number {
-  if (!timeoutValue) {
-    return 30000;
-  }
-
-  const parsed = Number.parseInt(timeoutValue, 10);
-  if (Number.isNaN(parsed) || parsed < 0) {
-    return 30000;
-  }
-
-  const cap = getPollTimeoutCapMs();
-  return Math.min(parsed, cap);
-}
-
-function parseLimit(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed;
-}
-
-function parseCookies(header: string | undefined): Record<string, string> {
-  if (!header) return {};
-
-  return header.split(";").reduce<Record<string, string>>((acc, pair) => {
-    const index = pair.indexOf("=");
-    if (index === -1) return acc;
-    const key = pair.slice(0, index).trim();
-    const value = pair.slice(index + 1).trim();
-    acc[key] = decodeURIComponent(value);
-    return acc;
-  }, {});
-}
-
-function setSessionCookie(res: express.Response, token: string): void {
-  const secure = (process.env.LETAGENTS_BASE_URL || "").startsWith("https://");
-  const cookieParts = [
-    `letagents_session=${encodeURIComponent(token)}`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Lax",
-  ];
-
-  if (secure) {
-    cookieParts.push("Secure");
-  }
-
-  res.setHeader("Set-Cookie", cookieParts.join("; "));
-}
-
-function clearSessionCookie(res: express.Response): void {
-  res.setHeader(
-    "Set-Cookie",
-    "letagents_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-  );
 }
 
 function isRepoBackedRoomId(roomId: string): boolean {
@@ -2403,38 +2321,6 @@ async function handleGitHubWebhookEvent(
   }
 }
 
-const WEB_DIR = path.resolve(process.cwd(), "src", "web");
-const VUE_DIST_DIR = path.join(WEB_DIR, "dist");
-const VUE_INDEX = path.join(VUE_DIST_DIR, "index.html");
-const HAS_VUE_BUILD = fs.existsSync(VUE_INDEX);
-
-function normalizeWebMode(rawMode: string | undefined): "legacy" | "vue" {
-  const normalized = (rawMode || "legacy").trim().toLowerCase();
-  if (normalized === "vue") {
-    return "vue";
-  }
-  if (normalized !== "" && normalized !== "legacy") {
-    const safeRawMode = JSON.stringify(rawMode ?? "");
-    console.warn(
-      `[web] Unknown LETAGENTS_WEB_MODE=${safeRawMode}. Falling back to legacy mode.`
-    );
-  }
-  return "legacy";
-}
-
-const WEB_MODE = normalizeWebMode(process.env.LETAGENTS_WEB_MODE);
-const SHOULD_SERVE_VUE = WEB_MODE === "vue" && HAS_VUE_BUILD;
-
-if (WEB_MODE === "vue" && !HAS_VUE_BUILD) {
-  console.warn(
-    `[web] LETAGENTS_WEB_MODE=vue was set, but ${VUE_INDEX} is missing. Falling back to legacy pages.`
-  );
-}
-
-console.log(
-  `[web] Serving ${SHOULD_SERVE_VUE ? "vue" : "legacy"} web UI (requested mode: ${WEB_MODE}).`
-);
-
 const app = express();
 app.use(
   express.json({
@@ -2446,58 +2332,6 @@ app.use(
     },
   })
 );
-
-const SAFE_BAD_REQUEST_PATTERNS = [
-  /^Invalid transition:/,
-  /^display_name must be between 2 and 64 characters$/,
-];
-
-function logServerError(context: string, error: unknown): void {
-  console.error(`[${context}]`, error);
-}
-
-function isSafeBadRequestError(error: unknown): error is Error {
-  return (
-    error instanceof Error &&
-    SAFE_BAD_REQUEST_PATTERNS.some((pattern) => pattern.test(error.message))
-  );
-}
-
-function respondWithInternalError(
-  res: Response,
-  context: string,
-  error: unknown,
-  message: string
-): void {
-  return respondWithError(res, 500, context, message, error);
-}
-
-function respondWithBadRequest(
-  res: Response,
-  context: string,
-  error: unknown,
-  fallbackMessage: string
-): void {
-  if (isSafeBadRequestError(error)) {
-    res.status(400).json({ error: error.message });
-    return;
-  }
-
-  respondWithError(res, 400, context, fallbackMessage, error);
-}
-
-function respondWithError(
-  res: Response,
-  status: number,
-  context: string,
-  message: string,
-  error?: unknown
-): void {
-  if (error !== undefined) {
-    logServerError(context, error);
-  }
-  res.status(status).json({ error: message });
-}
 
 app.use(async (req: AuthenticatedRequest, _res, next) => {
   try {
@@ -2540,38 +2374,7 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
-// Serve Vue build assets only when the server is explicitly configured to use the Vue frontend.
-if (SHOULD_SERVE_VUE) {
-  app.use("/assets", express.static(path.join(VUE_DIST_DIR, "assets"), {
-    maxAge: "1y",
-    immutable: true,
-  }));
-  app.use("/images", express.static(path.join(VUE_DIST_DIR, "images"), {
-    maxAge: "1d",
-  }));
-}
-
-app.get("/", (_req, res) => {
-  if (SHOULD_SERVE_VUE) {
-    res.sendFile(VUE_INDEX);
-  } else {
-    res.sendFile(path.join(WEB_DIR, "landing.html"));
-  }
-});
-
-app.get("/docs", (_req, res) => {
-  if (SHOULD_SERVE_VUE) {
-    res.sendFile(VUE_INDEX);
-  } else {
-    res.sendFile(path.join(WEB_DIR, "docs.html"));
-  }
-});
-
-app.get("/app", (_req, res) => {
-  res.redirect(301, "/");
-});
-
-app.use(express.static(WEB_DIR, { index: false }));
+registerWebRoutes(app);
 
 app.get(/^\/api\/rooms\/resolve\/(.+)$/, async (req, res) => {
   const identifier = decodeURIComponent(req.params[0] || "");
@@ -2627,11 +2430,7 @@ app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
     }
   }
 
-  if (SHOULD_SERVE_VUE) {
-    res.sendFile(VUE_INDEX);
-  } else {
-    res.sendFile(path.join(WEB_DIR, "index.html"));
-  }
+  sendAppPage(res);
 });
 
 app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (req: AuthenticatedRequest, res) => {
