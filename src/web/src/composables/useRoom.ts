@@ -97,7 +97,7 @@ export interface RoomMessage {
   id: string
   sender: string
   text: string
-  attachments?: RoomMessageAttachment[]
+  attachments?: readonly RoomMessageAttachment[]
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
