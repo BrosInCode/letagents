@@ -96,7 +96,7 @@ export const rooms = pgTable(
         OR ${table.focus_activity_scope} IN ('task_and_branch', 'task_only', 'room')
       ) AND (
         ${table.focus_github_event_routing} IS NULL
-        OR ${table.focus_github_event_routing} IN ('task_and_branch', 'task_only', 'all_parent_repo', 'off')
+        OR ${table.focus_github_event_routing} IN ('task_and_branch', 'focus_owned_only', 'task_only', 'all_parent_repo', 'off')
       )`
     ),
     focus_lineage_check: check(

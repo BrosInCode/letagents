@@ -8,6 +8,7 @@ import {
   parseLimit,
   type AuthenticatedRequest,
 } from "../http-helpers.js";
+import { getFocusRoomSettings } from "../room-formatting.js";
 import { normalizeRoomId } from "../room-routing.js";
 
 export interface RoomEventRouteDeps {
@@ -19,6 +20,17 @@ export interface RoomEventRouteDeps {
     project: Project
   ): Promise<boolean>;
   getProjectAccessRoomId(project: Project): string;
+}
+
+export function getGitHubEventLaneRoomId(project: Project, accessRoomId: string): string {
+  if (
+    project.kind === "focus" &&
+    getFocusRoomSettings(project).github_event_routing === "focus_owned_only"
+  ) {
+    return project.id;
+  }
+
+  return accessRoomId;
 }
 
 export function registerRoomEventRoutes(
@@ -42,7 +54,7 @@ export function registerRoomEventRoutes(
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
 
-    const githubRoomId = deps.getProjectAccessRoomId(project);
+    const githubRoomId = getGitHubEventLaneRoomId(project, deps.getProjectAccessRoomId(project));
     const result = await getGitHubRoomEvents({
       room_id: githubRoomId,
       event_type,

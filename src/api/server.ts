@@ -70,6 +70,7 @@ import {
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
 import {
+  shouldHardIsolateGitHubEventToFocusRoom,
   shouldPostFocusRoomEventToParent,
   shouldRouteGitHubEventToFocusRoom,
   type FocusGitHubRoutingContext,
@@ -341,9 +342,10 @@ async function emitTaskAnchoredMessage(
   }
 
   const focusSettings = getFocusRoomSettings(focusRoom);
+  const githubRoutingContext = options?.github_routing_context ?? {};
   if (
     options?.event_kind === "github" &&
-    !shouldRouteGitHubEventToFocusRoom(focusSettings, options.github_routing_context ?? {})
+    !shouldRouteGitHubEventToFocusRoom(focusSettings, githubRoutingContext)
   ) {
     return emitProjectMessage(projectId, sender, text, {
       source: options?.source,
@@ -355,7 +357,11 @@ async function emitTaskAnchoredMessage(
     source: options?.source,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
   });
+  const hardIsolatedGitHubEvent =
+    options?.event_kind === "github" &&
+    shouldHardIsolateGitHubEventToFocusRoom(focusSettings, githubRoutingContext);
   if (
+    !hardIsolatedGitHubEvent &&
     shouldPostFocusRoomEventToParent(
       focusSettings,
       options?.parent_event_kind ?? "major_activity"
@@ -409,12 +415,16 @@ async function emitTaskLifecycleStatusMessage(
   },
   options?: {
     agent_prompt_kind?: AgentPromptKind | null;
+    event_kind?: "github";
+    github_routing_context?: FocusGitHubRoutingContext;
   }
 ): Promise<Message> {
   return emitTaskAnchoredMessage(projectId, "letagents", formatTaskLifecycleStatus(task), task, {
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
     parent_activity: "Task status",
     parent_event_kind: "major_activity",
+    event_kind: options?.event_kind,
+    github_routing_context: options?.github_routing_context,
   });
 }
 
@@ -947,6 +957,15 @@ function emptyRepoRoomEventTaskResolution(): RepoRoomEventTaskResolution {
   };
 }
 
+function toGitHubRoutingContext(
+  taskResolution: RepoRoomEventTaskResolution
+): FocusGitHubRoutingContext {
+  return {
+    matched_task_reference: taskResolution.matchedByTaskReference,
+    matched_workflow_artifact: taskResolution.matchedByWorkflowArtifact,
+  };
+}
+
 function taskIdsMatch(left: string | null | undefined, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
 }
@@ -1017,6 +1036,28 @@ async function resolveLinkedTaskForRepoRoomEvent(
   );
 }
 
+async function getHardIsolatedFocusRoomForGitHubEvent(
+  projectId: string,
+  linkedTask: Task | undefined,
+  githubRoutingContext: FocusGitHubRoutingContext
+): Promise<Project | null> {
+  if (!linkedTask) {
+    return null;
+  }
+
+  const focusRoom = await getActiveTaskFocusRoom(projectId, linkedTask.id);
+  if (!focusRoom) {
+    return null;
+  }
+
+  return shouldHardIsolateGitHubEventToFocusRoom(
+    getFocusRoomSettings(focusRoom),
+    githubRoutingContext
+  )
+    ? focusRoom
+    : null;
+}
+
 function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequestRef | null {
   switch (event.kind) {
     case "pull_request":
@@ -1073,6 +1114,7 @@ async function applyRepoRoomEventToTask(
   event: RepoRoomEvent,
   input: {
     installationId: string | null;
+    githubRoutingContext: FocusGitHubRoutingContext;
   }
 ): Promise<{
   task: Task | undefined;
@@ -1123,10 +1165,17 @@ async function applyRepoRoomEventToTask(
     });
 
     if (decision.kind === "deny") {
-      await emitProjectMessage(
+      await emitTaskAnchoredMessage(
         project.id,
         "letagents",
-        `[status] Ignored unleased GitHub ${event.kind} projection for ${linkedTask.id}: ${decision.reason}`
+        `[status] Ignored unleased GitHub ${event.kind} projection for ${linkedTask.id}: ${decision.reason}`,
+        linkedTask,
+        {
+          parent_activity: "GitHub projection",
+          parent_event_kind: "major_activity",
+          event_kind: "github",
+          github_routing_context: input.githubRoutingContext,
+        }
       );
       return { task: linkedTask, authoritative: false };
     }
@@ -1165,6 +1214,8 @@ async function applyRepoRoomEventToTask(
         agent_prompt_kind: shouldAutoPromptForBoardProjection(projectedTaskState)
           ? "auto"
           : null,
+        event_kind: "github",
+        github_routing_context: input.githubRoutingContext,
       });
     }
     return { task: nextTask, authoritative: true };
@@ -1218,10 +1269,16 @@ async function handleMaterializedGitHubRoomEvent(
     ? await resolveLinkedTaskForRepoRoomEvent(project, roomEvent)
     : emptyRepoRoomEventTaskResolution();
   let linkedTask = taskResolution.task;
+  const githubRoutingContext = toGitHubRoutingContext(taskResolution);
+  const isolatedFocusRoom = await getHardIsolatedFocusRoomForGitHubEvent(
+    project.id,
+    linkedTask,
+    githubRoutingContext
+  );
 
   const persisted = await persistMaterializedGitHubRoomEvent(event, {
     deliveryId: input.deliveryId,
-    roomId: project.id,
+    roomId: isolatedFocusRoom?.id ?? project.id,
     linkedTaskId: linkedTask?.id ?? null,
   });
 
@@ -1244,7 +1301,9 @@ async function handleMaterializedGitHubRoomEvent(
   }
 
   if (roomEvent.kind === "check_run") {
-    linkedTask = await maybeAutoCreateTaskForFailedCheckRun(project, linkedTask, roomEvent);
+    linkedTask = await maybeAutoCreateTaskForFailedCheckRun(project, linkedTask, roomEvent, {
+      githubRoutingContext,
+    });
     if (linkedTask) {
       taskResolution = {
         ...taskResolution,
@@ -1256,6 +1315,7 @@ async function handleMaterializedGitHubRoomEvent(
 
   const taskProjection = await applyRepoRoomEventToTask(project, linkedTask, roomEvent, {
     installationId: input.installationId,
+    githubRoutingContext,
   });
   if (!taskProjection.authoritative && linkedTask) {
     await updateGitHubRoomEventLinkedTaskId(event.idempotency_key, null);
@@ -1277,17 +1337,24 @@ async function handleMaterializedGitHubRoomEvent(
         parent_activity: "GitHub activity",
         parent_event_kind: "major_activity",
         event_kind: "github",
-        github_routing_context: {
-          matched_task_reference: taskResolution.matchedByTaskReference,
-          matched_workflow_artifact: taskResolution.matchedByWorkflowArtifact,
-        },
+        github_routing_context: githubRoutingContext,
+      });
+    } else if (linkedTask && isolatedFocusRoom) {
+      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+        source: "github",
+        parent_activity: "GitHub activity",
+        parent_event_kind: "major_activity",
+        event_kind: "github",
+        github_routing_context: githubRoutingContext,
       });
     } else {
       await emitProjectMessage(project.id, "github", message, { source: "github" });
     }
-    await emitGitHubEventToAllParentRepoFocusRooms(project.id, "github", message, {
-      excludeRoomIds: linkedFocusRoom ? new Set([linkedFocusRoom.id]) : undefined,
-    });
+    if (!isolatedFocusRoom) {
+      await emitGitHubEventToAllParentRepoFocusRooms(project.id, "github", message, {
+        excludeRoomIds: linkedFocusRoom ? new Set([linkedFocusRoom.id]) : undefined,
+      });
+    }
   }
 
   return {
@@ -1301,7 +1368,10 @@ async function handleMaterializedGitHubRoomEvent(
 async function maybeAutoCreateTaskForFailedCheckRun(
   project: Project,
   linkedTask: Task | undefined,
-  event: Extract<RepoRoomEvent, { kind: "check_run" }>
+  event: Extract<RepoRoomEvent, { kind: "check_run" }>,
+  options?: {
+    githubRoutingContext?: FocusGitHubRoutingContext;
+  }
 ): Promise<Task | undefined> {
   if (!isFailedCheckRunEvent(event)) {
     return linkedTask;
@@ -1322,6 +1392,8 @@ async function maybeAutoCreateTaskForFailedCheckRun(
       if (reopenedTask) {
         await emitTaskLifecycleStatusMessage(project.id, reopenedTask, {
           agent_prompt_kind: "auto",
+          event_kind: "github",
+          github_routing_context: options?.githubRoutingContext,
         });
         return reopenedTask;
       }

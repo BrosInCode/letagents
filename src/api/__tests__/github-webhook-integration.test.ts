@@ -27,6 +27,7 @@ const updateTask = dbModule?.updateTask;
 const createTaskLease = dbModule?.createTaskLease;
 const createFocusRoomForTask = dbModule?.createFocusRoomForTask;
 const updateFocusRoomSettings = dbModule?.updateFocusRoomSettings;
+const getGitHubRoomEvents = dbModule?.getGitHubRoomEvents;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
 const webhookSecret = "test-webhook-secret";
@@ -648,6 +649,110 @@ test(
       message.sender === "github" &&
       message.text.includes("PR #203 opened by octocat")
     ), false);
+  }
+);
+
+test(
+  "hard-isolated focus routing keeps focus-owned pull request events out of the parent room",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (
+      !createProjectWithName ||
+      !createTask ||
+      !getMessages ||
+      !getTaskById ||
+      !updateTask ||
+      !createTaskLease ||
+      !createFocusRoomForTask ||
+      !updateFocusRoomSettings ||
+      !getGitHubRoomEvents
+    ) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const task = await createTask(room.id, "Hard-isolated focus webhook", "OliveWolf");
+    await updateTask(room.id, task.id, { status: "accepted" });
+    await updateTask(room.id, task.id, { status: "assigned" });
+    const focus = await createFocusRoomForTask(room.id, task.id);
+    assert.ok(focus);
+    await updateFocusRoomSettings(room.id, task.id, {
+      parent_visibility: "major_activity",
+      github_event_routing: "focus_owned_only",
+    });
+
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/204";
+    await createWorkLeaseForPr({
+      roomId: room.id,
+      taskId: task.id,
+      prUrl: pullRequestUrl,
+      branchRef: "olive/hard-isolated-focus",
+    });
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-opened-hard-isolated-focus",
+      eventName: "pull_request",
+      payload: {
+        action: "opened",
+        repository: buildRepositoryPayload(),
+        sender: { login: "octocat" },
+        pull_request: {
+          number: 204,
+          title: `${task.id}: hard-isolated focus webhook coverage`,
+          body: "covers parent suppression for focus-owned workflow events",
+          html_url: pullRequestUrl,
+          head: {
+            ref: "olive/hard-isolated-focus",
+            sha: "abc204",
+          },
+          merged: false,
+          user: { login: "octocat" },
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const updatedTask = await getTaskById(room.id, task.id);
+    assert.equal(updatedTask?.status, "in_review");
+    assert.equal(updatedTask?.pr_url, pullRequestUrl);
+
+    const parentMessages = (await getMessages(room.id)).messages;
+    const focusMessages = (await getMessages(focus.room.id)).messages;
+    assert.ok(focusMessages.some((message) =>
+      message.sender === "letagents" &&
+      message.text.includes(`${task.id}`) &&
+      message.text.includes("in review")
+    ));
+    assert.ok(focusMessages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #204 opened by octocat") &&
+      message.text.includes(task.id)
+    ));
+    assert.equal(parentMessages.some((message) =>
+      message.text.includes(task.id) &&
+      (
+        message.text.includes("Task status") ||
+        message.text.includes("GitHub activity") ||
+        message.text.includes("PR #204 opened by octocat")
+      )
+    ), false);
+
+    const parentEvents = await getGitHubRoomEvents({ room_id: room.id, event_type: "pull_request" });
+    const focusEvents = await getGitHubRoomEvents({ room_id: focus.room.id, event_type: "pull_request" });
+    assert.equal(parentEvents.events.some((event) => event.github_object_id === "204"), false);
+    assert.ok(focusEvents.events.some((event) =>
+      event.github_object_id === "204" &&
+      event.linked_task_id === task.id
+    ));
   }
 );
 
