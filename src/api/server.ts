@@ -176,15 +176,15 @@ import {
   type ResolvedRequestAuth,
 } from "./http-helpers.js";
 import { startSseStream, stopSseStream } from "./sse.js";
-import { registerWebRoutes, sendAppPage } from "./web-routes.js";
+import { registerWebRoutes, sendAppPage } from "./routes/web.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
-} from "./auth-routes.js";
+} from "./routes/auth.js";
 import {
   registerGitHubIntegrationRoutes,
   registerGitHubIntegrationSetupRoute,
-} from "./github-integration-routes.js";
+} from "./routes/github-integration.js";
 
 interface MessageCreatedEvent {
   projectId: string;

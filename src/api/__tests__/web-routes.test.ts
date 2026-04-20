@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.LETAGENTS_WEB_MODE = "legacy";
-const { normalizeWebMode, registerWebRoutes } = await import("../web-routes.js");
+const { normalizeWebMode, registerWebRoutes } = await import("../routes/web.js");
 
 test("normalizeWebMode accepts vue and defaults to legacy", (t) => {
   const originalWarn = console.warn;
