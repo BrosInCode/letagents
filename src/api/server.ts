@@ -61,16 +61,17 @@ import {
   type MaterializedGitHubRoomEvent,
 } from "./github-room-events.js";
 import {
-  buildRepoRoomEventArtifactMatches,
-  extractReferencedTaskId,
   formatRepoRoomEventMessage,
-  getRepoRoomEventReferenceTexts,
   projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,
   type RepoPullRequestRef,
   type RepoRoomEvent,
-  type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
+import {
+  createRepoRoomEventTaskResolver,
+  emptyRepoRoomEventTaskResolution,
+  toGitHubRoutingContext,
+} from "./repo-event-task-resolution.js";
 import {
   shouldHardIsolateGitHubEventToFocusRoom,
   type FocusGitHubRoutingContext,
@@ -223,6 +224,13 @@ const {
   upsertGitHubAppInstallation,
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
+});
+const {
+  resolveLinkedTaskForRepoRoomEvent,
+} = createRepoRoomEventTaskResolver({
+  findTaskByWorkflowArtifactMatches,
+  findTaskByPrUrl,
+  getTaskById,
 });
 
 async function emitProjectMessage(
@@ -680,99 +688,6 @@ async function isTrustedAgentCreator(projectId: string, createdBy: string): Prom
   }
 
   return hasMessagesFromSender(projectId, createdBy);
-}
-
-interface RepoRoomEventTaskResolution {
-  task: Task | undefined;
-  matchedByTaskReference: boolean;
-  matchedByWorkflowArtifact: boolean;
-}
-
-function emptyRepoRoomEventTaskResolution(): RepoRoomEventTaskResolution {
-  return {
-    task: undefined,
-    matchedByTaskReference: false,
-    matchedByWorkflowArtifact: false,
-  };
-}
-
-function toGitHubRoutingContext(
-  taskResolution: RepoRoomEventTaskResolution
-): FocusGitHubRoutingContext {
-  return {
-    matched_task_reference: taskResolution.matchedByTaskReference,
-    matched_workflow_artifact: taskResolution.matchedByWorkflowArtifact,
-  };
-}
-
-function taskIdsMatch(left: string | null | undefined, right: string): boolean {
-  return Boolean(left && left.toLowerCase() === right.toLowerCase());
-}
-
-async function resolveTaskByArtifactsOrReferences(
-  project: Project,
-  artifactMatches: TaskWorkflowArtifactMatch[],
-  ...fallbackTexts: Array<string | null | undefined>
-): Promise<RepoRoomEventTaskResolution> {
-  const referencedTaskId = extractReferencedTaskId(...fallbackTexts);
-  const artifactTask = await findTaskByWorkflowArtifactMatches(project.id, artifactMatches);
-  if (artifactTask) {
-    return {
-      task: artifactTask,
-      matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
-      matchedByWorkflowArtifact: true,
-    };
-  }
-
-  if (!referencedTaskId) {
-    return emptyRepoRoomEventTaskResolution();
-  }
-
-  const task = await getTaskById(project.id, referencedTaskId);
-  return {
-    task: task ?? undefined,
-    matchedByTaskReference: Boolean(task),
-    matchedByWorkflowArtifact: false,
-  };
-}
-
-async function resolveLinkedTaskForRepoRoomEvent(
-  project: Project,
-  event: RepoRoomEvent
-): Promise<RepoRoomEventTaskResolution> {
-  const artifactMatches = buildRepoRoomEventArtifactMatches(event);
-  const referencedTaskId = extractReferencedTaskId(...getRepoRoomEventReferenceTexts(event));
-
-  if (event.kind === "pull_request") {
-    const artifactTask =
-      (await findTaskByWorkflowArtifactMatches(project.id, artifactMatches)) ??
-      (await findTaskByPrUrl(project.id, event.pullRequest.url));
-
-    if (artifactTask) {
-      return {
-        task: artifactTask,
-        matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
-        matchedByWorkflowArtifact: true,
-      };
-    }
-
-    if (!referencedTaskId) {
-      return emptyRepoRoomEventTaskResolution();
-    }
-
-    const task = await getTaskById(project.id, referencedTaskId);
-    return {
-      task: task ?? undefined,
-      matchedByTaskReference: Boolean(task),
-      matchedByWorkflowArtifact: false,
-    };
-  }
-
-  return resolveTaskByArtifactsOrReferences(
-    project,
-    artifactMatches,
-    ...getRepoRoomEventReferenceTexts(event)
-  );
 }
 
 async function getHardIsolatedFocusRoomForGitHubEvent(
