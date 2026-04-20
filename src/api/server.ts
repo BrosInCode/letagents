@@ -185,6 +185,10 @@ import {
   registerRoomEntryRoutes,
   type RoomEntryRouteDeps,
 } from "./routes/room-entry.js";
+import {
+  registerRoomJoinRoutes,
+  type RoomJoinRouteDeps,
+} from "./routes/room-join.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2423,6 +2427,19 @@ const roomMetadataRouteDeps = {
   toRoomResponse,
 } satisfies RoomMetadataRouteDeps;
 
+const roomJoinRouteDeps = {
+  resolveCanonicalRoomRequestId,
+  isRepoBackedRoomId,
+  resolveRepoRoomAccessDecision,
+  replyRepoRoomAccessDecision,
+  resolveRoomOrReply,
+  getProjectAccessRoomId,
+  isRepoBackedProject,
+  resolveProjectRole,
+  rememberHumanRoomParticipant,
+  toRoomResponse,
+} satisfies RoomJoinRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2542,95 +2559,7 @@ registerLegacyProjectTaskRoutes(app, legacyProjectTaskRouteDeps);
 //   ROOM_NOT_FOUND         — canonical ID does not map to any room
 // ═══════════════════════════════════════════════════════════════════
 
-/** Simple in-memory rate limiter for room join attempts. */
-const joinRateLimit = new Map<string, { count: number; resetAt: number }>();
-const JOIN_RATE_WINDOW_MS = 60_000;
-const JOIN_RATE_MAX = 10;
-
-function checkJoinRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = joinRateLimit.get(ip);
-
-  if (!entry || now > entry.resetAt) {
-    joinRateLimit.set(ip, { count: 1, resetAt: now + JOIN_RATE_WINDOW_MS });
-    return true;
-  }
-
-  entry.count += 1;
-  if (entry.count > JOIN_RATE_MAX) {
-    return false;
-  }
-
-  return true;
-}
-app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const requestedRoomId = normalizeRoomId(rawId);
-  const roomId = await resolveCanonicalRoomRequestId(requestedRoomId);
-
-  const ip =
-    req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ??
-    req.socket.remoteAddress ??
-    "unknown";
-  if (!checkJoinRateLimit(ip)) {
-    res.status(429).json({
-      error: "Too many join attempts. Please slow down.",
-      code: "RATE_LIMITED",
-    });
-    return;
-  }
-
-  if (isRepoBackedRoomId(roomId)) {
-    const decision = await resolveRepoRoomAccessDecision({
-      roomName: roomId,
-      sessionAccount: req.sessionAccount,
-    });
-    if (decision.kind !== "allow") {
-      replyRepoRoomAccessDecision(res, roomId, decision);
-      return;
-    }
-  }
-
-  const project = await resolveRoomOrReply(roomId, res, { allowCreate: true });
-  if (!project) return;
-
-  const accessRoomId = getProjectAccessRoomId(project);
-  if (accessRoomId !== roomId && isRepoBackedRoomId(accessRoomId)) {
-    const decision = await resolveRepoRoomAccessDecision({
-      roomName: accessRoomId,
-      sessionAccount: req.sessionAccount,
-    });
-    if (decision.kind !== "allow") {
-      replyRepoRoomAccessDecision(res, accessRoomId, decision);
-      return;
-    }
-  }
-
-  if (req.sessionAccount) {
-    if (isRepoBackedProject(project)) {
-      await resolveProjectRole(project, req.sessionAccount);
-    } else {
-      await assignProjectAdmin(project.id, req.sessionAccount.account_id);
-    }
-  }
-
-  const role = await resolveProjectRole(project, req.sessionAccount);
-
-  if (req.sessionAccount) {
-    await rememberHumanRoomParticipant({
-      projectId: project.id,
-      sessionAccount: req.sessionAccount,
-    });
-  }
-
-  res.status(200).json({
-    ...toRoomResponse(project, {
-      role,
-      authenticated: Boolean(req.sessionAccount),
-    }),
-  });
-});
-
+registerRoomJoinRoutes(app, roomJoinRouteDeps);
 registerRoomMessageRoutes(app, roomMessageRouteDeps);
 registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
 registerRoomFocusRoutes(app, roomFocusRouteDeps);
