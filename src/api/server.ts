@@ -49,11 +49,13 @@ import {
 } from "./github-lease-enforcement.js";
 import {
   buildGitHubRepoRoomId,
-  getGitHubInstallationTarget,
   getGitHubRepositoryOwnerLogin,
   type GitHubWebhookPayload,
-  type GitHubWebhookRepository,
 } from "./github-app.js";
+import {
+  createGitHubAppSync,
+  toGitHubWebhookId,
+} from "./github-app-sync.js";
 import {
   materializeGitHubWebhookEvent,
   type MaterializedGitHubRoomEvent,
@@ -213,6 +215,15 @@ const {
   rememberAgentRoomParticipant,
   rememberRoomParticipantFromMessage,
 } = createRoomParticipantRecorder({ upsertRoomParticipant });
+const {
+  syncGitHubAppInstallationFromPayload,
+  syncGitHubAppRepositoryFromPayload,
+} = createGitHubAppSync({
+  getGitHubAppRepositoryByFullName,
+  upsertGitHubAppInstallation,
+  upsertGitHubAppRepository,
+  upsertGitHubRepositoryLink,
+});
 
 async function emitProjectMessage(
   projectId: string,
@@ -669,96 +680,6 @@ async function isTrustedAgentCreator(projectId: string, createdBy: string): Prom
   }
 
   return hasMessagesFromSender(projectId, createdBy);
-}
-
-function toGitHubWebhookId(value: string | number | null | undefined): string | null {
-  if (value === undefined || value === null) {
-    return null;
-  }
-
-  const normalized = String(value).trim();
-  return normalized || null;
-}
-
-async function syncGitHubAppInstallationFromPayload(
-  payload: GitHubWebhookPayload,
-  options?: {
-    suspended_at?: string | null;
-    uninstalled_at?: string | null;
-  }
-): Promise<string | null> {
-  const installationId = toGitHubWebhookId(payload.installation?.id);
-  if (!installationId) {
-    return null;
-  }
-
-  const target = getGitHubInstallationTarget(payload);
-  if (!target?.login) {
-    return installationId;
-  }
-
-  await upsertGitHubAppInstallation({
-    installation_id: installationId,
-    target_type: payload.installation?.target_type ?? target.type ?? "Account",
-    target_login: target.login,
-    target_github_id: toGitHubWebhookId(target.id) ?? installationId,
-    repository_selection: payload.installation?.repository_selection ?? "selected",
-    permissions: payload.installation?.permissions,
-    suspended_at: options?.suspended_at,
-    uninstalled_at: options?.uninstalled_at,
-  });
-
-  return installationId;
-}
-
-async function syncGitHubAppRepositoryFromPayload(
-  repository: GitHubWebhookRepository | undefined,
-  installationId: string | null
-): Promise<{
-  installationId: string | null;
-  githubRepoId: string | null;
-  roomId: string | null;
-}> {
-  if (!repository) {
-    return {
-      installationId,
-      githubRepoId: null,
-      roomId: null,
-    };
-  }
-
-  const githubRepoId = toGitHubWebhookId(repository.id);
-  const roomId = buildGitHubRepoRoomId(repository.full_name);
-  const ownerLogin = getGitHubRepositoryOwnerLogin(repository);
-  let resolvedInstallationId = installationId;
-
-  if (!resolvedInstallationId) {
-    resolvedInstallationId =
-      (await getGitHubAppRepositoryByFullName(repository.full_name))?.installation_id ?? null;
-  }
-
-  if (resolvedInstallationId && githubRepoId && ownerLogin && repository.name) {
-    await upsertGitHubAppRepository({
-      github_repo_id: githubRepoId,
-      installation_id: resolvedInstallationId,
-      owner_login: ownerLogin,
-      repo_name: repository.name,
-    });
-
-    // Also populate the stable github_repositories mapping
-    await upsertGitHubRepositoryLink({
-      github_repo_id: githubRepoId,
-      room_id: roomId,
-      owner_login: ownerLogin,
-      repo_name: repository.name,
-    });
-  }
-
-  return {
-    installationId: resolvedInstallationId,
-    githubRepoId,
-    roomId,
-  };
 }
 
 interface RepoRoomEventTaskResolution {
@@ -1423,27 +1344,7 @@ async function handleGitHubWebhookEvent(
         })) ?? installationId;
 
       for (const repository of payload.repositories_added ?? []) {
-        const ownerLogin = getGitHubRepositoryOwnerLogin(repository);
-        const repositoryId = toGitHubWebhookId(repository.id);
-        if (!repositoryId || !ownerLogin || !repository.name) {
-          continue;
-        }
-
-        await upsertGitHubAppRepository({
-          github_repo_id: repositoryId,
-          installation_id: syncedInstallationId,
-          owner_login: ownerLogin,
-          repo_name: repository.name,
-        });
-
-        // Also seed the stable github_repositories mapping for migration support
-        const repoRoomId = buildGitHubRepoRoomId(repository.full_name);
-        await upsertGitHubRepositoryLink({
-          github_repo_id: repositoryId,
-          room_id: repoRoomId,
-          owner_login: ownerLogin,
-          repo_name: repository.name,
-        });
+        await syncGitHubAppRepositoryFromPayload(repository, syncedInstallationId);
       }
 
       for (const repository of payload.repositories_removed ?? []) {
