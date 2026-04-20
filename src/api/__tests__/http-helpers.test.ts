@@ -6,6 +6,7 @@ import {
   parseCookies,
   parseLimit,
   parsePollTimeout,
+  sanitizeRedirectPath,
   setSessionCookie,
 } from "../http-helpers.js";
 
@@ -44,6 +45,14 @@ test("parsePollTimeout defaults invalid values and caps valid values", () => {
       process.env.LETAGENTS_POLL_MAX_MS = previousCap;
     }
   }
+});
+
+test("sanitizeRedirectPath keeps local redirect paths only", () => {
+  assert.equal(sanitizeRedirectPath("/in/focus_5?tab=tasks#task_3"), "/in/focus_5?tab=tasks#task_3");
+  assert.equal(sanitizeRedirectPath("https://evil.example/in/focus_5", "/"), "/");
+  assert.equal(sanitizeRedirectPath("//evil.example/in/focus_5", "/safe"), "/safe");
+  assert.equal(sanitizeRedirectPath("not-a-path", "/safe"), "/safe");
+  assert.equal(sanitizeRedirectPath(undefined, "/safe"), "/safe");
 });
 
 test("session cookie helpers write the expected Set-Cookie header", () => {
