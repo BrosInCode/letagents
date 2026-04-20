@@ -1,6 +1,15 @@
 <template>
   <div class="messages-wrap">
     <div class="messages scroll-fade-y" ref="messagesEl">
+      <button
+        v-if="hasOlderMessages"
+        class="load-older-btn"
+        type="button"
+        :disabled="isLoadingOlderMessages"
+        @click="emit('loadOlder')"
+      >
+        {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
+      </button>
       <ChatMessage
         v-for="msg in messages"
         :key="msg.id"
@@ -36,9 +45,12 @@ import ChatMessage from './ChatMessage.vue'
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
+  hasOlderMessages?: boolean
+  isLoadingOlderMessages?: boolean
   searchQuery?: string
 }>()
 const emit = defineEmits<{
+  loadOlder: []
   reply: [message: RoomMessage]
 }>()
 
@@ -95,6 +107,9 @@ function checkScroll() {
   const el = messagesEl.value
   const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
   isScrolledToBottom = distanceToBottom < 60
+  if (el.scrollTop < 240 && props.hasOlderMessages && !props.isLoadingOlderMessages) {
+    emit('loadOlder')
+  }
   
   /* Show a scroll-to-bottom prompt if user scrolls quite far up */
   isScrolledFarUp.value = distanceToBottom > 1500
@@ -131,13 +146,30 @@ watch(() => props.searchQuery, async () => {
   }
 })
 
-watch(() => props.messages.length, async (newLen, oldLen) => {
-  if (newLen > (oldLen || 0)) {
+watch(() => props.messages, async (newMessages, oldMessages) => {
+  const newLen = newMessages.length
+  const oldLen = oldMessages?.length || 0
+  if (newLen > oldLen) {
+    const oldFirstId = oldMessages?.[0]?.id
+    const oldLastId = oldMessages?.[oldLen - 1]?.id
+    const newFirstId = newMessages[0]?.id
+    const newLastId = newMessages[newLen - 1]?.id
+    const isPrepend = Boolean(oldFirstId && oldLastId && newFirstId !== oldFirstId && newLastId === oldLastId)
+    if (isPrepend) {
+      const el = messagesEl.value
+      const previousScrollHeight = el?.scrollHeight || 0
+      await nextTick()
+      if (el) {
+        el.scrollTop += el.scrollHeight - previousScrollHeight
+      }
+      return
+    }
+
     if (isScrolledToBottom) {
       await nextTick()
       scrollToBottom()
     } else {
-      unreadCount.value += newLen - (oldLen || 0)
+      unreadCount.value += newLen - oldLen
     }
   }
 })
@@ -163,6 +195,25 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   overflow-y: auto;
   padding: 16px 20px;
   scroll-behavior: smooth;
+}
+
+.load-older-btn {
+  display: block;
+  width: fit-content;
+  margin: 0 auto 14px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #27272a);
+  background: var(--surface, #18181b);
+  color: var(--text, #fafafa);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.load-older-btn:disabled {
+  cursor: wait;
+  opacity: 0.68;
 }
 
 .new-messages-pill {

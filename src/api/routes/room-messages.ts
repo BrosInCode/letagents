@@ -2,8 +2,10 @@ import type { EventEmitter } from "events";
 import type { Express, Request, Response } from "express";
 
 import {
+  getLatestMessages,
   getMessages,
   getMessagesAfter,
+  getMessagesBefore,
   type Message,
   type Project,
   type Task,
@@ -132,16 +134,23 @@ export function registerRoomMessageRoutes(
 
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
-    const result = await getMessages(project.id, {
-      limit,
-      after,
-      include_prompt_only: deps.shouldIncludePromptOnlyMessages(req),
-    });
+    const before = typeof req.query.before === "string" ? req.query.before : undefined;
+    const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const result = before === "latest"
+      ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly })
+      : before
+        ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly })
+        : await getMessages(project.id, {
+          limit,
+          after,
+          include_prompt_only: includePromptOnly,
+        });
 
     res.json({
       room_id: project.id,
       messages: result.messages,
       has_more: result.has_more,
+      has_older: before ? result.has_more : undefined,
     });
   });
 

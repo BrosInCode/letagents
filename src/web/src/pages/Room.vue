@@ -53,7 +53,10 @@
           ref="messageListRef"
           class="room-tab-panel"
           :messages="messages"
+          :hasOlderMessages="messagesHasOlder"
+          :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
+          @loadOlder="loadOlderMessages"
           @reply="selectedReply = $event"
         />
 
@@ -214,6 +217,8 @@ const route = useRoute()
 const router = useRouter()
 const {
   messages,
+  messagesHasOlder,
+  isLoadingOlderMessages,
   tasks,
   focusRooms,
   presence,
@@ -239,6 +244,7 @@ const {
   updateFocusRoomSettings,
   restoreSession,
   renameRoom,
+  loadOlderMessages,
   refreshRoomGitHubEvents,
 } = useRoom()
 const auth = useAuth()

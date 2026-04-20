@@ -2,8 +2,10 @@ import type { EventEmitter } from "events";
 import type { Express, Request, Response } from "express";
 
 import {
+  getLatestMessages,
   getMessages,
   getMessagesAfter,
+  getMessagesBefore,
   getProjectById,
   type Message,
   type Project,
@@ -131,16 +133,23 @@ export function registerLegacyProjectMessageRoutes(
 
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
-    const result = await getMessages(projectId, {
-      limit,
-      after,
-      include_prompt_only: deps.shouldIncludePromptOnlyMessages(req),
-    });
+    const before = typeof req.query.before === "string" ? req.query.before : undefined;
+    const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const result = before === "latest"
+      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly })
+      : before
+        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly })
+        : await getMessages(projectId, {
+          limit,
+          after,
+          include_prompt_only: includePromptOnly,
+        });
 
     res.json({
       project_id: projectId,
       messages: result.messages,
       has_more: result.has_more,
+      has_older: before ? result.has_more : undefined,
     });
   });
 
