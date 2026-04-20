@@ -136,6 +136,7 @@ async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildP
     env: {
       ...process.env,
       DB_URL: testDatabaseUrl,
+      HOST: "127.0.0.1",
       PORT: String(port),
       GITHUB_API_BASE_URL: githubApiBaseUrl,
     },

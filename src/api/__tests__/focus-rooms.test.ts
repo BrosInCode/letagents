@@ -110,6 +110,7 @@ async function startApiServer(): Promise<{ child: ChildProcessWithoutNullStreams
     env: {
       ...process.env,
       DB_URL: testDatabaseUrl,
+      HOST: "127.0.0.1",
       PORT: String(port),
     },
     stdio: ["ignore", "pipe", "pipe"],
