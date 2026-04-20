@@ -72,15 +72,12 @@ import {
   emptyRepoRoomEventTaskResolution,
   toGitHubRoutingContext,
 } from "./repo-event-task-resolution.js";
-import {
-  shouldHardIsolateGitHubEventToFocusRoom,
-  type FocusGitHubRoutingContext,
-} from "./focus-room-settings.js";
+import type { FocusGitHubRoutingContext } from "./focus-room-settings.js";
 import {
   formatFocusRoomConclusionMessage,
-  getFocusRoomSettings,
   toRoomResponse,
 } from "./room-formatting.js";
+import { createGitHubFocusIsolationResolver } from "./github-focus-isolation.js";
 import { selectStaleTaskAutoPrompt } from "./stale-work.js";
 import {
   buildFailedCheckRunTaskDescription,
@@ -264,6 +261,9 @@ const {
   getFocusRoomsForParent,
   emitProjectMessage,
 });
+const {
+  getHardIsolatedFocusRoomForGitHubEvent,
+} = createGitHubFocusIsolationResolver({ getActiveTaskFocusRoom });
 
 async function validateOwnerTokenTaskActorKey(input: {
   req: AuthenticatedRequest;
@@ -688,28 +688,6 @@ async function isTrustedAgentCreator(projectId: string, createdBy: string): Prom
   }
 
   return hasMessagesFromSender(projectId, createdBy);
-}
-
-async function getHardIsolatedFocusRoomForGitHubEvent(
-  projectId: string,
-  linkedTask: Task | undefined,
-  githubRoutingContext: FocusGitHubRoutingContext
-): Promise<Project | null> {
-  if (!linkedTask) {
-    return null;
-  }
-
-  const focusRoom = await getActiveTaskFocusRoom(projectId, linkedTask.id);
-  if (!focusRoom) {
-    return null;
-  }
-
-  return shouldHardIsolateGitHubEventToFocusRoom(
-    getFocusRoomSettings(focusRoom),
-    githubRoutingContext
-  )
-    ? focusRoom
-    : null;
 }
 
 function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequestRef | null {
