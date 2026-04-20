@@ -1,5 +1,13 @@
 <template>
-  <div class="message" :class="{ 'system-message': isSystem }" :data-msg-id="message.id">
+  <div
+    class="message"
+    :class="{
+      'system-message': isSystem,
+      'reply-message': Boolean(message.reply_to),
+      'has-thread': hasThread,
+    }"
+    :data-msg-id="message.id"
+  >
     <div class="message-avatar" :style="{ '--sender-color': senderColor }" />
     <div class="message-body">
       <div class="message-meta">
@@ -63,6 +71,18 @@
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
         <div v-else class="md-content" v-html="renderedContent" />
       </div>
+      <button
+        v-if="hasThread"
+        class="thread-marker"
+        type="button"
+        :aria-label="threadActionLabel"
+        @click="emit('scrollToReply', threadLatestId)"
+      >
+        <span class="thread-marker-label">{{ threadLabel }}</span>
+        <span v-if="threadLatestPreview" class="thread-marker-preview">
+          {{ threadLatestDisplayName }}: {{ threadLatestPreview }}
+        </span>
+      </button>
     </div>
   </div>
 </template>
@@ -73,8 +93,14 @@ import GitHubEventCard from './GitHubEventCard.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
 
+interface MessageThreadSummary {
+  count: number
+  latest: RoomMessage | null
+}
+
 const props = defineProps<{
   message: RoomMessage
+  thread?: MessageThreadSummary | null
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
@@ -115,6 +141,23 @@ const replyDisplayName = computed(() => {
 })
 
 const replyPreviewText = computed(() => getReplyPreviewText(props.message.reply_to))
+const hasThread = computed(() => Boolean(props.thread?.count && props.thread.count > 0))
+
+const threadLabel = computed(() => {
+  const count = props.thread?.count || 0
+  return count === 1 ? '1 reply' : `${count} replies`
+})
+
+const threadLatestId = computed(() => props.thread?.latest?.id || props.message.id)
+
+const threadLatestDisplayName = computed(() => {
+  const sender = props.thread?.latest?.sender
+  if (!sender) return 'Latest'
+  return parseAgentIdentity(sender).displayName || sender
+})
+
+const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest))
+const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
 
 const provenanceBadge = computed(() => {
   if (isSystem.value) return { label: 'system', class: 'system' }
@@ -291,6 +334,10 @@ const renderedContent = computed(() => {
   padding-left: 0;
 }
 
+.reply-message .message-bubble {
+  border-left-style: dashed;
+}
+
 .reply-preview {
   display: flex;
   flex-direction: column;
@@ -299,7 +346,7 @@ const renderedContent = computed(() => {
   padding: 8px 10px;
   border-left: 2px solid color-mix(in srgb, var(--sender-color, #71717a) 50%, transparent);
   background: color-mix(in srgb, var(--surface, #18181b) 82%, transparent);
-  border-radius: 0 10px 10px 0;
+  border-radius: 0 8px 8px 0;
   width: 100%;
   text-align: left;
   border-top: none;
@@ -330,6 +377,59 @@ const renderedContent = computed(() => {
 }
 .message.jump-target .message-bubble {
   border-left-color: color-mix(in srgb, var(--sender-color, #71717a) 85%, white 15%);
+}
+
+.thread-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(100%, 780px);
+  margin-top: 8px;
+  margin-left: 14px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--sender-color, #71717a) 26%, var(--line, #27272a));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface, #18181b) 72%, transparent);
+  color: var(--muted, #a1a1aa);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.thread-marker::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--sender-color, #71717a);
+}
+
+.thread-marker-label {
+  flex: 0 0 auto;
+  color: var(--text, #fafafa);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.thread-marker-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted, #a1a1aa);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-marker:hover,
+.thread-marker:focus-visible {
+  background: color-mix(in srgb, var(--surface, #18181b) 90%, var(--sender-color, #71717a) 10%);
+  border-color: color-mix(in srgb, var(--sender-color, #71717a) 60%, var(--line, #27272a));
+  color: var(--text, #fafafa);
+  outline: none;
 }
 
 .message-bubble :deep(.md-content) { line-height: 1.6; font-size: 0.88rem; word-break: break-word; }
@@ -408,5 +508,16 @@ const renderedContent = computed(() => {
   .provenance-badge { padding: 2px 6px; font-size: 0.58rem; }
   .prompt-injection-badge { font-size: 0.58rem; padding: 2px 8px; }
   .reply-preview { padding: 6px 8px; margin-bottom: 6px; }
+  .thread-marker {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    margin-left: 12px;
+    padding: 6px 8px;
+  }
+  .thread-marker::before { display: none; }
+  .thread-marker-preview {
+    width: 100%;
+  }
 }
 </style>
