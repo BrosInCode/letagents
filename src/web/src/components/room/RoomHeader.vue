@@ -5,7 +5,19 @@
     </button>
 
     <div v-show="!searchActive || !canSearch" class="chat-title">
-      <h2>{{ title }}</h2>
+      <div class="chat-title-heading">
+        <h2>{{ title }}</h2>
+        <button
+          v-if="canRename"
+          class="title-rename-btn"
+          @click="$emit('rename')"
+          type="button"
+          aria-label="Rename room"
+          title="Rename room"
+        >
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+        </button>
+      </div>
       <p>{{ subtitle }}</p>
     </div>
 
@@ -26,16 +38,6 @@
     </div>
 
     <div class="header-actions">
-      <!-- Rename button (only when authenticated & room active) -->
-      <button v-if="canRename" class="action-btn" @click="$emit('rename')" type="button" aria-label="Rename room" title="Rename room">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-      </button>
-
-      <button v-if="showRulesButton" class="rules-btn" @click="$emit('openRules')" type="button" aria-label="Open room rules" title="Open room rules">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v14H7l-3 3V4z"/><path d="M8 8h8"/><path d="M8 12h6"/></svg>
-        <span>Rules</span>
-      </button>
-
       <!-- Search toggle -->
       <button v-if="canSearch" class="action-btn" @click="toggleSearch" type="button" aria-label="Search messages" title="Search messages">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -85,7 +87,6 @@ const props = defineProps<{
   matchCount: number
   canRename?: boolean
   showEventsTab?: boolean
-  showRulesButton?: boolean
 }>()
 
 defineEmits<{
@@ -93,7 +94,6 @@ defineEmits<{
   'update:activeTab': [tab: RoomTab]
   'update:searchQuery': [query: string]
   rename: []
-  openRules: []
 }>()
 
 const searchActive = ref(false)
@@ -164,13 +164,41 @@ function closeSearch() {
 }
 
 .chat-title { flex: 1; min-width: 0; }
+.chat-title-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
 .chat-title h2 {
   font-size: 0.92rem;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.title-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted, #71717a);
+  cursor: pointer;
+  opacity: 0.72;
+  transition: background 150ms, color 150ms, opacity 150ms;
+}
+.title-rename-btn:hover,
+.title-rename-btn:focus-visible {
+  background: var(--surface, #18181b);
+  color: var(--text, #fafafa);
+  opacity: 1;
+  outline: none;
 }
 .chat-title p {
   font-size: 0.72rem;
@@ -234,26 +262,6 @@ function closeSearch() {
   transition: all 150ms;
 }
 .action-btn:hover { background: var(--surface, #18181b); color: var(--text, #fafafa); }
-
-.rules-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 6px;
-  border: 1px solid var(--line, #27272a);
-  background: var(--surface, #18181b);
-  color: var(--muted, #71717a);
-  cursor: pointer;
-  font-size: 0.76rem;
-  font-weight: 700;
-  transition: background 150ms, color 150ms, border-color 150ms;
-}
-.rules-btn:hover {
-  border-color: rgba(147, 197, 253, 0.42);
-  color: var(--text, #fafafa);
-}
 
 .tab-bar {
   display: grid;
@@ -321,11 +329,9 @@ function closeSearch() {
 @media (max-width: 768px) {
   .chat-header { padding: 0 12px; gap: 6px; height: 48px; }
   .tab-bar { display: none; }
-  .action-btn:first-of-type { display: none; }
-  .rules-btn { width: 32px; justify-content: center; padding: 0; }
-  .rules-btn span { display: none; }
   .chat-title h2 { font-size: 0.84rem; }
   .chat-title p { font-size: 0.66rem; }
+  .title-rename-btn { width: 24px; height: 24px; opacity: 1; }
   .presence { padding: 4px 6px; font-size: 0.66rem; }
 }
 </style>

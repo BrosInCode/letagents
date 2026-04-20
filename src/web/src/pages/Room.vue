@@ -6,8 +6,10 @@
       :room="room"
       :messages="messages"
       :senderName="senderName"
+      :showRulesButton="rulesBoardAvailable"
       @close="drawerOpen = false"
       @themeChange="theme = $event"
+      @openRules="openRulesFromDrawer"
     />
 
     <RoomHeader
@@ -19,12 +21,10 @@
       :matchCount="matchCount"
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
-      :showRulesButton="rulesBoardAvailable"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
       @rename="handleRename"
-      @openRules="rulesBoardOpen = true"
     />
 
     <RoomRulesBoard
@@ -284,6 +284,11 @@ const focusParentAddress = computed(() =>
     ? room.value.parentRoomId
     : room.value?.identifier || room.value?.name || ''
 )
+
+function openRulesFromDrawer() {
+  drawerOpen.value = false
+  rulesBoardOpen.value = true
+}
 const githubEventsRepository = computed(() =>
   room.value?.kind === 'focus' && room.value.parentRoomId
     ? room.value.parentRoomId
