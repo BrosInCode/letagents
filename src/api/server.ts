@@ -11,7 +11,6 @@ import {
   findTaskByWorkflowArtifactMatches,
   getAgentIdentityByCanonicalKey,
   getGitHubAppRepositoryByFullName,
-  getOwnerTokenAccountByToken,
   getActiveFocusRoomForTask,
   getFocusRoomByKey,
   getFocusRoomsForParent,
@@ -20,7 +19,6 @@ import {
   getProjectByCode,
   getProjectById,
   insertGitHubRoomEvent,
-  getSessionAccountByToken,
   getActiveTaskLeases,
   getActiveTaskLocks,
   getTaskById,
@@ -125,16 +123,15 @@ import {
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
 import {
-  parseCookies,
   respondWithError,
   sanitizeRedirectPath,
   type AuthenticatedRequest,
-  type ResolvedRequestAuth,
 } from "./http-helpers.js";
 import {
   registerHttpMiddleware,
   type HttpMiddlewareDeps,
 } from "./http-middleware.js";
+import { resolveRequestAuth } from "./request-auth.js";
 import { registerWebRoutes } from "./routes/web.js";
 import {
   registerAuthRoutes,
@@ -1225,49 +1222,6 @@ async function resolveGitHubRoomEntryDecision(input: {
       roomName: input.roomName,
       redirectTo: input.redirectTo,
     }),
-  };
-}
-
-async function resolveRequestAuth(req: express.Request): Promise<ResolvedRequestAuth> {
-  const cookies = parseCookies(req.headers.cookie);
-  const sessionToken = cookies.letagents_session;
-  if (sessionToken) {
-    const sessionAccount = await getSessionAccountByToken(sessionToken);
-    if (sessionAccount) {
-      return {
-        account: sessionAccount,
-        authKind: "session",
-      };
-    }
-  }
-
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    return {
-      account: null,
-      authKind: null,
-    };
-  }
-
-  const providerToken = authHeader.slice("Bearer ".length).trim();
-  if (!providerToken) {
-    return {
-      account: null,
-      authKind: null,
-    };
-  }
-
-  const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
-  if (ownerTokenAccount) {
-    return {
-      account: ownerTokenAccount,
-      authKind: "owner_token",
-    };
-  }
-
-  return {
-    account: null,
-    authKind: null,
   };
 }
 
