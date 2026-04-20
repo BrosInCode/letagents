@@ -39,7 +39,12 @@
       </div>
       <div class="message-bubble" :class="{ 'github-message-bubble': githubEvent }" :style="{ '--sender-color': senderColor }">
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
-        <div v-else class="md-content" v-html="renderedContent" />
+        <LongMessageContent
+          v-else
+          :text="message.text || ''"
+          :html="renderedContent"
+          :messageId="message.id"
+        />
       </div>
     </div>
   </div>
@@ -48,6 +53,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import GitHubEventCard from './GitHubEventCard.vue'
+import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 
 export interface MessageData {

@@ -535,6 +535,134 @@
         border-left: 2px solid var(--line); color: var(--muted);
       }
       .message-bubble .md-content strong { font-weight: 700; }
+      .long-message-content {
+        position: relative;
+        min-width: 0;
+      }
+      .long-message-content.collapsed {
+        max-height: 260px;
+        overflow: hidden;
+      }
+      .long-message-fade {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        height: 56px;
+        pointer-events: none;
+        background: linear-gradient(to bottom, transparent, var(--bg-1) 85%);
+      }
+      .long-message-actions {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .long-message-stats {
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1.3;
+      }
+      .long-message-button,
+      .message-reader-close,
+      .message-reader-action {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.76rem;
+        font-weight: 700;
+        line-height: 1;
+        padding: 8px 10px;
+        transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+      }
+      .long-message-button:hover,
+      .long-message-button:focus-visible,
+      .message-reader-close:hover,
+      .message-reader-close:focus-visible,
+      .message-reader-action:hover,
+      .message-reader-action:focus-visible {
+        background: color-mix(in srgb, var(--surface) 84%, var(--text) 8%);
+        border-color: var(--muted);
+        outline: none;
+      }
+      .message-reader-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: rgba(9, 9, 11, 0.78);
+      }
+      .message-reader-dialog {
+        display: flex;
+        flex-direction: column;
+        width: min(960px, 100%);
+        max-height: min(86vh, 900px);
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg-0);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
+      }
+      .message-reader-dialog:focus { outline: none; }
+      .message-reader-header,
+      .message-reader-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .message-reader-footer {
+        justify-content: flex-end;
+        border-top: 1px solid var(--line);
+        border-bottom: none;
+      }
+      .message-reader-eyebrow {
+        margin: 0 0 4px;
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1.2;
+      }
+      .message-reader-header h2 {
+        margin: 0;
+        color: var(--text);
+        font-size: 1rem;
+        line-height: 1.2;
+      }
+      .message-reader-content {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 18px 20px;
+        color: var(--text);
+        overflow-wrap: anywhere;
+      }
+      .message-reader-action.primary {
+        background: var(--text);
+        color: var(--bg-0);
+        border-color: var(--text);
+      }
+      @media (max-width: 768px) {
+        .long-message-content.collapsed { max-height: 220px; }
+        .message-reader-backdrop { align-items: stretch; padding: 10px; }
+        .message-reader-dialog { max-height: calc(100vh - 20px); }
+        .message-reader-header,
+        .message-reader-footer {
+          align-items: flex-start;
+          flex-direction: column;
+          padding: 12px;
+        }
+        .message-reader-close,
+        .message-reader-action { width: 100%; }
+        .message-reader-content { padding: 14px; }
+      }
       .reply-preview {
         display: flex;
         flex-direction: column;
@@ -1511,6 +1639,140 @@
         `;
       }
 
+      const LONG_MESSAGE_COLLAPSE_CHARS = 1400;
+      const LONG_MESSAGE_COLLAPSE_LINES = 18;
+
+      function getLongMessageMeta(text) {
+        const value = String(text || "");
+        const lineCount = value ? value.split(/\r\n|\r|\n/).length : 0;
+        const charCount = value.length;
+        return {
+          lineCount,
+          charCount,
+          isLong: charCount > LONG_MESSAGE_COLLAPSE_CHARS || lineCount > LONG_MESSAGE_COLLAPSE_LINES,
+          statsLabel: `${lineCount} ${lineCount === 1 ? "line" : "lines"} / ${new Intl.NumberFormat().format(charCount)} chars`,
+        };
+      }
+
+      function safeMessageDomId(messageId) {
+        return String(messageId || "message").replace(/[^A-Za-z0-9_-]/g, "-") || "message";
+      }
+
+      function longMessageContentId(messageId) {
+        return `long-message-content-${safeMessageDomId(messageId)}`;
+      }
+
+      function renderLongMessageHtml(message, renderedText) {
+        const text = message.text || "";
+        const meta = getLongMessageMeta(text);
+        if (!meta.isLong) {
+          return `<div class="md-content">${renderedText}</div>`;
+        }
+
+        const contentId = longMessageContentId(message.id);
+        const escapedMessageId = escapeHtml(message.id);
+        const escapedContentId = escapeHtml(contentId);
+        return `
+          <div id="${escapedContentId}" class="long-message-content collapsed">
+            <div class="md-content">${renderedText}</div>
+            <span class="long-message-fade" aria-hidden="true"></span>
+          </div>
+          <div class="long-message-actions">
+            <span class="long-message-stats">${escapeHtml(meta.statsLabel)}</span>
+            <button
+              class="long-message-button"
+              type="button"
+              data-long-message-toggle-id="${escapedMessageId}"
+              aria-expanded="false"
+              aria-controls="${escapedContentId}"
+            >Show full message</button>
+            <button
+              class="long-message-button"
+              type="button"
+              data-long-message-reader-id="${escapedMessageId}"
+            >Open reader</button>
+          </div>
+        `;
+      }
+
+      function setLongMessageExpanded(messageId, expanded) {
+        const content = document.getElementById(longMessageContentId(messageId));
+        if (!content) return;
+        content.classList.toggle("collapsed", !expanded);
+        const fade = content.querySelector(".long-message-fade");
+        if (fade instanceof HTMLElement) {
+          fade.hidden = expanded;
+        }
+        const button = Array.from(elements.messages.querySelectorAll("[data-long-message-toggle-id]"))
+          .find((candidate) => candidate.getAttribute("data-long-message-toggle-id") === messageId);
+        if (button instanceof HTMLButtonElement) {
+          button.setAttribute("aria-expanded", String(expanded));
+          button.textContent = expanded ? "Collapse" : "Show full message";
+        }
+      }
+
+      function closeMessageReader() {
+        document.querySelector(".message-reader-backdrop")?.remove();
+      }
+
+      function openMessageReader(messageId) {
+        const message = state.messages.get(messageId);
+        if (!message) return;
+        closeMessageReader();
+
+        const text = message.text || "";
+        const meta = getLongMessageMeta(text);
+        const modal = document.createElement("div");
+        const titleId = `message-reader-title-${safeMessageDomId(messageId)}`;
+        modal.className = "message-reader-backdrop";
+        modal.dataset.messageReader = "true";
+        modal.dataset.readerMessageId = messageId;
+        modal.innerHTML = `
+          <section
+            class="message-reader-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="${escapeHtml(titleId)}"
+            tabindex="-1"
+          >
+            <header class="message-reader-header">
+              <div>
+                <p class="message-reader-eyebrow">${escapeHtml(meta.statsLabel)}</p>
+                <h2 id="${escapeHtml(titleId)}">Message reader</h2>
+              </div>
+              <button class="message-reader-close" type="button" data-message-reader-close>Close</button>
+            </header>
+            <div class="message-reader-content md-content">${renderMarkdown(text)}</div>
+            <footer class="message-reader-footer">
+              <button class="message-reader-action" type="button" data-message-reader-copy>Copy text</button>
+              <button class="message-reader-action primary" type="button" data-message-reader-close>Done</button>
+            </footer>
+          </section>
+        `;
+        document.body.appendChild(modal);
+        modal.querySelector(".message-reader-dialog")?.focus();
+      }
+
+      async function copyReaderMessage(button) {
+        const modal = button.closest("[data-message-reader]");
+        const messageId = modal?.getAttribute("data-reader-message-id");
+        const message = messageId ? state.messages.get(messageId) : null;
+        if (!message) return;
+
+        try {
+          await navigator.clipboard.writeText(message.text || "");
+          button.textContent = "Copied";
+          window.setTimeout(() => {
+            button.textContent = "Copy text";
+          }, 1600);
+        } catch (_) {
+          button.textContent = "Copy failed";
+          window.setTimeout(() => {
+            button.textContent = "Copy text";
+          }, 1600);
+        }
+      }
+
       const elements = {
         chatTitle: document.getElementById("chatTitle"),
         chatSubtitle: document.getElementById("chatSubtitle"),
@@ -2183,7 +2445,7 @@
               </div>
               <div class="message-bubble">
                 ${renderReplyPreviewHtml(message.reply_to)}
-                <div class="md-content">${renderedText}</div>
+                ${renderLongMessageHtml(message, renderedText)}
               </div>
             </div>
           `;
@@ -2952,6 +3214,23 @@
         if (!elements.promptMenu.contains(event.target)) {
           closePromptMenu();
         }
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) {
+          return;
+        }
+        if (target.closest("[data-message-reader-close]") || target.classList.contains("message-reader-backdrop")) {
+          closeMessageReader();
+          return;
+        }
+        const copyButton = target.closest("[data-message-reader-copy]");
+        if (copyButton instanceof HTMLButtonElement) {
+          void copyReaderMessage(copyButton);
+        }
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          closeMessageReader();
+        }
       });
 
       // --- New messages pill: sequential scroll ---
@@ -2986,6 +3265,23 @@
         if (jumpButton) {
           const originalMessageId = jumpButton.getAttribute("data-scroll-to-msg-id");
           scrollToMessageById(originalMessageId);
+          return;
+        }
+        const longToggle = target.closest("[data-long-message-toggle-id]");
+        if (longToggle) {
+          const messageId = longToggle.getAttribute("data-long-message-toggle-id");
+          const isExpanded = longToggle.getAttribute("aria-expanded") === "true";
+          if (messageId) {
+            setLongMessageExpanded(messageId, !isExpanded);
+          }
+          return;
+        }
+        const readerButton = target.closest("[data-long-message-reader-id]");
+        if (readerButton) {
+          const messageId = readerButton.getAttribute("data-long-message-reader-id");
+          if (messageId) {
+            openMessageReader(messageId);
+          }
           return;
         }
         const replyButton = target.closest("[data-reply-id]");
