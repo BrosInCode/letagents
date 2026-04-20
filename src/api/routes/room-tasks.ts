@@ -33,6 +33,7 @@ import {
   normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
 } from "../task-ownership.js";
+import type { FocusParentBoardWriteIsolationDecision } from "../focus-room-task-write-isolation.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
@@ -110,6 +111,10 @@ export interface RoomTaskRouteDeps {
     actorKey: string | null;
     actorInstanceId: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
+  enforceFocusParentBoardWriteIsolation(input: {
+    req: AuthenticatedRequest;
+    targetProject: Project;
+  }): Promise<FocusParentBoardWriteIsolationDecision>;
   emitProjectMessage(projectId: string, sender: string, text: string): Promise<unknown>;
 }
 
@@ -185,6 +190,15 @@ export function registerRoomTaskRoutes(
       return;
     }
 
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
+
     const admission = await deps.enforceTaskAdmissionCoordination({
       req,
       projectId: project.id,
@@ -244,6 +258,15 @@ export function registerRoomTaskRoutes(
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
     const { display_name } = requestBody as { display_name?: string };
@@ -367,6 +390,15 @@ export function registerRoomTaskRoutes(
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
 
     const task = await getTaskById(project.id, taskId);
     const taskOwnership = await getTaskOwnershipState(project.id, taskId);

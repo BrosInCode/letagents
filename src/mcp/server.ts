@@ -73,6 +73,7 @@ import {
 import { buildRoomEventsQueryString } from "./room-events-query.js";
 import type { AgentPresenceStatus } from "../shared/agent-presence.js";
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
+import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../shared/request-headers.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -1155,9 +1156,25 @@ async function roomScopedApiCall<T>(input: {
   project_path: (projectId: string) => string;
   options?: RequestInit;
 }): Promise<T> {
+  const headers = {
+    ...(input.options?.headers as Record<string, string> | undefined),
+  };
+  if (
+    currentRoom?.room_id &&
+    !Object.keys(headers).some((key) =>
+      key.toLowerCase() === LETAGENTS_ORIGIN_ROOM_ID_HEADER.toLowerCase()
+    )
+  ) {
+    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentRoom.room_id;
+  }
+  const options = {
+    ...input.options,
+    headers,
+  };
+
   if (input.room_id) {
     try {
-      const result = await apiCall<T>(input.room_path(input.room_id), input.options);
+      const result = await apiCall<T>(input.room_path(input.room_id), options);
       touchRoomSession(input.room_id, getLastMessageId(result));
       return result;
     } catch (error) {
@@ -1172,7 +1189,7 @@ async function roomScopedApiCall<T>(input: {
     throw new Error("No room is available for this request.");
   }
 
-  const result = await apiCall<T>(input.project_path(input.project_id), input.options);
+  const result = await apiCall<T>(input.project_path(input.project_id), options);
   if (input.room_id) {
     touchRoomSession(input.room_id, getLastMessageId(result));
   }
