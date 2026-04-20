@@ -108,6 +108,11 @@ import {
   normalizeTaskActorLabel,
 } from "./task-ownership.js";
 import {
+  classifyTaskCoordinationMutation,
+  getTaskUpdatePrUrlBinding,
+  normalizeOptionalString,
+} from "./task-coordination-inputs.js";
+import {
   evaluateTaskAdmission,
   evaluateCoordinationMutation,
   evaluateWorkflowArtifactMutation,
@@ -298,44 +303,6 @@ type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
 type TaskCoordinationGuardDecision =
   | { kind: "allow" }
   | { kind: "deny"; code: string; error: string };
-
-function normalizeOptionalString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed || null;
-}
-
-function classifyTaskCoordinationMutation(
-  updates: TaskUpdatePatch
-): { mutation: CoordinationMutationKind; leaseKind: TaskLeaseKind; claim: boolean } | null {
-  if (updates.status === "assigned") {
-    return { mutation: "task_claim", leaseKind: "work", claim: true };
-  }
-
-  if (updates.status === "in_review") {
-    return { mutation: "task_complete", leaseKind: "work", claim: false };
-  }
-
-  if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined) {
-    return { mutation: "workflow_artifact_attach", leaseKind: "work", claim: false };
-  }
-
-  if (updates.status === "in_progress" || updates.status === "blocked") {
-    return { mutation: "task_update", leaseKind: "work", claim: false };
-  }
-
-  return null;
-}
-
-function getTaskUpdatePrUrlBinding(updates: TaskUpdatePatch): string | null | undefined {
-  if (!Object.prototype.hasOwnProperty.call(updates, "pr_url")) {
-    return undefined;
-  }
-
-  return updates.pr_url ?? null;
-}
 
 async function bindWorkflowArtifactPrUrlIfPresent(
   roomId: string,
