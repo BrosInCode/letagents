@@ -169,6 +169,13 @@
       "when": 1776633720000,
       "tag": "0023_allow_ad_hoc_focus_rooms",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1776646921013,
+      "tag": "0024_repair_ad_hoc_focus_lineage",
+      "breakpoints": true
     }
   ]
 }

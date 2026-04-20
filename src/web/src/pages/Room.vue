@@ -208,7 +208,7 @@ import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import { useToast } from '@/composables/useToast'
-import type { FocusRoomSettingsPatch, RoomMessage } from '@/composables/useRoom'
+import type { FocusRoomInfo, FocusRoomSettingsPatch, RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
 const router = useRouter()
@@ -350,6 +350,19 @@ function buildFocusRoomPath(focusKey: string): string {
   return `/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`
 }
 
+function buildDirectRoomPath(roomId: string | null | undefined): string {
+  return roomId ? `/in/${roomRoutePath(roomId)}` : ''
+}
+
+function buildFocusRoomInfoPath(focusRoom: FocusRoomInfo): string {
+  const focusKey = focusRoom.focus_key || focusRoom.source_task_id
+  const parent = focusRoom.parent_room_id || focusParentAddress.value
+  if (parent && focusKey) {
+    return `/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`
+  }
+  return buildDirectRoomPath(focusRoom.room_id)
+}
+
 function openBlankFocusRoomTab(): Window | null {
   try {
     const target = window.open('about:blank', '_blank')
@@ -402,7 +415,9 @@ async function openFocusRoomPath(path: string, targetWindow?: Window | null): Pr
 }
 
 async function handleOpenFocusRoom(focusKey: string, targetWindow?: Window | null): Promise<boolean> {
-  const path = buildFocusRoomPath(focusKey)
+  const path = focusKey.startsWith('focus_')
+    ? buildDirectRoomPath(focusKey)
+    : buildFocusRoomPath(focusKey)
   if (!path) {
     closeFocusTargetWindow(targetWindow)
     return false
@@ -435,8 +450,8 @@ async function handleFocusTask(taskId: string) {
       return
     }
 
-    const focusKey = focusRoom.focus_key || focusRoom.source_task_id || taskId
-    const opened = await handleOpenFocusRoom(focusKey, focusWindow)
+    const path = buildFocusRoomInfoPath(focusRoom) || buildFocusRoomPath(taskId)
+    const opened = await openFocusRoomPath(path, focusWindow)
     if (!opened) {
       toast.error('Focus Room could not be opened.')
     }
@@ -468,8 +483,7 @@ async function handleCreateAdHocFocusRoom(title: string) {
       return
     }
 
-    const focusKey = focusRoom.focus_key || focusRoom.room_id
-    const opened = await handleOpenFocusRoom(focusKey, focusWindow)
+    const opened = await openFocusRoomPath(buildFocusRoomInfoPath(focusRoom), focusWindow)
     if (!opened) {
       toast.error('Focus Room could not be opened.')
     }
