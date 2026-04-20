@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   normalizeFocusRoomSettings,
+  shouldHardIsolateGitHubEventToFocusRoom,
   shouldRouteGitHubEventToFocusRoom,
   shouldPostFocusRoomEventToParent,
   validateFocusRoomSettingsPatch,
@@ -92,6 +93,13 @@ test("shouldRouteGitHubEventToFocusRoom follows GitHub routing policy", () => {
   );
   assert.equal(
     shouldRouteGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "focus_owned_only" },
+      { matched_workflow_artifact: true }
+    ),
+    true
+  );
+  assert.equal(
+    shouldRouteGitHubEventToFocusRoom(
       { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "all_parent_repo" },
       { parent_repo_event: true }
     ),
@@ -101,6 +109,30 @@ test("shouldRouteGitHubEventToFocusRoom follows GitHub routing policy", () => {
     shouldRouteGitHubEventToFocusRoom(
       { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "off" },
       { matched_task_reference: true }
+    ),
+    false
+  );
+});
+
+test("shouldHardIsolateGitHubEventToFocusRoom only isolates focus-owned GitHub events", () => {
+  assert.equal(
+    shouldHardIsolateGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "focus_owned_only" },
+      { matched_task_reference: true }
+    ),
+    true
+  );
+  assert.equal(
+    shouldHardIsolateGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "focus_owned_only" },
+      { parent_repo_event: true }
+    ),
+    false
+  );
+  assert.equal(
+    shouldHardIsolateGitHubEventToFocusRoom(
+      { ...DEFAULT_FOCUS_ROOM_SETTINGS, github_event_routing: "task_and_branch" },
+      { matched_workflow_artifact: true }
     ),
     false
   );

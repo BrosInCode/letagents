@@ -421,6 +421,7 @@ const activityScopeOptions: Array<{ value: FocusActivityScope; label: string }> 
 ]
 const githubEventRoutingOptions: Array<{ value: FocusGitHubEventRouting; label: string }> = [
   { value: 'task_and_branch', label: 'Matching task/branch' },
+  { value: 'focus_owned_only', label: 'Focus-owned only' },
   { value: 'task_only', label: 'Task-linked only' },
   { value: 'all_parent_repo', label: 'All parent repo events' },
   { value: 'off', label: 'Do not route' },
@@ -578,6 +579,8 @@ const githubEventRoutingDescription = computed(() => {
   switch (settingsDraft.value.github_event_routing) {
     case 'off':
       return 'GitHub events stay out of this Focus Room routing lane.'
+    case 'focus_owned_only':
+      return 'Task, branch, PR, review, and check events stay in this Focus Room.'
     case 'all_parent_repo':
       return 'Parent repo GitHub events can be surfaced here.'
     case 'task_only':

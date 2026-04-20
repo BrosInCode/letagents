@@ -13,6 +13,7 @@ export const FOCUS_ACTIVITY_SCOPES = [
 
 export const FOCUS_GITHUB_EVENT_ROUTINGS = [
   "task_and_branch",
+  "focus_owned_only",
   "task_only",
   "all_parent_repo",
   "off",
@@ -144,8 +145,20 @@ export function shouldRouteGitHubEventToFocusRoom(
       );
     case "task_only":
       return Boolean(context.matched_task_reference);
+    case "focus_owned_only":
     case "task_and_branch":
     default:
       return Boolean(context.matched_task_reference || context.matched_workflow_artifact);
   }
+}
+
+export function shouldHardIsolateGitHubEventToFocusRoom(
+  settingsInput: FocusRoomSettings | null | undefined,
+  context: FocusGitHubRoutingContext
+): boolean {
+  const settings = normalizeFocusRoomSettings(settingsInput);
+  return (
+    settings.github_event_routing === "focus_owned_only" &&
+    Boolean(context.matched_task_reference || context.matched_workflow_artifact)
+  );
 }

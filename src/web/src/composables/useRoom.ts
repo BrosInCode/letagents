@@ -9,7 +9,7 @@ import {
 /** ── Types ── */
 export type FocusParentVisibility = 'summary_only' | 'major_activity' | 'all_activity' | 'silent'
 export type FocusActivityScope = 'task_and_branch' | 'task_only' | 'room'
-export type FocusGitHubEventRouting = 'task_and_branch' | 'task_only' | 'all_parent_repo' | 'off'
+export type FocusGitHubEventRouting = 'task_and_branch' | 'focus_owned_only' | 'task_only' | 'all_parent_repo' | 'off'
 
 export interface FocusRoomSettings {
   parent_visibility: FocusParentVisibility
@@ -453,16 +453,21 @@ function roomPath(identifier: string): string {
   return `/rooms/${encodeURIComponent(identifier)}`
 }
 
-function getGitHubAccessIdentifier(roomInfo: RoomInfo | null): string {
+function getGitHubEventsIdentifier(roomInfo: RoomInfo | null): string {
+  if (!roomInfo) return ''
+  return roomInfo.identifier || roomInfo.name || roomInfo.projectId
+}
+
+function getGitHubSupportIdentifier(roomInfo: RoomInfo | null): string {
   if (!roomInfo) return ''
   if (roomInfo.kind === 'focus' && roomInfo.parentRoomId) {
     return roomInfo.parentRoomId
   }
-  return roomInfo.identifier || roomInfo.name || roomInfo.projectId
+  return getGitHubEventsIdentifier(roomInfo)
 }
 
 const githubEventsSupported = computed(() =>
-  isRepoBackedRoomId(getGitHubAccessIdentifier(room.value))
+  isRepoBackedRoomId(getGitHubSupportIdentifier(room.value))
 )
 
 interface MessagePage {
@@ -620,8 +625,11 @@ function stopParticipantRefreshLoop() {
   }
 }
 
-async function refreshGitHubEvents(roomIdentifier: string) {
-  if (!isRepoBackedRoomId(roomIdentifier)) {
+async function refreshGitHubEvents(
+  roomIdentifier: string,
+  supported = isRepoBackedRoomId(roomIdentifier),
+) {
+  if (!supported) {
     githubEvents.value = []
     githubEventsAvailable.value = false
     githubEventsHasMore.value = false
@@ -644,15 +652,15 @@ async function refreshGitHubEvents(roomIdentifier: string) {
 
 async function refreshRoomGitHubEvents(): Promise<boolean> {
   if (!room.value) return false
-  await refreshGitHubEvents(getGitHubAccessIdentifier(room.value))
+  await refreshGitHubEvents(getGitHubEventsIdentifier(room.value), githubEventsSupported.value)
   return true
 }
 
-function scheduleGitHubEventsRefresh(roomIdentifier: string) {
+function scheduleGitHubEventsRefresh(roomIdentifier: string, supported = isRepoBackedRoomId(roomIdentifier)) {
   if (githubEventsRefreshTimer) return
   githubEventsRefreshTimer = setTimeout(() => {
     githubEventsRefreshTimer = null
-    void refreshGitHubEvents(roomIdentifier)
+    void refreshGitHubEvents(roomIdentifier, supported)
   }, 350)
 }
 
@@ -715,7 +723,7 @@ function startStreaming(roomIdentifier: string) {
 
         if ((msg.source || '').toLowerCase() === 'github' || (msg.sender || '').toLowerCase() === 'github') {
           if (room.value && githubEventsSupported.value) {
-            scheduleGitHubEventsRefresh(getGitHubAccessIdentifier(room.value))
+            scheduleGitHubEventsRefresh(getGitHubEventsIdentifier(room.value), githubEventsSupported.value)
           }
           // Also refresh task github status when new github events arrive
           if (room.value) {
@@ -1073,15 +1081,16 @@ async function joinRoom(roomIdentifier: string) {
     persistSession()
 
     // Load existing room state in parallel
-    const githubAccessIdentifier = getGitHubAccessIdentifier(joinedRoom)
+    const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
+    const supportsGitHubEvents = isRepoBackedRoomId(getGitHubSupportIdentifier(joinedRoom))
     const [messagePage, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
-      isRepoBackedRoomId(githubAccessIdentifier)
-        ? fetchGitHubEvents(githubAccessIdentifier)
+      supportsGitHubEvents
+        ? fetchGitHubEvents(githubEventsIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
       fetchTaskGithubStatus(roomIdentifier),
     ])
