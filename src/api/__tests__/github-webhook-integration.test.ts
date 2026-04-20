@@ -234,7 +234,7 @@ function buildRepositoryPayload() {
 async function createWorkLeaseForPr(input: {
   roomId: string;
   taskId: string;
-  prUrl: string;
+  prUrl?: string | null;
   branchRef?: string;
 }) {
   if (!createTaskLease) {
@@ -248,7 +248,7 @@ async function createWorkLeaseForPr(input: {
     agent_key: "EmmyMay/olivewolf",
     actor_label: "OliveWolf | EmmyMay's agent | Agent",
     created_by: "test",
-    pr_url: input.prUrl,
+    pr_url: input.prUrl ?? null,
     branch_ref: input.branchRef ?? null,
   });
 }
@@ -752,6 +752,106 @@ test(
     assert.ok(focusEvents.events.some((event) =>
       event.github_object_id === "204" &&
       event.linked_task_id === task.id
+    ));
+  }
+);
+
+test(
+  "hard-isolated focus routing resolves leases owned by the focus room itself",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed webhook integration tests" : false,
+  },
+  async (t) => {
+    if (
+      !createProjectWithName ||
+      !createTask ||
+      !getMessages ||
+      !getTaskById ||
+      !updateTask ||
+      !createTaskLease ||
+      !createFocusRoomForTask ||
+      !updateFocusRoomSettings ||
+      !getGitHubRoomEvents
+    ) {
+      throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
+    }
+
+    const { child, port } = await startServer();
+    t.after(async () => {
+      await stopServer(child);
+    });
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const parentTask = await createTask(room.id, "Open focus lane", "OliveWolf");
+    await updateTask(room.id, parentTask.id, { status: "accepted" });
+    await updateTask(room.id, parentTask.id, { status: "assigned" });
+    const focus = await createFocusRoomForTask(room.id, parentTask.id);
+    assert.ok(focus);
+    await updateFocusRoomSettings(room.id, parentTask.id, {
+      parent_visibility: "major_activity",
+      github_event_routing: "focus_owned_only",
+    });
+
+    const focusTask = await createTask(focus.room.id, "Focus-owned implementation", "OliveWolf");
+    await updateTask(focus.room.id, focusTask.id, { status: "accepted" });
+    await updateTask(focus.room.id, focusTask.id, { status: "assigned" });
+
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/205";
+    await createWorkLeaseForPr({
+      roomId: focus.room.id,
+      taskId: focusTask.id,
+      prUrl: null,
+      branchRef: "olive/focus-owned-branch",
+    });
+
+    const result = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-opened-focus-owned-lease",
+      eventName: "pull_request",
+      payload: {
+        action: "opened",
+        repository: buildRepositoryPayload(),
+        sender: { login: "octocat" },
+        pull_request: {
+          number: 205,
+          title: "focus-owned branch without task mention",
+          body: "covers focus room owned lease routing",
+          html_url: pullRequestUrl,
+          head: {
+            ref: "olive/focus-owned-branch",
+            sha: "abc205",
+          },
+          merged: false,
+          user: { login: "octocat" },
+        },
+      },
+    });
+
+    assert.equal(result.status, "processed");
+
+    const updatedFocusTask = await getTaskById(focus.room.id, focusTask.id);
+    assert.equal(updatedFocusTask?.status, "in_review");
+    assert.equal(updatedFocusTask?.pr_url, pullRequestUrl);
+
+    const parentMessages = (await getMessages(room.id)).messages;
+    const focusMessages = (await getMessages(focus.room.id)).messages;
+    assert.equal(parentMessages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #205 opened by octocat")
+    ), false);
+    assert.ok(focusMessages.some((message) =>
+      message.sender === "github" &&
+      message.text.includes("PR #205 opened by octocat") &&
+      message.text.includes(focusTask.id)
+    ));
+
+    const parentEvents = await getGitHubRoomEvents({ room_id: room.id, event_type: "pull_request" });
+    const focusEvents = await getGitHubRoomEvents({ room_id: focus.room.id, event_type: "pull_request" });
+    assert.equal(parentEvents.events.some((event) => event.github_object_id === "205"), false);
+    assert.ok(focusEvents.events.some((event) =>
+      event.github_object_id === "205" &&
+      event.linked_task_id === focusTask.id
     ));
   }
 );
