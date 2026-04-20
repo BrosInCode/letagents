@@ -159,20 +159,32 @@ async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildP
   return { child, port };
 }
 
+function childHasExited(child: ChildProcessWithoutNullStreams): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function waitForChildExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) {
+    return true;
+  }
+
+  return Promise.race([
+    once(child, "exit").then(() => true),
+    sleep(timeoutMs).then(() => false),
+  ]);
+}
+
 async function stopChildProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (child.exitCode !== null) {
+  if (childHasExited(child)) {
     return;
   }
 
   child.kill("SIGTERM");
-  await Promise.race([
-    once(child, "exit"),
-    sleep(5000),
-  ]);
+  const exitedAfterSigterm = await waitForChildExit(child, 5000);
 
-  if (child.exitCode === null) {
+  if (!exitedAfterSigterm && !childHasExited(child)) {
     child.kill("SIGKILL");
-    await once(child, "exit");
+    await waitForChildExit(child, 5000);
   }
 }
 
