@@ -35,9 +35,7 @@ import {
   getRoomAgentPresence,
   type GitHubWebhookDeliveryStatus,
   type Message,
-  type OwnerTokenAccount,
   type Project,
-  type SessionAccount,
   type Task,
   type TaskLeaseKind,
   type TaskStatus,
@@ -106,6 +104,7 @@ import {
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
 } from "./room-resolution.js";
+import { createRoomParticipantRecorder } from "./room-participants.js";
 import {
   buildTaskUpdatePatch,
   normalizeTaskActorKey,
@@ -119,11 +118,7 @@ import {
   type CoordinationDecisionResult,
   type CoordinationMutationKind,
 } from "./coordination-policy.js";
-import { getAgentPrimaryLabel, parseAgentActorLabel } from "../shared/agent-identity.js";
-import {
-  buildAgentRoomParticipantKey,
-  buildHumanRoomParticipantKey,
-} from "../shared/room-participant.js";
+import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
@@ -214,6 +209,11 @@ function pruneStaleWorkPromptTimestamps(now: number): void {
 
 const messageEvents = new EventEmitter();
 const taskEvents = new EventEmitter();
+const {
+  rememberHumanRoomParticipant,
+  rememberAgentRoomParticipant,
+  rememberRoomParticipantFromMessage,
+} = createRoomParticipantRecorder({ upsertRoomParticipant });
 
 async function emitProjectMessage(
   projectId: string,
@@ -397,120 +397,6 @@ async function emitGitHubEventToAllParentRepoFocusRooms(
       emitProjectMessage(focusRoom.id, sender, text, { source: "github" })
     )
   );
-}
-
-function normalizeParticipantValue(value: string | null | undefined): string {
-  return String(value ?? "").trim();
-}
-
-function getOwnerLabelFromAttribution(ownerAttribution: string | null | undefined): string | null {
-  const normalized = normalizeParticipantValue(ownerAttribution);
-  if (!normalized) {
-    return null;
-  }
-
-  const match = normalized.match(/^(.+?)(?:'s|s')?\s+agent$/i);
-  return match?.[1]?.trim() || normalized;
-}
-
-function isAgentIdentityValue(value: string | null | undefined): boolean {
-  const parsed = parseAgentActorLabel(value);
-  return Boolean(parsed && (parsed.structured || parsed.owner_attribution || parsed.ide_label));
-}
-
-async function rememberHumanRoomParticipant(input: {
-  projectId: string;
-  sender?: string | null;
-  sessionAccount?: SessionAccount | OwnerTokenAccount | null | undefined;
-  lastSeenAt?: string | null;
-}): Promise<void> {
-  const githubLogin = normalizeParticipantValue(input.sessionAccount?.login ?? input.sender);
-  const displayName = githubLogin || normalizeParticipantValue(input.sender);
-  const participantKey = buildHumanRoomParticipantKey({
-    github_login: githubLogin || null,
-    display_name: displayName || null,
-  });
-
-  if (!participantKey || !displayName) {
-    return;
-  }
-
-  await upsertRoomParticipant({
-    room_id: input.projectId,
-    participant_key: participantKey,
-    kind: "human",
-    github_login: githubLogin || null,
-    display_name: displayName,
-    last_seen_at: input.lastSeenAt ?? null,
-  });
-}
-
-async function rememberAgentRoomParticipant(input: {
-  projectId: string;
-  actorLabel?: string | null;
-  agentKey?: string | null;
-  displayName?: string | null;
-  ownerLabel?: string | null;
-  ideLabel?: string | null;
-  lastSeenAt?: string | null;
-}): Promise<void> {
-  const actorLabel = normalizeParticipantValue(input.actorLabel);
-  const participantKey = buildAgentRoomParticipantKey(actorLabel);
-  if (!actorLabel || !participantKey) {
-    return;
-  }
-
-  const parsed = parseAgentActorLabel(actorLabel);
-  const displayName = normalizeParticipantValue(input.displayName)
-    || parsed?.display_name
-    || actorLabel;
-
-  await upsertRoomParticipant({
-    room_id: input.projectId,
-    participant_key: participantKey,
-    kind: "agent",
-    actor_label: actorLabel,
-    agent_key: normalizeParticipantValue(input.agentKey) || null,
-    display_name: displayName,
-    owner_label: normalizeParticipantValue(input.ownerLabel) || getOwnerLabelFromAttribution(parsed?.owner_attribution),
-    ide_label: normalizeParticipantValue(input.ideLabel) || parsed?.ide_label || null,
-    last_seen_at: input.lastSeenAt ?? null,
-  });
-}
-
-async function rememberRoomParticipantFromMessage(input: {
-  projectId: string;
-  sender: string;
-  source: string | undefined;
-  sessionAccount?: SessionAccount | OwnerTokenAccount | null | undefined;
-  timestamp: string;
-}): Promise<void> {
-  const normalizedSender = normalizeParticipantValue(input.sender);
-  const normalizedSource = normalizeParticipantValue(input.source).toLowerCase();
-  if (!normalizedSender) {
-    return;
-  }
-
-  if (normalizedSource === "agent" || isAgentIdentityValue(normalizedSender)) {
-    await rememberAgentRoomParticipant({
-      projectId: input.projectId,
-      actorLabel: normalizedSender,
-      lastSeenAt: input.timestamp,
-    });
-    return;
-  }
-
-  const lowerSender = normalizedSender.toLowerCase();
-  if (lowerSender === "letagents" || lowerSender === "system" || lowerSender === "github") {
-    return;
-  }
-
-  await rememberHumanRoomParticipant({
-    projectId: input.projectId,
-    sender: normalizedSender,
-    sessionAccount: input.sessionAccount,
-    lastSeenAt: input.timestamp,
-  });
 }
 
 async function emitTaskLifecycleStatusMessage(
