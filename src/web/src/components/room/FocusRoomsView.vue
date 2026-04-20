@@ -117,7 +117,7 @@
 
     <div class="focus-layout">
       <section class="focus-list">
-        <div v-if="!isFocusRoom" class="focus-section-card">
+        <div v-if="!isFocusRoom" class="focus-section-card adhoc-card">
           <form class="focus-adhoc" @submit.prevent="submitAdHocFocusRoom">
             <div>
               <p class="focus-eyebrow">Branch from an idea</p>
@@ -146,88 +146,94 @@
           </form>
         </div>
 
-        <div v-if="!isFocusRoom" class="focus-section-card">
+        <div v-if="!isFocusRoom" class="focus-section-card category-card">
           <div class="focus-section-header">
             <div>
               <h3>Open Focus Rooms</h3>
               <p>Active task rooms ready to enter.</p>
             </div>
-            <span>{{ openFocusRooms.length }}</span>
+            <span class="focus-badge">{{ openFocusRooms.length }}</span>
           </div>
 
-          <div v-if="openFocusRooms.length === 0" class="focus-empty compact">
-            <h4>No open Focus Rooms</h4>
-            <p>Open one from a task when the work needs a dedicated room.</p>
-          </div>
-
-          <button
-            v-for="focusRoom in openFocusRooms"
-            :key="focusRoom.room_id"
-            class="focus-task focus-room-link"
-            type="button"
-            @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
-          >
-            <div>
-              <strong>{{ focusRoom.display_name }}</strong>
-              <span>{{ focusRoom.source_task_id || 'No linked task yet' }}</span>
+          <div class="focus-card-list">
+            <div v-if="openFocusRooms.length === 0" class="focus-empty compact">
+              <h4>No open Focus Rooms</h4>
+              <p>Open one from a task when the work needs a dedicated room.</p>
             </div>
-            <small>{{ focusRoom.focus_status || 'active' }}</small>
-          </button>
+
+            <button
+              v-for="focusRoom in openFocusRooms"
+              :key="focusRoom.room_id"
+              class="focus-task focus-room-link"
+              type="button"
+              @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+            >
+              <div>
+                <strong>{{ focusRoom.display_name }}</strong>
+                <span>{{ focusRoom.source_task_id || 'No linked task yet' }}</span>
+              </div>
+              <small>{{ focusRoom.focus_status || 'active' }}</small>
+            </button>
+          </div>
         </div>
 
-        <div v-if="!isFocusRoom && concludedFocusRooms.length > 0" class="focus-section-card">
+        <div v-if="!isFocusRoom && concludedFocusRooms.length > 0" class="focus-section-card category-card">
           <div class="focus-section-header">
             <div>
               <h3>Shared results</h3>
               <p>Concluded task rooms with outcomes in the parent room.</p>
             </div>
-            <span>{{ concludedFocusRooms.length }}</span>
+            <span class="focus-badge">{{ concludedFocusRooms.length }}</span>
           </div>
 
-          <button
-            v-for="focusRoom in concludedFocusRooms"
-            :key="focusRoom.room_id"
-            class="focus-task focus-room-link"
-            data-concluded="true"
-            type="button"
-            @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
-          >
-            <div>
-              <strong>{{ focusRoom.display_name }}</strong>
-              <span>{{ focusRoom.conclusion_summary || focusRoom.source_task_id || focusRoom.room_id }}</span>
-            </div>
-            <small>concluded</small>
-          </button>
+          <div class="focus-card-list">
+            <button
+              v-for="focusRoom in concludedFocusRooms"
+              :key="focusRoom.room_id"
+              class="focus-task focus-room-link"
+              data-concluded="true"
+              type="button"
+              @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+            >
+              <div>
+                <strong>{{ focusRoom.display_name }}</strong>
+                <span>{{ focusRoom.conclusion_summary || focusRoom.source_task_id || focusRoom.room_id }}</span>
+              </div>
+              <small>concluded</small>
+            </button>
+          </div>
         </div>
 
-        <div class="focus-section-card">
+        <div class="focus-section-card category-card">
           <div class="focus-section-header">
             <div>
               <h3>Focus candidates</h3>
               <p>Large, noisy, or multi-agent work belongs here.</p>
             </div>
-            <span>{{ candidateTasks.length }}</span>
+            <span class="focus-badge">{{ candidateTasks.length }}</span>
           </div>
 
-          <div v-if="candidateTasks.length === 0" class="focus-empty">
-            <h4>No open tasks yet</h4>
-            <p>Add a task or branch a room from an idea.</p>
-          </div>
-
-          <button
-            v-for="task in candidateTasks"
-            :key="task.id"
-            class="focus-task"
-            :data-selected="task.id === currentTask?.id"
-            type="button"
-            @click="emit('selectTask', task.id)"
-          >
-            <div>
-              <strong>{{ task.title }}</strong>
-              <span>{{ task.description || task.id }}</span>
+          <div class="focus-card-list">
+            <div v-if="candidateTasks.length === 0" class="focus-empty">
+              <h4>No open tasks yet</h4>
+              <p>Add a task or branch a room from an idea.</p>
             </div>
-            <small>{{ taskStatusLabel(task.status) }}</small>
-          </button>
+
+            <button
+              v-for="task in candidateTasks"
+              :key="task.id"
+              class="focus-task"
+              :data-selected="task.id === currentTask?.id"
+              type="button"
+              @click="emit('selectTask', task.id)"
+            >
+              <div>
+                <strong>{{ task.title }}</strong>
+                <span>{{ task.description || task.id }}</span>
+              </div>
+              <small>{{ taskStatusLabel(task.status) }}</small>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -639,6 +645,7 @@ function taskStatusLabel(status: string): string {
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: var(--bg-card, #131316);
   border-radius: 8px;
+  letter-spacing: 0;
 }
 
 .focus-hero-copy {
@@ -708,6 +715,16 @@ function taskStatusLabel(status: string): string {
 .focus-section-card,
 .focus-detail {
   padding: 14px;
+}
+
+.adhoc-card {
+  padding: 16px 20px;
+}
+
+.category-card {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
 }
 
 .focus-adhoc {
@@ -904,10 +921,10 @@ function taskStatusLabel(status: string): string {
 
 .focus-section-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 16px;
 }
 
 .focus-section-header h3 {
@@ -915,9 +932,10 @@ function taskStatusLabel(status: string): string {
   color: var(--text-primary, #ffffff);
   font-size: 1.15rem;
   font-weight: 700;
+  letter-spacing: 0;
 }
 
-.focus-section-header span {
+.focus-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -928,6 +946,13 @@ function taskStatusLabel(status: string): string {
   color: var(--text-primary, #ffffff);
   font-size: 0.78rem;
   font-weight: 800;
+  letter-spacing: 0;
+}
+
+.focus-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .focus-task {
@@ -937,7 +962,6 @@ function taskStatusLabel(status: string): string {
   gap: 12px;
   width: 100%;
   padding: 14px 16px;
-  margin-bottom: 10px;
   border: 1px solid rgba(255, 255, 255, 0.04);
   background: rgba(255, 255, 255, 0.02);
   border-radius: 8px;
@@ -945,6 +969,7 @@ function taskStatusLabel(status: string): string {
   cursor: pointer;
   text-align: left;
   transition: all 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  letter-spacing: 0;
 }
 
 .focus-task:hover,
@@ -992,6 +1017,7 @@ function taskStatusLabel(status: string): string {
   font-size: 0.64rem;
   font-weight: 800;
   text-transform: capitalize;
+  letter-spacing: 0;
 }
 
 .focus-detail {
@@ -1077,7 +1103,6 @@ function taskStatusLabel(status: string): string {
 
 .focus-empty.compact {
   padding: 14px;
-  margin-bottom: 12px;
   border: 1px dashed var(--line, #27272a);
   border-radius: 8px;
 }
