@@ -102,6 +102,7 @@ import { createRoomParticipantRecorder } from "./room-participants.js";
 import { normalizeOptionalString } from "./task-coordination-inputs.js";
 import {
   evaluateWorkflowArtifactMutation,
+  leaseMatchesWorkflowArtifact,
   type CoordinationDecisionResult,
 } from "./coordination-policy.js";
 import { createTaskCoordinationEnforcement } from "./task-coordination-enforcement.js";
@@ -205,6 +206,18 @@ const {
 } = createRepoRoomEventTaskResolver({
   findTaskByWorkflowArtifactMatches,
   findTaskByPrUrl,
+  findTaskByActiveWorkflowLease: async (projectId, workflow) => {
+    const leases = await getActiveTaskLeases(projectId);
+    const lease = leases.find((candidate) =>
+      candidate.kind === "work" &&
+      leaseMatchesWorkflowArtifact({
+        lease: candidate,
+        prUrl: workflow.prUrl,
+        branchRef: workflow.branchRef,
+      })
+    );
+    return lease ? getTaskById(projectId, lease.task_id) : undefined;
+  },
   getTaskById,
 });
 
