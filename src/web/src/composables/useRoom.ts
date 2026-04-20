@@ -258,6 +258,8 @@ export interface RoomParticipant {
 
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
+const messagesHasOlder = ref(false)
+const isLoadingOlderMessages = ref(false)
 const presence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
@@ -283,6 +285,7 @@ let presenceRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let participantRefreshTimer: ReturnType<typeof setInterval> | null = null
 let participantRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
+const MESSAGE_HISTORY_PAGE_SIZE = 150
 
 /** ── Color Palette ── */
 const OWNER_COLORS = [
@@ -462,24 +465,43 @@ const githubEventsSupported = computed(() =>
   isRepoBackedRoomId(getGitHubAccessIdentifier(room.value))
 )
 
-async function fetchMessages(roomIdentifier: string): Promise<RoomMessage[]> {
-  const all: RoomMessage[] = []
-  let afterCursor = ''
+interface MessagePage {
+  messages: RoomMessage[]
+  hasOlder: boolean
+}
 
-  for (;;) {
-    const qs = afterCursor ? `?after=${encodeURIComponent(afterCursor)}` : ''
-    try {
-      const data = await apiFetch(`${roomPath(roomIdentifier)}/messages${qs}`)
-      const msgs: RoomMessage[] = data.messages || []
-      all.push(...msgs)
-      if (!data.has_more || msgs.length === 0) break
-      afterCursor = msgs[msgs.length - 1].id
-    } catch {
-      break
+async function fetchMessages(roomIdentifier: string, before: string = 'latest'): Promise<MessagePage> {
+  const params = new URLSearchParams({
+    limit: String(MESSAGE_HISTORY_PAGE_SIZE),
+    before,
+  })
+
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/messages?${params.toString()}`)
+    return {
+      messages: data.messages || [],
+      hasOlder: Boolean(data.has_older ?? data.has_more),
+    }
+  } catch {
+    return { messages: [], hasOlder: false }
+  }
+}
+
+function mergeMessages(current: readonly RoomMessage[], incoming: readonly RoomMessage[]): RoomMessage[] {
+  const byId = new Map<string, RoomMessage>()
+  for (const msg of current) byId.set(msg.id, msg)
+  for (const msg of incoming) {
+    if (!isPromptOnlyRoomMessage(msg)) {
+      byId.set(msg.id, msg)
     }
   }
 
-  return all
+  return Array.from(byId.values()).sort((a, b) => {
+    const aNum = Number(/^msg_(\d+)$/.exec(a.id)?.[1] || 0)
+    const bNum = Number(/^msg_(\d+)$/.exec(b.id)?.[1] || 0)
+    if (aNum && bNum && aNum !== bNum) return aNum - bNum
+    return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  })
 }
 
 async function fetchPresence(roomIdentifier: string): Promise<RoomAgentPresence[]> {
@@ -1006,6 +1028,8 @@ async function joinRoom(roomIdentifier: string) {
   stopStreaming()
   room.value = null
   messages.value = []
+  messagesHasOlder.value = false
+  isLoadingOlderMessages.value = false
   tasks.value = []
   focusRooms.value = []
   presence.value = []
@@ -1050,7 +1074,7 @@ async function joinRoom(roomIdentifier: string) {
 
     // Load existing room state in parallel
     const githubAccessIdentifier = getGitHubAccessIdentifier(joinedRoom)
-    const [msgs, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
+    const [messagePage, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
@@ -1061,7 +1085,8 @@ async function joinRoom(roomIdentifier: string) {
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
       fetchTaskGithubStatus(roomIdentifier),
     ])
-    messages.value = msgs
+    messages.value = mergeMessages([], messagePage.messages)
+    messagesHasOlder.value = messagePage.hasOlder
     tasks.value = tsks
     focusRooms.value = focused
     presence.value = prs
@@ -1102,6 +1127,27 @@ async function joinRoom(roomIdentifier: string) {
   }
 }
 
+async function loadOlderMessages(): Promise<boolean> {
+  if (!room.value || isLoadingOlderMessages.value || !messagesHasOlder.value) {
+    return false
+  }
+
+  const firstMessageId = messages.value[0]?.id
+  if (!firstMessageId) {
+    return false
+  }
+
+  isLoadingOlderMessages.value = true
+  try {
+    const page = await fetchMessages(room.value.identifier, firstMessageId)
+    messages.value = mergeMessages(messages.value, page.messages)
+    messagesHasOlder.value = page.hasOlder
+    return page.messages.length > 0
+  } finally {
+    isLoadingOlderMessages.value = false
+  }
+}
+
 /** ── Restore Session ── */
 async function restoreSession(): Promise<boolean> {
   const saved = loadPersistedSession()
@@ -1113,6 +1159,8 @@ function leaveRoom() {
   stopStreaming()
   room.value = null
   messages.value = []
+  messagesHasOlder.value = false
+  isLoadingOlderMessages.value = false
   tasks.value = []
   focusRooms.value = []
   presence.value = []
@@ -1171,6 +1219,8 @@ export function useRoom() {
   return {
     // State
     messages: readonly(messages),
+    messagesHasOlder: readonly(messagesHasOlder),
+    isLoadingOlderMessages: readonly(isLoadingOlderMessages),
     tasks: readonly(tasks),
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
@@ -1204,6 +1254,7 @@ export function useRoom() {
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,
+    loadOlderMessages,
     restoreSession,
     toggleSound,
 

@@ -1863,6 +1863,91 @@ export async function getMessages(
 
   const has_more = rows.length > limit;
   const bounded = has_more ? rows.slice(0, limit) : rows;
+  const hydratedMessages = await hydrateMessageReplies(roomId, bounded);
+
+  return {
+    messages: hydratedMessages,
+    has_more,
+  };
+}
+
+export async function getLatestMessages(
+  roomId: string,
+  options?: { limit?: number; include_prompt_only?: boolean }
+): Promise<{ messages: Message[]; has_more: boolean }> {
+  const limit = clampLimit(options?.limit);
+  const visibilityCondition = options?.include_prompt_only
+    ? sql`TRUE`
+    : sql`NOT (${messages.agent_prompt_kind} = 'auto' AND BTRIM(${messages.text}) = '')`;
+
+  const rows = await db
+    .select({
+      room_id: messages.room_id,
+      number: messages.number,
+      reply_to_number: messages.reply_to_number,
+      sender: messages.sender,
+      text: messages.text,
+      agent_prompt_kind: messages.agent_prompt_kind,
+      source: messages.source,
+      timestamp: messages.timestamp,
+    })
+    .from(messages)
+    .where(and(eq(messages.room_id, roomId), visibilityCondition))
+    .orderBy(desc(messages.number))
+    .limit(limit + 1);
+
+  const has_more = rows.length > limit;
+  const bounded = (has_more ? rows.slice(0, limit) : rows).reverse();
+  const hydratedMessages = await hydrateMessageReplies(roomId, bounded);
+
+  return {
+    messages: hydratedMessages,
+    has_more,
+  };
+}
+
+export async function getMessagesBefore(
+  roomId: string,
+  beforeMessageId: string | undefined,
+  options?: { limit?: number; include_prompt_only?: boolean }
+): Promise<{ messages: Message[]; has_more: boolean }> {
+  const beforeNumber = beforeMessageId ? parseScopedId(beforeMessageId, "msg") : null;
+  if (!beforeNumber) {
+    return getLatestMessages(roomId, options);
+  }
+
+  const limit = clampLimit(options?.limit);
+  const visibilityCondition = options?.include_prompt_only
+    ? sql`TRUE`
+    : sql`NOT (${messages.agent_prompt_kind} = 'auto' AND BTRIM(${messages.text}) = '')`;
+
+  const rows = await db
+    .select({
+      room_id: messages.room_id,
+      number: messages.number,
+      reply_to_number: messages.reply_to_number,
+      sender: messages.sender,
+      text: messages.text,
+      agent_prompt_kind: messages.agent_prompt_kind,
+      source: messages.source,
+      timestamp: messages.timestamp,
+    })
+    .from(messages)
+    .where(and(eq(messages.room_id, roomId), sql`${messages.number} < ${beforeNumber}`, visibilityCondition))
+    .orderBy(desc(messages.number))
+    .limit(limit + 1);
+
+  const has_more = rows.length > limit;
+  const bounded = (has_more ? rows.slice(0, limit) : rows).reverse();
+  const hydratedMessages = await hydrateMessageReplies(roomId, bounded);
+
+  return {
+    messages: hydratedMessages,
+    has_more,
+  };
+}
+
+async function hydrateMessageReplies(roomId: string, bounded: MessageRow[]): Promise<Message[]> {
   const replyToNumbers = Array.from(
     new Set(
       bounded
@@ -1889,10 +1974,9 @@ export async function getMessages(
     }
   }
 
-  return {
-    messages: bounded.map((row) => toMessageWithReply(row, row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null)),
-    has_more,
-  };
+  return bounded.map((row) =>
+    toMessageWithReply(row, row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null)
+  );
 }
 
 export async function getMessagesAfter(
