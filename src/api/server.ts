@@ -64,12 +64,12 @@ import {
   formatRepoRoomEventMessage,
   projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,
-  type RepoPullRequestRef,
   type RepoRoomEvent,
 } from "./repo-workflow.js";
 import {
   createRepoRoomEventTaskResolver,
   emptyRepoRoomEventTaskResolution,
+  getPullRequestWorkflowRef,
   toGitHubRoutingContext,
 } from "./repo-event-task-resolution.js";
 import type { FocusGitHubRoutingContext } from "./focus-room-settings.js";
@@ -650,16 +650,6 @@ async function isTrustedAgentCreator(projectId: string, createdBy: string): Prom
   }
 
   return hasMessagesFromSender(projectId, createdBy);
-}
-
-function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequestRef | null {
-  switch (event.kind) {
-    case "pull_request":
-    case "pull_request_review":
-      return event.pullRequest;
-    default:
-      return null;
-  }
 }
 
 async function maybePublishGitHubLeaseEnforcement(input: {

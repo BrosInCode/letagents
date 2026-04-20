@@ -5,6 +5,7 @@ import type { Task } from "../db.js";
 import {
   createRepoRoomEventTaskResolver,
   emptyRepoRoomEventTaskResolution,
+  getPullRequestWorkflowRef,
   toGitHubRoutingContext,
 } from "../repo-event-task-resolution.js";
 import type {
@@ -118,6 +119,33 @@ test("toGitHubRoutingContext maps task resolution flags", () => {
       matched_workflow_artifact: false,
     }
   );
+});
+
+test("getPullRequestWorkflowRef returns workflow refs for PR-backed events only", () => {
+  const pullRequest = {
+    number: 249,
+    title: "Fix task_1",
+    url: "https://github.com/BrosInCode/letagents/pull/249",
+    body: null,
+  };
+  const pullRequestEvent = makePullRequestEvent({ pullRequest });
+  const reviewEvent: RepoRoomEvent = {
+    provider: "github",
+    kind: "pull_request_review",
+    action: "submitted",
+    repositoryFullName: "BrosInCode/letagents",
+    pullRequest,
+    review: {
+      id: "review_1",
+      state: "approved",
+      url: "https://github.com/BrosInCode/letagents/pull/249#pullrequestreview-1",
+      body: null,
+    },
+  };
+
+  assert.equal(getPullRequestWorkflowRef(pullRequestEvent), pullRequest);
+  assert.equal(getPullRequestWorkflowRef(reviewEvent), pullRequest);
+  assert.equal(getPullRequestWorkflowRef(makeIssueEvent()), null);
 });
 
 test("resolveLinkedTaskForRepoRoomEvent prefers workflow artifact matches", async () => {

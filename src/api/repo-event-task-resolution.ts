@@ -4,6 +4,7 @@ import {
   buildRepoRoomEventArtifactMatches,
   extractReferencedTaskId,
   getRepoRoomEventReferenceTexts,
+  type RepoPullRequestRef,
   type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
@@ -38,6 +39,16 @@ export function toGitHubRoutingContext(
     matched_task_reference: taskResolution.matchedByTaskReference,
     matched_workflow_artifact: taskResolution.matchedByWorkflowArtifact,
   };
+}
+
+export function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequestRef | null {
+  switch (event.kind) {
+    case "pull_request":
+    case "pull_request_review":
+      return event.pullRequest;
+    default:
+      return null;
+  }
 }
 
 function taskIdsMatch(left: string | null | undefined, right: string): boolean {
