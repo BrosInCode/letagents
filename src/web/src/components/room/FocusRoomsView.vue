@@ -903,7 +903,8 @@ function taskStatusLabel(status: string): string {
 .focus-settings-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 16px;
+  align-items: start;
 }
 
 .focus-settings-grid.compact {
