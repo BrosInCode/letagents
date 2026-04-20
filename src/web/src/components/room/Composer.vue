@@ -84,6 +84,41 @@
         @keyup="handleKeyUp"
         rows="1"
       />
+      <div v-if="attachmentDrafts.length || attachmentError" class="attachment-tray">
+        <div v-if="attachmentDrafts.length" class="attachment-list">
+          <div
+            v-for="attachment in attachmentDrafts"
+            :key="attachment.id"
+            class="attachment-chip"
+          >
+            <img
+              v-if="attachment.previewUrl"
+              class="attachment-preview"
+              :src="attachment.previewUrl"
+              alt=""
+            >
+            <span v-else class="attachment-file-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none">
+                <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                <path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="attachment-chip-copy">
+              <strong>{{ attachment.name }}</strong>
+              <span>{{ formatFileSize(attachment.size) }}</span>
+            </span>
+            <button
+              class="attachment-remove"
+              type="button"
+              :aria-label="`Remove ${attachment.name}`"
+              @click="removeAttachment(attachment.id)"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+        <p v-if="attachmentError" class="attachment-error">{{ attachmentError }}</p>
+      </div>
       <div v-if="mentionMenuOpen" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
         <button
           v-for="(candidate, index) in filteredMentionCandidates"
@@ -101,7 +136,27 @@
         </button>
       </div>
       <div class="composer-toolbar">
-        <button class="send-btn" type="submit" :disabled="!text.trim()" aria-label="Send message">
+        <div class="composer-toolbar-left">
+          <input
+            ref="fileInputEl"
+            class="attachment-input"
+            type="file"
+            multiple
+            @change="handleFileSelection"
+          >
+          <button
+            class="attachment-btn"
+            type="button"
+            :disabled="disabled || attachmentDrafts.length >= MAX_ATTACHMENTS"
+            @click="openFilePicker"
+          >
+            Attach
+          </button>
+          <span v-if="attachmentDrafts.length" class="attachment-count">
+            {{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}
+          </span>
+        </div>
+        <button class="send-btn" type="submit" :disabled="!canSend" aria-label="Send message">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
       </div>
@@ -111,10 +166,12 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { type RoomAgentPresence, type RoomMessage, parseAgentIdentity, getReplyPreviewText, isHumanSender } from '@/composables/useRoom'
+import { type OutgoingMessageAttachment, type RoomAgentPresence, type RoomMessage, parseAgentIdentity, getReplyPreviewText, isHumanSender } from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
 const PREFS_KEY = 'lac-prompt-prefs'
+const MAX_ATTACHMENTS = 4
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 const props = withDefaults(defineProps<{
   senderName?: string
@@ -135,17 +192,20 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
-  send: [text: string, agentPromptKind: string | null, replyTo: string | null]
+  send: [text: string, agentPromptKind: string | null, replyTo: string | null, attachments?: OutgoingMessageAttachment[]]
   clearReply: []
   signIn: []
 }>()
 
 const text = ref('')
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
+const fileInputEl = ref<HTMLInputElement | null>(null)
 const menuEl = ref<HTMLDivElement | null>(null)
 const menuOpen = ref(false)
 const autoKeepPolling = ref(false)
 const injectPrompt = ref(false)
+const attachmentDrafts = ref<AttachmentDraft[]>([])
+const attachmentError = ref('')
 const mentionQuery = ref('')
 const mentionStart = ref(-1)
 const mentionEnd = ref(-1)
@@ -153,6 +213,15 @@ const mentionActiveIndex = ref(0)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
 let keepPollingInFlight = false
+
+interface AttachmentDraft {
+  id: string
+  name: string
+  type: string
+  size: number
+  file: File
+  previewUrl: string | null
+}
 
 const replyDisplayName = computed(() => {
   const reply = props.replyTo
@@ -310,7 +379,7 @@ async function sendAutoPollingPrompt() {
   if (!props.roomIdentifier || keepPollingInFlight) return
   keepPollingInFlight = true
   try {
-    emit('send', '', 'auto', null)
+    emit('send', '', 'auto', null, [])
   } finally {
     keepPollingInFlight = false
   }
@@ -419,15 +488,101 @@ function selectMention(candidate: MentionCandidate) {
   })
 }
 
+const canSend = computed(() =>
+  !props.disabled && (text.value.trim().length > 0 || attachmentDrafts.value.length > 0)
+)
+
+function openFilePicker() {
+  attachmentError.value = ''
+  fileInputEl.value?.click()
+}
+
+async function handleFileSelection(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = Array.from(input.files || [])
+  input.value = ''
+  if (!selected.length) return
+
+  attachmentError.value = ''
+  const availableSlots = Math.max(0, MAX_ATTACHMENTS - attachmentDrafts.value.length)
+  const acceptedFiles = selected.slice(0, availableSlots)
+  if (selected.length > availableSlots) {
+    attachmentError.value = `Attach up to ${MAX_ATTACHMENTS} files per message.`
+  }
+
+  for (const file of acceptedFiles) {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      attachmentError.value = `${file.name} is larger than ${formatFileSize(MAX_ATTACHMENT_BYTES)}.`
+      continue
+    }
+    try {
+      const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+      attachmentDrafts.value = [
+        ...attachmentDrafts.value,
+        {
+          id: `${file.name}-${file.size}-${file.lastModified}-${globalThis.crypto?.randomUUID?.() || Date.now()}`,
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+          size: file.size,
+          file,
+          previewUrl,
+        },
+      ]
+    } catch {
+      attachmentError.value = `${file.name} could not be attached.`
+    }
+  }
+}
+
+function removeAttachment(id: string) {
+  for (const attachment of attachmentDrafts.value) {
+    if (attachment.id === id && attachment.previewUrl) {
+      URL.revokeObjectURL(attachment.previewUrl)
+    }
+  }
+  attachmentDrafts.value = attachmentDrafts.value.filter((attachment) => attachment.id !== id)
+}
+
+function clearAttachments() {
+  for (const attachment of attachmentDrafts.value) {
+    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl)
+  }
+  attachmentDrafts.value = []
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = bytes
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  const precision = size >= 10 || unitIndex === 0 ? 0 : 1
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
+}
+
+function buildOutgoingAttachments(): OutgoingMessageAttachment[] {
+  return attachmentDrafts.value.map((attachment) => ({
+    file_name: attachment.name,
+    mime_type: attachment.type,
+    size_bytes: attachment.size,
+    file: attachment.file,
+  }))
+}
+
 // ── Send ──
 function handleSend() {
   const trimmed = text.value.trim()
-  if (!trimmed || props.disabled) return
+  if (!canSend.value) return
 
   // Determine agent_prompt_kind for this message
   const kind = injectPrompt.value ? 'inline' : null
-  emit('send', trimmed, kind, props.replyTo?.id || null)
+  emit('send', trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
   text.value = ''
+  clearAttachments()
+  attachmentError.value = ''
   resetMentionContext()
   if (textareaEl.value) {
     textareaEl.value.style.height = 'auto'
@@ -486,6 +641,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopKeepPollingLoop()
+  clearAttachments()
   document.removeEventListener('click', handleDocClick)
 })
 
@@ -625,6 +781,105 @@ watch(filteredMentionCandidates, (candidates) => {
   font-size: 0.72rem;
   color: var(--muted, #71717a);
 }
+.attachment-tray {
+  display: grid;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attachment-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  max-width: min(100%, 360px);
+  padding: 6px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface, #18181b) 88%, var(--text, #fafafa) 5%);
+}
+.attachment-preview,
+.attachment-file-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  border: 1px solid var(--line, #27272a);
+  background: var(--bg-0, #09090b);
+  flex-shrink: 0;
+}
+.attachment-preview {
+  object-fit: cover;
+}
+.attachment-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #a1a1aa);
+}
+.attachment-file-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.attachment-chip-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.attachment-chip-copy strong,
+.attachment-chip-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip-copy strong {
+  font-size: 0.76rem;
+  color: var(--text, #fafafa);
+}
+.attachment-chip-copy span,
+.attachment-count,
+.attachment-error {
+  font-size: 0.68rem;
+  color: var(--muted, #71717a);
+}
+.attachment-error {
+  margin: 0;
+  color: #fca5a5;
+}
+.attachment-remove,
+.attachment-btn {
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease, opacity 150ms ease;
+}
+.attachment-remove {
+  padding: 5px 8px;
+}
+.attachment-btn {
+  height: 30px;
+  padding: 0 10px;
+}
+.attachment-remove:hover,
+.attachment-btn:hover:not(:disabled) {
+  border-color: var(--line-strong, #3f3f46);
+  background: rgba(255, 255, 255, 0.08);
+}
+.attachment-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.attachment-input {
+  display: none;
+}
 .composer-pills-row {
   display: flex;
   align-items: center;
@@ -641,7 +896,8 @@ watch(filteredMentionCandidates, (candidates) => {
 .composer-toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 8px;
   padding: 0 6px 6px;
 }
 .composer-toolbar-left {
@@ -847,6 +1103,8 @@ watch(filteredMentionCandidates, (candidates) => {
   .message-textarea { padding: 12px 14px 6px; font-size: 0.88rem; min-height: 44px; max-height: 120px; }
   .composer-pills-row { padding: 0 2px 4px; }
   .composer-toolbar { padding: 0 4px 4px; }
+  .attachment-tray { padding: 0 6px 6px; }
+  .attachment-chip { max-width: 100%; }
   .composer-mention-panel { padding: 0 6px 6px; }
   .composer-mention-option { padding: 8px 10px; }
   .prompt-panel { width: 220px; }

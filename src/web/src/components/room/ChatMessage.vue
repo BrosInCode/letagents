@@ -70,11 +70,39 @@
         </button>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
         <LongMessageContent
-          v-else
+          v-else-if="message.text"
           :text="message.text || ''"
           :html="renderedContent"
           :messageId="message.id"
         />
+        <div v-if="attachments.length" class="message-attachments">
+          <a
+            v-for="attachment in attachments"
+            :key="attachmentKey(attachment)"
+            class="message-attachment"
+            :href="attachmentHref(attachment)"
+            :download="attachmentName(attachment)"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <img
+              v-if="isImageAttachment(attachment)"
+              class="message-attachment-image"
+              :src="attachmentHref(attachment)"
+              :alt="attachmentName(attachment)"
+            >
+            <span v-else class="message-attachment-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none">
+                <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                <path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="message-attachment-copy">
+              <strong>{{ attachmentName(attachment) }}</strong>
+              <span>{{ attachmentMeta(attachment) }}</span>
+            </span>
+          </a>
+        </div>
       </div>
       <button
         v-if="hasThread"
@@ -97,7 +125,7 @@ import { computed } from 'vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
-import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
+import { type RoomMessage, type RoomMessageAttachment, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
 
 interface MessageThreadSummary {
   count: number
@@ -122,6 +150,7 @@ const isSystem = computed(() => {
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
 const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
+const attachments = computed(() => props.message.attachments || [])
 
 // Prefer the rich agent_identity from the API, fall back to sender-string parsing
 const ideLabel = computed(() => {
@@ -188,6 +217,55 @@ const formattedTime = computed(() => {
 })
 
 const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
+function attachmentName(attachment: RoomMessageAttachment): string {
+  return attachment.file_name || attachment.filename || attachment.name || 'attachment'
+}
+
+function attachmentMimeType(attachment: RoomMessageAttachment): string {
+  return attachment.mime_type || attachment.content_type || 'application/octet-stream'
+}
+
+function attachmentSize(attachment: RoomMessageAttachment): number {
+  return Number(attachment.size_bytes ?? attachment.byte_size ?? 0)
+}
+
+function attachmentHref(attachment: RoomMessageAttachment): string {
+  if (attachment.url) return attachment.url
+  if (attachment.download_url) return attachment.download_url
+  if (attachment.data_url) return attachment.data_url
+  if (attachment.content_base64) {
+    return `data:${attachmentMimeType(attachment)};base64,${attachment.content_base64}`
+  }
+  return '#'
+}
+
+function isImageAttachment(attachment: RoomMessageAttachment): boolean {
+  return attachmentMimeType(attachment).startsWith('image/') && attachmentHref(attachment) !== '#'
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = bytes
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  const precision = size >= 10 || unitIndex === 0 ? 0 : 1
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
+}
+
+function attachmentMeta(attachment: RoomMessageAttachment): string {
+  return [attachmentMimeType(attachment), formatAttachmentSize(attachmentSize(attachment))]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function attachmentKey(attachment: RoomMessageAttachment): string {
+  return attachment.id || `${attachmentName(attachment)}-${attachmentSize(attachment)}-${attachmentMimeType(attachment)}`
+}
 
 const renderedContent = computed(() => {
   const text = props.message.text || ''
@@ -342,6 +420,72 @@ const renderedContent = computed(() => {
 
 .reply-message .message-bubble {
   border-left-style: dashed;
+}
+
+.message-attachments {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.message-attachment {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  max-width: min(100%, 420px);
+  padding: 8px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface, #18181b) 82%, transparent);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.message-attachment:hover,
+.message-attachment:focus-visible {
+  border-color: color-mix(in srgb, var(--sender-color, #71717a) 45%, var(--line-strong, #3f3f46));
+  background: color-mix(in srgb, var(--surface, #18181b) 92%, var(--sender-color, #71717a) 8%);
+  outline: none;
+}
+.message-attachment-image,
+.message-attachment-icon {
+  width: 54px;
+  height: 54px;
+  border-radius: 6px;
+  border: 1px solid var(--line, #27272a);
+  background: var(--bg-0, #09090b);
+}
+.message-attachment-image {
+  object-fit: cover;
+}
+.message-attachment-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #a1a1aa);
+}
+.message-attachment-icon svg {
+  width: 22px;
+  height: 22px;
+}
+.message-attachment-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.message-attachment-copy strong,
+.message-attachment-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message-attachment-copy strong {
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+}
+.message-attachment-copy span {
+  color: var(--muted, #a1a1aa);
+  font-size: 0.72rem;
 }
 
 .reply-preview {

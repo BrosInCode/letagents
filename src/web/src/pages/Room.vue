@@ -213,7 +213,7 @@ import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import { useToast } from '@/composables/useToast'
-import type { FocusRoomInfo, FocusRoomSettingsPatch, RoomMessage } from '@/composables/useRoom'
+import type { FocusRoomInfo, FocusRoomSettingsPatch, OutgoingMessageAttachment, RoomMessage } from '@/composables/useRoom'
 
 const route = useRoute()
 const router = useRouter()
@@ -329,8 +329,13 @@ const joinErrorBody = computed(() => {
   return joinError.value?.message || 'Could not connect to room.'
 })
 
-async function handleSend(text: string, agentPromptKind: string | null, replyTo: string | null) {
-  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo)
+async function handleSend(
+  text: string,
+  agentPromptKind: string | null,
+  replyTo: string | null,
+  attachments: OutgoingMessageAttachment[] = [],
+) {
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments)
   if (sent) {
     selectedReply.value = null
   }
