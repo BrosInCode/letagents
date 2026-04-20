@@ -107,6 +107,7 @@ jobs:
           src/api/__tests__/coordination-db.test.ts
 
       - name: Run focus room tests
+        timeout-minutes: 5
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
