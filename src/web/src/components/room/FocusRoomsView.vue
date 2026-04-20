@@ -8,111 +8,123 @@
       </div>
     </section>
 
-    <section v-if="isFocusRoom" class="focus-context" :data-concluded="isConcluded">
-      <div>
-        <p class="focus-eyebrow">Current Focus Room</p>
-        <h4>{{ sourceTaskId || 'Ad-hoc room' }}</h4>
-        <p>{{ focusContextCopy }}</p>
-      </div>
-      <dl class="focus-facts compact">
+    <section v-if="isFocusRoom" class="focus-context-container">
+      <div class="focus-context-header" :data-concluded="isConcluded">
         <div>
-          <dt>Parent</dt>
-          <dd>{{ roomAddress }}</dd>
+          <p class="focus-eyebrow">Current Focus Room</p>
+          <h4>{{ sourceTaskId || 'Ad-hoc room' }}</h4>
+          <p>{{ focusContextCopy }}</p>
         </div>
-        <div>
-          <dt>Source task</dt>
-          <dd>{{ sourceTaskId || 'Not linked yet' }}</dd>
-        </div>
-        <div>
-          <dt>Status</dt>
-          <dd>{{ focusStatusLabel }}</dd>
-        </div>
-        <div>
-          <dt>Parent chat</dt>
-          <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
-        </div>
-      </dl>
-      <div class="focus-context-actions">
-        <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
-          Back to parent room
-        </button>
-      </div>
-      <form v-if="settingsTarget" class="focus-settings-form" @submit.prevent="submitFocusSettings">
-        <div class="focus-settings-heading">
+        <dl class="focus-facts compact">
           <div>
-            <p class="focus-eyebrow">Visibility settings</p>
-            <h4>Choose what leaves this room.</h4>
+            <dt>Parent</dt>
+            <dd>{{ roomAddress }}</dd>
           </div>
-          <button
-            class="focus-secondary"
-            type="submit"
-            :disabled="!canSaveSettings"
-          >
-            {{ settingsButtonLabel }}
+          <div>
+            <dt>Source task</dt>
+            <dd>{{ sourceTaskId || 'Not linked yet' }}</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd>{{ focusStatusLabel }}</dd>
+          </div>
+          <div>
+            <dt>Parent chat</dt>
+            <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
+          </div>
+        </dl>
+        <div class="focus-context-actions">
+          <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
+            Back to parent room
           </button>
         </div>
-        <div class="focus-settings-grid">
-          <label>
-            <span>Parent chat</span>
-            <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
-              <option
-                v-for="option in parentVisibilityOptions"
-                :key="option.value"
-                :value="option.value"
-              >
-                {{ option.label }}
-              </option>
-            </select>
-            <small>{{ parentVisibilityDescription }}</small>
-          </label>
-          <label>
-            <span>Activity scope</span>
-            <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
-              <option
-                v-for="option in activityScopeOptions"
-                :key="option.value"
-                :value="option.value"
-              >
-                {{ option.label }}
-              </option>
-            </select>
-            <small>{{ activityScopeDescription }}</small>
-          </label>
-          <label>
-            <span>GitHub events</span>
-            <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
-              <option
-                v-for="option in githubEventRoutingOptions"
-                :key="option.value"
-                :value="option.value"
-              >
-                {{ option.label }}
-              </option>
-            </select>
-            <small>{{ githubEventRoutingDescription }}</small>
-          </label>
-        </div>
-      </form>
-      <form class="focus-share-form" @submit.prevent="submitShareResults">
-        <label class="focus-share-label" for="focus-result-summary">Result summary</label>
-        <textarea
-          id="focus-result-summary"
-          v-model="resultSummary"
-          :disabled="isConcluded || isSharingFocusResult"
-          :placeholder="sharePlaceholder"
-          rows="4"
-        />
-        <div class="focus-share-footer">
-          <p>{{ shareHelpText }}</p>
-          <button
-            class="focus-primary"
-            type="submit"
-            :disabled="!canShareResults"
-          >
-            {{ shareButtonLabel }}
-          </button>
-        </div>
-      </form>
+      </div>
+
+      <div class="focus-context-panels">
+        <form v-if="settingsTarget" class="focus-settings-form" @submit.prevent="submitFocusSettings">
+          <div class="focus-panel-header">
+            <div>
+              <p class="focus-eyebrow">Visibility settings</p>
+              <h4>Choose what leaves this room.</h4>
+            </div>
+            <button
+              class="focus-secondary"
+              type="submit"
+              :disabled="!canSaveSettings"
+            >
+              {{ settingsButtonLabel }}
+            </button>
+          </div>
+          <div class="focus-settings-grid">
+            <label>
+              <span>Parent chat</span>
+              <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
+                <option
+                  v-for="option in parentVisibilityOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <small>{{ parentVisibilityDescription }}</small>
+            </label>
+            <label>
+              <span>Activity scope</span>
+              <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
+                <option
+                  v-for="option in activityScopeOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <small>{{ activityScopeDescription }}</small>
+            </label>
+            <label>
+              <span>GitHub events</span>
+              <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
+                <option
+                  v-for="option in githubEventRoutingOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <small>{{ githubEventRoutingDescription }}</small>
+            </label>
+          </div>
+        </form>
+        <form class="focus-share-form" @submit.prevent="submitShareResults">
+          <div class="focus-panel-header">
+            <div>
+              <p class="focus-eyebrow">Result summary</p>
+              <h4 v-if="isConcluded">Focus room concluded.</h4>
+              <h4 v-else>Share task outcome.</h4>
+            </div>
+          </div>
+          <textarea
+            id="focus-result-summary"
+            v-model="resultSummary"
+            :disabled="isConcluded || isSharingFocusResult"
+            :placeholder="sharePlaceholder"
+            rows="3"
+            class="focus-result-textarea"
+          />
+          <div class="focus-share-footer">
+            <p>{{ shareHelpText }}</p>
+            <button
+              class="focus-primary"
+              type="submit"
+              :disabled="!canShareResults"
+            >
+              {{ shareButtonLabel }}
+            </button>
+          </div>
+        </form>
+      </div>
     </section>
 
     <div class="focus-layout">
@@ -669,7 +681,8 @@ function taskStatusLabel(status: string): string {
   font-size: 1.45rem;
 }
 
-.focus-context h4,
+.focus-context-header h4,
+.focus-panel-header h4,
 .focus-adhoc h4,
 .focus-detail h4,
 .focus-empty h4 {
@@ -679,7 +692,8 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-hero p,
-.focus-context p,
+.focus-context-header p,
+.focus-panel-header p,
 .focus-adhoc p,
 .focus-section-header p,
 .focus-detail-copy,
@@ -763,20 +777,28 @@ function taskStatusLabel(status: string): string {
   color: #fca5a5;
 }
 
-.focus-context {
+.focus-context-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.focus-context-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(240px, 0.8fr) auto;
   gap: 14px;
   align-items: center;
-  margin-bottom: 14px;
-  padding: 14px;
-  border: 1px solid var(--line, #27272a);
+  padding: 18px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
-  background: var(--bg-1, #0f0f11);
+  background: var(--bg-card, #131316);
+  letter-spacing: 0;
 }
 
-.focus-context h4 {
-  font-size: 1rem;
+.focus-context-header[data-concluded="true"] {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.02);
 }
 
 .focus-context-actions {
@@ -784,32 +806,32 @@ function taskStatusLabel(status: string): string {
   gap: 8px;
 }
 
-.focus-context[data-concluded="true"] {
-  border-color: rgba(34, 197, 94, 0.35);
+.focus-context-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
 }
 
+.focus-settings-form,
 .focus-share-form {
-  grid-column: 1 / -1;
-  display: grid;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.focus-settings-form {
-  grid-column: 1 / -1;
-  display: grid;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(96, 165, 250, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
-  background: linear-gradient(135deg, rgba(96, 165, 250, 0.08), rgba(20, 184, 166, 0.05));
+  background: var(--bg-card, #131316);
+  letter-spacing: 0;
 }
 
 .focus-settings-form.compact {
-  margin: 10px 0 14px;
-  background: rgba(96, 165, 250, 0.06);
+  padding: 14px;
+  margin: 0 0 14px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
+.focus-panel-header,
 .focus-settings-heading {
   display: flex;
   align-items: flex-start;
@@ -817,16 +839,19 @@ function taskStatusLabel(status: string): string {
   gap: 12px;
 }
 
+.focus-panel-header h4,
 .focus-settings-heading h4 {
   margin: 0;
   color: var(--text, #fafafa);
   font-size: 0.92rem;
 }
 
+.focus-panel-header .focus-eyebrow,
 .focus-settings-heading .focus-eyebrow {
   margin-bottom: 4px;
 }
 
+.focus-panel-header .focus-secondary,
 .focus-settings-heading .focus-secondary {
   flex-shrink: 0;
 }
@@ -876,12 +901,11 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-share-label {
-  color: var(--text, #fafafa);
-  font-size: 0.78rem;
-  font-weight: 800;
+  display: none;
 }
 
-.focus-share-form textarea {
+.focus-result-textarea {
+  flex-grow: 1;
   width: 100%;
   min-height: 96px;
   resize: vertical;
@@ -895,7 +919,7 @@ function taskStatusLabel(status: string): string {
   line-height: 1.5;
 }
 
-.focus-share-form textarea:disabled {
+.focus-result-textarea:disabled {
   cursor: not-allowed;
   opacity: 0.72;
 }
@@ -905,6 +929,7 @@ function taskStatusLabel(status: string): string {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-top: auto;
 }
 
 .focus-share-footer p {
@@ -1108,8 +1133,12 @@ function taskStatusLabel(status: string): string {
 }
 
 @media (max-width: 860px) {
-  .focus-context,
+  .focus-context-header,
   .focus-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .focus-context-panels {
     grid-template-columns: 1fr;
   }
 
@@ -1152,12 +1181,15 @@ function taskStatusLabel(status: string): string {
   }
 
   .focus-settings-heading,
+  .focus-panel-header,
   .focus-settings-grid {
     grid-template-columns: 1fr;
   }
 
-  .focus-settings-heading {
+  .focus-settings-heading,
+  .focus-panel-header {
     align-items: stretch;
+    flex-direction: column;
   }
 
   .focus-share-footer .focus-primary {
