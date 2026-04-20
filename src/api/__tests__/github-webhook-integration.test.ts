@@ -139,6 +139,7 @@ async function startServer(): Promise<{ child: ChildProcessWithoutNullStreams; p
     env: {
       ...process.env,
       DB_URL: testDatabaseUrl,
+      HOST: "127.0.0.1",
       PORT: String(port),
       GITHUB_WEBHOOK_SECRET: webhookSecret,
     },
