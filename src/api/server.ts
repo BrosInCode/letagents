@@ -120,10 +120,12 @@ import {
   type CoordinationMutationKind,
 } from "./coordination-policy.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
+import type { AgentPromptKind } from "../shared/room-agent-prompts.js";
 import {
-  normalizeAgentPromptKind,
-  type AgentPromptKind,
-} from "../shared/room-agent-prompts.js";
+  parseOptionalAgentPromptKind,
+  parseOptionalReplyToMessageId,
+  shouldIncludePromptOnlyMessages,
+} from "./message-inputs.js";
 import {
   respondWithError,
   type AuthenticatedRequest,
@@ -233,50 +235,6 @@ async function emitProjectMessage(
   });
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
-}
-
-function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
-  if (value === undefined || value === null || value === "") {
-    return null;
-  }
-
-  const normalizedValue = typeof value === "string" ? value.trim().toLowerCase() : value;
-  if (normalizedValue === "join") {
-    throw new Error("agent_prompt_kind must be one of: inline, auto");
-  }
-
-  const kind = normalizeAgentPromptKind(normalizedValue);
-  if (!kind) {
-    throw new Error("agent_prompt_kind must be one of: inline, auto");
-  }
-
-  return kind;
-}
-
-function parseOptionalReplyToMessageId(value: unknown): string | null {
-  if (value === undefined || value === null || value === "") {
-    return null;
-  }
-
-  if (typeof value !== "string") {
-    throw new Error("reply_to must be a valid message id");
-  }
-
-  const normalized = value.trim();
-  if (!/^msg_\d+$/.test(normalized)) {
-    throw new Error("reply_to must be a valid message id");
-  }
-
-  return normalized;
-}
-
-function shouldIncludePromptOnlyMessages(req: express.Request): boolean {
-  const value = req.query.include_prompt_only;
-  if (typeof value !== "string") {
-    return false;
-  }
-
-  return value === "1" || value.toLowerCase() === "true";
 }
 
 function formatTaskLifecycleStatus(task: {
