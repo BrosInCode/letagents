@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { RoomAgentPresence, Task } from "../db.js";
-import { STALE_TASK_THRESHOLD_MS, selectStaleTaskAutoPrompt } from "../stale-work.js";
+import type { Message, RoomAgentPresence, Task } from "../db.js";
+import {
+  createStaleWorkPromptEmitter,
+  STALE_TASK_THRESHOLD_MS,
+  STALE_WORK_PROMPT_COOLDOWN_MS,
+  selectStaleTaskAutoPrompt,
+} from "../stale-work.js";
 
 const NOW = Date.parse("2026-04-07T21:00:00.000Z");
 
@@ -42,6 +47,18 @@ function buildPresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPre
     created_at: overrides.created_at ?? isoMinutesAgo(180),
     updated_at: overrides.updated_at ?? isoMinutesAgo(1),
     freshness: overrides.freshness ?? "active",
+  };
+}
+
+function buildMessage(text: string, index: number): Message {
+  return {
+    id: `msg_${index}`,
+    sender: "letagents",
+    text,
+    agent_prompt_kind: "auto",
+    source: undefined,
+    timestamp: new Date(NOW).toISOString(),
+    reply_to: null,
   };
 }
 
@@ -124,4 +141,68 @@ test("selectStaleTaskAutoPrompt skips fresh tasks that have not crossed the stal
   });
 
   assert.equal(prompt, null);
+});
+
+test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", async () => {
+  let now = NOW;
+  const staleTask = buildTask({
+    id: "task_62",
+    updated_at: isoMinutesAgo(
+      Math.ceil(STALE_TASK_THRESHOLD_MS.accepted_unclaimed / 60_000) + 5
+    ),
+  });
+  const taskCalls: Array<{ projectId: string; limit: number }> = [];
+  const presenceCalls: Array<{ projectId: string; limit: number }> = [];
+  const emitted: Array<{
+    projectId: string;
+    sender: string;
+    text: string;
+    task: { id: string; title: string };
+    options: {
+      agent_prompt_kind: "auto";
+      parent_activity: string;
+      parent_event_kind: "all_activity";
+    };
+  }> = [];
+  const emitter = createStaleWorkPromptEmitter({
+    getOpenTasks: async (projectId, options) => {
+      taskCalls.push({ projectId, limit: options.limit });
+      return { tasks: [staleTask] };
+    },
+    getRoomAgentPresence: async (projectId, options) => {
+      presenceCalls.push({ projectId, limit: options.limit });
+      return [buildPresence()];
+    },
+    emitTaskAnchoredMessage: async (projectId, sender, text, task, options) => {
+      emitted.push({ projectId, sender, text, task, options });
+      return buildMessage(text, emitted.length);
+    },
+    now: () => now,
+  });
+
+  const firstMessage = await emitter.maybeEmitStaleWorkPrompt(
+    "github.com/brosincode/letagents"
+  );
+  const secondMessage = await emitter.maybeEmitStaleWorkPrompt(
+    "github.com/brosincode/letagents"
+  );
+  now += STALE_WORK_PROMPT_COOLDOWN_MS + 1;
+  const thirdMessage = await emitter.maybeEmitStaleWorkPrompt(
+    "github.com/brosincode/letagents"
+  );
+
+  assert.equal(firstMessage?.id, "msg_1");
+  assert.equal(secondMessage, null);
+  assert.equal(thirdMessage?.id, "msg_2");
+  assert.deepEqual(taskCalls.map((call) => call.limit), [200, 200, 200]);
+  assert.deepEqual(presenceCalls.map((call) => call.limit), [50, 50, 50]);
+  assert.equal(emitted.length, 2);
+  assert.equal(emitted[0]?.projectId, "github.com/brosincode/letagents");
+  assert.equal(emitted[0]?.sender, "letagents");
+  assert.equal(emitted[0]?.task.id, "task_62");
+  assert.deepEqual(emitted[0]?.options, {
+    agent_prompt_kind: "auto",
+    parent_activity: "Stale-work prompt",
+    parent_event_kind: "all_activity",
+  });
 });
