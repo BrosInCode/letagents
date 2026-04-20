@@ -9,20 +9,20 @@ import {
   deleteSessionByToken,
   refreshProviderAccessTokenForAccount,
   upsertAccount,
-} from "./db.js";
-import { db } from "./db/client.js";
-import { system_github_app } from "./db/schema.js";
-import { buildGitHubAppSetupRedirectPath } from "./github-app-installation.js";
+} from "../db.js";
+import { db } from "../db/client.js";
+import { system_github_app } from "../db/schema.js";
+import { buildGitHubAppSetupRedirectPath } from "../github-app-installation.js";
 import {
   clearGitHubRepoAccessCacheForLogin,
-} from "./github-repo-access.js";
+} from "../github-repo-access.js";
 import {
   buildGitHubAuthorizeUrl,
   exchangeGitHubDeviceCodeForAccessToken,
   exchangeGitHubCodeForAccessToken,
   fetchGitHubUser,
   requestGitHubDeviceCode,
-} from "./github-oauth.js";
+} from "../github-oauth.js";
 import {
   clearSessionCookie,
   parseCookies,
@@ -30,7 +30,7 @@ import {
   sanitizeRedirectPath,
   setSessionCookie,
   type AuthenticatedRequest,
-} from "./http-helpers.js";
+} from "../http-helpers.js";
 
 interface PendingDeviceAuth {
   deviceCode: string;
