@@ -30,9 +30,7 @@ import {
   isProjectAdmin,
   markGitHubAppInstallationUninstalled,
   markGitHubAppRepositoryRemoved,
-  markGitHubWebhookDeliveryProcessed,
   migrateGitHubRepositoryCanonicalRoom,
-  recordGitHubWebhookDelivery,
   setGitHubAppInstallationSuspended,
   updateGitHubRoomEventLinkedTaskId,
   updateTaskLeaseWorkflowRefs,
@@ -62,8 +60,6 @@ import {
   buildGitHubRepoRoomId,
   getGitHubInstallationTarget,
   getGitHubRepositoryOwnerLogin,
-  getGitHubWebhookMetadata,
-  verifyGitHubWebhookSignature,
   type GitHubWebhookPayload,
   type GitHubWebhookRepository,
 } from "./github-app.js";
@@ -131,7 +127,6 @@ import {
 import {
   parseCookies,
   respondWithError,
-  respondWithInternalError,
   sanitizeRedirectPath,
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
@@ -189,6 +184,10 @@ import {
   registerRoomJoinRoutes,
   type RoomJoinRouteDeps,
 } from "./routes/room-join.js";
+import {
+  registerGitHubWebhookRoutes,
+  type GitHubWebhookRouteDeps,
+} from "./routes/github-webhooks.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2440,6 +2439,11 @@ const roomJoinRouteDeps = {
   toRoomResponse,
 } satisfies RoomJoinRouteDeps;
 
+const githubWebhookRouteDeps = {
+  toGitHubWebhookId,
+  handleGitHubWebhookEvent,
+} satisfies GitHubWebhookRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2448,88 +2452,7 @@ app.get("/api/health", (_req, res) => {
 
 registerGitHubAppCallbackRoute(app);
 
-app.post("/webhooks/github", async (req: AuthenticatedRequest, res) => {
-  const config = await getGitHubAppConfig();
-  if (!config.webhookSecret) {
-    res.status(503).json({ error: "GitHub App webhook handling is not configured" });
-    return;
-  }
-
-  const rawBody = req.rawBody;
-  if (!rawBody) {
-    res.status(400).json({ error: "Raw webhook body is required" });
-    return;
-  }
-
-  const metadata = getGitHubWebhookMetadata(
-    req.headers as Record<string, string | string[] | undefined>
-  );
-  if (!metadata.deliveryId || !metadata.eventName) {
-    res.status(400).json({ error: "Missing GitHub webhook headers" });
-    return;
-  }
-
-  if (!verifyGitHubWebhookSignature(rawBody, metadata.signature256, config.webhookSecret)) {
-    res.status(401).json({ error: "Invalid GitHub webhook signature" });
-    return;
-  }
-
-  const payload = req.body as GitHubWebhookPayload;
-  const initialInstallationId = toGitHubWebhookId(payload.installation?.id);
-  const initialGitHubRepoId = toGitHubWebhookId(payload.repository?.id);
-  const initialRoomId = payload.repository?.full_name
-    ? buildGitHubRepoRoomId(payload.repository.full_name)
-    : null;
-
-  const delivery = await recordGitHubWebhookDelivery({
-    delivery_id: metadata.deliveryId,
-    event_name: metadata.eventName,
-    action: payload.action ?? null,
-    installation_id: initialInstallationId,
-    github_repo_id: initialGitHubRepoId,
-    room_id: initialRoomId,
-  });
-
-  if (delivery.duplicate) {
-    res.status(202).json({ ok: true, duplicate: true });
-    return;
-  }
-
-  try {
-    const result = await handleGitHubWebhookEvent(
-      metadata.eventName,
-      payload,
-      metadata.deliveryId
-    );
-    await markGitHubWebhookDeliveryProcessed(metadata.deliveryId, {
-      status: result.status,
-      installation_id: result.installationId,
-      github_repo_id: result.githubRepoId,
-      room_id: result.roomId,
-      error: null,
-    });
-
-    res.status(202).json({
-      ok: true,
-      status: result.status,
-    });
-  } catch (error) {
-    await markGitHubWebhookDeliveryProcessed(metadata.deliveryId, {
-      status: "failed",
-      installation_id: initialInstallationId,
-      github_repo_id: initialGitHubRepoId,
-      room_id: initialRoomId,
-      error: error instanceof Error ? error.message : "Unknown GitHub webhook processing error",
-    });
-
-    respondWithInternalError(
-      res,
-      "POST /webhooks/github",
-      error,
-      "GitHub webhook processing failed."
-    );
-  }
-});
+registerGitHubWebhookRoutes(app, githubWebhookRouteDeps);
 
 registerAuthRoutes(app);
 
