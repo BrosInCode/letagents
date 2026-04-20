@@ -34,6 +34,7 @@ const tsxBinary = path.resolve(
   ".bin",
   process.platform === "win32" ? "tsx.cmd" : "tsx"
 );
+const SERVER_READY_ATTEMPTS = 120;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -75,7 +76,7 @@ async function waitForServer(
   child: ChildProcessWithoutNullStreams,
   stderrBuffer: () => string
 ): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < SERVER_READY_ATTEMPTS; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(`focus room test server exited early: ${stderrBuffer()}`.trim());
     }
@@ -100,7 +101,8 @@ async function startApiServer(): Promise<{ child: ChildProcessWithoutNullStreams
     throw new Error("DB-backed focus room tests require TEST_DB_URL");
   }
 
-  const port = 4100 + Math.floor(Math.random() * 500);
+  const port = 4100 + Math.floor(Math.random() * 2000);
+  let stdout = "";
   let stderr = "";
 
   const child = spawn(tsxBinary, ["src/api/server.ts"], {
@@ -113,17 +115,24 @@ async function startApiServer(): Promise<{ child: ChildProcessWithoutNullStreams
     stdio: ["ignore", "pipe", "pipe"],
   });
 
+  child.stdout.on("data", (chunk: Buffer | string) => {
+    stdout += chunk.toString();
+  });
   child.stderr.on("data", (chunk: Buffer | string) => {
     stderr += chunk.toString();
   });
-  child.stdout.resume();
 
-  await waitForServer(port, child, () => stderr);
-  return { child, port };
+  try {
+    await waitForServer(port, child, () => [stderr, stdout].filter(Boolean).join("\n"));
+    return { child, port };
+  } catch (error) {
+    await stopChildProcess(child);
+    throw error;
+  }
 }
 
 async function stopChildProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (child.exitCode !== null) {
+  if (child.exitCode !== null || child.signalCode !== null) {
     return;
   }
 
@@ -133,7 +142,7 @@ async function stopChildProcess(child: ChildProcessWithoutNullStreams): Promise<
     sleep(5000),
   ]);
 
-  if (child.exitCode === null) {
+  if (child.exitCode === null && child.signalCode === null) {
     child.kill("SIGKILL");
     await once(child, "exit");
   }
