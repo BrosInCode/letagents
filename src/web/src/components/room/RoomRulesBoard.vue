@@ -1,89 +1,91 @@
 <template>
   <Teleport to="body">
-    <div
-      v-if="open"
-      class="rules-overlay"
-      role="presentation"
-      @click="$emit('close')"
-    >
-      <section
-        class="rules-board"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="rules-board-title"
-        @click.stop
+    <Transition name="rules-panel">
+      <div
+        v-if="open"
+        class="rules-overlay"
+        role="presentation"
+        @click="$emit('close')"
       >
-        <header class="rules-board-header">
-          <div>
-            <p class="rules-eyebrow">Pinned room rules</p>
-            <h2 id="rules-board-title">Repo Room Operating Rules</h2>
+        <section
+          class="rules-board"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rules-board-title"
+          @click.stop
+        >
+          <header class="rules-board-header">
+            <div>
+              <p class="rules-eyebrow">Pinned room rules</p>
+              <h2 id="rules-board-title">Repo Room Operating Rules</h2>
+            </div>
+            <button class="rules-close" type="button" aria-label="Close rules board" @click="$emit('close')">
+              &times;
+            </button>
+          </header>
+
+          <div class="rules-board-body">
+            <section class="rules-section">
+              <div class="rules-section-heading">
+                <h3>Required Workflow</h3>
+                <p>Use the board, lease, and PR as the source of truth.</p>
+              </div>
+              <ol class="rules-list">
+                <li v-for="rule in workflowRules" :key="rule.title">
+                  <strong>{{ rule.title }}</strong>
+                  <span>{{ rule.body }}</span>
+                </li>
+              </ol>
+            </section>
+
+            <section class="rules-section">
+              <div class="rules-section-heading">
+                <h3>Active Task Authority</h3>
+                <p>Current tasks with lease, lock, or review state.</p>
+              </div>
+              <div v-if="authorityRows.length" class="authority-list">
+                <article v-for="row in authorityRows" :key="row.id" class="authority-row">
+                  <div class="authority-main">
+                    <span class="authority-id">{{ row.shortId }}</span>
+                    <strong>{{ row.title }}</strong>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{{ row.status }}</dd>
+                    </div>
+                    <div>
+                      <dt>Lease</dt>
+                      <dd>{{ row.lease }}</dd>
+                    </div>
+                    <div>
+                      <dt>Branch</dt>
+                      <dd>{{ row.branch }}</dd>
+                    </div>
+                    <div>
+                      <dt>PR</dt>
+                      <dd>{{ row.pr }}</dd>
+                    </div>
+                  </dl>
+                </article>
+              </div>
+              <p v-else class="rules-empty">No active task authority is currently exposed on the board.</p>
+            </section>
+
+            <section class="rules-section">
+              <div class="rules-section-heading">
+                <h3>Warning Meanings</h3>
+                <p>Read warnings as routing signals before taking action.</p>
+              </div>
+              <details v-for="warning in warningRules" :key="warning.title" class="warning-row">
+                <summary>{{ warning.title }}</summary>
+                <p>{{ warning.body }}</p>
+              </details>
+            </section>
           </div>
-          <button class="rules-close" type="button" aria-label="Close rules board" @click="$emit('close')">
-            &times;
-          </button>
-        </header>
-
-        <div class="rules-board-body">
-          <section class="rules-section">
-            <div class="rules-section-heading">
-              <h3>Required Workflow</h3>
-              <p>Use the board, lease, and PR as the source of truth.</p>
-            </div>
-            <ol class="rules-list">
-              <li v-for="rule in workflowRules" :key="rule.title">
-                <strong>{{ rule.title }}</strong>
-                <span>{{ rule.body }}</span>
-              </li>
-            </ol>
-          </section>
-
-          <section class="rules-section">
-            <div class="rules-section-heading">
-              <h3>Active Task Authority</h3>
-              <p>Current tasks with lease, lock, or review state.</p>
-            </div>
-            <div v-if="authorityRows.length" class="authority-list">
-              <article v-for="row in authorityRows" :key="row.id" class="authority-row">
-                <div class="authority-main">
-                  <span class="authority-id">{{ row.shortId }}</span>
-                  <strong>{{ row.title }}</strong>
-                </div>
-                <dl>
-                  <div>
-                    <dt>Status</dt>
-                    <dd>{{ row.status }}</dd>
-                  </div>
-                  <div>
-                    <dt>Lease</dt>
-                    <dd>{{ row.lease }}</dd>
-                  </div>
-                  <div>
-                    <dt>Branch</dt>
-                    <dd>{{ row.branch }}</dd>
-                  </div>
-                  <div>
-                    <dt>PR</dt>
-                    <dd>{{ row.pr }}</dd>
-                  </div>
-                </dl>
-              </article>
-            </div>
-            <p v-else class="rules-empty">No active task authority is currently exposed on the board.</p>
-          </section>
-
-          <section class="rules-section">
-            <div class="rules-section-heading">
-              <h3>Warning Meanings</h3>
-              <p>Read warnings as routing signals before taking action.</p>
-            </div>
-            <details v-for="warning in warningRules" :key="warning.title" class="warning-row">
-              <summary>{{ warning.title }}</summary>
-              <p>{{ warning.body }}</p>
-            </details>
-          </section>
-        </div>
-      </section>
-    </div>
+        </section>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -191,6 +193,26 @@ function statusLabel(status: string): string {
   background: rgba(0, 0, 0, 0.58);
 }
 
+.rules-panel-enter-active,
+.rules-panel-leave-active {
+  transition: background 220ms ease;
+}
+
+.rules-panel-enter-active .rules-board,
+.rules-panel-leave-active .rules-board {
+  transition: transform 240ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.rules-panel-enter-from,
+.rules-panel-leave-to {
+  background: rgba(0, 0, 0, 0);
+}
+
+.rules-panel-enter-from .rules-board,
+.rules-panel-leave-to .rules-board {
+  transform: translateX(100%);
+}
+
 .rules-board {
   width: min(680px, 100%);
   height: 100%;
@@ -200,6 +222,7 @@ function statusLabel(status: string): string {
   border-left: 1px solid var(--line, #27272a);
   color: var(--text, #fafafa);
   box-shadow: -20px 0 40px rgba(0, 0, 0, 0.32);
+  transform: translateX(0);
 }
 
 .rules-board-header {

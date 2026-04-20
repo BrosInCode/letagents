@@ -54,6 +54,22 @@
         </a>
       </div>
 
+      <div v-if="showRulesButton" class="drawer-section rules-shortcut-section">
+        <div class="drawer-section-title">
+          <h2>Room Rules</h2>
+          <span>repo</span>
+        </div>
+        <button class="rules-shortcut-btn" type="button" @click="$emit('openRules')">
+          <span class="rules-shortcut-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v14H7l-3 3V4z"/><path d="M8 8h8"/><path d="M8 12h6"/></svg>
+          </span>
+          <span>
+            <strong>Rules</strong>
+            <small>Open the pinned operating contract.</small>
+          </span>
+        </button>
+      </div>
+
       <!-- Sender Palette -->
       <div class="drawer-section">
         <div class="drawer-section-title">
@@ -162,9 +178,10 @@ const props = defineProps<{
   room: RoomInfo | null
   messages: readonly RoomMessage[]
   senderName?: string
+  showRulesButton?: boolean
 }>()
 
-const emit = defineEmits<{ close: [], themeChange: [theme: string] }>()
+const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [] }>()
 
 const { soundEnabled, toggleSound } = useRoom()
 const isDark = ref(localStorage.getItem('lac-theme') !== 'light')
@@ -530,6 +547,66 @@ watch(() => props.open, (isOpen) => {
 
 .parent-room-link:hover strong {
   text-decoration: underline;
+}
+
+.rules-shortcut-section {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface, #18181b);
+  border: 1px solid var(--line, #27272a);
+}
+
+.rules-shortcut-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text, #fafafa);
+  cursor: pointer;
+  text-align: left;
+}
+
+.rules-shortcut-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--bg-0, #09090b);
+  color: #93c5fd;
+}
+
+.rules-shortcut-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.rules-shortcut-btn strong {
+  display: block;
+  font-size: 0.84rem;
+}
+
+.rules-shortcut-btn small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted, #71717a);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.rules-shortcut-btn:hover .rules-shortcut-icon,
+.rules-shortcut-btn:focus-visible .rules-shortcut-icon {
+  background: var(--surface-hover, #27272a);
+  color: var(--text, #fafafa);
+}
+
+.rules-shortcut-btn:focus-visible {
+  outline: none;
 }
 
 /* ── Sender legend (compact dot chips) ── */
