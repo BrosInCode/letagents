@@ -826,6 +826,10 @@ function taskStatusLabel(status: string): string {
   border: 1px solid var(--line, #27272a);
   padding: 5px 12px;
   border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .focus-metadata-item strong {
@@ -833,6 +837,7 @@ function taskStatusLabel(status: string): string {
   font-weight: 700;
   font-size: 0.72rem;
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 
 .focus-context-header[data-concluded="true"] {
