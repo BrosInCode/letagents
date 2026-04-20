@@ -105,6 +105,9 @@ export interface RoomTask {
     agent_key: string
     agent_instance_id: string | null
     actor_label: string
+    branch_ref: string | null
+    pr_url: string | null
+    output_intent: string | null
   }>
   active_locks?: ReadonlyArray<{
     id: string
