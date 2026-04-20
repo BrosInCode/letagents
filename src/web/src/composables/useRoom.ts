@@ -52,10 +52,52 @@ export interface MessageReplyReference {
   timestamp: string
 }
 
+export interface RoomMessageAttachment {
+  id?: string | null
+  name?: string | null
+  file_name?: string | null
+  filename?: string | null
+  mime_type?: string | null
+  content_type?: string | null
+  size_bytes?: number | null
+  byte_size?: number | null
+  url?: string | null
+  download_url?: string | null
+  data_url?: string | null
+  content_base64?: string | null
+}
+
+export interface OutgoingMessageAttachment {
+  file_name: string
+  mime_type: string
+  size_bytes: number
+  file: File
+}
+
+interface PreparedMessageAttachment {
+  upload_id: string
+}
+
+interface AttachmentUploadTarget {
+  upload_id?: string
+  attachment_id?: string
+  id?: string
+  upload_url?: string
+  url?: string
+  method?: string
+  headers?: Record<string, string>
+  attachment?: {
+    upload_id?: string
+    attachment_id?: string
+    id?: string
+  }
+}
+
 export interface RoomMessage {
   id: string
   sender: string
   text: string
+  attachments?: RoomMessageAttachment[]
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
@@ -826,16 +868,23 @@ async function sendMessage(
   text: string,
   sender?: string,
   agentPromptKind?: string | null,
-  replyTo?: string | null
+  replyTo?: string | null,
+  attachments: OutgoingMessageAttachment[] = []
 ): Promise<boolean> {
   if (!room.value) return false
   try {
-    const body: Record<string, string> = { text, sender: sender || 'anonymous' }
+    const preparedAttachments = attachments.length
+      ? await prepareMessageAttachments(room.value.identifier, attachments)
+      : []
+    const body: Record<string, unknown> = { text, sender: sender || 'anonymous' }
     if (agentPromptKind) {
       body.agent_prompt_kind = agentPromptKind
     }
     if (replyTo) {
       body.reply_to = replyTo
+    }
+    if (preparedAttachments.length) {
+      body.attachments = preparedAttachments
     }
     const msg = await apiFetch(`${roomPath(room.value.identifier)}/messages`, {
       method: 'POST',
@@ -849,6 +898,51 @@ async function sendMessage(
   } catch {
     return false
   }
+}
+
+async function prepareMessageAttachments(
+  roomIdentifier: string,
+  attachments: OutgoingMessageAttachment[]
+): Promise<PreparedMessageAttachment[]> {
+  const prepared: PreparedMessageAttachment[] = []
+  for (const attachment of attachments) {
+    const target = await apiFetch(`${roomPath(roomIdentifier)}/attachments/uploads`, {
+      method: 'POST',
+      body: JSON.stringify({
+        file_name: attachment.file_name,
+        mime_type: attachment.mime_type,
+        size_bytes: attachment.size_bytes,
+      }),
+    }) as AttachmentUploadTarget
+
+    const uploadId = target.upload_id
+      || target.attachment?.upload_id
+      || target.attachment_id
+      || target.attachment?.attachment_id
+      || target.id
+      || target.attachment?.id
+    const uploadUrl = target.upload_url || target.url
+    if (!uploadId || !uploadUrl) {
+      throw new Error('Attachment upload target is incomplete.')
+    }
+
+    const headers: Record<string, string> = {
+      ...(target.headers || {}),
+    }
+    if (!Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')) {
+      headers['Content-Type'] = attachment.mime_type || 'application/octet-stream'
+    }
+    const uploadRes = await fetch(uploadUrl, {
+      method: target.method || 'PUT',
+      headers,
+      body: attachment.file,
+    })
+    if (!uploadRes.ok) {
+      throw new Error(`Attachment upload failed with HTTP ${uploadRes.status}.`)
+    }
+    prepared.push({ upload_id: uploadId })
+  }
+  return prepared
 }
 
 async function addTask(title: string): Promise<boolean> {

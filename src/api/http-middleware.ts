@@ -31,6 +31,7 @@ export function registerHttpMiddleware(
 ): void {
   app.use(
     express.json({
+      limit: "1mb",
       verify(req, _res, buf) {
         const request = req as AuthenticatedRequest & { originalUrl?: string };
         if (request.originalUrl?.startsWith("/webhooks/github")) {
