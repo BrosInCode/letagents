@@ -116,6 +116,7 @@ async function startApiServer(): Promise<{ child: ChildProcessWithoutNullStreams
   child.stderr.on("data", (chunk: Buffer | string) => {
     stderr += chunk.toString();
   });
+  child.stdout.resume();
 
   await waitForServer(port, child, () => stderr);
   return { child, port };
@@ -390,6 +391,7 @@ test(
     const parent = await createProjectWithName("focus-lifecycle-route-api");
     const task = await createTask(parent.id, "Route task lifecycle", "StoneCloud");
     await updateTask(parent.id, task.id, { status: "accepted" });
+    await updateTask(parent.id, task.id, { status: "assigned", assignee: "StoneCloud" });
     const focus = await createFocusRoomForTask(parent.id, task.id);
     assert.ok(focus);
     await updateFocusRoomSettings(parent.id, task.id, {
