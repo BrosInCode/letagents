@@ -416,10 +416,10 @@ test(
 
     const parentMessages = (await getMessages(parent.id)).messages;
     const focusMessages = (await getMessages(focus.room.id)).messages;
+    const focusedLifecycleMessage = `StoneCloud is working on ${task.id}: Route task lifecycle`;
     assert.ok(focusMessages.some((message) =>
       message.sender === "letagents" &&
-      message.text.includes(task.id) &&
-      message.text.includes("in progress")
+      message.text.includes(focusedLifecycleMessage)
     ));
     assert.ok(parentMessages.some((message) =>
       message.sender === "letagents" &&
@@ -429,7 +429,7 @@ test(
     ));
     assert.equal(parentMessages.some((message) =>
       message.sender === "letagents" &&
-      message.text.includes(`${task.id} is in progress`)
+      message.text.includes(focusedLifecycleMessage)
     ), false);
   }
 );
