@@ -104,10 +104,7 @@ import {
 } from "./github-repo-access.js";
 import {
   isInviteCode,
-  isKnownProvider,
   normalizeRoomId,
-  normalizeRoomName,
-  resolveRoomIdentifier,
 } from "./room-routing.js";
 import {
   buildTaskUpdatePatch,
@@ -139,7 +136,7 @@ import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
 } from "./http-helpers.js";
-import { registerWebRoutes, sendAppPage } from "./routes/web.js";
+import { registerWebRoutes } from "./routes/web.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
@@ -184,6 +181,10 @@ import {
   registerRoomMetadataRoutes,
   type RoomMetadataRouteDeps,
 } from "./routes/room-metadata.js";
+import {
+  registerRoomEntryRoutes,
+  type RoomEntryRouteDeps,
+} from "./routes/room-entry.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2300,64 +2301,14 @@ app.options("{*path}", (_req, res) => {
   res.sendStatus(204);
 });
 
+const roomEntryRouteDeps = {
+  isRepoBackedRoomId,
+  resolveGitHubRoomEntryDecision,
+} satisfies RoomEntryRouteDeps;
+
 registerWebRoutes(app);
 
-app.get(/^\/api\/rooms\/resolve\/(.+)$/, async (req, res) => {
-  const identifier = decodeURIComponent(req.params[0] || "");
-  const resolved = resolveRoomIdentifier(identifier);
-  if (resolved.type === "invite") {
-    res.json(resolved);
-    return;
-  }
-
-  const project = await getProjectById(resolved.name);
-  res.json({
-    ...resolved,
-    canonical_room_id: project?.id ?? resolved.name,
-  });
-});
-
-app.get("/:provider/:owner/:repo", (req, res, next) => {
-  const provider = req.params.provider.toLowerCase();
-
-  if (!isKnownProvider(provider)) {
-    return next();
-  }
-
-  const roomKey = `${provider}/${req.params.owner}/${req.params.repo}`;
-  const normalized = normalizeRoomName(roomKey);
-  res.redirect(301, `/in/${normalized}`);
-});
-
-app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
-  const roomIdentifier = decodeURIComponent(req.params[0] || "");
-  const resolved = resolveRoomIdentifier(roomIdentifier);
-
-  if (resolved.type === "room") {
-    const project = await getProjectById(resolved.name);
-    const canonicalRoomId = project?.id ?? resolved.name;
-
-    if (canonicalRoomId !== roomIdentifier) {
-      res.redirect(301, `/in/${canonicalRoomId}`);
-      return;
-    }
-
-    if (isRepoBackedRoomId(canonicalRoomId)) {
-      const decision = await resolveGitHubRoomEntryDecision({
-        roomName: canonicalRoomId,
-        sessionAccount: req.sessionAccount,
-        redirectTo: `/in/${canonicalRoomId}`,
-      });
-
-      if (decision.kind === "redirect") {
-        res.redirect(302, decision.location);
-        return;
-      }
-    }
-  }
-
-  sendAppPage(res);
-});
+registerRoomEntryRoutes(app, roomEntryRouteDeps);
 
 const githubIntegrationRouteDeps = {
   resolveCanonicalRoomRequestId,
@@ -2612,27 +2563,6 @@ function checkJoinRateLimit(ip: string): boolean {
 
   return true;
 }
-
-
-
-app.get("/rooms/resolve/:identifier", async (req, res) => {
-  const identifier = decodeURIComponent(req.params.identifier);
-  const normalized = normalizeRoomId(identifier);
-  const resolved = resolveRoomIdentifier(normalized);
-  if (resolved.type === "invite") {
-    res.json({ input: identifier, normalized, resolved });
-    return;
-  }
-
-  const project = await getProjectById(resolved.name);
-  res.json({
-    input: identifier,
-    normalized,
-    resolved,
-    canonical_room_id: project?.id ?? resolved.name,
-  });
-});
-
 app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
   const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
   const requestedRoomId = normalizeRoomId(rawId);
