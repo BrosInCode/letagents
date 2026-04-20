@@ -924,10 +924,15 @@ function taskStatusLabel(status: string): string {
 .focus-settings-grid select {
   min-width: 0;
   width: 100%;
-  padding: 9px 10px;
+  padding: 9px 32px 9px 10px;
   border: 1px solid var(--line, #27272a);
   border-radius: 8px;
   background: var(--bg-0, #09090b);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  -webkit-appearance: none;
+  appearance: none;
   color: var(--text, #fafafa);
   font: inherit;
   font-size: 0.78rem;
