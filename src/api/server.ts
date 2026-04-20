@@ -131,6 +131,10 @@ import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
 } from "./http-helpers.js";
+import {
+  registerHttpMiddleware,
+  type HttpMiddlewareDeps,
+} from "./http-middleware.js";
 import { registerWebRoutes } from "./routes/web.js";
 import {
   registerAuthRoutes,
@@ -2253,57 +2257,12 @@ async function handleGitHubWebhookEvent(
 }
 
 const app = express();
-app.use(
-  express.json({
-    verify(req, _res, buf) {
-      const request = req as AuthenticatedRequest & { originalUrl?: string };
-      if (request.originalUrl?.startsWith("/webhooks/github")) {
-        request.rawBody = Buffer.from(buf);
-      }
-    },
-  })
-);
 
-app.use(async (req: AuthenticatedRequest, _res, next) => {
-  try {
-    const auth = await resolveRequestAuth(req);
-    req.sessionAccount = auth.account;
-    req.authKind = auth.authKind;
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
+const httpMiddlewareDeps = {
+  resolveRequestAuth,
+} satisfies HttpMiddlewareDeps;
 
-// CORS: restrict to known origins instead of wildcard
-const ALLOWED_ORIGINS = new Set([
-  "https://letagents.chat",
-  "http://localhost:3001",
-  "http://localhost:3000",
-  "http://127.0.0.1:3001",
-  "http://127.0.0.1:3000",
-  ...(process.env.LETAGENTS_BASE_URL
-    ? [process.env.LETAGENTS_BASE_URL.replace(/\/+$/, "")]
-    : []),
-  ...(process.env.PUBLIC_API_URL
-    ? [process.env.PUBLIC_API_URL.replace(/\/+$/, "")]
-    : []),
-]);
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  next();
-});
-
-app.options("{*path}", (_req, res) => {
-  res.sendStatus(204);
-});
+registerHttpMiddleware(app, httpMiddlewareDeps);
 
 const roomEntryRouteDeps = {
   isRepoBackedRoomId,
