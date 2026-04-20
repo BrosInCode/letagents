@@ -184,6 +184,10 @@ import {
   registerLegacyProjectRoutes,
   type LegacyProjectRouteDeps,
 } from "./routes/legacy-projects.js";
+import {
+  registerLegacyProjectMessageRoutes,
+  type LegacyProjectMessageRouteDeps,
+} from "./routes/legacy-project-messages.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2397,6 +2401,17 @@ const legacyProjectRouteDeps = {
   rememberHumanRoomParticipant,
 } satisfies LegacyProjectRouteDeps;
 
+const legacyProjectMessageRouteDeps = {
+  messageEvents,
+  resolveCanonicalRoomRequestId,
+  requireParticipant,
+  parseOptionalAgentPromptKind,
+  parseOptionalReplyToMessageId,
+  shouldIncludePromptOnlyMessages,
+  emitProjectMessage,
+  rememberRoomParticipantFromMessage,
+} satisfies LegacyProjectMessageRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2494,199 +2509,7 @@ registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
 
 registerLegacyProjectRoutes(app, legacyProjectRouteDeps);
 
-app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
-  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-  const project = await getProjectById(projectId);
-
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  if (!(await requireParticipant(req, res, project))) {
-    return;
-  }
-
-  const { sender, text, agent_prompt_kind, reply_to } = req.body as {
-    sender?: string;
-    text?: string;
-    agent_prompt_kind?: string;
-    reply_to?: string;
-  };
-
-  try {
-    const promptKind = parseOptionalAgentPromptKind(agent_prompt_kind);
-    const replyToMessageId = parseOptionalReplyToMessageId(reply_to);
-    const normalizedSender = typeof sender === "string" ? sender.trim() : "";
-    if (
-      !normalizedSender ||
-      typeof text !== "string" ||
-      (!text.trim() && (!promptKind || promptKind !== "auto"))
-    ) {
-      res.status(400).json({ error: "sender and text are required" });
-      return;
-    }
-    const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
-    const message = await emitProjectMessage(projectId, normalizedSender, text, {
-      source,
-      agent_prompt_kind: promptKind,
-      reply_to: replyToMessageId,
-    });
-    await rememberRoomParticipantFromMessage({
-      projectId,
-      sender: normalizedSender,
-      source,
-      sessionAccount: req.sessionAccount,
-      timestamp: message.timestamp,
-    });
-    res.status(201).json(message);
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "POST /projects/:id/messages",
-      error,
-      "Message could not be created."
-    );
-  }
-});
-
-app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
-  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-  const project = await getProjectById(projectId);
-
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  if (!(await requireParticipant(req, res, project))) {
-    return;
-  }
-
-  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const result = await getMessages(projectId, {
-    limit,
-    after,
-    include_prompt_only: shouldIncludePromptOnlyMessages(req),
-  });
-
-  res.json({
-    project_id: projectId,
-    messages: result.messages,
-    has_more: result.has_more,
-  });
-});
-
-app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) => {
-  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-  const project = await getProjectById(projectId);
-
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  if (!(await requireParticipant(req, res, project))) {
-    return;
-  }
-
-  const heartbeat = startSseStream(res);
-
-  const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
-    if (eventProjectId !== projectId) {
-      return;
-    }
-    if (!shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
-      return;
-    }
-
-    res.write(`data: ${JSON.stringify(message)}\n\n`);
-  };
-
-  messageEvents.on("message:created", onMessageCreated);
-
-  req.on("close", () => {
-    messageEvents.off("message:created", onMessageCreated);
-    stopSseStream(res, heartbeat);
-  });
-});
-
-app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) => {
-  const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-  const project = await getProjectById(projectId);
-
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  if (!(await requireParticipant(req, res, project))) {
-    return;
-  }
-
-  const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
-  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const includePromptOnly = shouldIncludePromptOnlyMessages(req);
-  const existing = await getMessagesAfter(projectId, after, {
-    limit,
-    include_prompt_only: includePromptOnly,
-  });
-
-  if (existing.messages.length > 0) {
-    res.json({ project_id: projectId, messages: existing.messages, has_more: existing.has_more });
-    return;
-  }
-
-  let settled = false;
-
-  const cleanup = () => {
-    clearTimeout(timeout);
-    messageEvents.off("message:created", onMessageCreated);
-    req.off("close", onClientClose);
-  };
-
-  const resolveRequest = (msgs: Message[], hasMore = false) => {
-    if (settled) {
-      return;
-    }
-
-    settled = true;
-    cleanup();
-    res.json({ project_id: projectId, messages: msgs, has_more: hasMore });
-  };
-
-  const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
-    if (eventProjectId !== projectId) {
-      return;
-    }
-
-    const next = await getMessagesAfter(projectId, after, {
-      limit,
-      include_prompt_only: includePromptOnly,
-    });
-    if (next.messages.length > 0) {
-      resolveRequest(next.messages, next.has_more);
-    }
-  };
-
-  const onClientClose = () => {
-    if (settled) {
-      return;
-    }
-
-    settled = true;
-    cleanup();
-  };
-
-  const timeout = setTimeout(() => {
-    resolveRequest([]);
-  }, timeoutMs);
-
-  messageEvents.on("message:created", onMessageCreated);
-  req.on("close", onClientClose);
-});
+registerLegacyProjectMessageRoutes(app, legacyProjectMessageRouteDeps);
 
 app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
   const projectId = await resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
