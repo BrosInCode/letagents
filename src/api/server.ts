@@ -4,7 +4,6 @@ import express from "express";
 import {
   addMessage,
   assignProjectAdmin,
-  createFocusRoomForTask,
   createCoordinationEvent,
   createTask,
   createTaskLease,
@@ -51,10 +50,8 @@ import {
   type Project,
   type SessionAccount,
   type Task,
-  type TaskGitHubArtifactStatus,
   type TaskLeaseKind,
   type TaskStatus,
-  getTasksGitHubArtifactStatus,
 } from "./db.js";
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
 import {
@@ -83,7 +80,6 @@ import {
   getRepoRoomEventReferenceTexts,
   projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,
-  validateTaskWorkflowArtifactsInput,
   type RepoPullRequestRef,
   type RepoRoomEvent,
   type TaskWorkflowArtifactMatch,
@@ -117,10 +113,8 @@ import {
 } from "./room-routing.js";
 import {
   buildTaskUpdatePatch,
-  evaluateTaskOwnership,
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
-  requiresTaskOwnershipGuard,
 } from "./task-ownership.js";
 import {
   evaluateTaskAdmission,
@@ -182,6 +176,10 @@ import {
   registerRoomFocusRoutes,
   type RoomFocusRouteDeps,
 } from "./routes/room-focus.js";
+import {
+  registerRoomTaskRoutes,
+  type RoomTaskRouteDeps,
+} from "./routes/room-tasks.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2438,6 +2436,23 @@ const roomFocusRouteDeps = {
   formatFocusRoomConclusionMessage,
 } satisfies RoomFocusRouteDeps;
 
+const roomTaskRouteDeps = {
+  taskEvents,
+  resolveCanonicalRoomRequestId,
+  resolveRoomOrReply,
+  requireAdmin,
+  requireParticipant,
+  resolveProjectRole,
+  toRoomResponse,
+  normalizeOptionalString,
+  enforceTaskAdmissionCoordination,
+  isTrustedAgentCreator,
+  emitTaskLifecycleStatusMessage,
+  validateOwnerTokenTaskActorKey,
+  enforceTaskCoordinationMutation,
+  emitProjectMessage,
+} satisfies RoomTaskRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2670,364 +2685,7 @@ app.post(/^\/rooms\/(.+)\/join$/, async (req: AuthenticatedRequest, res) => {
 registerRoomMessageRoutes(app, roomMessageRouteDeps);
 registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
 registerRoomFocusRoutes(app, roomFocusRouteDeps);
-
-app.get(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const status = typeof req.query.status === "string" ? req.query.status : undefined;
-  const open = req.query.open === "true";
-  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-  const after = typeof req.query.after === "string" ? req.query.after : undefined;
-  const result = open ? await getOpenTasks(project.id, { limit, after }) : await getTasks(project.id, status, { limit, after });
-
-  const [leases, locks] = await Promise.all([
-    getActiveTaskLeases(project.id),
-    getActiveTaskLocks(project.id)
-  ]);
-  const tasksWithDetails = result.tasks.map(t => ({
-    ...t,
-    active_leases: leases.filter(l => l.task_id === t.id),
-    active_locks: locks.filter(l => l.task_id === t.id || l.scope === "room")
-  }));
-
-  res.json({ room_id: project.id, tasks: tasksWithDetails, has_more: result.has_more });
-});
-
-app.post(/^\/rooms\/(.+)\/tasks$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = req.body as {
-    title?: string;
-    description?: string;
-    created_by?: string;
-    source_message_id?: string;
-    actor_label?: string;
-    actor_key?: string;
-    actor_instance_id?: string;
-  };
-
-  if (!title || !created_by) {
-    res.status(400).json({ error: "title and created_by are required" });
-    return;
-  }
-
-  const admission = await enforceTaskAdmissionCoordination({
-    req,
-    projectId: project.id,
-    title,
-    sourceMessageId: source_message_id ?? null,
-    actorLabel: actor_label ?? created_by,
-    actorKey: actor_key ?? null,
-    actorInstanceId: normalizeOptionalString(actor_instance_id),
-  });
-  if (admission.kind === "deny") {
-    res.status(409).json({ error: admission.error, code: admission.code });
-    return;
-  }
-
-  const task = await createTask(project.id, title, created_by, description, source_message_id);
-
-  if (req.authKind === "owner_token") {
-    await createCoordinationEvent({
-      room_id: project.id,
-      task_id: task.id,
-      event_type: "task_admit",
-      decision: "record",
-      actor_label: created_by,
-      actor_key: normalizeTaskActorKey(actor_key),
-      actor_instance_id: normalizeOptionalString(actor_instance_id),
-      reason: "Agent-created task requires coordinator acceptance before it is claimable.",
-    });
-    res.status(201).json({ ...task, room_id: project.id });
-    return;
-  }
-
-  if (!(await isTrustedAgentCreator(project.id, created_by))) {
-    res.status(201).json({ ...task, room_id: project.id });
-    return;
-  }
-
-  const acceptedTask = await updateTask(project.id, task.id, { status: "accepted" });
-  if (!acceptedTask) {
-    res.status(500).json({ error: "Task created but could not be auto-accepted" });
-    return;
-  }
-
-  await emitTaskLifecycleStatusMessage(project.id, acceptedTask);
-
-  const [leases, locks] = await Promise.all([
-    getActiveTaskLeases(project.id),
-    getActiveTaskLocks(project.id)
-  ]);
-  const taskWithDetails = {
-    ...acceptedTask,
-    active_leases: leases.filter(l => l.task_id === acceptedTask.id),
-    active_locks: locks.filter(l => l.task_id === acceptedTask.id || l.scope === "room")
-  };
-
-  taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
-  res.status(201).json({ ...taskWithDetails, room_id: project.id });
-});
-
-app.post(/^\/rooms\/(.+)\/tasks\/([^/]+)\/focus-room$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-  const taskId = (req.params as Record<string, string>)[1] ?? "";
-
-  const project = await resolveRoomOrReply(roomId, res, { allowCreate: false });
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const requestBody = (req.body ?? {}) as Record<string, unknown>;
-  const { display_name } = requestBody as { display_name?: string };
-  try {
-    const task = await getTaskById(project.id, taskId);
-    const taskOwnership = await getTaskOwnershipState(project.id, taskId);
-    if (!task || !taskOwnership) {
-      res.status(404).json({ error: "Task not found" });
-      return;
-    }
-
-    const coordination = await enforceTaskCoordinationMutation({
-      req,
-      projectId: project.id,
-      task,
-      taskOwnership,
-      updates: {},
-      forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
-      actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
-      actorKey: normalizeTaskActorKey(requestBody.actor_key),
-      actorInstanceId: normalizeOptionalString(requestBody.actor_instance_id),
-    });
-    if (coordination.kind === "deny") {
-      res.status(409).json({ error: coordination.error, code: coordination.code });
-      return;
-    }
-
-    const result = await createFocusRoomForTask(project.id, taskId, {
-      displayName: display_name,
-    });
-    if (!result) {
-      res.status(404).json({ error: "Task not found" });
-      return;
-    }
-
-    if (result.created && req.sessionAccount) {
-      await assignProjectAdmin(result.room.id, req.sessionAccount.account_id);
-    }
-
-    if (result.created) {
-      await emitProjectMessage(
-        project.id,
-        "letagents",
-        `[status] Focus Room opened for ${result.task.id}: ${result.task.title}`
-      );
-    }
-
-    const role = await resolveProjectRole(result.room, req.sessionAccount);
-    res.status(result.created ? 201 : 200).json({
-      room_id: project.id,
-      task_id: result.task.id,
-      created: result.created,
-      focus_room: toRoomResponse(result.room, {
-        role,
-        authenticated: Boolean(req.sessionAccount),
-      }),
-    });
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "POST /rooms/:room_id/tasks/:task_id/focus-room",
-      error,
-      "Focus Room could not be opened."
-    );
-  }
-});
-
-/**
- * GET /rooms/:room/tasks/github-status
- * Returns GitHub artifact status for all tasks in a room that have linked events.
- */
-app.get(/^(?:\/api)?\/rooms\/(.+)\/tasks\/github-status$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const statusMap = await getTasksGitHubArtifactStatus(project.id);
-
-  const statuses: Record<string, TaskGitHubArtifactStatus> = {};
-  for (const [taskId, status] of statusMap) {
-    statuses[taskId] = status;
-  }
-
-  res.json({
-    room_id: project.id,
-    statuses,
-  });
-});
-
-app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-  const taskId = (req.params as Record<string, string>)[1] ?? "";
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const task = await getTaskById(project.id, taskId);
-  if (!task) {
-    res.status(404).json({ error: "Task not found" });
-    return;
-  }
-
-  const [leases, locks] = await Promise.all([
-    getActiveTaskLeases(project.id),
-    getActiveTaskLocks(project.id)
-  ]);
-  const taskWithDetails = {
-    ...task,
-    active_leases: leases.filter(l => l.task_id === task.id),
-    active_locks: locks.filter(l => l.task_id === task.id || l.scope === "room")
-  };
-
-  res.json({ ...taskWithDetails, room_id: project.id });
-});
-
-app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-  const taskId = (req.params as Record<string, string>)[1] ?? "";
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireParticipant(req, res, project))) return;
-
-  const task = await getTaskById(project.id, taskId);
-  const taskOwnership = await getTaskOwnershipState(project.id, taskId);
-  if (!task || !taskOwnership) {
-    res.status(404).json({ error: "Task not found" });
-    return;
-  }
-
-  const requestBody = (req.body ?? {}) as Record<string, unknown>;
-  const workflow_artifacts = validateTaskWorkflowArtifactsInput(
-    requestBody.workflow_artifacts
-  );
-  const { updates, actorLabel, actorKey } = buildTaskUpdatePatch({
-    body: requestBody,
-    workflowArtifacts: workflow_artifacts,
-  });
-  const actorInstanceId = normalizeOptionalString(requestBody.actor_instance_id);
-
-  try {
-    const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
-    if (updates.status && adminOnlyStatuses.has(updates.status)) {
-      if (!(await requireAdmin(req, res, project))) return;
-    }
-
-    let verifiedActorKey = actorKey;
-    if (
-      requiresTaskOwnershipGuard({
-        authKind: req.authKind,
-        requestedStatus: updates.status,
-        requestedAssignee: updates.assignee,
-        requestedAssigneeAgentKey: updates.assignee_agent_key,
-      })
-    ) {
-      const actorValidation = await validateOwnerTokenTaskActorKey({
-        req,
-        actorKey,
-      });
-      if (actorValidation.error) {
-        res.status(409).json({ error: actorValidation.error });
-        return;
-      }
-      verifiedActorKey = actorValidation.actorKey;
-    }
-
-    const ownership = evaluateTaskOwnership({
-      authKind: req.authKind,
-      currentStatus: taskOwnership.status,
-      currentAssignee: taskOwnership.assignee,
-      currentAssigneeAgentKey: taskOwnership.assignee_agent_key,
-      requestedStatus: updates.status,
-      requestedAssignee: updates.assignee,
-      requestedAssigneeAgentKey: updates.assignee_agent_key,
-      actorLabel,
-      actorKey: verifiedActorKey,
-    });
-    if (ownership.kind === "deny") {
-      res.status(409).json({ error: ownership.error });
-      return;
-    }
-    if (Object.prototype.hasOwnProperty.call(ownership, "assigneeAgentKey")) {
-      updates.assignee_agent_key = ownership.assigneeAgentKey;
-    }
-
-    const coordination = await enforceTaskCoordinationMutation({
-      req,
-      projectId: project.id,
-      task,
-      taskOwnership,
-      updates,
-      actorLabel,
-      actorKey: verifiedActorKey,
-      actorInstanceId,
-    });
-    if (coordination.kind === "deny") {
-      res.status(409).json({ error: coordination.error, code: coordination.code });
-      return;
-    }
-
-    const updated = await updateTask(project.id, taskId, updates);
-    if (updated && updates.status && updates.status !== task.status) {
-      await emitTaskLifecycleStatusMessage(project.id, updated);
-    }
-
-    if (updated) {
-      const [leases, locks] = await Promise.all([
-        getActiveTaskLeases(project.id),
-        getActiveTaskLocks(project.id)
-      ]);
-      const taskWithDetails = {
-        ...updated,
-        active_leases: leases.filter(l => l.task_id === updated.id),
-        active_locks: locks.filter(l => l.task_id === updated.id || l.scope === "room")
-      };
-      taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
-      res.json({ ...taskWithDetails, room_id: project.id });
-    } else {
-      res.status(404).json({ error: "Task not found" });
-    }
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "PATCH /rooms/:room_id/tasks/:task_id",
-      error,
-      "Task update could not be completed."
-    );
-  }
-});
+registerRoomTaskRoutes(app, roomTaskRouteDeps);
 
 // ── Room GitHub Events ──────────────────────────────────────────────
 app.get(/^(?:\/api)?\/rooms\/(.+)\/events$/, async (req: AuthenticatedRequest, res) => {
