@@ -40,7 +40,6 @@ import {
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
   upsertRoomParticipant,
-  updateProjectDisplayName,
   updateTask,
   getRoomAgentPresence,
   type GitHubWebhookDeliveryStatus,
@@ -134,7 +133,6 @@ import {
 } from "../shared/room-agent-prompts.js";
 import {
   parseCookies,
-  respondWithBadRequest,
   respondWithError,
   respondWithInternalError,
   sanitizeRedirectPath,
@@ -182,6 +180,10 @@ import {
   registerRoomEventRoutes,
   type RoomEventRouteDeps,
 } from "./routes/room-events.js";
+import {
+  registerRoomMetadataRoutes,
+  type RoomMetadataRouteDeps,
+} from "./routes/room-metadata.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2462,6 +2464,14 @@ const roomEventRouteDeps = {
   getProjectAccessRoomId,
 } satisfies RoomEventRouteDeps;
 
+const roomMetadataRouteDeps = {
+  resolveCanonicalRoomRequestId,
+  resolveRoomOrReply,
+  requireAdmin,
+  resolveProjectRole,
+  toRoomResponse,
+} satisfies RoomMetadataRouteDeps;
+
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
 app.get("/api/health", (_req, res) => {
@@ -2696,45 +2706,7 @@ registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
 registerRoomFocusRoutes(app, roomFocusRouteDeps);
 registerRoomTaskRoutes(app, roomTaskRouteDeps);
 registerRoomEventRoutes(app, roomEventRouteDeps);
-
-app.patch(/^\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
-  const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-  const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
-
-  const project = await resolveRoomOrReply(roomId, res);
-  if (!project) return;
-
-  if (!(await requireAdmin(req, res, project))) return;
-
-  const { display_name } = req.body as { display_name?: string };
-  if (!display_name?.trim()) {
-    res.status(400).json({ error: "display_name is required" });
-    return;
-  }
-
-  try {
-    const updated = await updateProjectDisplayName(project.id, display_name);
-    if (!updated) {
-      res.status(404).json({ error: "Room not found" });
-      return;
-    }
-
-    const role = await resolveProjectRole(updated, req.sessionAccount);
-    res.json({
-      ...toRoomResponse(updated, {
-        role,
-        authenticated: Boolean(req.sessionAccount),
-      }),
-    });
-  } catch (error) {
-    respondWithBadRequest(
-      res,
-      "PATCH /rooms/:room_id",
-      error,
-      "Room update could not be completed."
-    );
-  }
-});
+registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 
