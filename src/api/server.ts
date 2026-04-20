@@ -188,6 +188,7 @@ import {
   registerGitHubWebhookRoutes,
   type GitHubWebhookRouteDeps,
 } from "./routes/github-webhooks.js";
+import { registerHealthRoutes } from "./routes/health.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -2446,9 +2447,7 @@ const githubWebhookRouteDeps = {
 
 registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
-app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", service: "letagents-api" });
-});
+registerHealthRoutes(app);
 
 registerGitHubAppCallbackRoute(app);
 
