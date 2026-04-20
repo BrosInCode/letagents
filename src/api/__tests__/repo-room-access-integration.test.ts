@@ -70,10 +70,33 @@ async function resetDatabase(): Promise<void> {
   await migrate(db, { migrationsFolder });
 }
 
-async function waitForServer(port: number, child: ChildProcessWithoutNullStreams, stderrBuffer: () => string): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (child.exitCode !== null) {
-      throw new Error(`repo room access test server exited early: ${stderrBuffer()}`.trim());
+function formatServerDiagnostics(input: {
+  stdout: string;
+  stderr: string;
+  readinessError?: string;
+}): string {
+  const diagnostics = [
+    input.readinessError ? `last readiness error: ${input.readinessError}` : "",
+    input.stdout ? `stdout:\n${input.stdout}` : "",
+    input.stderr ? `stderr:\n${input.stderr}` : "",
+  ].filter(Boolean);
+
+  return diagnostics.length > 0 ? `\n${diagnostics.join("\n")}` : "";
+}
+
+async function waitForServer(
+  port: number,
+  child: ChildProcessWithoutNullStreams,
+  diagnostics: () => { stdout: string; stderr: string }
+): Promise<void> {
+  let lastReadinessError: string | undefined;
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `repo room access test server exited early with code ${child.exitCode ?? "null"} signal ${child.signalCode ?? "null"}` +
+          formatServerDiagnostics(diagnostics())
+      );
     }
 
     try {
@@ -81,14 +104,22 @@ async function waitForServer(port: number, child: ChildProcessWithoutNullStreams
       if (response.ok) {
         return;
       }
-    } catch {
+      lastReadinessError = `health returned ${response.status}`;
+    } catch (error) {
+      lastReadinessError = error instanceof Error ? error.message : String(error);
       // keep polling until ready
     }
 
     await sleep(250);
   }
 
-  throw new Error(`repo room access test server did not become ready: ${stderrBuffer()}`.trim());
+  throw new Error(
+    "repo room access test server did not become ready" +
+      formatServerDiagnostics({
+        ...diagnostics(),
+        readinessError: lastReadinessError,
+      })
+  );
 }
 
 async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildProcessWithoutNullStreams; port: number }> {
@@ -96,7 +127,8 @@ async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildP
     throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
   }
 
-  const port = 3600 + Math.floor(Math.random() * 500);
+  const port = 4600 + Math.floor(Math.random() * 500);
+  let stdout = "";
   let stderr = "";
 
   const child = spawn(tsxBinary, ["src/api/server.ts"], {
@@ -110,12 +142,20 @@ async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildP
     stdio: ["ignore", "pipe", "pipe"],
   });
 
+  child.stdout.on("data", (chunk: Buffer | string) => {
+    stdout += chunk.toString();
+  });
   child.stderr.on("data", (chunk: Buffer | string) => {
     stderr += chunk.toString();
   });
-  child.stdout.resume();
 
-  await waitForServer(port, child, () => stderr);
+  try {
+    await waitForServer(port, child, () => ({ stdout, stderr }));
+  } catch (error) {
+    await stopChildProcess(child);
+    throw error;
+  }
+
   return { child, port };
 }
 
