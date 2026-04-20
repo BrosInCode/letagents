@@ -3,6 +3,7 @@ import type { Express, Request, Response } from "express";
 
 import {
   getLatestMessages,
+  getMessageAttachment,
   getMessages,
   getMessagesAfter,
   getMessagesBefore,
@@ -22,6 +23,14 @@ import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
 } from "../../shared/room-agent-prompts.js";
+import {
+  normalizeMessageAttachmentReferences,
+  type NormalizedMessageAttachmentReference,
+} from "../message-attachments.js";
+import {
+  createPresignedAttachmentDownload,
+  isAttachmentStorageConfigured,
+} from "../attachment-storage.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -47,6 +56,7 @@ export interface LegacyProjectMessageRouteDeps {
       source?: string;
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
+      attachments?: NormalizedMessageAttachmentReference[];
     }
   ): Promise<Message>;
   rememberRoomParticipantFromMessage(input: {
@@ -75,23 +85,29 @@ export function registerLegacyProjectMessageRoutes(
       return;
     }
 
-    const { sender, text, agent_prompt_kind, reply_to } = req.body as {
+    const { sender, text, agent_prompt_kind, reply_to, attachments: rawAttachments } = req.body as {
       sender?: string;
       text?: string;
       agent_prompt_kind?: string;
       reply_to?: string;
+      attachments?: unknown;
     };
 
     try {
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
+      const attachments = normalizeMessageAttachmentReferences(rawAttachments);
       const normalizedSender = typeof sender === "string" ? sender.trim() : "";
       if (
         !normalizedSender ||
         typeof text !== "string" ||
-        (!text.trim() && (!promptKind || promptKind !== "auto"))
+        (!text.trim() && attachments.length === 0 && (!promptKind || promptKind !== "auto"))
       ) {
-        res.status(400).json({ error: "sender and text are required" });
+        res.status(400).json({ error: "sender and text or attachments are required" });
+        return;
+      }
+      if (promptKind === "auto" && attachments.length > 0) {
+        res.status(400).json({ error: "auto prompt messages cannot include attachments" });
         return;
       }
       const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
@@ -99,6 +115,7 @@ export function registerLegacyProjectMessageRoutes(
         source,
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
+        attachments,
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId,
@@ -116,6 +133,37 @@ export function registerLegacyProjectMessageRoutes(
         "Message could not be created."
       );
     }
+  });
+
+  app.get("/projects/:id/messages/:messageId/attachments/:attachmentId", async (req: AuthenticatedRequest, res) => {
+    const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
+    const project = await getProjectById(projectId);
+
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+
+    if (!(await deps.requireParticipant(req, res, project))) {
+      return;
+    }
+
+    const attachment = await getMessageAttachment(
+      projectId,
+      String(req.params.messageId),
+      String(req.params.attachmentId)
+    );
+    if (!attachment) {
+      res.status(404).json({ error: "Attachment not found", code: "ATTACHMENT_NOT_FOUND" });
+      return;
+    }
+
+    if (!isAttachmentStorageConfigured()) {
+      res.status(503).json({ error: "Attachment object storage is not configured" });
+      return;
+    }
+
+    res.redirect(302, createPresignedAttachmentDownload(attachment));
   });
 
   app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
