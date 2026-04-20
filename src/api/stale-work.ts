@@ -1,4 +1,4 @@
-import type { RoomAgentPresence, Task } from "./db.js";
+import type { Message, RoomAgentPresence, Task } from "./db.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 
 export type StaleTaskReason =
@@ -20,6 +20,31 @@ export const STALE_TASK_THRESHOLD_MS: Record<StaleTaskReason, number> = {
   in_review_no_follow_up: 30 * 60 * 1000,
   blocked_no_follow_up: 30 * 60 * 1000,
 };
+
+export const STALE_WORK_PROMPT_COOLDOWN_MS = 15 * 60 * 1000;
+
+export interface StaleWorkPromptEmitterDeps {
+  getOpenTasks(
+    projectId: string,
+    options: { limit: number }
+  ): Promise<{ tasks: Task[] }>;
+  getRoomAgentPresence(
+    projectId: string,
+    options: { limit: number }
+  ): Promise<RoomAgentPresence[]>;
+  emitTaskAnchoredMessage(
+    projectId: string,
+    sender: string,
+    text: string,
+    task: { id: string; title: string },
+    options: {
+      agent_prompt_kind: "auto";
+      parent_activity: string;
+      parent_event_kind: "all_activity";
+    }
+  ): Promise<Message>;
+  now?(): number;
+}
 
 function formatStaleDuration(ms: number): string {
   const totalMinutes = Math.max(1, Math.floor(ms / 60_000));
@@ -136,5 +161,60 @@ export function selectStaleTaskAutoPrompt(input: {
     idle_agent: idleAgent,
     prompt_text: buildPromptText(selected.task, idleAgent, selected.reason, selected.stale_for_ms),
     cache_key: buildPromptCacheKey(selected.task, selected.reason),
+  };
+}
+
+export function createStaleWorkPromptEmitter(deps: StaleWorkPromptEmitterDeps) {
+  const staleWorkPromptTimestamps = new Map<string, number>();
+
+  function pruneStaleWorkPromptTimestamps(now: number): void {
+    for (const [key, timestamp] of staleWorkPromptTimestamps) {
+      if (now - timestamp > STALE_WORK_PROMPT_COOLDOWN_MS) {
+        staleWorkPromptTimestamps.delete(key);
+      }
+    }
+  }
+
+  async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
+    const [taskResult, presence] = await Promise.all([
+      deps.getOpenTasks(projectId, { limit: 200 }),
+      deps.getRoomAgentPresence(projectId, { limit: 50 }),
+    ]);
+
+    const now = deps.now?.() ?? Date.now();
+    const prompt = selectStaleTaskAutoPrompt({
+      tasks: taskResult.tasks,
+      presence,
+      now,
+    });
+    if (!prompt) {
+      return null;
+    }
+
+    pruneStaleWorkPromptTimestamps(now);
+
+    const cacheKey = `${projectId}:${prompt.cache_key}`;
+    const lastPromptAt = staleWorkPromptTimestamps.get(cacheKey);
+    if (lastPromptAt && now - lastPromptAt < STALE_WORK_PROMPT_COOLDOWN_MS) {
+      return null;
+    }
+
+    const message = await deps.emitTaskAnchoredMessage(
+      projectId,
+      "letagents",
+      prompt.prompt_text,
+      prompt.task,
+      {
+        agent_prompt_kind: "auto",
+        parent_activity: "Stale-work prompt",
+        parent_event_kind: "all_activity",
+      }
+    );
+    staleWorkPromptTimestamps.set(cacheKey, now);
+    return message;
+  }
+
+  return {
+    maybeEmitStaleWorkPrompt,
   };
 }

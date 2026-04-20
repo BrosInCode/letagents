@@ -78,7 +78,7 @@ import {
   toRoomResponse,
 } from "./room-formatting.js";
 import { createGitHubFocusIsolationResolver } from "./github-focus-isolation.js";
-import { selectStaleTaskAutoPrompt } from "./stale-work.js";
+import { createStaleWorkPromptEmitter } from "./stale-work.js";
 import {
   buildFailedCheckRunTaskDescription,
   buildFailedCheckRunTaskTitle,
@@ -195,17 +195,6 @@ interface MessageCreatedEvent {
   message: Message;
 }
 
-const STALE_WORK_PROMPT_COOLDOWN_MS = 15 * 60 * 1000;
-const staleWorkPromptTimestamps = new Map<string, number>();
-
-function pruneStaleWorkPromptTimestamps(now: number): void {
-  for (const [key, timestamp] of staleWorkPromptTimestamps) {
-    if (now - timestamp > STALE_WORK_PROMPT_COOLDOWN_MS) {
-      staleWorkPromptTimestamps.delete(key);
-    }
-  }
-}
-
 const messageEvents = new EventEmitter();
 const taskEvents = new EventEmitter();
 const {
@@ -264,6 +253,11 @@ const {
 const {
   getHardIsolatedFocusRoomForGitHubEvent,
 } = createGitHubFocusIsolationResolver({ getActiveTaskFocusRoom });
+const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
+  getOpenTasks,
+  getRoomAgentPresence,
+  emitTaskAnchoredMessage,
+});
 
 async function validateOwnerTokenTaskActorKey(input: {
   req: AuthenticatedRequest;
@@ -647,38 +641,6 @@ async function enforceTaskCoordinationMutation(input: {
     code: `coordination_${decision.code}`,
     error: decision.reason,
   };
-}
-
-async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
-  const [taskResult, presence] = await Promise.all([
-    getOpenTasks(projectId, { limit: 200 }),
-    getRoomAgentPresence(projectId, { limit: 50 }),
-  ]);
-
-  const prompt = selectStaleTaskAutoPrompt({
-    tasks: taskResult.tasks,
-    presence,
-  });
-  if (!prompt) {
-    return null;
-  }
-
-  const now = Date.now();
-  pruneStaleWorkPromptTimestamps(now);
-
-  const cacheKey = `${projectId}:${prompt.cache_key}`;
-  const lastPromptAt = staleWorkPromptTimestamps.get(cacheKey);
-  if (lastPromptAt && now - lastPromptAt < STALE_WORK_PROMPT_COOLDOWN_MS) {
-    return null;
-  }
-
-  const message = await emitTaskAnchoredMessage(projectId, "letagents", prompt.prompt_text, prompt.task, {
-    agent_prompt_kind: "auto",
-    parent_activity: "Stale-work prompt",
-    parent_event_kind: "all_activity",
-  });
-  staleWorkPromptTimestamps.set(cacheKey, now);
-  return message;
 }
 
 async function isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean> {
