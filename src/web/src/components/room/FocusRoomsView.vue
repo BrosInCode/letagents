@@ -33,7 +33,7 @@
             <strong>Status</strong> {{ focusStatusLabel }}
           </span>
           <span class="focus-metadata-item">
-            <strong>Parent chat</strong> {{ parentVisibilityLabel(settingsDraft.parent_visibility) }}
+            <strong>Parent room</strong> {{ parentVisibilityLabel(settingsDraft.parent_visibility) }}
           </span>
         </div>
       </div>
@@ -42,8 +42,8 @@
         <form v-if="settingsTarget" class="focus-settings-form" @submit.prevent="submitFocusSettings">
           <div class="focus-panel-header">
             <div>
-              <p class="focus-eyebrow">Visibility settings</p>
-              <h4>Choose what leaves this room.</h4>
+              <p class="focus-eyebrow">Sharing</p>
+              <h4>Choose what the parent room can see.</h4>
             </div>
             <button
               class="focus-secondary"
@@ -55,7 +55,7 @@
           </div>
           <div class="focus-settings-grid">
             <label>
-              <span>Parent chat</span>
+              <span>Parent room</span>
               <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
                 <option
                   v-for="option in parentVisibilityOptions"
@@ -68,7 +68,7 @@
               <small>{{ parentVisibilityDescription }}</small>
             </label>
             <label>
-              <span>Activity scope</span>
+              <span>What counts</span>
               <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
                 <option
                   v-for="option in activityScopeOptions"
@@ -81,7 +81,7 @@
               <small>{{ activityScopeDescription }}</small>
             </label>
             <label>
-              <span>GitHub events</span>
+              <span>Code updates</span>
               <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
                 <option
                   v-for="option in githubEventRoutingOptions"
@@ -270,7 +270,7 @@
               <dd>{{ shareBackLabel }}</dd>
             </div>
             <div v-if="currentFocusRoom">
-              <dt>Parent chat</dt>
+              <dt>Parent room</dt>
               <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
             </div>
           </dl>
@@ -282,8 +282,8 @@
           >
             <div class="focus-settings-heading">
               <div>
-                <p class="focus-eyebrow">Visibility settings</p>
-                <h4>Parent visibility</h4>
+                <p class="focus-eyebrow">Sharing</p>
+                <h4>What the parent room sees</h4>
               </div>
               <button
                 class="focus-secondary"
@@ -295,7 +295,7 @@
             </div>
             <div class="focus-settings-grid compact">
               <label>
-                <span>Parent chat</span>
+                <span>Parent room</span>
                 <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
                   <option
                     v-for="option in parentVisibilityOptions"
@@ -308,7 +308,7 @@
                 <small>{{ parentVisibilityDescription }}</small>
               </label>
               <label>
-                <span>Activity scope</span>
+                <span>What counts</span>
                 <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
                   <option
                     v-for="option in activityScopeOptions"
@@ -321,7 +321,7 @@
                 <small>{{ activityScopeDescription }}</small>
               </label>
               <label>
-                <span>GitHub events</span>
+                <span>Code updates</span>
                 <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
                   <option
                     v-for="option in githubEventRoutingOptions"
@@ -409,22 +409,22 @@ const adHocTitle = ref('')
 const adHocAttempted = ref(false)
 
 const parentVisibilityOptions: Array<{ value: FocusParentVisibility; label: string }> = [
-  { value: 'summary_only', label: 'Result summaries only' },
-  { value: 'major_activity', label: 'Major activity' },
-  { value: 'all_activity', label: 'All activity' },
-  { value: 'silent', label: 'Keep parent quiet' },
+  { value: 'summary_only', label: 'Only the final note' },
+  { value: 'major_activity', label: 'Important updates' },
+  { value: 'all_activity', label: 'Every update' },
+  { value: 'silent', label: 'Nothing automatic' },
 ]
 const activityScopeOptions: Array<{ value: FocusActivityScope; label: string }> = [
-  { value: 'task_and_branch', label: 'Task and branch' },
-  { value: 'task_only', label: 'Task only' },
-  { value: 'room', label: 'Whole Focus Room' },
+  { value: 'task_and_branch', label: 'Task and linked code' },
+  { value: 'task_only', label: 'This task only' },
+  { value: 'room', label: 'Everything in this room' },
 ]
 const githubEventRoutingOptions: Array<{ value: FocusGitHubEventRouting; label: string }> = [
-  { value: 'task_and_branch', label: 'Matching task/branch' },
-  { value: 'focus_owned_only', label: 'Focus-owned only' },
-  { value: 'task_only', label: 'Task-linked only' },
-  { value: 'all_parent_repo', label: 'All parent repo events' },
-  { value: 'off', label: 'Do not route' },
+  { value: 'task_and_branch', label: 'Related code activity' },
+  { value: 'focus_owned_only', label: 'Keep related code here' },
+  { value: 'task_only', label: 'Only task mentions' },
+  { value: 'all_parent_repo', label: 'All repo activity' },
+  { value: 'off', label: 'No code activity' },
 ]
 
 const candidateTasks = computed(() =>
@@ -502,7 +502,7 @@ const shareHelpText = computed(() => {
     return 'Write a short outcome before sharing.'
   }
   if (settingsDraft.value.parent_visibility === 'silent') {
-    return 'Conclude this Focus Room without posting the summary into parent chat.'
+    return 'Conclude this Focus Room without posting the summary into the parent room.'
   }
   return 'Send a concise outcome to the parent room.'
 })
@@ -554,40 +554,40 @@ const settingsButtonLabel = computed(() =>
 const parentVisibilityDescription = computed(() => {
   switch (settingsDraft.value.parent_visibility) {
     case 'silent':
-      return 'No task activity or result summaries are posted to parent chat.'
+      return 'Keep the parent quiet unless you share an outcome yourself.'
     case 'all_activity':
-      return 'Every routed Focus Room event may appear in parent chat.'
+      return 'Let every update appear in the parent room.'
     case 'major_activity':
-      return 'Only major task, PR, and conclusion updates appear in parent chat.'
+      return 'Share only task, pull request, and completion milestones.'
     case 'summary_only':
     default:
-      return 'Only explicit result summaries appear in parent chat.'
+      return 'Share only the outcome you write when the room is done.'
   }
 })
 const activityScopeDescription = computed(() => {
   switch (settingsDraft.value.activity_scope) {
     case 'room':
-      return 'Activity can include the whole Focus Room thread.'
+      return 'Use the whole room conversation to decide what belongs here.'
     case 'task_only':
-      return 'Activity is limited to the linked source task.'
+      return 'Use only the source task to decide what belongs here.'
     case 'task_and_branch':
     default:
-      return 'Activity is scoped to the linked task and its branch/artifacts.'
+      return 'Use the task plus linked branches, PRs, reviews, and checks.'
   }
 })
 const githubEventRoutingDescription = computed(() => {
   switch (settingsDraft.value.github_event_routing) {
     case 'off':
-      return 'GitHub events stay out of this Focus Room routing lane.'
+      return 'Hide code activity from this Focus Room.'
     case 'focus_owned_only':
-      return 'Task, branch, PR, review, and check events stay in this Focus Room.'
+      return 'Keep matching PRs, reviews, and checks here without echoing them to the parent.'
     case 'all_parent_repo':
-      return 'Parent repo GitHub events can be surfaced here.'
+      return 'Show every code update from the parent repository here.'
     case 'task_only':
-      return 'Only GitHub events explicitly linked to the task are routed.'
+      return 'Show only code updates that name this task.'
     case 'task_and_branch':
     default:
-      return 'GitHub events must match the task, branch, or workflow artifact.'
+      return 'Show code updates for this task and its linked code.'
   }
 })
 
@@ -625,7 +625,7 @@ function submitFocusSettings() {
 }
 
 function parentVisibilityLabel(value: FocusParentVisibility): string {
-  return parentVisibilityOptions.find(option => option.value === value)?.label || 'Result summaries only'
+  return parentVisibilityOptions.find(option => option.value === value)?.label || 'Only the final note'
 }
 
 function submitAdHocFocusRoom() {
