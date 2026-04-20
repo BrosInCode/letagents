@@ -135,8 +135,10 @@
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
+      :isSignedIn="auth.isSignedIn.value"
       @send="handleSend"
       @clearReply="selectedReply = null"
+      @signIn="handleSignIn"
     />
 
     <!-- Mobile bottom navigation -->

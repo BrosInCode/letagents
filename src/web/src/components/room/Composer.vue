@@ -49,9 +49,19 @@
           </div>
         </div>
       </div>
-      <span class="composer-sender-label">
-        Sending as <strong>{{ senderName }}</strong>
-      </span>
+      <div class="composer-identity">
+        <span class="composer-sender-label">
+          Sending as <strong>{{ senderName }}</strong>
+        </span>
+        <button
+          v-if="!isSignedIn"
+          class="composer-signin-btn"
+          type="button"
+          @click="emit('signIn')"
+        >
+          Sign in
+        </button>
+      </div>
       <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
     </div>
     <div class="composer-card">
@@ -109,6 +119,7 @@ const PREFS_KEY = 'lac-prompt-prefs'
 const props = withDefaults(defineProps<{
   senderName?: string
   disabled?: boolean
+  isSignedIn?: boolean
   roomIdentifier?: string
   replyTo?: RoomMessage | null
   messages?: readonly RoomMessage[]
@@ -116,6 +127,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   senderName: 'anonymous',
   disabled: false,
+  isSignedIn: false,
   roomIdentifier: '',
   replyTo: null,
   messages: () => [],
@@ -125,6 +137,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   send: [text: string, agentPromptKind: string | null, replyTo: string | null]
   clearReply: []
+  signIn: []
 }>()
 
 const text = ref('')
@@ -616,12 +629,14 @@ watch(filteredMentionCandidates, (candidates) => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 0 4px 6px;
 }
 .composer-toolbar-pills {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 .composer-toolbar {
   display: flex;
@@ -635,16 +650,43 @@ watch(filteredMentionCandidates, (candidates) => {
   gap: 8px;
   min-width: 0;
 }
+.composer-identity {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
 .composer-sender-label {
   font-size: 0.72rem;
   color: var(--muted, #71717a);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 .composer-sender-label strong {
   color: var(--text, #fafafa);
   font-weight: 600;
+}
+.composer-signin-btn {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #27272a);
+  background: color-mix(in srgb, var(--surface, #18181b) 88%, var(--text, #fafafa) 12%);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+.composer-signin-btn:hover {
+  border-color: var(--line-strong, #3f3f46);
+  background: color-mix(in srgb, var(--surface, #18181b) 76%, var(--text, #fafafa) 24%);
 }
 .composer-shortcut-hint {
   display: none;
@@ -652,6 +694,7 @@ watch(filteredMentionCandidates, (candidates) => {
   color: var(--muted, #71717a);
   opacity: 0.5;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 @media (min-width: 641px) {
   .composer-shortcut-hint { display: inline; }
