@@ -72,12 +72,17 @@ import {
   type TaskWorkflowArtifactMatch,
 } from "./repo-workflow.js";
 import {
-  normalizeFocusRoomSettings,
   shouldPostFocusRoomEventToParent,
   shouldRouteGitHubEventToFocusRoom,
   type FocusGitHubRoutingContext,
   type FocusParentEventKind,
 } from "./focus-room-settings.js";
+import {
+  formatFocusRoomAnchorMessage,
+  formatFocusRoomConclusionMessage,
+  getFocusRoomSettings,
+  toRoomResponse,
+} from "./room-formatting.js";
 import { selectStaleTaskAutoPrompt } from "./stale-work.js";
 import {
   buildFailedCheckRunTaskDescription,
@@ -302,77 +307,6 @@ function formatTaskLifecycleStatus(task: {
     default:
       return `[status] ${task.id} moved to ${task.status}: ${task.title}`;
   }
-}
-
-function toRoomResponse(
-  project: Project,
-  options?: {
-    role?: "admin" | "participant" | "anonymous";
-    authenticated?: boolean;
-  }
-): Record<string, unknown> {
-  const focusSettings = project.kind === "focus"
-    ? normalizeFocusRoomSettings({
-        parent_visibility: project.focus_parent_visibility,
-        activity_scope: project.focus_activity_scope,
-        github_event_routing: project.focus_github_event_routing,
-      })
-    : null;
-
-  return {
-    room_id: project.id,
-    name: project.name ?? null,
-    display_name: project.display_name,
-    code: project.code,
-    kind: project.kind,
-    parent_room_id: project.parent_room_id,
-    focus_key: project.focus_key,
-    source_task_id: project.source_task_id,
-    focus_status: project.focus_status,
-    focus_parent_visibility: focusSettings?.parent_visibility ?? null,
-    focus_activity_scope: focusSettings?.activity_scope ?? null,
-    focus_github_event_routing: focusSettings?.github_event_routing ?? null,
-    focus_settings: focusSettings,
-    concluded_at: project.concluded_at,
-    conclusion_summary: project.conclusion_summary,
-    created_at: project.created_at,
-    ...(options?.role ? { role: options.role } : {}),
-    ...(options ? { authenticated: Boolean(options.authenticated) } : {}),
-  };
-}
-
-function formatFocusRoomConclusionMessage(input: {
-  focusRoom: Project;
-  task?: Task;
-  summary: string;
-}): string {
-  const taskLabel = input.task
-    ? `${input.task.id}: ${input.task.title}`
-    : input.focusRoom.source_task_id || input.focusRoom.focus_key || input.focusRoom.id;
-  return `[status] Focus Room concluded for ${taskLabel}. Result: ${input.summary}`;
-}
-
-function formatFocusRoomReference(focusRoom: Project): string {
-  const key = focusRoom.focus_key || focusRoom.source_task_id || focusRoom.id;
-  return focusRoom.display_name
-    ? `${focusRoom.display_name} (${key})`
-    : key;
-}
-
-function formatFocusRoomAnchorMessage(input: {
-  task: { id: string; title: string };
-  focusRoom: Project;
-  activity: string;
-}): string {
-  return `[status] ${input.activity} for ${input.task.id}: ${input.task.title} is in Focus Room ${formatFocusRoomReference(input.focusRoom)}.`;
-}
-
-function getFocusRoomSettings(focusRoom: Project) {
-  return normalizeFocusRoomSettings({
-    parent_visibility: focusRoom.focus_parent_visibility,
-    activity_scope: focusRoom.focus_activity_scope,
-    github_event_routing: focusRoom.focus_github_event_routing,
-  });
 }
 
 async function getActiveTaskFocusRoom(projectId: string, taskId: string): Promise<Project | null> {
