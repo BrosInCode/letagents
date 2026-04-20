@@ -10,33 +10,31 @@
 
     <section v-if="isFocusRoom" class="focus-context-container">
       <div class="focus-context-header" :data-concluded="isConcluded">
-        <div>
-          <p class="focus-eyebrow">Current Focus Room</p>
-          <h4>{{ sourceTaskId || 'Ad-hoc room' }}</h4>
-          <p>{{ focusContextCopy }}</p>
+        <div class="focus-context-header-top">
+          <div class="focus-context-title">
+            <p class="focus-eyebrow">Current Focus Room</p>
+            <h4>{{ sourceTaskId || 'Ad-hoc room' }}</h4>
+            <p>{{ focusContextCopy }}</p>
+          </div>
+          <div class="focus-context-actions">
+            <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
+              Back to parent room
+            </button>
+          </div>
         </div>
-        <dl class="focus-facts compact">
-          <div>
-            <dt>Parent</dt>
-            <dd>{{ roomAddress }}</dd>
-          </div>
-          <div>
-            <dt>Source task</dt>
-            <dd>{{ sourceTaskId || 'Not linked yet' }}</dd>
-          </div>
-          <div>
-            <dt>Status</dt>
-            <dd>{{ focusStatusLabel }}</dd>
-          </div>
-          <div>
-            <dt>Parent chat</dt>
-            <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
-          </div>
-        </dl>
-        <div class="focus-context-actions">
-          <button class="focus-secondary" type="button" @click="emit('openParentRoom')">
-            Back to parent room
-          </button>
+        <div class="focus-metadata-bar">
+          <span class="focus-metadata-item">
+            <strong>Parent</strong> {{ roomAddress }}
+          </span>
+          <span class="focus-metadata-item">
+            <strong>Source task</strong> {{ sourceTaskId || 'Not linked yet' }}
+          </span>
+          <span class="focus-metadata-item">
+            <strong>Status</strong> {{ focusStatusLabel }}
+          </span>
+          <span class="focus-metadata-item">
+            <strong>Parent chat</strong> {{ parentVisibilityLabel(settingsDraft.parent_visibility) }}
+          </span>
         </div>
       </div>
 
@@ -786,15 +784,60 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-context-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.8fr) auto;
-  gap: 14px;
-  align-items: center;
-  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
   background: var(--bg-card, #131316);
   letter-spacing: 0;
+}
+
+.focus-context-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  width: 100%;
+  gap: 16px;
+}
+
+.focus-context-title h4 {
+  margin: 0;
+  color: var(--text-primary, #ffffff);
+  font-weight: 700;
+}
+
+.focus-metadata-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.focus-metadata-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-tertiary, #a1a1aa);
+  background: var(--bg-0, #09090b);
+  border: 1px solid var(--line, #27272a);
+  padding: 5px 12px;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.focus-metadata-item strong {
+  color: var(--text-secondary, #d4d4d8);
+  font-weight: 700;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  flex-shrink: 0;
 }
 
 .focus-context-header[data-concluded="true"] {
@@ -803,8 +846,8 @@ function taskStatusLabel(status: string): string {
 }
 
 .focus-context-actions {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-shrink: 0;
 }
 
 .focus-context-panels {
@@ -1056,11 +1099,6 @@ function taskStatusLabel(status: string): string {
   display: grid;
   gap: 8px;
   margin: 14px 0;
-}
-
-.focus-facts.compact {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 0;
 }
 
 .focus-facts div {
