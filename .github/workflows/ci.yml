@@ -113,6 +113,13 @@ jobs:
           --test
           src/api/__tests__/focus-rooms.test.ts
 
+      - name: Run focus lineage repair tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/focus-lineage-repair.test.ts
+
   # ── Build and push Docker images to GHCR ──
   docker:
     needs: [build, integration-tests]
@@ -190,7 +197,7 @@ jobs:
             docker tag "ghcr.io/brosincode/letagents:${IMAGE_TAG}" "ghcr.io/brosincode/letagents:latest"
             docker tag "ghcr.io/brosincode/letagents:${IMAGE_TAG}-migrate" "ghcr.io/brosincode/letagents:latest-migrate"
 
-            # Run database migrations using the baked-in drizzle-kit
+            # Run schema push plus targeted repair steps using the baked-in migrator
             docker compose --profile migrate run --rm migrate
 
             # Stop systemd service if it's still running (one-time migration)
