@@ -5,6 +5,7 @@
         v-for="msg in messages"
         :key="msg.id"
         :message="msg"
+        :thread="threadSummaries.get(msg.id) || null"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
@@ -56,6 +57,27 @@ const matchedIds = computed(() => {
     }
   }
   return ids
+})
+
+interface MessageThreadSummary {
+  count: number
+  latest: RoomMessage | null
+}
+
+const threadSummaries = computed(() => {
+  const summaries = new Map<string, MessageThreadSummary>()
+
+  for (const msg of props.messages) {
+    const parentId = msg.reply_to?.id
+    if (!parentId) continue
+
+    const summary = summaries.get(parentId) || { count: 0, latest: null }
+    summary.count += 1
+    summary.latest = msg
+    summaries.set(parentId, summary)
+  }
+
+  return summaries
 })
 
 function searchClasses(msg: RoomMessage): Record<string, boolean> {
