@@ -69,7 +69,12 @@
           <span class="reply-preview-text">{{ replyPreviewText }}</span>
         </button>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
-        <div v-else class="md-content" v-html="renderedContent" />
+        <LongMessageContent
+          v-else
+          :text="message.text || ''"
+          :html="renderedContent"
+          :messageId="message.id"
+        />
       </div>
       <button
         v-if="hasThread"
@@ -90,6 +95,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import GitHubEventCard from './GitHubEventCard.vue'
+import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 import { type RoomMessage, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
 
