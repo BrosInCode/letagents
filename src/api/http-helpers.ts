@@ -71,6 +71,27 @@ export function clearSessionCookie(res: express.Response): void {
   );
 }
 
+export function sanitizeRedirectPath(
+  pathValue: string | null | undefined,
+  fallback = "/"
+): string {
+  const trimmed = pathValue?.trim();
+  if (!trimmed || !trimmed.startsWith("/") || trimmed.startsWith("//")) {
+    return fallback;
+  }
+
+  try {
+    const parsed = new URL(trimmed, "http://localhost");
+    if (parsed.origin !== "http://localhost") {
+      return fallback;
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return fallback;
+  }
+}
+
 const SAFE_BAD_REQUEST_PATTERNS = [
   /^Invalid transition:/,
   /^display_name must be between 2 and 64 characters$/,
