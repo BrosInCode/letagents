@@ -3,7 +3,6 @@ import express from "express";
 
 import {
   addMessage,
-  assignProjectAdmin,
   createCoordinationEvent,
   createTask,
   createTaskLease,
@@ -25,7 +24,6 @@ import {
   getTaskOwnershipState,
   getTasks,
   hasMessagesFromSender,
-  isProjectAdmin,
   markGitHubAppInstallationUninstalled,
   markGitHubAppRepositoryRemoved,
   migrateGitHubRepositoryCanonicalRoom,
@@ -92,14 +90,17 @@ import {
   shouldReopenTaskForFailedCheckRun,
 } from "./check-run-autotasks.js";
 import {
-  isGitHubRepoAdmin,
-  parseGitHubRepoName,
-  resolveGitHubRepoRoomAccessDecision,
-} from "./github-repo-access.js";
-import {
-  isInviteCode,
-  normalizeRoomId,
-} from "./room-routing.js";
+  getProjectAccessRoomId,
+  isRepoBackedProject,
+  isRepoBackedRoomId,
+  replyRepoRoomAccessDecision,
+  requireAdmin,
+  requireParticipant,
+  resolveGitHubRoomEntryDecision,
+  resolveProjectRole,
+  resolveRepoRoomAccessDecision,
+} from "./room-access.js";
+import { isInviteCode, normalizeRoomId } from "./room-routing.js";
 import {
   buildTaskUpdatePatch,
   normalizeTaskActorKey,
@@ -124,7 +125,6 @@ import {
 } from "../shared/room-agent-prompts.js";
 import {
   respondWithError,
-  sanitizeRedirectPath,
   type AuthenticatedRequest,
 } from "./http-helpers.js";
 import {
@@ -1023,14 +1023,6 @@ async function isTrustedAgentCreator(projectId: string, createdBy: string): Prom
   return hasMessagesFromSender(projectId, createdBy);
 }
 
-function isRepoBackedRoomId(roomId: string): boolean {
-  return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(roomId);
-}
-
-function getProjectAccessRoomId(project: Project): string {
-  return project.parent_room_id ?? project.id;
-}
-
 function parseFocusRoomLocator(
   roomId: string
 ): { parentRoomId: string; focusKey: string } | null {
@@ -1051,178 +1043,6 @@ function parseFocusRoomLocator(
 
 function isReservedRoomId(roomId: string): boolean {
   return /^focus_\d+$/.test(roomId);
-}
-
-function buildLandingRedirect(input: {
-  reason: "repo_signin_required" | "repo_access_denied";
-  roomName: string;
-  redirectTo: string;
-}): string {
-  const params = new URLSearchParams({
-    reason: input.reason,
-    room: input.roomName,
-    redirect_to: sanitizeRedirectPath(input.redirectTo, "/"),
-  });
-  return `/?${params.toString()}`;
-}
-
-function isRepoBackedProject(project: Project): boolean {
-  return isRepoBackedRoomId(getProjectAccessRoomId(project));
-}
-
-function getPublicBaseUrl(): string {
-  const configuredBaseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
-  if (configuredBaseUrl?.trim()) {
-    return configuredBaseUrl.replace(/\/+$/, "");
-  }
-
-  return `http://localhost:${process.env.PORT || "3001"}`;
-}
-
-function buildDeviceFlowUrl(roomName: string): string {
-  const url = new URL("/auth/device/start", `${getPublicBaseUrl()}/`);
-  url.searchParams.set("room_id", roomName);
-  return url.toString();
-}
-
-type RepoRoomAccessDecision =
-  | { kind: "allow" }
-  | { kind: "auth_required" }
-  | { kind: "private_repo_no_access" };
-
-function replyRepoRoomAccessDecision(
-  res: express.Response,
-  roomName: string,
-  decision: Exclude<RepoRoomAccessDecision, { kind: "allow" }>
-): false {
-  if (decision.kind === "auth_required") {
-    res.status(401).json({
-      error: "auth_required",
-      code: "NOT_AUTHENTICATED",
-      message: "Authentication is required for repo-backed rooms",
-      room_id: roomName,
-      device_flow_url: buildDeviceFlowUrl(roomName),
-    });
-    return false;
-  }
-
-  res.status(403).json({
-    error: "private_repo_no_access",
-    code: "PRIVATE_REPO_NO_ACCESS",
-    message: "Authenticated account does not have access to this private repo room",
-    room_id: roomName,
-  });
-  return false;
-}
-
-async function resolveRepoRoomAccessDecision(input: {
-  roomName: string;
-  sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined;
-}): Promise<RepoRoomAccessDecision> {
-  if (!isRepoBackedRoomId(input.roomName)) {
-    return { kind: "allow" };
-  }
-
-  return resolveGitHubRepoRoomAccessDecision(input);
-}
-
-async function resolveProjectRole(
-  project: Project,
-  sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined
-): Promise<"admin" | "participant" | "anonymous"> {
-  const accessRoomId = getProjectAccessRoomId(project);
-  if (!sessionAccount) {
-    return isRepoBackedProject(project) ? "anonymous" : "participant";
-  }
-
-  if (
-    (await isProjectAdmin(project.id, sessionAccount.account_id)) ||
-    (accessRoomId !== project.id && (await isProjectAdmin(accessRoomId, sessionAccount.account_id)))
-  ) {
-    return "admin";
-  }
-
-  if (parseGitHubRepoName(accessRoomId) && sessionAccount.provider === "github") {
-    const eligible = await isGitHubRepoAdmin({
-      roomName: accessRoomId,
-      login: sessionAccount.login,
-      accessToken: sessionAccount.provider_access_token ?? "",
-    });
-
-    if (eligible) {
-      await assignProjectAdmin(project.id, sessionAccount.account_id);
-      return "admin";
-    }
-  }
-
-  return "participant";
-}
-
-async function requireAdmin(
-  req: AuthenticatedRequest,
-  res: express.Response,
-  project: Project
-): Promise<boolean> {
-  if (!req.sessionAccount) {
-    res.status(401).json({ error: "Authentication required" });
-    return false;
-  }
-
-  const role = await resolveProjectRole(project, req.sessionAccount);
-  if (role !== "admin") {
-    res.status(403).json({ error: "Admin privileges required" });
-    return false;
-  }
-
-  return true;
-}
-
-async function requireParticipant(
-  req: AuthenticatedRequest,
-  res: express.Response,
-  project: Project
-): Promise<boolean> {
-  if (!isRepoBackedProject(project)) {
-    return true;
-  }
-
-  const decision = await resolveRepoRoomAccessDecision({
-    roomName: getProjectAccessRoomId(project),
-    sessionAccount: req.sessionAccount,
-  });
-
-  if (decision.kind === "allow") {
-    return true;
-  }
-
-  return replyRepoRoomAccessDecision(res, getProjectAccessRoomId(project), decision);
-}
-
-async function resolveGitHubRoomEntryDecision(input: {
-  roomName: string;
-  sessionAccount: SessionAccount | OwnerTokenAccount | null | undefined;
-  redirectTo: string;
-}): Promise<
-  | { kind: "allow" }
-  | { kind: "redirect"; location: string }
-> {
-  const decision = await resolveRepoRoomAccessDecision({
-    roomName: input.roomName,
-    sessionAccount: input.sessionAccount,
-  });
-
-  if (decision.kind === "allow") {
-    return { kind: "allow" };
-  }
-
-  return {
-    kind: "redirect",
-    location: buildLandingRedirect({
-      reason: decision.kind === "auth_required" ? "repo_signin_required" : "repo_access_denied",
-      roomName: input.roomName,
-      redirectTo: input.redirectTo,
-    }),
-  };
 }
 
 async function resolveRoomOrReply(
