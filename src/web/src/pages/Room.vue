@@ -132,6 +132,7 @@
       v-if="activeTab === 'chat' && isConnected"
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
+      :attachmentsEnabled="room?.attachmentsEnabled !== false"
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
@@ -233,6 +234,7 @@ const {
   githubEventsSupported,
   githubEventsLoading,
   room,
+  lastSendError,
   isConnected,
   connectionState,
   joinError,
@@ -338,7 +340,9 @@ async function handleSend(
   const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments)
   if (sent) {
     selectedReply.value = null
+    return
   }
+  toast.error(lastSendError.value || 'Message could not be sent.')
 }
 
 async function handleAddTask(title: string) {

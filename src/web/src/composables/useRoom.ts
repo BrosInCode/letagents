@@ -202,6 +202,7 @@ export interface RoomInfo {
   role: string
   authenticated: boolean
   kind: 'main' | 'focus'
+  attachmentsEnabled: boolean
   parentRoomId: string | null
   focusKey: string | null
   sourceTaskId: string | null
@@ -219,6 +220,7 @@ export interface FocusRoomInfo {
   display_name: string
   code: string | null
   kind: 'main' | 'focus'
+  attachments_enabled?: boolean
   parent_room_id: string | null
   focus_key: string | null
   source_task_id: string | null
@@ -313,6 +315,7 @@ const githubEventsHasMore = ref(false)
 const githubEventsError = ref<RoomGitHubEventsError | null>(null)
 const githubEventsLoading = ref(false)
 const room = ref<RoomInfo | null>(null)
+const lastSendError = ref('')
 const isConnected = ref(false)
 const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
@@ -872,6 +875,7 @@ async function sendMessage(
   attachments: OutgoingMessageAttachment[] = []
 ): Promise<boolean> {
   if (!room.value) return false
+  lastSendError.value = ''
   try {
     const preparedAttachments = attachments.length
       ? await prepareMessageAttachments(room.value.identifier, attachments)
@@ -895,7 +899,11 @@ async function sendMessage(
       messages.value = [...messages.value, msg]
     }
     return true
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message.trim() : ''
+    lastSendError.value = /attachment object storage is not configured/i.test(message)
+      ? 'Attachments are unavailable right now.'
+      : message || 'Message could not be sent.'
     return false
   }
 }
@@ -1023,6 +1031,7 @@ async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: Focus
     room.value = {
       ...room.value,
       displayName: focusRoom.display_name || room.value.displayName,
+      attachmentsEnabled: focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
       focusStatus: focusRoom.focus_status || room.value.focusStatus,
       focusParentVisibility: focusRoom.focus_parent_visibility || room.value.focusParentVisibility,
       focusActivityScope: focusRoom.focus_activity_scope || room.value.focusActivityScope,
@@ -1065,6 +1074,7 @@ async function updateFocusRoomSettings(
     if (room.value.kind === 'focus' && room.value.projectId === focusRoom.room_id) {
       room.value = {
         ...room.value,
+        attachmentsEnabled: focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
         focusParentVisibility: focusRoom.focus_parent_visibility,
         focusActivityScope: focusRoom.focus_activity_scope,
         focusGitHubEventRouting: focusRoom.focus_github_event_routing,
@@ -1160,6 +1170,7 @@ async function joinRoom(roomIdentifier: string) {
       role: project.role || 'participant',
       authenticated: !!project.authenticated,
       kind: project.kind || 'main',
+      attachmentsEnabled: project.attachments_enabled !== false,
       parentRoomId: project.parent_room_id || null,
       focusKey: project.focus_key || null,
       sourceTaskId: project.source_task_id || null,
@@ -1336,6 +1347,7 @@ export function useRoom() {
     githubEventsSupported,
     githubEventsLoading: readonly(githubEventsLoading),
     room: readonly(room),
+    lastSendError: readonly(lastSendError),
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
     connectionState: readonly(connectionState),
