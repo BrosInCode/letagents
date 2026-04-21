@@ -363,6 +363,7 @@ export interface RoomActivityHistoryEntry {
 export interface RoomActivityHistoryPage {
   room_id: string
   root_room_id: string
+  selected_room_id: string
   hidden_count: number
   entries: ReadonlyArray<RoomActivityHistoryEntry>
   page: number
@@ -408,6 +409,7 @@ let lastActivityHistoryRequest: {
   page?: number
   pageSize?: number
   kind?: RoomActivityHistoryKind
+  roomId?: string
 } = {}
 let activityHistoryRequestSequence = 0
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
@@ -660,6 +662,7 @@ async function fetchActivityHistory(
     page?: number
     pageSize?: number
     kind?: RoomActivityHistoryKind
+    roomId?: string
   }
 ): Promise<RoomActivityHistoryPage | null> {
   const params = new URLSearchParams()
@@ -667,6 +670,7 @@ async function fetchActivityHistory(
   if (options?.page) params.set('page', String(options.page))
   if (options?.pageSize) params.set('page_size', String(options.pageSize))
   if (options?.kind && options.kind !== 'all') params.set('kind', options.kind)
+  if (options?.roomId?.trim()) params.set('room_id', options.roomId.trim())
 
   try {
     const suffix = params.toString() ? `?${params.toString()}` : ''
@@ -721,6 +725,7 @@ async function loadActivityHistory(options?: {
   page?: number
   pageSize?: number
   kind?: RoomActivityHistoryKind
+  roomId?: string
 }): Promise<boolean> {
   if (!room.value) return false
   const roomIdentifier = room.value.identifier
@@ -729,6 +734,7 @@ async function loadActivityHistory(options?: {
     page: options?.page ?? lastActivityHistoryRequest.page ?? 1,
     pageSize: options?.pageSize ?? lastActivityHistoryRequest.pageSize ?? 20,
     kind: options?.kind ?? lastActivityHistoryRequest.kind ?? 'all',
+    roomId: options?.roomId ?? lastActivityHistoryRequest.roomId ?? roomIdentifier,
   }
   lastActivityHistoryRequest = nextRequest
   const requestId = ++activityHistoryRequestSequence
@@ -1388,7 +1394,7 @@ async function joinRoom(roomIdentifier: string) {
   activityHistory.value = null
   activityHistoryLoading.value = true
   activityHistoryError.value = ''
-  lastActivityHistoryRequest = { page: 1, pageSize: 20, kind: 'all' }
+  lastActivityHistoryRequest = { page: 1, pageSize: 20, kind: 'all', roomId: roomIdentifier }
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false

@@ -91,6 +91,8 @@
           key="activity"
           class="room-tab-panel"
           :roomIdentifier="room?.identifier || ''"
+          :currentRoom="room"
+          :focusRooms="focusRooms"
           :messages="messages"
           :participants="participants"
           :presence="presence"

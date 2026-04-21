@@ -80,6 +80,11 @@ function normalizeHistoryKind(value: unknown): RoomActivityHistoryKind {
   return normalized === "agent" || normalized === "human" ? normalized : "all";
 }
 
+function normalizeHistoryRoomId(value: unknown): string | null {
+  const normalized = normalizeRoomId(String(value ?? "").trim());
+  return normalized || null;
+}
+
 function normalizeActorLabel(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
@@ -195,18 +200,22 @@ export function registerRoomPresenceRoutes(
         ? await getFocusRoomsForParent(rootRoom.id)
         : [];
       const rooms = [rootRoom, ...focusRooms];
-      const roomIds = rooms.map((room) => room.id);
-      const [participants, roomTasks, currentRoomParticipants] = await Promise.all([
-        getRoomParticipantsForRooms(roomIds, { includeHidden: true }),
-        getTasksForRooms(roomIds),
-        getRoomParticipantsForRooms([project.id], { includeHidden: true }),
+      const selectedRoomId = normalizeHistoryRoomId(req.query.room_id) ?? project.id;
+      const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? project;
+      const scopedRooms = rooms.filter((room) => room.id === selectedRoom.id);
+      const scopedRoomIds = scopedRooms.map((room) => room.id);
+      const [participants, roomTasks, selectedRoomParticipants] = await Promise.all([
+        getRoomParticipantsForRooms(scopedRoomIds, { includeHidden: true }),
+        getTasksForRooms(scopedRoomIds),
+        getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
       ]);
       const entries = buildRoomActivityHistoryEntries({
-        rooms,
+        rooms: scopedRooms,
         participants,
         tasks: roomTasks,
       });
       const filtered = filterRoomActivityHistoryEntries(entries, {
+        roomId: selectedRoom.id,
         kind: normalizeHistoryKind(req.query.kind),
         query: typeof req.query.query === "string" ? req.query.query : null,
       });
@@ -218,7 +227,8 @@ export function registerRoomPresenceRoutes(
       res.json({
         room_id: project.id,
         root_room_id: rootRoom.id,
-        hidden_count: currentRoomParticipants.filter((participant) => Boolean(participant.hidden_at)).length,
+        selected_room_id: selectedRoom.id,
+        hidden_count: selectedRoomParticipants.filter((participant) => Boolean(participant.hidden_at)).length,
         ...paginated,
       });
     } catch (error) {

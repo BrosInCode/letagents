@@ -130,6 +130,8 @@ test("filterRoomActivityHistoryEntries matches room, participant, and task searc
   assert.equal(filterRoomActivityHistoryEntries(entries, { query: "attachment" }).length, 1);
   assert.equal(filterRoomActivityHistoryEntries(entries, { kind: "human" }).length, 0);
   assert.equal(filterRoomActivityHistoryEntries(entries, { kind: "agent", query: "spinner" }).length, 1);
+  assert.equal(filterRoomActivityHistoryEntries(entries, { roomId: "focus_14" }).length, 1);
+  assert.equal(filterRoomActivityHistoryEntries(entries, { roomId: "github.com/BrosInCode/letagents" })[0]?.participant.display_name, "Thicket");
 });
 
 test("filterRoomActivityHistoryEntries searches tasks beyond the displayed top five", () => {

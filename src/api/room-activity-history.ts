@@ -283,12 +283,18 @@ export function filterRoomActivityHistoryEntries(
   options?: {
     kind?: RoomActivityHistoryKind;
     query?: string | null;
+    roomId?: string | null;
   }
 ): RoomActivityHistoryEntry[] {
   const kind = options?.kind ?? "all";
   const query = normalize(options?.query);
+  const roomId = String(options?.roomId ?? "").trim();
 
   return entries.filter((entry) => {
+    if (roomId && entry.room.id !== roomId) {
+      return false;
+    }
+
     if (kind !== "all" && entry.participant.kind !== kind) {
       return false;
     }

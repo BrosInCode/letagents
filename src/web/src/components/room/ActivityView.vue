@@ -1,22 +1,34 @@
 <template>
   <div class="activity-panel">
     <div class="activity-summary">
-      <article class="summary-card">
-        <strong>{{ onlineAgents.length }}</strong>
-        <span>Agents online</span>
-      </article>
-      <article class="summary-card">
-        <strong>{{ disconnectedAgents.length }}</strong>
-        <span>Agents disconnected</span>
-      </article>
-      <article class="summary-card">
-        <strong>{{ humans.length }}</strong>
-        <span>Humans seen</span>
-      </article>
-      <article class="summary-card">
-        <strong>{{ participants.length }}</strong>
-        <span>Known participants</span>
-      </article>
+      <template v-if="activeView === 'live'">
+        <article class="summary-card">
+          <strong>{{ onlineAgents.length }}</strong>
+          <span>Agents online</span>
+        </article>
+        <article class="summary-card">
+          <strong>{{ disconnectedAgents.length }}</strong>
+          <span>Agents disconnected</span>
+        </article>
+        <article class="summary-card">
+          <strong>{{ humans.length }}</strong>
+          <span>Humans seen</span>
+        </article>
+        <article class="summary-card">
+          <strong>{{ participants.length }}</strong>
+          <span>Known participants</span>
+        </article>
+      </template>
+      <template v-else>
+        <article
+          v-for="card in historySummaryCards"
+          :key="card.label"
+          class="summary-card"
+        >
+          <strong>{{ card.value }}</strong>
+          <span>{{ card.label }}</span>
+        </article>
+      </template>
     </div>
 
     <div class="activity-toolbar-row">
@@ -39,19 +51,32 @@
         </button>
       </div>
 
-      <p v-if="archivedCount > 0" class="activity-toolbar-note">
+      <p v-if="activeView === 'live' && archivedCount > 0" class="activity-toolbar-note">
         {{ archivedCount }} archived from the live disconnected list.
       </p>
     </div>
 
     <div v-if="activeView === 'history'" class="activity-history-view">
       <div class="activity-history-toolbar">
+        <label v-if="historyRoomOptions.length > 1" class="activity-history-filter">
+          <span>Room</span>
+          <select v-model="historyRoomId">
+            <option
+              v-for="option in historyRoomOptions"
+              :key="option.id"
+              :value="option.id"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+
         <label class="activity-history-search">
           <span>Search history</span>
           <input
             v-model="historyQuery"
             type="search"
-            placeholder="Room, agent, owner, or task"
+            placeholder="Agent, owner, or task"
           >
         </label>
 
@@ -82,132 +107,381 @@
 
       <div v-else-if="historyEntries.length === 0" class="activity-empty">
         <h3>No matching history</h3>
-        <p>Try a broader query or switch back to the live roster.</p>
+        <p>Try a broader query or choose another room scope.</p>
       </div>
 
-      <div v-else class="activity-history-list">
-        <article
-          v-for="entry in historyEntries"
-          :key="entry.id"
-          class="activity-history-card"
-        >
-          <div class="activity-history-card-header">
+      <div v-else class="activity-layout">
+        <div class="activity-groups">
+          <section class="activity-group">
+            <div class="activity-group-header">
+              <div>
+                <h3>{{ historyPrimaryAgentsTitle }}</h3>
+                <p>{{ historyPrimaryAgentsDescription }}</p>
+              </div>
+              <span class="activity-group-count">{{ historyPrimaryAgents.length }}</span>
+            </div>
+
+            <div v-if="historyPrimaryAgents.length > 0" class="activity-roster">
+              <button
+                v-for="participant in historyPrimaryAgents"
+                :key="participant.key"
+                class="activity-roster-item"
+                :data-selected="selectedHistoryParticipant?.key === participant.key"
+                :data-kind="participant.kind"
+                :data-connection="participant.connection"
+                type="button"
+                @click="selectedHistoryParticipantKey = participant.key"
+              >
+                <div class="activity-roster-header">
+                  <div>
+                    <div class="activity-roster-name">{{ participant.label }}</div>
+                    <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
+                  </div>
+                  <span
+                    v-if="participant.kind === 'agent' && participant.connection"
+                    class="activity-connection-pill"
+                    :data-connection="participant.connection"
+                  >
+                    {{ connectionLabel(participant) }}
+                  </span>
+                  <span v-else-if="participant.kind === 'agent'" class="activity-kind-pill">
+                    History
+                  </span>
+                </div>
+                <div class="activity-roster-status">
+                  <span
+                    v-if="participant.status"
+                    class="activity-status-dot"
+                    :data-status="participant.status"
+                  />
+                  <span>{{ participantNote(participant) }}</span>
+                  <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
+                </div>
+              </button>
+            </div>
+
+            <div v-else class="activity-group-empty">
+              No agents match this room scope right now.
+            </div>
+          </section>
+
+          <section v-if="isCurrentHistoryRoom" class="activity-group">
+            <div class="activity-group-header">
+              <div>
+                <h3>{{ historySecondaryAgentsTitle }}</h3>
+                <p>{{ historySecondaryAgentsDescription }}</p>
+              </div>
+              <span class="activity-group-count">{{ historyOtherAgents.length }}</span>
+            </div>
+
+            <div v-if="historyOtherAgents.length > 0" class="activity-roster">
+              <button
+                v-for="participant in historyOtherAgents"
+                :key="participant.key"
+                class="activity-roster-item"
+                :data-selected="selectedHistoryParticipant?.key === participant.key"
+                :data-kind="participant.kind"
+                :data-connection="participant.connection"
+                type="button"
+                @click="selectedHistoryParticipantKey = participant.key"
+              >
+                <div class="activity-roster-header">
+                  <div>
+                    <div class="activity-roster-name">{{ participant.label }}</div>
+                    <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
+                  </div>
+                  <span
+                    class="activity-connection-pill"
+                    :data-connection="participant.connection || 'disconnected'"
+                  >
+                    {{ connectionLabel(participant) }}
+                  </span>
+                </div>
+                <div class="activity-roster-status">
+                  <span
+                    v-if="participant.status"
+                    class="activity-status-dot"
+                    :data-status="participant.status"
+                  />
+                  <span>{{ participantNote(participant) }}</span>
+                  <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
+                </div>
+              </button>
+            </div>
+
+            <div v-else class="activity-group-empty">
+              No disconnected or archived agents are tracked in this room scope.
+            </div>
+          </section>
+
+          <section class="activity-group">
+            <div class="activity-group-header">
+              <div>
+                <h3>Humans seen in room</h3>
+                <p>Browser-side activity recorded for this room scope.</p>
+              </div>
+              <span class="activity-group-count">{{ historyHumans.length }}</span>
+            </div>
+
+            <div v-if="historyHumans.length > 0" class="activity-roster">
+              <button
+                v-for="participant in historyHumans"
+                :key="participant.key"
+                class="activity-roster-item"
+                :data-selected="selectedHistoryParticipant?.key === participant.key"
+                :data-kind="participant.kind"
+                type="button"
+                @click="selectedHistoryParticipantKey = participant.key"
+              >
+                <div class="activity-roster-header">
+                  <div>
+                    <div class="activity-roster-name">{{ participant.label }}</div>
+                    <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
+                  </div>
+                  <span class="activity-kind-pill">Human</span>
+                </div>
+                <div class="activity-roster-status">
+                  <span>{{ participantNote(participant) }}</span>
+                  <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
+                </div>
+              </button>
+            </div>
+
+            <div v-else class="activity-group-empty">
+              No human room activity is recorded for this scope yet.
+            </div>
+          </section>
+        </div>
+
+        <aside v-if="selectedHistoryParticipant" class="activity-detail" :data-kind="selectedHistoryParticipant.kind">
+          <div class="activity-detail-header">
             <div>
-              <div class="activity-history-room-line">
-                <strong>{{ entry.room.display_name }}</strong>
-                <span class="activity-history-room-pill">{{ entry.room.kind === 'focus' ? 'Focus room' : 'Main room' }}</span>
-                <span
-                  v-if="entry.participant.hidden_at"
-                  class="activity-history-room-pill"
-                  data-hidden="true"
-                >
-                  Archived from live
-                </span>
-              </div>
-              <div class="activity-history-room-meta">
-                <span>{{ entry.participant.display_name }}</span>
-                <span>{{ historyParticipantMeta(entry) }}</span>
-              </div>
+              <div class="activity-detail-kicker">History detail</div>
+              <h3>{{ selectedHistoryParticipant.label }}</h3>
+              <p>{{ selectedHistoryRoomOption?.label }} · {{ participantMeta(selectedHistoryParticipant) }}</p>
             </div>
 
-            <div class="activity-history-timestamps">
-              <span>Seen {{ formatLastSeen(entry.last_seen_at) }}</span>
-              <span>Joined {{ formatLastSeen(entry.first_seen_at) }}</span>
+            <div class="activity-detail-badges">
+              <span class="activity-history-room-pill">
+                {{ selectedHistoryRoomOption?.kind === 'focus' ? 'Focus room' : 'Main room' }}
+              </span>
+              <span
+                v-if="selectedHistoryParticipant.archived"
+                class="activity-history-room-pill"
+                data-hidden="true"
+              >
+                Archived
+              </span>
+              <span
+                v-if="selectedHistoryParticipant.kind === 'agent' && selectedHistoryParticipant.connection"
+                class="activity-connection-pill"
+                :data-connection="selectedHistoryParticipant.connection"
+              >
+                {{ connectionLabel(selectedHistoryParticipant) }}
+              </span>
+              <span
+                v-if="selectedHistoryParticipant.status"
+                class="activity-status-pill"
+                :data-status="selectedHistoryParticipant.status"
+              >
+                {{ STATUS_LABELS[selectedHistoryParticipant.status] }}
+              </span>
             </div>
           </div>
 
-          <div class="activity-history-task-columns">
-            <section class="activity-history-task-section">
-              <div class="activity-detail-section-header">
-                <h4>Current</h4>
-                <span>{{ entry.current_tasks.length }}</span>
-              </div>
-              <div v-if="entry.current_tasks.length === 0" class="activity-detail-empty">
-                No open tasks in this room.
-              </div>
-              <div v-else class="activity-task-list">
-                <article
-                  v-for="task in entry.current_tasks"
-                  :key="task.id"
-                  class="activity-task-card"
-                >
-                  <div class="activity-task-copy">
-                    <strong>{{ task.title }}</strong>
-                    <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
-                  </div>
-                  <a
-                    v-if="getHistoryTaskLink(task)"
-                    class="activity-task-link"
-                    :href="getHistoryTaskLink(task)!.url"
-                    target="_blank"
-                  >
-                    {{ getHistoryTaskLink(task)!.label }}
-                  </a>
-                </article>
-              </div>
-            </section>
+          <p class="activity-detail-description">
+            Seen {{ formatLastSeen(selectedHistoryParticipant.lastSeenAt) }}
+            <template v-if="selectedHistoryParticipant.firstSeenAt">
+              · first joined {{ formatLastSeen(selectedHistoryParticipant.firstSeenAt) }}
+            </template>
+          </p>
 
-            <section class="activity-history-task-section">
-              <div class="activity-detail-section-header">
-                <h4>Completed</h4>
-                <span>{{ entry.completed_tasks.length }}</span>
-              </div>
-              <div v-if="entry.completed_tasks.length === 0" class="activity-detail-empty">
-                No completed work tracked.
-              </div>
-              <div v-else class="activity-task-list">
-                <article
-                  v-for="task in entry.completed_tasks"
-                  :key="task.id"
-                  class="activity-task-card"
-                >
-                  <div class="activity-task-copy">
-                    <strong>{{ task.title }}</strong>
-                    <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
-                  </div>
-                  <a
-                    v-if="getHistoryTaskLink(task)"
-                    class="activity-task-link"
-                    :href="getHistoryTaskLink(task)!.url"
-                    target="_blank"
-                  >
-                    {{ getHistoryTaskLink(task)!.label }}
-                  </a>
-                </article>
-              </div>
-            </section>
-
-            <section class="activity-history-task-section">
-              <div class="activity-detail-section-header">
-                <h4>Created</h4>
-                <span>{{ entry.created_tasks.length }}</span>
-              </div>
-              <div v-if="entry.created_tasks.length === 0" class="activity-detail-empty">
-                No created tasks tracked.
-              </div>
-              <div v-else class="activity-task-list">
-                <article
-                  v-for="task in entry.created_tasks"
-                  :key="task.id"
-                  class="activity-task-card"
-                >
-                  <div class="activity-task-copy">
-                    <strong>{{ task.title }}</strong>
-                    <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
-                  </div>
-                  <a
-                    v-if="getHistoryTaskLink(task)"
-                    class="activity-task-link"
-                    :href="getHistoryTaskLink(task)!.url"
-                    target="_blank"
-                  >
-                    {{ getHistoryTaskLink(task)!.label }}
-                  </a>
-                </article>
-              </div>
-            </section>
+          <div class="activity-detail-stats">
+            <article class="detail-stat">
+              <strong>{{ selectedHistoryParticipant.currentTasks.length }}</strong>
+              <span>Current work</span>
+            </article>
+            <article class="detail-stat">
+              <strong>{{ selectedHistoryParticipant.completedTasks.length }}</strong>
+              <span>Completed</span>
+            </article>
+            <article class="detail-stat">
+              <strong>{{ selectedHistoryParticipant.createdTasks.length }}</strong>
+              <span>Created</span>
+            </article>
+            <article class="detail-stat">
+              <strong>{{ selectedHistoryParticipant.messageCount }}</strong>
+              <span>{{ isCurrentHistoryRoom ? 'Messages loaded' : 'Messages loaded here' }}</span>
+            </article>
           </div>
-        </article>
+
+          <section
+            v-if="selectedHistoryParticipant.kind === 'agent' && selectedHistoryParticipant.thinkingSnapshot"
+            class="activity-detail-section"
+          >
+            <div class="activity-detail-section-header">
+              <h4>Reasoning snapshot</h4>
+              <span>Current room transcript</span>
+            </div>
+
+            <AgentThinkingCard
+              :card="selectedHistoryParticipant.thinkingSnapshot"
+              kicker="Latest visible reasoning"
+              :timestampLabel="formatLastSeen(selectedHistoryParticipant.lastSeenAt)"
+            />
+          </section>
+
+          <p
+            v-else-if="selectedHistoryParticipant.statusText"
+            class="activity-detail-description"
+          >
+            {{ selectedHistoryParticipant.statusText }}
+          </p>
+
+          <p
+            v-else-if="selectedHistoryParticipant.kind === 'agent' && !isCurrentHistoryRoom"
+            class="activity-detail-description"
+          >
+            Open this room directly to inspect recent reasoning and transcript details. Parent-room history stays focused on who was in the room and what work they touched.
+          </p>
+
+          <section
+            v-if="selectedHistoryParticipant.kind === 'agent' && selectedHistoryParticipant.thinkingTimeline.length > 0"
+            class="activity-detail-section"
+          >
+            <div class="activity-detail-section-header">
+              <h4>Reasoning trail</h4>
+              <span>{{ selectedHistoryParticipant.thinkingTimeline.length }}</span>
+            </div>
+
+            <div class="activity-thinking-list">
+              <AgentThinkingCard
+                v-for="entry in selectedHistoryParticipant.thinkingTimeline"
+                :key="entry.id"
+                :card="entry"
+                compact
+                :timestampLabel="formatLastSeen(entry.timestamp)"
+              />
+            </div>
+          </section>
+
+          <section class="activity-detail-section">
+            <div class="activity-detail-section-header">
+              <h4>Current work</h4>
+              <span>{{ selectedHistoryParticipant.currentTasks.length }}</span>
+            </div>
+
+            <div v-if="selectedHistoryParticipant.currentTasks.length === 0" class="activity-detail-empty">
+              No open tasks linked to this participant in this room.
+            </div>
+
+            <div v-else class="activity-task-list">
+              <article
+                v-for="task in selectedHistoryParticipant.currentTasks"
+                :key="task.id"
+                class="activity-task-card"
+              >
+                <div class="activity-task-copy">
+                  <strong>{{ task.title }}</strong>
+                  <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
+                </div>
+                <a
+                  v-if="getTaskLink(task)"
+                  class="activity-task-link"
+                  :href="getTaskLink(task)!.url"
+                  target="_blank"
+                >
+                  {{ getTaskLink(task)!.label }}
+                </a>
+              </article>
+            </div>
+          </section>
+
+          <section class="activity-detail-section">
+            <div class="activity-detail-section-header">
+              <h4>Recent completed work</h4>
+              <span>{{ selectedHistoryParticipant.completedTasks.length }}</span>
+            </div>
+
+            <div v-if="selectedHistoryParticipant.completedTasks.length === 0" class="activity-detail-empty">
+              No completed or merged tasks tracked yet.
+            </div>
+
+            <div v-else class="activity-task-list">
+              <article
+                v-for="task in selectedHistoryParticipant.completedTasks"
+                :key="task.id"
+                class="activity-task-card"
+              >
+                <div class="activity-task-copy">
+                  <strong>{{ task.title }}</strong>
+                  <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
+                </div>
+                <a
+                  v-if="getTaskLink(task)"
+                  class="activity-task-link"
+                  :href="getTaskLink(task)!.url"
+                  target="_blank"
+                >
+                  {{ getTaskLink(task)!.label }}
+                </a>
+              </article>
+            </div>
+          </section>
+
+          <section v-if="selectedHistoryParticipant.createdTasks.length > 0" class="activity-detail-section">
+            <div class="activity-detail-section-header">
+              <h4>Tasks created</h4>
+              <span>{{ selectedHistoryParticipant.createdTasks.length }}</span>
+            </div>
+
+            <div class="activity-task-list">
+              <article
+                v-for="task in selectedHistoryParticipant.createdTasks"
+                :key="task.id"
+                class="activity-task-card"
+              >
+                <div class="activity-task-copy">
+                  <strong>{{ task.title }}</strong>
+                  <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
+                </div>
+                <a
+                  v-if="getTaskLink(task)"
+                  class="activity-task-link"
+                  :href="getTaskLink(task)!.url"
+                  target="_blank"
+                >
+                  {{ getTaskLink(task)!.label }}
+                </a>
+              </article>
+            </div>
+          </section>
+
+          <section v-if="isCurrentHistoryRoom" class="activity-detail-section">
+            <div class="activity-detail-section-header">
+              <h4>Recent room messages</h4>
+              <span>{{ selectedHistoryParticipant.recentMessages.length }}</span>
+            </div>
+
+            <div v-if="selectedHistoryParticipant.recentMessages.length === 0" class="activity-detail-empty">
+              No recent room messages loaded for this participant.
+            </div>
+
+            <div v-else class="activity-message-list">
+              <article
+                v-for="message in selectedHistoryParticipant.recentMessages"
+                :key="message.id"
+                class="activity-message-card"
+              >
+                <div class="activity-message-meta">
+                  <span>{{ message.source === 'browser' ? 'Browser' : 'Agent message' }}</span>
+                  <span>{{ formatLastSeen(message.timestamp) }}</span>
+                </div>
+                <p>{{ previewMessage(message.text) }}</p>
+              </article>
+            </div>
+          </section>
+        </aside>
       </div>
 
       <div v-if="props.activityHistory && props.activityHistory.page_count > 1" class="activity-history-pagination">
@@ -600,6 +874,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import {
+  type FocusRoomInfo,
   isHumanSender,
   parseAgentIdentity,
   type RoomActivityHistoryEntry,
@@ -608,6 +883,7 @@ import {
   type RoomAgentPresence,
   type RoomMessage,
   type RoomParticipant,
+  type RoomInfo,
   type RoomTask,
   type TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
@@ -642,8 +918,40 @@ interface ActivityParticipant {
   thinkingTimeline: AgentThinkingTimelineEntry[]
 }
 
+interface HistoryParticipant {
+  key: string
+  roomId: string
+  kind: ParticipantKind
+  label: string
+  actorLabel: string
+  ownerLabel: string | null
+  ideLabel: string | null
+  connection: ParticipantConnection | null
+  status: RoomAgentPresence['status'] | null
+  statusText: string | null
+  firstSeenAt: string | null
+  lastSeenAt: string | null
+  messageCount: number
+  currentTasks: ReadonlyArray<RoomActivityHistoryEntry['current_tasks'][number]>
+  completedTasks: ReadonlyArray<RoomActivityHistoryEntry['completed_tasks'][number]>
+  createdTasks: ReadonlyArray<RoomActivityHistoryEntry['created_tasks'][number]>
+  recentMessages: RoomMessage[]
+  thinkingSnapshot: AgentThinkingCardData | null
+  thinkingTimeline: AgentThinkingTimelineEntry[]
+  archived: boolean
+}
+
+interface HistoryRoomOption {
+  id: string
+  label: string
+  kind: 'main' | 'focus'
+  sourceTaskId: string | null
+}
+
 const props = defineProps<{
   roomIdentifier: string
+  currentRoom: RoomInfo | null
+  focusRooms: readonly FocusRoomInfo[]
   messages: readonly RoomMessage[]
   participants: readonly RoomParticipant[]
   presence: readonly RoomAgentPresence[]
@@ -657,6 +965,7 @@ const props = defineProps<{
     page?: number
     pageSize?: number
     kind?: RoomActivityHistoryKind
+    roomId?: string
   }) => Promise<boolean>
   archiveDisconnectedParticipants?: () => Promise<number>
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
@@ -685,8 +994,10 @@ const OPEN_TASK_STATUSES = new Set(['proposed', 'accepted', 'assigned', 'in_prog
 
 const activeView = ref<'live' | 'history'>('live')
 const selectedParticipantKey = ref<string | null>(null)
+const selectedHistoryParticipantKey = ref<string | null>(null)
 const historyQuery = ref('')
 const historyKind = ref<RoomActivityHistoryKind>('all')
+const historyRoomId = ref('')
 const archiveBusy = ref(false)
 let historySearchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -914,7 +1225,7 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
   }
 }
 
-function compareParticipants(left: ActivityParticipant, right: ActivityParticipant): number {
+function compareParticipants(left: ActivityParticipant | HistoryParticipant, right: ActivityParticipant | HistoryParticipant): number {
   const leftStatus = left.status ? STATUS_ORDER.indexOf(left.status) : STATUS_ORDER.length
   const rightStatus = right.status ? STATUS_ORDER.indexOf(right.status) : STATUS_ORDER.length
   if (leftStatus !== rightStatus) {
@@ -959,20 +1270,253 @@ const participants = computed(() => [
   ...humans.value,
 ])
 
+const currentRoomIdentifier = computed(() => props.currentRoom?.identifier || props.roomIdentifier)
 const historyEntries = computed(() => props.activityHistory?.entries || [])
 const archivedCount = computed(() => props.activityHistory?.hidden_count || 0)
+const historyRoomOptions = computed<HistoryRoomOption[]>(() => {
+  const options: HistoryRoomOption[] = []
+  const seen = new Set<string>()
+
+  const pushOption = (option: HistoryRoomOption | null) => {
+    if (!option?.id || seen.has(option.id)) return
+    seen.add(option.id)
+    options.push(option)
+  }
+
+  pushOption(currentRoomIdentifier.value
+    ? {
+      id: currentRoomIdentifier.value,
+      label: props.currentRoom?.displayName || currentRoomIdentifier.value,
+      kind: props.currentRoom?.kind || 'main',
+      sourceTaskId: props.currentRoom?.sourceTaskId || null,
+    }
+    : null)
+
+  if (props.currentRoom?.kind === 'main') {
+    for (const focusRoom of props.focusRooms) {
+      pushOption({
+        id: focusRoom.room_id,
+        label: focusRoom.display_name,
+        kind: focusRoom.kind,
+        sourceTaskId: focusRoom.source_task_id || null,
+      })
+    }
+  }
+
+  return options
+})
+const selectedHistoryRoomId = computed(() =>
+  props.activityHistory?.selected_room_id
+  || historyRoomId.value
+  || currentRoomIdentifier.value
+)
+const selectedHistoryRoomOption = computed<HistoryRoomOption | null>(() => {
+  const selected = historyRoomOptions.value.find((option) => option.id === selectedHistoryRoomId.value)
+  if (selected) {
+    return selected
+  }
+
+  const historyRoom = historyEntries.value[0]?.room
+  if (historyRoom) {
+    return {
+      id: historyRoom.id,
+      label: historyRoom.display_name,
+      kind: historyRoom.kind,
+      sourceTaskId: historyRoom.source_task_id,
+    }
+  }
+
+  if (!selectedHistoryRoomId.value) {
+    return null
+  }
+
+  return {
+    id: selectedHistoryRoomId.value,
+    label: selectedHistoryRoomId.value,
+    kind: 'main',
+    sourceTaskId: null,
+  }
+})
+const isCurrentHistoryRoom = computed(() =>
+  selectedHistoryRoomId.value === currentRoomIdentifier.value
+)
 const historyCountLabel = computed(() => {
   const total = props.activityHistory?.total || 0
-  return total === 1 ? '1 history entry' : `${total} history entries`
+  const roomLabel = selectedHistoryRoomOption.value?.label || 'selected room'
+  return total === 1
+    ? `1 participant in ${roomLabel}`
+    : `${total} participants in ${roomLabel}`
 })
 const historyPageLabel = computed(() => {
   if (!props.activityHistory) return ''
   return `Page ${props.activityHistory.page} of ${props.activityHistory.page_count}`
 })
+const historyOpenTaskCount = computed(() =>
+  historyEntries.value.reduce((total, entry) => total + entry.current_tasks.length, 0)
+)
+
+function historyEntryMatchesHuman(entry: RoomActivityHistoryEntry, value: string | null): boolean {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return false
+
+  const githubLogin = String(entry.participant.github_login || '').trim().toLowerCase()
+  const displayName = String(entry.participant.display_name || '').trim().toLowerCase()
+  return normalized === githubLogin || normalized === displayName
+}
+
+function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryParticipant {
+  const isCurrentRoomEntry = isCurrentHistoryRoom.value
+  const actorLabel = String(entry.participant.actor_label || entry.participant.display_name || '').trim()
+  const parsed = parseAgentIdentity(actorLabel)
+  const presenceEntry = isCurrentRoomEntry && entry.participant.kind === 'agent' && actorLabel
+    ? (presenceByActor.value.get(actorLabel) || null)
+    : null
+  const messages = !isCurrentRoomEntry
+    ? []
+    : entry.participant.kind === 'agent'
+      ? (actorLabel ? (agentMessagesByActor.value.get(actorLabel) || []) : [])
+      : props.messages.filter((message) =>
+        isHumanSender(message.sender, message.source) && historyEntryMatchesHuman(entry, message.sender)
+      )
+  const latestMessage = messages[messages.length - 1] || null
+  const latestStatusMessage = entry.participant.kind === 'agent'
+    ? [...messages].reverse().find((message) => /^\[status\]\s*/i.test(String(message.text || ''))) || null
+    : null
+  const label = entry.participant.display_name
+    || presenceEntry?.display_name
+    || latestMessage?.agent_identity?.display_name
+    || parsed.displayName
+    || actorLabel
+    || 'Unknown participant'
+  const ownerLabel = entry.participant.owner_label
+    || presenceEntry?.owner_label
+    || latestMessage?.agent_identity?.owner_label
+    || parsed.ownerAttribution
+    || null
+  const ideLabel = entry.participant.ide_label
+    || presenceEntry?.ide_label
+    || latestMessage?.agent_identity?.ide_label
+    || parsed.ideLabel
+    || null
+  const statusText = entry.participant.kind === 'agent'
+    ? presenceEntry?.status_text
+      || (latestStatusMessage ? extractStatusText(latestStatusMessage.text || '') : null)
+      || (entry.participant.hidden_at ? 'Archived from the live roster' : null)
+      || null
+    : latestMessage
+      ? previewMessage(latestMessage.text)
+      : null
+  const thinkingSnapshot = entry.participant.kind === 'agent' && isCurrentRoomEntry
+    ? buildAgentThinkingSnapshot({
+      messages,
+      status: presenceEntry?.status || null,
+      statusText,
+    })
+    : null
+  const thinkingTimeline = entry.participant.kind === 'agent' && isCurrentRoomEntry
+    ? buildAgentThinkingTimeline(messages)
+    : []
+
+  return {
+    key: entry.id,
+    roomId: entry.room.id,
+    kind: entry.participant.kind,
+    label,
+    actorLabel: entry.participant.kind === 'human'
+      ? (entry.participant.github_login || label)
+      : actorLabel,
+    ownerLabel,
+    ideLabel,
+    connection: entry.participant.kind === 'agent' && isCurrentRoomEntry
+      ? (presenceEntry?.freshness === 'active' ? 'online' : 'disconnected')
+      : null,
+    status: entry.participant.kind === 'agent' ? (presenceEntry?.status || null) : null,
+    statusText,
+    firstSeenAt: entry.first_seen_at,
+    lastSeenAt: latestTimestamp(
+      entry.last_seen_at,
+      latestMessage?.timestamp,
+      presenceEntry?.last_heartbeat_at
+    ),
+    messageCount: messages.length,
+    currentTasks: entry.current_tasks,
+    completedTasks: entry.completed_tasks,
+    createdTasks: entry.created_tasks,
+    recentMessages: [...messages].slice(-4).reverse(),
+    thinkingSnapshot,
+    thinkingTimeline,
+    archived: Boolean(entry.participant.hidden_at),
+  }
+}
+
+const historyParticipants = computed(() =>
+  historyEntries.value
+    .map((entry) => buildHistoryParticipant(entry))
+    .sort(compareParticipants)
+)
+const historyAgents = computed(() =>
+  historyParticipants.value.filter((participant) => participant.kind === 'agent')
+)
+const historyHumans = computed(() =>
+  historyParticipants.value.filter((participant) => participant.kind === 'human')
+)
+const historyOnlineAgents = computed(() =>
+  historyAgents.value.filter((participant) => participant.connection === 'online')
+)
+const historyOtherAgents = computed(() =>
+  isCurrentHistoryRoom.value
+    ? historyAgents.value.filter((participant) => participant.connection !== 'online')
+    : historyAgents.value
+)
+const historyArchivedAgents = computed(() =>
+  historyAgents.value.filter((participant) => participant.archived)
+)
+const historyPrimaryAgents = computed(() =>
+  isCurrentHistoryRoom.value ? historyOnlineAgents.value : historyAgents.value
+)
+const historyPrimaryAgentsTitle = computed(() =>
+  isCurrentHistoryRoom.value ? 'Agents online' : 'Agents seen in room'
+)
+const historyPrimaryAgentsDescription = computed(() =>
+  isCurrentHistoryRoom.value
+    ? 'Currently active in the selected room.'
+    : 'Recorded agent activity in the selected room.'
+)
+const historySecondaryAgentsTitle = computed(() =>
+  isCurrentHistoryRoom.value ? 'Other agents seen' : 'Archived agents'
+)
+const historySecondaryAgentsDescription = computed(() =>
+  isCurrentHistoryRoom.value
+    ? 'Disconnected or archived agents still tied to this room.'
+    : 'Agents cleared from the live roster for this room.'
+)
+const historySummaryCards = computed(() => [
+  {
+    value: historyPrimaryAgents.value.length,
+    label: isCurrentHistoryRoom.value ? 'Agents online' : 'Agents seen',
+  },
+  {
+    value: isCurrentHistoryRoom.value ? historyOtherAgents.value.length : historyArchivedAgents.value.length,
+    label: isCurrentHistoryRoom.value ? 'Other agents seen' : 'Archived agents',
+  },
+  {
+    value: historyHumans.value.length,
+    label: 'Humans seen',
+  },
+  {
+    value: historyOpenTaskCount.value,
+    label: 'Open tasks linked',
+  },
+])
 
 const selectedParticipant = computed(() =>
   participants.value.find((participant) => participant.key === selectedParticipantKey.value)
   || participants.value[0]
+  || null
+)
+const selectedHistoryParticipant = computed(() =>
+  historyParticipants.value.find((participant) => participant.key === selectedHistoryParticipantKey.value)
+  || historyParticipants.value[0]
   || null
 )
 
@@ -987,6 +1531,17 @@ watch(participants, (next) => {
   }
 }, { immediate: true })
 
+watch(historyParticipants, (next) => {
+  if (!next.length) {
+    selectedHistoryParticipantKey.value = null
+    return
+  }
+
+  if (!selectedHistoryParticipantKey.value || !next.some((participant) => participant.key === selectedHistoryParticipantKey.value)) {
+    selectedHistoryParticipantKey.value = next[0].key
+  }
+}, { immediate: true })
+
 async function requestHistory(page = props.activityHistory?.page || 1): Promise<void> {
   if (!props.roomIdentifier || !props.loadActivityHistory) return
   await props.loadActivityHistory({
@@ -994,6 +1549,7 @@ async function requestHistory(page = props.activityHistory?.page || 1): Promise<
     page,
     pageSize: props.activityHistory?.page_size || 20,
     kind: historyKind.value,
+    roomId: historyRoomId.value || currentRoomIdentifier.value,
   })
 }
 
@@ -1010,14 +1566,33 @@ function queueHistoryReload(): void {
 
 watch(() => activeView.value, (next) => {
   if (next === 'history' && !props.activityHistoryLoading) {
+    if (!historyRoomId.value) {
+      historyRoomId.value = currentRoomIdentifier.value || ''
+    }
     void requestHistory(props.activityHistory?.page || 1)
   }
 })
 
-watch(() => props.roomIdentifier, () => {
+watch(currentRoomIdentifier, (next) => {
+  if (next && !historyRoomId.value) {
+    historyRoomId.value = next
+  }
   if (activeView.value === 'history') {
     void requestHistory(1)
   }
+}, { immediate: true })
+
+watch(() => props.activityHistory?.selected_room_id, (next) => {
+  if (next && next !== historyRoomId.value) {
+    historyRoomId.value = next
+  }
+})
+
+watch(() => historyRoomId.value, (next, previous) => {
+  if (!next || next === previous || activeView.value !== 'history') {
+    return
+  }
+  void requestHistory(1)
 })
 
 watch(() => historyKind.value, () => {
@@ -1037,7 +1612,7 @@ onUnmounted(() => {
   }
 })
 
-function participantMeta(participant: ActivityParticipant): string {
+function participantMeta(participant: ActivityParticipant | HistoryParticipant): string {
   if (participant.kind === 'human') {
     return 'Human participant'
   }
@@ -1046,12 +1621,20 @@ function participantMeta(participant: ActivityParticipant): string {
   return bits.join(' · ') || 'Agent'
 }
 
-function participantNote(participant: ActivityParticipant): string {
+function participantNote(participant: ActivityParticipant | HistoryParticipant): string {
   if (participant.statusText) {
     return participant.statusText
   }
 
   if (participant.kind === 'agent') {
+    if ('archived' in participant && participant.archived) {
+      return 'Archived from the live roster'
+    }
+
+    if (participant.connection === null) {
+      return 'Recorded in room history'
+    }
+
     return participant.connection === 'online'
       ? 'No live status text'
       : 'Disconnected from the room'
@@ -1062,12 +1645,16 @@ function participantNote(participant: ActivityParticipant): string {
     : 'Known from task history'
 }
 
-function connectionLabel(participant: ActivityParticipant | null): string {
+function connectionLabel(participant: ActivityParticipant | HistoryParticipant | null): string {
   if (!participant || participant.kind !== 'agent') return 'Human'
+  if (participant.connection === null) return 'History'
   return participant.connection === 'online' ? 'Online' : 'Disconnected'
 }
 
-function getTaskLink(task: RoomTask): { label: string; url: string } | null {
+function getTaskLink(task: {
+  id: string
+  workflow_refs: ReadonlyArray<{ label: string; url: string }>
+}): { label: string; url: string } | null {
   const gh = props.taskGithubStatus[task.id]
   if (gh?.pr_url) {
     return {
@@ -1085,22 +1672,6 @@ function getTaskLink(task: RoomTask): { label: string; url: string } | null {
   }
 
   return null
-}
-
-function getHistoryTaskLink(task: RoomActivityHistoryEntry['current_tasks'][number]): { label: string; url: string } | null {
-  const firstWorkflowRef = task.workflow_refs[0]
-  return firstWorkflowRef
-    ? { label: firstWorkflowRef.label, url: firstWorkflowRef.url }
-    : null
-}
-
-function historyParticipantMeta(entry: RoomActivityHistoryEntry): string {
-  if (entry.participant.kind === 'human') {
-    return 'Human participant'
-  }
-
-  const bits = [entry.participant.owner_label, entry.participant.ide_label].filter(Boolean)
-  return bits.join(' · ') || 'Agent'
 }
 
 function changeHistoryPage(page: number): void {
