@@ -64,7 +64,17 @@
       </div>
       <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
     </div>
-    <div class="composer-card">
+    <div
+      class="composer-card"
+      :data-drag-active="isDragActive"
+      @dragenter.prevent="handleDragEnter"
+      @dragover.prevent="handleDragOver"
+      @dragleave.prevent="handleDragLeave"
+      @drop.prevent="handleDrop"
+    >
+      <div v-if="isDragActive" class="composer-drop-hint">
+        Drop files to attach
+      </div>
       <div v-if="replyTo" class="reply-draft">
         <div class="reply-draft-copy">
           <strong>Replying to {{ replyDisplayName }}</strong>
@@ -211,6 +221,7 @@ const autoKeepPolling = ref(false)
 const injectPrompt = ref(false)
 const attachmentDrafts = ref<AttachmentDraft[]>([])
 const attachmentError = ref('')
+const isDragActive = ref(false)
 const mentionQuery = ref('')
 const mentionStart = ref(-1)
 const mentionEnd = ref(-1)
@@ -218,6 +229,7 @@ const mentionActiveIndex = ref(0)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
 let keepPollingInFlight = false
+let dragDepth = 0
 
 interface AttachmentDraft {
   id: string
@@ -513,7 +525,14 @@ async function handleFileSelection(event: Event) {
   input.value = ''
   if (!selected.length) return
 
+  await addAttachmentFiles(selected)
+}
+
+async function addAttachmentFiles(selected: readonly File[]) {
+  if (!selected.length) return
+
   attachmentError.value = ''
+  if (props.disabled) return
   if (!attachmentsAvailable.value) {
     attachmentError.value = 'Attachments are unavailable right now.'
     return
@@ -546,6 +565,47 @@ async function handleFileSelection(event: Event) {
       attachmentError.value = `${file.name} could not be attached.`
     }
   }
+}
+
+function dragContainsFiles(event: DragEvent): boolean {
+  const types = Array.from(event.dataTransfer?.types || [])
+  return types.includes('Files')
+}
+
+function resetDragState() {
+  dragDepth = 0
+  isDragActive.value = false
+}
+
+function handleDragEnter(event: DragEvent) {
+  if (!dragContainsFiles(event)) return
+  dragDepth += 1
+  isDragActive.value = true
+}
+
+function handleDragOver(event: DragEvent) {
+  if (!dragContainsFiles(event)) return
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = attachmentsAvailable.value && !props.disabled ? 'copy' : 'none'
+  }
+  isDragActive.value = true
+}
+
+function handleDragLeave(event: DragEvent) {
+  if (!dragContainsFiles(event)) return
+  if (dragDepth > 0) {
+    dragDepth -= 1
+  }
+  if (dragDepth === 0) {
+    isDragActive.value = false
+  }
+}
+
+async function handleDrop(event: DragEvent) {
+  const dropped = Array.from(event.dataTransfer?.files || [])
+  resetDragState()
+  if (!dropped.length) return
+  await addAttachmentFiles(dropped)
 }
 
 function removeAttachment(id: string) {
@@ -701,6 +761,26 @@ watch(filteredMentionCandidates, (candidates) => {
   border-radius: 16px;
   transition: border-color 200ms ease, box-shadow 200ms ease;
   overflow: hidden;
+}
+.composer-card[data-drag-active="true"] {
+  border-color: color-mix(in srgb, var(--line-strong, #3f3f46) 45%, #7dd3fc 55%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, #7dd3fc 65%, transparent),
+    0 14px 32px rgba(0, 0, 0, 0.28);
+}
+.composer-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg-1, #0f0f11) 82%, #7dd3fc 18%);
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0;
+  pointer-events: none;
 }
 .reply-draft {
   display: flex;
