@@ -56,7 +56,7 @@
           :hasOlderMessages="messagesHasOlder"
           :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
-          :stalePromptMuteStates="stalePromptMuteStates"
+          :stalePromptTaskStates="stalePromptTaskStates"
           @loadOlder="loadOlderMessages"
           @reply="selectedReply = $event"
           @toggleStalePromptMute="handleToggleStalePromptMute"
@@ -213,7 +213,12 @@ import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import { useToast } from '@/composables/useToast'
-import type { FocusRoomInfo, FocusRoomSettingsPatch, RoomMessage } from '@/composables/useRoom'
+import type {
+  FocusRoomInfo,
+  FocusRoomSettingsPatch,
+  RoomMessage,
+  StalePromptTaskState,
+} from '@/composables/useRoom'
 
 const route = useRoute()
 const router = useRouter()
@@ -329,9 +334,13 @@ const joinErrorBody = computed(() => {
   }
   return joinError.value?.message || 'Could not connect to room.'
 })
-const stalePromptMuteStates = computed<Record<string, boolean>>(() =>
+const stalePromptTaskStates = computed<Record<string, StalePromptTaskState>>(() =>
   Object.fromEntries(
-    tasks.value.map(task => [task.id, Boolean(task.stale_prompt_state?.muted)])
+    tasks.value.map(task => [task.id, {
+      isStale: Boolean(task.stale_prompt_state?.is_stale),
+      muted: Boolean(task.stale_prompt_state?.muted),
+      taskUpdatedAt: task.updated_at,
+    }])
   )
 )
 
@@ -350,8 +359,14 @@ async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
 }
 
-async function handleToggleStalePromptMute(taskId: string, muted: boolean) {
-  const updated = await setTaskStalePromptMute(taskId, muted)
+async function handleToggleStalePromptMute(payload: {
+  taskId: string
+  muted: boolean
+  promptTimestamp: string
+}) {
+  const updated = await setTaskStalePromptMute(payload.taskId, payload.muted, {
+    promptTimestamp: payload.promptTimestamp,
+  })
   if (!updated) {
     toast.error('Stale task reminder preference could not be updated.')
   }

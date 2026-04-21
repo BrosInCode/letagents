@@ -3,7 +3,10 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomTaskRoutes } = await import("../routes/room-tasks.js");
+const {
+  isCurrentStalePromptAction,
+  registerRoomTaskRoutes,
+} = await import("../routes/room-tasks.js");
 
 function createDeps() {
   const unused = async () => {
@@ -57,4 +60,28 @@ test("registerRoomTaskRoutes preserves canonical task route order", () => {
     { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
     { method: "patch", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
   ]);
+});
+
+test("isCurrentStalePromptAction only allows prompts from the current task version", () => {
+  assert.equal(
+    isCurrentStalePromptAction({
+      taskUpdatedAt: "2026-04-21T11:00:00.000Z",
+      promptTimestamp: "2026-04-21T11:05:00.000Z",
+    }),
+    true
+  );
+  assert.equal(
+    isCurrentStalePromptAction({
+      taskUpdatedAt: "2026-04-21T11:00:00.000Z",
+      promptTimestamp: "2026-04-21T10:59:59.000Z",
+    }),
+    false
+  );
+  assert.equal(
+    isCurrentStalePromptAction({
+      taskUpdatedAt: "2026-04-21T11:00:00.000Z",
+      promptTimestamp: null,
+    }),
+    false
+  );
 });

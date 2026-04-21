@@ -109,7 +109,7 @@ export interface RoomTaskRouteDeps {
     task: Task;
     taskOwnership: TaskOwnershipState;
     updates: TaskUpdatePatch;
-    forcedMutation?: { mutation: "focus_room_open"; leaseKind: "work" };
+    forcedMutation?: { mutation: "focus_room_open" | "task_update"; leaseKind: "work" };
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
@@ -153,6 +153,19 @@ async function attachTaskListDetails(projectId: string, tasks: Task[]) {
     active_leases: leases.filter((lease) => lease.task_id === task.id),
     active_locks: locks.filter((lock) => lock.task_id === task.id || lock.scope === "room"),
   }));
+}
+
+export function isCurrentStalePromptAction(input: {
+  taskUpdatedAt: string;
+  promptTimestamp: string | null | undefined;
+}): boolean {
+  const taskUpdatedAtMs = Date.parse(input.taskUpdatedAt);
+  const promptTimestampMs = Date.parse(input.promptTimestamp ?? "");
+  if (!Number.isFinite(taskUpdatedAtMs) || !Number.isFinite(promptTimestampMs)) {
+    return false;
+  }
+
+  return taskUpdatedAtMs <= promptTimestampMs;
 }
 
 export function registerRoomTaskRoutes(
@@ -341,12 +354,41 @@ export function registerRoomTaskRoutes(
 
     try {
       const task = await getTaskById(project.id, taskId);
-      if (!task) {
+      const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+      if (!task || !taskOwnership) {
         res.status(404).json({ error: "Task not found" });
         return;
       }
 
-      const requestBody = (req.body ?? {}) as { muted_by?: unknown };
+      const requestBody = (req.body ?? {}) as Record<string, unknown>;
+      const promptTimestamp = deps.normalizeOptionalString(requestBody.prompt_timestamp);
+      if (!isCurrentStalePromptAction({ taskUpdatedAt: task.updated_at, promptTimestamp })) {
+        const taskWithDetails = await attachTaskDetails(project.id, task);
+        res.status(409).json({
+          ...taskWithDetails,
+          room_id: project.id,
+          error: "This stale prompt is outdated because the task changed after it was posted.",
+          code: "STALE_PROMPT_OUTDATED",
+        });
+        return;
+      }
+
+      const coordination = await deps.enforceTaskCoordinationMutation({
+        req,
+        projectId: project.id,
+        task,
+        taskOwnership,
+        updates: {},
+        forcedMutation: { mutation: "task_update", leaseKind: "work" },
+        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+      });
+      if (coordination.kind === "deny") {
+        res.status(409).json({ error: coordination.error, code: coordination.code });
+        return;
+      }
+
       const mutedBy = deps.normalizeOptionalString(requestBody.muted_by)
         ?? req.sessionAccount?.display_name
         ?? req.sessionAccount?.login
@@ -384,8 +426,38 @@ export function registerRoomTaskRoutes(
 
     try {
       const task = await getTaskById(project.id, taskId);
-      if (!task) {
+      const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+      if (!task || !taskOwnership) {
         res.status(404).json({ error: "Task not found" });
+        return;
+      }
+
+      const requestBody = (req.body ?? {}) as Record<string, unknown>;
+      const promptTimestamp = deps.normalizeOptionalString(requestBody.prompt_timestamp);
+      if (!isCurrentStalePromptAction({ taskUpdatedAt: task.updated_at, promptTimestamp })) {
+        const taskWithDetails = await attachTaskDetails(project.id, task);
+        res.status(409).json({
+          ...taskWithDetails,
+          room_id: project.id,
+          error: "This stale prompt is outdated because the task changed after it was posted.",
+          code: "STALE_PROMPT_OUTDATED",
+        });
+        return;
+      }
+
+      const coordination = await deps.enforceTaskCoordinationMutation({
+        req,
+        projectId: project.id,
+        task,
+        taskOwnership,
+        updates: {},
+        forcedMutation: { mutation: "task_update", leaseKind: "work" },
+        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+      });
+      if (coordination.kind === "deny") {
+        res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
 
