@@ -85,12 +85,26 @@
             target="_blank"
             rel="noopener noreferrer"
           >
-            <img
+            <div
               v-if="isImageAttachment(attachment)"
-              class="message-attachment-image"
-              :src="attachmentHref(attachment)"
-              :alt="attachmentName(attachment)"
+              class="message-attachment-image-shell"
+              :data-image-state="attachmentImageState(attachment)"
             >
+              <img
+                v-if="attachmentImageState(attachment) !== 'error'"
+                class="message-attachment-image"
+                :src="attachmentHref(attachment)"
+                :alt="attachmentName(attachment)"
+                @load="markAttachmentImageLoaded(attachment)"
+                @error="markAttachmentImageError(attachment)"
+              >
+              <span v-if="attachmentImageState(attachment) === 'loading'" class="message-attachment-image-status">
+                Loading image...
+              </span>
+              <span v-else-if="attachmentImageState(attachment) === 'error'" class="message-attachment-image-status error">
+                Image unavailable
+              </span>
+            </div>
             <span v-else class="message-attachment-icon" aria-hidden="true">
               <svg viewBox="0 0 16 16" fill="none">
                 <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
@@ -121,7 +135,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
@@ -151,6 +165,7 @@ const senderColor = computed(() => getSenderColor(props.message.sender, props.me
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
 const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
 const attachments = computed(() => props.message.attachments || [])
+const attachmentImageStates = reactive<Record<string, 'loading' | 'loaded' | 'error'>>({})
 
 // Prefer the rich agent_identity from the API, fall back to sender-string parsing
 const ideLabel = computed(() => {
@@ -265,6 +280,18 @@ function attachmentMeta(attachment: RoomMessageAttachment): string {
 
 function attachmentKey(attachment: RoomMessageAttachment): string {
   return attachment.id || `${attachmentName(attachment)}-${attachmentSize(attachment)}-${attachmentMimeType(attachment)}`
+}
+
+function attachmentImageState(attachment: RoomMessageAttachment): 'loading' | 'loaded' | 'error' {
+  return attachmentImageStates[attachmentKey(attachment)] || 'loading'
+}
+
+function markAttachmentImageLoaded(attachment: RoomMessageAttachment) {
+  attachmentImageStates[attachmentKey(attachment)] = 'loaded'
+}
+
+function markAttachmentImageError(attachment: RoomMessageAttachment) {
+  attachmentImageStates[attachmentKey(attachment)] = 'error'
 }
 
 const renderedContent = computed(() => {
@@ -447,6 +474,7 @@ const renderedContent = computed(() => {
   background: color-mix(in srgb, var(--surface, #18181b) 92%, var(--sender-color, #71717a) 8%);
   outline: none;
 }
+.message-attachment-image-shell,
 .message-attachment-image,
 .message-attachment-icon {
   width: 54px;
@@ -455,8 +483,39 @@ const renderedContent = computed(() => {
   border: 1px solid var(--line, #27272a);
   background: var(--bg-0, #09090b);
 }
+.message-attachment-image-shell {
+  position: relative;
+  overflow: hidden;
+}
+.message-attachment-image-shell[data-image-state="loading"]::after,
+.message-attachment-image-shell[data-image-state="error"]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-0, #09090b) 74%, transparent);
+}
 .message-attachment-image {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
+}
+.message-attachment-image-status {
+  position: absolute;
+  inset-inline: 4px;
+  bottom: 4px;
+  z-index: 1;
+  display: inline-flex;
+  justify-content: center;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.88);
+  color: var(--text, #fafafa);
+  font-size: 0.58rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.message-attachment-image-status.error {
+  background: rgba(127, 29, 29, 0.9);
 }
 .message-attachment-icon {
   display: inline-flex;

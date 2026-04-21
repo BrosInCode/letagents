@@ -2282,6 +2282,56 @@ export async function createMessageAttachmentUpload(input: {
   return toMessageAttachmentUpload(row);
 }
 
+export async function getMessageAttachmentUpload(
+  roomId: string,
+  uploadId: string
+): Promise<MessageAttachmentUpload | undefined> {
+  const [row] = await db
+    .select({
+      upload_id: message_attachment_uploads.upload_id,
+      room_id: message_attachment_uploads.room_id,
+      filename: message_attachment_uploads.filename,
+      content_type: message_attachment_uploads.content_type,
+      byte_size: message_attachment_uploads.byte_size,
+      storage_provider: message_attachment_uploads.storage_provider,
+      bucket: message_attachment_uploads.bucket,
+      object_key: message_attachment_uploads.object_key,
+      status: message_attachment_uploads.status,
+      expires_at: message_attachment_uploads.expires_at,
+      attached_message_number: message_attachment_uploads.attached_message_number,
+      created_at: message_attachment_uploads.created_at,
+      attached_at: message_attachment_uploads.attached_at,
+    })
+    .from(message_attachment_uploads)
+    .where(
+      and(
+        eq(message_attachment_uploads.room_id, roomId),
+        eq(message_attachment_uploads.upload_id, uploadId)
+      )
+    )
+    .limit(1);
+
+  return row ? toMessageAttachmentUpload(row) : undefined;
+}
+
+export async function deletePendingMessageAttachmentUpload(
+  roomId: string,
+  uploadId: string
+): Promise<MessageAttachmentUpload | undefined> {
+  const [row] = await db
+    .delete(message_attachment_uploads)
+    .where(
+      and(
+        eq(message_attachment_uploads.room_id, roomId),
+        eq(message_attachment_uploads.upload_id, uploadId),
+        eq(message_attachment_uploads.status, "pending")
+      )
+    )
+    .returning();
+
+  return row ? toMessageAttachmentUpload(row) : undefined;
+}
+
 export async function hasMessagesFromSender(roomId: string, sender: string): Promise<boolean> {
   const [row] = await db
     .select({
