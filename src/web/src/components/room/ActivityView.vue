@@ -2173,6 +2173,10 @@ function formatLastSeen(value: string | null): string {
 .activity-history-search input {
   min-height: 40px;
   padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface);
+  color: var(--text, #fafafa);
 }
 
 .activity-history-filter :deep(.app-select__control) {
