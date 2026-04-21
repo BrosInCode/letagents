@@ -89,6 +89,23 @@ function encodeQueryValue(value: string): string {
   );
 }
 
+function compareCanonicalQueryPart(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+function buildCanonicalQueryString(query: ReadonlyMap<string, string>): string {
+  return [...query.entries()]
+    .map(([key, value]) => [encodeQueryValue(key), encodeQueryValue(value)] as const)
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) => {
+      const keyOrder = compareCanonicalQueryPart(leftKey, rightKey);
+      return keyOrder || compareCanonicalQueryPart(leftValue, rightValue);
+    })
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+}
+
 function hmac(key: Buffer | string, value: string): Buffer {
   return crypto.createHmac("sha256", key).update(value, "utf8").digest();
 }
@@ -155,10 +172,7 @@ function presignS3Url(input: {
     query.set("response-content-type", input.responseContentType);
   }
 
-  const sortedQuery = [...query.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${encodeQueryValue(key)}=${encodeQueryValue(value)}`)
-    .join("&");
+  const sortedQuery = buildCanonicalQueryString(query);
   const canonicalHeaders = `host:${url.host}\n`;
   const canonicalRequest = [
     input.method,
