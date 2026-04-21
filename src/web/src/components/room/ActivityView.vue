@@ -60,7 +60,7 @@
       <div class="activity-history-toolbar">
         <label v-if="historyRoomOptions.length > 1" class="activity-history-filter">
           <span>Room</span>
-          <select v-model="historyRoomId">
+          <AppSelect v-model="historyRoomId">
             <option
               v-for="option in historyRoomOptions"
               :key="option.id"
@@ -68,7 +68,7 @@
             >
               {{ option.label }}
             </option>
-          </select>
+          </AppSelect>
         </label>
 
         <label class="activity-history-search">
@@ -82,11 +82,11 @@
 
         <label class="activity-history-filter">
           <span>Filter</span>
-          <select v-model="historyKind">
+          <AppSelect v-model="historyKind">
             <option value="all">All</option>
             <option value="agent">Agents</option>
             <option value="human">Humans</option>
-          </select>
+          </AppSelect>
         </label>
       </div>
 
@@ -873,6 +873,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
+import { AppSelect } from '@/components/ui'
 import {
   type FocusRoomInfo,
   isHumanSender,
@@ -2169,14 +2170,23 @@ function formatLastSeen(value: string | null): string {
   color: var(--activity-text-tertiary);
 }
 
-.activity-history-search input,
-.activity-history-filter select {
+.activity-history-search input {
   min-height: 40px;
   padding: 0 12px;
   border-radius: 10px;
   border: 1px solid var(--activity-border);
   background: var(--activity-surface);
   color: var(--text, #fafafa);
+}
+
+.activity-history-filter :deep(.app-select__control) {
+  --app-select-border: var(--activity-border);
+  --app-select-bg: var(--activity-surface);
+  --app-select-text: var(--text, #fafafa);
+  --app-select-focus: rgba(59, 130, 246, 0.28);
+  --app-select-height: 40px;
+  --app-select-padding-left: 12px;
+  --app-select-padding-right: 38px;
 }
 
 .activity-history-meta {
