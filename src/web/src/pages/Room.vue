@@ -133,11 +133,13 @@
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
       :attachmentsEnabled="room?.attachmentsEnabled !== false"
+      :submitMessage="handleSend"
+      :stageAttachmentDraft="stageAttachmentUpload"
+      :discardAttachmentDraft="discardAttachmentUpload"
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
       :isSignedIn="auth.isSignedIn.value"
-      @send="handleSend"
       @clearReply="selectedReply = null"
       @signIn="handleSignIn"
     />
@@ -240,6 +242,8 @@ const {
   joinError,
   joinRoom,
   sendMessage,
+  stageAttachmentUpload,
+  discardAttachmentUpload,
   addTask,
   updateTask,
   createFocusRoom,
@@ -336,13 +340,14 @@ async function handleSend(
   agentPromptKind: string | null,
   replyTo: string | null,
   attachments: OutgoingMessageAttachment[] = [],
-) {
+): Promise<boolean> {
   const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments)
   if (sent) {
     selectedReply.value = null
-    return
+    return true
   }
   toast.error(lastSendError.value || 'Message could not be sent.')
+  return false
 }
 
 async function handleAddTask(title: string) {

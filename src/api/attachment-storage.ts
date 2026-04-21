@@ -148,7 +148,7 @@ function amzTimestamp(date: Date): { dateStamp: string; dateTime: string } {
 }
 
 function presignS3Url(input: {
-  method: "GET" | "PUT";
+  method: "DELETE" | "GET" | "PUT";
   objectKey: string;
   expiresSeconds: number;
   responseContentDisposition?: string;
@@ -244,4 +244,17 @@ export function createPresignedAttachmentDownload(input: {
     responseContentDisposition: formatAttachmentContentDisposition(input.filename),
     responseContentType: input.content_type,
   });
+}
+
+export async function deleteAttachmentObject(input: { object_key: string }): Promise<void> {
+  const config = getAttachmentStorageConfig();
+  const deleteUrl = presignS3Url({
+    method: "DELETE",
+    objectKey: input.object_key,
+    expiresSeconds: Math.min(config.uploadExpiresSeconds, 60),
+  });
+  const response = await fetch(deleteUrl, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`attachment object delete failed with HTTP ${response.status}`);
+  }
 }

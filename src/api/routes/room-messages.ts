@@ -4,8 +4,10 @@ import type { Express, Request, Response } from "express";
 
 import {
   createMessageAttachmentUpload,
+  deletePendingMessageAttachmentUpload,
   getLatestMessages,
   getMessageAttachment,
+  getMessageAttachmentUpload,
   getMessages,
   getMessagesAfter,
   getMessagesBefore,
@@ -32,6 +34,7 @@ import {
 } from "../message-attachments.js";
 import {
   createAttachmentObjectKey,
+  deleteAttachmentObject,
   createPresignedAttachmentDownload,
   createPresignedAttachmentUpload,
   isAttachmentStorageConfigured,
@@ -234,6 +237,35 @@ export function registerRoomMessageRoutes(
         "Attachment upload could not be staged."
       );
     }
+  });
+
+  app.delete(/^\/rooms\/(.+)\/attachments\/uploads\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const uploadId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const upload = await getMessageAttachmentUpload(project.id, uploadId);
+    if (!upload || upload.status !== "pending") {
+      res.status(200).json({ ok: true, upload_id: uploadId });
+      return;
+    }
+
+    if (isAttachmentStorageConfigured()) {
+      try {
+        await deleteAttachmentObject({ object_key: upload.object_key });
+      } catch {
+        res.status(502).json({ error: "Attachment draft could not be removed." });
+        return;
+      }
+    }
+
+    await deletePendingMessageAttachmentUpload(project.id, uploadId);
+    res.status(200).json({ ok: true, upload_id: uploadId });
   });
 
   app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
