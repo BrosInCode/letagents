@@ -68,6 +68,16 @@
           <span class="reply-preview-label">Replying to {{ replyDisplayName }}</span>
           <span class="reply-preview-text">{{ replyPreviewText }}</span>
         </button>
+        <div v-if="reasoningSession" class="reasoning-anchor">
+          <div class="reasoning-anchor-copy">
+            <span class="reasoning-anchor-label">Reasoning trace</span>
+            <strong>{{ reasoningTitle }}</strong>
+            <p v-if="reasoningSummary">{{ reasoningSummary }}</p>
+          </div>
+          <button class="reasoning-anchor-button" type="button" @click="reasoningOpen = true">
+            Open reasoning
+          </button>
+        </div>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
         <AgentThinkingCard
           v-else-if="thinkingCard"
@@ -158,14 +168,21 @@
         </span>
       </button>
     </div>
+    <ReasoningTraceModal
+      :open="reasoningOpen"
+      :roomIdentifier="roomIdentifier"
+      :session="reasoningSession || null"
+      @close="reasoningOpen = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
+import ReasoningTraceModal from './ReasoningTraceModal.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 import { buildAgentThinkingEntry } from './agentThinking'
 import {
@@ -179,6 +196,7 @@ import {
 import {
   type RoomMessage,
   type RoomMessageAttachment,
+  type RoomReasoningSession,
   type StalePromptTaskState,
   parseAgentIdentity,
   isHumanSender,
@@ -194,8 +212,10 @@ interface MessageThreadSummary {
 
 const props = defineProps<{
   message: RoomMessage
+  roomIdentifier?: string
   thread?: MessageThreadSummary | null
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
+  reasoningSession?: RoomReasoningSession | null
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
@@ -204,6 +224,7 @@ const emit = defineEmits<{
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
 }>()
 
+const reasoningOpen = ref(false)
 const identity = computed(() => parseAgentIdentity(props.message.sender))
 const displayName = computed(() => identity.value.displayName || 'anonymous')
 const isSystem = computed(() => {
@@ -293,6 +314,20 @@ const threadLatestDisplayName = computed(() => {
 
 const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest))
 const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
+const reasoningTitle = computed(() =>
+  props.reasoningSession?.title
+  || props.reasoningSession?.summary
+  || 'Open the current reasoning stream'
+)
+const reasoningSummary = computed(() =>
+  props.reasoningSession?.latest_payload?.checking
+  || props.reasoningSession?.latest_payload?.next_action
+  || props.reasoningSession?.checking
+  || props.reasoningSession?.next_action
+  || props.reasoningSession?.goal
+  || props.reasoningSession?.summary
+  || null
+)
 
 const provenanceBadge = computed(() => {
   if (isSystem.value) return { label: 'system', class: 'system' }
@@ -478,6 +513,69 @@ const renderedContent = computed(() => {
 .message-bubble.github-message-bubble {
   border-left: none;
   padding-left: 0;
+}
+
+.reasoning-anchor {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.03));
+}
+
+.reasoning-anchor-copy {
+  min-width: 0;
+}
+
+.reasoning-anchor-copy strong {
+  display: block;
+  margin: 0 0 4px;
+  color: var(--text, #fafafa);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.reasoning-anchor-copy p {
+  margin: 0;
+  color: var(--muted, #a1a1aa);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.reasoning-anchor-label {
+  display: inline-flex;
+  margin-bottom: 6px;
+  color: #93c5fd;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.reasoning-anchor-button {
+  flex-shrink: 0;
+  border: 1px solid rgba(147, 197, 253, 0.28);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #dbeafe;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 10px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.reasoning-anchor-button:hover,
+.reasoning-anchor-button:focus-visible {
+  background: rgba(30, 41, 59, 0.92);
+  border-color: rgba(191, 219, 254, 0.42);
+  outline: none;
 }
 
 .reply-message .message-bubble {
@@ -787,6 +885,12 @@ const renderedContent = computed(() => {
   }
   .thread-marker::before { display: none; }
   .thread-marker-preview {
+    width: 100%;
+  }
+  .reasoning-anchor {
+    flex-direction: column;
+  }
+  .reasoning-anchor-button {
     width: 100%;
   }
 }

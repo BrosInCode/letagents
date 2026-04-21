@@ -53,6 +53,8 @@
           ref="messageListRef"
           class="room-tab-panel"
           :messages="messages"
+          :roomIdentifier="room?.identifier || ''"
+          :reasoningSessions="reasoningSessions"
           :hasOlderMessages="messagesHasOlder"
           :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
@@ -97,6 +99,7 @@
           :participants="participants"
           :liveArchivedCount="participantHiddenCount"
           :presence="presence"
+          :reasoningSessions="reasoningSessions"
           :tasks="tasks"
           :activityHistory="activityHistory"
           :activityHistoryLoading="activityHistoryLoading"
@@ -259,6 +262,7 @@ const {
   focusRooms,
   presence,
   participants,
+  reasoningSessions,
   participantHiddenCount,
   activityHistory,
   activityHistoryLoading,

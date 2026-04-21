@@ -387,6 +387,62 @@ interface RoomParticipantsPage {
   hidden_count: number
 }
 
+export interface RoomReasoningSnapshot {
+  summary: string
+  goal?: string | null
+  checking?: string | null
+  hypothesis?: string | null
+  blocker?: string | null
+  next_action?: string | null
+  milestone?: string | null
+  status?: string | null
+  confidence?: number | null
+}
+
+export interface RoomReasoningEntry {
+  id: string
+  kind?: string | null
+  label?: string | null
+  text: string
+  timestamp: string
+}
+
+export interface RoomReasoningUpdate {
+  id: string
+  actor_label?: string | null
+  status?: string | null
+  summary: string
+  milestone?: string | null
+  payload?: RoomReasoningSnapshot | null
+  created_at: string
+}
+
+export interface RoomReasoningSession {
+  id: string
+  room_id?: string | null
+  actor_label?: string | null
+  agent_key?: string | null
+  anchor_message_id?: string | null
+  task_id?: string | null
+  title?: string | null
+  status?: string | null
+  visibility?: string | null
+  summary?: string | null
+  latest_payload?: RoomReasoningSnapshot | null
+  goal?: string | null
+  checking?: string | null
+  hypothesis?: string | null
+  blocker?: string | null
+  next_action?: string | null
+  milestone?: string | null
+  confidence?: number | null
+  entries?: ReadonlyArray<RoomReasoningEntry> | null
+  updates?: ReadonlyArray<RoomReasoningUpdate> | null
+  closed_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const messagesHasOlder = ref(false)
@@ -397,6 +453,7 @@ const participantHiddenCount = ref(0)
 const activityHistory = ref<RoomActivityHistoryPage | null>(null)
 const activityHistoryLoading = ref(false)
 const activityHistoryError = ref('')
+const reasoningSessions = ref<RoomReasoningSession[]>([])
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
 const tasks = ref<RoomTask[]>([])
 const focusRooms = ref<FocusRoomInfo[]>([])
@@ -677,6 +734,66 @@ async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipan
   }
 }
 
+function reasoningSortValue(session: RoomReasoningSession): number {
+  const detailEntries = session.entries || session.updates
+  const latestEntry = detailEntries?.[detailEntries.length - 1]
+  const latestTimestamp = latestEntry
+    ? 'timestamp' in latestEntry
+      ? latestEntry.timestamp
+      : latestEntry.created_at
+    : null
+  const timestamp = session.updated_at || session.created_at || latestTimestamp || ''
+  const parsed = Date.parse(timestamp)
+  return Number.isFinite(parsed) ? parsed : -1
+}
+
+function sortReasoningSessions(sessions: readonly RoomReasoningSession[]): RoomReasoningSession[] {
+  return [...sessions].sort((left, right) => {
+    const byTime = reasoningSortValue(right) - reasoningSortValue(left)
+    if (byTime !== 0) return byTime
+    return String(left.id || '').localeCompare(String(right.id || ''))
+  })
+}
+
+async function fetchReasoningSessions(roomIdentifier: string): Promise<RoomReasoningSession[]> {
+  const paths = [
+    `${roomPath(roomIdentifier)}/reasoning-sessions`,
+    `${roomPath(roomIdentifier)}/reasoning`,
+  ]
+
+  for (const path of paths) {
+    try {
+      const data = await apiFetch(path)
+      const sessions = Array.isArray(data.sessions)
+        ? data.sessions
+        : Array.isArray(data.reasoning_sessions)
+          ? data.reasoning_sessions
+          : []
+      return sortReasoningSessions(sessions)
+    } catch {
+      continue
+    }
+  }
+
+  return []
+}
+
+function upsertReasoningSession(session: RoomReasoningSession | null | undefined) {
+  if (!session?.id) return
+  const idx = reasoningSessions.value.findIndex((item) => item.id === session.id)
+  if (idx >= 0) {
+    const updated = [...reasoningSessions.value]
+    updated[idx] = session
+    reasoningSessions.value = sortReasoningSessions(updated)
+    return
+  }
+  reasoningSessions.value = sortReasoningSessions([...reasoningSessions.value, session])
+}
+
+function removeReasoningSession(sessionId: string) {
+  reasoningSessions.value = reasoningSessions.value.filter((session) => session.id !== sessionId)
+}
+
 async function fetchActivityHistory(
   roomIdentifier: string,
   options?: {
@@ -915,6 +1032,12 @@ async function refreshTaskGithubStatus(): Promise<boolean> {
   return true
 }
 
+async function refreshReasoningSessions(): Promise<boolean> {
+  if (!room.value) return false
+  reasoningSessions.value = await fetchReasoningSessions(room.value.identifier)
+  return true
+}
+
 async function refreshFocusRooms(): Promise<boolean> {
   if (!room.value) return false
   focusRooms.value = await fetchFocusRooms(room.value.identifier)
@@ -995,6 +1118,30 @@ function startStreaming(roomIdentifier: string) {
         tasks.value = updated
       } else {
         tasks.value = [...tasks.value, task]
+      }
+    } catch { /* ignore */ }
+  })
+
+  eventSource.addEventListener('reasoning_update', (e) => {
+    try {
+      const payload = JSON.parse(e.data)
+      const session = payload?.session || payload
+      if (session?.id) {
+        upsertReasoningSession(session)
+      }
+    } catch { /* ignore */ }
+  })
+
+  eventSource.addEventListener('reasoning_remove', (e) => {
+    try {
+      const payload = JSON.parse(e.data)
+      const sessionId = typeof payload?.session_id === 'string'
+        ? payload.session_id
+        : typeof payload?.id === 'string'
+          ? payload.id
+          : ''
+      if (sessionId) {
+        removeReasoningSession(sessionId)
       }
     } catch { /* ignore */ }
   })
@@ -1423,6 +1570,7 @@ async function joinRoom(roomIdentifier: string) {
   activityHistoryLoading.value = true
   activityHistoryError.value = ''
   lastActivityHistoryRequest = { page: 1, pageSize: 20, kind: 'all', roomId: roomIdentifier }
+  reasoningSessions.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1466,13 +1614,14 @@ async function joinRoom(roomIdentifier: string) {
     // Load existing room state in parallel
     const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
     const supportsGitHubEvents = isRepoBackedRoomId(getGitHubSupportIdentifier(joinedRoom))
-    const [messagePage, tsks, focused, prs, roomParticipantsPage, history, gh, ghStatus] = await Promise.all([
+    const [messagePage, tsks, focused, prs, roomParticipantsPage, history, reasoning, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
       fetchActivityHistory(roomIdentifier, lastActivityHistoryRequest),
+      fetchReasoningSessions(roomIdentifier),
       supportsGitHubEvents
         ? fetchGitHubEvents(githubEventsIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
@@ -1485,6 +1634,7 @@ async function joinRoom(roomIdentifier: string) {
     presence.value = prs
     participants.value = roomParticipantsPage.participants
     participantHiddenCount.value = roomParticipantsPage.hidden_count
+    reasoningSessions.value = reasoning
     if (
       bootstrapActivityHistoryRequestId === activityHistoryRequestSequence
       && room.value?.identifier === roomIdentifier
@@ -1573,6 +1723,7 @@ function leaveRoom() {
   activityHistoryLoading.value = false
   activityHistoryError.value = ''
   lastActivityHistoryRequest = {}
+  reasoningSessions.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1637,6 +1788,7 @@ export function useRoom() {
     activityHistory: readonly(activityHistory),
     activityHistoryLoading: readonly(activityHistoryLoading),
     activityHistoryError: readonly(activityHistoryError),
+    reasoningSessions: readonly(reasoningSessions),
     taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
@@ -1669,6 +1821,7 @@ export function useRoom() {
     refreshRoomPresence,
     loadActivityHistory,
     archiveDisconnectedParticipants,
+    refreshReasoningSessions,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,
