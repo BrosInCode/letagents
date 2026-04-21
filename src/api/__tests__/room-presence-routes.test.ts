@@ -12,6 +12,7 @@ function createDeps() {
   return {
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
+    requireAdmin: unused,
     requireParticipant: unused,
     rememberAgentRoomParticipant: unused,
     maybeEmitStaleWorkPrompt: unused,
@@ -34,6 +35,8 @@ test("registerRoomPresenceRoutes preserves canonical presence route order", () =
   assert.deepEqual(calls, [
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/presence$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/participants$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/activity-history$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/archive-disconnected$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/presence$/" },
   ]);
 });

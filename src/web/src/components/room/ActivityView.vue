@@ -19,9 +19,226 @@
       </article>
     </div>
 
-    <div v-if="participants.length === 0" class="activity-empty">
-      <h3>No room participants yet</h3>
-      <p>Agents and humans will appear here once they join, post status, or send messages.</p>
+    <div class="activity-toolbar-row">
+      <div class="activity-view-switcher">
+        <button
+          class="activity-view-button"
+          type="button"
+          :data-active="activeView === 'live'"
+          @click="activeView = 'live'"
+        >
+          Live
+        </button>
+        <button
+          class="activity-view-button"
+          type="button"
+          :data-active="activeView === 'history'"
+          @click="activeView = 'history'"
+        >
+          History
+        </button>
+      </div>
+
+      <p v-if="archivedCount > 0" class="activity-toolbar-note">
+        {{ archivedCount }} archived from the live disconnected list.
+      </p>
+    </div>
+
+    <div v-if="activeView === 'history'" class="activity-history-view">
+      <div class="activity-history-toolbar">
+        <label class="activity-history-search">
+          <span>Search history</span>
+          <input
+            v-model="historyQuery"
+            type="search"
+            placeholder="Room, agent, owner, or task"
+          >
+        </label>
+
+        <label class="activity-history-filter">
+          <span>Filter</span>
+          <select v-model="historyKind">
+            <option value="all">All</option>
+            <option value="agent">Agents</option>
+            <option value="human">Humans</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="activity-history-meta">
+        <span>{{ historyCountLabel }}</span>
+        <span v-if="props.activityHistory">{{ historyPageLabel }}</span>
+      </div>
+
+      <div v-if="props.activityHistoryLoading" class="activity-empty">
+        <h3>Loading room history</h3>
+        <p>Pulling room-family activity and task history.</p>
+      </div>
+
+      <div v-else-if="props.activityHistoryError" class="activity-empty">
+        <h3>History unavailable</h3>
+        <p>{{ props.activityHistoryError }}</p>
+      </div>
+
+      <div v-else-if="historyEntries.length === 0" class="activity-empty">
+        <h3>No matching history</h3>
+        <p>Try a broader query or switch back to the live roster.</p>
+      </div>
+
+      <div v-else class="activity-history-list">
+        <article
+          v-for="entry in historyEntries"
+          :key="entry.id"
+          class="activity-history-card"
+        >
+          <div class="activity-history-card-header">
+            <div>
+              <div class="activity-history-room-line">
+                <strong>{{ entry.room.display_name }}</strong>
+                <span class="activity-history-room-pill">{{ entry.room.kind === 'focus' ? 'Focus room' : 'Main room' }}</span>
+                <span
+                  v-if="entry.participant.hidden_at"
+                  class="activity-history-room-pill"
+                  data-hidden="true"
+                >
+                  Archived from live
+                </span>
+              </div>
+              <div class="activity-history-room-meta">
+                <span>{{ entry.participant.display_name }}</span>
+                <span>{{ historyParticipantMeta(entry) }}</span>
+              </div>
+            </div>
+
+            <div class="activity-history-timestamps">
+              <span>Seen {{ formatLastSeen(entry.last_seen_at) }}</span>
+              <span>Joined {{ formatLastSeen(entry.first_seen_at) }}</span>
+            </div>
+          </div>
+
+          <div class="activity-history-task-columns">
+            <section class="activity-history-task-section">
+              <div class="activity-detail-section-header">
+                <h4>Current</h4>
+                <span>{{ entry.current_tasks.length }}</span>
+              </div>
+              <div v-if="entry.current_tasks.length === 0" class="activity-detail-empty">
+                No open tasks in this room.
+              </div>
+              <div v-else class="activity-task-list">
+                <article
+                  v-for="task in entry.current_tasks"
+                  :key="task.id"
+                  class="activity-task-card"
+                >
+                  <div class="activity-task-copy">
+                    <strong>{{ task.title }}</strong>
+                    <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
+                  </div>
+                  <a
+                    v-if="getHistoryTaskLink(task)"
+                    class="activity-task-link"
+                    :href="getHistoryTaskLink(task)!.url"
+                    target="_blank"
+                  >
+                    {{ getHistoryTaskLink(task)!.label }}
+                  </a>
+                </article>
+              </div>
+            </section>
+
+            <section class="activity-history-task-section">
+              <div class="activity-detail-section-header">
+                <h4>Completed</h4>
+                <span>{{ entry.completed_tasks.length }}</span>
+              </div>
+              <div v-if="entry.completed_tasks.length === 0" class="activity-detail-empty">
+                No completed work tracked.
+              </div>
+              <div v-else class="activity-task-list">
+                <article
+                  v-for="task in entry.completed_tasks"
+                  :key="task.id"
+                  class="activity-task-card"
+                >
+                  <div class="activity-task-copy">
+                    <strong>{{ task.title }}</strong>
+                    <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
+                  </div>
+                  <a
+                    v-if="getHistoryTaskLink(task)"
+                    class="activity-task-link"
+                    :href="getHistoryTaskLink(task)!.url"
+                    target="_blank"
+                  >
+                    {{ getHistoryTaskLink(task)!.label }}
+                  </a>
+                </article>
+              </div>
+            </section>
+
+            <section class="activity-history-task-section">
+              <div class="activity-detail-section-header">
+                <h4>Created</h4>
+                <span>{{ entry.created_tasks.length }}</span>
+              </div>
+              <div v-if="entry.created_tasks.length === 0" class="activity-detail-empty">
+                No created tasks tracked.
+              </div>
+              <div v-else class="activity-task-list">
+                <article
+                  v-for="task in entry.created_tasks"
+                  :key="task.id"
+                  class="activity-task-card"
+                >
+                  <div class="activity-task-copy">
+                    <strong>{{ task.title }}</strong>
+                    <span>{{ TASK_STATUS_LABELS[task.status] || task.status }}</span>
+                  </div>
+                  <a
+                    v-if="getHistoryTaskLink(task)"
+                    class="activity-task-link"
+                    :href="getHistoryTaskLink(task)!.url"
+                    target="_blank"
+                  >
+                    {{ getHistoryTaskLink(task)!.label }}
+                  </a>
+                </article>
+              </div>
+            </section>
+          </div>
+        </article>
+      </div>
+
+      <div v-if="props.activityHistory && props.activityHistory.page_count > 1" class="activity-history-pagination">
+        <button
+          class="activity-pagination-button"
+          type="button"
+          :disabled="props.activityHistory.page <= 1 || props.activityHistoryLoading"
+          @click="changeHistoryPage((props.activityHistory?.page || 1) - 1)"
+        >
+          Previous
+        </button>
+        <button
+          class="activity-pagination-button"
+          type="button"
+          :disabled="props.activityHistory.page >= props.activityHistory.page_count || props.activityHistoryLoading"
+          @click="changeHistoryPage((props.activityHistory?.page || 1) + 1)"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+
+    <div v-else-if="participants.length === 0" class="activity-empty">
+      <h3>{{ archivedCount > 0 ? 'Live roster cleared' : 'No room participants yet' }}</h3>
+      <p>
+        {{
+          archivedCount > 0
+            ? 'Disconnected agents are archived from the live roster. Switch to History to inspect the full room record.'
+            : 'Agents and humans will appear here once they join, post status, or send messages.'
+        }}
+      </p>
     </div>
 
     <div v-else class="activity-layout">
@@ -78,7 +295,18 @@
               <h3>Agents disconnected</h3>
               <p>Ever seen in this room, but not currently live.</p>
             </div>
-            <span class="activity-group-count">{{ disconnectedAgents.length }}</span>
+            <div class="activity-group-header-actions">
+              <span class="activity-group-count">{{ disconnectedAgents.length }}</span>
+              <button
+                v-if="props.canManageParticipants && disconnectedAgents.length > 0"
+                class="activity-action-button"
+                type="button"
+                :disabled="archiveBusy"
+                @click="handleArchiveDisconnected"
+              >
+                {{ archiveBusy ? 'Clearing…' : 'Clear disconnected' }}
+              </button>
+            </div>
           </div>
 
           <div v-if="disconnectedAgents.length > 0" class="activity-roster">
@@ -114,7 +342,7 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            No disconnected agents have been seen yet.
+            {{ archivedCount > 0 ? 'Disconnected agents are archived from the live roster.' : 'No disconnected agents have been seen yet.' }}
           </div>
         </section>
 
@@ -369,11 +597,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import {
   isHumanSender,
   parseAgentIdentity,
+  type RoomActivityHistoryEntry,
+  type RoomActivityHistoryKind,
+  type RoomActivityHistoryPage,
   type RoomAgentPresence,
   type RoomMessage,
   type RoomParticipant,
@@ -412,10 +643,22 @@ interface ActivityParticipant {
 }
 
 const props = defineProps<{
+  roomIdentifier: string
   messages: readonly RoomMessage[]
   participants: readonly RoomParticipant[]
   presence: readonly RoomAgentPresence[]
   tasks: readonly RoomTask[]
+  activityHistory: RoomActivityHistoryPage | null
+  activityHistoryLoading: boolean
+  activityHistoryError: string
+  canManageParticipants: boolean
+  loadActivityHistory?: (options?: {
+    query?: string
+    page?: number
+    pageSize?: number
+    kind?: RoomActivityHistoryKind
+  }) => Promise<boolean>
+  archiveDisconnectedParticipants?: () => Promise<number>
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
 }>()
 
@@ -440,7 +683,12 @@ const TASK_STATUS_LABELS: Record<string, string> = {
 const COMPLETED_TASK_STATUSES = new Set(['merged', 'done'])
 const OPEN_TASK_STATUSES = new Set(['proposed', 'accepted', 'assigned', 'in_progress', 'blocked', 'in_review'])
 
+const activeView = ref<'live' | 'history'>('live')
 const selectedParticipantKey = ref<string | null>(null)
+const historyQuery = ref('')
+const historyKind = ref<RoomActivityHistoryKind>('all')
+const archiveBusy = ref(false)
+let historySearchTimer: ReturnType<typeof setTimeout> | null = null
 
 function isAgentIdentityValue(value: string | null | undefined): boolean {
   const normalized = String(value || '').trim()
@@ -711,6 +959,17 @@ const participants = computed(() => [
   ...humans.value,
 ])
 
+const historyEntries = computed(() => props.activityHistory?.entries || [])
+const archivedCount = computed(() => props.activityHistory?.hidden_count || 0)
+const historyCountLabel = computed(() => {
+  const total = props.activityHistory?.total || 0
+  return total === 1 ? '1 history entry' : `${total} history entries`
+})
+const historyPageLabel = computed(() => {
+  if (!props.activityHistory) return ''
+  return `Page ${props.activityHistory.page} of ${props.activityHistory.page_count}`
+})
+
 const selectedParticipant = computed(() =>
   participants.value.find((participant) => participant.key === selectedParticipantKey.value)
   || participants.value[0]
@@ -727,6 +986,56 @@ watch(participants, (next) => {
     selectedParticipantKey.value = next[0].key
   }
 }, { immediate: true })
+
+async function requestHistory(page = props.activityHistory?.page || 1): Promise<void> {
+  if (!props.roomIdentifier || !props.loadActivityHistory) return
+  await props.loadActivityHistory({
+    query: historyQuery.value,
+    page,
+    pageSize: props.activityHistory?.page_size || 20,
+    kind: historyKind.value,
+  })
+}
+
+function queueHistoryReload(): void {
+  if (historySearchTimer) {
+    clearTimeout(historySearchTimer)
+  }
+  historySearchTimer = setTimeout(() => {
+    if (activeView.value === 'history') {
+      void requestHistory(1)
+    }
+  }, 220)
+}
+
+watch(() => activeView.value, (next) => {
+  if (next === 'history' && !props.activityHistoryLoading) {
+    void requestHistory(props.activityHistory?.page || 1)
+  }
+})
+
+watch(() => props.roomIdentifier, () => {
+  if (activeView.value === 'history') {
+    void requestHistory(1)
+  }
+})
+
+watch(() => historyKind.value, () => {
+  if (activeView.value === 'history') {
+    void requestHistory(1)
+  }
+})
+
+watch(() => historyQuery.value, () => {
+  queueHistoryReload()
+})
+
+onUnmounted(() => {
+  if (historySearchTimer) {
+    clearTimeout(historySearchTimer)
+    historySearchTimer = null
+  }
+})
 
 function participantMeta(participant: ActivityParticipant): string {
   if (participant.kind === 'human') {
@@ -776,6 +1085,39 @@ function getTaskLink(task: RoomTask): { label: string; url: string } | null {
   }
 
   return null
+}
+
+function getHistoryTaskLink(task: RoomActivityHistoryEntry['current_tasks'][number]): { label: string; url: string } | null {
+  const firstWorkflowRef = task.workflow_refs[0]
+  return firstWorkflowRef
+    ? { label: firstWorkflowRef.label, url: firstWorkflowRef.url }
+    : null
+}
+
+function historyParticipantMeta(entry: RoomActivityHistoryEntry): string {
+  if (entry.participant.kind === 'human') {
+    return 'Human participant'
+  }
+
+  const bits = [entry.participant.owner_label, entry.participant.ide_label].filter(Boolean)
+  return bits.join(' · ') || 'Agent'
+}
+
+function changeHistoryPage(page: number): void {
+  void requestHistory(page)
+}
+
+async function handleArchiveDisconnected(): Promise<void> {
+  if (!props.archiveDisconnectedParticipants || archiveBusy.value) return
+  archiveBusy.value = true
+  try {
+    await props.archiveDisconnectedParticipants()
+    if (activeView.value === 'history') {
+      await requestHistory(props.activityHistory?.page || 1)
+    }
+  } finally {
+    archiveBusy.value = false
+  }
 }
 
 function formatLastSeen(value: string | null): string {
@@ -1178,8 +1520,194 @@ function formatLastSeen(value: string | null): string {
   color: var(--text, #fafafa);
 }
 
+.activity-toolbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: var(--space-md, 16px);
+}
+
+.activity-view-switcher {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--activity-border);
+  border-radius: 999px;
+  background: var(--activity-surface-soft);
+}
+
+.activity-view-button,
+.activity-action-button,
+.activity-pagination-button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text, #fafafa);
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, opacity 0.18s ease;
+}
+
+.activity-view-button {
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.activity-view-button[data-active="true"] {
+  background: var(--activity-blue-dim);
+  border-color: rgba(59, 130, 246, 0.26);
+}
+
+.activity-toolbar-note {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--activity-text-secondary);
+}
+
+.activity-history-view {
+  display: grid;
+  gap: 14px;
+}
+
+.activity-history-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.activity-history-search,
+.activity-history-filter {
+  display: grid;
+  gap: 6px;
+}
+
+.activity-history-search {
+  flex: 1;
+  min-width: 220px;
+}
+
+.activity-history-search span,
+.activity-history-filter span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-history-search input,
+.activity-history-filter select {
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface);
+  color: var(--text, #fafafa);
+}
+
+.activity-history-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.76rem;
+  color: var(--activity-text-secondary);
+}
+
+.activity-history-list {
+  display: grid;
+  gap: 12px;
+}
+
+.activity-history-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--activity-border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
+}
+
+.activity-history-card-header,
+.activity-group-header-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-history-room-line,
+.activity-history-room-meta,
+.activity-history-timestamps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.activity-history-room-meta,
+.activity-history-timestamps {
+  font-size: 0.76rem;
+  color: var(--activity-text-secondary);
+}
+
+.activity-history-room-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--activity-surface-soft);
+  border: 1px solid var(--activity-border);
+  font-size: 0.7rem;
+  color: var(--activity-text-secondary);
+}
+
+.activity-history-room-pill[data-hidden="true"] {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.26);
+  color: #fbbf24;
+}
+
+.activity-history-task-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.activity-history-task-section {
+  display: grid;
+  gap: 8px;
+}
+
+.activity-history-pagination {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.activity-action-button,
+.activity-pagination-button {
+  padding: 8px 12px;
+  border-radius: 10px;
+  border-color: var(--activity-border);
+  background: var(--activity-surface-soft);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.activity-action-button:disabled,
+.activity-pagination-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 @media (max-width: 960px) {
   .activity-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-history-task-columns {
     grid-template-columns: 1fr;
   }
 }
@@ -1194,8 +1722,13 @@ function formatLastSeen(value: string | null): string {
     margin-bottom: var(--space-md, 16px);
   }
 
+  .activity-toolbar-row,
+  .activity-history-toolbar,
   .activity-roster-header,
   .activity-group-header,
+  .activity-group-header-actions,
+  .activity-history-card-header,
+  .activity-history-meta,
   .activity-detail-header,
   .activity-detail-section-header,
   .activity-message-meta {

@@ -1172,6 +1172,7 @@ const roomMessageRouteDeps = {
 const roomPresenceRouteDeps = {
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
+  requireAdmin,
   requireParticipant,
   rememberAgentRoomParticipant,
   maybeEmitStaleWorkPrompt,
