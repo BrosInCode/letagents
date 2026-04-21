@@ -19,6 +19,7 @@ const addMessage = dbModule?.addMessage;
 const createMessageAttachmentUpload = dbModule?.createMessageAttachmentUpload;
 const createProjectWithName = dbModule?.createProjectWithName;
 const getMessageAttachment = dbModule?.getMessageAttachment;
+const getMessageAttachmentUpload = dbModule?.getMessageAttachmentUpload;
 const getMessages = dbModule?.getMessages;
 
 async function resetDatabase(): Promise<void> {
@@ -56,6 +57,7 @@ test(
       !createMessageAttachmentUpload ||
       !createProjectWithName ||
       !getMessageAttachment ||
+      !getMessageAttachmentUpload ||
       !getMessages
     ) {
       throw new Error("DB-backed attachment tests require TEST_DB_URL");
@@ -91,5 +93,9 @@ test(
     assert.equal(attachment?.object_key, "rooms/attachment-room/uploads/upl_1234567890abcdef/notes.txt");
     assert.equal(attachment?.bucket, "letagents-test");
     assert.equal(attachment?.byte_size, Buffer.byteLength("attachment contents"));
+
+    const upload = await getMessageAttachmentUpload(room.id, "upl_1234567890abcdef");
+    assert.equal(upload?.status, "attached");
+    assert.equal(upload?.attached_message_number, 1);
   }
 );
