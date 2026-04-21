@@ -67,12 +67,12 @@
     <div
       class="composer-card"
       :data-drag-active="isDragActive"
-      @dragenter.prevent="handleDragEnter"
-      @dragover.prevent="handleDragOver"
-      @dragleave.prevent="handleDragLeave"
-      @drop.prevent="handleDrop"
+      @dragenter="handleDragEnter"
+      @dragover="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
     >
-      <div v-if="isDragActive" class="composer-drop-hint">
+      <div v-if="isDragActive && dropAttachmentsEnabled" class="composer-drop-hint">
         Drop files to attach
       </div>
       <div v-if="replyTo" class="reply-draft">
@@ -248,6 +248,7 @@ const replyDisplayName = computed(() => {
 
 const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
 const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
+const dropAttachmentsEnabled = computed(() => attachmentsAvailable.value && !props.disabled)
 
 interface MentionCandidate {
   key: string
@@ -532,7 +533,10 @@ async function addAttachmentFiles(selected: readonly File[]) {
   if (!selected.length) return
 
   attachmentError.value = ''
-  if (props.disabled) return
+  if (props.disabled) {
+    attachmentError.value = 'Attachments cannot be added right now.'
+    return
+  }
   if (!attachmentsAvailable.value) {
     attachmentError.value = 'Attachments are unavailable right now.'
     return
@@ -579,20 +583,28 @@ function resetDragState() {
 
 function handleDragEnter(event: DragEvent) {
   if (!dragContainsFiles(event)) return
+  event.preventDefault()
+  if (!dropAttachmentsEnabled.value) return
   dragDepth += 1
   isDragActive.value = true
 }
 
 function handleDragOver(event: DragEvent) {
   if (!dragContainsFiles(event)) return
+  event.preventDefault()
   if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = attachmentsAvailable.value && !props.disabled ? 'copy' : 'none'
+    event.dataTransfer.dropEffect = dropAttachmentsEnabled.value ? 'copy' : 'none'
+  }
+  if (!dropAttachmentsEnabled.value) {
+    isDragActive.value = false
+    return
   }
   isDragActive.value = true
 }
 
 function handleDragLeave(event: DragEvent) {
   if (!dragContainsFiles(event)) return
+  if (!dropAttachmentsEnabled.value) return
   if (dragDepth > 0) {
     dragDepth -= 1
   }
@@ -603,6 +615,9 @@ function handleDragLeave(event: DragEvent) {
 
 async function handleDrop(event: DragEvent) {
   const dropped = Array.from(event.dataTransfer?.files || [])
+  if (dropped.length) {
+    event.preventDefault()
+  }
   resetDragState()
   if (!dropped.length) return
   await addAttachmentFiles(dropped)
