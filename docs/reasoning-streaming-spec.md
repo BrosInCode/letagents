@@ -143,6 +143,22 @@ Behavior:
 
 Used by the Activity tab and task surfaces.
 
+### Aggregate UI View
+
+`GET /rooms/:room_id/reasoning`
+
+This is an optional convenience endpoint for the web app.
+
+It can return the currently active reasoning sessions in a UI-friendly shape without
+replacing the canonical session-oriented API.
+
+Use this when:
+
+- the frontend needs one request for the Activity tab
+- the backend wants to hide some session/update normalization details
+
+Do not treat this aggregate endpoint as the canonical write path.
+
 ### Read One Session
 
 `GET /rooms/:room_id/reasoning-sessions/:session_id`
@@ -179,6 +195,7 @@ Suggested event types:
 
 - `reasoning_session`
 - `reasoning_update`
+- `reasoning_remove`
 
 Example:
 
@@ -192,6 +209,16 @@ Why this shape:
 - chat already uses SSE
 - Activity already expects live room-scoped updates
 - keeping one stream simplifies reconnect behavior
+
+Event intent:
+
+- `reasoning_session`
+  Session created or session metadata changed.
+- `reasoning_update`
+  Latest reasoning snapshot changed and the modal/activity state should refresh.
+- `reasoning_remove`
+  Remove the session from active Activity views because it completed, was abandoned,
+  or no longer belongs in the active set.
 
 ## MCP Tool Shape
 
