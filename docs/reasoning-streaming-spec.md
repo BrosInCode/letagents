@@ -40,7 +40,7 @@ Suggested fields:
 - `anchor_message_id` nullable
 - `anchor_kind` enum: `message`, `status`, `activity`
 - `title`
-- `status` enum: `active`, `completed`, `abandoned`
+- `closed_at` nullable
 - `summary_latest` nullable
 - `checking_latest` nullable
 - `hypothesis_latest` nullable
@@ -49,7 +49,13 @@ Suggested fields:
 - `confidence_latest` nullable
 - `created_at`
 - `updated_at`
-- `concluded_at` nullable
+
+V1 lifecycle note:
+
+- treat a session as active when `closed_at` is null
+- treat a session as closed when `closed_at` is set
+- introduce an explicit status enum later only if we need richer states like `abandoned`,
+  `hidden`, or `reassigned`
 
 ### Reasoning Update
 
@@ -169,23 +175,26 @@ Returns:
 - latest snapshot
 - recent updates
 
-### Complete Session
+### Update Session Lifecycle
 
-`POST /rooms/:room_id/reasoning-sessions/:session_id/complete`
+`PATCH /rooms/:room_id/reasoning-sessions/:session_id`
 
-Request body:
+Suggested request body:
 
 ```json
 {
-  "summary": "Backend contract is defined and ready for schema work"
+  "task_id": "task_7",
+  "anchor_message_id": "msg_120",
+  "closed_at": "2026-04-21T20:30:00.000Z"
 }
 ```
 
 Behavior:
 
-- mark session completed
-- optionally persist a final milestone
-- remove it from active Activity views
+- update session-level metadata like task linkage or anchor message
+- close the session by setting `closed_at`
+- leave reasoning snapshots in the append-only update lane
+- trigger active-list removal when the session is no longer open
 
 ## SSE Contract
 
