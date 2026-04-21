@@ -119,7 +119,7 @@ export function registerRoomReasoningRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-    const open_only = req.query.open === "true";
+    const open_only = req.query.open !== "false";
     const actor_label =
       typeof req.query.actor_label === "string" ? req.query.actor_label.trim() || null : null;
     const task_id = typeof req.query.task_id === "string" ? req.query.task_id.trim() || null : null;

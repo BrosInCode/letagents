@@ -2377,7 +2377,7 @@ export async function appendReasoningSessionUpdate(input: {
       summary: input.snapshot.summary,
       latest_payload: mergedPayload,
       updated_at: now,
-      closed_at: null,
+      closed_at: existingSession.closed_at,
     };
 
     await tx

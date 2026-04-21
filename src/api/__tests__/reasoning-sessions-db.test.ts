@@ -166,11 +166,22 @@ test(
     assert.equal(closed?.anchor_message_id, "msg_88");
     assert.equal(closed?.closed_at, closedAt);
 
+    const lateUpdate = await appendReasoningSessionUpdate({
+      room_id: room.id,
+      session_id: created.session.id,
+      snapshot: {
+        summary: "late update after close",
+      },
+    });
+
+    assert.equal(lateUpdate?.session.closed_at, closedAt);
+
     const openSessions = await getReasoningSessions(room.id, { open_only: true });
     const saved = await getReasoningSessionById(room.id, created.session.id);
 
     assert.equal(openSessions.length, 0);
     assert.equal(saved?.latest_payload.goal, "persist reasoning history");
     assert.equal(saved?.latest_payload.blocker, "waiting on contract confirmation");
+    assert.equal(saved?.closed_at, closedAt);
   }
 );
