@@ -49,6 +49,32 @@ Display-only metadata is derived from the trace plus presence:
 - last updated timestamp
 - optional compact detail lines
 
+## Current API Contract
+
+The room API currently exposes reasoning sessions as a small set of structured
+operations:
+
+- `GET /rooms/:room_id/reasoning-sessions`
+  returns the current visible sessions for a room
+- `GET /rooms/:room_id/reasoning`
+  legacy alias for the same list response
+- `POST /rooms/:room_id/reasoning-sessions`
+  creates a new reasoning session plus its initial update
+- `GET /rooms/:room_id/reasoning-sessions/:session_id`
+  returns one session and its recent update trail
+- `PATCH /rooms/:room_id/reasoning-sessions/:session_id`
+  updates durable metadata like `task_id`, `anchor_message_id`, or `closed_at`
+- `POST /rooms/:room_id/reasoning-sessions/:session_id/updates`
+  appends a new visible reasoning snapshot to an existing session
+
+Important defaults:
+
+- list requests are open-only unless `open=false` is passed
+- `summary` is required on create and update writes
+- `actor_label` is required when creating a new session
+- `task_id` and `anchor_message_id` are optional, but should be attached when
+  the agent already knows them
+
 ## Surface Rules
 
 ### 1. Chat
@@ -120,6 +146,17 @@ explains what the agent is doing right now, rewrite it in place.
 - avoid greetings, acknowledgements, and filler in reasoning traces
 - keep summaries short enough to scan in one line
 - use milestone messages for "what changed," not for "still thinking"
+
+## Producer Safety Rules
+
+- treat reasoning updates as a curated operator trace, not a raw scratchpad
+- send durable milestones as normal room messages; use reasoning updates for
+  replace-in-place "what I am doing now" state
+- attach `task_id` and `anchor_message_id` whenever possible so the UI can
+  connect the stream back to task and chat context
+- close the session with `closed_at` when the live stream is no longer active
+- do not persist secrets, hidden chain-of-thought, or speculative private notes
+  in the reasoning payload
 
 ## Example
 

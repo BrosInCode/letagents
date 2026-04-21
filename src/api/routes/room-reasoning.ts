@@ -29,6 +29,16 @@ export interface RoomReasoningRouteDeps {
     res: Response,
     project: Project
   ): Promise<boolean>;
+  reasoningStore?: Partial<RoomReasoningStore>;
+}
+
+export interface RoomReasoningStore {
+  appendReasoningSessionUpdate: typeof appendReasoningSessionUpdate;
+  createReasoningSession: typeof createReasoningSession;
+  getReasoningSessionById: typeof getReasoningSessionById;
+  getReasoningSessionUpdates: typeof getReasoningSessionUpdates;
+  getReasoningSessions: typeof getReasoningSessions;
+  updateReasoningSession: typeof updateReasoningSession;
 }
 
 function normalizeOptionalString(value: unknown): string | null {
@@ -81,6 +91,16 @@ export function registerRoomReasoningRoutes(
   app: Express,
   deps: RoomReasoningRouteDeps
 ): void {
+  const reasoningStore: RoomReasoningStore = {
+    appendReasoningSessionUpdate,
+    createReasoningSession,
+    getReasoningSessionById,
+    getReasoningSessionUpdates,
+    getReasoningSessions,
+    updateReasoningSession,
+    ...deps.reasoningStore,
+  };
+
   app.get(/^\/rooms\/(.+)\/reasoning$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -96,7 +116,7 @@ export function registerRoomReasoningRoutes(
     const task_id = typeof req.query.task_id === "string" ? req.query.task_id.trim() || null : null;
     const open_only = req.query.open !== "false";
 
-    const sessions = await getReasoningSessions(project.id, {
+    const sessions = await reasoningStore.getReasoningSessions(project.id, {
       limit,
       open_only,
       actor_label,
@@ -124,7 +144,7 @@ export function registerRoomReasoningRoutes(
       typeof req.query.actor_label === "string" ? req.query.actor_label.trim() || null : null;
     const task_id = typeof req.query.task_id === "string" ? req.query.task_id.trim() || null : null;
 
-    const sessions = await getReasoningSessions(project.id, {
+    const sessions = await reasoningStore.getReasoningSessions(project.id, {
       limit,
       open_only,
       actor_label,
@@ -154,7 +174,7 @@ export function registerRoomReasoningRoutes(
     }
 
     try {
-      const result = await createReasoningSession({
+      const result = await reasoningStore.createReasoningSession({
         room_id: project.id,
         task_id: normalizeOptionalString(body.task_id),
         anchor_message_id: normalizeOptionalString(body.anchor_message_id),
@@ -188,14 +208,14 @@ export function registerRoomReasoningRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const session = await getReasoningSessionById(project.id, sessionId);
+    const session = await reasoningStore.getReasoningSessionById(project.id, sessionId);
     if (!session) {
       res.status(404).json({ error: "Reasoning session not found" });
       return;
     }
 
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-    const updates = await getReasoningSessionUpdates(project.id, sessionId, { limit });
+    const updates = await reasoningStore.getReasoningSessionUpdates(project.id, sessionId, { limit });
 
     res.json({
       room_id: project.id,
@@ -226,7 +246,7 @@ export function registerRoomReasoningRoutes(
     }
 
     try {
-      const session = await updateReasoningSession({
+      const session = await reasoningStore.updateReasoningSession({
         room_id: project.id,
         session_id: sessionId,
         ...(hasOwn(body, "task_id") ? { task_id: normalizeOptionalString(body.task_id) } : {}),
@@ -272,7 +292,7 @@ export function registerRoomReasoningRoutes(
       const body = (req.body ?? {}) as Record<string, unknown>;
 
       try {
-        const result = await appendReasoningSessionUpdate({
+        const result = await reasoningStore.appendReasoningSessionUpdate({
           room_id: project.id,
           session_id: sessionId,
           actor_label: normalizeOptionalString(body.actor_label),
