@@ -106,6 +106,7 @@ import {
   type CoordinationDecisionResult,
 } from "./coordination-policy.js";
 import { createTaskCoordinationEnforcement } from "./task-coordination-enforcement.js";
+import { createFocusParentBoardWriteIsolationEnforcer } from "./focus-room-task-write-isolation.js";
 import type { AgentPromptKind } from "../shared/room-agent-prompts.js";
 import {
   parseOptionalAgentPromptKind,
@@ -314,6 +315,10 @@ const taskCoordinationEnforcement = createTaskCoordinationEnforcement({
   getActiveTaskLeases,
   createTaskLease,
   updateTaskLeaseWorkflowRefs,
+});
+
+const enforceFocusParentBoardWriteIsolation = createFocusParentBoardWriteIsolationEnforcer({
+  getProjectById,
 });
 const {
   validateOwnerTokenTaskActorKey,
@@ -1132,6 +1137,7 @@ const legacyProjectMessageRouteDeps = {
 
 const legacyProjectTaskRouteDeps = {
   resolveCanonicalRoomRequestId,
+  getProjectById,
   requireAdmin,
   requireParticipant,
   normalizeOptionalString,
@@ -1140,6 +1146,11 @@ const legacyProjectTaskRouteDeps = {
   emitTaskLifecycleStatusMessage,
   validateOwnerTokenTaskActorKey,
   enforceTaskCoordinationMutation,
+  enforceFocusParentBoardWriteIsolation: ({ req, targetProject }) =>
+    enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProjectId: targetProject.id,
+    }),
 } satisfies LegacyProjectTaskRouteDeps;
 
 const roomMessageRouteDeps = {
@@ -1193,6 +1204,11 @@ const roomTaskRouteDeps = {
   emitTaskLifecycleStatusMessage,
   validateOwnerTokenTaskActorKey,
   enforceTaskCoordinationMutation,
+  enforceFocusParentBoardWriteIsolation: ({ req, targetProject }) =>
+    enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProjectId: targetProject.id,
+    }),
   emitProjectMessage,
 } satisfies RoomTaskRouteDeps;
 
