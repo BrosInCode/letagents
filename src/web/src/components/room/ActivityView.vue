@@ -7,16 +7,16 @@
           <span>Agents online</span>
         </article>
         <article class="summary-card">
-          <strong>{{ disconnectedAgents.length }}</strong>
-          <span>Agents disconnected</span>
+          <strong>{{ staleAgents.length }}</strong>
+          <span>Recently offline</span>
         </article>
         <article class="summary-card">
           <strong>{{ humans.length }}</strong>
           <span>Humans seen</span>
         </article>
         <article class="summary-card">
-          <strong>{{ participants.length }}</strong>
-          <span>Known participants</span>
+          <strong>{{ historicalAgents.length + archivedCount }}</strong>
+          <span>History only</span>
         </article>
       </template>
       <template v-else>
@@ -52,7 +52,7 @@
       </div>
 
       <p v-if="activeView === 'live' && archivedCount > 0" class="activity-toolbar-note">
-        {{ archivedCount }} archived from the live disconnected list.
+        {{ archivedCount }} archived from the live roster.
       </p>
     </div>
 
@@ -115,20 +115,20 @@
           <section class="activity-group">
             <div class="activity-group-header">
               <div>
-                <h3>{{ historyPrimaryAgentsTitle }}</h3>
-                <p>{{ historyPrimaryAgentsDescription }}</p>
+                <h3>Agents online</h3>
+                <p>Heartbeat-valid agents in the selected room.</p>
               </div>
-              <span class="activity-group-count">{{ historyPrimaryAgents.length }}</span>
+              <span class="activity-group-count">{{ historyOnlineAgents.length }}</span>
             </div>
 
-            <div v-if="historyPrimaryAgents.length > 0" class="activity-roster">
+            <div v-if="historyOnlineAgents.length > 0" class="activity-roster">
               <button
-                v-for="participant in historyPrimaryAgents"
+                v-for="participant in historyOnlineAgents"
                 :key="participant.key"
                 class="activity-roster-item"
                 :data-selected="selectedHistoryParticipant?.key === participant.key"
                 :data-kind="participant.kind"
-                :data-connection="participant.connection"
+                :data-connection="participant.activityState"
                 type="button"
                 @click="selectedHistoryParticipantKey = participant.key"
               >
@@ -138,14 +138,11 @@
                     <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                   </div>
                   <span
-                    v-if="participant.kind === 'agent' && participant.connection"
+                    v-if="participant.kind === 'agent' && participant.activityState"
                     class="activity-connection-pill"
-                    :data-connection="participant.connection"
+                    :data-connection="participant.activityState"
                   >
                     {{ connectionLabel(participant) }}
-                  </span>
-                  <span v-else-if="participant.kind === 'agent'" class="activity-kind-pill">
-                    History
                   </span>
                 </div>
                 <div class="activity-roster-status">
@@ -161,27 +158,27 @@
             </div>
 
             <div v-else class="activity-group-empty">
-              No agents match this room scope right now.
+              No agents are online in this room right now.
             </div>
           </section>
 
-          <section v-if="isCurrentHistoryRoom" class="activity-group">
+          <section class="activity-group">
             <div class="activity-group-header">
               <div>
-                <h3>{{ historySecondaryAgentsTitle }}</h3>
-                <p>{{ historySecondaryAgentsDescription }}</p>
+                <h3>Recently offline</h3>
+                <p>Agents with a real room heartbeat that has expired.</p>
               </div>
-              <span class="activity-group-count">{{ historyOtherAgents.length }}</span>
+              <span class="activity-group-count">{{ historyStaleAgents.length }}</span>
             </div>
 
-            <div v-if="historyOtherAgents.length > 0" class="activity-roster">
+            <div v-if="historyStaleAgents.length > 0" class="activity-roster">
               <button
-                v-for="participant in historyOtherAgents"
+                v-for="participant in historyStaleAgents"
                 :key="participant.key"
                 class="activity-roster-item"
                 :data-selected="selectedHistoryParticipant?.key === participant.key"
                 :data-kind="participant.kind"
-                :data-connection="participant.connection"
+                :data-connection="participant.activityState"
                 type="button"
                 @click="selectedHistoryParticipantKey = participant.key"
               >
@@ -192,7 +189,7 @@
                   </div>
                   <span
                     class="activity-connection-pill"
-                    :data-connection="participant.connection || 'disconnected'"
+                    :data-connection="participant.activityState || 'stale'"
                   >
                     {{ connectionLabel(participant) }}
                   </span>
@@ -210,7 +207,57 @@
             </div>
 
             <div v-else class="activity-group-empty">
-              No disconnected or archived agents are tracked in this room scope.
+              No recently offline agents are tracked in this room scope.
+            </div>
+          </section>
+
+          <section class="activity-group">
+            <div class="activity-group-header">
+              <div>
+                <h3>Room history</h3>
+                <p>Agents remembered by room history but not currently reachable.</p>
+              </div>
+              <span class="activity-group-count">{{ historyMemoryAgents.length }}</span>
+            </div>
+
+            <div v-if="historyMemoryAgents.length > 0" class="activity-roster">
+              <button
+                v-for="participant in historyMemoryAgents"
+                :key="participant.key"
+                class="activity-roster-item"
+                :data-selected="selectedHistoryParticipant?.key === participant.key"
+                :data-kind="participant.kind"
+                :data-connection="participant.activityState"
+                type="button"
+                @click="selectedHistoryParticipantKey = participant.key"
+              >
+                <div class="activity-roster-header">
+                  <div>
+                    <div class="activity-roster-name">{{ participant.label }}</div>
+                    <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
+                  </div>
+                  <span
+                    v-if="participant.activityState"
+                    class="activity-connection-pill"
+                    :data-connection="participant.activityState"
+                  >
+                    {{ connectionLabel(participant) }}
+                  </span>
+                </div>
+                <div class="activity-roster-status">
+                  <span
+                    v-if="participant.status"
+                    class="activity-status-dot"
+                    :data-status="participant.status"
+                  />
+                  <span>{{ participantNote(participant) }}</span>
+                  <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
+                </div>
+              </button>
+            </div>
+
+            <div v-else class="activity-group-empty">
+              No history-only agents are tracked in this room scope.
             </div>
           </section>
 
@@ -266,16 +313,9 @@
                 {{ selectedHistoryRoomOption?.kind === 'focus' ? 'Focus room' : 'Main room' }}
               </span>
               <span
-                v-if="selectedHistoryParticipant.archived"
-                class="activity-history-room-pill"
-                data-hidden="true"
-              >
-                Archived
-              </span>
-              <span
-                v-if="selectedHistoryParticipant.kind === 'agent' && selectedHistoryParticipant.connection"
+                v-if="selectedHistoryParticipant.kind === 'agent' && selectedHistoryParticipant.activityState"
                 class="activity-connection-pill"
-                :data-connection="selectedHistoryParticipant.connection"
+                :data-connection="selectedHistoryParticipant.activityState"
               >
                 {{ connectionLabel(selectedHistoryParticipant) }}
               </span>
@@ -290,7 +330,7 @@
           </div>
 
           <p class="activity-detail-description">
-            Seen {{ formatLastSeen(selectedHistoryParticipant.lastSeenAt) }}
+            Last activity {{ formatLastSeen(selectedHistoryParticipant.lastSeenAt) }}
             <template v-if="selectedHistoryParticipant.firstSeenAt">
               · first joined {{ formatLastSeen(selectedHistoryParticipant.firstSeenAt) }}
             </template>
@@ -505,12 +545,14 @@
     </div>
 
     <div v-else-if="participants.length === 0" class="activity-empty">
-      <h3>{{ archivedCount > 0 ? 'Live roster cleared' : 'No room participants yet' }}</h3>
+      <h3>{{ archivedCount > 0 ? 'Live roster cleared' : 'No live room participants right now' }}</h3>
       <p>
         {{
           archivedCount > 0
-            ? 'Disconnected agents are archived from the live roster. Switch to History to inspect the full room record.'
-            : 'Agents and humans will appear here once they join, post status, or send messages.'
+            ? 'Non-live agents are archived from the live roster. Switch to History to inspect the full room record.'
+            : historicalAgents.length > 0
+              ? 'Only history-only agents are tracked right now. Switch to History to inspect the full room record.'
+              : 'Agents and humans will appear here once they join, post status, or send messages.'
         }}
       </p>
     </div>
@@ -533,7 +575,7 @@
               class="activity-roster-item"
               :data-selected="selectedParticipant?.key === participant.key"
               :data-kind="participant.kind"
-              :data-connection="participant.connection"
+              :data-connection="participant.activityState"
               type="button"
               @click="selectedParticipantKey = participant.key"
             >
@@ -542,7 +584,7 @@
                   <div class="activity-roster-name">{{ participant.label }}</div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
-                <span class="activity-connection-pill" :data-connection="participant.connection">
+                <span class="activity-connection-pill" :data-connection="participant.activityState">
                   {{ connectionLabel(participant) }}
                 </span>
               </div>
@@ -566,31 +608,31 @@
         <section class="activity-group">
           <div class="activity-group-header">
             <div>
-              <h3>Agents disconnected</h3>
-              <p>Ever seen in this room, but not currently live.</p>
+              <h3>Recently offline</h3>
+              <p>Agents with real room heartbeats that have expired.</p>
             </div>
             <div class="activity-group-header-actions">
-              <span class="activity-group-count">{{ disconnectedAgents.length }}</span>
+              <span class="activity-group-count">{{ staleAgents.length }}</span>
               <button
-                v-if="props.canManageParticipants && disconnectedAgents.length > 0"
+                v-if="props.canManageParticipants && (staleAgents.length > 0 || historicalAgents.length > 0)"
                 class="activity-action-button"
                 type="button"
                 :disabled="archiveBusy"
                 @click="handleArchiveDisconnected"
               >
-                {{ archiveBusy ? 'Clearing…' : 'Clear disconnected' }}
+                {{ archiveBusy ? 'Clearing…' : 'Clear non-live' }}
               </button>
             </div>
           </div>
 
-          <div v-if="disconnectedAgents.length > 0" class="activity-roster">
+          <div v-if="staleAgents.length > 0" class="activity-roster">
             <button
-              v-for="participant in disconnectedAgents"
+              v-for="participant in staleAgents"
               :key="participant.key"
               class="activity-roster-item"
               :data-selected="selectedParticipant?.key === participant.key"
               :data-kind="participant.kind"
-              :data-connection="participant.connection"
+              :data-connection="participant.activityState"
               type="button"
               @click="selectedParticipantKey = participant.key"
             >
@@ -599,7 +641,7 @@
                   <div class="activity-roster-name">{{ participant.label }}</div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
-                <span class="activity-connection-pill" :data-connection="participant.connection">
+                <span class="activity-connection-pill" :data-connection="participant.activityState">
                   {{ connectionLabel(participant) }}
                 </span>
               </div>
@@ -616,7 +658,7 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            {{ archivedCount > 0 ? 'Disconnected agents are archived from the live roster.' : 'No disconnected agents have been seen yet.' }}
+            {{ archivedCount > 0 ? 'Non-live agents are archived from the live roster.' : 'No recently offline agents have been seen yet.' }}
           </div>
         </section>
 
@@ -673,7 +715,7 @@
             <span
               v-if="selectedParticipant.kind === 'agent'"
               class="activity-connection-pill"
-              :data-connection="selectedParticipant.connection"
+              :data-connection="selectedParticipant.activityState"
             >
               {{ connectionLabel(selectedParticipant) }}
             </span>
@@ -702,7 +744,7 @@
           </article>
           <article class="detail-stat">
             <strong>{{ formatLastSeen(selectedParticipant.lastSeenAt) }}</strong>
-            <span>Last seen</span>
+            <span>Last activity</span>
           </article>
         </div>
 
@@ -897,7 +939,7 @@ import {
 } from './agentThinking'
 
 type ParticipantKind = 'agent' | 'human'
-type ParticipantConnection = 'online' | 'disconnected'
+type ParticipantActivityState = 'online' | 'stale' | 'historical' | 'archived'
 
 interface ActivityParticipant {
   key: string
@@ -906,7 +948,7 @@ interface ActivityParticipant {
   actorLabel: string
   ownerLabel: string | null
   ideLabel: string | null
-  connection: ParticipantConnection | null
+  activityState: ParticipantActivityState | null
   status: RoomAgentPresence['status'] | null
   statusText: string | null
   lastSeenAt: string | null
@@ -927,7 +969,7 @@ interface HistoryParticipant {
   actorLabel: string
   ownerLabel: string | null
   ideLabel: string | null
-  connection: ParticipantConnection | null
+  activityState: ParticipantActivityState | null
   status: RoomAgentPresence['status'] | null
   statusText: string | null
   firstSeenAt: string | null
@@ -979,6 +1021,12 @@ const STATUS_LABELS: Record<RoomAgentPresence['status'], string> = {
   working: 'Working',
   reviewing: 'Reviewing',
   blocked: 'Blocked',
+}
+const ACTIVITY_STATE_LABELS: Record<ParticipantActivityState, string> = {
+  online: 'Online',
+  stale: 'Recently offline',
+  historical: 'History only',
+  archived: 'Archived',
 }
 const TASK_STATUS_LABELS: Record<string, string> = {
   proposed: 'Proposed',
@@ -1048,10 +1096,6 @@ function sortTasksByUpdated(tasks: readonly RoomTask[]): RoomTask[] {
   return [...tasks].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
 }
 
-function latestTaskTimestamp(tasks: readonly RoomTask[]): string | null {
-  return sortTasksByUpdated(tasks)[0]?.updated_at || null
-}
-
 const agentMessagesByActor = computed(() => {
   const grouped = new Map<string, RoomMessage[]>()
   for (const message of props.messages) {
@@ -1112,7 +1156,7 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     actorLabel,
     ownerLabel,
     ideLabel,
-    connection: null,
+    activityState: null,
     status: null,
     statusText: null,
     lastSeenAt: null,
@@ -1136,7 +1180,7 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
       actorLabel,
       ownerLabel,
       ideLabel,
-      connection: null,
+      activityState: null,
       status: null,
       statusText: null,
       lastSeenAt: null,
@@ -1164,16 +1208,14 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     actorLabel,
     ownerLabel,
     ideLabel,
-    connection: presenceEntry?.freshness === 'active' ? 'online' : 'disconnected',
+    activityState: participant.activity_state || presenceEntry?.activity_state || 'historical',
     status: presenceEntry?.status || null,
     statusText,
     lastSeenAt: latestTimestamp(
+      participant.last_room_activity_at,
       participant.last_seen_at,
-      presenceEntry?.last_heartbeat_at,
       latestMessage?.timestamp,
-      latestTaskTimestamp(currentTasks),
-      latestTaskTimestamp(completedTasks),
-      latestTaskTimestamp(createdTasks)
+      presenceEntry?.last_heartbeat_at
     ),
     messageCount: messages.length,
     currentTasks,
@@ -1207,15 +1249,13 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
     actorLabel: participant.github_login || label,
     ownerLabel: null,
     ideLabel: null,
-    connection: null,
+    activityState: null,
     status: null,
     statusText: latestMessage ? previewMessage(latestMessage.text) : null,
     lastSeenAt: latestTimestamp(
+      participant.last_room_activity_at,
       participant.last_seen_at,
-      latestMessage?.timestamp,
-      latestTaskTimestamp(currentTasks),
-      latestTaskTimestamp(completedTasks),
-      latestTaskTimestamp(createdTasks)
+      latestMessage?.timestamp
     ),
     messageCount: messages.length,
     currentTasks,
@@ -1257,18 +1297,24 @@ const humanParticipants = computed(() => {
 })
 
 const onlineAgents = computed(() =>
-  agentParticipants.value.filter((participant) => participant.connection === 'online')
+  agentParticipants.value.filter((participant) => participant.activityState === 'online')
 )
 
-const disconnectedAgents = computed(() =>
-  agentParticipants.value.filter((participant) => participant.connection !== 'online')
+const staleAgents = computed(() =>
+  agentParticipants.value.filter((participant) => participant.activityState === 'stale')
+)
+
+const historicalAgents = computed(() =>
+  agentParticipants.value.filter((participant) =>
+    participant.activityState === 'historical' || participant.activityState === 'archived'
+  )
 )
 
 const humans = computed(() => humanParticipants.value)
 
 const participants = computed(() => [
   ...onlineAgents.value,
-  ...disconnectedAgents.value,
+  ...staleAgents.value,
   ...humans.value,
 ])
 
@@ -1429,13 +1475,14 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
       : actorLabel,
     ownerLabel,
     ideLabel,
-    connection: entry.participant.kind === 'agent' && isCurrentRoomEntry
-      ? (presenceEntry?.freshness === 'active' ? 'online' : 'disconnected')
+    activityState: entry.participant.kind === 'agent'
+      ? (entry.participant.activity_state || (isCurrentRoomEntry ? presenceEntry?.activity_state : null) || 'historical')
       : null,
     status: entry.participant.kind === 'agent' ? (presenceEntry?.status || null) : null,
     statusText,
     firstSeenAt: entry.first_seen_at,
     lastSeenAt: latestTimestamp(
+      entry.last_room_activity_at,
       entry.last_seen_at,
       latestMessage?.timestamp,
       presenceEntry?.last_heartbeat_at
@@ -1463,47 +1510,28 @@ const historyHumans = computed(() =>
   historyParticipants.value.filter((participant) => participant.kind === 'human')
 )
 const historyOnlineAgents = computed(() =>
-  historyAgents.value.filter((participant) => participant.connection === 'online')
+  historyAgents.value.filter((participant) => participant.activityState === 'online')
 )
-const historyOtherAgents = computed(() =>
-  isCurrentHistoryRoom.value
-    ? historyAgents.value.filter((participant) => participant.connection !== 'online')
-    : historyAgents.value
+const historyStaleAgents = computed(() =>
+  historyAgents.value.filter((participant) => participant.activityState === 'stale')
 )
-const historyArchivedAgents = computed(() =>
-  historyAgents.value.filter((participant) => participant.archived)
-)
-const historyPrimaryAgents = computed(() =>
-  isCurrentHistoryRoom.value ? historyOnlineAgents.value : historyAgents.value
-)
-const historyPrimaryAgentsTitle = computed(() =>
-  isCurrentHistoryRoom.value ? 'Agents online' : 'Agents seen in room'
-)
-const historyPrimaryAgentsDescription = computed(() =>
-  isCurrentHistoryRoom.value
-    ? 'Currently active in the selected room.'
-    : 'Recorded agent activity in the selected room.'
-)
-const historySecondaryAgentsTitle = computed(() =>
-  isCurrentHistoryRoom.value ? 'Other agents seen' : 'Archived agents'
-)
-const historySecondaryAgentsDescription = computed(() =>
-  isCurrentHistoryRoom.value
-    ? 'Disconnected or archived agents still tied to this room.'
-    : 'Agents cleared from the live roster for this room.'
+const historyMemoryAgents = computed(() =>
+  historyAgents.value.filter((participant) =>
+    participant.activityState === 'historical' || participant.activityState === 'archived'
+  )
 )
 const historySummaryCards = computed(() => [
   {
-    value: historyPrimaryAgents.value.length,
-    label: isCurrentHistoryRoom.value ? 'Agents online' : 'Agents seen',
+    value: historyOnlineAgents.value.length,
+    label: 'Agents online',
   },
   {
-    value: isCurrentHistoryRoom.value ? historyOtherAgents.value.length : historyArchivedAgents.value.length,
-    label: isCurrentHistoryRoom.value ? 'Other agents seen' : 'Archived agents',
+    value: historyStaleAgents.value.length,
+    label: 'Recently offline',
   },
   {
-    value: historyHumans.value.length,
-    label: 'Humans seen',
+    value: historyMemoryAgents.value.length,
+    label: 'History only',
   },
   {
     value: historyOpenTaskCount.value,
@@ -1629,17 +1657,19 @@ function participantNote(participant: ActivityParticipant | HistoryParticipant):
   }
 
   if (participant.kind === 'agent') {
-    if ('archived' in participant && participant.archived) {
+    if (participant.activityState === 'archived' || ('archived' in participant && participant.archived)) {
       return 'Archived from the live roster'
     }
 
-    if (participant.connection === null) {
+    if (participant.activityState === 'historical') {
       return 'Recorded in room history'
     }
 
-    return participant.connection === 'online'
-      ? 'No live status text'
-      : 'Disconnected from the room'
+    if (participant.activityState === 'stale') {
+      return 'Recently offline'
+    }
+
+    return 'No live status text'
   }
 
   return participant.messageCount > 0
@@ -1649,8 +1679,7 @@ function participantNote(participant: ActivityParticipant | HistoryParticipant):
 
 function connectionLabel(participant: ActivityParticipant | HistoryParticipant | null): string {
   if (!participant || participant.kind !== 'agent') return 'Human'
-  if (participant.connection === null) return 'History'
-  return participant.connection === 'online' ? 'Online' : 'Disconnected'
+  return participant.activityState ? ACTIVITY_STATE_LABELS[participant.activityState] : 'History'
 }
 
 function getTaskLink(task: {
@@ -1857,7 +1886,17 @@ function formatLastSeen(value: string | null): string {
   color: var(--activity-green);
 }
 
-.activity-connection-pill[data-connection='disconnected'] {
+.activity-connection-pill[data-connection='stale'] {
+  background: var(--activity-amber-dim);
+  color: var(--activity-amber);
+}
+
+.activity-connection-pill[data-connection='historical'] {
+  background: var(--activity-surface-hover);
+  color: var(--activity-text-secondary);
+}
+
+.activity-connection-pill[data-connection='archived'] {
   background: var(--activity-red-dim);
   color: var(--activity-red);
 }

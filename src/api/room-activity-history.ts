@@ -1,5 +1,9 @@
 import type { Project, RoomParticipant, Task } from "./db.js";
 import type { TaskWorkflowRef } from "./repo-workflow.js";
+import type {
+  RoomActivitySourceFlag,
+  RoomAgentActivityState,
+} from "../shared/room-agent-activity.js";
 
 export type RoomActivityHistoryKind = "all" | "agent" | "human";
 
@@ -31,9 +35,13 @@ export interface RoomActivityHistoryEntry {
     ide_label: string | null;
     hidden_at: string | null;
     hidden_by: string | null;
+    last_live_heartbeat_at: string | null;
+    activity_state: RoomAgentActivityState | null;
+    source_flags: RoomActivitySourceFlag[];
   };
   first_seen_at: string;
   last_seen_at: string;
+  last_room_activity_at: string;
   current_tasks: RoomActivityHistoryTaskSummary[];
   completed_tasks: RoomActivityHistoryTaskSummary[];
   created_tasks: RoomActivityHistoryTaskSummary[];
@@ -231,9 +239,13 @@ export function buildRoomActivityHistoryEntries(input: {
           ide_label: participant.ide_label,
           hidden_at: participant.hidden_at,
           hidden_by: participant.hidden_by,
+          last_live_heartbeat_at: participant.last_live_heartbeat_at,
+          activity_state: participant.activity_state,
+          source_flags: participant.source_flags,
         },
         first_seen_at: participant.created_at,
-        last_seen_at: latestTimestamp(
+        last_seen_at: participant.last_seen_at,
+        last_room_activity_at: latestTimestamp(
           participant.last_seen_at,
           currentTasks[0]?.updated_at,
           completedTasks[0]?.updated_at,
@@ -263,8 +275,8 @@ export function buildRoomActivityHistoryEntries(input: {
     })
     .filter((entry): entry is RoomActivityHistoryEntry => entry !== null)
     .sort((left, right) => {
-      const leftTime = Date.parse(left.last_seen_at);
-      const rightTime = Date.parse(right.last_seen_at);
+      const leftTime = Date.parse(left.last_room_activity_at);
+      const rightTime = Date.parse(right.last_room_activity_at);
       if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
         return rightTime - leftTime;
       }

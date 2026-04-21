@@ -48,6 +48,8 @@ function buildPresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPre
     created_at: overrides.created_at ?? isoMinutesAgo(180),
     updated_at: overrides.updated_at ?? isoMinutesAgo(1),
     freshness: overrides.freshness ?? "active",
+    activity_state: overrides.activity_state ?? "online",
+    source_flags: overrides.source_flags ?? ["presence"],
   };
 }
 

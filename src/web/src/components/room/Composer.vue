@@ -299,21 +299,11 @@ interface MentionCandidate {
 const mentionCandidates = computed<MentionCandidate[]>(() => {
   const seen = new Set<string>()
   const candidates: MentionCandidate[] = []
-  const activeAgentActors = new Set(
+  const onlinePresenceByActor = new Map(
     props.presence
-      .filter((entry) => entry.freshness === 'active')
-      .map((entry) => String(entry.actor_label || '').trim())
-      .filter(Boolean)
-  )
-  const visibleActiveAgentActors = new Set(
-    props.participants
-      .filter((participant) =>
-        participant.kind === 'agent'
-        && !participant.hidden_at
-        && activeAgentActors.has(String(participant.actor_label || '').trim())
-      )
-      .map((participant) => String(participant.actor_label || '').trim())
-      .filter(Boolean)
+      .filter((entry) => entry.activity_state === 'online')
+      .map((entry) => [String(entry.actor_label || '').trim(), entry] as const)
+      .filter(([actorLabel]) => Boolean(actorLabel))
   )
 
   const pushCandidate = (
@@ -341,39 +331,26 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
     })
   }
 
-  for (const agent of props.presence) {
-    const actorLabel = String(agent.actor_label || '').trim()
-    if (agent.freshness !== 'active') {
-      continue
-    }
-
-    const parsed = parseAgentIdentity(agent.actor_label)
-    const label = agent.display_name || parsed.displayName || agent.actor_label
-    const meta = [agent.owner_label, agent.ide_label].filter(Boolean).join(' · ') || 'Agent'
-    pushCandidate(label, label, meta, agent.freshness === 'active' ? 0 : 1, [
-      actorLabel,
-      agent.owner_label,
-      agent.ide_label,
-      agent.status,
-    ])
-  }
-
   for (const participant of props.participants) {
     if (participant.hidden_at) continue
 
     if (participant.kind === 'agent') {
       const actorLabel = String(participant.actor_label || '').trim()
-      if (!actorLabel || !visibleActiveAgentActors.has(actorLabel)) {
+      const presenceEntry = actorLabel ? (onlinePresenceByActor.get(actorLabel) || null) : null
+      if (!actorLabel || participant.activity_state !== 'online' || !presenceEntry) {
         continue
       }
 
-      const label = participant.display_name || parseAgentIdentity(participant.actor_label || '').displayName
-      const meta = [participant.owner_label, participant.ide_label].filter(Boolean).join(' · ') || 'Agent'
+      const label = participant.display_name || presenceEntry.display_name || parseAgentIdentity(participant.actor_label || '').displayName
+      const meta = [participant.owner_label || presenceEntry.owner_label, participant.ide_label || presenceEntry.ide_label]
+        .filter(Boolean)
+        .join(' · ') || 'Agent'
       pushCandidate(label, label, meta, 0, [
         participant.actor_label,
         participant.owner_label,
         participant.ide_label,
         participant.agent_key,
+        presenceEntry.status,
       ])
       continue
     }

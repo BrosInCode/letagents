@@ -1,9 +1,10 @@
 import type { Message, RoomAgentPresence } from "./db.js";
 import { parseAgentActorLabel } from "../shared/agent-identity.js";
+import { type AgentPresenceStatus } from "../shared/agent-presence.js";
 import {
-  getAgentPresenceFreshness,
-  type AgentPresenceStatus,
-} from "../shared/agent-presence.js";
+  buildRoomActivitySourceFlags,
+  type RoomAgentActivityState,
+} from "../shared/room-agent-activity.js";
 
 const IDLE_STATUS_RE = /\b(idle|available|online|polling|monitoring|watch(?:ing)?|ready|standby)\b/i;
 const IDLE_WAITING_STATUS_RE = /\b(?:awaiting|waiting)\s+(?:for\s+)?(?:tasks?|work|instructions?|direction|assignment|assignments|next(?:\s+task)?|queue)\b/i;
@@ -55,8 +56,8 @@ function isPresenceCandidateMessage(message: Message): boolean {
 }
 
 function comparePresence(left: RoomAgentPresence, right: RoomAgentPresence): number {
-  if (left.freshness !== right.freshness) {
-    return left.freshness === "active" ? -1 : 1;
+  if (left.activity_state !== right.activity_state) {
+    return left.activity_state === "online" ? -1 : 1;
   }
 
   const leftHeartbeat = Date.parse(left.last_heartbeat_at);
@@ -84,7 +85,6 @@ export function buildFallbackPresenceFromMessages(input: {
     latestBySender.set(message.sender, message);
   }
 
-  const now = input.now ?? Date.now();
   return Array.from(latestBySender.entries())
     .map(([actorLabel, message]) => {
       const parsed = parseAgentActorLabel(actorLabel);
@@ -103,7 +103,9 @@ export function buildFallbackPresenceFromMessages(input: {
         last_heartbeat_at: lastHeartbeatAt,
         created_at: lastHeartbeatAt,
         updated_at: lastHeartbeatAt,
-        freshness: getAgentPresenceFreshness(lastHeartbeatAt, now),
+        freshness: "stale",
+        activity_state: "historical" satisfies RoomAgentActivityState,
+        source_flags: buildRoomActivitySourceFlags(["messages"]),
       } satisfies RoomAgentPresence;
     })
     .sort(comparePresence);
@@ -133,6 +135,8 @@ export function buildSyntheticPresenceEntry(input: {
     last_heartbeat_at: timestamp,
     created_at: timestamp,
     updated_at: timestamp,
-    freshness: getAgentPresenceFreshness(timestamp, input.now),
+    freshness: "active",
+    activity_state: "online",
+    source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
 }
