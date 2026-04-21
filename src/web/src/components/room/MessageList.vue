@@ -16,11 +16,14 @@
         :message="msg"
         :roomIdentifier="roomIdentifier"
         :thread="threadSummaries.get(msg.id) || null"
+        :stalePromptTaskStates="stalePromptTaskStates"
         :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
+        @openImageViewer="emit('openImageViewer', $event)"
         @scrollToReply="scrollToMessage"
+        @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
       />
     </div>
     <button
@@ -42,7 +45,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { type RoomMessage, type RoomReasoningSession } from '@/composables/useRoom'
+import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 
 const props = defineProps<{
@@ -52,10 +55,13 @@ const props = defineProps<{
   hasOlderMessages?: boolean
   isLoadingOlderMessages?: boolean
   searchQuery?: string
+  stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
 }>()
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
+  openImageViewer: [imageId: string]
+  toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)

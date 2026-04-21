@@ -1,4 +1,5 @@
 import type { Project, Task } from "./db.js";
+import { isAttachmentStorageConfigured } from "./attachment-storage.js";
 import {
   normalizeFocusRoomSettings,
   type FocusRoomSettings,
@@ -29,6 +30,7 @@ export function toRoomResponse(
     display_name: project.display_name,
     code: project.code,
     kind: project.kind,
+    attachments_enabled: isAttachmentStorageConfigured(),
     parent_room_id: project.parent_room_id,
     focus_key: project.focus_key,
     source_task_id: project.source_task_id,

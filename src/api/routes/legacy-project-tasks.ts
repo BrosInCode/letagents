@@ -4,7 +4,6 @@ import {
   createCoordinationEvent,
   createTask,
   getOpenTasks,
-  getProjectById,
   getTaskById,
   getTaskOwnershipState,
   getTasks,
@@ -26,6 +25,7 @@ import {
   normalizeTaskActorKey,
   requiresTaskOwnershipGuard,
 } from "../task-ownership.js";
+import type { FocusParentBoardWriteIsolationDecision } from "../focus-room-task-write-isolation.js";
 
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
 
@@ -37,6 +37,7 @@ type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnership
 
 export interface LegacyProjectTaskRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
+  getProjectById(projectId: string): Promise<Project | undefined>;
   requireAdmin(
     req: AuthenticatedRequest,
     res: Response,
@@ -81,6 +82,10 @@ export interface LegacyProjectTaskRouteDeps {
     actorKey: string | null;
     actorInstanceId: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
+  enforceFocusParentBoardWriteIsolation(input: {
+    req: AuthenticatedRequest;
+    targetProject: Project;
+  }): Promise<FocusParentBoardWriteIsolationDecision>;
 }
 
 export function registerLegacyProjectTaskRoutes(
@@ -89,7 +94,7 @@ export function registerLegacyProjectTaskRoutes(
 ): void {
   app.post("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await deps.getProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -112,6 +117,15 @@ export function registerLegacyProjectTaskRoutes(
     }
 
     if (!(await deps.requireParticipant(req, res, project))) {
+      return;
+    }
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
       return;
     }
 
@@ -163,7 +177,7 @@ export function registerLegacyProjectTaskRoutes(
 
   app.get("/projects/:id/tasks", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await deps.getProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -185,7 +199,7 @@ export function registerLegacyProjectTaskRoutes(
 
   app.get("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await deps.getProjectById(projectId);
     const taskId = String(req.params.taskId);
     const task = await getTaskById(projectId, taskId);
 
@@ -209,21 +223,31 @@ export function registerLegacyProjectTaskRoutes(
   app.patch("/projects/:id/tasks/:taskId", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
     const taskId = String(req.params.taskId);
-    const task = await getTaskById(projectId, taskId);
-    const taskOwnership = await getTaskOwnershipState(projectId, taskId);
 
-    if (!task || !taskOwnership) {
-      res.status(404).json({ error: "Task not found" });
-      return;
-    }
-
-    const project = await getProjectById(projectId);
+    const project = await deps.getProjectById(projectId);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
 
     if (!(await deps.requireParticipant(req, res, project))) {
+      return;
+    }
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
+
+    const task = await getTaskById(projectId, taskId);
+    const taskOwnership = await getTaskOwnershipState(projectId, taskId);
+
+    if (!task || !taskOwnership) {
+      res.status(404).json({ error: "Task not found" });
       return;
     }
 

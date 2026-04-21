@@ -18,8 +18,8 @@ import {
   getActiveTaskLeases,
   getActiveTaskLocks,
   getTaskById,
-  getTaskOwnershipState,
   getTasks,
+  getStaleTaskPromptMutes,
   hasMessagesFromSender,
   markGitHubAppInstallationUninstalled,
   markGitHubAppRepositoryRemoved,
@@ -37,13 +37,11 @@ import {
   type Message,
   type Project,
   type Task,
-  type TaskLeaseKind,
   type TaskStatus,
 } from "./db.js";
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
 import {
   buildGitHubLeaseEnforcementPlan,
-  buildLeasedBranchRef,
   publishGitHubLeaseEnforcement,
   resolveGitHubLeaseEnforcementMode,
 } from "./github-lease-enforcement.js";
@@ -78,6 +76,7 @@ import {
   toRoomResponse,
 } from "./room-formatting.js";
 import { createGitHubFocusIsolationResolver } from "./github-focus-isolation.js";
+import { createFocusParentBoardWriteIsolationEnforcer } from "./focus-room-task-write-isolation.js";
 import { createStaleWorkPromptEmitter } from "./stale-work.js";
 import {
   buildFailedCheckRunTaskDescription,
@@ -102,34 +101,23 @@ import {
   resolveRoomOrReply,
 } from "./room-resolution.js";
 import { createRoomParticipantRecorder } from "./room-participants.js";
+import { normalizeOptionalString } from "./task-coordination-inputs.js";
 import {
-  buildTaskUpdatePatch,
-  normalizeTaskActorKey,
-  normalizeTaskActorLabel,
-} from "./task-ownership.js";
-import {
-  classifyTaskCoordinationMutation,
-  getTaskUpdatePrUrlBinding,
-  normalizeOptionalString,
-} from "./task-coordination-inputs.js";
-import {
-  evaluateTaskAdmission,
-  evaluateCoordinationMutation,
   evaluateWorkflowArtifactMutation,
-  findApplicableLock,
+  leaseMatchesWorkflowArtifact,
   type CoordinationDecisionResult,
-  type CoordinationMutationKind,
 } from "./coordination-policy.js";
+import { createTaskCoordinationEnforcement } from "./task-coordination-enforcement.js";
 import type { AgentPromptKind } from "../shared/room-agent-prompts.js";
 import {
   parseOptionalAgentPromptKind,
   parseOptionalReplyToMessageId,
   shouldIncludePromptOnlyMessages,
 } from "./message-inputs.js";
+import type { NormalizedMessageAttachmentReference } from "./message-attachments.js";
 import { createTaskActivityMessageEmitters } from "./task-activity-messages.js";
 import {
   respondWithError,
-  type AuthenticatedRequest,
 } from "./http-helpers.js";
 import {
   registerHttpMiddleware,
@@ -165,6 +153,10 @@ import {
   registerRoomPresenceRoutes,
   type RoomPresenceRouteDeps,
 } from "./routes/room-presence.js";
+import {
+  registerRoomReasoningRoutes,
+  type RoomReasoningRouteDeps,
+} from "./routes/room-reasoning.js";
 import {
   registerRoomFocusRoutes,
   type RoomFocusRouteDeps,
@@ -221,8 +213,51 @@ const {
 } = createRepoRoomEventTaskResolver({
   findTaskByWorkflowArtifactMatches,
   findTaskByPrUrl,
+  findTaskByActiveWorkflowLease: async (projectId, workflow) => {
+    const findTaskInRoom = async (roomId: string): Promise<Task | undefined> => {
+      const leases = await getActiveTaskLeases(roomId);
+      const lease = leases.find((candidate) =>
+        candidate.kind === "work" &&
+        leaseMatchesWorkflowArtifact({
+          lease: candidate,
+          prUrl: workflow.prUrl,
+          branchRef: workflow.branchRef,
+        })
+      );
+      return lease ? getTaskById(roomId, lease.task_id) : undefined;
+    };
+
+    const parentTask = await findTaskInRoom(projectId);
+    if (parentTask) {
+      return parentTask;
+    }
+
+    const focusRooms = await getFocusRoomsForParent(projectId);
+    for (const focusRoom of focusRooms) {
+      if (focusRoom.focus_status === "concluded") {
+        continue;
+      }
+      const focusTask = await findTaskInRoom(focusRoom.id);
+      if (focusTask) {
+        return focusTask;
+      }
+    }
+
+    return undefined;
+  },
   getTaskById,
 });
+
+async function getProjectForResolvedTask(
+  fallbackProject: Project,
+  linkedTask: Pick<Task, "room_id"> | undefined
+): Promise<Project> {
+  if (!linkedTask || linkedTask.room_id === fallbackProject.id) {
+    return fallbackProject;
+  }
+
+  return (await getProjectById(linkedTask.room_id)) ?? fallbackProject;
+}
 
 async function emitProjectMessage(
   projectId: string,
@@ -232,12 +267,14 @@ async function emitProjectMessage(
     source?: string;
     agent_prompt_kind?: AgentPromptKind | null;
     reply_to?: string | null;
+    attachments?: NormalizedMessageAttachmentReference[];
   }
 ): Promise<Message> {
   const message = await addMessage(projectId, sender, text, {
     source: options?.source,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
     reply_to_message_id: options?.reply_to ?? null,
+    attachments: options?.attachments,
   });
   messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
   return message;
@@ -256,359 +293,46 @@ const {
   emitProjectMessage,
 });
 const {
+  getFocusRoomForGitHubEventTask,
   getHardIsolatedFocusRoomForGitHubEvent,
-} = createGitHubFocusIsolationResolver({ getActiveTaskFocusRoom });
+} = createGitHubFocusIsolationResolver({
+  getActiveTaskFocusRoom,
+  getProjectById: async (projectId) => (await getProjectById(projectId)) ?? null,
+});
 const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
   getOpenTasks,
   getRoomAgentPresence,
+  getStaleTaskPromptMutes: async (projectId, options) =>
+    getStaleTaskPromptMutes(projectId, options.taskIds),
   emitTaskAnchoredMessage,
 });
+const enforceFocusParentBoardWriteIsolation = createFocusParentBoardWriteIsolationEnforcer({
+  getProjectById,
+});
 
-async function validateOwnerTokenTaskActorKey(input: {
-  req: AuthenticatedRequest;
-  actorKey: string | null;
-}): Promise<{ actorKey: string | null; error: string | null }> {
-  const { req, actorKey } = input;
-
-  if (req.authKind !== "owner_token") {
-    return {
-      actorKey,
-      error: null,
-    };
-  }
-
-  if (!actorKey) {
-    return {
-      actorKey: null,
-      error: "actor_key is required for agent-owned task transitions",
-    };
-  }
-
-  const actorIdentity = await getAgentIdentityByCanonicalKey(actorKey);
-  if (!actorIdentity || actorIdentity.owner_account_id !== req.sessionAccount?.account_id) {
-    return {
-      actorKey: null,
-      error: "actor_key must belong to the authenticated agent owner",
-    };
-  }
-
-  return {
-    actorKey: actorIdentity.canonical_key,
-    error: null,
-  };
-}
-
-type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
-
-type TaskCoordinationGuardDecision =
-  | { kind: "allow" }
-  | { kind: "deny"; code: string; error: string };
-
-async function bindWorkflowArtifactPrUrlIfPresent(
-  roomId: string,
-  leaseId: string,
-  updates: TaskUpdatePatch
-): Promise<void> {
-  const prUrl = getTaskUpdatePrUrlBinding(updates);
-  if (prUrl === undefined) {
-    return;
-  }
-
-  await updateTaskLeaseWorkflowRefs(roomId, leaseId, { pr_url: prUrl });
-}
-
-async function recordCoordinationDecision(input: {
-  roomId: string;
-  taskId: string | null;
-  mutation: CoordinationMutationKind;
-  decision: "allow" | "deny";
-  actorLabel: string | null;
-  actorKey: string | null;
-  actorInstanceId: string | null;
-  reason?: string | null;
-  leaseId?: string | null;
-  lockId?: string | null;
-}): Promise<void> {
-  await createCoordinationEvent({
-    room_id: input.roomId,
-    task_id: input.taskId,
-    event_type: input.mutation,
-    decision: input.decision,
-    actor_label: input.actorLabel,
-    actor_key: input.actorKey,
-    actor_instance_id: input.actorInstanceId,
-    reason: input.reason ?? null,
-    lease_id: input.leaseId ?? null,
-    lock_id: input.lockId ?? null,
-  });
-}
-
-async function enforceTaskAdmissionCoordination(input: {
-  req: AuthenticatedRequest;
-  projectId: string;
-  title: string;
-  sourceMessageId?: string | null;
-  actorLabel: string | null;
-  actorKey: string | null;
-  actorInstanceId: string | null;
-}): Promise<TaskCoordinationGuardDecision> {
-  if (input.req.authKind !== "owner_token") {
-    return { kind: "allow" };
-  }
-
-  const actorLabel = normalizeTaskActorLabel(input.actorLabel);
-  const actorKey = normalizeTaskActorKey(input.actorKey);
-
-  const locks = await getActiveTaskLocks(input.projectId);
-  const lock = findApplicableLock({ locks, taskId: null });
-  if (lock) {
-    await recordCoordinationDecision({
-      roomId: input.projectId,
-      taskId: null,
-      mutation: "task_admit",
-      decision: "deny",
-      actorLabel,
-      actorKey,
-      actorInstanceId: input.actorInstanceId,
-      reason: `Task admission is blocked by ${lock.reason} lock ${lock.id}.`,
-      lockId: lock.id,
-    });
-    return {
-      kind: "deny",
-      code: "coordination_active_lock",
-      error: `Task admission is blocked by ${lock.reason} lock ${lock.id}.`,
-    };
-  }
-
-  const [tasks, focusRooms, leases] = await Promise.all([
-    getTasks(input.projectId, undefined, { limit: 500 }),
-    getFocusRoomsForParent(input.projectId),
-    getActiveTaskLeases(input.projectId),
-  ]);
-  const admission = evaluateTaskAdmission({
-    intent: {
-      sourceMessageId: input.sourceMessageId,
-      outputIntent: input.title,
-    },
-    tasks: tasks.tasks,
-    focusRooms: focusRooms.map((focusRoom) => ({
+const taskCoordinationEnforcement = createTaskCoordinationEnforcement({
+  getAgentIdentityByCanonicalKey,
+  createCoordinationEvent,
+  getActiveTaskLocks,
+  getTasks,
+  getFocusRoomsForParent: async (parentRoomId) =>
+    (await getFocusRoomsForParent(parentRoomId)).map((focusRoom) => ({
       room_id: focusRoom.id,
       focus_key: focusRoom.focus_key,
       source_task_id: focusRoom.source_task_id,
       focus_status: focusRoom.focus_status,
     })),
-    leases,
-  });
-  if (admission.kind === "route_to_review") {
-    await recordCoordinationDecision({
-      roomId: input.projectId,
-      taskId: null,
-      mutation: "task_admit",
-      decision: "deny",
-      actorLabel,
-      actorKey,
-      actorInstanceId: input.actorInstanceId,
-      reason: admission.reason,
-      leaseId: admission.duplicate.lease?.id ?? null,
-    });
-    return {
-      kind: "deny",
-      code: "coordination_duplicate_work",
-      error: admission.reason,
-    };
-  }
+  getActiveTaskLeases,
+  createTaskLease,
+  updateTaskLeaseWorkflowRefs,
+});
 
-  return { kind: "allow" };
-}
-
-async function issueWorkLeaseForActor(input: {
-  roomId: string;
-  taskId: string;
-  actorLabel: string;
-  actorKey: string;
-  actorInstanceId: string | null;
-  mutation: CoordinationMutationKind;
-  outputIntent?: string | null;
-}) {
-  const lease = await createTaskLease({
-    room_id: input.roomId,
-    task_id: input.taskId,
-    kind: "work",
-    agent_key: input.actorKey,
-    agent_instance_id: input.actorInstanceId,
-    actor_label: input.actorLabel,
-    branch_ref: buildLeasedBranchRef({
-      taskId: input.taskId,
-      agentKey: input.actorKey,
-    }),
-    created_by: input.actorLabel,
-    output_intent: input.outputIntent ?? input.mutation,
-  });
-  await recordCoordinationDecision({
-    roomId: input.roomId,
-    taskId: input.taskId,
-    mutation: input.mutation,
-    decision: "allow",
-    actorLabel: input.actorLabel,
-    actorKey: input.actorKey,
-    actorInstanceId: input.actorInstanceId,
-    leaseId: lease.id,
-    reason: `Issued ${lease.kind} lease ${lease.id} for ${input.mutation}.`,
-  });
-  return lease;
-}
-
-function taskIsAssignedToActor(input: {
-  taskOwnership: NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
-  actorLabel: string;
-  actorKey: string;
-}): boolean {
-  const assignedKey = normalizeTaskActorKey(input.taskOwnership.assignee_agent_key);
-  if (assignedKey) {
-    return assignedKey === input.actorKey;
-  }
-
-  return normalizeTaskActorLabel(input.taskOwnership.assignee) === input.actorLabel;
-}
-
-async function enforceTaskCoordinationMutation(input: {
-  req: AuthenticatedRequest;
-  projectId: string;
-  task: Task;
-  taskOwnership: NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
-  updates: TaskUpdatePatch;
-  forcedMutation?: { mutation: CoordinationMutationKind; leaseKind: TaskLeaseKind };
-  actorLabel: string | null;
-  actorKey: string | null;
-  actorInstanceId: string | null;
-}): Promise<TaskCoordinationGuardDecision> {
-  if (input.req.authKind !== "owner_token") {
-    return { kind: "allow" };
-  }
-
-  const classified = input.forcedMutation
-    ? { ...input.forcedMutation, claim: false }
-    : classifyTaskCoordinationMutation(input.updates);
-  if (!classified) {
-    return { kind: "allow" };
-  }
-
-  const actorLabel = normalizeTaskActorLabel(input.actorLabel);
-  const requestedActorKey = normalizeTaskActorKey(input.actorKey);
-  if (!actorLabel || !requestedActorKey) {
-    return {
-      kind: "deny",
-      code: "coordination_missing_actor",
-      error: "actor_label and actor_key are required for coordinated task mutations",
-    };
-  }
-  const verified = await validateOwnerTokenTaskActorKey({
-    req: input.req,
-    actorKey: requestedActorKey,
-  });
-  if (verified.error || !verified.actorKey) {
-    return {
-      kind: "deny",
-      code: "coordination_invalid_actor",
-      error: verified.error ?? "actor_key must belong to the authenticated agent owner",
-    };
-  }
-  const actorKey = verified.actorKey;
-
-  const [leases, locks] = await Promise.all([
-    getActiveTaskLeases(input.projectId, input.task.id),
-    getActiveTaskLocks(input.projectId, input.task.id),
-  ]);
-  const decision = evaluateCoordinationMutation({
-    mutation: classified.mutation,
-    taskId: input.task.id,
-    requiredLeaseKind: classified.leaseKind,
-    actor: {
-      actorLabel,
-      agentKey: actorKey,
-      agentInstanceId: input.actorInstanceId,
-    },
-    leases,
-    locks,
-  });
-
-  if (decision.kind === "allow") {
-    await recordCoordinationDecision({
-      roomId: input.projectId,
-      taskId: input.task.id,
-      mutation: classified.mutation,
-      decision: "allow",
-      actorLabel,
-      actorKey,
-      actorInstanceId: input.actorInstanceId,
-      leaseId: decision.lease.id,
-      reason: `Allowed ${classified.mutation} with lease ${decision.lease.id}.`,
-    });
-    if (classified.mutation === "workflow_artifact_attach") {
-      await bindWorkflowArtifactPrUrlIfPresent(input.projectId, decision.lease.id, input.updates);
-    }
-    return { kind: "allow" };
-  }
-
-  if (decision.code === "missing_lease") {
-    if (classified.claim && input.task.status === "accepted") {
-      const lease = await issueWorkLeaseForActor({
-        roomId: input.projectId,
-        taskId: input.task.id,
-        actorLabel,
-        actorKey,
-        actorInstanceId: input.actorInstanceId,
-        mutation: classified.mutation,
-        outputIntent: input.task.title,
-      });
-      if (classified.mutation === "workflow_artifact_attach") {
-        await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
-      }
-      return { kind: "allow" };
-    }
-
-    if (
-      !classified.claim &&
-      taskIsAssignedToActor({
-        taskOwnership: input.taskOwnership,
-        actorLabel,
-        actorKey,
-      })
-    ) {
-      const lease = await issueWorkLeaseForActor({
-        roomId: input.projectId,
-        taskId: input.task.id,
-        actorLabel,
-        actorKey,
-        actorInstanceId: input.actorInstanceId,
-        mutation: classified.mutation,
-        outputIntent: input.task.title,
-      });
-      if (classified.mutation === "workflow_artifact_attach") {
-        await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
-      }
-      return { kind: "allow" };
-    }
-  }
-
-  await recordCoordinationDecision({
-    roomId: input.projectId,
-    taskId: input.task.id,
-    mutation: classified.mutation,
-    decision: "deny",
-    actorLabel,
-    actorKey,
-    actorInstanceId: input.actorInstanceId,
-    reason: decision.reason,
-    leaseId: decision.lease?.id ?? null,
-    lockId: decision.lock?.id ?? null,
-  });
-  return {
-    kind: "deny",
-    code: `coordination_${decision.code}`,
-    error: decision.reason,
-  };
-}
+const {
+  validateOwnerTokenTaskActorKey,
+  recordCoordinationDecision,
+  enforceTaskAdmissionCoordination,
+  enforceTaskCoordinationMutation,
+} = taskCoordinationEnforcement;
 
 async function isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean> {
   const normalizedSender = createdBy.trim().toLowerCase();
@@ -852,7 +576,8 @@ async function handleMaterializedGitHubRoomEvent(
   }
 
   if (roomEvent.kind === "check_run") {
-    linkedTask = await maybeAutoCreateTaskForFailedCheckRun(project, linkedTask, roomEvent, {
+    const taskProject = await getProjectForResolvedTask(project, linkedTask);
+    linkedTask = await maybeAutoCreateTaskForFailedCheckRun(taskProject, linkedTask, roomEvent, {
       githubRoutingContext,
     });
     if (linkedTask) {
@@ -864,7 +589,8 @@ async function handleMaterializedGitHubRoomEvent(
     }
   }
 
-  const taskProjection = await applyRepoRoomEventToTask(project, linkedTask, roomEvent, {
+  const taskProject = await getProjectForResolvedTask(project, linkedTask);
+  const taskProjection = await applyRepoRoomEventToTask(taskProject, linkedTask, roomEvent, {
     installationId: input.installationId,
     githubRoutingContext,
   });
@@ -880,10 +606,11 @@ async function handleMaterializedGitHubRoomEvent(
   });
   if (message) {
     const linkedFocusRoom = taskProjection.authoritative && linkedTask
-      ? await getActiveTaskFocusRoom(project.id, linkedTask.id)
+      ? await getFocusRoomForGitHubEventTask(project.id, linkedTask)
       : null;
+    const linkedTaskProject = await getProjectForResolvedTask(project, linkedTask);
     if (taskProjection.authoritative && linkedTask) {
-      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+      await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
         source: "github",
         parent_activity: "GitHub activity",
         parent_event_kind: "major_activity",
@@ -891,7 +618,7 @@ async function handleMaterializedGitHubRoomEvent(
         github_routing_context: githubRoutingContext,
       });
     } else if (linkedTask && isolatedFocusRoom) {
-      await emitTaskAnchoredMessage(project.id, "github", message, linkedTask, {
+      await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
         source: "github",
         parent_activity: "GitHub activity",
         parent_event_kind: "major_activity",
@@ -1417,6 +1144,7 @@ const legacyProjectMessageRouteDeps = {
 
 const legacyProjectTaskRouteDeps = {
   resolveCanonicalRoomRequestId,
+  getProjectById,
   requireAdmin,
   requireParticipant,
   normalizeOptionalString,
@@ -1425,6 +1153,11 @@ const legacyProjectTaskRouteDeps = {
   emitTaskLifecycleStatusMessage,
   validateOwnerTokenTaskActorKey,
   enforceTaskCoordinationMutation,
+  enforceFocusParentBoardWriteIsolation: ({ req, targetProject }) =>
+    enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProjectId: targetProject.id,
+    }),
 } satisfies LegacyProjectTaskRouteDeps;
 
 const roomMessageRouteDeps = {
@@ -1443,10 +1176,17 @@ const roomMessageRouteDeps = {
 const roomPresenceRouteDeps = {
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
+  requireAdmin,
   requireParticipant,
   rememberAgentRoomParticipant,
   maybeEmitStaleWorkPrompt,
 } satisfies RoomPresenceRouteDeps;
+
+const roomReasoningRouteDeps = {
+  resolveCanonicalRoomRequestId,
+  resolveRoomOrReply,
+  requireParticipant,
+} satisfies RoomReasoningRouteDeps;
 
 const roomFocusRouteDeps = {
   resolveCanonicalRoomRequestId,
@@ -1478,6 +1218,11 @@ const roomTaskRouteDeps = {
   emitTaskLifecycleStatusMessage,
   validateOwnerTokenTaskActorKey,
   enforceTaskCoordinationMutation,
+  enforceFocusParentBoardWriteIsolation: ({ req, targetProject }) =>
+    enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProjectId: targetProject.id,
+    }),
   emitProjectMessage,
 } satisfies RoomTaskRouteDeps;
 
@@ -1553,6 +1298,7 @@ registerLegacyProjectTaskRoutes(app, legacyProjectTaskRouteDeps);
 registerRoomJoinRoutes(app, roomJoinRouteDeps);
 registerRoomMessageRoutes(app, roomMessageRouteDeps);
 registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
+registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
 registerRoomFocusRoutes(app, roomFocusRouteDeps);
 registerRoomTaskRoutes(app, roomTaskRouteDeps);
 registerRoomEventRoutes(app, roomEventRouteDeps);

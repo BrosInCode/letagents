@@ -4,6 +4,10 @@ import {
   buildAgentRoomParticipantKey,
   buildHumanRoomParticipantKey,
 } from "../shared/room-participant.js";
+import {
+  buildRoomActivitySourceFlags,
+  deriveRoomAgentActivityState,
+} from "../shared/room-agent-activity.js";
 
 function normalizeValue(value: string | null | undefined): string {
   return String(value ?? "").trim();
@@ -50,6 +54,50 @@ function compareParticipants(left: RoomParticipant, right: RoomParticipant): num
   return left.display_name.localeCompare(right.display_name);
 }
 
+function latestTimestamp(...values: Array<string | null | undefined>): string | null {
+  let best: string | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) continue;
+    if (parsed > bestMs) {
+      bestMs = parsed;
+      best = value;
+    }
+  }
+
+  return best;
+}
+
+function mergeParticipantActivityState(
+  primary: RoomParticipant,
+  secondary: RoomParticipant
+): RoomParticipant["activity_state"] {
+  if (primary.kind !== "agent") {
+    return primary.activity_state ?? secondary.activity_state ?? null;
+  }
+
+  const hidden = Boolean(primary.hidden_at || secondary.hidden_at);
+  const hasPresence = Boolean(
+    primary.last_live_heartbeat_at
+      || secondary.last_live_heartbeat_at
+      || primary.source_flags?.includes("presence")
+      || secondary.source_flags?.includes("presence")
+  );
+  const freshness = primary.activity_state === "online" || secondary.activity_state === "online"
+    ? "active"
+    : hasPresence
+      ? "stale"
+      : null;
+
+  return deriveRoomAgentActivityState({
+    hidden,
+    hasPresence,
+    freshness,
+  });
+}
+
 export function buildFallbackRoomParticipants(input: {
   roomId: string;
   messages: readonly Message[];
@@ -78,6 +126,21 @@ export function buildFallbackRoomParticipants(input: {
       github_login: primary.github_login ?? secondary.github_login,
       owner_label: primary.owner_label ?? secondary.owner_label,
       ide_label: primary.ide_label ?? secondary.ide_label,
+      last_room_activity_at: latestTimestamp(
+        primary.last_room_activity_at,
+        secondary.last_room_activity_at,
+        primary.last_seen_at,
+        secondary.last_seen_at
+      ),
+      last_live_heartbeat_at: latestTimestamp(
+        primary.last_live_heartbeat_at,
+        secondary.last_live_heartbeat_at
+      ),
+      activity_state: mergeParticipantActivityState(primary, secondary),
+      source_flags: buildRoomActivitySourceFlags([
+        ...(secondary.source_flags ?? []),
+        ...(primary.source_flags ?? []),
+      ]),
       created_at: existing.created_at,
       updated_at: primary.updated_at,
       last_seen_at: primary.last_seen_at,
@@ -100,7 +163,13 @@ export function buildFallbackRoomParticipants(input: {
       display_name: entry.display_name,
       owner_label: entry.owner_label,
       ide_label: entry.ide_label,
+      hidden_at: null,
+      hidden_by: null,
       last_seen_at: entry.last_heartbeat_at,
+      last_room_activity_at: entry.last_heartbeat_at,
+      last_live_heartbeat_at: entry.activity_state === "historical" ? null : entry.last_heartbeat_at,
+      activity_state: entry.activity_state,
+      source_flags: buildRoomActivitySourceFlags(entry.source_flags),
       created_at: entry.created_at,
       updated_at: entry.updated_at,
     });
@@ -131,7 +200,13 @@ export function buildFallbackRoomParticipants(input: {
         display_name: sender,
         owner_label: null,
         ide_label: null,
+        hidden_at: null,
+        hidden_by: null,
         last_seen_at: message.timestamp,
+        last_room_activity_at: message.timestamp,
+        last_live_heartbeat_at: null,
+        activity_state: null,
+        source_flags: buildRoomActivitySourceFlags(["messages"]),
         created_at: message.timestamp,
         updated_at: message.timestamp,
       });
@@ -158,7 +233,17 @@ export function buildFallbackRoomParticipants(input: {
       display_name: parsed?.display_name || sender,
       owner_label: getOwnerLabel(parsed?.owner_attribution),
       ide_label: parsed?.ide_label ?? null,
+      hidden_at: null,
+      hidden_by: null,
       last_seen_at: message.timestamp,
+      last_room_activity_at: message.timestamp,
+      last_live_heartbeat_at: null,
+      activity_state: deriveRoomAgentActivityState({
+        hidden: false,
+        hasPresence: false,
+        freshness: null,
+      }),
+      source_flags: buildRoomActivitySourceFlags(["messages"]),
       created_at: message.timestamp,
       updated_at: message.timestamp,
     });

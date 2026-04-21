@@ -11,6 +11,7 @@ function createDeps() {
 
   return {
     resolveCanonicalRoomRequestId: unused,
+    getProjectById: unused,
     requireAdmin: unused,
     requireParticipant: unused,
     normalizeOptionalString: () => null,
@@ -19,6 +20,7 @@ function createDeps() {
     emitTaskLifecycleStatusMessage: unused,
     validateOwnerTokenTaskActorKey: unused,
     enforceTaskCoordinationMutation: unused,
+    enforceFocusParentBoardWriteIsolation: unused,
   };
 }
 
