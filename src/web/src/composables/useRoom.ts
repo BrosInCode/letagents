@@ -52,10 +52,53 @@ export interface MessageReplyReference {
   timestamp: string
 }
 
+export interface RoomMessageAttachment {
+  id?: string | null
+  name?: string | null
+  file_name?: string | null
+  filename?: string | null
+  mime_type?: string | null
+  content_type?: string | null
+  size_bytes?: number | null
+  byte_size?: number | null
+  url?: string | null
+  download_url?: string | null
+  data_url?: string | null
+  content_base64?: string | null
+}
+
+export interface OutgoingMessageAttachment {
+  file_name: string
+  mime_type: string
+  size_bytes: number
+  file?: File | null
+  upload_id?: string | null
+}
+
+export interface StagedMessageAttachment {
+  upload_id: string
+}
+
+interface AttachmentUploadTarget {
+  upload_id?: string
+  attachment_id?: string
+  id?: string
+  upload_url?: string
+  url?: string
+  method?: string
+  headers?: Record<string, string>
+  attachment?: {
+    upload_id?: string
+    attachment_id?: string
+    id?: string
+  }
+}
+
 export interface RoomMessage {
   id: string
   sender: string
   text: string
+  attachments?: readonly RoomMessageAttachment[]
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
@@ -94,6 +137,14 @@ export interface RoomTask {
     label: string
     url: string
   }>
+  stale_prompt_state?: {
+    is_stale: boolean
+    reason: string | null
+    stale_for_ms: number | null
+    muted: boolean
+    muted_by: string | null
+    muted_at: string | null
+  } | null
   created_at: string
   updated_at: string
   active_leases?: ReadonlyArray<{
@@ -119,6 +170,12 @@ export interface RoomTask {
     created_by: string
     cleared_at: string | null
   }>
+}
+
+export interface StalePromptTaskState {
+  isStale: boolean
+  muted: boolean
+  taskUpdatedAt: string
 }
 
 export interface TaskGitHubArtifactStatus {
@@ -160,6 +217,7 @@ export interface RoomInfo {
   role: string
   authenticated: boolean
   kind: 'main' | 'focus'
+  attachmentsEnabled: boolean
   parentRoomId: string | null
   focusKey: string | null
   sourceTaskId: string | null
@@ -177,6 +235,7 @@ export interface FocusRoomInfo {
   display_name: string
   code: string | null
   kind: 'main' | 'focus'
+  attachments_enabled?: boolean
   parent_room_id: string | null
   focus_key: string | null
   source_task_id: string | null
@@ -239,6 +298,8 @@ export interface RoomAgentPresence {
   created_at: string
   updated_at: string
   freshness: 'active' | 'stale'
+  activity_state: 'online' | 'stale' | 'historical' | 'archived'
+  source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
 }
 
 export interface RoomParticipant {
@@ -251,9 +312,79 @@ export interface RoomParticipant {
   display_name: string
   owner_label: string | null
   ide_label: string | null
+  hidden_at: string | null
+  hidden_by: string | null
   last_seen_at: string
+  last_room_activity_at: string | null
+  last_live_heartbeat_at: string | null
+  activity_state: 'online' | 'stale' | 'historical' | 'archived' | null
+  source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
   created_at: string
   updated_at: string
+}
+
+export type RoomActivityHistoryKind = 'all' | 'agent' | 'human'
+
+export interface RoomActivityHistoryTaskSummary {
+  id: string
+  title: string
+  status: string
+  updated_at: string
+  workflow_refs: ReadonlyArray<{
+    provider: string
+    kind: string
+    label: string
+    url: string
+  }>
+}
+
+export interface RoomActivityHistoryEntry {
+  id: string
+  room: {
+    id: string
+    display_name: string
+    kind: 'main' | 'focus'
+    focus_status: 'active' | 'concluded' | null
+    source_task_id: string | null
+  }
+  participant: {
+    participant_key: string
+    kind: 'human' | 'agent'
+    actor_label: string | null
+    agent_key: string | null
+    github_login: string | null
+    display_name: string
+    owner_label: string | null
+    ide_label: string | null
+    hidden_at: string | null
+    hidden_by: string | null
+    last_live_heartbeat_at: string | null
+    activity_state: 'online' | 'stale' | 'historical' | 'archived' | null
+    source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
+  }
+  first_seen_at: string
+  last_seen_at: string
+  last_room_activity_at: string
+  current_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
+  completed_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
+  created_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
+}
+
+export interface RoomActivityHistoryPage {
+  room_id: string
+  root_room_id: string
+  selected_room_id: string
+  hidden_count: number
+  entries: ReadonlyArray<RoomActivityHistoryEntry>
+  page: number
+  page_size: number
+  page_count: number
+  total: number
+}
+
+interface RoomParticipantsPage {
+  participants: RoomParticipant[]
+  hidden_count: number
 }
 
 /** ── State ── */
@@ -262,6 +393,10 @@ const messagesHasOlder = ref(false)
 const isLoadingOlderMessages = ref(false)
 const presence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
+const participantHiddenCount = ref(0)
+const activityHistory = ref<RoomActivityHistoryPage | null>(null)
+const activityHistoryLoading = ref(false)
+const activityHistoryError = ref('')
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
 const tasks = ref<RoomTask[]>([])
 const focusRooms = ref<FocusRoomInfo[]>([])
@@ -271,6 +406,7 @@ const githubEventsHasMore = ref(false)
 const githubEventsError = ref<RoomGitHubEventsError | null>(null)
 const githubEventsLoading = ref(false)
 const room = ref<RoomInfo | null>(null)
+const lastSendError = ref('')
 const isConnected = ref(false)
 const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
@@ -284,6 +420,14 @@ let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null
 let presenceRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let participantRefreshTimer: ReturnType<typeof setInterval> | null = null
 let participantRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let lastActivityHistoryRequest: {
+  query?: string
+  page?: number
+  pageSize?: number
+  kind?: RoomActivityHistoryKind
+  roomId?: string
+} = {}
+let activityHistoryRequestSequence = 0
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
 const MESSAGE_HISTORY_PAGE_SIZE = 150
 
@@ -518,12 +662,43 @@ async function fetchPresence(roomIdentifier: string): Promise<RoomAgentPresence[
   }
 }
 
-async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipant[]> {
+async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipantsPage> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/participants`)
-    return data.participants || []
+    return {
+      participants: data.participants || [],
+      hidden_count: Number(data.hidden_count || 0),
+    }
   } catch {
-    return []
+    return {
+      participants: [],
+      hidden_count: 0,
+    }
+  }
+}
+
+async function fetchActivityHistory(
+  roomIdentifier: string,
+  options?: {
+    query?: string
+    page?: number
+    pageSize?: number
+    kind?: RoomActivityHistoryKind
+    roomId?: string
+  }
+): Promise<RoomActivityHistoryPage | null> {
+  const params = new URLSearchParams()
+  if (options?.query?.trim()) params.set('query', options.query.trim())
+  if (options?.page) params.set('page', String(options.page))
+  if (options?.pageSize) params.set('page_size', String(options.pageSize))
+  if (options?.kind && options.kind !== 'all') params.set('kind', options.kind)
+  if (options?.roomId?.trim()) params.set('room_id', options.roomId.trim())
+
+  try {
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return await apiFetch(`${roomPath(roomIdentifier)}/activity-history${suffix}`)
+  } catch {
+    return null
   }
 }
 
@@ -564,7 +739,68 @@ async function refreshPresence(roomIdentifier: string) {
 }
 
 async function refreshParticipants(roomIdentifier: string) {
-  participants.value = await fetchParticipants(roomIdentifier)
+  const next = await fetchParticipants(roomIdentifier)
+  participants.value = next.participants
+  participantHiddenCount.value = next.hidden_count
+}
+
+async function loadActivityHistory(options?: {
+  query?: string
+  page?: number
+  pageSize?: number
+  kind?: RoomActivityHistoryKind
+  roomId?: string
+}): Promise<boolean> {
+  if (!room.value) return false
+  const roomIdentifier = room.value.identifier
+  const nextRequest = {
+    query: options?.query ?? lastActivityHistoryRequest.query,
+    page: options?.page ?? lastActivityHistoryRequest.page ?? 1,
+    pageSize: options?.pageSize ?? lastActivityHistoryRequest.pageSize ?? 20,
+    kind: options?.kind ?? lastActivityHistoryRequest.kind ?? 'all',
+    roomId: options?.roomId ?? lastActivityHistoryRequest.roomId ?? roomIdentifier,
+  }
+  lastActivityHistoryRequest = nextRequest
+  const requestId = ++activityHistoryRequestSequence
+
+  activityHistoryLoading.value = true
+  activityHistoryError.value = ''
+  try {
+    const next = await fetchActivityHistory(roomIdentifier, nextRequest)
+    if (requestId !== activityHistoryRequestSequence || room.value?.identifier !== roomIdentifier) {
+      return false
+    }
+    if (!next) {
+      activityHistoryError.value = 'Could not load room activity history.'
+      return false
+    }
+    activityHistory.value = next
+    return true
+  } finally {
+    if (requestId === activityHistoryRequestSequence) {
+      activityHistoryLoading.value = false
+    }
+  }
+}
+
+async function archiveDisconnectedParticipants(): Promise<number> {
+  if (!room.value) return 0
+
+  try {
+    const response = await apiFetch(`${roomPath(room.value.identifier)}/participants/archive-disconnected`, {
+      method: 'POST',
+    })
+    await refreshParticipants(room.value.identifier)
+    if ((activityHistory.value?.selected_room_id || lastActivityHistoryRequest.roomId || room.value.identifier) === room.value.identifier) {
+      await loadActivityHistory({
+        ...lastActivityHistoryRequest,
+        roomId: room.value.identifier,
+      })
+    }
+    return Number(response.archived_count || 0)
+  } catch {
+    return 0
+  }
 }
 
 async function refreshRoomPresence(): Promise<boolean> {
@@ -826,16 +1062,24 @@ async function sendMessage(
   text: string,
   sender?: string,
   agentPromptKind?: string | null,
-  replyTo?: string | null
+  replyTo?: string | null,
+  attachments: OutgoingMessageAttachment[] = []
 ): Promise<boolean> {
   if (!room.value) return false
+  lastSendError.value = ''
   try {
-    const body: Record<string, string> = { text, sender: sender || 'anonymous' }
+    const preparedAttachments = attachments.length
+      ? await prepareMessageAttachments(room.value.identifier, attachments)
+      : []
+    const body: Record<string, unknown> = { text, sender: sender || 'anonymous' }
     if (agentPromptKind) {
       body.agent_prompt_kind = agentPromptKind
     }
     if (replyTo) {
       body.reply_to = replyTo
+    }
+    if (preparedAttachments.length) {
+      body.attachments = preparedAttachments
     }
     const msg = await apiFetch(`${roomPath(room.value.identifier)}/messages`, {
       method: 'POST',
@@ -846,9 +1090,102 @@ async function sendMessage(
       messages.value = [...messages.value, msg]
     }
     return true
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message.trim() : ''
+    lastSendError.value = /attachment object storage is not configured/i.test(message)
+      ? 'Attachments are unavailable right now.'
+      : message || 'Message could not be sent.'
     return false
   }
+}
+
+async function prepareMessageAttachments(
+  roomIdentifier: string,
+  attachments: OutgoingMessageAttachment[]
+): Promise<StagedMessageAttachment[]> {
+  const prepared: StagedMessageAttachment[] = []
+  for (const attachment of attachments) {
+    if (attachment.upload_id) {
+      prepared.push({ upload_id: attachment.upload_id })
+      continue
+    }
+
+    prepared.push(await stageAttachmentUpload(roomIdentifier, attachment))
+  }
+  return prepared
+}
+
+function resolveAttachmentUploadTarget(target: AttachmentUploadTarget): {
+  uploadId: string
+  uploadUrl: string
+} {
+  const uploadId = target.upload_id
+    || target.attachment?.upload_id
+    || target.attachment_id
+    || target.attachment?.attachment_id
+    || target.id
+    || target.attachment?.id
+  const uploadUrl = target.upload_url || target.url
+  if (!uploadId || !uploadUrl) {
+    throw new Error('Attachment upload target is incomplete.')
+  }
+  return { uploadId, uploadUrl }
+}
+
+async function stageAttachmentUpload(
+  roomIdentifier: string,
+  attachment: OutgoingMessageAttachment,
+  signal?: AbortSignal
+): Promise<StagedMessageAttachment> {
+  if (!attachment.file) {
+    throw new Error('Attachment file is missing.')
+  }
+
+  let uploadId: string | null = null
+  try {
+    const target = await apiFetch(`${roomPath(roomIdentifier)}/attachments/uploads`, {
+      method: 'POST',
+      body: JSON.stringify({
+        file_name: attachment.file_name,
+        mime_type: attachment.mime_type,
+        size_bytes: attachment.size_bytes,
+      }),
+      signal,
+    }) as AttachmentUploadTarget
+
+    const resolved = resolveAttachmentUploadTarget(target)
+    uploadId = resolved.uploadId
+
+    const headers: Record<string, string> = {
+      ...(target.headers || {}),
+    }
+    if (!Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')) {
+      headers['Content-Type'] = attachment.mime_type || 'application/octet-stream'
+    }
+
+    const uploadRes = await fetch(resolved.uploadUrl, {
+      method: target.method || 'PUT',
+      headers,
+      body: attachment.file,
+      signal,
+    })
+    if (!uploadRes.ok) {
+      throw new Error(`Attachment upload failed with HTTP ${uploadRes.status}.`)
+    }
+
+    return { upload_id: resolved.uploadId }
+  } catch (error) {
+    if (uploadId) {
+      void discardAttachmentUpload(roomIdentifier, uploadId).catch(() => {})
+    }
+    throw error
+  }
+}
+
+async function discardAttachmentUpload(roomIdentifier: string, uploadId: string): Promise<void> {
+  await apiFetch(`${roomPath(roomIdentifier)}/attachments/uploads/${encodeURIComponent(uploadId)}`, {
+    method: 'DELETE',
+  })
 }
 
 async function addTask(title: string): Promise<boolean> {
@@ -929,6 +1266,7 @@ async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: Focus
     room.value = {
       ...room.value,
       displayName: focusRoom.display_name || room.value.displayName,
+      attachmentsEnabled: focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
       focusStatus: focusRoom.focus_status || room.value.focusStatus,
       focusParentVisibility: focusRoom.focus_parent_visibility || room.value.focusParentVisibility,
       focusActivityScope: focusRoom.focus_activity_scope || room.value.focusActivityScope,
@@ -971,6 +1309,7 @@ async function updateFocusRoomSettings(
     if (room.value.kind === 'focus' && room.value.projectId === focusRoom.room_id) {
       room.value = {
         ...room.value,
+        attachmentsEnabled: focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
         focusParentVisibility: focusRoom.focus_parent_visibility,
         focusActivityScope: focusRoom.focus_activity_scope,
         focusGitHubEventRouting: focusRoom.focus_github_event_routing,
@@ -1011,6 +1350,42 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
   }
 }
 
+async function setTaskStalePromptMute(
+  taskId: string,
+  muted: boolean,
+  options?: { promptTimestamp?: string | null }
+): Promise<boolean> {
+  if (!room.value) return false
+  try {
+    const data = await apiFetch(
+      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/stale-prompt-mute`,
+      {
+        method: muted ? 'POST' : 'DELETE',
+        body: JSON.stringify({
+          prompt_timestamp: options?.promptTimestamp ?? null,
+        }),
+      }
+    )
+    const updatedTask = data.task || (data.id ? data : null)
+    if (updatedTask) {
+      const idx = tasks.value.findIndex(t => t.id === taskId)
+      if (idx >= 0) {
+        const updated = [...tasks.value]
+        updated[idx] = updatedTask
+        tasks.value = updated
+      }
+    }
+    tasks.value = await fetchTasks(room.value.identifier)
+    return true
+  } catch (error) {
+    tasks.value = await fetchTasks(room.value.identifier)
+    if ((error as { code?: string | null }).code === 'STALE_PROMPT_OUTDATED') {
+      return true
+    }
+    return false
+  }
+}
+
 /** ── Room Rename ── */
 async function renameRoom(newName: string): Promise<boolean> {
   if (!room.value) return false
@@ -1034,6 +1409,7 @@ async function joinRoom(roomIdentifier: string) {
   // Clear active room state before attempting new join to prevent
   // failed transitions from leaving stale room data that misdirects sends
   stopStreaming()
+  activityHistoryRequestSequence += 1
   room.value = null
   messages.value = []
   messagesHasOlder.value = false
@@ -1042,6 +1418,11 @@ async function joinRoom(roomIdentifier: string) {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  participantHiddenCount.value = 0
+  activityHistory.value = null
+  activityHistoryLoading.value = true
+  activityHistoryError.value = ''
+  lastActivityHistoryRequest = { page: 1, pageSize: 20, kind: 'all', roomId: roomIdentifier }
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1066,6 +1447,7 @@ async function joinRoom(roomIdentifier: string) {
       role: project.role || 'participant',
       authenticated: !!project.authenticated,
       kind: project.kind || 'main',
+      attachmentsEnabled: project.attachments_enabled !== false,
       parentRoomId: project.parent_room_id || null,
       focusKey: project.focus_key || null,
       sourceTaskId: project.source_task_id || null,
@@ -1079,16 +1461,18 @@ async function joinRoom(roomIdentifier: string) {
     room.value = joinedRoom
     isConnected.value = true
     persistSession()
+    const bootstrapActivityHistoryRequestId = activityHistoryRequestSequence
 
     // Load existing room state in parallel
     const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
     const supportsGitHubEvents = isRepoBackedRoomId(getGitHubSupportIdentifier(joinedRoom))
-    const [messagePage, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
+    const [messagePage, tsks, focused, prs, roomParticipantsPage, history, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
+      fetchActivityHistory(roomIdentifier, lastActivityHistoryRequest),
       supportsGitHubEvents
         ? fetchGitHubEvents(githubEventsIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
@@ -1099,7 +1483,16 @@ async function joinRoom(roomIdentifier: string) {
     tasks.value = tsks
     focusRooms.value = focused
     presence.value = prs
-    participants.value = roomParticipants
+    participants.value = roomParticipantsPage.participants
+    participantHiddenCount.value = roomParticipantsPage.hidden_count
+    if (
+      bootstrapActivityHistoryRequestId === activityHistoryRequestSequence
+      && room.value?.identifier === roomIdentifier
+    ) {
+      activityHistory.value = history
+      activityHistoryLoading.value = false
+      activityHistoryError.value = history ? '' : 'Could not load room activity history.'
+    }
     taskGithubStatus.value = ghStatus
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
@@ -1166,6 +1559,7 @@ async function restoreSession(): Promise<boolean> {
 
 function leaveRoom() {
   stopStreaming()
+  activityHistoryRequestSequence += 1
   room.value = null
   messages.value = []
   messagesHasOlder.value = false
@@ -1174,6 +1568,11 @@ function leaveRoom() {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  participantHiddenCount.value = 0
+  activityHistory.value = null
+  activityHistoryLoading.value = false
+  activityHistoryError.value = ''
+  lastActivityHistoryRequest = {}
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1234,6 +1633,10 @@ export function useRoom() {
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
     participants: readonly(participants),
+    participantHiddenCount: readonly(participantHiddenCount),
+    activityHistory: readonly(activityHistory),
+    activityHistoryLoading: readonly(activityHistoryLoading),
+    activityHistoryError: readonly(activityHistoryError),
     taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
@@ -1242,6 +1645,7 @@ export function useRoom() {
     githubEventsSupported,
     githubEventsLoading: readonly(githubEventsLoading),
     room: readonly(room),
+    lastSendError: readonly(lastSendError),
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
     connectionState: readonly(connectionState),
@@ -1252,14 +1656,19 @@ export function useRoom() {
     joinRoom,
     leaveRoom,
     sendMessage,
+    stageAttachmentUpload,
+    discardAttachmentUpload,
     addTask,
     updateTask,
+    setTaskStalePromptMute,
     createFocusRoom,
     createAdHocFocusRoom,
     shareFocusRoomResult,
     updateFocusRoomSettings,
     refreshFocusRooms,
     refreshRoomPresence,
+    loadActivityHistory,
+    archiveDisconnectedParticipants,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,

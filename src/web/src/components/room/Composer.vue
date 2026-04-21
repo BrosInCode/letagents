@@ -49,12 +49,32 @@
           </div>
         </div>
       </div>
-      <span class="composer-sender-label">
-        Sending as <strong>{{ senderName }}</strong>
-      </span>
+      <div class="composer-identity">
+        <span class="composer-sender-label">
+          Sending as <strong>{{ senderName }}</strong>
+        </span>
+        <button
+          v-if="!isSignedIn"
+          class="composer-signin-btn"
+          type="button"
+          @click="emit('signIn')"
+        >
+          Sign in
+        </button>
+      </div>
       <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
     </div>
-    <div class="composer-card">
+    <div
+      class="composer-card"
+      :data-drag-active="isDragActive"
+      @dragenter="handleDragEnter"
+      @dragover="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
+    >
+      <div v-if="isDragActive && dropAttachmentsEnabled" class="composer-drop-hint">
+        Drop files to attach
+      </div>
       <div v-if="replyTo" class="reply-draft">
         <div class="reply-draft-copy">
           <strong>Replying to {{ replyDisplayName }}</strong>
@@ -74,6 +94,57 @@
         @keyup="handleKeyUp"
         rows="1"
       />
+      <div v-if="attachmentDrafts.length || attachmentError || attachmentStatusSummary" class="attachment-tray">
+        <div v-if="attachmentDrafts.length" class="attachment-list">
+          <div
+            v-for="attachment in attachmentDrafts"
+            :key="attachment.id"
+            class="attachment-chip"
+            :data-upload-state="attachment.uploadState"
+          >
+            <div
+              v-if="attachment.previewUrl"
+              class="attachment-preview-shell"
+              :data-preview-state="attachment.previewState"
+            >
+              <img
+                class="attachment-preview"
+                :src="attachment.previewUrl"
+                alt=""
+                @load="markAttachmentPreviewLoaded(attachment.id)"
+                @error="markAttachmentPreviewError(attachment.id)"
+              >
+              <span v-if="attachment.previewState === 'loading'" class="attachment-preview-badge">
+                Loading
+              </span>
+              <span v-else-if="attachment.previewState === 'error'" class="attachment-preview-badge error">
+                Preview unavailable
+              </span>
+            </div>
+            <span v-else class="attachment-file-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" fill="none">
+                <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                <path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="attachment-chip-copy">
+              <strong>{{ attachment.name }}</strong>
+              <span>{{ attachment.uploadMessage || attachmentSecondaryText(attachment) }}</span>
+            </span>
+            <button
+              class="attachment-remove"
+              type="button"
+              :disabled="isSending"
+              :aria-label="`Remove ${attachment.name}`"
+              @click="removeAttachment(attachment.id)"
+            >
+              {{ attachment.uploadState === 'uploading' ? 'Cancel' : 'Remove' }}
+            </button>
+          </div>
+        </div>
+        <p v-if="attachmentStatusSummary" class="attachment-status">{{ attachmentStatusSummary }}</p>
+        <p v-if="attachmentError" class="attachment-error">{{ attachmentError }}</p>
+      </div>
       <div v-if="mentionMenuOpen" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
         <button
           v-for="(candidate, index) in filteredMentionCandidates"
@@ -91,7 +162,30 @@
         </button>
       </div>
       <div class="composer-toolbar">
-        <button class="send-btn" type="submit" :disabled="!text.trim()" aria-label="Send message">
+        <div class="composer-toolbar-left">
+          <input
+            ref="fileInputEl"
+            class="attachment-input"
+            type="file"
+            multiple
+            @change="handleFileSelection"
+          >
+          <button
+            class="attachment-btn"
+            type="button"
+            :disabled="disabled || isSending || !attachmentsAvailable || attachmentDrafts.length >= MAX_ATTACHMENTS"
+            @click="openFilePicker"
+          >
+            Attach
+          </button>
+          <span v-if="!attachmentsAvailable" class="attachment-count">
+            Unavailable
+          </span>
+          <span v-if="attachmentDrafts.length" class="attachment-count">
+            {{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}
+          </span>
+        </div>
+        <button class="send-btn" type="submit" :disabled="!canSend" aria-label="Send message">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
       </div>
@@ -101,45 +195,84 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { type RoomAgentPresence, type RoomMessage, parseAgentIdentity, getReplyPreviewText, isHumanSender } from '@/composables/useRoom'
+import {
+  type OutgoingMessageAttachment,
+  type RoomAgentPresence,
+  type RoomMessage,
+  type RoomParticipant,
+  parseAgentIdentity,
+  getReplyPreviewText,
+} from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
 const PREFS_KEY = 'lac-prompt-prefs'
+const MAX_ATTACHMENTS = 4
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 const props = withDefaults(defineProps<{
   senderName?: string
   disabled?: boolean
+  isSignedIn?: boolean
+  attachmentsEnabled?: boolean
   roomIdentifier?: string
+  submitMessage?: (text: string, agentPromptKind: string | null, replyTo: string | null, attachments?: OutgoingMessageAttachment[]) => Promise<boolean>
+  stageAttachmentDraft?: (roomIdentifier: string, attachment: OutgoingMessageAttachment, signal?: AbortSignal) => Promise<{ upload_id: string }>
+  discardAttachmentDraft?: (roomIdentifier: string, uploadId: string) => Promise<void>
   replyTo?: RoomMessage | null
   messages?: readonly RoomMessage[]
   presence?: readonly RoomAgentPresence[]
+  participants?: readonly RoomParticipant[]
 }>(), {
   senderName: 'anonymous',
   disabled: false,
+  isSignedIn: false,
+  attachmentsEnabled: true,
   roomIdentifier: '',
   replyTo: null,
   messages: () => [],
   presence: () => [],
+  participants: () => [],
 })
 
 const emit = defineEmits<{
-  send: [text: string, agentPromptKind: string | null, replyTo: string | null]
+  send: [text: string, agentPromptKind: string | null, replyTo: string | null, attachments?: OutgoingMessageAttachment[]]
   clearReply: []
+  signIn: []
 }>()
 
 const text = ref('')
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
+const fileInputEl = ref<HTMLInputElement | null>(null)
 const menuEl = ref<HTMLDivElement | null>(null)
 const menuOpen = ref(false)
 const autoKeepPolling = ref(false)
 const injectPrompt = ref(false)
+const attachmentDrafts = ref<AttachmentDraft[]>([])
+const attachmentError = ref('')
+const isDragActive = ref(false)
 const mentionQuery = ref('')
 const mentionStart = ref(-1)
 const mentionEnd = ref(-1)
 const mentionActiveIndex = ref(0)
+const isSending = ref(false)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
 let keepPollingInFlight = false
+let dragDepth = 0
+
+interface AttachmentDraft {
+  id: string
+  name: string
+  type: string
+  size: number
+  file: File
+  uploadId: string | null
+  uploadState: 'idle' | 'uploading' | 'uploaded' | 'error'
+  uploadMessage: string
+  abortController: AbortController | null
+  previewUrl: string | null
+  previewState: 'idle' | 'loading' | 'loaded' | 'error'
+}
 
 const replyDisplayName = computed(() => {
   const reply = props.replyTo
@@ -148,6 +281,11 @@ const replyDisplayName = computed(() => {
 })
 
 const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
+const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
+const dropAttachmentsEnabled = computed(() => attachmentsAvailable.value && !props.disabled && !isSending.value)
+const eagerUploadsEnabled = computed(() =>
+  Boolean(props.stageAttachmentDraft && props.roomIdentifier && attachmentsAvailable.value)
+)
 
 interface MentionCandidate {
   key: string
@@ -161,6 +299,12 @@ interface MentionCandidate {
 const mentionCandidates = computed<MentionCandidate[]>(() => {
   const seen = new Set<string>()
   const candidates: MentionCandidate[] = []
+  const onlinePresenceByActor = new Map(
+    props.presence
+      .filter((entry) => entry.activity_state === 'online')
+      .map((entry) => [String(entry.actor_label || '').trim(), entry] as const)
+      .filter(([actorLabel]) => Boolean(actorLabel))
+  )
 
   const pushCandidate = (
     rawMention: string,
@@ -187,42 +331,33 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
     })
   }
 
-  for (const agent of props.presence) {
-    const parsed = parseAgentIdentity(agent.actor_label)
-    const label = agent.display_name || parsed.displayName || agent.actor_label
-    const meta = [agent.owner_label, agent.ide_label].filter(Boolean).join(' · ') || 'Agent'
-    pushCandidate(label, label, meta, agent.freshness === 'active' ? 0 : 1, [
-      agent.actor_label,
-      agent.owner_label,
-      agent.ide_label,
-      agent.status,
-    ])
-  }
+  for (const participant of props.participants) {
+    if (participant.hidden_at) continue
 
-  for (const message of props.messages) {
-    const sender = String(message.sender || '').trim()
-    const normalizedSender = sender.toLowerCase()
-    if (!sender || normalizedSender === 'letagents' || normalizedSender === 'system') continue
-    if (isHumanSender(sender, message.source)) continue
+    if (participant.kind === 'agent') {
+      const actorLabel = String(participant.actor_label || '').trim()
+      const presenceEntry = actorLabel ? (onlinePresenceByActor.get(actorLabel) || null) : null
+      if (!actorLabel || participant.activity_state !== 'online' || !presenceEntry) {
+        continue
+      }
 
-    const parsed = parseAgentIdentity(sender)
-    const label = message.agent_identity?.display_name || parsed.displayName || sender
-    const ownerLabel = message.agent_identity?.owner_label || parsed.ownerAttribution || null
-    const ideLabel = message.agent_identity?.ide_label || parsed.ideLabel || null
-    const meta = [ownerLabel, ideLabel].filter(Boolean).join(' · ') || 'Agent'
+      const label = participant.display_name || presenceEntry.display_name || parseAgentIdentity(participant.actor_label || '').displayName
+      const meta = [participant.owner_label || presenceEntry.owner_label, participant.ide_label || presenceEntry.ide_label]
+        .filter(Boolean)
+        .join(' · ') || 'Agent'
+      pushCandidate(label, label, meta, 0, [
+        participant.actor_label,
+        participant.owner_label,
+        participant.ide_label,
+        participant.agent_key,
+        presenceEntry.status,
+      ])
+      continue
+    }
 
-    pushCandidate(label, label, meta, 1, [
-      sender,
-      ownerLabel,
-      ideLabel,
-      message.source,
-    ])
-  }
-
-  for (const message of props.messages) {
-    if (!isHumanSender(message.sender, message.source)) continue
-    if (message.sender === props.senderName) continue
-    pushCandidate(message.sender, message.sender, 'User', 2, [])
+    const label = participant.display_name || participant.github_login || ''
+    if (!label || label === props.senderName) continue
+    pushCandidate(label, label, 'User', 2, [participant.github_login])
   }
 
   return candidates.sort((left, right) =>
@@ -292,12 +427,25 @@ function loadPrefs() {
   }
 }
 
+async function submitComposerMessage(
+  bodyText: string,
+  agentPromptKind: string | null,
+  replyTo: string | null,
+  attachments: OutgoingMessageAttachment[]
+): Promise<boolean> {
+  if (props.submitMessage) {
+    return props.submitMessage(bodyText, agentPromptKind, replyTo, attachments)
+  }
+  emit('send', bodyText, agentPromptKind, replyTo, attachments)
+  return true
+}
+
 // ── Auto-poll loop ──
 async function sendAutoPollingPrompt() {
   if (!props.roomIdentifier || keepPollingInFlight) return
   keepPollingInFlight = true
   try {
-    emit('send', '', 'auto', null)
+    await submitComposerMessage('', 'auto', null, [])
   } finally {
     keepPollingInFlight = false
   }
@@ -406,18 +554,353 @@ function selectMention(candidate: MentionCandidate) {
   })
 }
 
+const hasUploadingAttachments = computed(() =>
+  attachmentDrafts.value.some((attachment) => attachment.uploadState === 'uploading')
+)
+
+const hasFailedAttachments = computed(() =>
+  eagerUploadsEnabled.value
+    && attachmentDrafts.value.some((attachment) => attachment.uploadState === 'error')
+)
+
+const attachmentStatusSummary = computed(() => {
+  if (hasUploadingAttachments.value) {
+    const count = attachmentDrafts.value.filter((attachment) => attachment.uploadState === 'uploading').length
+    return count === 1 ? 'Uploading 1 attachment...' : `Uploading ${count} attachments...`
+  }
+  if (hasFailedAttachments.value) {
+    const count = attachmentDrafts.value.filter((attachment) => attachment.uploadState === 'error').length
+    return count === 1
+      ? 'Remove the failed attachment before sending.'
+      : 'Remove the failed attachments before sending.'
+  }
+  return ''
+})
+
+const canSend = computed(() =>
+  !props.disabled
+  && !isSending.value
+  && !hasUploadingAttachments.value
+  && !hasFailedAttachments.value
+  && (text.value.trim().length > 0 || attachmentDrafts.value.length > 0)
+)
+
+function updateAttachmentDraft(id: string, update: (draft: AttachmentDraft) => AttachmentDraft) {
+  attachmentDrafts.value = attachmentDrafts.value.map((attachment) =>
+    attachment.id === id ? update(attachment) : attachment
+  )
+}
+
+function findAttachmentDraft(id: string): AttachmentDraft | undefined {
+  return attachmentDrafts.value.find((attachment) => attachment.id === id)
+}
+
+function releaseAttachmentPreview(attachment: AttachmentDraft) {
+  if (attachment.previewUrl) {
+    URL.revokeObjectURL(attachment.previewUrl)
+  }
+}
+
+function describeAttachmentUploadError(error: unknown, fileName: string): string {
+  if (error instanceof DOMException && error.name === 'AbortError') {
+    return `${fileName} upload was cancelled.`
+  }
+  const message = error instanceof Error ? error.message.trim() : ''
+  if (/attachment object storage is not configured/i.test(message)) {
+    return 'Attachments are unavailable right now.'
+  }
+  return message || `${fileName} could not be uploaded.`
+}
+
+function attachmentSecondaryText(attachment: AttachmentDraft): string {
+  const size = formatFileSize(attachment.size)
+  if (attachment.uploadState === 'uploading') {
+    return size ? `Uploading... · ${size}` : 'Uploading...'
+  }
+  if (attachment.uploadState === 'uploaded') {
+    return size ? `Ready · ${size}` : 'Ready'
+  }
+  if (attachment.uploadState === 'error') {
+    return size ? `Upload failed · ${size}` : 'Upload failed'
+  }
+  return size
+}
+
+function markAttachmentPreviewLoaded(id: string) {
+  updateAttachmentDraft(id, (attachment) => ({
+    ...attachment,
+    previewState: 'loaded',
+  }))
+}
+
+function markAttachmentPreviewError(id: string) {
+  updateAttachmentDraft(id, (attachment) => ({
+    ...attachment,
+    previewState: 'error',
+  }))
+}
+
+async function startAttachmentDraftUpload(id: string) {
+  const attachment = findAttachmentDraft(id)
+  if (!attachment || !props.stageAttachmentDraft || !props.roomIdentifier) return
+
+  const abortController = new AbortController()
+  updateAttachmentDraft(id, (draft) => ({
+    ...draft,
+    abortController,
+    uploadState: 'uploading',
+    uploadMessage: '',
+  }))
+
+  try {
+    const staged = await props.stageAttachmentDraft(props.roomIdentifier, {
+      file_name: attachment.name,
+      mime_type: attachment.type,
+      size_bytes: attachment.size,
+      file: attachment.file,
+    }, abortController.signal)
+
+    if (!findAttachmentDraft(id)) return
+
+    updateAttachmentDraft(id, (draft) => ({
+      ...draft,
+      uploadId: staged.upload_id,
+      uploadState: 'uploaded',
+      uploadMessage: '',
+      abortController: null,
+    }))
+  } catch (error) {
+    if (!findAttachmentDraft(id)) return
+    if (abortController.signal.aborted) return
+
+    const uploadMessage = describeAttachmentUploadError(error, attachment.name)
+    updateAttachmentDraft(id, (draft) => ({
+      ...draft,
+      uploadState: 'error',
+      uploadMessage,
+      uploadId: null,
+      abortController: null,
+    }))
+    attachmentError.value = uploadMessage
+  }
+}
+
+async function discardUploadedAttachment(attachment: AttachmentDraft) {
+  if (!props.discardAttachmentDraft || !props.roomIdentifier || !attachment.uploadId) return
+  try {
+    await props.discardAttachmentDraft(props.roomIdentifier, attachment.uploadId)
+  } catch {
+    attachmentError.value = `${attachment.name} could not be removed from draft storage.`
+  }
+}
+
+function openFilePicker() {
+  attachmentError.value = ''
+  if (isSending.value) {
+    attachmentError.value = 'Wait for the current send to finish.'
+    return
+  }
+  if (!attachmentsAvailable.value) {
+    attachmentError.value = 'Attachments are unavailable right now.'
+    return
+  }
+  fileInputEl.value?.click()
+}
+
+async function handleFileSelection(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = Array.from(input.files || [])
+  input.value = ''
+  if (!selected.length) return
+
+  await addAttachmentFiles(selected)
+}
+
+async function addAttachmentFiles(selected: readonly File[]) {
+  if (!selected.length) return
+
+  attachmentError.value = ''
+  if (props.disabled) {
+    attachmentError.value = 'Attachments cannot be added right now.'
+    return
+  }
+  if (isSending.value) {
+    attachmentError.value = 'Wait for the current send to finish.'
+    return
+  }
+  if (!attachmentsAvailable.value) {
+    attachmentError.value = 'Attachments are unavailable right now.'
+    return
+  }
+  const availableSlots = Math.max(0, MAX_ATTACHMENTS - attachmentDrafts.value.length)
+  const acceptedFiles = selected.slice(0, availableSlots)
+  if (selected.length > availableSlots) {
+    attachmentError.value = `Attach up to ${MAX_ATTACHMENTS} files per message.`
+  }
+
+  for (const file of acceptedFiles) {
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      attachmentError.value = `${file.name} is larger than ${formatFileSize(MAX_ATTACHMENT_BYTES)}.`
+      continue
+    }
+    try {
+      const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+      const id = `${file.name}-${file.size}-${file.lastModified}-${globalThis.crypto?.randomUUID?.() || Date.now()}`
+      const draft: AttachmentDraft = {
+        id,
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        size: file.size,
+        file,
+        uploadId: null,
+        uploadState: eagerUploadsEnabled.value ? 'uploading' : 'idle',
+        uploadMessage: '',
+        abortController: null,
+        previewUrl,
+        previewState: previewUrl ? 'loading' : 'idle',
+      }
+      attachmentDrafts.value = [
+        ...attachmentDrafts.value,
+        draft,
+      ]
+      if (eagerUploadsEnabled.value) {
+        void startAttachmentDraftUpload(id)
+      }
+    } catch {
+      attachmentError.value = `${file.name} could not be attached.`
+    }
+  }
+}
+
+function dragContainsFiles(event: DragEvent): boolean {
+  const types = Array.from(event.dataTransfer?.types || [])
+  return types.includes('Files')
+}
+
+function resetDragState() {
+  dragDepth = 0
+  isDragActive.value = false
+}
+
+function handleDragEnter(event: DragEvent) {
+  if (!dragContainsFiles(event)) return
+  event.preventDefault()
+  if (!dropAttachmentsEnabled.value) return
+  dragDepth += 1
+  isDragActive.value = true
+}
+
+function handleDragOver(event: DragEvent) {
+  if (!dragContainsFiles(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = dropAttachmentsEnabled.value ? 'copy' : 'none'
+  }
+  if (!dropAttachmentsEnabled.value) {
+    isDragActive.value = false
+    return
+  }
+  isDragActive.value = true
+}
+
+function handleDragLeave(event: DragEvent) {
+  if (!dragContainsFiles(event)) return
+  if (!dropAttachmentsEnabled.value) return
+  if (dragDepth > 0) {
+    dragDepth -= 1
+  }
+  if (dragDepth === 0) {
+    isDragActive.value = false
+  }
+}
+
+async function handleDrop(event: DragEvent) {
+  const dropped = Array.from(event.dataTransfer?.files || [])
+  if (dropped.length) {
+    event.preventDefault()
+  }
+  resetDragState()
+  if (!dropped.length) return
+  await addAttachmentFiles(dropped)
+}
+
+function removeAttachment(id: string) {
+  if (isSending.value) return
+  const attachment = findAttachmentDraft(id)
+  if (!attachment) return
+
+  attachment.abortController?.abort()
+  releaseAttachmentPreview(attachment)
+  attachmentDrafts.value = attachmentDrafts.value.filter((draft) => draft.id !== id)
+
+  if (attachment.uploadId) {
+    void discardUploadedAttachment(attachment)
+  }
+}
+
+function clearAttachments(options: { discardUploads?: boolean } = {}) {
+  const drafts = attachmentDrafts.value
+  attachmentDrafts.value = []
+  const shouldDiscardUploads = Boolean(options.discardUploads && !isSending.value)
+
+  for (const attachment of drafts) {
+    attachment.abortController?.abort()
+    releaseAttachmentPreview(attachment)
+    if (shouldDiscardUploads && attachment.uploadId) {
+      void discardUploadedAttachment(attachment)
+    }
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = bytes
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  const precision = size >= 10 || unitIndex === 0 ? 0 : 1
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
+}
+
+function buildOutgoingAttachments(): OutgoingMessageAttachment[] {
+  return attachmentDrafts.value.map((attachment) => ({
+    file_name: attachment.name,
+    mime_type: attachment.type,
+    size_bytes: attachment.size,
+    file: attachment.file,
+    upload_id: attachment.uploadId,
+  }))
+}
+
 // ── Send ──
-function handleSend() {
+async function handleSend() {
   const trimmed = text.value.trim()
-  if (!trimmed || props.disabled) return
+  if (!canSend.value) return
+  if (!attachmentsAvailable.value && attachmentDrafts.value.length > 0) {
+    attachmentError.value = 'Attachments are unavailable right now.'
+    clearAttachments({ discardUploads: true })
+    return
+  }
 
   // Determine agent_prompt_kind for this message
   const kind = injectPrompt.value ? 'inline' : null
-  emit('send', trimmed, kind, props.replyTo?.id || null)
-  text.value = ''
-  resetMentionContext()
-  if (textareaEl.value) {
-    textareaEl.value.style.height = 'auto'
+  isSending.value = true
+  try {
+    const sent = await submitComposerMessage(trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
+    if (!sent) return
+
+    text.value = ''
+    clearAttachments()
+    attachmentError.value = ''
+    resetMentionContext()
+    if (textareaEl.value) {
+      textareaEl.value.style.height = 'auto'
+    }
+  } finally {
+    isSending.value = false
   }
 }
 
@@ -447,7 +930,7 @@ function handleKeyDown(e: KeyboardEvent) {
 
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault()
-    handleSend()
+    void handleSend()
   }
 }
 
@@ -473,11 +956,16 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopKeepPollingLoop()
+  clearAttachments({ discardUploads: true })
   document.removeEventListener('click', handleDocClick)
 })
 
 // Reload prefs + restart loop when room changes
-watch(() => props.roomIdentifier, (newId) => {
+watch(() => props.roomIdentifier, (newId, oldId) => {
+  if (oldId && newId !== oldId && attachmentDrafts.value.length > 0) {
+    clearAttachments({ discardUploads: true })
+    attachmentError.value = ''
+  }
   stopKeepPollingLoop()
   loadPrefs()
   if (newId && autoKeepPolling.value) {
@@ -513,6 +1001,26 @@ watch(filteredMentionCandidates, (candidates) => {
   border-radius: 16px;
   transition: border-color 200ms ease, box-shadow 200ms ease;
   overflow: hidden;
+}
+.composer-card[data-drag-active="true"] {
+  border-color: color-mix(in srgb, var(--line-strong, #3f3f46) 45%, #7dd3fc 55%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, #7dd3fc 65%, transparent),
+    0 14px 32px rgba(0, 0, 0, 0.28);
+}
+.composer-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg-1, #0f0f11) 82%, #7dd3fc 18%);
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0;
+  pointer-events: none;
 }
 .reply-draft {
   display: flex;
@@ -612,21 +1120,171 @@ watch(filteredMentionCandidates, (candidates) => {
   font-size: 0.72rem;
   color: var(--muted, #71717a);
 }
+.attachment-tray {
+  display: grid;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attachment-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  max-width: min(100%, 360px);
+  padding: 6px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface, #18181b) 88%, var(--text, #fafafa) 5%);
+}
+.attachment-chip[data-upload-state="uploading"] {
+  border-color: color-mix(in srgb, #7dd3fc 30%, var(--line, #27272a));
+}
+.attachment-chip[data-upload-state="error"] {
+  border-color: color-mix(in srgb, #fca5a5 55%, var(--line, #27272a));
+}
+.attachment-chip[data-upload-state="uploaded"] {
+  border-color: color-mix(in srgb, #34d399 38%, var(--line, #27272a));
+}
+.attachment-preview-shell,
+.attachment-file-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  border: 1px solid var(--line, #27272a);
+  background: var(--bg-0, #09090b);
+  flex-shrink: 0;
+}
+.attachment-preview-shell {
+  position: relative;
+  overflow: hidden;
+}
+.attachment-preview-shell[data-preview-state="loading"]::after,
+.attachment-preview-shell[data-preview-state="error"]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-0, #09090b) 74%, transparent);
+}
+.attachment-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.attachment-preview-badge {
+  position: absolute;
+  inset-inline: 3px;
+  bottom: 3px;
+  z-index: 1;
+  display: inline-flex;
+  justify-content: center;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.88);
+  color: var(--text, #fafafa);
+  font-size: 0.58rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.attachment-preview-badge.error {
+  background: rgba(127, 29, 29, 0.9);
+}
+.attachment-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #a1a1aa);
+}
+.attachment-file-icon svg {
+  width: 18px;
+  height: 18px;
+}
+.attachment-chip-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.attachment-chip-copy strong,
+.attachment-chip-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip-copy strong {
+  font-size: 0.76rem;
+  color: var(--text, #fafafa);
+}
+.attachment-chip-copy span,
+.attachment-count,
+.attachment-status,
+.attachment-error {
+  font-size: 0.68rem;
+  color: var(--muted, #71717a);
+}
+.attachment-status,
+.attachment-error {
+  margin: 0;
+}
+.attachment-status {
+  color: var(--muted, #a1a1aa);
+}
+.attachment-error {
+  color: #fca5a5;
+}
+.attachment-remove,
+.attachment-btn {
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease, opacity 150ms ease;
+}
+.attachment-remove {
+  padding: 5px 8px;
+}
+.attachment-btn {
+  height: 30px;
+  padding: 0 10px;
+}
+.attachment-remove:hover:not(:disabled),
+.attachment-btn:hover:not(:disabled) {
+  border-color: var(--line-strong, #3f3f46);
+  background: rgba(255, 255, 255, 0.08);
+}
+.attachment-remove:disabled,
+.attachment-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.attachment-input {
+  display: none;
+}
 .composer-pills-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 0 4px 6px;
 }
 .composer-toolbar-pills {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 .composer-toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 8px;
   padding: 0 6px 6px;
 }
 .composer-toolbar-left {
@@ -635,16 +1293,43 @@ watch(filteredMentionCandidates, (candidates) => {
   gap: 8px;
   min-width: 0;
 }
+.composer-identity {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
 .composer-sender-label {
   font-size: 0.72rem;
   color: var(--muted, #71717a);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 .composer-sender-label strong {
   color: var(--text, #fafafa);
   font-weight: 600;
+}
+.composer-signin-btn {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line, #27272a);
+  background: color-mix(in srgb, var(--surface, #18181b) 88%, var(--text, #fafafa) 12%);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+.composer-signin-btn:hover {
+  border-color: var(--line-strong, #3f3f46);
+  background: color-mix(in srgb, var(--surface, #18181b) 76%, var(--text, #fafafa) 24%);
 }
 .composer-shortcut-hint {
   display: none;
@@ -652,6 +1337,7 @@ watch(filteredMentionCandidates, (candidates) => {
   color: var(--muted, #71717a);
   opacity: 0.5;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 @media (min-width: 641px) {
   .composer-shortcut-hint { display: inline; }
@@ -804,6 +1490,8 @@ watch(filteredMentionCandidates, (candidates) => {
   .message-textarea { padding: 12px 14px 6px; font-size: 0.88rem; min-height: 44px; max-height: 120px; }
   .composer-pills-row { padding: 0 2px 4px; }
   .composer-toolbar { padding: 0 4px 4px; }
+  .attachment-tray { padding: 0 6px 6px; }
+  .attachment-chip { max-width: 100%; }
   .composer-mention-panel { padding: 0 6px 6px; }
   .composer-mention-option { padding: 8px 10px; }
   .prompt-panel { width: 220px; }

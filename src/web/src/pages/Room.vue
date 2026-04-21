@@ -56,8 +56,11 @@
           :hasOlderMessages="messagesHasOlder"
           :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
+          :stalePromptTaskStates="stalePromptTaskStates"
           @loadOlder="loadOlderMessages"
           @reply="selectedReply = $event"
+          @openImageViewer="openImageViewer"
+          @toggleStalePromptMute="handleToggleStalePromptMute"
         />
 
         <GitHubEventFeed
@@ -87,10 +90,20 @@
           v-else-if="activeTab === 'activity'"
           key="activity"
           class="room-tab-panel"
+          :roomIdentifier="room?.identifier || ''"
+          :currentRoom="room"
+          :focusRooms="focusRooms"
           :messages="messages"
           :participants="participants"
+          :liveArchivedCount="participantHiddenCount"
           :presence="presence"
           :tasks="tasks"
+          :activityHistory="activityHistory"
+          :activityHistoryLoading="activityHistoryLoading"
+          :activityHistoryError="activityHistoryError"
+          :canManageParticipants="room?.role === 'admin'"
+          :loadActivityHistory="loadActivityHistory"
+          :archiveDisconnectedParticipants="archiveDisconnectedParticipants"
           :taskGithubStatus="taskGithubStatus"
         />
 
@@ -132,11 +145,26 @@
       v-if="activeTab === 'chat' && isConnected"
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
+      :attachmentsEnabled="room?.attachmentsEnabled !== false"
+      :submitMessage="handleSend"
+      :stageAttachmentDraft="stageAttachmentUpload"
+      :discardAttachmentDraft="discardAttachmentUpload"
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
-      @send="handleSend"
+      :participants="participants"
+      :isSignedIn="auth.isSignedIn.value"
       @clearReply="selectedReply = null"
+      @signIn="handleSignIn"
+    />
+
+    <ImageViewerModal
+      v-if="activeImageId && roomImages.length"
+      :images="roomImages"
+      :activeImageId="activeImageId"
+      @close="closeImageViewer"
+      @next="showNextImage"
+      @previous="showPreviousImage"
     />
 
     <!-- Mobile bottom navigation -->
@@ -204,14 +232,22 @@ import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
+import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import MessageList from '@/components/room/MessageList.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
+import { collectMessageImageAttachments } from '@/components/room/messageAttachments'
 import { useToast } from '@/composables/useToast'
-import type { FocusRoomInfo, FocusRoomSettingsPatch, RoomMessage } from '@/composables/useRoom'
+import type {
+  FocusRoomInfo,
+  FocusRoomSettingsPatch,
+  OutgoingMessageAttachment,
+  RoomMessage,
+  StalePromptTaskState,
+} from '@/composables/useRoom'
 
 const route = useRoute()
 const router = useRouter()
@@ -223,6 +259,10 @@ const {
   focusRooms,
   presence,
   participants,
+  participantHiddenCount,
+  activityHistory,
+  activityHistoryLoading,
+  activityHistoryError,
   taskGithubStatus,
   githubEvents,
   githubEventsAvailable,
@@ -231,13 +271,17 @@ const {
   githubEventsSupported,
   githubEventsLoading,
   room,
+  lastSendError,
   isConnected,
   connectionState,
   joinError,
   joinRoom,
   sendMessage,
+  stageAttachmentUpload,
+  discardAttachmentUpload,
   addTask,
   updateTask,
+  setTaskStalePromptMute,
   createFocusRoom,
   createAdHocFocusRoom,
   shareFocusRoomResult,
@@ -245,6 +289,8 @@ const {
   restoreSession,
   renameRoom,
   loadOlderMessages,
+  loadActivityHistory,
+  archiveDisconnectedParticipants,
   refreshRoomGitHubEvents,
 } = useRoom()
 const auth = useAuth()
@@ -260,6 +306,7 @@ const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
+const activeImageId = ref<string | null>(null)
 const focusDraftTaskId = ref<string | null>(null)
 const creatingFocusRoomTaskId = ref<string | null>(null)
 const creatingAdHocFocusRoom = ref(false)
@@ -289,6 +336,12 @@ const focusParentAddress = computed(() =>
   room.value?.kind === 'focus' && room.value.parentRoomId
     ? room.value.parentRoomId
     : room.value?.identifier || room.value?.name || ''
+)
+const roomImages = computed(() => collectMessageImageAttachments(messages.value))
+const activeImageIndex = computed(() =>
+  activeImageId.value
+    ? roomImages.value.findIndex((image) => image.id === activeImageId.value)
+    : -1
 )
 
 function openRulesFromDrawer() {
@@ -326,12 +379,55 @@ const joinErrorBody = computed(() => {
   }
   return joinError.value?.message || 'Could not connect to room.'
 })
+const stalePromptTaskStates = computed<Record<string, StalePromptTaskState>>(() =>
+  Object.fromEntries(
+    tasks.value.map(task => [task.id, {
+      isStale: Boolean(task.stale_prompt_state?.is_stale),
+      muted: Boolean(task.stale_prompt_state?.muted),
+      taskUpdatedAt: task.updated_at,
+    }])
+  )
+)
 
-async function handleSend(text: string, agentPromptKind: string | null, replyTo: string | null) {
-  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo)
+async function handleSend(
+  text: string,
+  agentPromptKind: string | null,
+  replyTo: string | null,
+  attachments: OutgoingMessageAttachment[] = [],
+): Promise<boolean> {
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments)
   if (sent) {
     selectedReply.value = null
+    return true
   }
+  toast.error(lastSendError.value || 'Message could not be sent.')
+  return false
+}
+
+function openImageViewer(imageId: string) {
+  if (!roomImages.value.some((image) => image.id === imageId)) return
+  activeImageId.value = imageId
+}
+
+function closeImageViewer() {
+  activeImageId.value = null
+}
+
+function shiftImage(direction: 1 | -1) {
+  if (!roomImages.value.length) return
+  const currentIndex = activeImageIndex.value >= 0 ? activeImageIndex.value : 0
+  const nextIndex = (currentIndex + direction + roomImages.value.length) % roomImages.value.length
+  activeImageId.value = roomImages.value[nextIndex]?.id || null
+}
+
+function showNextImage() {
+  if (roomImages.value.length < 2) return
+  shiftImage(1)
+}
+
+function showPreviousImage() {
+  if (roomImages.value.length < 2) return
+  shiftImage(-1)
 }
 
 async function handleAddTask(title: string) {
@@ -340,6 +436,19 @@ async function handleAddTask(title: string) {
 
 async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
+}
+
+async function handleToggleStalePromptMute(payload: {
+  taskId: string
+  muted: boolean
+  promptTimestamp: string
+}) {
+  const updated = await setTaskStalePromptMute(payload.taskId, payload.muted, {
+    promptTimestamp: payload.promptTimestamp,
+  })
+  if (!updated) {
+    toast.error('Stale task reminder preference could not be updated.')
+  }
 }
 
 function roomRoutePath(identifier: string): string {
@@ -632,8 +741,18 @@ watch(() => route.query.view, (newView) => {
 })
 
 watch(activeTab, async (tab) => {
+  if (tab !== 'chat') {
+    closeImageViewer()
+  }
   if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
+  }
+})
+
+watch(roomImages, (images) => {
+  if (!activeImageId.value) return
+  if (!images.some((image) => image.id === activeImageId.value)) {
+    closeImageViewer()
   }
 })
 

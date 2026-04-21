@@ -56,7 +56,7 @@
           <div class="focus-settings-grid">
             <label>
               <span>Parent room</span>
-              <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
+              <AppSelect v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
                 <option
                   v-for="option in parentVisibilityOptions"
                   :key="option.value"
@@ -64,12 +64,12 @@
                 >
                   {{ option.label }}
                 </option>
-              </select>
+              </AppSelect>
               <small>{{ parentVisibilityDescription }}</small>
             </label>
             <label>
               <span>What counts</span>
-              <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
+              <AppSelect v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
                 <option
                   v-for="option in activityScopeOptions"
                   :key="option.value"
@@ -77,12 +77,12 @@
                 >
                   {{ option.label }}
                 </option>
-              </select>
+              </AppSelect>
               <small>{{ activityScopeDescription }}</small>
             </label>
             <label>
               <span>Code updates</span>
-              <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
+              <AppSelect v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
                 <option
                   v-for="option in githubEventRoutingOptions"
                   :key="option.value"
@@ -90,7 +90,7 @@
                 >
                   {{ option.label }}
                 </option>
-              </select>
+              </AppSelect>
               <small>{{ githubEventRoutingDescription }}</small>
             </label>
           </div>
@@ -296,7 +296,7 @@
             <div class="focus-settings-grid compact">
               <label>
                 <span>Parent room</span>
-                <select v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
+                <AppSelect v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
                   <option
                     v-for="option in parentVisibilityOptions"
                     :key="option.value"
@@ -304,12 +304,12 @@
                   >
                     {{ option.label }}
                   </option>
-                </select>
+                </AppSelect>
                 <small>{{ parentVisibilityDescription }}</small>
               </label>
               <label>
                 <span>What counts</span>
-                <select v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
+                <AppSelect v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
                   <option
                     v-for="option in activityScopeOptions"
                     :key="option.value"
@@ -317,12 +317,12 @@
                   >
                     {{ option.label }}
                   </option>
-                </select>
+                </AppSelect>
                 <small>{{ activityScopeDescription }}</small>
               </label>
               <label>
                 <span>Code updates</span>
-                <select v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
+                <AppSelect v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
                   <option
                     v-for="option in githubEventRoutingOptions"
                     :key="option.value"
@@ -330,7 +330,7 @@
                   >
                     {{ option.label }}
                   </option>
-                </select>
+                </AppSelect>
                 <small>{{ githubEventRoutingDescription }}</small>
               </label>
             </div>
@@ -363,6 +363,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { AppSelect } from '@/components/ui'
 import {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   focusRoomSettingsFrom,
@@ -906,7 +907,8 @@ function taskStatusLabel(status: string): string {
 .focus-settings-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 16px;
+  align-items: start;
 }
 
 .focus-settings-grid.compact {
@@ -924,26 +926,12 @@ function taskStatusLabel(status: string): string {
   font-weight: 800;
 }
 
-.focus-settings-grid select {
-  min-width: 0;
-  width: 100%;
-  padding: 9px 32px 9px 10px;
-  border: 1px solid var(--line, #27272a);
-  border-radius: 8px;
-  background: var(--bg-0, #09090b);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-  -webkit-appearance: none;
-  appearance: none;
-  color: var(--text, #fafafa);
-  font: inherit;
-  font-size: 0.78rem;
-}
-
-.focus-settings-grid select:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
+.focus-settings-grid :deep(.app-select__control) {
+  --app-select-border: var(--line, #27272a);
+  --app-select-bg: var(--bg-0, #09090b);
+  --app-select-text: var(--text, #fafafa);
+  --app-select-focus: rgba(96, 165, 250, 0.28);
+  --app-select-radius: 8px;
 }
 
 .focus-settings-grid small {

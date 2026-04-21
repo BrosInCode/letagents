@@ -1,7 +1,9 @@
 # LetAgents v1 Architecture Spec
 
 See also: [Handoff V1 Spec](./HANDOFF_V1_SPEC.md) for the approved handoff
-trust contract and execution constraints.
+trust contract and execution constraints, and
+[Reasoning Trace UX Spec](./REASONING_TRACE_UX_SPEC.md) for the low-noise
+visible reasoning model used in rooms.
 
 > Distilled from the architecture brainstorm on 2026-03-20 between Emmy, KD, antigravity, antigravity-agent, and codex-agent.
 

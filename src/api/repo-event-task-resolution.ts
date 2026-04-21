@@ -21,6 +21,10 @@ export interface RepoRoomEventTaskResolverDeps {
     matches: TaskWorkflowArtifactMatch[]
   ): Promise<Task | undefined>;
   findTaskByPrUrl(projectId: string, prUrl: string): Promise<Task | undefined>;
+  findTaskByActiveWorkflowLease?(
+    projectId: string,
+    workflow: { prUrl?: string | null; branchRef?: string | null }
+  ): Promise<Task | undefined>;
   getTaskById(projectId: string, taskId: string): Promise<Task | undefined>;
 }
 
@@ -56,6 +60,30 @@ function taskIdsMatch(left: string | null | undefined, right: string): boolean {
 }
 
 export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverDeps) {
+  async function resolveTaskByActiveWorkflowLease(
+    project: { id: string },
+    pullRequest: RepoPullRequestRef,
+    referencedTaskId: string | null
+  ): Promise<RepoRoomEventTaskResolution | null> {
+    if (!deps.findTaskByActiveWorkflowLease) {
+      return null;
+    }
+
+    const task = await deps.findTaskByActiveWorkflowLease(project.id, {
+      prUrl: pullRequest.url,
+      branchRef: pullRequest.headRef,
+    });
+    if (!task) {
+      return null;
+    }
+
+    return {
+      task,
+      matchedByTaskReference: taskIdsMatch(referencedTaskId, task.id),
+      matchedByWorkflowArtifact: true,
+    };
+  }
+
   async function resolveTaskByArtifactsOrReferences(
     project: { id: string },
     artifactMatches: TaskWorkflowArtifactMatch[],
@@ -104,6 +132,58 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
           matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
           matchedByWorkflowArtifact: true,
         };
+      }
+
+      const leaseTask = await resolveTaskByActiveWorkflowLease(
+        project,
+        event.pullRequest,
+        referencedTaskId
+      );
+      if (leaseTask) {
+        return leaseTask;
+      }
+
+      if (!referencedTaskId) {
+        return emptyRepoRoomEventTaskResolution();
+      }
+
+      const task = await deps.getTaskById(project.id, referencedTaskId);
+      return {
+        task: task ?? undefined,
+        matchedByTaskReference: Boolean(task),
+        matchedByWorkflowArtifact: false,
+      };
+    }
+
+    if (event.kind === "pull_request_review") {
+      const artifactTask = await deps.findTaskByWorkflowArtifactMatches(
+        project.id,
+        artifactMatches
+      );
+      if (artifactTask) {
+        return {
+          task: artifactTask,
+          matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
+          matchedByWorkflowArtifact: true,
+        };
+      }
+
+      const prUrlTask = await deps.findTaskByPrUrl(project.id, event.pullRequest.url);
+      if (prUrlTask) {
+        return {
+          task: prUrlTask,
+          matchedByTaskReference: taskIdsMatch(referencedTaskId, prUrlTask.id),
+          matchedByWorkflowArtifact: true,
+        };
+      }
+
+      const leaseTask = await resolveTaskByActiveWorkflowLease(
+        project,
+        event.pullRequest,
+        referencedTaskId
+      );
+      if (leaseTask) {
+        return leaseTask;
       }
 
       if (!referencedTaskId) {

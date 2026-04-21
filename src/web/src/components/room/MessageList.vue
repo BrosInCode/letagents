@@ -15,10 +15,13 @@
         :key="msg.id"
         :message="msg"
         :thread="threadSummaries.get(msg.id) || null"
+        :stalePromptTaskStates="stalePromptTaskStates"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
+        @openImageViewer="emit('openImageViewer', $event)"
         @scrollToReply="scrollToMessage"
+        @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
       />
     </div>
     <button
@@ -40,7 +43,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { type RoomMessage } from '@/composables/useRoom'
+import { type RoomMessage, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 
 const props = defineProps<{
@@ -48,10 +51,13 @@ const props = defineProps<{
   hasOlderMessages?: boolean
   isLoadingOlderMessages?: boolean
   searchQuery?: string
+  stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
 }>()
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
+  openImageViewer: [imageId: string]
+  toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
