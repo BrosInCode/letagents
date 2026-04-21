@@ -355,16 +355,16 @@ export interface RoomActivityHistoryEntry {
   }
   first_seen_at: string
   last_seen_at: string
-  current_tasks: RoomActivityHistoryTaskSummary[]
-  completed_tasks: RoomActivityHistoryTaskSummary[]
-  created_tasks: RoomActivityHistoryTaskSummary[]
+  current_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
+  completed_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
+  created_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
 }
 
 export interface RoomActivityHistoryPage {
   room_id: string
   root_room_id: string
   hidden_count: number
-  entries: RoomActivityHistoryEntry[]
+  entries: ReadonlyArray<RoomActivityHistoryEntry>
   page: number
   page_size: number
   page_count: number
