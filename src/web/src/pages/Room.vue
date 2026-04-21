@@ -95,6 +95,7 @@
           :focusRooms="focusRooms"
           :messages="messages"
           :participants="participants"
+          :liveArchivedCount="participantHiddenCount"
           :presence="presence"
           :tasks="tasks"
           :activityHistory="activityHistory"
@@ -258,6 +259,7 @@ const {
   focusRooms,
   presence,
   participants,
+  participantHiddenCount,
   activityHistory,
   activityHistoryLoading,
   activityHistoryError,

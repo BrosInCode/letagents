@@ -372,12 +372,18 @@ export interface RoomActivityHistoryPage {
   total: number
 }
 
+interface RoomParticipantsPage {
+  participants: RoomParticipant[]
+  hidden_count: number
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const messagesHasOlder = ref(false)
 const isLoadingOlderMessages = ref(false)
 const presence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
+const participantHiddenCount = ref(0)
 const activityHistory = ref<RoomActivityHistoryPage | null>(null)
 const activityHistoryLoading = ref(false)
 const activityHistoryError = ref('')
@@ -646,12 +652,18 @@ async function fetchPresence(roomIdentifier: string): Promise<RoomAgentPresence[
   }
 }
 
-async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipant[]> {
+async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipantsPage> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/participants`)
-    return data.participants || []
+    return {
+      participants: data.participants || [],
+      hidden_count: Number(data.hidden_count || 0),
+    }
   } catch {
-    return []
+    return {
+      participants: [],
+      hidden_count: 0,
+    }
   }
 }
 
@@ -717,7 +729,9 @@ async function refreshPresence(roomIdentifier: string) {
 }
 
 async function refreshParticipants(roomIdentifier: string) {
-  participants.value = await fetchParticipants(roomIdentifier)
+  const next = await fetchParticipants(roomIdentifier)
+  participants.value = next.participants
+  participantHiddenCount.value = next.hidden_count
 }
 
 async function loadActivityHistory(options?: {
@@ -766,10 +780,13 @@ async function archiveDisconnectedParticipants(): Promise<number> {
     const response = await apiFetch(`${roomPath(room.value.identifier)}/participants/archive-disconnected`, {
       method: 'POST',
     })
-    await Promise.all([
-      refreshParticipants(room.value.identifier),
-      loadActivityHistory(lastActivityHistoryRequest),
-    ])
+    await refreshParticipants(room.value.identifier)
+    if ((activityHistory.value?.selected_room_id || lastActivityHistoryRequest.roomId || room.value.identifier) === room.value.identifier) {
+      await loadActivityHistory({
+        ...lastActivityHistoryRequest,
+        roomId: room.value.identifier,
+      })
+    }
     return Number(response.archived_count || 0)
   } catch {
     return 0
@@ -1391,6 +1408,7 @@ async function joinRoom(roomIdentifier: string) {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  participantHiddenCount.value = 0
   activityHistory.value = null
   activityHistoryLoading.value = true
   activityHistoryError.value = ''
@@ -1438,7 +1456,7 @@ async function joinRoom(roomIdentifier: string) {
     // Load existing room state in parallel
     const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
     const supportsGitHubEvents = isRepoBackedRoomId(getGitHubSupportIdentifier(joinedRoom))
-    const [messagePage, tsks, focused, prs, roomParticipants, history, gh, ghStatus] = await Promise.all([
+    const [messagePage, tsks, focused, prs, roomParticipantsPage, history, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
@@ -1455,7 +1473,8 @@ async function joinRoom(roomIdentifier: string) {
     tasks.value = tsks
     focusRooms.value = focused
     presence.value = prs
-    participants.value = roomParticipants
+    participants.value = roomParticipantsPage.participants
+    participantHiddenCount.value = roomParticipantsPage.hidden_count
     if (
       bootstrapActivityHistoryRequestId === activityHistoryRequestSequence
       && room.value?.identifier === roomIdentifier
@@ -1539,6 +1558,7 @@ function leaveRoom() {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  participantHiddenCount.value = 0
   activityHistory.value = null
   activityHistoryLoading.value = false
   activityHistoryError.value = ''
@@ -1603,6 +1623,7 @@ export function useRoom() {
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
     participants: readonly(participants),
+    participantHiddenCount: readonly(participantHiddenCount),
     activityHistory: readonly(activityHistory),
     activityHistoryLoading: readonly(activityHistoryLoading),
     activityHistoryError: readonly(activityHistoryError),

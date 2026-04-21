@@ -954,6 +954,7 @@ const props = defineProps<{
   focusRooms: readonly FocusRoomInfo[]
   messages: readonly RoomMessage[]
   participants: readonly RoomParticipant[]
+  liveArchivedCount: number
   presence: readonly RoomAgentPresence[]
   tasks: readonly RoomTask[]
   activityHistory: RoomActivityHistoryPage | null
@@ -1272,7 +1273,7 @@ const participants = computed(() => [
 
 const currentRoomIdentifier = computed(() => props.currentRoom?.identifier || props.roomIdentifier)
 const historyEntries = computed(() => props.activityHistory?.entries || [])
-const archivedCount = computed(() => props.activityHistory?.hidden_count || 0)
+const archivedCount = computed(() => props.liveArchivedCount || 0)
 const historyRoomOptions = computed<HistoryRoomOption[]>(() => {
   const options: HistoryRoomOption[] = []
   const seen = new Set<string>()
