@@ -257,9 +257,15 @@ watch(
   () => [props.open, props.roomIdentifier, props.session?.id] as const,
   async ([isOpen, roomIdentifier, sessionId]) => {
     if (!isOpen || !roomIdentifier || !sessionId) return
-    if (timelineEntries.value.length > 0) return
+    if (sessionDetail.value?.id && sessionDetail.value.id !== sessionId) {
+      sessionDetail.value = null
+    }
+    if (sessionDetail.value?.id === sessionId && Array.isArray(sessionDetail.value.updates)) {
+      return
+    }
 
     isLoadingDetail.value = true
+    sessionDetail.value = null
     try {
       const response = await fetch(
         `/rooms/${encodeURIComponent(roomIdentifier)}/reasoning-sessions/${encodeURIComponent(sessionId)}`,
