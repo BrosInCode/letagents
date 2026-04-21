@@ -18,6 +18,7 @@
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
+        @openImageViewer="emit('openImageViewer', $event)"
         @scrollToReply="scrollToMessage"
       />
     </div>
@@ -52,6 +53,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
+  openImageViewer: [imageId: string]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)

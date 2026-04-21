@@ -82,46 +82,58 @@
           :messageId="message.id"
         />
         <div v-if="attachments.length" class="message-attachments">
-          <a
-            v-for="attachment in attachments"
-            :key="attachmentKey(attachment)"
-            class="message-attachment"
-            :href="attachmentHref(attachment)"
-            :download="attachmentName(attachment)"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <div
+          <template v-for="attachment in attachments" :key="attachmentKey(attachment)">
+            <button
               v-if="isImageAttachment(attachment)"
-              class="message-attachment-image-shell"
-              :data-image-state="attachmentImageState(attachment)"
+              class="message-attachment message-attachment-button"
+              type="button"
+              :aria-label="`Open ${attachmentName(attachment)} in image viewer`"
+              @click="emit('openImageViewer', imageAttachmentId(message.id, attachment))"
             >
-              <img
-                v-if="attachmentImageState(attachment) !== 'error'"
-                class="message-attachment-image"
-                :src="attachmentHref(attachment)"
-                :alt="attachmentName(attachment)"
-                @load="markAttachmentImageLoaded(attachment)"
-                @error="markAttachmentImageError(attachment)"
+              <div
+                class="message-attachment-image-shell"
+                :data-image-state="attachmentImageState(attachment)"
               >
-              <span v-if="attachmentImageState(attachment) === 'loading'" class="message-attachment-image-status">
-                Loading image...
+                <img
+                  v-if="attachmentImageState(attachment) !== 'error'"
+                  class="message-attachment-image"
+                  :src="attachmentHref(attachment)"
+                  :alt="attachmentName(attachment)"
+                  @load="markAttachmentImageLoaded(attachment)"
+                  @error="markAttachmentImageError(attachment)"
+                >
+                <span v-if="attachmentImageState(attachment) === 'loading'" class="message-attachment-image-status">
+                  Loading image...
+                </span>
+                <span v-else-if="attachmentImageState(attachment) === 'error'" class="message-attachment-image-status error">
+                  Image unavailable
+                </span>
+              </div>
+              <span class="message-attachment-copy">
+                <strong>{{ attachmentName(attachment) }}</strong>
+                <span>{{ attachmentMeta(attachment) }}</span>
               </span>
-              <span v-else-if="attachmentImageState(attachment) === 'error'" class="message-attachment-image-status error">
-                Image unavailable
+            </button>
+            <a
+              v-else
+              class="message-attachment"
+              :href="attachmentHref(attachment)"
+              :download="attachmentName(attachment)"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span class="message-attachment-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none">
+                  <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                  <path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                </svg>
               </span>
-            </div>
-            <span v-else class="message-attachment-icon" aria-hidden="true">
-              <svg viewBox="0 0 16 16" fill="none">
-                <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                <path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="message-attachment-copy">
-              <strong>{{ attachmentName(attachment) }}</strong>
-              <span>{{ attachmentMeta(attachment) }}</span>
-            </span>
-          </a>
+              <span class="message-attachment-copy">
+                <strong>{{ attachmentName(attachment) }}</strong>
+                <span>{{ attachmentMeta(attachment) }}</span>
+              </span>
+            </a>
+          </template>
         </div>
       </div>
       <button
@@ -148,6 +160,14 @@ import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 import { type RoomMessage, type RoomMessageAttachment, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
 import { buildAgentThinkingEntry } from './agentThinking'
+import {
+  attachmentHref,
+  attachmentKey,
+  attachmentMeta,
+  attachmentName,
+  imageAttachmentId,
+  isImageAttachment,
+} from './messageAttachments'
 
 interface MessageThreadSummary {
   count: number
@@ -161,6 +181,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   reply: [message: RoomMessage]
   scrollToReply: [messageId: string]
+  openImageViewer: [imageId: string]
 }>()
 
 const identity = computed(() => parseAgentIdentity(props.message.sender))
@@ -242,55 +263,6 @@ const formattedTime = computed(() => {
 
 const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
-function attachmentName(attachment: RoomMessageAttachment): string {
-  return attachment.file_name || attachment.filename || attachment.name || 'attachment'
-}
-
-function attachmentMimeType(attachment: RoomMessageAttachment): string {
-  return attachment.mime_type || attachment.content_type || 'application/octet-stream'
-}
-
-function attachmentSize(attachment: RoomMessageAttachment): number {
-  return Number(attachment.size_bytes ?? attachment.byte_size ?? 0)
-}
-
-function attachmentHref(attachment: RoomMessageAttachment): string {
-  if (attachment.url) return attachment.url
-  if (attachment.download_url) return attachment.download_url
-  if (attachment.data_url) return attachment.data_url
-  if (attachment.content_base64) {
-    return `data:${attachmentMimeType(attachment)};base64,${attachment.content_base64}`
-  }
-  return '#'
-}
-
-function isImageAttachment(attachment: RoomMessageAttachment): boolean {
-  return attachmentMimeType(attachment).startsWith('image/') && attachmentHref(attachment) !== '#'
-}
-
-function formatAttachmentSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return ''
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = bytes
-  let unitIndex = 0
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024
-    unitIndex += 1
-  }
-  const precision = size >= 10 || unitIndex === 0 ? 0 : 1
-  return `${size.toFixed(precision)} ${units[unitIndex]}`
-}
-
-function attachmentMeta(attachment: RoomMessageAttachment): string {
-  return [attachmentMimeType(attachment), formatAttachmentSize(attachmentSize(attachment))]
-    .filter(Boolean)
-    .join(' · ')
-}
-
-function attachmentKey(attachment: RoomMessageAttachment): string {
-  return attachment.id || `${attachmentName(attachment)}-${attachmentSize(attachment)}-${attachmentMimeType(attachment)}`
-}
-
 function attachmentImageState(attachment: RoomMessageAttachment): 'loading' | 'loaded' | 'error' {
   return attachmentImageStates[attachmentKey(attachment)] || 'loading'
 }
@@ -302,7 +274,6 @@ function markAttachmentImageLoaded(attachment: RoomMessageAttachment) {
 function markAttachmentImageError(attachment: RoomMessageAttachment) {
   attachmentImageStates[attachmentKey(attachment)] = 'error'
 }
-
 const renderedContent = computed(() => {
   const text = props.message.text || ''
   // Simple markdown-like rendering (basic)
@@ -483,7 +454,13 @@ const renderedContent = computed(() => {
   background: color-mix(in srgb, var(--surface, #18181b) 92%, var(--sender-color, #71717a) 8%);
   outline: none;
 }
-.message-attachment-image-shell,
+
+.message-attachment-button {
+  width: 100%;
+  font: inherit;
+  cursor: zoom-in;
+  text-align: left;
+}
 .message-attachment-image,
 .message-attachment-icon {
   width: 54px;
