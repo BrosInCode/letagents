@@ -135,7 +135,7 @@
             </a>
           </template>
         </div>
-        <div v-if="stalePromptTaskId" class="stale-prompt-actions">
+        <div v-if="showStalePromptToggle" class="stale-prompt-actions">
           <button
             class="stale-prompt-toggle"
             type="button"
@@ -167,7 +167,6 @@ import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
-import { type RoomMessage, type RoomMessageAttachment, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
 import { buildAgentThinkingEntry } from './agentThinking'
 import {
   attachmentHref,
@@ -177,6 +176,16 @@ import {
   imageAttachmentId,
   isImageAttachment,
 } from './messageAttachments'
+import {
+  type RoomMessage,
+  type RoomMessageAttachment,
+  type StalePromptTaskState,
+  parseAgentIdentity,
+  isHumanSender,
+  getSenderColor,
+  hasInlinePromptInjection,
+  getReplyPreviewText,
+} from '@/composables/useRoom'
 
 interface MessageThreadSummary {
   count: number
@@ -186,13 +195,13 @@ interface MessageThreadSummary {
 const props = defineProps<{
   message: RoomMessage
   thread?: MessageThreadSummary | null
-  stalePromptMuteStates?: Readonly<Record<string, boolean>>
+  stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
 }>()
 const emit = defineEmits<{
   reply: [message: RoomMessage]
   scrollToReply: [messageId: string]
   openImageViewer: [imageId: string]
-  toggleStalePromptMute: [payload: { taskId: string; muted: boolean }]
+  toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
 }>()
 
 const identity = computed(() => parseAgentIdentity(props.message.sender))
@@ -213,17 +222,33 @@ const stalePromptTaskId = computed(() => {
   const match = /\b(task_\d+)\b/.exec(props.message.text || '')
   return match?.[1] || null
 })
-const stalePromptMuted = computed(() =>
+const stalePromptTaskState = computed(() =>
   stalePromptTaskId.value
-    ? Boolean(props.stalePromptMuteStates?.[stalePromptTaskId.value])
-    : false
+    ? props.stalePromptTaskStates?.[stalePromptTaskId.value] ?? null
+    : null
+)
+const stalePromptTimestampMs = computed(() => Date.parse(props.message.timestamp))
+const stalePromptIsCurrent = computed(() => {
+  const taskState = stalePromptTaskState.value
+  const taskUpdatedAtMs = Date.parse(taskState?.taskUpdatedAt || '')
+  if (!taskState || !Number.isFinite(taskUpdatedAtMs) || !Number.isFinite(stalePromptTimestampMs.value)) {
+    return false
+  }
+  return taskUpdatedAtMs <= stalePromptTimestampMs.value
+})
+const stalePromptMuted = computed(() =>
+  Boolean(stalePromptTaskState.value?.muted)
+)
+const showStalePromptToggle = computed(() =>
+  Boolean(stalePromptTaskId.value && stalePromptTaskState.value?.isStale && stalePromptIsCurrent.value)
 )
 
 function handleToggleStalePromptMute() {
-  if (!stalePromptTaskId.value) return
+  if (!stalePromptTaskId.value || !showStalePromptToggle.value) return
   emit('toggleStalePromptMute', {
     taskId: stalePromptTaskId.value,
     muted: !stalePromptMuted.value,
+    promptTimestamp: props.message.timestamp,
   })
 }
 

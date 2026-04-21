@@ -172,6 +172,12 @@ export interface RoomTask {
   }>
 }
 
+export interface StalePromptTaskState {
+  isStale: boolean
+  muted: boolean
+  taskUpdatedAt: string
+}
+
 export interface TaskGitHubArtifactStatus {
   task_id: string
   pr_state: string | null
@@ -1168,13 +1174,20 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
   }
 }
 
-async function setTaskStalePromptMute(taskId: string, muted: boolean): Promise<boolean> {
+async function setTaskStalePromptMute(
+  taskId: string,
+  muted: boolean,
+  options?: { promptTimestamp?: string | null }
+): Promise<boolean> {
   if (!room.value) return false
   try {
     const data = await apiFetch(
       `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/stale-prompt-mute`,
       {
         method: muted ? 'POST' : 'DELETE',
+        body: JSON.stringify({
+          prompt_timestamp: options?.promptTimestamp ?? null,
+        }),
       }
     )
     const updatedTask = data.task || (data.id ? data : null)
@@ -1188,7 +1201,11 @@ async function setTaskStalePromptMute(taskId: string, muted: boolean): Promise<b
     }
     tasks.value = await fetchTasks(room.value.identifier)
     return true
-  } catch {
+  } catch (error) {
+    tasks.value = await fetchTasks(room.value.identifier)
+    if ((error as { code?: string | null }).code === 'STALE_PROMPT_OUTDATED') {
+      return true
+    }
     return false
   }
 }
