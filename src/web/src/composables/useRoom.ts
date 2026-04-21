@@ -11,6 +11,16 @@ export type FocusParentVisibility = 'summary_only' | 'major_activity' | 'all_act
 export type FocusActivityScope = 'task_and_branch' | 'task_only' | 'room'
 export type FocusGitHubEventRouting = 'task_and_branch' | 'focus_owned_only' | 'task_only' | 'all_parent_repo' | 'off'
 
+export interface AgentReasoningTrace {
+  summary: string
+  goal: string | null
+  hypothesis: string | null
+  checking: string | null
+  next_action: string | null
+  blocker: string | null
+  confidence: number | null
+}
+
 export interface FocusRoomSettings {
   parent_visibility: FocusParentVisibility
   activity_scope: FocusActivityScope
@@ -280,6 +290,7 @@ export interface RoomAgentPresence {
   ide_label: string | null
   status: 'idle' | 'working' | 'reviewing' | 'blocked'
   status_text: string | null
+  reasoning_trace: AgentReasoningTrace | null
   last_heartbeat_at: string
   created_at: string
   updated_at: string

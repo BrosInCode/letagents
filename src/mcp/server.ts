@@ -60,6 +60,10 @@ import {
   normalizeAgentPromptKind,
 } from "../shared/room-agent-prompts.js";
 import {
+  normalizeAgentReasoningTrace,
+  type AgentReasoningTrace,
+} from "../shared/agent-reasoning.js";
+import {
   inspectLocalCodexSession,
   startLocalCodexSession,
   stopLocalCodexSession,
@@ -91,9 +95,14 @@ let currentRoom: RoomState | null = null;
 let currentAgentIdentityKey = "";
 let currentAgentIdentity: StoredAgentIdentityState | null = null;
 let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
+type RememberedRoomPresence = {
+  status: AgentPresenceStatus;
+  status_text: string | null;
+  reasoning_trace: AgentReasoningTrace | null;
+};
 const roomPresenceByIdentity = new Map<
   string,
-  { status: AgentPresenceStatus; status_text: string | null }
+  RememberedRoomPresence
 >();
 
 // ---------------------------------------------------------------------------
@@ -1028,22 +1037,22 @@ function touchCurrentRoom(lastMessageId?: string): void {
 function getRememberedRoomPresence(
   roomId: string | null | undefined,
   identity: StoredAgentIdentityState | null | undefined
-): { status: AgentPresenceStatus; status_text: string | null } {
+): RememberedRoomPresence {
   if (!roomId || !identity) {
-    return { status: "idle", status_text: null };
+    return { status: "idle", status_text: null, reasoning_trace: null };
   }
 
   return (
     roomPresenceByIdentity.get(
       getRoomIdentityPresenceCacheKey(roomId, identity.actor_label)
-    ) ?? { status: "idle", status_text: null }
+    ) ?? { status: "idle", status_text: null, reasoning_trace: null }
   );
 }
 
 async function syncRoomPresence(
   roomId: string | null | undefined,
   identity: StoredAgentIdentityState | null | undefined,
-  presence: { status: AgentPresenceStatus; status_text: string | null }
+  presence: RememberedRoomPresence
 ): Promise<void> {
   if (!roomId || !identity) {
     return;
@@ -1065,6 +1074,7 @@ async function syncRoomPresence(
         ide_label: identity.ide_label,
         status: presence.status,
         status_text: presence.status_text,
+        reasoning_trace: presence.reasoning_trace,
       }),
     });
     touchRoomSession(roomId);
@@ -1229,6 +1239,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
     await syncRoomPresence(room.room_id, agentIdentity, {
       status: "idle",
       status_text: "online in room",
+      reasoning_trace: null,
     });
     return {
       room,
@@ -1266,6 +1277,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
     await syncRoomPresence(room.room_id, agentIdentity, {
       status: "idle",
       status_text: "online in room",
+      reasoning_trace: null,
     });
     return {
       room,
@@ -1306,6 +1318,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
   await syncRoomPresence(room.room_id, agentIdentity, {
     status: "idle",
     status_text: "online in room",
+    reasoning_trace: null,
   });
   return {
     room,
@@ -1343,6 +1356,7 @@ async function createInviteRoom(): Promise<{
   await syncRoomPresence(room.room_id, agentIdentity, {
     status: "idle",
     status_text: "online in room",
+    reasoning_trace: null,
   });
 
   return {
@@ -1951,6 +1965,7 @@ server.tool(
         getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
       ),
       status_text: status,
+      reasoning_trace: null,
     });
 
     return {
@@ -1965,6 +1980,144 @@ server.tool(
               agent_identity: toPublicAgentIdentity(identity),
               message_id: typeof message.id === "string" ? message.id : null,
               timestamp: typeof message.timestamp === "string" ? message.timestamp : null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "post_reasoning",
+  "Update a structured, replace-in-place reasoning trace for the current room without spamming chat. " +
+    "Use this for visible thought-process updates such as goal, hypothesis, checks in progress, blockers, and next action. " +
+    "Optionally persist a milestone summary into room history when something durable changed.",
+  {
+    summary: z.string().describe("Short current reasoning summary shown in the room UI."),
+    goal: z.string().optional().describe("What the agent is trying to achieve right now."),
+    hypothesis: z.string().optional().describe("Current working theory or approach."),
+    checking: z.string().optional().describe("What the agent is verifying or inspecting."),
+    next_action: z.string().optional().describe("Immediate next step the agent plans to take."),
+    blocker: z.string().optional().describe("Current blocker, if any."),
+    confidence: z.number().min(0).max(1).optional().describe("Optional confidence score between 0 and 1."),
+    status: z.enum(["idle", "working", "reviewing", "blocked"]).optional().describe("Optional explicit presence state override."),
+    milestone: z.string().optional().describe("Optional durable milestone summary to append to room history."),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+  },
+  async ({
+    summary,
+    goal,
+    hypothesis,
+    checking,
+    next_action,
+    blocker,
+    confidence,
+    status,
+    milestone,
+    room_id,
+    conversation_id,
+  }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    const targetProjectId = getFallbackProjectId();
+
+    if (!targetRoomId && !targetProjectId) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "No room_id provided and not currently in a room.",
+                hint: "Join or create a room first, or pass room_id explicitly.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+    const reasoningTrace = normalizeAgentReasoningTrace({
+      summary,
+      goal,
+      hypothesis,
+      checking,
+      next_action,
+      blocker,
+      confidence,
+    });
+
+    if (!reasoningTrace) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "At least one non-empty reasoning field is required.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const rememberedPresence = getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    const nextStatus = status
+      ?? (reasoningTrace.blocker
+        ? "blocked"
+        : classifyPresenceStatusText(reasoningTrace.summary, rememberedPresence.status));
+
+    await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+      status: nextStatus,
+      status_text: reasoningTrace.summary,
+      reasoning_trace: reasoningTrace,
+    });
+
+    let milestoneMessageId: string | null = null;
+    let milestoneTimestamp: string | null = null;
+    const milestoneText = String(milestone || "").trim().replace(/^\[status\]\s*/i, "");
+    if (milestoneText) {
+      const message = await roomScopedApiCall<Record<string, unknown>>({
+        room_id: targetRoomId,
+        project_id: targetProjectId,
+        room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages`,
+        project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
+        options: {
+          method: "POST",
+          body: JSON.stringify({
+            sender: identity.actor_label,
+            text: `[status] ${milestoneText}`,
+          }),
+        },
+      });
+      milestoneMessageId = typeof message.id === "string" ? message.id : null;
+      milestoneTimestamp = typeof message.timestamp === "string" ? message.timestamp : null;
+      touchCurrentRoom(milestoneMessageId ?? undefined);
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              sender: identity.actor_label,
+              agent_identity: toPublicAgentIdentity(identity),
+              reasoning_trace: reasoningTrace,
+              milestone_message_id: milestoneMessageId,
+              milestone_timestamp: milestoneTimestamp,
             },
             null,
             2
@@ -2199,6 +2352,7 @@ server.tool(
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status: "working",
         status_text: `claimed ${task_id}`,
+        reasoning_trace: null,
       });
 
       return {
@@ -2294,6 +2448,9 @@ server.tool(
         status_text: status
           ? `${task_id} -> ${status}`
           : getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status_text,
+        reasoning_trace: status
+          ? null
+          : getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).reasoning_trace,
       });
 
       return {
@@ -2361,6 +2518,7 @@ server.tool(
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status: "reviewing",
         status_text: `${task_id} -> in_review`,
+        reasoning_trace: null,
       });
 
       return {

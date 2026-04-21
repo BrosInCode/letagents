@@ -43,6 +43,7 @@ function buildPresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPre
     ide_label: overrides.ide_label ?? "Agent",
     status: overrides.status ?? "idle",
     status_text: overrides.status_text ?? "idle and monitoring room",
+    reasoning_trace: overrides.reasoning_trace ?? null,
     last_heartbeat_at: overrides.last_heartbeat_at ?? isoMinutesAgo(1),
     created_at: overrides.created_at ?? isoMinutesAgo(180),
     updated_at: overrides.updated_at ?? isoMinutesAgo(1),

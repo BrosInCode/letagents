@@ -26,6 +26,7 @@ function makePresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPres
     ide_label: overrides.ide_label ?? "Agent",
     status: overrides.status ?? "idle",
     status_text: overrides.status_text ?? "watching the room",
+    reasoning_trace: overrides.reasoning_trace ?? null,
     last_heartbeat_at: overrides.last_heartbeat_at ?? "2026-04-08T15:04:00.000Z",
     created_at: overrides.created_at ?? "2026-04-08T15:00:00.000Z",
     updated_at: overrides.updated_at ?? "2026-04-08T15:04:00.000Z",

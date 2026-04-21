@@ -100,6 +100,7 @@ export function buildFallbackPresenceFromMessages(input: {
         ide_label: parsed?.ide_label ?? null,
         status: classifyPresenceStatusText(statusText),
         status_text: statusText || null,
+        reasoning_trace: null,
         last_heartbeat_at: lastHeartbeatAt,
         created_at: lastHeartbeatAt,
         updated_at: lastHeartbeatAt,
@@ -118,6 +119,7 @@ export function buildSyntheticPresenceEntry(input: {
   ideLabel: string | null;
   status: AgentPresenceStatus;
   statusText: string | null;
+  reasoningTrace?: RoomAgentPresence["reasoning_trace"];
   now?: number;
 }): RoomAgentPresence {
   const timestamp = new Date(input.now ?? Date.now()).toISOString();
@@ -130,6 +132,7 @@ export function buildSyntheticPresenceEntry(input: {
     ide_label: input.ideLabel,
     status: input.status,
     status_text: input.statusText,
+    reasoning_trace: input.reasoningTrace ?? null,
     last_heartbeat_at: timestamp,
     created_at: timestamp,
     updated_at: timestamp,
