@@ -54,6 +54,50 @@ function compareParticipants(left: RoomParticipant, right: RoomParticipant): num
   return left.display_name.localeCompare(right.display_name);
 }
 
+function latestTimestamp(...values: Array<string | null | undefined>): string | null {
+  let best: string | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) continue;
+    if (parsed > bestMs) {
+      bestMs = parsed;
+      best = value;
+    }
+  }
+
+  return best;
+}
+
+function mergeParticipantActivityState(
+  primary: RoomParticipant,
+  secondary: RoomParticipant
+): RoomParticipant["activity_state"] {
+  if (primary.kind !== "agent") {
+    return primary.activity_state ?? secondary.activity_state ?? null;
+  }
+
+  const hidden = Boolean(primary.hidden_at || secondary.hidden_at);
+  const hasPresence = Boolean(
+    primary.last_live_heartbeat_at
+      || secondary.last_live_heartbeat_at
+      || primary.source_flags?.includes("presence")
+      || secondary.source_flags?.includes("presence")
+  );
+  const freshness = primary.activity_state === "online" || secondary.activity_state === "online"
+    ? "active"
+    : hasPresence
+      ? "stale"
+      : null;
+
+  return deriveRoomAgentActivityState({
+    hidden,
+    hasPresence,
+    freshness,
+  });
+}
+
 export function buildFallbackRoomParticipants(input: {
   roomId: string;
   messages: readonly Message[];
@@ -82,9 +126,17 @@ export function buildFallbackRoomParticipants(input: {
       github_login: primary.github_login ?? secondary.github_login,
       owner_label: primary.owner_label ?? secondary.owner_label,
       ide_label: primary.ide_label ?? secondary.ide_label,
-      last_room_activity_at: primary.last_room_activity_at ?? secondary.last_room_activity_at,
-      last_live_heartbeat_at: primary.last_live_heartbeat_at ?? secondary.last_live_heartbeat_at,
-      activity_state: primary.activity_state ?? secondary.activity_state,
+      last_room_activity_at: latestTimestamp(
+        primary.last_room_activity_at,
+        secondary.last_room_activity_at,
+        primary.last_seen_at,
+        secondary.last_seen_at
+      ),
+      last_live_heartbeat_at: latestTimestamp(
+        primary.last_live_heartbeat_at,
+        secondary.last_live_heartbeat_at
+      ),
+      activity_state: mergeParticipantActivityState(primary, secondary),
       source_flags: buildRoomActivitySourceFlags([
         ...(secondary.source_flags ?? []),
         ...(primary.source_flags ?? []),

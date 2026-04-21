@@ -70,3 +70,36 @@ test("buildFallbackRoomParticipants combines stored presence and browser activit
   assert.equal(participants[2]?.activity_state, "historical");
   assert.deepEqual(participants[2]?.source_flags, ["messages"]);
 });
+
+test("buildFallbackRoomParticipants preserves presence-backed reachability when a newer message exists", () => {
+  const actorLabel = "CrestPine | EmmyMay's agent | Agent";
+  const participants = buildFallbackRoomParticipants({
+    roomId: "github.com/brosincode/letagents",
+    presence: [
+      makePresence({
+        actor_label: actorLabel,
+        last_heartbeat_at: "2026-04-08T15:04:00.000Z",
+        updated_at: "2026-04-08T15:04:00.000Z",
+        activity_state: "online",
+        source_flags: ["presence"],
+      }),
+    ],
+    messages: [
+      makeMessage({
+        id: "msg_2",
+        sender: actorLabel,
+        source: "agent",
+        text: "[status] still here",
+        timestamp: "2026-04-08T15:05:00.000Z",
+      }),
+    ],
+  });
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0]?.participant_key, "agent:crestpine | emmymay's agent | agent");
+  assert.equal(participants[0]?.activity_state, "online");
+  assert.equal(participants[0]?.last_live_heartbeat_at, "2026-04-08T15:04:00.000Z");
+  assert.equal(participants[0]?.last_room_activity_at, "2026-04-08T15:05:00.000Z");
+  assert.equal(participants[0]?.last_seen_at, "2026-04-08T15:05:00.000Z");
+  assert.deepEqual(participants[0]?.source_flags, ["presence", "messages"]);
+});
