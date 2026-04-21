@@ -553,15 +553,6 @@ export function registerRoomTaskRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
-      req,
-      targetProject: project,
-    });
-    if (isolation.kind === "deny") {
-      res.status(409).json({ error: isolation.error, code: isolation.code });
-      return;
-    }
-
     const task = await getTaskById(project.id, taskId);
     if (!task) {
       res.status(404).json({ error: "Task not found" });
