@@ -53,6 +53,8 @@
           ref="messageListRef"
           class="room-tab-panel"
           :messages="messages"
+          :roomIdentifier="room?.identifier || ''"
+          :reasoningSessions="reasoningSessions"
           :hasOlderMessages="messagesHasOlder"
           :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
@@ -88,8 +90,10 @@
           key="activity"
           class="room-tab-panel"
           :messages="messages"
+          :roomIdentifier="room?.identifier || ''"
           :participants="participants"
           :presence="presence"
+          :reasoningSessions="reasoningSessions"
           :tasks="tasks"
           :taskGithubStatus="taskGithubStatus"
         />
@@ -223,6 +227,7 @@ const {
   focusRooms,
   presence,
   participants,
+  reasoningSessions,
   taskGithubStatus,
   githubEvents,
   githubEventsAvailable,

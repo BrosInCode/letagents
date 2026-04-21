@@ -256,12 +256,46 @@ export interface RoomParticipant {
   updated_at: string
 }
 
+export interface RoomReasoningEntry {
+  id: string
+  kind?: string | null
+  label?: string | null
+  text: string
+  timestamp: string
+}
+
+export interface RoomReasoningSession {
+  id: string
+  room_id?: string | null
+  actor_label?: string | null
+  agent_key?: string | null
+  anchor_message_id?: string | null
+  task_id?: string | null
+  title?: string | null
+  status?: string | null
+  visibility?: string | null
+  summary?: string | null
+  goal?: string | null
+  checking?: string | null
+  hypothesis?: string | null
+  blocker?: string | null
+  next_action?: string | null
+  milestone?: string | null
+  confidence?: number | null
+  entries?: ReadonlyArray<RoomReasoningEntry> | null
+  updates?: ReadonlyArray<RoomReasoningEntry> | null
+  closed_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
 /** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const messagesHasOlder = ref(false)
 const isLoadingOlderMessages = ref(false)
 const presence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
+const reasoningSessions = ref<RoomReasoningSession[]>([])
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
 const tasks = ref<RoomTask[]>([])
 const focusRooms = ref<FocusRoomInfo[]>([])
@@ -527,6 +561,61 @@ async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipan
   }
 }
 
+function reasoningSortValue(session: RoomReasoningSession): number {
+  const detailEntries = session.entries || session.updates
+  const latestEntry = detailEntries?.[detailEntries.length - 1]?.timestamp
+  const timestamp = session.updated_at || session.created_at || latestEntry || ''
+  const parsed = Date.parse(timestamp)
+  return Number.isFinite(parsed) ? parsed : -1
+}
+
+function sortReasoningSessions(sessions: readonly RoomReasoningSession[]): RoomReasoningSession[] {
+  return [...sessions].sort((left, right) => {
+    const byTime = reasoningSortValue(right) - reasoningSortValue(left)
+    if (byTime !== 0) return byTime
+    return String(left.id || '').localeCompare(String(right.id || ''))
+  })
+}
+
+async function fetchReasoningSessions(roomIdentifier: string): Promise<RoomReasoningSession[]> {
+  const paths = [
+    `${roomPath(roomIdentifier)}/reasoning-sessions`,
+    `${roomPath(roomIdentifier)}/reasoning`,
+  ]
+
+  for (const path of paths) {
+    try {
+      const data = await apiFetch(path)
+      const sessions = Array.isArray(data.sessions)
+        ? data.sessions
+        : Array.isArray(data.reasoning_sessions)
+          ? data.reasoning_sessions
+          : []
+      return sortReasoningSessions(sessions)
+    } catch {
+      continue
+    }
+  }
+
+  return []
+}
+
+function upsertReasoningSession(session: RoomReasoningSession | null | undefined) {
+  if (!session?.id) return
+  const idx = reasoningSessions.value.findIndex((item) => item.id === session.id)
+  if (idx >= 0) {
+    const updated = [...reasoningSessions.value]
+    updated[idx] = session
+    reasoningSessions.value = sortReasoningSessions(updated)
+    return
+  }
+  reasoningSessions.value = sortReasoningSessions([...reasoningSessions.value, session])
+}
+
+function removeReasoningSession(sessionId: string) {
+  reasoningSessions.value = reasoningSessions.value.filter((session) => session.id !== sessionId)
+}
+
 async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`)
@@ -679,6 +768,12 @@ async function refreshTaskGithubStatus(): Promise<boolean> {
   return true
 }
 
+async function refreshReasoningSessions(): Promise<boolean> {
+  if (!room.value) return false
+  reasoningSessions.value = await fetchReasoningSessions(room.value.identifier)
+  return true
+}
+
 async function refreshFocusRooms(): Promise<boolean> {
   if (!room.value) return false
   focusRooms.value = await fetchFocusRooms(room.value.identifier)
@@ -759,6 +854,30 @@ function startStreaming(roomIdentifier: string) {
         tasks.value = updated
       } else {
         tasks.value = [...tasks.value, task]
+      }
+    } catch { /* ignore */ }
+  })
+
+  eventSource.addEventListener('reasoning_update', (e) => {
+    try {
+      const payload = JSON.parse(e.data)
+      const session = payload?.session || payload
+      if (session?.id) {
+        upsertReasoningSession(session)
+      }
+    } catch { /* ignore */ }
+  })
+
+  eventSource.addEventListener('reasoning_remove', (e) => {
+    try {
+      const payload = JSON.parse(e.data)
+      const sessionId = typeof payload?.session_id === 'string'
+        ? payload.session_id
+        : typeof payload?.id === 'string'
+          ? payload.id
+          : ''
+      if (sessionId) {
+        removeReasoningSession(sessionId)
       }
     } catch { /* ignore */ }
   })
@@ -1042,6 +1161,7 @@ async function joinRoom(roomIdentifier: string) {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  reasoningSessions.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1083,12 +1203,13 @@ async function joinRoom(roomIdentifier: string) {
     // Load existing room state in parallel
     const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
     const supportsGitHubEvents = isRepoBackedRoomId(getGitHubSupportIdentifier(joinedRoom))
-    const [messagePage, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
+    const [messagePage, tsks, focused, prs, roomParticipants, reasoning, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
+      fetchReasoningSessions(roomIdentifier),
       supportsGitHubEvents
         ? fetchGitHubEvents(githubEventsIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
@@ -1100,6 +1221,7 @@ async function joinRoom(roomIdentifier: string) {
     focusRooms.value = focused
     presence.value = prs
     participants.value = roomParticipants
+    reasoningSessions.value = reasoning
     taskGithubStatus.value = ghStatus
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
@@ -1174,6 +1296,7 @@ function leaveRoom() {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  reasoningSessions.value = []
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1234,6 +1357,7 @@ export function useRoom() {
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
     participants: readonly(participants),
+    reasoningSessions: readonly(reasoningSessions),
     taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
@@ -1260,6 +1384,7 @@ export function useRoom() {
     updateFocusRoomSettings,
     refreshFocusRooms,
     refreshRoomPresence,
+    refreshReasoningSessions,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,

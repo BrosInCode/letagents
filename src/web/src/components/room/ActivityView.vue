@@ -17,6 +17,10 @@
         <strong>{{ participants.length }}</strong>
         <span>Known participants</span>
       </article>
+      <article class="summary-card">
+        <strong>{{ activeReasoningSessions.length }}</strong>
+        <span>Active reasoning</span>
+      </article>
     </div>
 
     <div v-if="participants.length === 0" class="activity-empty">
@@ -62,6 +66,12 @@
                   :data-status="participant.status"
                 />
                 <span>{{ participantNote(participant) }}</span>
+                <span
+                  v-if="participant.activeReasoning.length > 0"
+                  class="activity-reasoning-pill"
+                >
+                  {{ participant.activeReasoning.length === 1 ? '1 live reasoning stream' : `${participant.activeReasoning.length} live reasoning streams` }}
+                </span>
                 <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
               </div>
             </button>
@@ -108,6 +118,12 @@
                   :data-status="participant.status"
                 />
                 <span>{{ participantNote(participant) }}</span>
+                <span
+                  v-if="participant.activeReasoning.length > 0"
+                  class="activity-reasoning-pill"
+                >
+                  {{ participant.activeReasoning.length === 1 ? '1 live reasoning stream' : `${participant.activeReasoning.length} live reasoning streams` }}
+                </span>
                 <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
               </div>
             </button>
@@ -207,6 +223,48 @@
         <p v-if="selectedParticipant.statusText" class="activity-detail-description">
           {{ selectedParticipant.statusText }}
         </p>
+
+        <section
+          v-if="selectedParticipant.kind === 'agent'"
+          class="activity-detail-section"
+        >
+          <div class="activity-detail-section-header">
+            <h4>Live reasoning</h4>
+            <span>{{ selectedParticipant.activeReasoning.length }}</span>
+          </div>
+
+          <div
+            v-if="selectedParticipant.activeReasoning.length === 0"
+            class="activity-detail-empty"
+          >
+            No active reasoning streams are exposed for this agent right now.
+          </div>
+
+          <div v-else class="activity-reasoning-list">
+            <article
+              v-for="session in selectedParticipant.activeReasoning"
+              :key="session.id"
+              class="activity-reasoning-card"
+            >
+              <div class="activity-reasoning-header">
+                <strong>{{ reasoningCardTitle(session) }}</strong>
+                <span>{{ formatLastSeen(reasoningTimestamp(session)) }}</span>
+              </div>
+              <p>{{ reasoningCardSummary(session) }}</p>
+              <div class="activity-reasoning-meta">
+                <span>{{ reasoningStatusLabel(session) }}</span>
+                <span v-if="session.task_id">{{ session.task_id }}</span>
+              </div>
+              <button
+                class="activity-reasoning-action"
+                type="button"
+                @click="selectedReasoningId = session.id"
+              >
+                Open reasoning
+              </button>
+            </article>
+          </div>
+        </section>
 
         <section class="activity-detail-section">
           <div class="activity-detail-section-header">
@@ -326,17 +384,25 @@
         </section>
       </aside>
     </div>
+    <ReasoningTraceModal
+      :open="Boolean(selectedReasoningSession)"
+      :roomIdentifier="roomIdentifier"
+      :session="selectedReasoningSession"
+      @close="selectedReasoningId = null"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import ReasoningTraceModal from './ReasoningTraceModal.vue'
 import {
   isHumanSender,
   parseAgentIdentity,
   type RoomAgentPresence,
   type RoomMessage,
   type RoomParticipant,
+  type RoomReasoningSession,
   type RoomTask,
   type TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
@@ -356,6 +422,7 @@ interface ActivityParticipant {
   statusText: string | null
   lastSeenAt: string | null
   messageCount: number
+  activeReasoning: RoomReasoningSession[]
   currentTasks: RoomTask[]
   completedTasks: RoomTask[]
   createdTasks: RoomTask[]
@@ -364,8 +431,10 @@ interface ActivityParticipant {
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
+  roomIdentifier?: string
   participants: readonly RoomParticipant[]
   presence: readonly RoomAgentPresence[]
+  reasoningSessions: readonly RoomReasoningSession[]
   tasks: readonly RoomTask[]
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
 }>()
@@ -390,8 +459,10 @@ const TASK_STATUS_LABELS: Record<string, string> = {
 }
 const COMPLETED_TASK_STATUSES = new Set(['merged', 'done'])
 const OPEN_TASK_STATUSES = new Set(['proposed', 'accepted', 'assigned', 'in_progress', 'blocked', 'in_review'])
+const INACTIVE_REASONING_STATUSES = new Set(['completed', 'done', 'dismissed', 'closed'])
 
 const selectedParticipantKey = ref<string | null>(null)
+const selectedReasoningId = ref<string | null>(null)
 
 function isAgentIdentityValue(value: string | null | undefined): boolean {
   const normalized = String(value || '').trim()
@@ -447,6 +518,15 @@ function latestTaskTimestamp(tasks: readonly RoomTask[]): string | null {
   return sortTasksByUpdated(tasks)[0]?.updated_at || null
 }
 
+function reasoningTimestamp(session: Partial<RoomReasoningSession> | null | undefined): string | null {
+  if (!session) return null
+  return session.updated_at || session.created_at || session.entries?.[session.entries.length - 1]?.timestamp || null
+}
+
+function sortReasoningSessions(sessions: readonly RoomReasoningSession[]): RoomReasoningSession[] {
+  return [...sessions].sort((left, right) => timestampValue(reasoningTimestamp(right)) - timestampValue(reasoningTimestamp(left)))
+}
+
 const agentMessagesByActor = computed(() => {
   const grouped = new Map<string, RoomMessage[]>()
   for (const message of props.messages) {
@@ -483,6 +563,22 @@ function participantMatchesActor(participant: ActivityParticipant, value: string
   return false
 }
 
+function sessionMatchesAgent(participant: {
+  actorLabel: string
+  label: string
+}, session: RoomReasoningSession): boolean {
+  const actorLabel = String(session.actor_label || '').trim()
+  if (actorLabel && actorLabel === participant.actorLabel) return true
+
+  const agentDisplayName = actorLabel ? parseAgentIdentity(actorLabel).displayName : ''
+  return Boolean(agentDisplayName && agentDisplayName === participant.label)
+}
+
+function isActiveReasoningSession(session: RoomReasoningSession): boolean {
+  if (session.closed_at) return false
+  return !INACTIVE_REASONING_STATUSES.has(String(session.status || '').toLowerCase())
+}
+
 function buildAgentParticipant(participant: RoomParticipant): ActivityParticipant {
   const actorLabel = String(participant.actor_label || participant.display_name || '').trim()
   const presenceEntry = actorLabel ? (presenceByActor.value.get(actorLabel) || null) : null
@@ -497,6 +593,12 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     || parsed.ownerAttribution
     || null
   const ideLabel = participant.ide_label || presenceEntry?.ide_label || latestMessage?.agent_identity?.ide_label || parsed.ideLabel || null
+  const activeReasoning = sortReasoningSessions(
+    props.reasoningSessions.filter((session) =>
+      isActiveReasoningSession(session)
+      && sessionMatchesAgent({ actorLabel, label }, session)
+    )
+  )
 
   const assignedTasks = props.tasks.filter((task) => participantMatchesActor({
     key: participant.participant_key,
@@ -510,6 +612,7 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     statusText: null,
     lastSeenAt: null,
     messageCount: messages.length,
+    activeReasoning: [],
     currentTasks: [],
     completedTasks: [],
     createdTasks: [],
@@ -528,13 +631,14 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
       ownerLabel,
       ideLabel,
       connection: null,
-      status: null,
-      statusText: null,
-      lastSeenAt: null,
-      messageCount: messages.length,
-      currentTasks: [],
-      completedTasks: [],
-      createdTasks: [],
+    status: null,
+    statusText: null,
+    lastSeenAt: null,
+    messageCount: messages.length,
+    activeReasoning: [],
+    currentTasks: [],
+    completedTasks: [],
+    createdTasks: [],
       recentMessages: [],
     }, task.created_by))
   ).slice(0, 8)
@@ -553,11 +657,13 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
       participant.last_seen_at,
       presenceEntry?.last_heartbeat_at,
       latestMessage?.timestamp,
+      reasoningTimestamp(activeReasoning[0] || {}),
       latestTaskTimestamp(currentTasks),
       latestTaskTimestamp(completedTasks),
       latestTaskTimestamp(createdTasks)
     ),
     messageCount: messages.length,
+    activeReasoning,
     currentTasks,
     completedTasks,
     createdTasks,
@@ -598,6 +704,7 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
       latestTaskTimestamp(createdTasks)
     ),
     messageCount: messages.length,
+    activeReasoning: [],
     currentTasks,
     completedTasks,
     createdTasks,
@@ -643,6 +750,11 @@ const disconnectedAgents = computed(() =>
 )
 
 const humans = computed(() => humanParticipants.value)
+const activeReasoningSessions = computed(() =>
+  sortReasoningSessions(
+    props.reasoningSessions.filter((session) => isActiveReasoningSession(session))
+  )
+)
 
 const participants = computed(() => [
   ...onlineAgents.value,
@@ -655,6 +767,11 @@ const selectedParticipant = computed(() =>
   || participants.value[0]
   || null
 )
+const selectedReasoningSession = computed(() => {
+  const selectedId = selectedReasoningId.value
+  if (!selectedId) return null
+  return props.reasoningSessions.find((session) => session.id === selectedId) || null
+})
 
 watch(participants, (next) => {
   if (!next.length) {
@@ -690,6 +807,23 @@ function participantNote(participant: ActivityParticipant): string {
   return participant.messageCount > 0
     ? 'Seen via browser room activity'
     : 'Known from task history'
+}
+
+function reasoningCardTitle(session: RoomReasoningSession): string {
+  return session.title || session.summary || session.goal || 'Reasoning stream'
+}
+
+function reasoningCardSummary(session: RoomReasoningSession): string {
+  return session.checking || session.next_action || session.hypothesis || session.summary || 'No summary published yet.'
+}
+
+function reasoningStatusLabel(session: RoomReasoningSession): string {
+  if (session.closed_at) return 'Closed'
+  const normalized = String(session.status || 'active').trim()
+  if (!normalized) return 'Active'
+  return normalized
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 function connectionLabel(participant: ActivityParticipant | null): string {
@@ -950,6 +1084,16 @@ function formatLastSeen(value: string | null): string {
   white-space: nowrap;
 }
 
+.activity-reasoning-pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #93c5fd;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
 .activity-roster-seen {
   margin-left: auto;
   flex-shrink: 0;
@@ -1051,13 +1195,15 @@ function formatLastSeen(value: string | null): string {
 }
 
 .activity-task-list,
-.activity-message-list {
+.activity-message-list,
+.activity-reasoning-list {
   display: grid;
   gap: var(--space-sm, 8px);
 }
 
 .activity-task-card,
-.activity-message-card {
+.activity-message-card,
+.activity-reasoning-card {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1116,6 +1262,60 @@ function formatLastSeen(value: string | null): string {
   color: var(--text, #fafafa);
 }
 
+.activity-reasoning-card {
+  display: grid;
+  gap: 10px;
+}
+
+.activity-reasoning-header,
+.activity-reasoning-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-reasoning-header strong {
+  color: var(--text, #fafafa);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.activity-reasoning-header span,
+.activity-reasoning-meta span {
+  font-size: 0.72rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-reasoning-card p {
+  margin: 0;
+  color: var(--activity-text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.activity-reasoning-action {
+  justify-self: start;
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.1);
+  color: #bfdbfe;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 9px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.activity-reasoning-action:hover,
+.activity-reasoning-action:focus-visible {
+  background: rgba(59, 130, 246, 0.16);
+  border-color: rgba(147, 197, 253, 0.34);
+  outline: none;
+}
+
 @media (max-width: 960px) {
   .activity-layout {
     grid-template-columns: 1fr;
@@ -1136,7 +1336,9 @@ function formatLastSeen(value: string | null): string {
   .activity-group-header,
   .activity-detail-header,
   .activity-detail-section-header,
-  .activity-message-meta {
+  .activity-message-meta,
+  .activity-reasoning-header,
+  .activity-reasoning-meta {
     flex-direction: column;
     align-items: flex-start;
   }

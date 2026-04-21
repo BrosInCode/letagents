@@ -14,7 +14,9 @@
         v-for="msg in messages"
         :key="msg.id"
         :message="msg"
+        :roomIdentifier="roomIdentifier"
         :thread="threadSummaries.get(msg.id) || null"
+        :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
@@ -40,11 +42,13 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { type RoomMessage } from '@/composables/useRoom'
+import { type RoomMessage, type RoomReasoningSession } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
+  roomIdentifier?: string
+  reasoningSessions?: readonly RoomReasoningSession[]
   hasOlderMessages?: boolean
   isLoadingOlderMessages?: boolean
   searchQuery?: string
@@ -90,6 +94,17 @@ const threadSummaries = computed(() => {
   }
 
   return summaries
+})
+
+const reasoningByAnchorMessage = computed(() => {
+  const sessions = props.reasoningSessions || []
+  const map = new Map<string, RoomReasoningSession>()
+  for (const session of sessions) {
+    const anchorMessageId = String(session.anchor_message_id || '').trim()
+    if (!anchorMessageId) continue
+    map.set(anchorMessageId, session)
+  }
+  return map
 })
 
 function searchClasses(msg: RoomMessage): Record<string, boolean> {
