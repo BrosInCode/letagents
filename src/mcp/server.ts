@@ -59,6 +59,7 @@ import {
   buildRoomAgentPrompt,
   normalizeAgentPromptKind,
 } from "../shared/room-agent-prompts.js";
+import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../shared/request-headers.js";
 import {
   inspectLocalCodexSession,
   startLocalCodexSession,

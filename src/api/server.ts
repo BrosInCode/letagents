@@ -76,6 +76,7 @@ import {
   toRoomResponse,
 } from "./room-formatting.js";
 import { createGitHubFocusIsolationResolver } from "./github-focus-isolation.js";
+import { createFocusParentBoardWriteIsolationEnforcer } from "./focus-room-task-write-isolation.js";
 import { createStaleWorkPromptEmitter } from "./stale-work.js";
 import {
   buildFailedCheckRunTaskDescription,
@@ -301,6 +302,9 @@ const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
   getStaleTaskPromptMutes: async (projectId, options) =>
     getStaleTaskPromptMutes(projectId, options.taskIds),
   emitTaskAnchoredMessage,
+});
+const enforceFocusParentBoardWriteIsolation = createFocusParentBoardWriteIsolationEnforcer({
+  getProjectById,
 });
 
 const taskCoordinationEnforcement = createTaskCoordinationEnforcement({

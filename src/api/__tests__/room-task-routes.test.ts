@@ -37,16 +37,20 @@ function createRouteApp() {
     get: new Map<string, (req: unknown, res: unknown) => Promise<void>>(),
     post: new Map<string, (req: unknown, res: unknown) => Promise<void>>(),
     patch: new Map<string, (req: unknown, res: unknown) => Promise<void>>(),
+    delete: new Map<string, (req: unknown, res: unknown) => Promise<void>>(),
   };
   const app = {
     get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
       handlers.get.set(path.toString(), handler);
     },
-    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
-      handlers.post.set(path.toString(), handler);
-    },
     patch(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
       handlers.patch.set(path.toString(), handler);
+    },
+    delete(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.delete.set(path.toString(), handler);
+    },
+    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.post.set(path.toString(), handler);
     },
   };
   return { app, handlers };
@@ -201,4 +205,44 @@ test("isCurrentStalePromptAction only allows prompts from the current task versi
     }),
     false
   );
+});
+
+test("stale prompt mute denies parent board writes from hard-isolated Focus Rooms", async () => {
+  const { app, handlers } = createRouteApp();
+  let coordinationCalled = false;
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async () => ({ id: "github.com/brosincode/letagents" }),
+    requireParticipant: async () => true,
+    enforceFocusParentBoardWriteIsolation: async () => ({
+      kind: "deny" as const,
+      code: "focus_parent_board_read_only" as const,
+      error: "blocked by focus settings",
+    }),
+    enforceTaskCoordinationMutation: async () => {
+      coordinationCalled = true;
+      return { kind: "allow" as const };
+    },
+  };
+
+  registerRoomTaskRoutes(app as never, deps as never);
+  const handler = handlers.post.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/stale-prompt-mute$/");
+  assert.ok(handler);
+
+  const res = createResponseRecorder();
+  await handler(
+    {
+      params: { 0: "github.com/brosincode/letagents", 1: "task_153" },
+      body: {},
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, {
+    error: "blocked by focus settings",
+    code: "focus_parent_board_read_only",
+  });
+  assert.equal(coordinationCalled, false);
 });

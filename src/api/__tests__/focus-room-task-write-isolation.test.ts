@@ -47,7 +47,6 @@ test("shouldIsolateFocusRoomParentBoardWrites only isolates room-scoped focus ro
     }),
     false
   );
-
   assert.equal(
     shouldIsolateFocusRoomParentBoardWrites({
       originRoom: makeFocusRoom({ parent_room_id: "github.com/brosincode/other" }),
@@ -80,7 +79,6 @@ test("createFocusParentBoardWriteIsolationEnforcer denies parent board writes fr
     error: FOCUS_PARENT_BOARD_WRITE_ISOLATION_ERROR,
   });
 });
-
 test("createFocusParentBoardWriteIsolationEnforcer allows same-room writes and non-agent callers", async () => {
   const enforceFocusParentBoardWriteIsolation =
     createFocusParentBoardWriteIsolationEnforcer({
