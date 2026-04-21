@@ -568,6 +568,24 @@ export const task_leases = pgTable(
   })
 );
 
+export const stale_task_prompt_mutes = pgTable(
+  "stale_task_prompt_mutes",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_id: text("task_id").notNull(),
+    task_updated_at: timestamp("task_updated_at", { mode: "string", withTimezone: true }).notNull(),
+    muted_by: text("muted_by").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "stale_task_prompt_mutes_pk", columns: [table.room_id, table.task_id] }),
+    room_idx: index("stale_task_prompt_mutes_room_idx").on(table.room_id, table.updated_at),
+  })
+);
+
 export const task_locks = pgTable(
   "task_locks",
   {

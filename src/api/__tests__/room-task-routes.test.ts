@@ -65,7 +65,7 @@ function createResponseRecorder() {
 }
 
 test("registerRoomTaskRoutes preserves canonical task route order", () => {
-  const calls: Array<{ method: "get" | "patch" | "post"; path: string }> = [];
+  const calls: Array<{ method: "delete" | "get" | "patch" | "post"; path: string }> = [];
   const app = {
     get(path: RegExp) {
       calls.push({ method: "get", path: path.toString() });
@@ -76,6 +76,9 @@ test("registerRoomTaskRoutes preserves canonical task route order", () => {
     post(path: RegExp) {
       calls.push({ method: "post", path: path.toString() });
     },
+    delete(path: RegExp) {
+      calls.push({ method: "delete", path: path.toString() });
+    },
   };
 
   registerRoomTaskRoutes(app as never, createDeps() as never);
@@ -84,6 +87,8 @@ test("registerRoomTaskRoutes preserves canonical task route order", () => {
     { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/focus-room$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/stale-prompt-mute$/" },
+    { method: "delete", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/stale-prompt-mute$/" },
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/tasks\\/github-status$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
     { method: "patch", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },

@@ -19,6 +19,7 @@ import {
   getActiveTaskLocks,
   getTaskById,
   getTasks,
+  getStaleTaskPromptMutes,
   hasMessagesFromSender,
   markGitHubAppInstallationUninstalled,
   markGitHubAppRepositoryRemoved,
@@ -297,6 +298,8 @@ const {
 const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
   getOpenTasks,
   getRoomAgentPresence,
+  getStaleTaskPromptMutes: async (projectId, options) =>
+    getStaleTaskPromptMutes(projectId, options.taskIds),
   emitTaskAnchoredMessage,
 });
 
