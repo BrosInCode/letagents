@@ -147,11 +147,14 @@
           <button
             class="attachment-btn"
             type="button"
-            :disabled="disabled || attachmentDrafts.length >= MAX_ATTACHMENTS"
+            :disabled="disabled || !attachmentsAvailable || attachmentDrafts.length >= MAX_ATTACHMENTS"
             @click="openFilePicker"
           >
             Attach
           </button>
+          <span v-if="!attachmentsAvailable" class="attachment-count">
+            Unavailable
+          </span>
           <span v-if="attachmentDrafts.length" class="attachment-count">
             {{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}
           </span>
@@ -177,6 +180,7 @@ const props = withDefaults(defineProps<{
   senderName?: string
   disabled?: boolean
   isSignedIn?: boolean
+  attachmentsEnabled?: boolean
   roomIdentifier?: string
   replyTo?: RoomMessage | null
   messages?: readonly RoomMessage[]
@@ -185,6 +189,7 @@ const props = withDefaults(defineProps<{
   senderName: 'anonymous',
   disabled: false,
   isSignedIn: false,
+  attachmentsEnabled: true,
   roomIdentifier: '',
   replyTo: null,
   messages: () => [],
@@ -230,6 +235,7 @@ const replyDisplayName = computed(() => {
 })
 
 const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
+const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
 
 interface MentionCandidate {
   key: string
@@ -494,6 +500,10 @@ const canSend = computed(() =>
 
 function openFilePicker() {
   attachmentError.value = ''
+  if (!attachmentsAvailable.value) {
+    attachmentError.value = 'Attachments are unavailable right now.'
+    return
+  }
   fileInputEl.value?.click()
 }
 
@@ -504,6 +514,10 @@ async function handleFileSelection(event: Event) {
   if (!selected.length) return
 
   attachmentError.value = ''
+  if (!attachmentsAvailable.value) {
+    attachmentError.value = 'Attachments are unavailable right now.'
+    return
+  }
   const availableSlots = Math.max(0, MAX_ATTACHMENTS - attachmentDrafts.value.length)
   const acceptedFiles = selected.slice(0, availableSlots)
   if (selected.length > availableSlots) {
@@ -576,6 +590,11 @@ function buildOutgoingAttachments(): OutgoingMessageAttachment[] {
 function handleSend() {
   const trimmed = text.value.trim()
   if (!canSend.value) return
+  if (!attachmentsAvailable.value && attachmentDrafts.value.length > 0) {
+    attachmentError.value = 'Attachments are unavailable right now.'
+    clearAttachments()
+    return
+  }
 
   // Determine agent_prompt_kind for this message
   const kind = injectPrompt.value ? 'inline' : null
