@@ -56,8 +56,10 @@
           :hasOlderMessages="messagesHasOlder"
           :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
+          :stalePromptMuteStates="stalePromptMuteStates"
           @loadOlder="loadOlderMessages"
           @reply="selectedReply = $event"
+          @toggleStalePromptMute="handleToggleStalePromptMute"
         />
 
         <GitHubEventFeed
@@ -238,6 +240,7 @@ const {
   sendMessage,
   addTask,
   updateTask,
+  setTaskStalePromptMute,
   createFocusRoom,
   createAdHocFocusRoom,
   shareFocusRoomResult,
@@ -326,6 +329,11 @@ const joinErrorBody = computed(() => {
   }
   return joinError.value?.message || 'Could not connect to room.'
 })
+const stalePromptMuteStates = computed<Record<string, boolean>>(() =>
+  Object.fromEntries(
+    tasks.value.map(task => [task.id, Boolean(task.stale_prompt_state?.muted)])
+  )
+)
 
 async function handleSend(text: string, agentPromptKind: string | null, replyTo: string | null) {
   const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo)
@@ -340,6 +348,13 @@ async function handleAddTask(title: string) {
 
 async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
+}
+
+async function handleToggleStalePromptMute(taskId: string, muted: boolean) {
+  const updated = await setTaskStalePromptMute(taskId, muted)
+  if (!updated) {
+    toast.error('Stale task reminder preference could not be updated.')
+  }
 }
 
 function roomRoutePath(identifier: string): string {

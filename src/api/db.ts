@@ -21,6 +21,7 @@ import {
   room_participants,
   room_aliases,
   rooms,
+  stale_task_prompt_mutes,
   task_leases,
   task_locks,
   tasks,
@@ -282,8 +283,18 @@ export interface Task {
   workflow_refs: TaskWorkflowRef[];
   created_at: string;
   updated_at: string;
+  stale_prompt_state?: TaskStalePromptState | null;
   active_leases?: TaskLease[];
   active_locks?: TaskLock[];
+}
+
+export interface TaskStalePromptState {
+  is_stale: boolean;
+  reason: string | null;
+  stale_for_ms: number | null;
+  muted: boolean;
+  muted_by: string | null;
+  muted_at: string | null;
 }
 
 export interface TaskLease {
@@ -317,6 +328,15 @@ export interface TaskLock {
   created_at: string;
   cleared_by: string | null;
   cleared_at: string | null;
+}
+
+export interface StaleTaskPromptMute {
+  room_id: string;
+  task_id: string;
+  task_updated_at: string;
+  muted_by: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CoordinationEvent {
@@ -384,6 +404,15 @@ interface TaskLeaseRow {
   last_heartbeat_at: string | null;
   revoked_reason: string | null;
   created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface StaleTaskPromptMuteRow {
+  room_id: string;
+  task_id: string;
+  task_updated_at: string;
+  muted_by: string;
   created_at: string;
   updated_at: string;
 }
@@ -649,6 +678,17 @@ function toTask(row: TaskRow): Task {
       artifacts: workflowArtifacts,
       prUrl: row.pr_url,
     }),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toStaleTaskPromptMute(row: StaleTaskPromptMuteRow): StaleTaskPromptMute {
+  return {
+    room_id: row.room_id,
+    task_id: row.task_id,
+    task_updated_at: row.task_updated_at,
+    muted_by: row.muted_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -2805,6 +2845,66 @@ export async function getActiveTaskLeases(
     .orderBy(asc(task_leases.created_at))) as TaskLeaseRow[];
 
   return rows.map(toTaskLease);
+}
+
+export async function upsertStaleTaskPromptMute(input: {
+  room_id: string;
+  task_id: string;
+  task_updated_at: string;
+  muted_by: string;
+}): Promise<StaleTaskPromptMute> {
+  const now = new Date().toISOString();
+  const [row] = (await db
+    .insert(stale_task_prompt_mutes)
+    .values({
+      room_id: input.room_id,
+      task_id: input.task_id,
+      task_updated_at: input.task_updated_at,
+      muted_by: input.muted_by,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [stale_task_prompt_mutes.room_id, stale_task_prompt_mutes.task_id],
+      set: {
+        task_updated_at: input.task_updated_at,
+        muted_by: input.muted_by,
+        updated_at: now,
+      },
+    })
+    .returning()) as StaleTaskPromptMuteRow[];
+
+  return toStaleTaskPromptMute(row);
+}
+
+export async function getStaleTaskPromptMutes(
+  roomId: string,
+  taskIds?: readonly string[]
+): Promise<StaleTaskPromptMute[]> {
+  const conditions = [eq(stale_task_prompt_mutes.room_id, roomId)];
+  if (taskIds && taskIds.length > 0) {
+    conditions.push(inArray(stale_task_prompt_mutes.task_id, [...taskIds]));
+  }
+
+  const rows = (await db
+    .select()
+    .from(stale_task_prompt_mutes)
+    .where(and(...conditions))
+    .orderBy(asc(stale_task_prompt_mutes.updated_at))) as StaleTaskPromptMuteRow[];
+
+  return rows.map(toStaleTaskPromptMute);
+}
+
+export async function clearStaleTaskPromptMute(
+  roomId: string,
+  taskId: string
+): Promise<boolean> {
+  const deleted = await db
+    .delete(stale_task_prompt_mutes)
+    .where(and(eq(stale_task_prompt_mutes.room_id, roomId), eq(stale_task_prompt_mutes.task_id, taskId)))
+    .returning({ task_id: stale_task_prompt_mutes.task_id });
+
+  return deleted.length > 0;
 }
 
 export async function revokeTaskLease(

@@ -94,6 +94,14 @@ export interface RoomTask {
     label: string
     url: string
   }>
+  stale_prompt_state?: {
+    is_stale: boolean
+    reason: string | null
+    stale_for_ms: number | null
+    muted: boolean
+    muted_by: string | null
+    muted_at: string | null
+  } | null
   created_at: string
   updated_at: string
   active_leases?: ReadonlyArray<{
@@ -1011,6 +1019,31 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
   }
 }
 
+async function setTaskStalePromptMute(taskId: string, muted: boolean): Promise<boolean> {
+  if (!room.value) return false
+  try {
+    const data = await apiFetch(
+      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/stale-prompt-mute`,
+      {
+        method: muted ? 'POST' : 'DELETE',
+      }
+    )
+    const updatedTask = data.task || (data.id ? data : null)
+    if (updatedTask) {
+      const idx = tasks.value.findIndex(t => t.id === taskId)
+      if (idx >= 0) {
+        const updated = [...tasks.value]
+        updated[idx] = updatedTask
+        tasks.value = updated
+      }
+    }
+    tasks.value = await fetchTasks(room.value.identifier)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** ── Room Rename ── */
 async function renameRoom(newName: string): Promise<boolean> {
   if (!room.value) return false
@@ -1254,6 +1287,7 @@ export function useRoom() {
     sendMessage,
     addTask,
     updateTask,
+    setTaskStalePromptMute,
     createFocusRoom,
     createAdHocFocusRoom,
     shareFocusRoomResult,

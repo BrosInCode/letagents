@@ -15,10 +15,12 @@
         :key="msg.id"
         :message="msg"
         :thread="threadSummaries.get(msg.id) || null"
+        :stalePromptMuteStates="stalePromptMuteStates"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
         @reply="emit('reply', $event)"
         @scrollToReply="scrollToMessage"
+        @toggleStalePromptMute="emit('toggleStalePromptMute', $event.taskId, $event.muted)"
       />
     </div>
     <button
@@ -48,10 +50,12 @@ const props = defineProps<{
   hasOlderMessages?: boolean
   isLoadingOlderMessages?: boolean
   searchQuery?: string
+  stalePromptMuteStates?: Readonly<Record<string, boolean>>
 }>()
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
+  toggleStalePromptMute: [taskId: string, muted: boolean]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
