@@ -7,7 +7,6 @@ import {
   deletePendingMessageAttachmentUpload,
   getLatestMessages,
   getMessageAttachment,
-  getMessageAttachmentUpload,
   getMessages,
   getMessagesAfter,
   getMessagesBefore,
@@ -249,8 +248,8 @@ export function registerRoomMessageRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const upload = await getMessageAttachmentUpload(project.id, uploadId);
-    if (!upload || upload.status !== "pending") {
+    const upload = await deletePendingMessageAttachmentUpload(project.id, uploadId);
+    if (!upload) {
       res.status(200).json({ ok: true, upload_id: uploadId });
       return;
     }
@@ -259,12 +258,10 @@ export function registerRoomMessageRoutes(
       try {
         await deleteAttachmentObject({ object_key: upload.object_key });
       } catch {
-        res.status(502).json({ error: "Attachment draft could not be removed." });
-        return;
+        // The draft row is already gone, so prefer a small object leak over reviving a raceable record.
       }
     }
 
-    await deletePendingMessageAttachmentUpload(project.id, uploadId);
     res.status(200).json({ ok: true, upload_id: uploadId });
   });
 

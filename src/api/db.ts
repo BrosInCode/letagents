@@ -1936,8 +1936,22 @@ export async function addMessage(
     let attachmentRows: MessageAttachmentRow[] = [];
     if (attachmentRefs.length > 0) {
       const uploadIds = attachmentRefs.map((attachment) => attachment.upload_id);
-      const uploadRows = await tx
-        .select({
+      const claimedUploadRows = await tx
+        .update(message_attachment_uploads)
+        .set({
+          status: "attached",
+          attached_message_number: message.number,
+          attached_at: message.timestamp,
+        })
+        .where(
+          and(
+            eq(message_attachment_uploads.room_id, roomId),
+            inArray(message_attachment_uploads.upload_id, uploadIds),
+            eq(message_attachment_uploads.status, "pending"),
+            sql`${message_attachment_uploads.expires_at} > ${message.timestamp}`
+          )
+        )
+        .returning({
           upload_id: message_attachment_uploads.upload_id,
           room_id: message_attachment_uploads.room_id,
           filename: message_attachment_uploads.filename,
@@ -1951,19 +1965,11 @@ export async function addMessage(
           attached_message_number: message_attachment_uploads.attached_message_number,
           created_at: message_attachment_uploads.created_at,
           attached_at: message_attachment_uploads.attached_at,
-        })
-        .from(message_attachment_uploads)
-        .where(
-          and(
-            eq(message_attachment_uploads.room_id, roomId),
-            inArray(message_attachment_uploads.upload_id, uploadIds)
-          )
-        );
-      const uploadsById = new Map(uploadRows.map((row) => [row.upload_id, row]));
-      const now = Date.now();
+        });
+      const uploadsById = new Map(claimedUploadRows.map((row) => [row.upload_id, row]));
       const orderedUploads = uploadIds.map((uploadId) => {
         const upload = uploadsById.get(uploadId);
-        if (!upload || upload.status !== "pending" || new Date(upload.expires_at).getTime() <= now) {
+        if (!upload) {
           throw new Error("attachment upload not found or expired");
         }
         return upload;
@@ -1985,19 +1991,6 @@ export async function addMessage(
     }
     if (attachmentRows.length > 0) {
       await tx.insert(message_attachments).values(attachmentRows);
-      await tx
-        .update(message_attachment_uploads)
-        .set({
-          status: "attached",
-          attached_message_number: message.number,
-          attached_at: message.timestamp,
-        })
-        .where(
-          and(
-            eq(message_attachment_uploads.room_id, roomId),
-            inArray(message_attachment_uploads.upload_id, attachmentRows.map((row) => row.upload_id))
-          )
-        );
     }
     if (isPromptOnlyAgentMessage(message.text, promptKind)) {
       await tx
