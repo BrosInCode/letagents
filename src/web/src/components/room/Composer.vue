@@ -299,9 +299,19 @@ interface MentionCandidate {
 const mentionCandidates = computed<MentionCandidate[]>(() => {
   const seen = new Set<string>()
   const candidates: MentionCandidate[] = []
-  const visibleAgentActors = new Set(
+  const activeAgentActors = new Set(
+    props.presence
+      .filter((entry) => entry.freshness === 'active')
+      .map((entry) => String(entry.actor_label || '').trim())
+      .filter(Boolean)
+  )
+  const visibleActiveAgentActors = new Set(
     props.participants
-      .filter((participant) => participant.kind === 'agent' && !participant.hidden_at)
+      .filter((participant) =>
+        participant.kind === 'agent'
+        && !participant.hidden_at
+        && activeAgentActors.has(String(participant.actor_label || '').trim())
+      )
       .map((participant) => String(participant.actor_label || '').trim())
       .filter(Boolean)
   )
@@ -333,7 +343,7 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
 
   for (const agent of props.presence) {
     const actorLabel = String(agent.actor_label || '').trim()
-    if (agent.freshness !== 'active' && actorLabel && !visibleAgentActors.has(actorLabel)) {
+    if (agent.freshness !== 'active') {
       continue
     }
 
@@ -352,10 +362,14 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
     if (participant.hidden_at) continue
 
     if (participant.kind === 'agent') {
+      const actorLabel = String(participant.actor_label || '').trim()
+      if (!actorLabel || !visibleActiveAgentActors.has(actorLabel)) {
+        continue
+      }
+
       const label = participant.display_name || parseAgentIdentity(participant.actor_label || '').displayName
       const meta = [participant.owner_label, participant.ide_label].filter(Boolean).join(' · ') || 'Agent'
-      const isActive = props.presence.some((entry) => entry.actor_label === participant.actor_label && entry.freshness === 'active')
-      pushCandidate(label, label, meta, isActive ? 0 : 1, [
+      pushCandidate(label, label, meta, 0, [
         participant.actor_label,
         participant.owner_label,
         participant.ide_label,
