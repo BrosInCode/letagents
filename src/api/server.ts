@@ -194,6 +194,7 @@ interface MessageCreatedEvent {
 
 const messageEvents = new EventEmitter();
 const taskEvents = new EventEmitter();
+const reasoningEvents = new EventEmitter();
 const {
   rememberHumanRoomParticipant,
   rememberAgentRoomParticipant,
@@ -1163,6 +1164,7 @@ const legacyProjectTaskRouteDeps = {
 const roomMessageRouteDeps = {
   messageEvents,
   taskEvents,
+  reasoningEvents,
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
   requireParticipant,
@@ -1183,6 +1185,7 @@ const roomPresenceRouteDeps = {
 } satisfies RoomPresenceRouteDeps;
 
 const roomReasoningRouteDeps = {
+  reasoningEvents,
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
   requireParticipant,

@@ -1,3 +1,4 @@
+import type { EventEmitter } from "events";
 import type { Express, Response } from "express";
 
 import {
@@ -8,6 +9,7 @@ import {
   getReasoningSessions,
   updateReasoningSession,
   type Project,
+  type ReasoningSession,
 } from "../db.js";
 import {
   parseLimit,
@@ -21,7 +23,18 @@ import {
 } from "../../shared/agent-presence.js";
 import type { ReasoningSnapshot } from "../db/schema.js";
 
+interface ReasoningSessionUpdatedEvent {
+  projectId: string;
+  session: ReasoningSession;
+}
+
+interface ReasoningSessionRemovedEvent {
+  projectId: string;
+  session_id: string;
+}
+
 export interface RoomReasoningRouteDeps {
+  reasoningEvents: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
@@ -183,6 +196,11 @@ export function registerRoomReasoningRoutes(
         snapshot: parseReasoningSnapshot(body),
       });
 
+      deps.reasoningEvents.emit(
+        "reasoning:updated",
+        { projectId: project.id, session: result.session } satisfies ReasoningSessionUpdatedEvent
+      );
+
       res.status(201).json({
         room_id: project.id,
         session: result.session,
@@ -263,6 +281,18 @@ export function registerRoomReasoningRoutes(
         return;
       }
 
+      if (hasOwn(body, "closed_at") && session.closed_at) {
+        deps.reasoningEvents.emit(
+          "reasoning:removed",
+          { projectId: project.id, session_id: session.id } satisfies ReasoningSessionRemovedEvent
+        );
+      } else {
+        deps.reasoningEvents.emit(
+          "reasoning:updated",
+          { projectId: project.id, session } satisfies ReasoningSessionUpdatedEvent
+        );
+      }
+
       res.json({
         room_id: project.id,
         session,
@@ -303,6 +333,11 @@ export function registerRoomReasoningRoutes(
           res.status(404).json({ error: "Reasoning session not found" });
           return;
         }
+
+        deps.reasoningEvents.emit(
+          "reasoning:updated",
+          { projectId: project.id, session: result.session } satisfies ReasoningSessionUpdatedEvent
+        );
 
         res.status(201).json({
           room_id: project.id,

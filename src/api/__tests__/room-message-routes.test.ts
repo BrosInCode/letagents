@@ -13,6 +13,7 @@ function createDeps() {
   return {
     messageEvents: new EventEmitter(),
     taskEvents: new EventEmitter(),
+    reasoningEvents: new EventEmitter(),
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
     requireParticipant: unused,

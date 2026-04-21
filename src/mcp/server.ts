@@ -72,7 +72,10 @@ import {
   getRoomIdentityPresenceCacheKey,
 } from "./agent-presence.js";
 import { buildRoomEventsQueryString } from "./room-events-query.js";
-import type { AgentPresenceStatus } from "../shared/agent-presence.js";
+import {
+  AGENT_PRESENCE_STATUSES,
+  type AgentPresenceStatus,
+} from "../shared/agent-presence.js";
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 
 // ---------------------------------------------------------------------------
@@ -1196,6 +1199,11 @@ async function roomScopedApiCall<T>(input: {
   return result;
 }
 
+function normalizeOptionalToolString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Promise<{
   room: RoomState;
   response: Record<string, unknown>;
@@ -1965,6 +1973,220 @@ server.tool(
               agent_identity: toPublicAgentIdentity(identity),
               message_id: typeof message.id === "string" ? message.id : null,
               timestamp: typeof message.timestamp === "string" ? message.timestamp : null,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+// -- post_reasoning ---------------------------------------------------------
+
+server.tool(
+  "post_reasoning",
+  "Update a structured, replace-in-place reasoning trace for the current room without spamming chat. " +
+    "Use this for visible thought-process updates such as goal, hypothesis, checks in progress, blockers, " +
+    "and next action. Optionally persist a milestone summary into room history when something durable changed.",
+  {
+    summary: z.string().describe("Short current reasoning summary shown in the room UI."),
+    goal: z.string().optional().describe("What the agent is trying to achieve right now."),
+    checking: z.string().optional().describe("What the agent is verifying or inspecting."),
+    hypothesis: z.string().optional().describe("Current working theory or approach."),
+    blocker: z.string().optional().describe("Current blocker, if any."),
+    next_action: z.string().optional().describe("Immediate next step the agent plans to take."),
+    milestone: z.string().optional().describe("Optional durable milestone summary to append to room history."),
+    confidence: z.number().min(0).max(1).optional().describe("Optional confidence score between 0 and 1."),
+    status: z.enum(AGENT_PRESENCE_STATUSES).optional().describe("Optional explicit presence state override."),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
+    conversation_id: z
+      .string()
+      .optional()
+      .describe("Optional conversation ID for per-conversation identity scoping."),
+  },
+  async ({
+    summary,
+    goal,
+    checking,
+    hypothesis,
+    blocker,
+    next_action,
+    milestone,
+    confidence,
+    status,
+    room_id,
+    conversation_id,
+  }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    const targetProjectId = getFallbackProjectId();
+
+    if (!targetRoomId && !targetProjectId) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "No room_id provided and not currently in a room.",
+                hint: "Join or create a room first, or pass room_id explicitly.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const normalizedSummary = summary.trim();
+    if (!normalizedSummary) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: false, error: "summary is required" }, null, 2),
+          },
+        ],
+      };
+    }
+
+    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+    const snapshot = {
+      summary: normalizedSummary,
+      goal: normalizeOptionalToolString(goal),
+      checking: normalizeOptionalToolString(checking),
+      hypothesis: normalizeOptionalToolString(hypothesis),
+      blocker: normalizeOptionalToolString(blocker),
+      next_action: normalizeOptionalToolString(next_action),
+      milestone: normalizeOptionalToolString(milestone),
+      confidence,
+      status,
+    };
+
+    const query = new URLSearchParams({
+      open: "true",
+      actor_label: identity.actor_label,
+    });
+    const sessionsResult = await roomScopedApiCall<{
+      sessions?: Array<{
+        id: string;
+        task_id?: string | null;
+        anchor_message_id?: string | null;
+        actor_label: string;
+        agent_key?: string | null;
+        status?: AgentPresenceStatus | null;
+        summary: string;
+        latest_payload?: Record<string, unknown>;
+        created_at?: string;
+        updated_at?: string;
+        closed_at?: string | null;
+      }>;
+    }>({
+      room_id: targetRoomId,
+      project_id: targetProjectId,
+      room_path: (targetRoomId) =>
+        `/rooms/${encodeRoomIdPath(targetRoomId)}/reasoning-sessions?${query.toString()}`,
+      project_path: (targetProjectId) =>
+        `/projects/${encodeURIComponent(targetProjectId)}/reasoning-sessions?${query.toString()}`,
+    });
+
+    const existingSession = sessionsResult.sessions?.[0];
+    let result:
+      | {
+          room_id?: string;
+          session: Record<string, unknown>;
+          update?: Record<string, unknown>;
+        }
+      | null = null;
+
+    if (existingSession?.id) {
+      result = await roomScopedApiCall<{
+        room_id?: string;
+        session: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }>({
+        room_id: targetRoomId,
+        project_id: targetProjectId,
+        room_path: (targetRoomId) =>
+          `/rooms/${encodeRoomIdPath(targetRoomId)}/reasoning-sessions/${encodeURIComponent(existingSession.id)}/updates`,
+        project_path: (targetProjectId) =>
+          `/projects/${encodeURIComponent(targetProjectId)}/reasoning-sessions/${encodeURIComponent(existingSession.id)}/updates`,
+        options: {
+          method: "POST",
+          body: JSON.stringify({
+            actor_label: identity.actor_label,
+            ...snapshot,
+          }),
+        },
+      });
+    } else {
+      result = await roomScopedApiCall<{
+        room_id?: string;
+        session: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }>({
+        room_id: targetRoomId,
+        project_id: targetProjectId,
+        room_path: (targetRoomId) =>
+          `/rooms/${encodeRoomIdPath(targetRoomId)}/reasoning-sessions`,
+        project_path: (targetProjectId) =>
+          `/projects/${encodeURIComponent(targetProjectId)}/reasoning-sessions`,
+        options: {
+          method: "POST",
+          body: JSON.stringify({
+            actor_label: identity.actor_label,
+            agent_key: identity.canonical_key,
+            ...snapshot,
+          }),
+        },
+      });
+    }
+
+    let milestoneMessageId: string | null = null;
+    const normalizedMilestone = normalizeOptionalToolString(milestone);
+    if (normalizedMilestone) {
+      const milestoneMessage = await roomScopedApiCall<Record<string, unknown>>({
+        room_id: targetRoomId,
+        project_id: targetProjectId,
+        room_path: (targetRoomId) => `/rooms/${encodeRoomIdPath(targetRoomId)}/messages`,
+        project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
+        options: {
+          method: "POST",
+          body: JSON.stringify({
+            sender: identity.actor_label,
+            text: normalizedMilestone,
+          }),
+        },
+      });
+      milestoneMessageId =
+        typeof milestoneMessage.id === "string" ? milestoneMessage.id : null;
+      touchCurrentRoom(milestoneMessageId ?? undefined);
+    }
+
+    if (status) {
+      await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+        status,
+        status_text: normalizedSummary,
+      });
+    } else {
+      await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              room_id: result?.room_id ?? targetRoomId ?? targetProjectId ?? null,
+              session: result?.session ?? null,
+              update: result?.update ?? null,
+              milestone_message_id: milestoneMessageId,
+              agent_identity: toPublicAgentIdentity(identity),
             },
             null,
             2

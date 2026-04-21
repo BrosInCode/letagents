@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import type { Project } from "../db.js";
@@ -46,6 +47,7 @@ function createStore(overrides: Partial<RoomReasoningStore> = {}): RoomReasoning
 
 function createDeps(overrides: Partial<RoomReasoningRouteDeps> = {}): RoomReasoningRouteDeps {
   return {
+    reasoningEvents: new EventEmitter(),
     resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
     resolveRoomOrReply: async () => project(),
     requireParticipant: async () => true,

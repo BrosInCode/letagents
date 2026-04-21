@@ -12,6 +12,7 @@ import {
   getMessagesBefore,
   type Message,
   type Project,
+  type ReasoningSession,
   type Task,
 } from "../db.js";
 import {
@@ -49,9 +50,20 @@ interface TaskUpdatedEvent {
   task: Task;
 }
 
+interface ReasoningSessionUpdatedEvent {
+  projectId: string;
+  session: ReasoningSession;
+}
+
+interface ReasoningSessionRemovedEvent {
+  projectId: string;
+  session_id: string;
+}
+
 export interface RoomMessageRouteDeps {
   messageEvents: EventEmitter;
   taskEvents: EventEmitter;
+  reasoningEvents: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
@@ -381,12 +393,26 @@ export function registerRoomMessageRoutes(
       res.write(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
     };
 
+    const onReasoningUpdated = (event: ReasoningSessionUpdatedEvent) => {
+      if (event.projectId !== projectId) return;
+      res.write(`event: reasoning_update\ndata: ${JSON.stringify({ room_id: project.id, session: event.session })}\n\n`);
+    };
+
+    const onReasoningRemoved = (event: ReasoningSessionRemovedEvent) => {
+      if (event.projectId !== projectId) return;
+      res.write(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
+    };
+
     deps.messageEvents.on("message:created", onMessageCreated);
     deps.taskEvents.on("task:updated", onTaskUpdated);
+    deps.reasoningEvents.on("reasoning:updated", onReasoningUpdated);
+    deps.reasoningEvents.on("reasoning:removed", onReasoningRemoved);
 
     req.on("close", () => {
       deps.messageEvents.off("message:created", onMessageCreated);
       deps.taskEvents.off("task:updated", onTaskUpdated);
+      deps.reasoningEvents.off("reasoning:updated", onReasoningUpdated);
+      deps.reasoningEvents.off("reasoning:removed", onReasoningRemoved);
       stopSseStream(res, heartbeat);
     });
   });
