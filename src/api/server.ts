@@ -108,7 +108,6 @@ import {
   type CoordinationDecisionResult,
 } from "./coordination-policy.js";
 import { createTaskCoordinationEnforcement } from "./task-coordination-enforcement.js";
-import { createFocusParentBoardWriteIsolationEnforcer } from "./focus-room-task-write-isolation.js";
 import type { AgentPromptKind } from "../shared/room-agent-prompts.js";
 import {
   parseOptionalAgentPromptKind,
@@ -324,9 +323,6 @@ const taskCoordinationEnforcement = createTaskCoordinationEnforcement({
   updateTaskLeaseWorkflowRefs,
 });
 
-const enforceFocusParentBoardWriteIsolation = createFocusParentBoardWriteIsolationEnforcer({
-  getProjectById,
-});
 const {
   validateOwnerTokenTaskActorKey,
   recordCoordinationDecision,

@@ -74,7 +74,6 @@ import {
 import { buildRoomEventsQueryString } from "./room-events-query.js";
 import type { AgentPresenceStatus } from "../shared/agent-presence.js";
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
-import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../shared/request-headers.js";
 
 // ---------------------------------------------------------------------------
 // Room State

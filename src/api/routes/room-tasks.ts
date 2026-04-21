@@ -230,15 +230,6 @@ export function registerRoomTaskRoutes(
       return;
     }
 
-    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
-      req,
-      targetProject: project,
-    });
-    if (isolation.kind === "deny") {
-      res.status(409).json({ error: isolation.error, code: isolation.code });
-      return;
-    }
-
     const admission = await deps.enforceTaskAdmissionCoordination({
       req,
       projectId: project.id,
