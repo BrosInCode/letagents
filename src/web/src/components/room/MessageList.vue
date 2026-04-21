@@ -17,6 +17,7 @@
         :thread="threadSummaries.get(msg.id) || null"
         :class="searchClasses(msg)"
         :searchQuery="searchQuery"
+        @openImageViewer="emit('openImageViewer', $event)"
         @reply="emit('reply', $event)"
         @scrollToReply="scrollToMessage"
       />
@@ -52,6 +53,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
+  openImageViewer: [viewerId: string]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)

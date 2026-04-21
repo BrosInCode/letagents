@@ -34,6 +34,14 @@
       @close="rulesBoardOpen = false"
     />
 
+    <ImageViewerModal
+      :open="Boolean(selectedImageViewerId)"
+      :images="viewerImages"
+      :activeImageId="selectedImageViewerId"
+      @close="selectedImageViewerId = null"
+      @update:activeImageId="selectedImageViewerId = $event"
+    />
+
     <div v-if="connectionState === 'error' && !isConnected" class="room-error">
       <p class="room-error-title">{{ joinErrorTitle }}</p>
       <p class="room-error-body">{{ joinErrorBody }}</p>
@@ -57,6 +65,7 @@
           :isLoadingOlderMessages="isLoadingOlderMessages"
           :searchQuery="searchQuery"
           @loadOlder="loadOlderMessages"
+          @openImageViewer="handleOpenImageViewer"
           @reply="selectedReply = $event"
         />
 
@@ -206,6 +215,7 @@ import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
+import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import MessageList from '@/components/room/MessageList.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
@@ -213,6 +223,13 @@ import Composer from '@/components/room/Composer.vue'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
+import {
+  attachmentHref,
+  attachmentMeta,
+  attachmentName,
+  attachmentViewerId,
+  isImageAttachment,
+} from '@/components/room/messageAttachments'
 import { useToast } from '@/composables/useToast'
 import type { FocusRoomInfo, FocusRoomSettingsPatch, OutgoingMessageAttachment, RoomMessage } from '@/composables/useRoom'
 
@@ -264,6 +281,7 @@ const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
+const selectedImageViewerId = ref<string | null>(null)
 const focusDraftTaskId = ref<string | null>(null)
 const creatingFocusRoomTaskId = ref<string | null>(null)
 const creatingAdHocFocusRoom = ref(false)
@@ -305,10 +323,34 @@ const githubEventsRepository = computed(() =>
     : room.value?.name || room.value?.identifier || null
 )
 const showGitHubSignIn = computed(() => joinError.value?.code === 'NOT_AUTHENTICATED')
+const viewerImages = computed(() =>
+  messages.value.flatMap((message) =>
+    (message.attachments || [])
+      .filter((attachment) => isImageAttachment(attachment))
+      .map((attachment) => {
+        const href = attachmentHref(attachment)
+        return {
+          id: attachmentViewerId(message.id, attachment),
+          src: href,
+          name: attachmentName(attachment),
+          meta: attachmentMeta(attachment),
+          timestamp: message.timestamp,
+          downloadUrl: attachment.download_url || href,
+          openUrl: href,
+        }
+      })
+  )
+)
 const visibleTabOrder = computed(() => TAB_ORDER.filter(tab => tab !== 'events' || githubEventsSupported.value))
 const tabTransitionName = computed(() =>
   tabTransitionDirection.value === 'forward' ? 'tab-slide-forward' : 'tab-slide-back'
 )
+watch(viewerImages, (images) => {
+  if (!selectedImageViewerId.value) return
+  if (!images.some((image) => image.id === selectedImageViewerId.value)) {
+    selectedImageViewerId.value = null
+  }
+})
 const joinErrorTitle = computed(() => {
   if (joinError.value?.code === 'NOT_AUTHENTICATED') {
     return 'GitHub sign-in required'
@@ -351,6 +393,11 @@ async function handleAddTask(title: string) {
 
 async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
+}
+
+function handleOpenImageViewer(viewerId: string) {
+  if (!viewerImages.value.some((image) => image.id === viewerId)) return
+  selectedImageViewerId.value = viewerId
 }
 
 function roomRoutePath(identifier: string): string {
@@ -643,6 +690,9 @@ watch(() => route.query.view, (newView) => {
 })
 
 watch(activeTab, async (tab) => {
+  if (tab !== 'chat') {
+    selectedImageViewerId.value = null
+  }
   if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
   }
