@@ -4,6 +4,10 @@ import {
   buildAgentRoomParticipantKey,
   buildHumanRoomParticipantKey,
 } from "../shared/room-participant.js";
+import {
+  buildRoomActivitySourceFlags,
+  deriveRoomAgentActivityState,
+} from "../shared/room-agent-activity.js";
 
 function normalizeValue(value: string | null | undefined): string {
   return String(value ?? "").trim();
@@ -78,6 +82,13 @@ export function buildFallbackRoomParticipants(input: {
       github_login: primary.github_login ?? secondary.github_login,
       owner_label: primary.owner_label ?? secondary.owner_label,
       ide_label: primary.ide_label ?? secondary.ide_label,
+      last_room_activity_at: primary.last_room_activity_at ?? secondary.last_room_activity_at,
+      last_live_heartbeat_at: primary.last_live_heartbeat_at ?? secondary.last_live_heartbeat_at,
+      activity_state: primary.activity_state ?? secondary.activity_state,
+      source_flags: buildRoomActivitySourceFlags([
+        ...(secondary.source_flags ?? []),
+        ...(primary.source_flags ?? []),
+      ]),
       created_at: existing.created_at,
       updated_at: primary.updated_at,
       last_seen_at: primary.last_seen_at,
@@ -103,6 +114,10 @@ export function buildFallbackRoomParticipants(input: {
       hidden_at: null,
       hidden_by: null,
       last_seen_at: entry.last_heartbeat_at,
+      last_room_activity_at: entry.last_heartbeat_at,
+      last_live_heartbeat_at: entry.activity_state === "historical" ? null : entry.last_heartbeat_at,
+      activity_state: entry.activity_state,
+      source_flags: buildRoomActivitySourceFlags(entry.source_flags),
       created_at: entry.created_at,
       updated_at: entry.updated_at,
     });
@@ -136,6 +151,10 @@ export function buildFallbackRoomParticipants(input: {
         hidden_at: null,
         hidden_by: null,
         last_seen_at: message.timestamp,
+        last_room_activity_at: message.timestamp,
+        last_live_heartbeat_at: null,
+        activity_state: null,
+        source_flags: buildRoomActivitySourceFlags(["messages"]),
         created_at: message.timestamp,
         updated_at: message.timestamp,
       });
@@ -165,6 +184,14 @@ export function buildFallbackRoomParticipants(input: {
       hidden_at: null,
       hidden_by: null,
       last_seen_at: message.timestamp,
+      last_room_activity_at: message.timestamp,
+      last_live_heartbeat_at: null,
+      activity_state: deriveRoomAgentActivityState({
+        hidden: false,
+        hasPresence: false,
+        freshness: null,
+      }),
+      source_flags: buildRoomActivitySourceFlags(["messages"]),
       created_at: message.timestamp,
       updated_at: message.timestamp,
     });

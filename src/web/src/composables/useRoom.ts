@@ -298,6 +298,8 @@ export interface RoomAgentPresence {
   created_at: string
   updated_at: string
   freshness: 'active' | 'stale'
+  activity_state: 'online' | 'stale' | 'historical' | 'archived'
+  source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
 }
 
 export interface RoomParticipant {
@@ -313,6 +315,10 @@ export interface RoomParticipant {
   hidden_at: string | null
   hidden_by: string | null
   last_seen_at: string
+  last_room_activity_at: string | null
+  last_live_heartbeat_at: string | null
+  activity_state: 'online' | 'stale' | 'historical' | 'archived' | null
+  source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
   created_at: string
   updated_at: string
 }
@@ -352,9 +358,13 @@ export interface RoomActivityHistoryEntry {
     ide_label: string | null
     hidden_at: string | null
     hidden_by: string | null
+    last_live_heartbeat_at: string | null
+    activity_state: 'online' | 'stale' | 'historical' | 'archived' | null
+    source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
   }
   first_seen_at: string
   last_seen_at: string
+  last_room_activity_at: string
   current_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
   completed_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>
   created_tasks: ReadonlyArray<RoomActivityHistoryTaskSummary>

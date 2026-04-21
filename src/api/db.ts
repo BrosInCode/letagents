@@ -46,6 +46,12 @@ import {
   type AgentPresenceStatus,
 } from "../shared/agent-presence.js";
 import {
+  buildRoomActivitySourceFlags,
+  deriveRoomAgentActivityState,
+  type RoomActivitySourceFlag,
+  type RoomAgentActivityState,
+} from "../shared/room-agent-activity.js";
+import {
   buildTaskWorkflowRefs,
   normalizeTaskWorkflowArtifacts,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
@@ -220,6 +226,8 @@ export interface RoomAgentPresence {
   created_at: string;
   updated_at: string;
   freshness: AgentPresenceFreshness;
+  activity_state: RoomAgentActivityState;
+  source_flags: RoomActivitySourceFlag[];
 }
 
 export interface RoomParticipant {
@@ -235,6 +243,10 @@ export interface RoomParticipant {
   hidden_at: string | null;
   hidden_by: string | null;
   last_seen_at: string;
+  last_room_activity_at: string | null;
+  last_live_heartbeat_at: string | null;
+  activity_state: RoomAgentActivityState | null;
+  source_flags: RoomActivitySourceFlag[];
   created_at: string;
   updated_at: string;
 }
@@ -874,6 +886,7 @@ function toCoordinationEvent(row: CoordinationEventRow): CoordinationEvent {
 }
 
 function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
+  const freshness = getAgentPresenceFreshness(row.last_heartbeat_at);
   return {
     room_id: row.room_id,
     actor_label: row.actor_label,
@@ -886,7 +899,13 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     last_heartbeat_at: row.last_heartbeat_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
-    freshness: getAgentPresenceFreshness(row.last_heartbeat_at),
+    freshness,
+    activity_state: deriveRoomAgentActivityState({
+      hidden: false,
+      hasPresence: true,
+      freshness,
+    }),
+    source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
 }
 
@@ -904,6 +923,10 @@ function toRoomParticipant(row: RoomParticipantRow): RoomParticipant {
     hidden_at: row.hidden_at,
     hidden_by: row.hidden_by,
     last_seen_at: row.last_seen_at,
+    last_room_activity_at: row.last_seen_at,
+    last_live_heartbeat_at: null,
+    activity_state: null,
+    source_flags: [],
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

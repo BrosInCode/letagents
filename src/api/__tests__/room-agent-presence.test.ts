@@ -96,6 +96,8 @@ test(
     assert.equal(presence[0]?.status, "working");
     assert.equal(presence[0]?.status_text, "working on task_58");
     assert.equal(presence[0]?.freshness, "active");
+    assert.equal(presence[0]?.activity_state, "online");
+    assert.deepEqual(presence[0]?.source_flags, ["presence"]);
   }
 );
 
@@ -138,5 +140,6 @@ test(
     assert.equal(presence.length, 1);
     assert.equal(presence[0]?.status, "reviewing");
     assert.equal(presence[0]?.status_text, "reviewing PR #146");
+    assert.equal(presence[0]?.activity_state, "online");
   }
 );

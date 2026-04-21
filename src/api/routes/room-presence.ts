@@ -25,6 +25,10 @@ import {
   paginateRoomActivityHistoryEntries,
   type RoomActivityHistoryKind,
 } from "../room-activity-history.js";
+import {
+  decorateRoomActivityHistoryEntriesWithPresence,
+  decorateRoomParticipantsWithPresence,
+} from "../room-activity-state.js";
 import { buildFallbackPresenceFromMessages, buildSyntheticPresenceEntry } from "../presence-fallback.js";
 import { buildFallbackRoomParticipants } from "../room-participant-fallback.js";
 import { normalizeRoomId } from "../room-routing.js";
@@ -143,14 +147,21 @@ export function registerRoomPresenceRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined) ?? 100;
 
     try {
-      const storedParticipants = await getRoomParticipants(project.id, { limit, includeHidden: true });
+      const [storedParticipants, storedPresence] = await Promise.all([
+        getRoomParticipants(project.id, { limit, includeHidden: true }),
+        getRoomAgentPresence(project.id, { limit: 500 }).catch(() => []),
+      ]);
       if (storedParticipants.length > 0) {
+        const participants = decorateRoomParticipantsWithPresence({
+          participants: storedParticipants,
+          presence: storedPresence,
+        });
         res.json({
           room_id: project.id,
-          participants: storedParticipants
+          participants: participants
             .filter((participant) => !participant.hidden_at)
             .map(toPublicRoomParticipant),
-          hidden_count: storedParticipants.filter((participant) => Boolean(participant.hidden_at)).length,
+          hidden_count: participants.filter((participant) => Boolean(participant.hidden_at)).length,
         });
         return;
       }
@@ -158,12 +169,15 @@ export function registerRoomPresenceRoutes(
       const fallbackMessageLimit = Math.min(Math.max(limit * 4, 100), 200);
       const [messagesResult, presence] = await Promise.all([
         getMessages(project.id, { limit: fallbackMessageLimit }),
-        getRoomAgentPresence(project.id, { limit }),
+        getRoomAgentPresence(project.id, { limit }).catch(() => []),
       ]);
 
-      const participantsFromHistory = buildFallbackRoomParticipants({
-        roomId: project.id,
-        messages: messagesResult.messages,
+      const participantsFromHistory = decorateRoomParticipantsWithPresence({
+        participants: buildFallbackRoomParticipants({
+          roomId: project.id,
+          messages: messagesResult.messages,
+          presence,
+        }),
         presence,
       }).slice(0, limit);
 
@@ -204,15 +218,19 @@ export function registerRoomPresenceRoutes(
       const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? project;
       const scopedRooms = rooms.filter((room) => room.id === selectedRoom.id);
       const scopedRoomIds = scopedRooms.map((room) => room.id);
-      const [participants, roomTasks, selectedRoomParticipants] = await Promise.all([
+      const [participants, roomTasks, selectedRoomParticipants, selectedRoomPresence] = await Promise.all([
         getRoomParticipantsForRooms(scopedRoomIds, { includeHidden: true }),
         getTasksForRooms(scopedRoomIds),
         getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
+        getRoomAgentPresence(selectedRoom.id, { limit: 500 }).catch(() => []),
       ]);
-      const entries = buildRoomActivityHistoryEntries({
-        rooms: scopedRooms,
-        participants,
-        tasks: roomTasks,
+      const entries = decorateRoomActivityHistoryEntriesWithPresence({
+        entries: buildRoomActivityHistoryEntries({
+          rooms: scopedRooms,
+          participants,
+          tasks: roomTasks,
+        }),
+        presence: selectedRoomPresence,
       });
       const filtered = filterRoomActivityHistoryEntries(entries, {
         roomId: selectedRoom.id,
