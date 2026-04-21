@@ -69,6 +69,12 @@
           <span class="reply-preview-text">{{ replyPreviewText }}</span>
         </button>
         <GitHubEventCard v-if="githubEvent" :event="githubEvent" />
+        <AgentThinkingCard
+          v-else-if="thinkingCard"
+          :card="thinkingCard"
+          compact
+          kicker="Thinking update"
+        />
         <LongMessageContent
           v-else-if="message.text"
           :text="message.text || ''"
@@ -136,10 +142,12 @@
 
 <script setup lang="ts">
 import { computed, reactive } from 'vue'
+import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
 import { parseGitHubEventPresentation } from './githubEventMessage'
 import { type RoomMessage, type RoomMessageAttachment, parseAgentIdentity, isHumanSender, getSenderColor, hasInlinePromptInjection, getReplyPreviewText } from '@/composables/useRoom'
+import { buildAgentThinkingEntry } from './agentThinking'
 
 interface MessageThreadSummary {
   count: number
@@ -164,6 +172,7 @@ const isSystem = computed(() => {
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
 const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
+const thinkingCard = computed(() => buildAgentThinkingEntry(props.message))
 const attachments = computed(() => props.message.attachments || [])
 const attachmentImageStates = reactive<Record<string, 'loading' | 'loaded' | 'error'>>({})
 

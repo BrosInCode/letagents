@@ -204,9 +204,48 @@
           </article>
         </div>
 
-        <p v-if="selectedParticipant.statusText" class="activity-detail-description">
+        <section
+          v-if="selectedParticipant.kind === 'agent' && selectedParticipant.thinkingSnapshot"
+          class="activity-detail-section"
+        >
+          <div class="activity-detail-section-header">
+            <h4>Reasoning snapshot</h4>
+            <span>Live</span>
+          </div>
+
+          <AgentThinkingCard
+            :card="selectedParticipant.thinkingSnapshot"
+            kicker="Latest visible reasoning"
+            :timestampLabel="formatLastSeen(selectedParticipant.lastSeenAt)"
+          />
+        </section>
+
+        <p
+          v-else-if="selectedParticipant.statusText"
+          class="activity-detail-description"
+        >
           {{ selectedParticipant.statusText }}
         </p>
+
+        <section
+          v-if="selectedParticipant.kind === 'agent' && selectedParticipant.thinkingTimeline.length > 0"
+          class="activity-detail-section"
+        >
+          <div class="activity-detail-section-header">
+            <h4>Reasoning trail</h4>
+            <span>{{ selectedParticipant.thinkingTimeline.length }}</span>
+          </div>
+
+          <div class="activity-thinking-list">
+            <AgentThinkingCard
+              v-for="entry in selectedParticipant.thinkingTimeline"
+              :key="entry.id"
+              :card="entry"
+              compact
+              :timestampLabel="formatLastSeen(entry.timestamp)"
+            />
+          </div>
+        </section>
 
         <section class="activity-detail-section">
           <div class="activity-detail-section-header">
@@ -331,6 +370,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import AgentThinkingCard from './AgentThinkingCard.vue'
 import {
   isHumanSender,
   parseAgentIdentity,
@@ -340,6 +380,13 @@ import {
   type RoomTask,
   type TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
+import {
+  buildAgentThinkingSnapshot,
+  buildAgentThinkingTimeline,
+  extractStatusText,
+  type AgentThinkingCardData,
+  type AgentThinkingTimelineEntry,
+} from './agentThinking'
 
 type ParticipantKind = 'agent' | 'human'
 type ParticipantConnection = 'online' | 'disconnected'
@@ -360,6 +407,8 @@ interface ActivityParticipant {
   completedTasks: RoomTask[]
   createdTasks: RoomTask[]
   recentMessages: RoomMessage[]
+  thinkingSnapshot: AgentThinkingCardData | null
+  thinkingTimeline: AgentThinkingTimelineEntry[]
 }
 
 const props = defineProps<{
@@ -408,11 +457,6 @@ function pushMapValue<T>(target: Map<string, T[]>, key: string, value: T) {
     return
   }
   target.set(key, [value])
-}
-
-function extractStatusText(text: string | null | undefined): string | null {
-  const normalized = String(text || '').trim().replace(/^\[status\]\s*/i, '').trim()
-  return normalized || null
 }
 
 function previewMessage(text: string): string {
@@ -488,7 +532,9 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
   const presenceEntry = actorLabel ? (presenceByActor.value.get(actorLabel) || null) : null
   const messages = actorLabel ? (agentMessagesByActor.value.get(actorLabel) || []) : []
   const latestMessage = messages[messages.length - 1] || null
-  const latestStatusMessage = [...messages].reverse().find((message) => extractStatusText(message.text)) || null
+  const latestStatusMessage = [...messages].reverse().find((message) =>
+    /^\[status\]\s*/i.test(String(message.text || ''))
+  ) || null
   const parsed = parseAgentIdentity(actorLabel)
   const label = participant.display_name || presenceEntry?.display_name || latestMessage?.agent_identity?.display_name || parsed.displayName || actorLabel
   const ownerLabel = participant.owner_label
@@ -514,6 +560,8 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     completedTasks: [],
     createdTasks: [],
     recentMessages: [],
+    thinkingSnapshot: null,
+    thinkingTimeline: [],
   }, task.assignee))
   const currentTasks = sortTasksByUpdated(assignedTasks.filter((task) => OPEN_TASK_STATUSES.has(task.status)))
   const completedTasks = sortTasksByUpdated(
@@ -536,8 +584,17 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
       completedTasks: [],
       createdTasks: [],
       recentMessages: [],
+      thinkingSnapshot: null,
+      thinkingTimeline: [],
     }, task.created_by))
   ).slice(0, 8)
+  const statusText = presenceEntry?.status_text || (latestStatusMessage ? extractStatusText(latestStatusMessage.text || '') : null) || null
+  const thinkingSnapshot = buildAgentThinkingSnapshot({
+    messages,
+    status: presenceEntry?.status || null,
+    statusText,
+  })
+  const thinkingTimeline = buildAgentThinkingTimeline(messages)
 
   return {
     key: participant.participant_key,
@@ -548,7 +605,7 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     ideLabel,
     connection: presenceEntry?.freshness === 'active' ? 'online' : 'disconnected',
     status: presenceEntry?.status || null,
-    statusText: presenceEntry?.status_text || extractStatusText(latestStatusMessage?.text) || null,
+    statusText,
     lastSeenAt: latestTimestamp(
       participant.last_seen_at,
       presenceEntry?.last_heartbeat_at,
@@ -562,6 +619,8 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
     completedTasks,
     createdTasks,
     recentMessages: [...messages].slice(-4).reverse(),
+    thinkingSnapshot,
+    thinkingTimeline,
   }
 }
 
@@ -602,6 +661,8 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
     completedTasks,
     createdTasks,
     recentMessages: [...messages].slice(-4).reverse(),
+    thinkingSnapshot: null,
+    thinkingTimeline: [],
   }
 }
 
@@ -1051,7 +1112,8 @@ function formatLastSeen(value: string | null): string {
 }
 
 .activity-task-list,
-.activity-message-list {
+.activity-message-list,
+.activity-thinking-list {
   display: grid;
   gap: var(--space-sm, 8px);
 }
