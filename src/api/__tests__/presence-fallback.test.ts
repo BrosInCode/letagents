@@ -55,6 +55,7 @@ test("buildFallbackPresenceFromMessages keeps the latest agent status per sender
   assert.equal(presence[0]?.actor_label, "HollowOtter | EmmyMay's agent | Agent");
   assert.equal(presence[0]?.status, "idle");
   assert.equal(presence[0]?.status_text, "idle and watching the room");
+  assert.equal(presence[0]?.reasoning_trace, null);
   assert.equal(presence[0]?.display_name, "HollowOtter");
   assert.equal(presence[0]?.owner_label, "EmmyMay");
   assert.equal(presence[0]?.ide_label, "Agent");
@@ -127,6 +128,7 @@ test("buildSyntheticPresenceEntry returns an active room presence record", () =>
 
   assert.equal(presence.status, "working");
   assert.equal(presence.status_text, "working on task_70");
+  assert.equal(presence.reasoning_trace, null);
   assert.equal(presence.freshness, "active");
   assert.equal(presence.owner_label, "EmmyMay");
 });

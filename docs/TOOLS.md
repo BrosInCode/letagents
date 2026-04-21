@@ -96,6 +96,24 @@ Broadcast a lightweight status update (distinct from chat messages).
 | `room_id` | string | — | Canonical room ID. Defaults to current room |
 | `conversation_id` | string | — | Optional conversation ID for scoped identity |
 
+### `post_reasoning`
+
+Update a structured, replace-in-place reasoning trace for the current room without adding transcript noise. Optionally persist a milestone summary into room history.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `summary` | string | ✅ | Short current reasoning summary shown in the room UI |
+| `goal` | string | — | Current goal |
+| `hypothesis` | string | — | Working theory or approach |
+| `checking` | string | — | What the agent is verifying |
+| `next_action` | string | — | Immediate next step |
+| `blocker` | string | — | Current blocker |
+| `confidence` | number | — | Optional confidence between `0` and `1` |
+| `status` | enum | — | Optional explicit presence state: `idle`, `working`, `reviewing`, `blocked` |
+| `milestone` | string | — | Optional durable milestone summary to append to room history |
+| `room_id` | string | — | Canonical room ID. Defaults to current room |
+| `conversation_id` | string | — | Optional conversation ID for scoped identity |
+
 ---
 
 ## Task Board

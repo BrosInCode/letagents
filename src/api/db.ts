@@ -44,6 +44,7 @@ import {
   type AgentPresenceFreshness,
   type AgentPresenceStatus,
 } from "../shared/agent-presence.js";
+import type { AgentReasoningTrace } from "../shared/agent-reasoning.js";
 import {
   buildTaskWorkflowRefs,
   normalizeTaskWorkflowArtifacts,
@@ -215,6 +216,7 @@ export interface RoomAgentPresence {
   ide_label: string | null;
   status: AgentPresenceStatus;
   status_text: string | null;
+  reasoning_trace: AgentReasoningTrace | null;
   last_heartbeat_at: string;
   created_at: string;
   updated_at: string;
@@ -493,6 +495,7 @@ interface RoomAgentPresenceRow {
   ide_label: string | null;
   status: AgentPresenceStatus;
   status_text: string | null;
+  reasoning_trace: AgentReasoningTrace | null;
   last_heartbeat_at: string;
   created_at: string;
   updated_at: string;
@@ -837,6 +840,7 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     ide_label: row.ide_label,
     status: row.status,
     status_text: row.status_text,
+    reasoning_trace: row.reasoning_trace ?? null,
     last_heartbeat_at: row.last_heartbeat_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -2345,6 +2349,7 @@ export async function upsertRoomAgentPresence(input: {
   ide_label?: string | null;
   status: AgentPresenceStatus;
   status_text?: string | null;
+  reasoning_trace?: AgentReasoningTrace | null;
 }): Promise<RoomAgentPresence> {
   const now = new Date().toISOString();
 
@@ -2359,6 +2364,7 @@ export async function upsertRoomAgentPresence(input: {
       ide_label: input.ide_label ?? null,
       status: input.status,
       status_text: input.status_text ?? null,
+      reasoning_trace: input.reasoning_trace ?? null,
       last_heartbeat_at: now,
       created_at: now,
       updated_at: now,
@@ -2372,6 +2378,7 @@ export async function upsertRoomAgentPresence(input: {
         ide_label: input.ide_label ?? null,
         status: input.status,
         status_text: input.status_text ?? null,
+        reasoning_trace: input.reasoning_trace ?? null,
         last_heartbeat_at: now,
         updated_at: now,
       },

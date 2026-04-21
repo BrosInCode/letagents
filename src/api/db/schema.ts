@@ -6,6 +6,7 @@ import type {
   FocusGitHubEventRouting,
   FocusParentVisibility,
 } from "../focus-room-settings.js";
+import type { AgentReasoningTrace } from "../../shared/agent-reasoning.js";
 import { AGENT_PRESENCE_STATUSES } from "../../shared/agent-presence.js";
 import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
 
@@ -350,6 +351,7 @@ export const room_agent_presence = pgTable(
     ide_label: text("ide_label"),
     status: agentPresenceStatusEnum("status").notNull().default("idle"),
     status_text: text("status_text"),
+    reasoning_trace: jsonb("reasoning_trace").$type<AgentReasoningTrace | null>(),
     last_heartbeat_at: timestamp("last_heartbeat_at", { mode: "string", withTimezone: true }).notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),

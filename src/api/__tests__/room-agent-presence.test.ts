@@ -88,6 +88,15 @@ test(
       ide_label: "Agent",
       status: "working",
       status_text: "working on task_58",
+      reasoning_trace: {
+        summary: "working on task_58",
+        goal: "Surface visible reasoning",
+        hypothesis: "presence can carry the active trace",
+        checking: "room presence payloads",
+        next_action: "wire MCP tool",
+        blocker: null,
+        confidence: 0.6,
+      },
     });
 
     const presence = await getRoomAgentPresence(room.id);
@@ -95,6 +104,15 @@ test(
     assert.equal(presence[0]?.actor_label, "MapleRidge | EmmyMay's agent | Agent");
     assert.equal(presence[0]?.status, "working");
     assert.equal(presence[0]?.status_text, "working on task_58");
+    assert.deepEqual(presence[0]?.reasoning_trace, {
+      summary: "working on task_58",
+      goal: "Surface visible reasoning",
+      hypothesis: "presence can carry the active trace",
+      checking: "room presence payloads",
+      next_action: "wire MCP tool",
+      blocker: null,
+      confidence: 0.6,
+    });
     assert.equal(presence[0]?.freshness, "active");
   }
 );
@@ -121,6 +139,15 @@ test(
       ide_label: "Agent",
       status: "idle",
       status_text: "online in room",
+      reasoning_trace: {
+        summary: "online in room",
+        goal: "Watch the room",
+        hypothesis: null,
+        checking: null,
+        next_action: "wait for work",
+        blocker: null,
+        confidence: 0.5,
+      },
     });
 
     await upsertRoomAgentPresence({
@@ -132,11 +159,13 @@ test(
       ide_label: "Agent",
       status: "reviewing",
       status_text: "reviewing PR #146",
+      reasoning_trace: null,
     });
 
     const presence = await getRoomAgentPresence(room.id);
     assert.equal(presence.length, 1);
     assert.equal(presence[0]?.status, "reviewing");
     assert.equal(presence[0]?.status_text, "reviewing PR #146");
+    assert.equal(presence[0]?.reasoning_trace, null);
   }
 );

@@ -21,6 +21,7 @@ import {
   normalizeAgentPresenceStatus,
   type AgentPresenceStatus,
 } from "../../shared/agent-presence.js";
+import { normalizeAgentReasoningTrace } from "../../shared/agent-reasoning.js";
 
 export interface RoomPresenceRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -161,6 +162,7 @@ export function registerRoomPresenceRoutes(
       ide_label,
       status,
       status_text,
+      reasoning_trace,
     } = req.body as {
       actor_label?: string;
       agent_key?: string | null;
@@ -169,6 +171,7 @@ export function registerRoomPresenceRoutes(
       ide_label?: string | null;
       status?: string;
       status_text?: string | null;
+      reasoning_trace?: unknown;
     };
 
     const actorLabel = typeof actor_label === "string" ? actor_label.trim() : "";
@@ -176,7 +179,16 @@ export function registerRoomPresenceRoutes(
     const agentKey = typeof agent_key === "string" ? agent_key.trim() || null : null;
     const ownerLabel = typeof owner_label === "string" ? owner_label.trim() || null : null;
     const ideLabel = typeof ide_label === "string" ? ide_label.trim() || null : null;
-    const statusText = typeof status_text === "string" ? status_text.trim() || null : null;
+    const normalizedReasoningTrace = normalizeAgentReasoningTrace(reasoning_trace);
+    if (reasoning_trace !== undefined && reasoning_trace !== null && !normalizedReasoningTrace) {
+      res.status(400).json({
+        error: "reasoning_trace must include at least one non-empty reasoning field",
+      });
+      return;
+    }
+    const statusText = typeof status_text === "string"
+      ? status_text.trim() || null
+      : normalizedReasoningTrace?.summary || null;
     const normalizedStatus = normalizeAgentPresenceStatus(status);
 
     if (!actorLabel || !displayName || !normalizedStatus) {
@@ -196,6 +208,7 @@ export function registerRoomPresenceRoutes(
         ide_label: ideLabel,
         status: normalizedStatus as AgentPresenceStatus,
         status_text: statusText,
+        reasoning_trace: normalizedReasoningTrace,
       });
       await deps.rememberAgentRoomParticipant({
         projectId: project.id,
@@ -227,6 +240,7 @@ export function registerRoomPresenceRoutes(
         ideLabel,
         status: normalizedStatus as AgentPresenceStatus,
         statusText,
+        reasoningTrace: normalizedReasoningTrace,
       });
 
       res.status(200).json({
