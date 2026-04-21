@@ -132,6 +132,38 @@ test("filterRoomActivityHistoryEntries matches room, participant, and task searc
   assert.equal(filterRoomActivityHistoryEntries(entries, { kind: "agent", query: "spinner" }).length, 1);
 });
 
+test("filterRoomActivityHistoryEntries searches tasks beyond the displayed top five", () => {
+  const extendedTasks: Task[] = [
+    ...tasks,
+    ...Array.from({ length: 6 }, (_, index) => {
+      const hour = String(15 - index).padStart(2, "0");
+      return {
+        id: `task_archive_${index + 1}`,
+        room_id: "github.com/BrosInCode/letagents",
+        title: index === 5 ? "Legacy archive migration" : `Recent archive ${index + 1}`,
+        description: "",
+        status: "done",
+        assignee: "Thicket | EmmyMay's agent | Codex",
+        assignee_agent_key: "emmymay/thicket",
+        created_by: "EmmyMay",
+        source_message_id: null,
+        pr_url: null,
+        workflow_artifacts: [],
+        workflow_refs: [],
+        created_at: `2026-04-21T${hour}:00:00.000Z`,
+        updated_at: `2026-04-21T${hour}:30:00.000Z`,
+      };
+    }),
+  ];
+
+  const entries = buildRoomActivityHistoryEntries({ rooms, participants, tasks: extendedTasks });
+  const thicketEntry = entries.find((entry) => entry.participant.display_name === "Thicket");
+
+  assert.ok(thicketEntry);
+  assert.equal(thicketEntry.completed_tasks.length, 5);
+  assert.equal(filterRoomActivityHistoryEntries(entries, { query: "legacy archive migration" }).length, 1);
+});
+
 test("paginateRoomActivityHistoryEntries returns bounded pages", () => {
   const entries = buildRoomActivityHistoryEntries({ rooms, participants, tasks });
   const paginated = paginateRoomActivityHistoryEntries(entries, { page: 2, pageSize: 1 });

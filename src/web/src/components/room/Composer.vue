@@ -169,6 +169,12 @@ interface MentionCandidate {
 const mentionCandidates = computed<MentionCandidate[]>(() => {
   const seen = new Set<string>()
   const candidates: MentionCandidate[] = []
+  const visibleAgentActors = new Set(
+    props.participants
+      .filter((participant) => participant.kind === 'agent' && !participant.hidden_at)
+      .map((participant) => String(participant.actor_label || '').trim())
+      .filter(Boolean)
+  )
 
   const pushCandidate = (
     rawMention: string,
@@ -196,11 +202,16 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
   }
 
   for (const agent of props.presence) {
+    const actorLabel = String(agent.actor_label || '').trim()
+    if (agent.freshness !== 'active' && actorLabel && !visibleAgentActors.has(actorLabel)) {
+      continue
+    }
+
     const parsed = parseAgentIdentity(agent.actor_label)
     const label = agent.display_name || parsed.displayName || agent.actor_label
     const meta = [agent.owner_label, agent.ide_label].filter(Boolean).join(' · ') || 'Agent'
     pushCandidate(label, label, meta, agent.freshness === 'active' ? 0 : 1, [
-      agent.actor_label,
+      actorLabel,
       agent.owner_label,
       agent.ide_label,
       agent.status,

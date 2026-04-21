@@ -39,6 +39,16 @@ export interface RoomActivityHistoryEntry {
   created_tasks: RoomActivityHistoryTaskSummary[];
 }
 
+const SEARCH_TEXT = Symbol("roomActivityHistorySearchText");
+type RoomActivityHistoryEntryWithSearch = RoomActivityHistoryEntry & {
+  [SEARCH_TEXT]?: string;
+};
+type SearchableTaskLike = {
+  id: string;
+  title: string;
+  status: string;
+};
+
 function normalize(value: string | null | undefined): string {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -108,22 +118,59 @@ function participantMatchesCreator(participant: RoomParticipant, task: Task): bo
     || createdBy === normalize(participant.display_name);
 }
 
-function buildEntrySearchText(entry: RoomActivityHistoryEntry): string {
+function buildTaskSearchText(
+  tasks: ReadonlyArray<SearchableTaskLike>
+): string[] {
+  return tasks.flatMap((task) => [task.id, task.title, task.status]);
+}
+
+function buildHistorySearchText(input: {
+  roomDisplayName: string;
+  roomId: string;
+  participantDisplayName: string;
+  actorLabel: string | null;
+  githubLogin: string | null;
+  ownerLabel: string | null;
+  ideLabel: string | null;
+  currentTasks: ReadonlyArray<SearchableTaskLike>;
+  completedTasks: ReadonlyArray<SearchableTaskLike>;
+  createdTasks: ReadonlyArray<SearchableTaskLike>;
+}): string {
   return [
-    entry.room.display_name,
-    entry.room.id,
-    entry.participant.display_name,
-    entry.participant.actor_label,
-    entry.participant.github_login,
-    entry.participant.owner_label,
-    entry.participant.ide_label,
-    ...entry.current_tasks.flatMap((task) => [task.id, task.title, task.status]),
-    ...entry.completed_tasks.flatMap((task) => [task.id, task.title, task.status]),
-    ...entry.created_tasks.flatMap((task) => [task.id, task.title, task.status]),
+    input.roomDisplayName,
+    input.roomId,
+    input.participantDisplayName,
+    input.actorLabel,
+    input.githubLogin,
+    input.ownerLabel,
+    input.ideLabel,
+    ...buildTaskSearchText(input.currentTasks),
+    ...buildTaskSearchText(input.completedTasks),
+    ...buildTaskSearchText(input.createdTasks),
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+function buildEntrySearchText(entry: RoomActivityHistoryEntry): string {
+  const cached = (entry as RoomActivityHistoryEntryWithSearch)[SEARCH_TEXT];
+  if (cached) {
+    return cached;
+  }
+
+  return buildHistorySearchText({
+    roomDisplayName: entry.room.display_name,
+    roomId: entry.room.id,
+    participantDisplayName: entry.participant.display_name,
+    actorLabel: entry.participant.actor_label,
+    githubLogin: entry.participant.github_login,
+    ownerLabel: entry.participant.owner_label,
+    ideLabel: entry.participant.ide_label,
+    currentTasks: entry.current_tasks,
+    completedTasks: entry.completed_tasks,
+    createdTasks: entry.created_tasks,
+  });
 }
 
 export function buildRoomActivityHistoryEntries(input: {
@@ -156,15 +203,15 @@ export function buildRoomActivityHistoryEntries(input: {
         assignedTasks.filter((task) =>
           ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review"].includes(task.status)
         )
-      ).slice(0, 5);
+      );
       const completedTasks = sortTasksByUpdated(
         assignedTasks.filter((task) => ["merged", "done"].includes(task.status))
-      ).slice(0, 5);
+      );
       const createdTasks = sortTasksByUpdated(
         roomTasks.filter((task) => participantMatchesCreator(participant, task))
-      ).slice(0, 5);
+      );
 
-      return {
+      const entry: RoomActivityHistoryEntryWithSearch = {
         id: `${room.id}:${participant.participant_key}`,
         room: {
           id: room.id,
@@ -192,10 +239,27 @@ export function buildRoomActivityHistoryEntries(input: {
           completedTasks[0]?.updated_at,
           createdTasks[0]?.updated_at
         ),
-        current_tasks: currentTasks.map(toTaskSummary),
-        completed_tasks: completedTasks.map(toTaskSummary),
-        created_tasks: createdTasks.map(toTaskSummary),
-      } satisfies RoomActivityHistoryEntry;
+        current_tasks: currentTasks.slice(0, 5).map(toTaskSummary),
+        completed_tasks: completedTasks.slice(0, 5).map(toTaskSummary),
+        created_tasks: createdTasks.slice(0, 5).map(toTaskSummary),
+      };
+      Object.defineProperty(entry, SEARCH_TEXT, {
+        value: buildHistorySearchText({
+          roomDisplayName: room.display_name,
+          roomId: room.id,
+          participantDisplayName: participant.display_name,
+          actorLabel: participant.actor_label,
+          githubLogin: participant.github_login,
+          ownerLabel: participant.owner_label,
+          ideLabel: participant.ide_label,
+          currentTasks,
+          completedTasks,
+          createdTasks,
+        }),
+        enumerable: false,
+      });
+
+      return entry;
     })
     .filter((entry): entry is RoomActivityHistoryEntry => entry !== null)
     .sort((left, right) => {

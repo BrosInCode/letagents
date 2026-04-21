@@ -349,6 +349,7 @@ let lastActivityHistoryRequest: {
   pageSize?: number
   kind?: RoomActivityHistoryKind
 } = {}
+let activityHistoryRequestSequence = 0
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
 const MESSAGE_HISTORY_PAGE_SIZE = 150
 
@@ -662,17 +663,23 @@ async function loadActivityHistory(options?: {
   kind?: RoomActivityHistoryKind
 }): Promise<boolean> {
   if (!room.value) return false
-  lastActivityHistoryRequest = {
+  const roomIdentifier = room.value.identifier
+  const nextRequest = {
     query: options?.query ?? lastActivityHistoryRequest.query,
     page: options?.page ?? lastActivityHistoryRequest.page ?? 1,
     pageSize: options?.pageSize ?? lastActivityHistoryRequest.pageSize ?? 20,
     kind: options?.kind ?? lastActivityHistoryRequest.kind ?? 'all',
   }
+  lastActivityHistoryRequest = nextRequest
+  const requestId = ++activityHistoryRequestSequence
 
   activityHistoryLoading.value = true
   activityHistoryError.value = ''
   try {
-    const next = await fetchActivityHistory(room.value.identifier, lastActivityHistoryRequest)
+    const next = await fetchActivityHistory(roomIdentifier, nextRequest)
+    if (requestId !== activityHistoryRequestSequence || room.value?.identifier !== roomIdentifier) {
+      return false
+    }
     if (!next) {
       activityHistoryError.value = 'Could not load room activity history.'
       return false
@@ -680,7 +687,9 @@ async function loadActivityHistory(options?: {
     activityHistory.value = next
     return true
   } finally {
-    activityHistoryLoading.value = false
+    if (requestId === activityHistoryRequestSequence) {
+      activityHistoryLoading.value = false
+    }
   }
 }
 
@@ -1168,6 +1177,7 @@ async function joinRoom(roomIdentifier: string) {
   // Clear active room state before attempting new join to prevent
   // failed transitions from leaving stale room data that misdirects sends
   stopStreaming()
+  activityHistoryRequestSequence += 1
   room.value = null
   messages.value = []
   messagesHasOlder.value = false
@@ -1177,9 +1187,9 @@ async function joinRoom(roomIdentifier: string) {
   presence.value = []
   participants.value = []
   activityHistory.value = null
-  activityHistoryLoading.value = false
+  activityHistoryLoading.value = true
   activityHistoryError.value = ''
-  lastActivityHistoryRequest = {}
+  lastActivityHistoryRequest = { page: 1, pageSize: 20, kind: 'all' }
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1217,6 +1227,7 @@ async function joinRoom(roomIdentifier: string) {
     room.value = joinedRoom
     isConnected.value = true
     persistSession()
+    const bootstrapActivityHistoryRequestId = activityHistoryRequestSequence
 
     // Load existing room state in parallel
     const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
@@ -1227,7 +1238,7 @@ async function joinRoom(roomIdentifier: string) {
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
-      fetchActivityHistory(roomIdentifier, { page: 1, pageSize: 20, kind: 'all' }),
+      fetchActivityHistory(roomIdentifier, lastActivityHistoryRequest),
       supportsGitHubEvents
         ? fetchGitHubEvents(githubEventsIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
@@ -1239,9 +1250,14 @@ async function joinRoom(roomIdentifier: string) {
     focusRooms.value = focused
     presence.value = prs
     participants.value = roomParticipants
-    activityHistory.value = history
-    activityHistoryLoading.value = false
-    activityHistoryError.value = history ? '' : 'Could not load room activity history.'
+    if (
+      bootstrapActivityHistoryRequestId === activityHistoryRequestSequence
+      && room.value?.identifier === roomIdentifier
+    ) {
+      activityHistory.value = history
+      activityHistoryLoading.value = false
+      activityHistoryError.value = history ? '' : 'Could not load room activity history.'
+    }
     taskGithubStatus.value = ghStatus
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
@@ -1308,6 +1324,7 @@ async function restoreSession(): Promise<boolean> {
 
 function leaveRoom() {
   stopStreaming()
+  activityHistoryRequestSequence += 1
   room.value = null
   messages.value = []
   messagesHasOlder.value = false
