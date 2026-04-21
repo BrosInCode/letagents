@@ -256,12 +256,34 @@ export interface RoomParticipant {
   updated_at: string
 }
 
+export interface RoomReasoningSnapshot {
+  summary: string
+  goal?: string | null
+  checking?: string | null
+  hypothesis?: string | null
+  blocker?: string | null
+  next_action?: string | null
+  milestone?: string | null
+  confidence?: number | null
+  status?: string | null
+}
+
 export interface RoomReasoningEntry {
   id: string
   kind?: string | null
   label?: string | null
   text: string
   timestamp: string
+}
+
+export interface RoomReasoningUpdate {
+  id: string
+  actor_label?: string | null
+  status?: string | null
+  summary: string
+  milestone?: string | null
+  payload?: RoomReasoningSnapshot | null
+  created_at: string
 }
 
 export interface RoomReasoningSession {
@@ -275,6 +297,7 @@ export interface RoomReasoningSession {
   status?: string | null
   visibility?: string | null
   summary?: string | null
+  latest_payload?: RoomReasoningSnapshot | null
   goal?: string | null
   checking?: string | null
   hypothesis?: string | null
@@ -283,7 +306,7 @@ export interface RoomReasoningSession {
   milestone?: string | null
   confidence?: number | null
   entries?: ReadonlyArray<RoomReasoningEntry> | null
-  updates?: ReadonlyArray<RoomReasoningEntry> | null
+  updates?: ReadonlyArray<RoomReasoningUpdate> | null
   closed_at?: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -563,8 +586,13 @@ async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipan
 
 function reasoningSortValue(session: RoomReasoningSession): number {
   const detailEntries = session.entries || session.updates
-  const latestEntry = detailEntries?.[detailEntries.length - 1]?.timestamp
-  const timestamp = session.updated_at || session.created_at || latestEntry || ''
+  const latestEntry = detailEntries?.[detailEntries.length - 1]
+  const latestTimestamp = latestEntry
+    ? 'timestamp' in latestEntry
+      ? latestEntry.timestamp
+      : latestEntry.created_at
+    : null
+  const timestamp = session.updated_at || session.created_at || latestTimestamp || ''
   const parsed = Date.parse(timestamp)
   return Number.isFinite(parsed) ? parsed : -1
 }

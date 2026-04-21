@@ -198,7 +198,9 @@ const reasoningTitle = computed(() =>
   || 'Open the current reasoning stream'
 )
 const reasoningSummary = computed(() =>
-  props.reasoningSession?.checking
+  props.reasoningSession?.latest_payload?.checking
+  || props.reasoningSession?.latest_payload?.next_action
+  || props.reasoningSession?.checking
   || props.reasoningSession?.next_action
   || props.reasoningSession?.goal
   || props.reasoningSession?.summary

@@ -80,7 +80,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { parseAgentIdentity, type RoomReasoningEntry, type RoomReasoningSession } from '@/composables/useRoom'
+import {
+  parseAgentIdentity,
+  type RoomReasoningEntry,
+  type RoomReasoningSession,
+  type RoomReasoningSnapshot,
+  type RoomReasoningUpdate,
+} from '@/composables/useRoom'
 
 const props = defineProps<{
   open: boolean
@@ -130,22 +136,57 @@ const subtitle = computed(() => {
   return bits.join(' · ')
 })
 
+const currentSnapshot = computed<RoomReasoningSnapshot | null>(() => {
+  const session = activeSession.value
+  if (!session) return null
+
+  if (session.latest_payload) {
+    return session.latest_payload
+  }
+
+  if (
+    session.goal
+    || session.checking
+    || session.hypothesis
+    || session.blocker
+    || session.next_action
+    || session.milestone
+    || typeof session.confidence === 'number'
+    || session.status
+  ) {
+    return {
+      summary: session.summary || '',
+      goal: session.goal,
+      checking: session.checking,
+      hypothesis: session.hypothesis,
+      blocker: session.blocker,
+      next_action: session.next_action,
+      milestone: session.milestone,
+      confidence: session.confidence,
+      status: session.status,
+    }
+  }
+
+  return session.summary ? { summary: session.summary } : null
+})
+
 const highlights = computed(() => {
   const session = activeSession.value
-  if (!session) return []
+  const snapshot = currentSnapshot.value
+  if (!session || !snapshot) return []
 
   const values: Array<[string, string | null | undefined]> = [
-    ['Goal', session.goal],
-    ['Checking', session.checking],
-    ['Hypothesis', session.hypothesis],
-    ['Blocker', session.blocker],
-    ['Next action', session.next_action],
-    ['Milestone', session.milestone],
+    ['Goal', snapshot.goal],
+    ['Checking', snapshot.checking],
+    ['Hypothesis', snapshot.hypothesis],
+    ['Blocker', snapshot.blocker],
+    ['Next action', snapshot.next_action],
+    ['Milestone', snapshot.milestone],
     ['Visibility', session.visibility],
   ]
 
-  if (typeof session.confidence === 'number') {
-    values.push(['Confidence', `${Math.round(session.confidence * 100)}%`])
+  if (typeof snapshot.confidence === 'number') {
+    values.push(['Confidence', `${Math.round(snapshot.confidence * 100)}%`])
   }
 
   return values
@@ -160,7 +201,12 @@ const timelineEntries = computed<RoomReasoningEntry[]>(() => {
   const detailEntries = Array.isArray(session.entries) && session.entries.length > 0
     ? session.entries
     : Array.isArray(session.updates) && session.updates.length > 0
-      ? session.updates
+      ? session.updates.map((update: RoomReasoningUpdate) => ({
+        id: update.id,
+        label: update.milestone ? 'Milestone' : update.status || 'Update',
+        text: update.summary,
+        timestamp: update.created_at,
+      }))
       : []
 
   if (detailEntries.length > 0) {
@@ -177,13 +223,13 @@ const timelineEntries = computed<RoomReasoningEntry[]>(() => {
   }
 
   const synthesized = [
-    ['summary', 'Summary', session.summary],
-    ['goal', 'Goal', session.goal],
-    ['checking', 'Checking', session.checking],
-    ['hypothesis', 'Hypothesis', session.hypothesis],
-    ['blocker', 'Blocker', session.blocker],
-    ['next-action', 'Next action', session.next_action],
-    ['milestone', 'Milestone', session.milestone],
+    ['summary', 'Summary', currentSnapshot.value?.summary || session.summary],
+    ['goal', 'Goal', currentSnapshot.value?.goal],
+    ['checking', 'Checking', currentSnapshot.value?.checking],
+    ['hypothesis', 'Hypothesis', currentSnapshot.value?.hypothesis],
+    ['blocker', 'Blocker', currentSnapshot.value?.blocker],
+    ['next-action', 'Next action', currentSnapshot.value?.next_action],
+    ['milestone', 'Milestone', currentSnapshot.value?.milestone],
   ] as const
 
   const timestamp = session.updated_at || session.created_at || new Date().toISOString()
@@ -227,7 +273,11 @@ watch(
       }
 
       const data = await response.json()
-      sessionDetail.value = (data.session || data.reasoning_session || data) as RoomReasoningSession
+      const session = (data.session || data.reasoning_session || data) as RoomReasoningSession
+      sessionDetail.value = {
+        ...session,
+        updates: Array.isArray(data.updates) ? data.updates : session.updates,
+      }
     } catch {
       sessionDetail.value = props.session
     } finally {

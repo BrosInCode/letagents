@@ -814,7 +814,14 @@ function reasoningCardTitle(session: RoomReasoningSession): string {
 }
 
 function reasoningCardSummary(session: RoomReasoningSession): string {
-  return session.checking || session.next_action || session.hypothesis || session.summary || 'No summary published yet.'
+  return session.latest_payload?.checking
+    || session.latest_payload?.next_action
+    || session.latest_payload?.hypothesis
+    || session.checking
+    || session.next_action
+    || session.hypothesis
+    || session.summary
+    || 'No summary published yet.'
 }
 
 function reasoningStatusLabel(session: RoomReasoningSession): string {
