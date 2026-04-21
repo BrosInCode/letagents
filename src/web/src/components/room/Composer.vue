@@ -101,7 +101,13 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { type RoomAgentPresence, type RoomMessage, parseAgentIdentity, getReplyPreviewText, isHumanSender } from '@/composables/useRoom'
+import {
+  type RoomAgentPresence,
+  type RoomMessage,
+  type RoomParticipant,
+  parseAgentIdentity,
+  getReplyPreviewText,
+} from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
 const PREFS_KEY = 'lac-prompt-prefs'
@@ -113,6 +119,7 @@ const props = withDefaults(defineProps<{
   replyTo?: RoomMessage | null
   messages?: readonly RoomMessage[]
   presence?: readonly RoomAgentPresence[]
+  participants?: readonly RoomParticipant[]
 }>(), {
   senderName: 'anonymous',
   disabled: false,
@@ -120,6 +127,7 @@ const props = withDefaults(defineProps<{
   replyTo: null,
   messages: () => [],
   presence: () => [],
+  participants: () => [],
 })
 
 const emit = defineEmits<{
@@ -199,30 +207,25 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
     ])
   }
 
-  for (const message of props.messages) {
-    const sender = String(message.sender || '').trim()
-    const normalizedSender = sender.toLowerCase()
-    if (!sender || normalizedSender === 'letagents' || normalizedSender === 'system') continue
-    if (isHumanSender(sender, message.source)) continue
+  for (const participant of props.participants) {
+    if (participant.hidden_at) continue
 
-    const parsed = parseAgentIdentity(sender)
-    const label = message.agent_identity?.display_name || parsed.displayName || sender
-    const ownerLabel = message.agent_identity?.owner_label || parsed.ownerAttribution || null
-    const ideLabel = message.agent_identity?.ide_label || parsed.ideLabel || null
-    const meta = [ownerLabel, ideLabel].filter(Boolean).join(' · ') || 'Agent'
+    if (participant.kind === 'agent') {
+      const label = participant.display_name || parseAgentIdentity(participant.actor_label || '').displayName
+      const meta = [participant.owner_label, participant.ide_label].filter(Boolean).join(' · ') || 'Agent'
+      const isActive = props.presence.some((entry) => entry.actor_label === participant.actor_label && entry.freshness === 'active')
+      pushCandidate(label, label, meta, isActive ? 0 : 1, [
+        participant.actor_label,
+        participant.owner_label,
+        participant.ide_label,
+        participant.agent_key,
+      ])
+      continue
+    }
 
-    pushCandidate(label, label, meta, 1, [
-      sender,
-      ownerLabel,
-      ideLabel,
-      message.source,
-    ])
-  }
-
-  for (const message of props.messages) {
-    if (!isHumanSender(message.sender, message.source)) continue
-    if (message.sender === props.senderName) continue
-    pushCandidate(message.sender, message.sender, 'User', 2, [])
+    const label = participant.display_name || participant.github_login || ''
+    if (!label || label === props.senderName) continue
+    pushCandidate(label, label, 'User', 2, [participant.github_login])
   }
 
   return candidates.sort((left, right) =>

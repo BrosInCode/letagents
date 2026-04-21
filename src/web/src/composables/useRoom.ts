@@ -251,9 +251,65 @@ export interface RoomParticipant {
   display_name: string
   owner_label: string | null
   ide_label: string | null
+  hidden_at: string | null
+  hidden_by: string | null
   last_seen_at: string
   created_at: string
   updated_at: string
+}
+
+export type RoomActivityHistoryKind = 'all' | 'agent' | 'human'
+
+export interface RoomActivityHistoryTaskSummary {
+  id: string
+  title: string
+  status: string
+  updated_at: string
+  workflow_refs: ReadonlyArray<{
+    provider: string
+    kind: string
+    label: string
+    url: string
+  }>
+}
+
+export interface RoomActivityHistoryEntry {
+  id: string
+  room: {
+    id: string
+    display_name: string
+    kind: 'main' | 'focus'
+    focus_status: 'active' | 'concluded' | null
+    source_task_id: string | null
+  }
+  participant: {
+    participant_key: string
+    kind: 'human' | 'agent'
+    actor_label: string | null
+    agent_key: string | null
+    github_login: string | null
+    display_name: string
+    owner_label: string | null
+    ide_label: string | null
+    hidden_at: string | null
+    hidden_by: string | null
+  }
+  first_seen_at: string
+  last_seen_at: string
+  current_tasks: RoomActivityHistoryTaskSummary[]
+  completed_tasks: RoomActivityHistoryTaskSummary[]
+  created_tasks: RoomActivityHistoryTaskSummary[]
+}
+
+export interface RoomActivityHistoryPage {
+  room_id: string
+  root_room_id: string
+  hidden_count: number
+  entries: RoomActivityHistoryEntry[]
+  page: number
+  page_size: number
+  page_count: number
+  total: number
 }
 
 /** ── State ── */
@@ -262,6 +318,9 @@ const messagesHasOlder = ref(false)
 const isLoadingOlderMessages = ref(false)
 const presence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
+const activityHistory = ref<RoomActivityHistoryPage | null>(null)
+const activityHistoryLoading = ref(false)
+const activityHistoryError = ref('')
 const taskGithubStatus = ref<Record<string, TaskGitHubArtifactStatus>>({})
 const tasks = ref<RoomTask[]>([])
 const focusRooms = ref<FocusRoomInfo[]>([])
@@ -284,6 +343,12 @@ let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null
 let presenceRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let participantRefreshTimer: ReturnType<typeof setInterval> | null = null
 let participantRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let lastActivityHistoryRequest: {
+  query?: string
+  page?: number
+  pageSize?: number
+  kind?: RoomActivityHistoryKind
+} = {}
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
 const MESSAGE_HISTORY_PAGE_SIZE = 150
 
@@ -527,6 +592,29 @@ async function fetchParticipants(roomIdentifier: string): Promise<RoomParticipan
   }
 }
 
+async function fetchActivityHistory(
+  roomIdentifier: string,
+  options?: {
+    query?: string
+    page?: number
+    pageSize?: number
+    kind?: RoomActivityHistoryKind
+  }
+): Promise<RoomActivityHistoryPage | null> {
+  const params = new URLSearchParams()
+  if (options?.query?.trim()) params.set('query', options.query.trim())
+  if (options?.page) params.set('page', String(options.page))
+  if (options?.pageSize) params.set('page_size', String(options.pageSize))
+  if (options?.kind && options.kind !== 'all') params.set('kind', options.kind)
+
+  try {
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return await apiFetch(`${roomPath(roomIdentifier)}/activity-history${suffix}`)
+  } catch {
+    return null
+  }
+}
+
 async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`)
@@ -565,6 +653,52 @@ async function refreshPresence(roomIdentifier: string) {
 
 async function refreshParticipants(roomIdentifier: string) {
   participants.value = await fetchParticipants(roomIdentifier)
+}
+
+async function loadActivityHistory(options?: {
+  query?: string
+  page?: number
+  pageSize?: number
+  kind?: RoomActivityHistoryKind
+}): Promise<boolean> {
+  if (!room.value) return false
+  lastActivityHistoryRequest = {
+    query: options?.query ?? lastActivityHistoryRequest.query,
+    page: options?.page ?? lastActivityHistoryRequest.page ?? 1,
+    pageSize: options?.pageSize ?? lastActivityHistoryRequest.pageSize ?? 20,
+    kind: options?.kind ?? lastActivityHistoryRequest.kind ?? 'all',
+  }
+
+  activityHistoryLoading.value = true
+  activityHistoryError.value = ''
+  try {
+    const next = await fetchActivityHistory(room.value.identifier, lastActivityHistoryRequest)
+    if (!next) {
+      activityHistoryError.value = 'Could not load room activity history.'
+      return false
+    }
+    activityHistory.value = next
+    return true
+  } finally {
+    activityHistoryLoading.value = false
+  }
+}
+
+async function archiveDisconnectedParticipants(): Promise<number> {
+  if (!room.value) return 0
+
+  try {
+    const response = await apiFetch(`${roomPath(room.value.identifier)}/participants/archive-disconnected`, {
+      method: 'POST',
+    })
+    await Promise.all([
+      refreshParticipants(room.value.identifier),
+      loadActivityHistory(lastActivityHistoryRequest),
+    ])
+    return Number(response.archived_count || 0)
+  } catch {
+    return 0
+  }
 }
 
 async function refreshRoomPresence(): Promise<boolean> {
@@ -1042,6 +1176,10 @@ async function joinRoom(roomIdentifier: string) {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  activityHistory.value = null
+  activityHistoryLoading.value = false
+  activityHistoryError.value = ''
+  lastActivityHistoryRequest = {}
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1083,12 +1221,13 @@ async function joinRoom(roomIdentifier: string) {
     // Load existing room state in parallel
     const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
     const supportsGitHubEvents = isRepoBackedRoomId(getGitHubSupportIdentifier(joinedRoom))
-    const [messagePage, tsks, focused, prs, roomParticipants, gh, ghStatus] = await Promise.all([
+    const [messagePage, tsks, focused, prs, roomParticipants, history, gh, ghStatus] = await Promise.all([
       fetchMessages(roomIdentifier),
       fetchTasks(roomIdentifier),
       fetchFocusRooms(roomIdentifier),
       fetchPresence(roomIdentifier),
       fetchParticipants(roomIdentifier),
+      fetchActivityHistory(roomIdentifier, { page: 1, pageSize: 20, kind: 'all' }),
       supportsGitHubEvents
         ? fetchGitHubEvents(githubEventsIdentifier)
         : Promise.resolve({ events: [], available: false, hasMore: false, error: null }),
@@ -1100,6 +1239,9 @@ async function joinRoom(roomIdentifier: string) {
     focusRooms.value = focused
     presence.value = prs
     participants.value = roomParticipants
+    activityHistory.value = history
+    activityHistoryLoading.value = false
+    activityHistoryError.value = history ? '' : 'Could not load room activity history.'
     taskGithubStatus.value = ghStatus
     githubEvents.value = gh.events
     githubEventsAvailable.value = gh.available
@@ -1174,6 +1316,10 @@ function leaveRoom() {
   focusRooms.value = []
   presence.value = []
   participants.value = []
+  activityHistory.value = null
+  activityHistoryLoading.value = false
+  activityHistoryError.value = ''
+  lastActivityHistoryRequest = {}
   githubEvents.value = []
   githubEventsAvailable.value = false
   githubEventsHasMore.value = false
@@ -1234,6 +1380,9 @@ export function useRoom() {
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
     participants: readonly(participants),
+    activityHistory: readonly(activityHistory),
+    activityHistoryLoading: readonly(activityHistoryLoading),
+    activityHistoryError: readonly(activityHistoryError),
     taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),
@@ -1260,6 +1409,8 @@ export function useRoom() {
     updateFocusRoomSettings,
     refreshFocusRooms,
     refreshRoomPresence,
+    loadActivityHistory,
+    archiveDisconnectedParticipants,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,

@@ -228,6 +228,8 @@ export interface RoomParticipant {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  hidden_at: string | null;
+  hidden_by: string | null;
   last_seen_at: string;
   created_at: string;
   updated_at: string;
@@ -275,6 +277,7 @@ export interface Task {
   description: string | null;
   status: TaskStatus;
   assignee: string | null;
+  assignee_agent_key: string | null;
   created_by: string;
   source_message_id: string | null;
   pr_url: string | null;
@@ -441,6 +444,8 @@ interface RoomParticipantRow {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  hidden_at: string | null;
+  hidden_by: string | null;
   last_seen_at: string;
   created_at: string;
   updated_at: string;
@@ -641,6 +646,7 @@ function toTask(row: TaskRow): Task {
     description: row.description,
     status: row.status,
     assignee: row.assignee,
+    assignee_agent_key: row.assignee_agent_key,
     created_by: row.created_by,
     source_message_id: row.source_message_id,
     pr_url: row.pr_url,
@@ -737,6 +743,8 @@ function toRoomParticipant(row: RoomParticipantRow): RoomParticipant {
     display_name: row.display_name,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
+    hidden_at: row.hidden_at,
+    hidden_by: row.hidden_by,
     last_seen_at: row.last_seen_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -2085,6 +2093,8 @@ export async function upsertRoomParticipant(input: {
       display_name: input.display_name,
       owner_label: input.owner_label ?? null,
       ide_label: input.ide_label ?? null,
+      hidden_at: null,
+      hidden_by: null,
       last_seen_at: lastSeenAt,
       created_at: now,
       updated_at: now,
@@ -2099,6 +2109,8 @@ export async function upsertRoomParticipant(input: {
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
+        hidden_at: null,
+        hidden_by: null,
         last_seen_at: lastSeenAt,
         updated_at: now,
       },
@@ -2110,17 +2122,86 @@ export async function upsertRoomParticipant(input: {
 
 export async function getRoomParticipants(
   roomId: string,
-  options?: { limit?: number }
+  options?: { limit?: number; includeHidden?: boolean }
 ): Promise<RoomParticipant[]> {
   const limit = clampLimit(options?.limit, 50, 200);
+  const conditions = [eq(room_participants.room_id, roomId)];
+  if (!options?.includeHidden) {
+    conditions.push(sql`${room_participants.hidden_at} IS NULL`);
+  }
+
   const rows = await db
     .select()
     .from(room_participants)
-    .where(eq(room_participants.room_id, roomId))
+    .where(and(...conditions))
     .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name))
     .limit(limit);
 
   return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+}
+
+export async function getRoomParticipantsForRooms(
+  roomIds: readonly string[],
+  options?: { includeHidden?: boolean }
+): Promise<RoomParticipant[]> {
+  if (roomIds.length === 0) {
+    return [];
+  }
+
+  const conditions = [inArray(room_participants.room_id, [...roomIds])];
+  if (!options?.includeHidden) {
+    conditions.push(sql`${room_participants.hidden_at} IS NULL`);
+  }
+
+  const rows = await db
+    .select()
+    .from(room_participants)
+    .where(and(...conditions))
+    .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name));
+
+  return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+}
+
+export async function setRoomParticipantsHidden(input: {
+  room_id: string;
+  participant_keys: readonly string[];
+  hidden: boolean;
+  hidden_by?: string | null;
+}): Promise<number> {
+  if (input.participant_keys.length === 0) {
+    return 0;
+  }
+
+  const now = new Date().toISOString();
+  const result = await db
+    .update(room_participants)
+    .set({
+      hidden_at: input.hidden ? now : null,
+      hidden_by: input.hidden ? input.hidden_by ?? null : null,
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(room_participants.room_id, input.room_id),
+        inArray(room_participants.participant_key, [...input.participant_keys])
+      )
+    );
+
+  return Number(result.rowCount ?? 0);
+}
+
+export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task[]> {
+  if (roomIds.length === 0) {
+    return [];
+  }
+
+  const rows = await db
+    .select()
+    .from(tasks)
+    .where(inArray(tasks.room_id, [...roomIds]))
+    .orderBy(desc(tasks.updated_at), asc(tasks.number));
+
+  return (rows as TaskRow[]).map(toTask);
 }
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {

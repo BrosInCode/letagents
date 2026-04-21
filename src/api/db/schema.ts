@@ -380,6 +380,8 @@ export const room_participants = pgTable(
     display_name: text("display_name").notNull(),
     owner_label: text("owner_label"),
     ide_label: text("ide_label"),
+    hidden_at: timestamp("hidden_at", { mode: "string", withTimezone: true }),
+    hidden_by: text("hidden_by"),
     last_seen_at: timestamp("last_seen_at", { mode: "string", withTimezone: true }).notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
@@ -389,6 +391,7 @@ export const room_participants = pgTable(
     room_idx: index("room_participants_room_id_idx").on(table.room_id),
     room_kind_idx: index("room_participants_room_kind_idx").on(table.room_id, table.kind),
     room_last_seen_idx: index("room_participants_room_last_seen_idx").on(table.room_id, table.last_seen_at),
+    room_hidden_idx: index("room_participants_room_hidden_idx").on(table.room_id, table.hidden_at),
     room_actor_idx: index("room_participants_room_actor_idx").on(table.room_id, table.actor_label),
     room_login_idx: index("room_participants_room_login_idx").on(table.room_id, table.github_login),
   })

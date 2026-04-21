@@ -87,10 +87,17 @@
           v-else-if="activeTab === 'activity'"
           key="activity"
           class="room-tab-panel"
+          :roomIdentifier="room?.identifier || ''"
           :messages="messages"
           :participants="participants"
           :presence="presence"
           :tasks="tasks"
+          :activityHistory="activityHistory"
+          :activityHistoryLoading="activityHistoryLoading"
+          :activityHistoryError="activityHistoryError"
+          :canManageParticipants="room?.role === 'admin'"
+          :loadActivityHistory="loadActivityHistory"
+          :archiveDisconnectedParticipants="archiveDisconnectedParticipants"
           :taskGithubStatus="taskGithubStatus"
         />
 
@@ -135,6 +142,7 @@
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
+      :participants="participants"
       @send="handleSend"
       @clearReply="selectedReply = null"
     />
@@ -223,6 +231,9 @@ const {
   focusRooms,
   presence,
   participants,
+  activityHistory,
+  activityHistoryLoading,
+  activityHistoryError,
   taskGithubStatus,
   githubEvents,
   githubEventsAvailable,
@@ -245,6 +256,8 @@ const {
   restoreSession,
   renameRoom,
   loadOlderMessages,
+  loadActivityHistory,
+  archiveDisconnectedParticipants,
   refreshRoomGitHubEvents,
 } = useRoom()
 const auth = useAuth()

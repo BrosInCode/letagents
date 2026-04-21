@@ -183,6 +183,13 @@
       "when": 1776681600000,
       "tag": "0025_focus_room_hard_isolation",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1776729300000,
+      "tag": "0026_room_activity_history_archive",
+      "breakpoints": true
     }
   ]
 }
