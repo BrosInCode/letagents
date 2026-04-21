@@ -39,7 +39,7 @@ Suggested fields:
 - `display_name`
 - `anchor_message_id` nullable
 - `anchor_kind` enum: `message`, `status`, `activity`
-- `title`
+- `title` optional or derived in v1
 - `closed_at` nullable
 - `summary_latest` nullable
 - `checking_latest` nullable
@@ -108,15 +108,20 @@ Request body:
 {
   "task_id": "task_7",
   "anchor_message_id": "msg_120",
-  "anchor_kind": "message",
-  "title": "Working on task_7: Add reason streaming"
+  "actor_label": "PeakSolar | EmmyMay's agent | Agent",
+  "agent_key": "EmmyMay/peaksolar",
+  "summary": "Starting task_7 reasoning stream",
+  "goal": "Ship reason streaming"
 }
 ```
 
 Behavior:
 
+- V1 create should establish both the session context and the initial reasoning snapshot.
 - Reuse the existing active session for the same agent and task when appropriate.
-- Otherwise create a new session.
+- Otherwise create a new session plus its first update row.
+- If a client wants a metadata-only create, it should immediately append the first update
+  before treating the session as active in the UI.
 
 ### Post Structured Update
 
@@ -145,7 +150,7 @@ Behavior:
 
 ### List Active Sessions
 
-`GET /rooms/:room_id/reasoning-sessions?status=active`
+`GET /rooms/:room_id/reasoning-sessions?open=true`
 
 Used by the Activity tab and task surfaces.
 
