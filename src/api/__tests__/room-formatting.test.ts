@@ -4,6 +4,12 @@ import test from "node:test";
 import type { Project, Task } from "../db.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+delete process.env.ATTACHMENT_S3_BUCKET;
+delete process.env.S3_BUCKET;
+delete process.env.ATTACHMENT_S3_ACCESS_KEY_ID;
+delete process.env.AWS_ACCESS_KEY_ID;
+delete process.env.ATTACHMENT_S3_SECRET_ACCESS_KEY;
+delete process.env.AWS_SECRET_ACCESS_KEY;
 
 const {
   formatFocusRoomAnchorMessage,
@@ -65,6 +71,7 @@ test("toRoomResponse preserves non-focus room response shape", () => {
       display_name: "Main Room",
       code: "ABCD-1234",
       kind: "main",
+      attachments_enabled: false,
       parent_room_id: null,
       focus_key: null,
       source_task_id: null,
@@ -108,6 +115,7 @@ test("toRoomResponse normalizes focus settings into flat and nested fields", () 
     display_name: "Focus Room",
     code: null,
     kind: "focus",
+    attachments_enabled: false,
     parent_room_id: "github.com/owner/repo",
     focus_key: "task_1",
     source_task_id: "task_1",

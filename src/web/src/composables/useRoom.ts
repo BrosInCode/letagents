@@ -52,10 +52,53 @@ export interface MessageReplyReference {
   timestamp: string
 }
 
+export interface RoomMessageAttachment {
+  id?: string | null
+  name?: string | null
+  file_name?: string | null
+  filename?: string | null
+  mime_type?: string | null
+  content_type?: string | null
+  size_bytes?: number | null
+  byte_size?: number | null
+  url?: string | null
+  download_url?: string | null
+  data_url?: string | null
+  content_base64?: string | null
+}
+
+export interface OutgoingMessageAttachment {
+  file_name: string
+  mime_type: string
+  size_bytes: number
+  file?: File | null
+  upload_id?: string | null
+}
+
+export interface StagedMessageAttachment {
+  upload_id: string
+}
+
+interface AttachmentUploadTarget {
+  upload_id?: string
+  attachment_id?: string
+  id?: string
+  upload_url?: string
+  url?: string
+  method?: string
+  headers?: Record<string, string>
+  attachment?: {
+    upload_id?: string
+    attachment_id?: string
+    id?: string
+  }
+}
+
 export interface RoomMessage {
   id: string
   sender: string
   text: string
+  attachments?: readonly RoomMessageAttachment[]
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
@@ -94,6 +137,14 @@ export interface RoomTask {
     label: string
     url: string
   }>
+  stale_prompt_state?: {
+    is_stale: boolean
+    reason: string | null
+    stale_for_ms: number | null
+    muted: boolean
+    muted_by: string | null
+    muted_at: string | null
+  } | null
   created_at: string
   updated_at: string
   active_leases?: ReadonlyArray<{
@@ -119,6 +170,12 @@ export interface RoomTask {
     created_by: string
     cleared_at: string | null
   }>
+}
+
+export interface StalePromptTaskState {
+  isStale: boolean
+  muted: boolean
+  taskUpdatedAt: string
 }
 
 export interface TaskGitHubArtifactStatus {
@@ -160,6 +217,7 @@ export interface RoomInfo {
   role: string
   authenticated: boolean
   kind: 'main' | 'focus'
+  attachmentsEnabled: boolean
   parentRoomId: string | null
   focusKey: string | null
   sourceTaskId: string | null
@@ -177,6 +235,7 @@ export interface FocusRoomInfo {
   display_name: string
   code: string | null
   kind: 'main' | 'focus'
+  attachments_enabled?: boolean
   parent_room_id: string | null
   focus_key: string | null
   source_task_id: string | null
@@ -330,6 +389,7 @@ const githubEventsHasMore = ref(false)
 const githubEventsError = ref<RoomGitHubEventsError | null>(null)
 const githubEventsLoading = ref(false)
 const room = ref<RoomInfo | null>(null)
+const lastSendError = ref('')
 const isConnected = ref(false)
 const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
@@ -969,16 +1029,24 @@ async function sendMessage(
   text: string,
   sender?: string,
   agentPromptKind?: string | null,
-  replyTo?: string | null
+  replyTo?: string | null,
+  attachments: OutgoingMessageAttachment[] = []
 ): Promise<boolean> {
   if (!room.value) return false
+  lastSendError.value = ''
   try {
-    const body: Record<string, string> = { text, sender: sender || 'anonymous' }
+    const preparedAttachments = attachments.length
+      ? await prepareMessageAttachments(room.value.identifier, attachments)
+      : []
+    const body: Record<string, unknown> = { text, sender: sender || 'anonymous' }
     if (agentPromptKind) {
       body.agent_prompt_kind = agentPromptKind
     }
     if (replyTo) {
       body.reply_to = replyTo
+    }
+    if (preparedAttachments.length) {
+      body.attachments = preparedAttachments
     }
     const msg = await apiFetch(`${roomPath(room.value.identifier)}/messages`, {
       method: 'POST',
@@ -989,9 +1057,102 @@ async function sendMessage(
       messages.value = [...messages.value, msg]
     }
     return true
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message.trim() : ''
+    lastSendError.value = /attachment object storage is not configured/i.test(message)
+      ? 'Attachments are unavailable right now.'
+      : message || 'Message could not be sent.'
     return false
   }
+}
+
+async function prepareMessageAttachments(
+  roomIdentifier: string,
+  attachments: OutgoingMessageAttachment[]
+): Promise<StagedMessageAttachment[]> {
+  const prepared: StagedMessageAttachment[] = []
+  for (const attachment of attachments) {
+    if (attachment.upload_id) {
+      prepared.push({ upload_id: attachment.upload_id })
+      continue
+    }
+
+    prepared.push(await stageAttachmentUpload(roomIdentifier, attachment))
+  }
+  return prepared
+}
+
+function resolveAttachmentUploadTarget(target: AttachmentUploadTarget): {
+  uploadId: string
+  uploadUrl: string
+} {
+  const uploadId = target.upload_id
+    || target.attachment?.upload_id
+    || target.attachment_id
+    || target.attachment?.attachment_id
+    || target.id
+    || target.attachment?.id
+  const uploadUrl = target.upload_url || target.url
+  if (!uploadId || !uploadUrl) {
+    throw new Error('Attachment upload target is incomplete.')
+  }
+  return { uploadId, uploadUrl }
+}
+
+async function stageAttachmentUpload(
+  roomIdentifier: string,
+  attachment: OutgoingMessageAttachment,
+  signal?: AbortSignal
+): Promise<StagedMessageAttachment> {
+  if (!attachment.file) {
+    throw new Error('Attachment file is missing.')
+  }
+
+  let uploadId: string | null = null
+  try {
+    const target = await apiFetch(`${roomPath(roomIdentifier)}/attachments/uploads`, {
+      method: 'POST',
+      body: JSON.stringify({
+        file_name: attachment.file_name,
+        mime_type: attachment.mime_type,
+        size_bytes: attachment.size_bytes,
+      }),
+      signal,
+    }) as AttachmentUploadTarget
+
+    const resolved = resolveAttachmentUploadTarget(target)
+    uploadId = resolved.uploadId
+
+    const headers: Record<string, string> = {
+      ...(target.headers || {}),
+    }
+    if (!Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')) {
+      headers['Content-Type'] = attachment.mime_type || 'application/octet-stream'
+    }
+
+    const uploadRes = await fetch(resolved.uploadUrl, {
+      method: target.method || 'PUT',
+      headers,
+      body: attachment.file,
+      signal,
+    })
+    if (!uploadRes.ok) {
+      throw new Error(`Attachment upload failed with HTTP ${uploadRes.status}.`)
+    }
+
+    return { upload_id: resolved.uploadId }
+  } catch (error) {
+    if (uploadId) {
+      void discardAttachmentUpload(roomIdentifier, uploadId).catch(() => {})
+    }
+    throw error
+  }
+}
+
+async function discardAttachmentUpload(roomIdentifier: string, uploadId: string): Promise<void> {
+  await apiFetch(`${roomPath(roomIdentifier)}/attachments/uploads/${encodeURIComponent(uploadId)}`, {
+    method: 'DELETE',
+  })
 }
 
 async function addTask(title: string): Promise<boolean> {
@@ -1072,6 +1233,7 @@ async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: Focus
     room.value = {
       ...room.value,
       displayName: focusRoom.display_name || room.value.displayName,
+      attachmentsEnabled: focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
       focusStatus: focusRoom.focus_status || room.value.focusStatus,
       focusParentVisibility: focusRoom.focus_parent_visibility || room.value.focusParentVisibility,
       focusActivityScope: focusRoom.focus_activity_scope || room.value.focusActivityScope,
@@ -1114,6 +1276,7 @@ async function updateFocusRoomSettings(
     if (room.value.kind === 'focus' && room.value.projectId === focusRoom.room_id) {
       room.value = {
         ...room.value,
+        attachmentsEnabled: focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
         focusParentVisibility: focusRoom.focus_parent_visibility,
         focusActivityScope: focusRoom.focus_activity_scope,
         focusGitHubEventRouting: focusRoom.focus_github_event_routing,
@@ -1150,6 +1313,42 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
     tasks.value = await fetchTasks(room.value.identifier)
     return true
   } catch {
+    return false
+  }
+}
+
+async function setTaskStalePromptMute(
+  taskId: string,
+  muted: boolean,
+  options?: { promptTimestamp?: string | null }
+): Promise<boolean> {
+  if (!room.value) return false
+  try {
+    const data = await apiFetch(
+      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/stale-prompt-mute`,
+      {
+        method: muted ? 'POST' : 'DELETE',
+        body: JSON.stringify({
+          prompt_timestamp: options?.promptTimestamp ?? null,
+        }),
+      }
+    )
+    const updatedTask = data.task || (data.id ? data : null)
+    if (updatedTask) {
+      const idx = tasks.value.findIndex(t => t.id === taskId)
+      if (idx >= 0) {
+        const updated = [...tasks.value]
+        updated[idx] = updatedTask
+        tasks.value = updated
+      }
+    }
+    tasks.value = await fetchTasks(room.value.identifier)
+    return true
+  } catch (error) {
+    tasks.value = await fetchTasks(room.value.identifier)
+    if ((error as { code?: string | null }).code === 'STALE_PROMPT_OUTDATED') {
+      return true
+    }
     return false
   }
 }
@@ -1214,6 +1413,7 @@ async function joinRoom(roomIdentifier: string) {
       role: project.role || 'participant',
       authenticated: !!project.authenticated,
       kind: project.kind || 'main',
+      attachmentsEnabled: project.attachments_enabled !== false,
       parentRoomId: project.parent_room_id || null,
       focusKey: project.focus_key || null,
       sourceTaskId: project.source_task_id || null,
@@ -1408,6 +1608,7 @@ export function useRoom() {
     githubEventsSupported,
     githubEventsLoading: readonly(githubEventsLoading),
     room: readonly(room),
+    lastSendError: readonly(lastSendError),
     isConnected: readonly(isConnected),
     isStreaming: readonly(isStreaming),
     connectionState: readonly(connectionState),
@@ -1418,8 +1619,11 @@ export function useRoom() {
     joinRoom,
     leaveRoom,
     sendMessage,
+    stageAttachmentUpload,
+    discardAttachmentUpload,
     addTask,
     updateTask,
+    setTaskStalePromptMute,
     createFocusRoom,
     createAdHocFocusRoom,
     shareFocusRoomResult,

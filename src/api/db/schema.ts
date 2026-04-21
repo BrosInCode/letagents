@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { check, foreignKey, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 import type {
   FocusActivityScope,
@@ -442,6 +442,67 @@ export const messages = pgTable(
   })
 );
 
+export const message_attachments = pgTable(
+  "message_attachments",
+  {
+    room_id: text("room_id").notNull(),
+    message_number: integer("message_number").notNull(),
+    attachment_number: integer("attachment_number").notNull(),
+    upload_id: text("upload_id").notNull(),
+    filename: text("filename").notNull(),
+    content_type: text("content_type").notNull(),
+    byte_size: integer("byte_size").notNull(),
+    storage_provider: text("storage_provider").notNull(),
+    bucket: text("bucket").notNull(),
+    object_key: text("object_key").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "message_attachments_pk",
+      columns: [table.room_id, table.message_number, table.attachment_number],
+    }),
+    message_fk: foreignKey({
+      name: "message_attachments_message_fk",
+      columns: [table.room_id, table.message_number],
+      foreignColumns: [messages.room_id, messages.number],
+    }).onDelete("cascade").onUpdate("cascade"),
+    room_idx: index("message_attachments_room_idx").on(table.room_id, table.message_number),
+    upload_idx: uniqueIndex("message_attachments_upload_idx").on(table.upload_id),
+    byte_size_check: check("message_attachments_byte_size_check", sql`${table.byte_size} > 0`),
+  })
+);
+
+export const message_attachment_uploads = pgTable(
+  "message_attachment_uploads",
+  {
+    upload_id: text("upload_id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    filename: text("filename").notNull(),
+    content_type: text("content_type").notNull(),
+    byte_size: integer("byte_size").notNull(),
+    storage_provider: text("storage_provider").notNull(),
+    bucket: text("bucket").notNull(),
+    object_key: text("object_key").notNull(),
+    status: text("status").notNull(),
+    expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }).notNull(),
+    attached_message_number: integer("attached_message_number"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    attached_at: timestamp("attached_at", { mode: "string", withTimezone: true }),
+  },
+  (table) => ({
+    room_idx: index("message_attachment_uploads_room_idx").on(table.room_id, table.created_at),
+    object_key_idx: uniqueIndex("message_attachment_uploads_object_key_idx").on(table.object_key),
+    status_check: check(
+      "message_attachment_uploads_status_check",
+      sql`${table.status} IN ('pending', 'attached')`
+    ),
+    byte_size_check: check("message_attachment_uploads_byte_size_check", sql`${table.byte_size} > 0`),
+  })
+);
+
 export const tasks = pgTable(
   "tasks",
   {
@@ -507,6 +568,24 @@ export const task_leases = pgTable(
     active_review_agent_idx: uniqueIndex("task_leases_active_review_agent_idx")
       .on(table.room_id, table.task_id, table.agent_key)
       .where(sql`${table.kind} = 'review' AND ${table.status} = 'active'`),
+  })
+);
+
+export const stale_task_prompt_mutes = pgTable(
+  "stale_task_prompt_mutes",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    task_id: text("task_id").notNull(),
+    task_updated_at: timestamp("task_updated_at", { mode: "string", withTimezone: true }).notNull(),
+    muted_by: text("muted_by").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "stale_task_prompt_mutes_pk", columns: [table.room_id, table.task_id] }),
+    room_idx: index("stale_task_prompt_mutes_room_idx").on(table.room_id, table.updated_at),
   })
 );
 

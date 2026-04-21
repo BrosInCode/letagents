@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Message, RoomAgentPresence, Task } from "../db.js";
+import type { Message, RoomAgentPresence, StaleTaskPromptMute, Task } from "../db.js";
 import {
   createStaleWorkPromptEmitter,
+  getTaskStalePromptState,
   STALE_TASK_THRESHOLD_MS,
   STALE_WORK_PROMPT_COOLDOWN_MS,
   selectStaleTaskAutoPrompt,
@@ -59,6 +60,17 @@ function buildMessage(text: string, index: number): Message {
     source: undefined,
     timestamp: new Date(NOW).toISOString(),
     reply_to: null,
+  };
+}
+
+function buildMute(overrides: Partial<StaleTaskPromptMute> = {}): StaleTaskPromptMute {
+  return {
+    room_id: overrides.room_id ?? "github.com/brosincode/letagents",
+    task_id: overrides.task_id ?? "task_59",
+    task_updated_at: overrides.task_updated_at ?? isoMinutesAgo(120),
+    muted_by: overrides.muted_by ?? "EmmyMay",
+    created_at: overrides.created_at ?? isoMinutesAgo(5),
+    updated_at: overrides.updated_at ?? isoMinutesAgo(5),
   };
 }
 
@@ -143,6 +155,62 @@ test("selectStaleTaskAutoPrompt skips fresh tasks that have not crossed the stal
   assert.equal(prompt, null);
 });
 
+test("selectStaleTaskAutoPrompt skips stale tasks muted for the current task version", () => {
+  const mutedTask = buildTask({
+    id: "task_63",
+    status: "in_review",
+    updated_at: isoMinutesAgo(
+      Math.ceil(STALE_TASK_THRESHOLD_MS.in_review_no_follow_up / 60_000) + 10
+    ),
+  });
+  const prompt = selectStaleTaskAutoPrompt({
+    tasks: [mutedTask],
+    presence: [buildPresence()],
+    stalePromptMutes: [
+      buildMute({
+        task_id: mutedTask.id,
+        task_updated_at: mutedTask.updated_at,
+      }),
+    ],
+    now: NOW,
+  });
+
+  assert.equal(prompt, null);
+});
+
+test("getTaskStalePromptState keeps a mute active only until the task changes", () => {
+  const task = buildTask({
+    id: "task_64",
+    status: "blocked",
+    updated_at: isoMinutesAgo(
+      Math.ceil(STALE_TASK_THRESHOLD_MS.blocked_no_follow_up / 60_000) + 10
+    ),
+  });
+
+  const activeMuteState = getTaskStalePromptState({
+    task,
+    mute: buildMute({
+      task_id: task.id,
+      task_updated_at: task.updated_at,
+      muted_by: "EmmyMay",
+    }),
+    now: NOW,
+  });
+  const staleMuteState = getTaskStalePromptState({
+    task,
+    mute: buildMute({
+      task_id: task.id,
+      task_updated_at: isoMinutesAgo(5),
+      muted_by: "EmmyMay",
+    }),
+    now: NOW,
+  });
+
+  assert.equal(activeMuteState.muted, true);
+  assert.equal(activeMuteState.muted_by, "EmmyMay");
+  assert.equal(staleMuteState.muted, false);
+});
+
 test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", async () => {
   let now = NOW;
   const staleTask = buildTask({
@@ -173,6 +241,7 @@ test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", as
       presenceCalls.push({ projectId, limit: options.limit });
       return [buildPresence()];
     },
+    getStaleTaskPromptMutes: async () => [],
     emitTaskAnchoredMessage: async (projectId, sender, text, task, options) => {
       emitted.push({ projectId, sender, text, task, options });
       return buildMessage(text, emitted.length);

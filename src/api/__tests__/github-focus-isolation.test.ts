@@ -4,8 +4,8 @@ import test from "node:test";
 import type { Project, Task } from "../db.js";
 import { createGitHubFocusIsolationResolver } from "../github-focus-isolation.js";
 
-function makeTask(id: string): Pick<Task, "id"> {
-  return { id };
+function makeTask(id: string, roomId = "parent"): Pick<Task, "id" | "room_id"> {
+  return { id, room_id: roomId };
 }
 
 function makeProject(overrides: Partial<Project> = {}): Project {
@@ -30,14 +30,19 @@ function makeProject(overrides: Partial<Project> = {}): Project {
 
 function createHarness(activeFocusRoom: Project | null) {
   const calls: Array<{ projectId: string; taskId: string }> = [];
+  const projectByIdCalls: string[] = [];
   const resolver = createGitHubFocusIsolationResolver({
     getActiveTaskFocusRoom: async (projectId, taskId) => {
       calls.push({ projectId, taskId });
       return activeFocusRoom;
     },
+    getProjectById: async (projectId) => {
+      projectByIdCalls.push(projectId);
+      return activeFocusRoom?.id === projectId ? activeFocusRoom : null;
+    },
   });
 
-  return { calls, resolver };
+  return { calls, projectByIdCalls, resolver };
 }
 
 test("getHardIsolatedFocusRoomForGitHubEvent skips lookup without a linked task", async () => {
@@ -79,6 +84,24 @@ test("getHardIsolatedFocusRoomForGitHubEvent returns focus-owned GitHub rooms", 
   );
 
   assert.equal(focusRoom, activeFocusRoom);
+});
+
+test("getHardIsolatedFocusRoomForGitHubEvent resolves focus-room-owned tasks", async () => {
+  const activeFocusRoom = makeProject({
+    id: "focus_5",
+    focus_github_event_routing: "focus_owned_only",
+  });
+  const { calls, projectByIdCalls, resolver } = createHarness(activeFocusRoom);
+
+  const focusRoom = await resolver.getHardIsolatedFocusRoomForGitHubEvent(
+    "parent",
+    makeTask("task_37", "focus_5"),
+    { matched_workflow_artifact: true }
+  );
+
+  assert.equal(focusRoom, activeFocusRoom);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(projectByIdCalls, ["focus_5"]);
 });
 
 test("getHardIsolatedFocusRoomForGitHubEvent does not isolate non-hard routing modes", async () => {

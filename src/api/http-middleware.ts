@@ -4,6 +4,7 @@ import type {
   AuthenticatedRequest,
   ResolvedRequestAuth,
 } from "./http-helpers.js";
+import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../shared/request-headers.js";
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
@@ -31,6 +32,7 @@ export function registerHttpMiddleware(
 ): void {
   app.use(
     express.json({
+      limit: "1mb",
       verify(req, _res, buf) {
         const request = req as AuthenticatedRequest & { originalUrl?: string };
         if (request.originalUrl?.startsWith("/webhooks/github")) {
@@ -58,8 +60,11 @@ export function registerHttpMiddleware(
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
     }
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      `Content-Type, Authorization, ${LETAGENTS_ORIGIN_ROOM_ID_HEADER}`
+    );
     next();
   });
 
