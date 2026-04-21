@@ -166,6 +166,10 @@ import {
   type RoomPresenceRouteDeps,
 } from "./routes/room-presence.js";
 import {
+  registerRoomReasoningRoutes,
+  type RoomReasoningRouteDeps,
+} from "./routes/room-reasoning.js";
+import {
   registerRoomFocusRoutes,
   type RoomFocusRouteDeps,
 } from "./routes/room-focus.js";
@@ -1448,6 +1452,12 @@ const roomPresenceRouteDeps = {
   maybeEmitStaleWorkPrompt,
 } satisfies RoomPresenceRouteDeps;
 
+const roomReasoningRouteDeps = {
+  resolveCanonicalRoomRequestId,
+  resolveRoomOrReply,
+  requireParticipant,
+} satisfies RoomReasoningRouteDeps;
+
 const roomFocusRouteDeps = {
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
@@ -1553,6 +1563,7 @@ registerLegacyProjectTaskRoutes(app, legacyProjectTaskRouteDeps);
 registerRoomJoinRoutes(app, roomJoinRouteDeps);
 registerRoomMessageRoutes(app, roomMessageRouteDeps);
 registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
+registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
 registerRoomFocusRoutes(app, roomFocusRouteDeps);
 registerRoomTaskRoutes(app, roomTaskRouteDeps);
 registerRoomEventRoutes(app, roomEventRouteDeps);
