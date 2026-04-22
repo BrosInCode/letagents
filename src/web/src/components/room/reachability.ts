@@ -27,11 +27,12 @@ export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined)
 
 export function resolveAgentActivityState(input: {
   participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at'> | null
-  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state'> | null
+  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags'> | null
 }): AgentReachabilitySource['activityState'] {
+  const hasCanonicalPresence = input.presence?.source_flags?.includes('presence') || false
   if (input.participant?.hidden_at) return 'archived'
-  if (input.presence?.freshness === 'active') return 'online'
-  if (input.presence?.freshness === 'stale') return 'stale'
+  if (hasCanonicalPresence && input.presence?.freshness === 'active') return 'online'
+  if (hasCanonicalPresence && input.presence?.freshness === 'stale') return 'stale'
   return input.participant?.activity_state || input.presence?.activity_state || 'historical'
 }
 
@@ -157,7 +158,8 @@ export function buildAgentReachabilitySources(input: {
   }
 
   for (const presence of input.presence) {
-    if (!isLivePresenceEntry(presence)) continue
+    const activityState = resolveAgentActivityState({ presence })
+    if (activityState === 'historical' || activityState === 'archived') continue
     const actorLabel = String(presence.actor_label || '').trim()
     if (!actorLabel || seenActors.has(actorLabel) || hiddenActors.has(actorLabel)) continue
     next.push({
@@ -165,7 +167,7 @@ export function buildAgentReachabilitySources(input: {
       actorLabel,
       participant: null,
       presence,
-      activityState: 'online',
+      activityState,
     })
   }
 

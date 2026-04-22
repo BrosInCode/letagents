@@ -188,3 +188,37 @@ test('buildAgentReachabilitySources keeps stale presence in the recently offline
     [['LiveOak | EmmyMay\'s agent | Agent', 'stale']],
   )
 })
+
+test('buildAgentReachabilitySources keeps canonical stale presence without a participant row', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [],
+    presence: [
+      makePresence({
+        freshness: 'stale',
+        activity_state: 'historical',
+        source_flags: ['presence'],
+      }),
+    ],
+  })
+
+  assert.deepEqual(
+    sources.map((source) => [source.actorLabel, source.activityState]),
+    [['LiveOak | EmmyMay\'s agent | Agent', 'stale']],
+  )
+  assert.equal(sources[0]?.participant, null)
+})
+
+test('buildAgentReachabilitySources does not surface message-only fallback ghosts as stale', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [],
+    presence: [
+      makePresence({
+        freshness: 'stale',
+        activity_state: 'historical',
+        source_flags: ['messages'],
+      }),
+    ],
+  })
+
+  assert.deepEqual(sources, [])
+})
