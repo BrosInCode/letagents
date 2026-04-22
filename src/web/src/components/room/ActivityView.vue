@@ -1092,7 +1092,7 @@ const STATUS_LABELS: Record<RoomAgentPresence['status'], string> = {
 const ACTIVITY_STATE_LABELS: Record<ParticipantActivityState, string> = {
   online: 'Online',
   stale: 'Recently offline',
-  historical: 'History only',
+  historical: 'In room history',
   archived: 'Archived',
 }
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -1645,7 +1645,7 @@ const historySummaryCards = computed(() => [
   },
   {
     value: historyMemoryAgents.value.length,
-    label: 'History only',
+    label: 'Only in room history',
   },
   {
     value: historyOpenTaskCount.value,
@@ -2466,6 +2466,28 @@ function formatLastSeen(value: string | null): string {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.activity-group-header-actions {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.activity-group-header-actions > .activity-group-count,
+.activity-group-header-actions > .activity-action-button {
+  min-height: 40px;
+}
+
+.activity-group-header-actions > .activity-group-count {
+  min-width: 48px;
+  padding: 0 14px;
+}
+
+.activity-group-header-actions > .activity-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
 }
 
 .activity-history-room-line,
