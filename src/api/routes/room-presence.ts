@@ -4,6 +4,7 @@ import {
   getFocusRoomsForParent,
   getMessages,
   getRoomAgentPresence,
+  getRoomAgentPresenceSnapshot,
   getRoomParticipants,
   getRoomParticipantsForRooms,
   getProjectById,
@@ -37,6 +38,7 @@ import {
   normalizeAgentPresenceStatus,
   type AgentPresenceStatus,
 } from "../../shared/agent-presence.js";
+import { isWithinRecentlyOfflineWindow } from "../../shared/room-agent-activity.js";
 
 export interface RoomPresenceRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -265,7 +267,7 @@ export function registerRoomPresenceRoutes(
     try {
       const [participants, presence] = await Promise.all([
         getRoomParticipantsForRooms([project.id], { includeHidden: true }),
-        getRoomAgentPresence(project.id, { limit: 500 }),
+        getRoomAgentPresenceSnapshot(project.id),
       ]);
       const activeActors = new Set(
         presence
@@ -282,7 +284,10 @@ export function registerRoomPresenceRoutes(
         .map((participant) => participant.participant_key);
       const suppressedActorLabels = Array.from(new Set(
         presence
-          .filter((entry) => entry.freshness !== "active")
+          .filter((entry) =>
+            entry.freshness !== "active"
+            && isWithinRecentlyOfflineWindow(entry.last_heartbeat_at)
+          )
           .map((entry) => normalizeActorLabel(entry.actor_label))
           .filter(Boolean)
       ));
@@ -303,7 +308,7 @@ export function registerRoomPresenceRoutes(
 
       res.json({
         room_id: project.id,
-        archived_count: suppressedCount,
+        archived_count: hiddenParticipantCount,
         participant_hidden_count: hiddenParticipantCount,
         suppressed_count: suppressedCount,
       });

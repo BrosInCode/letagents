@@ -1156,6 +1156,38 @@ function filterRoomAgentPresenceForLiveRoster(input: {
   ];
 }
 
+async function getMergedRoomAgentPresenceRecords(
+  roomId: string,
+  options?: { statusLimit?: number; deliveryLimit?: number }
+): Promise<RoomAgentPresence[]> {
+  const statusQuery = db
+    .select()
+    .from(room_agent_presence)
+    .where(eq(room_agent_presence.room_id, roomId))
+    .orderBy(desc(room_agent_presence.last_heartbeat_at), asc(room_agent_presence.display_name));
+
+  const deliveryQuery = db
+    .select()
+    .from(room_agent_delivery_sessions)
+    .where(eq(room_agent_delivery_sessions.room_id, roomId))
+    .orderBy(
+      desc(room_agent_delivery_sessions.active_connection_count),
+      desc(room_agent_delivery_sessions.last_connected_at),
+      asc(room_agent_delivery_sessions.display_name)
+    );
+
+  const [statusRows, deliveryRows] = await Promise.all([
+    options?.statusLimit ? statusQuery.limit(options.statusLimit) : statusQuery,
+    options?.deliveryLimit ? deliveryQuery.limit(options.deliveryLimit) : deliveryQuery,
+  ]);
+
+  return mergeRoomAgentPresenceRecords({
+    roomId,
+    statusEntries: (statusRows as RoomAgentPresenceRow[]).map(toRoomAgentPresence),
+    deliverySessions: (deliveryRows as RoomAgentDeliverySessionRow[]).map(toRoomAgentDeliverySession),
+  });
+}
+
 function toRoomParticipant(row: RoomParticipantRow): RoomParticipant {
   return {
     room_id: row.room_id,
@@ -2905,28 +2937,25 @@ export async function getRoomAgentPresence(
   options?: { limit?: number; staleLimit?: number; staleWithinMs?: number }
 ): Promise<RoomAgentPresence[]> {
   const limit = clampLimit(options?.limit, 50, 200);
-  const [statusRows, deliverySessions, suppressedActors] = await Promise.all([
-    db
-      .select()
-      .from(room_agent_presence)
-      .where(eq(room_agent_presence.room_id, roomId))
-      .orderBy(desc(room_agent_presence.last_heartbeat_at), asc(room_agent_presence.display_name))
-      .limit(limit),
-    getRoomAgentDeliverySessions(roomId, { limit }),
+  const [presence, suppressedActors] = await Promise.all([
+    getMergedRoomAgentPresenceRecords(roomId, {
+      statusLimit: limit,
+      deliveryLimit: limit,
+    }),
     getRoomLiveAgentSuppressionActorLabels(roomId),
   ]);
 
   return filterRoomAgentPresenceForLiveRoster({
-    presence: mergeRoomAgentPresenceRecords({
-      roomId,
-      statusEntries: (statusRows as RoomAgentPresenceRow[]).map(toRoomAgentPresence),
-      deliverySessions,
-    }),
+    presence,
     suppressedActors,
     limit,
     staleLimit: options?.staleLimit,
     staleWithinMs: options?.staleWithinMs,
   });
+}
+
+export async function getRoomAgentPresenceSnapshot(roomId: string): Promise<RoomAgentPresence[]> {
+  return getMergedRoomAgentPresenceRecords(roomId);
 }
 
 export async function upsertRoomParticipant(input: {
