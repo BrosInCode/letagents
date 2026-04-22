@@ -71,6 +71,13 @@ type LeaseActionRequestBody = {
   target_actor_instance_id?: string;
 };
 
+const LEASE_RECOVERY_ACTIVE_STATUSES = new Set<TaskStatus>([
+  "assigned",
+  "in_progress",
+  "blocked",
+  "in_review",
+]);
+
 export interface RoomTaskRouteDeps {
   taskEvents: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -583,15 +590,18 @@ export function registerRoomTaskRoutes(
       ?? req.sessionAccount?.login
       ?? null;
     const actorInstanceId = normalizeTaskActorInstanceId(requestBody.actor_instance_id);
-    const actorValidation = await deps.validateOwnerTokenTaskActorKey({
-      req,
-      actorKey: normalizeTaskActorKey(requestBody.actor_key),
-    });
-    if (actorValidation.error) {
-      res.status(409).json({ error: actorValidation.error });
-      return;
+    let actorKey: string | null = null;
+    if (req.authKind === "owner_token") {
+      const actorValidation = await deps.validateOwnerTokenTaskActorKey({
+        req,
+        actorKey: normalizeTaskActorKey(requestBody.actor_key),
+      });
+      if (actorValidation.error) {
+        res.status(409).json({ error: actorValidation.error });
+        return;
+      }
+      actorKey = actorValidation.actorKey;
     }
-    const actorKey = actorValidation.actorKey;
 
     const leases = await getActiveTaskLeases(project.id, task.id);
     const activeWorkLease = getActiveWorkLease(leases);
@@ -611,7 +621,7 @@ export function registerRoomTaskRoutes(
       return;
     }
 
-    const requesterIsLeaseHolder = Boolean(
+    const requesterIsLeaseHolder = req.authKind === "owner_token" && Boolean(
       actorKey && normalizeTaskActorKey(activeWorkLease.agent_key) === actorKey
     );
     if (!requesterIsLeaseHolder) {
@@ -628,16 +638,19 @@ export function registerRoomTaskRoutes(
         return;
       }
 
-      const targetValidation = await deps.validateOwnerTokenTaskActorKey({
-        req,
-        actorKey: targetActorKeyRaw,
-      });
-      if (targetValidation.error) {
-        res.status(409).json({ error: targetValidation.error });
-        return;
+      if (req.authKind === "owner_token") {
+        const targetValidation = await deps.validateOwnerTokenTaskActorKey({
+          req,
+          actorKey: targetActorKeyRaw,
+        });
+        if (targetValidation.error) {
+          res.status(409).json({ error: targetValidation.error });
+          return;
+        }
+        targetActorKey = targetValidation.actorKey ?? targetActorKeyRaw;
+      } else {
+        targetActorKey = targetActorKeyRaw;
       }
-
-      targetActorKey = targetValidation.actorKey ?? targetActorKeyRaw;
       const targetIdentity = await getAgentIdentityByCanonicalKey(targetActorKey);
       if (!targetIdentity) {
         res.status(404).json({ error: `Unknown target actor_key ${targetActorKey}` });
@@ -652,6 +665,14 @@ export function registerRoomTaskRoutes(
     }
 
     try {
+      if (action === "handoff" && !LEASE_RECOVERY_ACTIVE_STATUSES.has(task.status)) {
+        res.status(409).json({
+          error: `Cannot hand off a task in ${task.status} status`,
+          code: "coordination_invalid_task_status",
+        });
+        return;
+      }
+
       const dispositionReason =
         deps.normalizeOptionalString(requestBody.reason)
         ?? (action === "handoff"
@@ -661,11 +682,21 @@ export function registerRoomTaskRoutes(
         ? await releaseTaskLease(project.id, activeWorkLease.id)
         : await revokeTaskLease(project.id, activeWorkLease.id, dispositionReason);
 
-      const nextTask = await setTaskAssignmentStateForLeaseAction(project.id, task.id, {
-        status: action === "handoff" ? "assigned" : "accepted",
-        assignee: action === "handoff" ? targetActorLabel : null,
-        assignee_agent_key: action === "handoff" ? targetActorKey : null,
-      });
+      const leaseActionUpdates =
+        action === "handoff"
+          ? {
+              status: "assigned" as const,
+              assignee: targetActorLabel,
+              assignee_agent_key: targetActorKey,
+            }
+          : LEASE_RECOVERY_ACTIVE_STATUSES.has(task.status)
+            ? {
+                status: "accepted" as const,
+                assignee: null,
+                assignee_agent_key: null,
+              }
+            : {};
+      const nextTask = await setTaskAssignmentStateForLeaseAction(project.id, task.id, leaseActionUpdates);
       if (!nextTask) {
         res.status(404).json({ error: "Task not found" });
         return;
