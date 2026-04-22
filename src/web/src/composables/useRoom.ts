@@ -970,7 +970,10 @@ async function archiveDisconnectedParticipants(): Promise<number> {
     const response = await apiFetch(`${roomPath(room.value.identifier)}/participants/archive-disconnected`, {
       method: 'POST',
     })
-    await refreshParticipants(room.value.identifier)
+    await Promise.all([
+      refreshParticipants(room.value.identifier),
+      refreshPresence(room.value.identifier),
+    ])
     if ((activityHistory.value?.selected_room_id || lastActivityHistoryRequest.roomId || room.value.identifier) === room.value.identifier) {
       await loadActivityHistory({
         ...lastActivityHistoryRequest,
