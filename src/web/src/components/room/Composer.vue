@@ -203,6 +203,7 @@ import {
   parseAgentIdentity,
   getReplyPreviewText,
 } from '@/composables/useRoom'
+import { buildMentionCandidates, normalizeMentionToken, type MentionCandidate } from './reachability'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
 const PREFS_KEY = 'lac-prompt-prefs'
@@ -287,82 +288,12 @@ const eagerUploadsEnabled = computed(() =>
   Boolean(props.stageAttachmentDraft && props.roomIdentifier && attachmentsAvailable.value)
 )
 
-interface MentionCandidate {
-  key: string
-  label: string
-  mention: string
-  meta: string
-  search: string
-  priority: number
-}
-
 const mentionCandidates = computed<MentionCandidate[]>(() => {
-  const seen = new Set<string>()
-  const candidates: MentionCandidate[] = []
-  const onlinePresenceByActor = new Map(
-    props.presence
-      .filter((entry) => entry.activity_state === 'online')
-      .map((entry) => [String(entry.actor_label || '').trim(), entry] as const)
-      .filter(([actorLabel]) => Boolean(actorLabel))
-  )
-
-  const pushCandidate = (
-    rawMention: string,
-    label: string,
-    meta: string,
-    priority: number,
-    searchParts: Array<string | null | undefined>
-  ) => {
-    const mention = normalizeMentionToken(rawMention)
-    if (!mention) return
-    const key = mention.toLowerCase()
-    if (seen.has(key)) return
-    seen.add(key)
-    candidates.push({
-      key,
-      label: `@${mention}`,
-      mention,
-      meta,
-      priority,
-      search: [mention, label, meta, ...searchParts]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase(),
-    })
-  }
-
-  for (const participant of props.participants) {
-    if (participant.hidden_at) continue
-
-    if (participant.kind === 'agent') {
-      const actorLabel = String(participant.actor_label || '').trim()
-      const presenceEntry = actorLabel ? (onlinePresenceByActor.get(actorLabel) || null) : null
-      if (!actorLabel || participant.activity_state !== 'online' || !presenceEntry) {
-        continue
-      }
-
-      const label = participant.display_name || presenceEntry.display_name || parseAgentIdentity(participant.actor_label || '').displayName
-      const meta = [participant.owner_label || presenceEntry.owner_label, participant.ide_label || presenceEntry.ide_label]
-        .filter(Boolean)
-        .join(' · ') || 'Agent'
-      pushCandidate(label, label, meta, 0, [
-        participant.actor_label,
-        participant.owner_label,
-        participant.ide_label,
-        participant.agent_key,
-        presenceEntry.status,
-      ])
-      continue
-    }
-
-    const label = participant.display_name || participant.github_login || ''
-    if (!label || label === props.senderName) continue
-    pushCandidate(label, label, 'User', 2, [participant.github_login])
-  }
-
-  return candidates.sort((left, right) =>
-    left.priority - right.priority || left.label.localeCompare(right.label)
-  )
+  return buildMentionCandidates({
+    participants: props.participants,
+    presence: props.presence,
+    senderName: props.senderName,
+  })
 })
 
 const filteredMentionCandidates = computed(() => {
@@ -493,14 +424,6 @@ function handleDocClick(e: MouseEvent) {
   if (menuOpen.value && menuEl.value && !menuEl.value.contains(e.target as Node)) {
     menuOpen.value = false
   }
-}
-
-function normalizeMentionToken(value: string): string {
-  return (value || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/\s+/g, '')
-    .replace(/[^A-Za-z0-9._-]/g, '')
 }
 
 function resetMentionContext() {
