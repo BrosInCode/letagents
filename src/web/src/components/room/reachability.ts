@@ -25,6 +25,16 @@ export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined)
   return entry?.activity_state === 'online' || entry?.freshness === 'active'
 }
 
+export function resolveAgentActivityState(input: {
+  participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at'> | null
+  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state'> | null
+}): AgentReachabilitySource['activityState'] {
+  if (input.participant?.hidden_at) return 'archived'
+  if (input.presence?.freshness === 'active') return 'online'
+  if (input.presence?.freshness === 'stale') return 'stale'
+  return input.participant?.activity_state || input.presence?.activity_state || 'historical'
+}
+
 export function normalizeMentionToken(value: string): string {
   return String(value || '')
     .trim()
@@ -80,7 +90,11 @@ export function buildMentionCandidates(input: {
     if (participant.kind === 'agent') {
       const actorLabel = String(participant.actor_label || '').trim()
       const presenceEntry = actorLabel ? (onlinePresenceByActor.get(actorLabel) || null) : null
-      if (!actorLabel || participant.activity_state !== 'online' || !presenceEntry) continue
+      if (
+        !actorLabel
+        || !presenceEntry
+        || resolveAgentActivityState({ participant, presence: presenceEntry }) !== 'online'
+      ) continue
 
       const label = participant.display_name
         || presenceEntry.display_name
@@ -135,7 +149,7 @@ export function buildAgentReachabilitySources(input: {
       actorLabel,
       participant,
       presence,
-      activityState: participant.activity_state || presence?.activity_state || 'historical',
+      activityState: resolveAgentActivityState({ participant, presence }),
     })
     if (actorLabel) {
       seenActors.add(actorLabel)

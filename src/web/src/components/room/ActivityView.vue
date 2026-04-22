@@ -996,7 +996,11 @@ import {
   type RoomTask,
   type TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
-import { buildAgentReachabilitySources, type AgentReachabilitySource } from './reachability'
+import {
+  buildAgentReachabilitySources,
+  resolveAgentActivityState,
+  type AgentReachabilitySource,
+} from './reachability'
 import {
   buildAgentThinkingSnapshot,
   buildAgentThinkingTimeline,
@@ -1595,7 +1599,10 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
     ownerLabel,
     ideLabel,
     activityState: entry.participant.kind === 'agent'
-      ? (entry.participant.activity_state || (isCurrentRoomEntry ? presenceEntry?.activity_state : null) || 'historical')
+      ? resolveAgentActivityState({
+        participant: entry.participant,
+        presence: isCurrentRoomEntry ? presenceEntry : null,
+      })
       : null,
     status: entry.participant.kind === 'agent' ? (presenceEntry?.status || null) : null,
     statusText,

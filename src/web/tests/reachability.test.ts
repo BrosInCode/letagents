@@ -106,6 +106,28 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
   assert.equal(candidates[0]?.meta.includes('Online now'), true)
 })
 
+test('buildMentionCandidates treats active presence as online even when participant history is stale', () => {
+  const candidates = buildMentionCandidates({
+    participants: [
+      makeParticipant({
+        activity_state: 'historical',
+      }),
+    ],
+    presence: [
+      makePresence({
+        freshness: 'active',
+        activity_state: 'historical',
+      }),
+    ],
+    senderName: 'OwlSolar',
+  })
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.label),
+    ['@LiveOak'],
+  )
+})
+
 test('buildAgentReachabilitySources merges live presence into participant history', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
@@ -142,4 +164,27 @@ test('buildAgentReachabilitySources merges live presence into participant histor
     ],
   )
   assert.equal(sources[1]?.participant, null)
+})
+
+test('buildAgentReachabilitySources keeps stale presence in the recently offline lane', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [
+      makeParticipant({
+        activity_state: 'historical',
+        source_flags: ['messages'],
+      }),
+    ],
+    presence: [
+      makePresence({
+        freshness: 'stale',
+        activity_state: 'historical',
+        source_flags: ['presence'],
+      }),
+    ],
+  })
+
+  assert.deepEqual(
+    sources.map((source) => [source.actorLabel, source.activityState]),
+    [['LiveOak | EmmyMay\'s agent | Agent', 'stale']],
+  )
 })
