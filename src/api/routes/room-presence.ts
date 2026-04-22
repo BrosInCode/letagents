@@ -8,6 +8,7 @@ import {
   getRoomParticipantsForRooms,
   getProjectById,
   getTasksForRooms,
+  setRoomLiveAgentSuppressed,
   setRoomParticipantsHidden,
   upsertRoomAgentPresence,
   type Project,
@@ -279,16 +280,32 @@ export function registerRoomPresenceRoutes(
           && !activeActors.has(normalizeActorLabel(participant.actor_label))
         )
         .map((participant) => participant.participant_key);
-      const archivedCount = await setRoomParticipantsHidden({
-        room_id: project.id,
-        participant_keys: archiveKeys,
-        hidden: true,
-        hidden_by: req.sessionAccount?.login ?? "room-admin",
-      });
+      const suppressedActorLabels = Array.from(new Set(
+        presence
+          .filter((entry) => entry.freshness !== "active")
+          .map((entry) => normalizeActorLabel(entry.actor_label))
+          .filter(Boolean)
+      ));
+      const [hiddenParticipantCount, suppressedCount] = await Promise.all([
+        setRoomParticipantsHidden({
+          room_id: project.id,
+          participant_keys: archiveKeys,
+          hidden: true,
+          hidden_by: req.sessionAccount?.login ?? "room-admin",
+        }),
+        setRoomLiveAgentSuppressed({
+          room_id: project.id,
+          actor_labels: suppressedActorLabels,
+          suppressed: true,
+          suppressed_by: req.sessionAccount?.login ?? "room-admin",
+        }),
+      ]);
 
       res.json({
         room_id: project.id,
-        archived_count: archivedCount,
+        archived_count: suppressedCount,
+        participant_hidden_count: hiddenParticipantCount,
+        suppressed_count: suppressedCount,
       });
     } catch (error) {
       respondWithInternalError(

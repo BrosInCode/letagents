@@ -7,6 +7,9 @@ export const ROOM_AGENT_ACTIVITY_STATES = [
   "archived",
 ] as const;
 
+export const RECENTLY_OFFLINE_WINDOW_MS = 15 * 60 * 1000;
+export const RECENTLY_OFFLINE_MAX_AGENTS = 20;
+
 export type RoomAgentActivityState = (typeof ROOM_AGENT_ACTIVITY_STATES)[number];
 
 export const ROOM_ACTIVITY_SOURCE_FLAGS = [
@@ -54,4 +57,13 @@ export function isReachableRoomAgentActivityState(
   value: RoomAgentActivityState | null | undefined
 ): boolean {
   return value === "online";
+}
+
+export function isWithinRecentlyOfflineWindow(
+  lastSeenAt: string | null | undefined,
+  now = Date.now(),
+  windowMs = RECENTLY_OFFLINE_WINDOW_MS
+): boolean {
+  const parsed = Date.parse(String(lastSeenAt ?? ""));
+  return Number.isFinite(parsed) && now - parsed <= windowMs;
 }
