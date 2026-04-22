@@ -2608,6 +2608,141 @@ server.tool(
 );
 
 server.tool(
+  "release_task_lease",
+  "Release or forcibly clear the active work lease on a task so it can be claimed again. " +
+    "Use this when the current worker is blocked, gone, or needs to give the lane back to the room.",
+  {
+    task_id: z.string().describe("The task whose active work lease should be cleared"),
+    lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
+    reason: z.string().optional().describe("Why the lease is being released"),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+  },
+  async ({ task_id, lease_id, reason, room_id, conversation_id }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    if (!targetRoomId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a canonical room." }) }],
+      };
+    }
+
+    try {
+      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const result = await apiCall<{
+        action: "release";
+        task: Record<string, unknown>;
+        released_lease: Record<string, unknown> | null;
+      }>(
+        `/rooms/${encodeRoomIdPath(targetRoomId)}/tasks/${encodeURIComponent(task_id)}/lease-action`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            action: "release",
+            lease_id: lease_id ?? undefined,
+            reason,
+            actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
+            actor_instance_id: AGENT_INSTANCE_UUID,
+          }),
+        }
+      );
+      await syncRoomPresence(targetRoomId, identity, {
+        status: "working",
+        status_text: `released lease on ${task_id}`,
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              ...result,
+              agent_identity: toPublicAgentIdentity(identity),
+            },
+            null,
+            2
+          ),
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "handoff_task_lease",
+  "Transfer the active work lease on a task to another agent. " +
+    "This reassigns the task and mints a fresh work lease for the target agent key.",
+  {
+    task_id: z.string().describe("The task whose active work lease should be transferred"),
+    target_agent_key: z.string().describe("Canonical agent key to receive the new work lease"),
+    lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
+    reason: z.string().optional().describe("Why the lane is being handed off"),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+  },
+  async ({ task_id, target_agent_key, lease_id, reason, room_id, conversation_id }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    if (!targetRoomId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a canonical room." }) }],
+      };
+    }
+
+    try {
+      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const result = await apiCall<{
+        action: "handoff";
+        task: Record<string, unknown>;
+        released_lease: Record<string, unknown> | null;
+        new_lease: Record<string, unknown> | null;
+      }>(
+        `/rooms/${encodeRoomIdPath(targetRoomId)}/tasks/${encodeURIComponent(task_id)}/lease-action`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            action: "handoff",
+            lease_id: lease_id ?? undefined,
+            reason,
+            target_actor_key: target_agent_key,
+            actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
+            actor_instance_id: AGENT_INSTANCE_UUID,
+          }),
+        }
+      );
+      await syncRoomPresence(targetRoomId, identity, {
+        status: "working",
+        status_text: `handed off ${task_id} to ${target_agent_key}`,
+      });
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              ...result,
+              agent_identity: toPublicAgentIdentity(identity),
+            },
+            null,
+            2
+          ),
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
   "initialize_repo",
   "Initialize the current repo for Let Agents Chat by creating a .letagents.json config file. " +
     "This explicitly sets up repo-based room auto-join. Reads git remote to derive the room name, " +

@@ -3509,6 +3509,60 @@ export async function updateTask(
   });
 }
 
+export async function setTaskAssignmentStateForLeaseAction(
+  roomId: string,
+  taskId: string,
+  updates: {
+    status?: TaskStatus;
+    assignee?: string | null;
+    assignee_agent_key?: string | null;
+  }
+): Promise<Task | null> {
+  const task = await getTaskRowById(roomId, taskId);
+  if (!task) return null;
+
+  const taskNumber = parseScopedId(taskId, "task");
+  if (!taskNumber) {
+    return null;
+  }
+
+  const newStatus = updates.status ?? task.status;
+  const hasAssigneeUpdate = Object.prototype.hasOwnProperty.call(updates, "assignee");
+  const hasAssigneeAgentKeyUpdate = Object.prototype.hasOwnProperty.call(
+    updates,
+    "assignee_agent_key"
+  );
+  const newAssignee = hasAssigneeUpdate
+    ? updates.assignee ?? null
+    : task.assignee;
+  const newAssigneeAgentKey = hasAssigneeUpdate
+    ? hasAssigneeAgentKeyUpdate
+      ? updates.assignee_agent_key ?? null
+      : null
+    : hasAssigneeAgentKeyUpdate
+      ? updates.assignee_agent_key ?? null
+      : task.assignee_agent_key;
+  const now = new Date().toISOString();
+
+  await db
+    .update(tasks)
+    .set({
+      status: newStatus,
+      assignee: newAssignee,
+      assignee_agent_key: newAssigneeAgentKey,
+      updated_at: now,
+    })
+    .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+
+  return toTask({
+    ...task,
+    status: newStatus,
+    assignee: newAssignee,
+    assignee_agent_key: newAssigneeAgentKey,
+    updated_at: now,
+  });
+}
+
 function coordinationId(prefix: "tl" | "lock" | "ce"): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
@@ -3671,6 +3725,28 @@ export async function revokeTaskLease(
     .set({
       status: "revoked",
       revoked_reason: revokedReason,
+      updated_at: now,
+    })
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)));
+
+  const [row] = (await db
+    .select()
+    .from(task_leases)
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)))
+    .limit(1)) as TaskLeaseRow[];
+
+  return row ? toTaskLease(row) : null;
+}
+
+export async function releaseTaskLease(
+  roomId: string,
+  leaseId: string
+): Promise<TaskLease | null> {
+  const now = new Date().toISOString();
+  await db
+    .update(task_leases)
+    .set({
+      status: "released",
       updated_at: now,
     })
     .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)));
