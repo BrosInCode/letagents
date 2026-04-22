@@ -418,6 +418,24 @@ export const room_agent_delivery_sessions = pgTable(
   })
 );
 
+export const room_live_agent_suppressions = pgTable(
+  "room_live_agent_suppressions",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    actor_label: text("actor_label").notNull(),
+    suppressed_by: text("suppressed_by"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "room_live_agent_suppressions_pk", columns: [table.room_id, table.actor_label] }),
+    room_idx: index("room_live_agent_suppressions_room_id_idx").on(table.room_id),
+    room_actor_idx: index("room_live_agent_suppressions_room_actor_idx").on(table.room_id, table.actor_label),
+  })
+);
+
 export interface ReasoningSnapshot {
   summary: string;
   goal?: string | null;
