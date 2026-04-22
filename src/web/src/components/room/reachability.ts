@@ -25,6 +25,17 @@ export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined)
   return entry?.activity_state === 'online' || entry?.freshness === 'active'
 }
 
+export function resolveAgentActivityState(input: {
+  participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at'> | null
+  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags'> | null
+}): AgentReachabilitySource['activityState'] {
+  const hasCanonicalPresence = input.presence?.source_flags?.includes('presence') || false
+  if (input.participant?.hidden_at) return 'archived'
+  if (hasCanonicalPresence && input.presence?.freshness === 'active') return 'online'
+  if (hasCanonicalPresence && input.presence?.freshness === 'stale') return 'stale'
+  return input.participant?.activity_state || input.presence?.activity_state || 'historical'
+}
+
 export function normalizeMentionToken(value: string): string {
   return String(value || '')
     .trim()
@@ -80,7 +91,11 @@ export function buildMentionCandidates(input: {
     if (participant.kind === 'agent') {
       const actorLabel = String(participant.actor_label || '').trim()
       const presenceEntry = actorLabel ? (onlinePresenceByActor.get(actorLabel) || null) : null
-      if (!actorLabel || participant.activity_state !== 'online' || !presenceEntry) continue
+      if (
+        !actorLabel
+        || !presenceEntry
+        || resolveAgentActivityState({ participant, presence: presenceEntry }) !== 'online'
+      ) continue
 
       const label = participant.display_name
         || presenceEntry.display_name
@@ -135,7 +150,7 @@ export function buildAgentReachabilitySources(input: {
       actorLabel,
       participant,
       presence,
-      activityState: participant.activity_state || presence?.activity_state || 'historical',
+      activityState: resolveAgentActivityState({ participant, presence }),
     })
     if (actorLabel) {
       seenActors.add(actorLabel)
@@ -143,7 +158,8 @@ export function buildAgentReachabilitySources(input: {
   }
 
   for (const presence of input.presence) {
-    if (!isLivePresenceEntry(presence)) continue
+    const activityState = resolveAgentActivityState({ presence })
+    if (activityState === 'historical' || activityState === 'archived') continue
     const actorLabel = String(presence.actor_label || '').trim()
     if (!actorLabel || seenActors.has(actorLabel) || hiddenActors.has(actorLabel)) continue
     next.push({
@@ -151,7 +167,7 @@ export function buildAgentReachabilitySources(input: {
       actorLabel,
       participant: null,
       presence,
-      activityState: 'online',
+      activityState,
     })
   }
 
