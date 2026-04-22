@@ -992,6 +992,25 @@ async function withAgentIdentity(
   };
 }
 
+function getCurrentStreamAgentIdentity():
+  | {
+    actorLabel: string;
+    actorKey: string | null;
+    actorInstanceId: string;
+  }
+  | null {
+  const identity = currentAgentIdentity ?? getStoredAgentIdentity(currentAgentIdentityKey);
+  if (!identity?.actor_label || !identity.canonical_key) {
+    return null;
+  }
+
+  return {
+    actorLabel: identity.actor_label,
+    actorKey: identity.canonical_key,
+    actorInstanceId: AGENT_INSTANCE_UUID,
+  };
+}
+
 function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
   currentRoom = state;
   saveRoomSession({
@@ -1007,6 +1026,7 @@ function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
     {
       roomId: state.room_id,
       projectId: state.project_id ?? null,
+      agentIdentity: getCurrentStreamAgentIdentity(),
     },
     (_message: Message) => {
       touchRoomSession(state.room_id);
@@ -1080,6 +1100,19 @@ async function heartbeatRoomPresence(
   identity: StoredAgentIdentityState | null | undefined
 ): Promise<void> {
   await syncRoomPresence(roomId, identity, getRememberedRoomPresence(roomId, identity));
+}
+
+function appendAgentDeliveryQuery(
+  params: URLSearchParams,
+  identity: StoredAgentIdentityState | null | undefined
+): void {
+  if (!identity?.actor_label || !identity.canonical_key) {
+    return;
+  }
+
+  params.set("actor_label", identity.actor_label);
+  params.set("actor_key", identity.canonical_key);
+  params.set("actor_instance_id", AGENT_INSTANCE_UUID);
 }
 
 function getTargetRoomId(roomId?: string): string | null {
@@ -1194,6 +1227,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       typeof response.room_id === "string"
         ? response.room_id
         : roomId;
+    const agentIdentity = await ensureAgentIdentity();
     const room = rememberRoom(
       toRoomState({
         room_id: joinedRoomId,
@@ -1208,7 +1242,6 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
         joined_via: joinedVia,
       })
     );
-    const agentIdentity = await ensureAgentIdentity();
     await syncRoomPresence(room.room_id, agentIdentity, {
       status: "idle",
       status_text: "online in room",
@@ -1236,6 +1269,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       typeof project.code === "string"
         ? project.code
         : roomId;
+    const agentIdentity = await ensureAgentIdentity();
     const room = rememberRoom(
       toRoomState({
         room_id: legacyRoomId,
@@ -1245,7 +1279,6 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
         joined_via: joinedVia,
       })
     );
-    const agentIdentity = await ensureAgentIdentity();
     await syncRoomPresence(room.room_id, agentIdentity, {
       status: "idle",
       status_text: "online in room",
@@ -1271,6 +1304,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       : typeof project.code === "string" && project.code.trim()
         ? project.code
         : roomId;
+  const agentIdentity = await ensureAgentIdentity();
   const room = rememberRoom(
     toRoomState({
       room_id: legacyRoomId,
@@ -1285,7 +1319,6 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
       joined_via: joinedVia,
     })
   );
-  const agentIdentity = await ensureAgentIdentity();
   await syncRoomPresence(room.room_id, agentIdentity, {
     status: "idle",
     status_text: "online in room",
@@ -2717,6 +2750,7 @@ server.tool(
     const params = new URLSearchParams();
     if (after_message_id) params.set("after", after_message_id);
     params.set("timeout", String(serverTimeout));
+    appendAgentDeliveryQuery(params, identity);
 
     const queryString = params.toString();
     const firstResult = await roomScopedApiCall<{

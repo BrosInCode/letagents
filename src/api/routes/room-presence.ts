@@ -14,7 +14,7 @@ import {
   respondWithInternalError,
   type AuthenticatedRequest,
 } from "../http-helpers.js";
-import { buildFallbackPresenceFromMessages, buildSyntheticPresenceEntry } from "../presence-fallback.js";
+import { buildSyntheticPresenceEntry } from "../presence-fallback.js";
 import { buildFallbackRoomParticipants } from "../room-participant-fallback.js";
 import { normalizeRoomId } from "../room-routing.js";
 import {
@@ -77,21 +77,14 @@ export function registerRoomPresenceRoutes(
       });
     } catch (error) {
       console.error(
-        `[presence] failed to read stored room presence for ${project.id}; falling back to recent agent messages`,
+        `[presence] failed to read canonical room presence for ${project.id}; returning an empty live roster`,
         error
       );
 
-      const fallbackMessageLimit = Math.min(Math.max(limit * 4, 100), 200);
-      const fallbackMessages = await getMessages(project.id, { limit: fallbackMessageLimit });
-      const presence = buildFallbackPresenceFromMessages({
-        roomId: project.id,
-        messages: fallbackMessages.messages,
-      }).slice(0, limit);
-
       res.json({
         room_id: project.id,
-        presence: presence.map(toPublicRoomAgentPresence),
-        fallback: "recent_agent_messages",
+        presence: [],
+        fallback: "unavailable",
       });
     }
   });

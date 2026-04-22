@@ -16,6 +16,7 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../http-helpers.js";
+import { beginRoomAgentDelivery } from "../room-agent-delivery.js";
 import { normalizeRoomId } from "../room-routing.js";
 import { startSseStream, stopSseStream } from "../sse.js";
 import {
@@ -166,6 +167,11 @@ export function registerLegacyProjectMessageRoutes(
       return;
     }
 
+    const endDelivery = await beginRoomAgentDelivery({
+      req,
+      roomId: project.id,
+      transport: "sse",
+    });
     const heartbeat = startSseStream(res);
 
     const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
@@ -183,6 +189,11 @@ export function registerLegacyProjectMessageRoutes(
 
     req.on("close", () => {
       deps.messageEvents.off("message:created", onMessageCreated);
+      if (endDelivery) {
+        void endDelivery().catch((error: unknown) => {
+          console.error(`[legacy messages stream] failed to end agent delivery for ${project.id}`, error);
+        });
+      }
       stopSseStream(res, heartbeat);
     });
   });
@@ -204,12 +215,20 @@ export function registerLegacyProjectMessageRoutes(
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const endDelivery = await beginRoomAgentDelivery({
+      req,
+      roomId: project.id,
+      transport: "long_poll",
+    });
     const existing = await getMessagesAfter(projectId, after, {
       limit,
       include_prompt_only: includePromptOnly,
     });
 
     if (existing.messages.length > 0) {
+      await endDelivery?.().catch((error: unknown) => {
+        console.error(`[legacy messages poll] failed to end agent delivery for ${project.id}`, error);
+      });
       res.json({ project_id: projectId, messages: existing.messages, has_more: existing.has_more });
       return;
     }
@@ -220,6 +239,11 @@ export function registerLegacyProjectMessageRoutes(
       clearTimeout(timeout);
       deps.messageEvents.off("message:created", onMessageCreated);
       req.off("close", onClientClose);
+      if (endDelivery) {
+        void endDelivery().catch((error: unknown) => {
+          console.error(`[legacy messages poll] failed to end agent delivery for ${project.id}`, error);
+        });
+      }
     };
 
     const resolveRequest = (msgs: Message[], hasMore = false) => {

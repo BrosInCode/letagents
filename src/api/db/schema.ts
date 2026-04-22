@@ -6,7 +6,10 @@ import type {
   FocusGitHubEventRouting,
   FocusParentVisibility,
 } from "../focus-room-settings.js";
-import { AGENT_PRESENCE_STATUSES } from "../../shared/agent-presence.js";
+import {
+  AGENT_PRESENCE_STATUSES,
+  ROOM_AGENT_DELIVERY_TRANSPORTS,
+} from "../../shared/agent-presence.js";
 import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
 
 export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
@@ -23,6 +26,10 @@ export const taskStatusEnum = pgEnum("task_status", [
   "cancelled",
 ]);
 export const agentPresenceStatusEnum = pgEnum("agent_presence_status", AGENT_PRESENCE_STATUSES);
+export const roomAgentDeliveryTransportEnum = pgEnum(
+  "room_agent_delivery_transport",
+  ROOM_AGENT_DELIVERY_TRANSPORTS
+);
 export const taskLeaseKindEnum = pgEnum("task_lease_kind", ["work", "review"]);
 export const taskLeaseStatusEnum = pgEnum("task_lease_status", [
   "active",
@@ -363,6 +370,51 @@ export const room_agent_presence = pgTable(
       table.last_heartbeat_at
     ),
     room_agent_key_idx: index("room_agent_presence_room_agent_key_idx").on(table.room_id, table.agent_key),
+  })
+);
+
+export const room_agent_delivery_sessions = pgTable(
+  "room_agent_delivery_sessions",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    actor_label: text("actor_label").notNull(),
+    agent_key: text("agent_key"),
+    agent_instance_id: text("agent_instance_id"),
+    display_name: text("display_name").notNull(),
+    owner_label: text("owner_label"),
+    ide_label: text("ide_label"),
+    transport: roomAgentDeliveryTransportEnum("transport").notNull(),
+    active_connection_count: integer("active_connection_count").notNull().default(0),
+    last_connected_at: timestamp("last_connected_at", { mode: "string", withTimezone: true }).notNull(),
+    last_disconnected_at: timestamp("last_disconnected_at", { mode: "string", withTimezone: true }),
+    reconnect_grace_expires_at: timestamp("reconnect_grace_expires_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "room_agent_delivery_sessions_pk", columns: [table.room_id, table.actor_label] }),
+    room_idx: index("room_agent_delivery_sessions_room_id_idx").on(table.room_id),
+    room_active_idx: index("room_agent_delivery_sessions_room_active_idx").on(
+      table.room_id,
+      table.active_connection_count
+    ),
+    room_grace_idx: index("room_agent_delivery_sessions_room_grace_idx").on(
+      table.room_id,
+      table.reconnect_grace_expires_at
+    ),
+    room_agent_key_idx: index("room_agent_delivery_sessions_room_agent_key_idx").on(
+      table.room_id,
+      table.agent_key
+    ),
+    active_count_check: check(
+      "room_agent_delivery_sessions_active_connection_count_check",
+      sql`${table.active_connection_count} >= 0`
+    ),
   })
 );
 

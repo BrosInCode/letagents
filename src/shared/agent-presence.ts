@@ -15,6 +15,14 @@ export const AGENT_PRESENCE_FRESHNESS = [
 export type AgentPresenceFreshness = (typeof AGENT_PRESENCE_FRESHNESS)[number];
 
 export const ACTIVE_AGENT_PRESENCE_WINDOW_MS = 90_000;
+export const ROOM_AGENT_RECONNECT_GRACE_MS = 10_000;
+
+export const ROOM_AGENT_DELIVERY_TRANSPORTS = [
+  "long_poll",
+  "sse",
+] as const;
+
+export type RoomAgentDeliveryTransport = (typeof ROOM_AGENT_DELIVERY_TRANSPORTS)[number];
 
 export function normalizeAgentPresenceStatus(value: unknown): AgentPresenceStatus | null {
   const normalized = String(value || "").trim().toLowerCase();
@@ -35,4 +43,10 @@ export function getAgentPresenceFreshness(
   return now - heartbeatTime <= ACTIVE_AGENT_PRESENCE_WINDOW_MS
     ? "active"
     : "stale";
+}
+
+export function getAgentPresenceFreshnessFromReachability(
+  isReachable: boolean
+): AgentPresenceFreshness {
+  return isReachable ? "active" : "stale";
 }

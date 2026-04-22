@@ -18,6 +18,7 @@ import {
 } from "../http-helpers.js";
 import { normalizeRoomId } from "../room-routing.js";
 import { startSseStream, stopSseStream } from "../sse.js";
+import { beginRoomAgentDelivery } from "../room-agent-delivery.js";
 import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
@@ -168,12 +169,20 @@ export function registerRoomMessageRoutes(
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const endDelivery = await beginRoomAgentDelivery({
+      req,
+      roomId: project.id,
+      transport: "long_poll",
+    });
     const existing = await getMessagesAfter(projectId, after, {
       limit,
       include_prompt_only: includePromptOnly,
     });
 
     if (existing.messages.length > 0) {
+      await endDelivery?.().catch((error: unknown) => {
+        console.error(`[room messages poll] failed to end agent delivery for ${project.id}`, error);
+      });
       res.json({ room_id: project.id, messages: existing.messages, has_more: existing.has_more });
       return;
     }
@@ -184,6 +193,11 @@ export function registerRoomMessageRoutes(
       clearTimeout(timeout);
       deps.messageEvents.off("message:created", onMessageCreated);
       req.off("close", onClientClose);
+      if (endDelivery) {
+        void endDelivery().catch((error: unknown) => {
+          console.error(`[room messages poll] failed to end agent delivery for ${project.id}`, error);
+        });
+      }
     };
 
     const resolveRequest = (msgs: Message[], hasMore = false) => {
@@ -223,6 +237,11 @@ export function registerRoomMessageRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const projectId = project.id;
+    const endDelivery = await beginRoomAgentDelivery({
+      req,
+      roomId: project.id,
+      transport: "sse",
+    });
 
     const heartbeat = startSseStream(res);
 
@@ -245,6 +264,11 @@ export function registerRoomMessageRoutes(
     req.on("close", () => {
       deps.messageEvents.off("message:created", onMessageCreated);
       deps.taskEvents.off("task:updated", onTaskUpdated);
+      if (endDelivery) {
+        void endDelivery().catch((error: unknown) => {
+          console.error(`[room messages stream] failed to end agent delivery for ${project.id}`, error);
+        });
+      }
       stopSseStream(res, heartbeat);
     });
   });
