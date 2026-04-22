@@ -45,6 +45,7 @@ import {
   normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
 } from "../task-ownership.js";
+import { findApplicableLock } from "../coordination-policy.js";
 import type { FocusParentBoardWriteIsolationDecision } from "../focus-room-task-write-isolation.js";
 import { buildAgentActorLabel } from "../../shared/agent-identity.js";
 
@@ -603,7 +604,10 @@ export function registerRoomTaskRoutes(
       actorKey = actorValidation.actorKey;
     }
 
-    const leases = await getActiveTaskLeases(project.id, task.id);
+    const [leases, locks] = await Promise.all([
+      getActiveTaskLeases(project.id, task.id),
+      getActiveTaskLocks(project.id, task.id),
+    ]);
     const activeWorkLease = getActiveWorkLease(leases);
     if (!activeWorkLease) {
       res.status(409).json({
@@ -672,6 +676,16 @@ export function registerRoomTaskRoutes(
         });
         return;
       }
+      if (action === "handoff") {
+        const lock = findApplicableLock({ locks, taskId: task.id });
+        if (lock) {
+          res.status(409).json({
+            error: `Task handoff is blocked by ${lock.reason} lock ${lock.id}.`,
+            code: "coordination_active_lock",
+          });
+          return;
+        }
+      }
 
       const dispositionReason =
         deps.normalizeOptionalString(requestBody.reason)
@@ -711,10 +725,11 @@ export function registerRoomTaskRoutes(
           agent_key: targetActorKey,
           agent_instance_id: targetActorInstanceId,
           actor_label: targetActorLabel,
-          branch_ref: buildLeasedBranchRef({
+          branch_ref: activeWorkLease.branch_ref ?? buildLeasedBranchRef({
             taskId: task.id,
             agentKey: targetActorKey,
           }),
+          pr_url: activeWorkLease.pr_url ?? task.pr_url ?? null,
           created_by: actorLabel ?? req.sessionAccount?.login ?? "participant",
           output_intent: task.title,
         });

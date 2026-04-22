@@ -522,6 +522,12 @@ test(
       ...dawnActor,
     });
     assert.equal(claimByDawn.status, 200);
+    const boundPrUrl = "https://github.com/BrosInCode/letagents/pull/1200";
+    const bindPr = await patchTask(task.id, {
+      pr_url: boundPrUrl,
+      ...dawnActor,
+    });
+    assert.equal(bindPr.status, 200);
 
     const handoff = await leaseAction(task.id, {
       action: "handoff",
@@ -537,10 +543,39 @@ test(
     assert.equal(handoffBody.task.assignee_agent_key, bayActor.actor_key);
     assert.equal(handoffBody.released_lease.status, "released");
     assert.equal(handoffBody.new_lease.agent_key, bayActor.actor_key);
+    assert.equal(handoffBody.new_lease.pr_url, boundPrUrl);
+    assert.equal(handoffBody.new_lease.branch_ref, handoffBody.released_lease.branch_ref);
 
     const activeLeases = await getActiveTaskLeases(room.id, task.id);
     assert.equal(activeLeases.length, 1);
     assert.equal(activeLeases[0]?.agent_key, bayActor.actor_key);
+    assert.equal(activeLeases[0]?.pr_url, boundPrUrl);
+
+    const lockedTask = await createTask(room.id, "Locked handoff should fail", "Human");
+    await updateTask(room.id, lockedTask.id, { status: "accepted" });
+    const lockedClaim = await patchTask(lockedTask.id, {
+      status: "assigned",
+      assignee: dawnActor.actor_label,
+      assignee_agent_key: dawnActor.actor_key,
+      ...dawnActor,
+    });
+    assert.equal(lockedClaim.status, 200);
+    await createTaskLock({
+      room_id: room.id,
+      task_id: lockedTask.id,
+      scope: "task",
+      reason: "human_stop",
+      created_by: "Human",
+      message: "Worker should not be handed off while stopped.",
+    });
+    const lockedHandoff = await leaseAction(lockedTask.id, {
+      action: "handoff",
+      reason: "Attempting to bypass the stop lock.",
+      target_actor_key: bayActor.actor_key,
+      ...dawnActor,
+    });
+    assert.equal(lockedHandoff.status, 409);
+    assert.equal((await lockedHandoff.json()).code, "coordination_active_lock");
   }
 );
 
