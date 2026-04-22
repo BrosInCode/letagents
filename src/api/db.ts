@@ -14,14 +14,19 @@ import {
   github_webhook_deliveries,
   github_repositories,
   id_sequences,
+  message_attachment_uploads,
+  message_attachments,
   messages,
   owner_tokens,
   room_agent_delivery_sessions,
   project_admins,
+  reasoning_session_updates,
+  reasoning_sessions,
   room_agent_presence,
   room_participants,
   room_aliases,
   rooms,
+  stale_task_prompt_mutes,
   task_leases,
   task_locks,
   tasks,
@@ -30,6 +35,7 @@ import type {
   CoordinationEventMetadata,
   GitHubRoomEventMetadata,
   GitHubRoomEventType,
+  ReasoningSnapshot,
 } from "./db/schema.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomId, normalizeRoomName } from "./room-routing.js";
@@ -47,6 +53,12 @@ import {
   type RoomAgentDeliveryTransport,
 } from "../shared/agent-presence.js";
 import {
+  buildRoomActivitySourceFlags,
+  deriveRoomAgentActivityState,
+  type RoomActivitySourceFlag,
+  type RoomAgentActivityState,
+} from "../shared/room-agent-activity.js";
+import {
   buildTaskWorkflowRefs,
   normalizeTaskWorkflowArtifacts,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
@@ -61,6 +73,7 @@ import {
   type FocusParentVisibility,
   type FocusRoomSettingsPatch,
 } from "./focus-room-settings.js";
+import { assertAttachmentTotalByteSize, type NormalizedMessageAttachmentReference } from "./message-attachments.js";
 
 export type RoomKind = "main" | "focus";
 export type FocusRoomStatus = "active" | "concluded";
@@ -220,6 +233,8 @@ export interface RoomAgentPresence {
   created_at: string;
   updated_at: string;
   freshness: AgentPresenceFreshness;
+  activity_state: RoomAgentActivityState;
+  source_flags: RoomActivitySourceFlag[];
 }
 
 export interface RoomAgentDeliverySession {
@@ -249,9 +264,42 @@ export interface RoomParticipant {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  hidden_at: string | null;
+  hidden_by: string | null;
   last_seen_at: string;
+  last_room_activity_at: string | null;
+  last_live_heartbeat_at: string | null;
+  activity_state: RoomAgentActivityState | null;
+  source_flags: RoomActivitySourceFlag[];
   created_at: string;
   updated_at: string;
+}
+
+export interface ReasoningSession {
+  id: string;
+  room_id: string;
+  task_id: string | null;
+  anchor_message_id: string | null;
+  actor_label: string;
+  agent_key: string | null;
+  status: AgentPresenceStatus | null;
+  summary: string;
+  latest_payload: ReasoningSnapshot;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+}
+
+export interface ReasoningSessionUpdate {
+  id: string;
+  room_id: string;
+  session_id: string;
+  actor_label: string;
+  status: AgentPresenceStatus | null;
+  summary: string;
+  milestone: string | null;
+  payload: ReasoningSnapshot;
+  created_at: string;
 }
 
 export interface Message {
@@ -262,6 +310,7 @@ export interface Message {
   source: string | null;
   timestamp: string;
   reply_to: MessageReplyReference | null;
+  attachments: MessageAttachment[];
 }
 
 export interface MessageReplyReference {
@@ -270,6 +319,39 @@ export interface MessageReplyReference {
   text: string;
   source: string | null;
   timestamp: string;
+}
+
+export interface MessageAttachment {
+  id: string;
+  filename: string;
+  file_name: string;
+  content_type: string;
+  mime_type: string;
+  byte_size: number;
+  size_bytes: number;
+  download_url: string;
+}
+
+export interface MessageAttachmentData extends MessageAttachment {
+  storage_provider: string;
+  bucket: string;
+  object_key: string;
+}
+
+export interface MessageAttachmentUpload {
+  upload_id: string;
+  room_id: string;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  storage_provider: string;
+  bucket: string;
+  object_key: string;
+  status: "pending" | "attached";
+  expires_at: string;
+  attached_message_number: number | null;
+  created_at: string;
+  attached_at: string | null;
 }
 
 export type TaskStatus =
@@ -296,6 +378,7 @@ export interface Task {
   description: string | null;
   status: TaskStatus;
   assignee: string | null;
+  assignee_agent_key: string | null;
   created_by: string;
   source_message_id: string | null;
   pr_url: string | null;
@@ -303,8 +386,18 @@ export interface Task {
   workflow_refs: TaskWorkflowRef[];
   created_at: string;
   updated_at: string;
+  stale_prompt_state?: TaskStalePromptState | null;
   active_leases?: TaskLease[];
   active_locks?: TaskLock[];
+}
+
+export interface TaskStalePromptState {
+  is_stale: boolean;
+  reason: string | null;
+  stale_for_ms: number | null;
+  muted: boolean;
+  muted_by: string | null;
+  muted_at: string | null;
 }
 
 export interface TaskLease {
@@ -340,6 +433,15 @@ export interface TaskLock {
   cleared_at: string | null;
 }
 
+export interface StaleTaskPromptMute {
+  room_id: string;
+  task_id: string;
+  task_updated_at: string;
+  muted_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CoordinationEvent {
   id: string;
   room_id: string;
@@ -371,6 +473,36 @@ interface MessageRow {
   agent_prompt_kind: string | null;
   source: string | null;
   timestamp: string;
+}
+
+interface MessageAttachmentRow {
+  room_id: string;
+  message_number: number;
+  attachment_number: number;
+  upload_id: string;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  storage_provider: string;
+  bucket: string;
+  object_key: string;
+  created_at: string;
+}
+
+interface MessageAttachmentUploadRow {
+  upload_id: string;
+  room_id: string;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  storage_provider: string;
+  bucket: string;
+  object_key: string;
+  status: string;
+  expires_at: string;
+  attached_message_number: number | null;
+  created_at: string;
+  attached_at: string | null;
 }
 
 interface TaskRow {
@@ -405,6 +537,15 @@ interface TaskLeaseRow {
   last_heartbeat_at: string | null;
   revoked_reason: string | null;
   created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface StaleTaskPromptMuteRow {
+  room_id: string;
+  task_id: string;
+  task_updated_at: string;
+  muted_by: string;
   created_at: string;
   updated_at: string;
 }
@@ -479,9 +620,38 @@ interface RoomParticipantRow {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  hidden_at: string | null;
+  hidden_by: string | null;
   last_seen_at: string;
   created_at: string;
   updated_at: string;
+}
+
+interface ReasoningSessionRow {
+  id: string;
+  room_id: string;
+  task_id: string | null;
+  anchor_message_id: string | null;
+  actor_label: string;
+  agent_key: string | null;
+  status: AgentPresenceStatus | null;
+  summary: string;
+  latest_payload: ReasoningSnapshot;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+}
+
+interface ReasoningSessionUpdateRow {
+  id: string;
+  room_id: string;
+  session_id: string;
+  actor_label: string;
+  status: AgentPresenceStatus | null;
+  summary: string;
+  milestone: string | null;
+  payload: ReasoningSnapshot;
+  created_at: string;
 }
 
 const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -616,6 +786,10 @@ function formatMessageId(number: number): string {
   return `msg_${number}`;
 }
 
+function formatAttachmentId(number: number): string {
+  return `att_${number}`;
+}
+
 function formatTaskId(number: number): string {
   return `task_${number}`;
 }
@@ -630,6 +804,50 @@ function parseScopedId(id: string, prefix: string): number | null {
   return Number.isInteger(number) && number > 0 ? number : null;
 }
 
+function formatMessageAttachmentDownloadUrl(row: Pick<MessageAttachmentRow, "room_id" | "message_number" | "attachment_number">): string {
+  return `/rooms/${encodeURIComponent(row.room_id)}/messages/${formatMessageId(row.message_number)}/attachments/${formatAttachmentId(row.attachment_number)}`;
+}
+
+function toMessageAttachment(row: MessageAttachmentRow): MessageAttachment {
+  return {
+    id: formatAttachmentId(row.attachment_number),
+    filename: row.filename,
+    file_name: row.filename,
+    content_type: row.content_type,
+    mime_type: row.content_type,
+    byte_size: row.byte_size,
+    size_bytes: row.byte_size,
+    download_url: formatMessageAttachmentDownloadUrl(row),
+  };
+}
+
+function toMessageAttachmentData(row: MessageAttachmentRow): MessageAttachmentData {
+  return {
+    ...toMessageAttachment(row),
+    storage_provider: row.storage_provider,
+    bucket: row.bucket,
+    object_key: row.object_key,
+  };
+}
+
+function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): MessageAttachmentUpload {
+  return {
+    upload_id: row.upload_id,
+    room_id: row.room_id,
+    filename: row.filename,
+    content_type: row.content_type,
+    byte_size: row.byte_size,
+    storage_provider: row.storage_provider,
+    bucket: row.bucket,
+    object_key: row.object_key,
+    status: row.status === "attached" ? "attached" : "pending",
+    expires_at: row.expires_at,
+    attached_message_number: row.attached_message_number,
+    created_at: row.created_at,
+    attached_at: row.attached_at,
+  };
+}
+
 function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
@@ -639,6 +857,7 @@ function toMessage(row: MessageRow): Message {
     source: row.source ?? null,
     timestamp: row.timestamp,
     reply_to: null,
+    attachments: [],
   };
 }
 
@@ -654,7 +873,8 @@ function toMessageReplyReference(row: Pick<MessageRow, "number" | "sender" | "te
 
 function toMessageWithReply(
   row: MessageRow,
-  replyReference: MessageReplyReference | null
+  replyReference: MessageReplyReference | null,
+  attachments: MessageAttachment[] = []
 ): Message {
   return {
     id: formatMessageId(row.number),
@@ -664,6 +884,7 @@ function toMessageWithReply(
     source: row.source ?? null,
     timestamp: row.timestamp,
     reply_to: replyReference,
+    attachments,
   };
 }
 
@@ -679,6 +900,7 @@ function toTask(row: TaskRow): Task {
     description: row.description,
     status: row.status,
     assignee: row.assignee,
+    assignee_agent_key: row.assignee_agent_key,
     created_by: row.created_by,
     source_message_id: row.source_message_id,
     pr_url: row.pr_url,
@@ -687,6 +909,17 @@ function toTask(row: TaskRow): Task {
       artifacts: workflowArtifacts,
       prUrl: row.pr_url,
     }),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function toStaleTaskPromptMute(row: StaleTaskPromptMuteRow): StaleTaskPromptMute {
+  return {
+    room_id: row.room_id,
+    task_id: row.task_id,
+    task_updated_at: row.task_updated_at,
+    muted_by: row.muted_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -748,6 +981,7 @@ function toCoordinationEvent(row: CoordinationEventRow): CoordinationEvent {
 }
 
 function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
+  const freshness = getAgentPresenceFreshness(row.last_heartbeat_at);
   return {
     room_id: row.room_id,
     actor_label: row.actor_label,
@@ -760,7 +994,13 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     last_heartbeat_at: row.last_heartbeat_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
-    freshness: getAgentPresenceFreshness(row.last_heartbeat_at),
+    freshness,
+    activity_state: deriveRoomAgentActivityState({
+      hidden: false,
+      hasPresence: true,
+      freshness,
+    }),
+    source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
 }
 
@@ -836,6 +1076,12 @@ function mergeRoomAgentPresenceRecords(input: {
       created_at: statusEntry?.created_at ?? deliverySession?.created_at ?? lastSeenAt,
       updated_at: deliverySession?.updated_at ?? statusEntry?.updated_at ?? lastSeenAt,
       freshness: getAgentPresenceFreshnessFromReachability(isReachable),
+      activity_state: deriveRoomAgentActivityState({
+        hidden: false,
+        hasPresence: Boolean(statusEntry || deliverySession),
+        freshness: getAgentPresenceFreshnessFromReachability(isReachable),
+      }),
+      source_flags: buildRoomActivitySourceFlags(["presence"]),
     } satisfies RoomAgentPresence;
   });
 
@@ -865,9 +1111,46 @@ function toRoomParticipant(row: RoomParticipantRow): RoomParticipant {
     display_name: row.display_name,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
+    hidden_at: row.hidden_at,
+    hidden_by: row.hidden_by,
     last_seen_at: row.last_seen_at,
+    last_room_activity_at: row.last_seen_at,
+    last_live_heartbeat_at: null,
+    activity_state: null,
+    source_flags: [],
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function toReasoningSession(row: ReasoningSessionRow): ReasoningSession {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    task_id: row.task_id,
+    anchor_message_id: row.anchor_message_id,
+    actor_label: row.actor_label,
+    agent_key: row.agent_key,
+    status: row.status,
+    summary: row.summary,
+    latest_payload: row.latest_payload,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    closed_at: row.closed_at,
+  };
+}
+
+function toReasoningSessionUpdate(row: ReasoningSessionUpdateRow): ReasoningSessionUpdate {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    session_id: row.session_id,
+    actor_label: row.actor_label,
+    status: row.status,
+    summary: row.summary,
+    milestone: row.milestone,
+    payload: row.payload,
+    created_at: row.created_at,
   };
 }
 
@@ -1890,9 +2173,11 @@ export async function addMessage(
     source?: string;
     agent_prompt_kind?: AgentPromptKind | null;
     reply_to_message_id?: string | null;
+    attachments?: NormalizedMessageAttachmentReference[];
   }
 ): Promise<Message> {
   const promptKind = options?.agent_prompt_kind ?? null;
+  const attachmentRefs = options?.attachments ?? [];
   return db.transaction(async (tx) => {
     let replyReference: MessageReplyReference | null = null;
     const replyToNumber =
@@ -1941,6 +2226,65 @@ export async function addMessage(
     };
 
     await tx.insert(messages).values(message);
+    let attachmentRows: MessageAttachmentRow[] = [];
+    if (attachmentRefs.length > 0) {
+      const uploadIds = attachmentRefs.map((attachment) => attachment.upload_id);
+      const claimedUploadRows = await tx
+        .update(message_attachment_uploads)
+        .set({
+          status: "attached",
+          attached_message_number: message.number,
+          attached_at: message.timestamp,
+        })
+        .where(
+          and(
+            eq(message_attachment_uploads.room_id, roomId),
+            inArray(message_attachment_uploads.upload_id, uploadIds),
+            eq(message_attachment_uploads.status, "pending"),
+            sql`${message_attachment_uploads.expires_at} > ${message.timestamp}`
+          )
+        )
+        .returning({
+          upload_id: message_attachment_uploads.upload_id,
+          room_id: message_attachment_uploads.room_id,
+          filename: message_attachment_uploads.filename,
+          content_type: message_attachment_uploads.content_type,
+          byte_size: message_attachment_uploads.byte_size,
+          storage_provider: message_attachment_uploads.storage_provider,
+          bucket: message_attachment_uploads.bucket,
+          object_key: message_attachment_uploads.object_key,
+          status: message_attachment_uploads.status,
+          expires_at: message_attachment_uploads.expires_at,
+          attached_message_number: message_attachment_uploads.attached_message_number,
+          created_at: message_attachment_uploads.created_at,
+          attached_at: message_attachment_uploads.attached_at,
+        });
+      const uploadsById = new Map(claimedUploadRows.map((row) => [row.upload_id, row]));
+      const orderedUploads = uploadIds.map((uploadId) => {
+        const upload = uploadsById.get(uploadId);
+        if (!upload) {
+          throw new Error("attachment upload not found or expired");
+        }
+        return upload;
+      });
+      assertAttachmentTotalByteSize(orderedUploads);
+      attachmentRows = orderedUploads.map((attachment, index) => ({
+        room_id: roomId,
+        message_number: message.number,
+        attachment_number: index + 1,
+        upload_id: attachment.upload_id,
+        filename: attachment.filename,
+        content_type: attachment.content_type,
+        byte_size: attachment.byte_size,
+        storage_provider: attachment.storage_provider,
+        bucket: attachment.bucket,
+        object_key: attachment.object_key,
+        created_at: message.timestamp,
+      }));
+    }
+    if (attachmentRows.length > 0) {
+      await tx.insert(message_attachments).values(attachmentRows);
+    }
     if (isPromptOnlyAgentMessage(message.text, promptKind)) {
       await tx
         .delete(messages)
@@ -1955,7 +2299,7 @@ export async function addMessage(
         );
     }
 
-    return toMessageWithReply(message, replyReference);
+    return toMessageWithReply(message, replyReference, attachmentRows.map(toMessageAttachment));
   });
 }
 
@@ -2102,8 +2446,45 @@ async function hydrateMessageReplies(roomId: string, bounded: MessageRow[]): Pro
     }
   }
 
+  const messageNumbers = bounded.map((row) => row.number);
+  const attachmentMap = new Map<number, MessageAttachment[]>();
+  if (messageNumbers.length > 0) {
+    const attachmentRows = await db
+      .select({
+        room_id: message_attachments.room_id,
+        message_number: message_attachments.message_number,
+        attachment_number: message_attachments.attachment_number,
+        upload_id: message_attachments.upload_id,
+        filename: message_attachments.filename,
+        content_type: message_attachments.content_type,
+        byte_size: message_attachments.byte_size,
+        storage_provider: message_attachments.storage_provider,
+        bucket: message_attachments.bucket,
+        object_key: message_attachments.object_key,
+        created_at: message_attachments.created_at,
+      })
+      .from(message_attachments)
+      .where(
+        and(
+          eq(message_attachments.room_id, roomId),
+          inArray(message_attachments.message_number, messageNumbers)
+        )
+      )
+      .orderBy(asc(message_attachments.message_number), asc(message_attachments.attachment_number));
+
+    for (const attachmentRow of attachmentRows) {
+      const list = attachmentMap.get(attachmentRow.message_number) ?? [];
+      list.push(toMessageAttachment(attachmentRow));
+      attachmentMap.set(attachmentRow.message_number, list);
+    }
+  }
+
   return bounded.map((row) =>
-    toMessageWithReply(row, row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null)
+    toMessageWithReply(
+      row,
+      row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null,
+      attachmentMap.get(row.number) ?? []
+    )
   );
 }
 
@@ -2113,6 +2494,128 @@ export async function getMessagesAfter(
   options?: { limit?: number; include_prompt_only?: boolean }
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   return getMessages(roomId, { ...options, after: afterMessageId });
+}
+
+export async function getMessageAttachment(
+  roomId: string,
+  messageId: string,
+  attachmentId: string
+): Promise<MessageAttachmentData | undefined> {
+  const messageNumber = parseScopedId(messageId, "msg");
+  const attachmentNumber = parseScopedId(attachmentId, "att");
+  if (!messageNumber || !attachmentNumber) {
+    return undefined;
+  }
+
+  const [row] = await db
+    .select({
+      room_id: message_attachments.room_id,
+      message_number: message_attachments.message_number,
+      attachment_number: message_attachments.attachment_number,
+      upload_id: message_attachments.upload_id,
+      filename: message_attachments.filename,
+      content_type: message_attachments.content_type,
+      byte_size: message_attachments.byte_size,
+      storage_provider: message_attachments.storage_provider,
+      bucket: message_attachments.bucket,
+      object_key: message_attachments.object_key,
+      created_at: message_attachments.created_at,
+    })
+    .from(message_attachments)
+    .where(
+      and(
+        eq(message_attachments.room_id, roomId),
+        eq(message_attachments.message_number, messageNumber),
+        eq(message_attachments.attachment_number, attachmentNumber)
+      )
+    )
+    .limit(1);
+
+  return row ? toMessageAttachmentData(row) : undefined;
+}
+
+export async function createMessageAttachmentUpload(input: {
+  upload_id: string;
+  room_id: string;
+  filename: string;
+  content_type: string;
+  byte_size: number;
+  storage_provider: string;
+  bucket: string;
+  object_key: string;
+  expires_at: string;
+}): Promise<MessageAttachmentUpload> {
+  const createdAt = new Date().toISOString();
+  const [row] = await db
+    .insert(message_attachment_uploads)
+    .values({
+      upload_id: input.upload_id,
+      room_id: input.room_id,
+      filename: input.filename,
+      content_type: input.content_type,
+      byte_size: input.byte_size,
+      storage_provider: input.storage_provider,
+      bucket: input.bucket,
+      object_key: input.object_key,
+      status: "pending",
+      expires_at: input.expires_at,
+      attached_message_number: null,
+      created_at: createdAt,
+      attached_at: null,
+    })
+    .returning();
+
+  return toMessageAttachmentUpload(row);
+}
+
+export async function getMessageAttachmentUpload(
+  roomId: string,
+  uploadId: string
+): Promise<MessageAttachmentUpload | undefined> {
+  const [row] = await db
+    .select({
+      upload_id: message_attachment_uploads.upload_id,
+      room_id: message_attachment_uploads.room_id,
+      filename: message_attachment_uploads.filename,
+      content_type: message_attachment_uploads.content_type,
+      byte_size: message_attachment_uploads.byte_size,
+      storage_provider: message_attachment_uploads.storage_provider,
+      bucket: message_attachment_uploads.bucket,
+      object_key: message_attachment_uploads.object_key,
+      status: message_attachment_uploads.status,
+      expires_at: message_attachment_uploads.expires_at,
+      attached_message_number: message_attachment_uploads.attached_message_number,
+      created_at: message_attachment_uploads.created_at,
+      attached_at: message_attachment_uploads.attached_at,
+    })
+    .from(message_attachment_uploads)
+    .where(
+      and(
+        eq(message_attachment_uploads.room_id, roomId),
+        eq(message_attachment_uploads.upload_id, uploadId)
+      )
+    )
+    .limit(1);
+
+  return row ? toMessageAttachmentUpload(row) : undefined;
+}
+
+export async function deletePendingMessageAttachmentUpload(
+  roomId: string,
+  uploadId: string
+): Promise<MessageAttachmentUpload | undefined> {
+  const [row] = await db
+    .delete(message_attachment_uploads)
+    .where(
+      and(
+        eq(message_attachment_uploads.room_id, roomId),
+        eq(message_attachment_uploads.upload_id, uploadId),
+        eq(message_attachment_uploads.status, "pending")
+      )
+    )
+    .returning();
+
+  return row ? toMessageAttachmentUpload(row) : undefined;
 }
 
 export async function hasMessagesFromSender(roomId: string, sender: string): Promise<boolean> {
@@ -2319,6 +2822,8 @@ export async function upsertRoomParticipant(input: {
       display_name: input.display_name,
       owner_label: input.owner_label ?? null,
       ide_label: input.ide_label ?? null,
+      hidden_at: null,
+      hidden_by: null,
       last_seen_at: lastSeenAt,
       created_at: now,
       updated_at: now,
@@ -2333,6 +2838,8 @@ export async function upsertRoomParticipant(input: {
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
+        hidden_at: null,
+        hidden_by: null,
         last_seen_at: lastSeenAt,
         updated_at: now,
       },
@@ -2344,17 +2851,309 @@ export async function upsertRoomParticipant(input: {
 
 export async function getRoomParticipants(
   roomId: string,
-  options?: { limit?: number }
+  options?: { limit?: number; includeHidden?: boolean }
 ): Promise<RoomParticipant[]> {
   const limit = clampLimit(options?.limit, 50, 200);
+  const conditions = [eq(room_participants.room_id, roomId)];
+  if (!options?.includeHidden) {
+    conditions.push(sql`${room_participants.hidden_at} IS NULL`);
+  }
+
   const rows = await db
     .select()
     .from(room_participants)
-    .where(eq(room_participants.room_id, roomId))
+    .where(and(...conditions))
     .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name))
     .limit(limit);
 
   return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+}
+
+export async function getRoomParticipantsForRooms(
+  roomIds: readonly string[],
+  options?: { includeHidden?: boolean }
+): Promise<RoomParticipant[]> {
+  if (roomIds.length === 0) {
+    return [];
+  }
+
+  const conditions = [inArray(room_participants.room_id, [...roomIds])];
+  if (!options?.includeHidden) {
+    conditions.push(sql`${room_participants.hidden_at} IS NULL`);
+  }
+
+  const rows = await db
+    .select()
+    .from(room_participants)
+    .where(and(...conditions))
+    .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name));
+
+  return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+}
+
+export async function setRoomParticipantsHidden(input: {
+  room_id: string;
+  participant_keys: readonly string[];
+  hidden: boolean;
+  hidden_by?: string | null;
+}): Promise<number> {
+  if (input.participant_keys.length === 0) {
+    return 0;
+  }
+
+  const now = new Date().toISOString();
+  const result = await db
+    .update(room_participants)
+    .set({
+      hidden_at: input.hidden ? now : null,
+      hidden_by: input.hidden ? input.hidden_by ?? null : null,
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(room_participants.room_id, input.room_id),
+        inArray(room_participants.participant_key, [...input.participant_keys])
+      )
+    );
+
+  return Number(result.rowCount ?? 0);
+}
+
+function reasoningId(prefix: "rs" | "ru"): string {
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+export async function createReasoningSession(input: {
+  room_id: string;
+  task_id?: string | null;
+  anchor_message_id?: string | null;
+  actor_label: string;
+  agent_key?: string | null;
+  snapshot: ReasoningSnapshot;
+}): Promise<{ session: ReasoningSession; update: ReasoningSessionUpdate }> {
+  const now = new Date().toISOString();
+  const sessionRow: ReasoningSessionRow = {
+    id: reasoningId("rs"),
+    room_id: input.room_id,
+    task_id: input.task_id ?? null,
+    anchor_message_id: input.anchor_message_id ?? null,
+    actor_label: input.actor_label,
+    agent_key: input.agent_key ?? null,
+    status: input.snapshot.status ?? null,
+    summary: input.snapshot.summary,
+    latest_payload: input.snapshot,
+    created_at: now,
+    updated_at: now,
+    closed_at: null,
+  };
+  const updateRow: ReasoningSessionUpdateRow = {
+    id: reasoningId("ru"),
+    room_id: input.room_id,
+    session_id: sessionRow.id,
+    actor_label: input.actor_label,
+    status: input.snapshot.status ?? null,
+    summary: input.snapshot.summary,
+    milestone: input.snapshot.milestone ?? null,
+    payload: input.snapshot,
+    created_at: now,
+  };
+
+  await db.transaction(async (tx) => {
+    await tx.insert(reasoning_sessions).values(sessionRow);
+    await tx.insert(reasoning_session_updates).values(updateRow);
+  });
+
+  return {
+    session: toReasoningSession(sessionRow),
+    update: toReasoningSessionUpdate(updateRow),
+  };
+}
+
+export async function getReasoningSessions(
+  roomId: string,
+  options?: {
+    limit?: number;
+    open_only?: boolean;
+    actor_label?: string | null;
+    task_id?: string | null;
+  }
+): Promise<ReasoningSession[]> {
+  const limit = clampLimit(options?.limit, 50, 200);
+  const conditions = [eq(reasoning_sessions.room_id, roomId)];
+
+  if (options?.open_only) {
+    conditions.push(sql`${reasoning_sessions.closed_at} IS NULL`);
+  }
+  if (options?.actor_label) {
+    conditions.push(eq(reasoning_sessions.actor_label, options.actor_label));
+  }
+  if (options?.task_id) {
+    conditions.push(eq(reasoning_sessions.task_id, options.task_id));
+  }
+
+  const rows = await db
+    .select()
+    .from(reasoning_sessions)
+    .where(and(...conditions))
+    .orderBy(desc(reasoning_sessions.updated_at), desc(reasoning_sessions.created_at))
+    .limit(limit);
+
+  return (rows as ReasoningSessionRow[]).map(toReasoningSession);
+}
+
+export async function getReasoningSessionById(
+  roomId: string,
+  sessionId: string
+): Promise<ReasoningSession | undefined> {
+  const [row] = await db
+    .select()
+    .from(reasoning_sessions)
+    .where(and(eq(reasoning_sessions.room_id, roomId), eq(reasoning_sessions.id, sessionId)))
+    .limit(1);
+
+  return row ? toReasoningSession(row as ReasoningSessionRow) : undefined;
+}
+
+export async function getReasoningSessionUpdates(
+  roomId: string,
+  sessionId: string,
+  options?: { limit?: number }
+): Promise<ReasoningSessionUpdate[]> {
+  const limit = clampLimit(options?.limit, 200, 500);
+  const rows = await db
+    .select()
+    .from(reasoning_session_updates)
+    .where(
+      and(
+        eq(reasoning_session_updates.room_id, roomId),
+        eq(reasoning_session_updates.session_id, sessionId)
+      )
+    )
+    .orderBy(asc(reasoning_session_updates.created_at), asc(reasoning_session_updates.id))
+    .limit(limit);
+
+  return (rows as ReasoningSessionUpdateRow[]).map(toReasoningSessionUpdate);
+}
+
+export async function appendReasoningSessionUpdate(input: {
+  room_id: string;
+  session_id: string;
+  actor_label?: string | null;
+  snapshot: ReasoningSnapshot;
+}): Promise<{ session: ReasoningSession; update: ReasoningSessionUpdate } | null> {
+  return db.transaction(async (tx) => {
+    const [existingSession] = await tx
+      .select()
+      .from(reasoning_sessions)
+      .where(
+        and(
+          eq(reasoning_sessions.room_id, input.room_id),
+          eq(reasoning_sessions.id, input.session_id)
+        )
+      )
+      .limit(1);
+
+    if (!existingSession) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const mergedPayload: ReasoningSnapshot = {
+      ...(existingSession.latest_payload ?? {}),
+      ...input.snapshot,
+    };
+    const nextStatus = Object.prototype.hasOwnProperty.call(input.snapshot, "status")
+      ? input.snapshot.status ?? null
+      : existingSession.status;
+    const updateRow: ReasoningSessionUpdateRow = {
+      id: reasoningId("ru"),
+      room_id: input.room_id,
+      session_id: input.session_id,
+      actor_label: input.actor_label ?? existingSession.actor_label,
+      status: nextStatus ?? null,
+      summary: input.snapshot.summary,
+      milestone: input.snapshot.milestone ?? null,
+      payload: input.snapshot,
+      created_at: now,
+    };
+
+    await tx.insert(reasoning_session_updates).values(updateRow);
+
+    const nextSessionRow: ReasoningSessionRow = {
+      ...(existingSession as ReasoningSessionRow),
+      status: nextStatus ?? null,
+      summary: input.snapshot.summary,
+      latest_payload: mergedPayload,
+      updated_at: now,
+      closed_at: existingSession.closed_at,
+    };
+
+    await tx
+      .update(reasoning_sessions)
+      .set({
+        status: nextSessionRow.status,
+        summary: nextSessionRow.summary,
+        latest_payload: nextSessionRow.latest_payload,
+        updated_at: nextSessionRow.updated_at,
+        closed_at: nextSessionRow.closed_at,
+      })
+      .where(
+        and(
+          eq(reasoning_sessions.room_id, input.room_id),
+          eq(reasoning_sessions.id, input.session_id)
+        )
+      );
+
+    return {
+      session: toReasoningSession(nextSessionRow),
+      update: toReasoningSessionUpdate(updateRow),
+    };
+  });
+}
+
+export async function updateReasoningSession(input: {
+  room_id: string;
+  session_id: string;
+  task_id?: string | null;
+  anchor_message_id?: string | null;
+  closed_at?: string | null;
+}): Promise<ReasoningSession | undefined> {
+  const now = new Date().toISOString();
+  const patch: Partial<typeof reasoning_sessions.$inferInsert> = {
+    updated_at: now,
+  };
+
+  if ("task_id" in input) {
+    patch.task_id = input.task_id ?? null;
+  }
+  if ("anchor_message_id" in input) {
+    patch.anchor_message_id = input.anchor_message_id ?? null;
+  }
+  if ("closed_at" in input) {
+    patch.closed_at = input.closed_at ?? null;
+  }
+
+  const [row] = await db
+    .update(reasoning_sessions)
+    .set(patch)
+    .where(and(eq(reasoning_sessions.room_id, input.room_id), eq(reasoning_sessions.id, input.session_id)))
+    .returning();
+
+  return row ? toReasoningSession(row as ReasoningSessionRow) : undefined;
+}
+
+export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task[]> {
+  if (roomIds.length === 0) {
+    return [];
+  }
+
+  const rows = await db
+    .select()
+    .from(tasks)
+    .where(inArray(tasks.room_id, [...roomIds]))
+    .orderBy(desc(tasks.updated_at), asc(tasks.number));
+
+  return (rows as TaskRow[]).map(toTask);
 }
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
@@ -2950,6 +3749,60 @@ export async function updateTask(
   });
 }
 
+export async function setTaskAssignmentStateForLeaseAction(
+  roomId: string,
+  taskId: string,
+  updates: {
+    status?: TaskStatus;
+    assignee?: string | null;
+    assignee_agent_key?: string | null;
+  }
+): Promise<Task | null> {
+  const task = await getTaskRowById(roomId, taskId);
+  if (!task) return null;
+
+  const taskNumber = parseScopedId(taskId, "task");
+  if (!taskNumber) {
+    return null;
+  }
+
+  const newStatus = updates.status ?? task.status;
+  const hasAssigneeUpdate = Object.prototype.hasOwnProperty.call(updates, "assignee");
+  const hasAssigneeAgentKeyUpdate = Object.prototype.hasOwnProperty.call(
+    updates,
+    "assignee_agent_key"
+  );
+  const newAssignee = hasAssigneeUpdate
+    ? updates.assignee ?? null
+    : task.assignee;
+  const newAssigneeAgentKey = hasAssigneeUpdate
+    ? hasAssigneeAgentKeyUpdate
+      ? updates.assignee_agent_key ?? null
+      : null
+    : hasAssigneeAgentKeyUpdate
+      ? updates.assignee_agent_key ?? null
+      : task.assignee_agent_key;
+  const now = new Date().toISOString();
+
+  await db
+    .update(tasks)
+    .set({
+      status: newStatus,
+      assignee: newAssignee,
+      assignee_agent_key: newAssigneeAgentKey,
+      updated_at: now,
+    })
+    .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+
+  return toTask({
+    ...task,
+    status: newStatus,
+    assignee: newAssignee,
+    assignee_agent_key: newAssigneeAgentKey,
+    updated_at: now,
+  });
+}
+
 function coordinationId(prefix: "tl" | "lock" | "ce"): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
@@ -3041,6 +3894,66 @@ export async function getActiveTaskLeases(
   return rows.map(toTaskLease);
 }
 
+export async function upsertStaleTaskPromptMute(input: {
+  room_id: string;
+  task_id: string;
+  task_updated_at: string;
+  muted_by: string;
+}): Promise<StaleTaskPromptMute> {
+  const now = new Date().toISOString();
+  const [row] = (await db
+    .insert(stale_task_prompt_mutes)
+    .values({
+      room_id: input.room_id,
+      task_id: input.task_id,
+      task_updated_at: input.task_updated_at,
+      muted_by: input.muted_by,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [stale_task_prompt_mutes.room_id, stale_task_prompt_mutes.task_id],
+      set: {
+        task_updated_at: input.task_updated_at,
+        muted_by: input.muted_by,
+        updated_at: now,
+      },
+    })
+    .returning()) as StaleTaskPromptMuteRow[];
+
+  return toStaleTaskPromptMute(row);
+}
+
+export async function getStaleTaskPromptMutes(
+  roomId: string,
+  taskIds?: readonly string[]
+): Promise<StaleTaskPromptMute[]> {
+  const conditions = [eq(stale_task_prompt_mutes.room_id, roomId)];
+  if (taskIds && taskIds.length > 0) {
+    conditions.push(inArray(stale_task_prompt_mutes.task_id, [...taskIds]));
+  }
+
+  const rows = (await db
+    .select()
+    .from(stale_task_prompt_mutes)
+    .where(and(...conditions))
+    .orderBy(asc(stale_task_prompt_mutes.updated_at))) as StaleTaskPromptMuteRow[];
+
+  return rows.map(toStaleTaskPromptMute);
+}
+
+export async function clearStaleTaskPromptMute(
+  roomId: string,
+  taskId: string
+): Promise<boolean> {
+  const deleted = await db
+    .delete(stale_task_prompt_mutes)
+    .where(and(eq(stale_task_prompt_mutes.room_id, roomId), eq(stale_task_prompt_mutes.task_id, taskId)))
+    .returning({ task_id: stale_task_prompt_mutes.task_id });
+
+  return deleted.length > 0;
+}
+
 export async function revokeTaskLease(
   roomId: string,
   leaseId: string,
@@ -3052,6 +3965,28 @@ export async function revokeTaskLease(
     .set({
       status: "revoked",
       revoked_reason: revokedReason,
+      updated_at: now,
+    })
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)));
+
+  const [row] = (await db
+    .select()
+    .from(task_leases)
+    .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)))
+    .limit(1)) as TaskLeaseRow[];
+
+  return row ? toTaskLease(row) : null;
+}
+
+export async function releaseTaskLease(
+  roomId: string,
+  leaseId: string
+): Promise<TaskLease | null> {
+  const now = new Date().toISOString();
+  await db
+    .update(task_leases)
+    .set({
+      status: "released",
       updated_at: now,
     })
     .where(and(eq(task_leases.room_id, roomId), eq(task_leases.id, leaseId)));

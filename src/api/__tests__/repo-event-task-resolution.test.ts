@@ -62,9 +62,33 @@ function makeIssueEvent(overrides: Partial<RepoRoomEvent> = {}): RepoRoomEvent {
   } as RepoRoomEvent;
 }
 
+function makePullRequestReviewEvent(overrides: Partial<RepoRoomEvent> = {}): RepoRoomEvent {
+  return {
+    provider: "github",
+    kind: "pull_request_review",
+    action: "submitted",
+    repositoryFullName: "BrosInCode/letagents",
+    pullRequest: {
+      number: 252,
+      title: "Review without task mention",
+      url: "https://github.com/BrosInCode/letagents/pull/252",
+      body: null,
+      headRef: "letagents/task_4/emmymay-wrenmoon",
+    },
+    review: {
+      id: "review_252",
+      state: "approved",
+      url: "https://github.com/BrosInCode/letagents/pull/252#pullrequestreview-252",
+      body: null,
+    },
+    ...overrides,
+  } as RepoRoomEvent;
+}
+
 function createHarness(input?: {
   artifactTask?: Task;
   prUrlTask?: Task;
+  activeWorkflowLeaseTask?: Task;
   tasksById?: Record<string, Task | undefined>;
 }) {
   const artifactMatchCalls: Array<{
@@ -72,6 +96,10 @@ function createHarness(input?: {
     matches: TaskWorkflowArtifactMatch[];
   }> = [];
   const prUrlCalls: Array<{ projectId: string; prUrl: string }> = [];
+  const activeWorkflowLeaseCalls: Array<{
+    projectId: string;
+    workflow: { prUrl?: string | null; branchRef?: string | null };
+  }> = [];
   const taskByIdCalls: Array<{ projectId: string; taskId: string }> = [];
 
   const resolver = createRepoRoomEventTaskResolver({
@@ -83,6 +111,10 @@ function createHarness(input?: {
       prUrlCalls.push({ projectId, prUrl });
       return input?.prUrlTask;
     },
+    findTaskByActiveWorkflowLease: async (projectId, workflow) => {
+      activeWorkflowLeaseCalls.push({ projectId, workflow });
+      return input?.activeWorkflowLeaseTask;
+    },
     getTaskById: async (projectId, taskId) => {
       taskByIdCalls.push({ projectId, taskId });
       return input?.tasksById?.[taskId];
@@ -90,6 +122,7 @@ function createHarness(input?: {
   });
 
   return {
+    activeWorkflowLeaseCalls,
     artifactMatchCalls,
     prUrlCalls,
     resolver,
@@ -192,6 +225,66 @@ test("resolveLinkedTaskForRepoRoomEvent falls back to pull request URL lookup", 
     {
       projectId: "github.com/brosincode/letagents",
       prUrl: "https://github.com/BrosInCode/letagents/pull/250",
+    },
+  ]);
+  assert.deepEqual(taskByIdCalls, []);
+});
+
+test("resolveLinkedTaskForRepoRoomEvent falls back to active lease branch for pull requests", async () => {
+  const task = makeTask("task_4");
+  const { activeWorkflowLeaseCalls, resolver, taskByIdCalls } = createHarness({
+    activeWorkflowLeaseTask: task,
+  });
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(
+    project,
+    makePullRequestEvent({
+      pullRequest: {
+        number: 251,
+        title: "Unreferenced title",
+        url: "https://github.com/BrosInCode/letagents/pull/251",
+        body: null,
+        headRef: "letagents/task_4/emmymay-wrenmoon",
+      },
+    })
+  );
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByTaskReference, false);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.deepEqual(activeWorkflowLeaseCalls, [
+    {
+      projectId: "github.com/brosincode/letagents",
+      workflow: {
+        prUrl: "https://github.com/BrosInCode/letagents/pull/251",
+        branchRef: "letagents/task_4/emmymay-wrenmoon",
+      },
+    },
+  ]);
+  assert.deepEqual(taskByIdCalls, []);
+});
+
+test("resolveLinkedTaskForRepoRoomEvent uses active lease workflow refs for pull request reviews", async () => {
+  const task = makeTask("task_4");
+  const { activeWorkflowLeaseCalls, resolver, taskByIdCalls } = createHarness({
+    activeWorkflowLeaseTask: task,
+  });
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(
+    project,
+    makePullRequestReviewEvent()
+  );
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByTaskReference, false);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.deepEqual(activeWorkflowLeaseCalls, [
+    {
+      projectId: "github.com/brosincode/letagents",
+      workflow: {
+        prUrl: "https://github.com/BrosInCode/letagents/pull/252",
+        branchRef: "letagents/task_4/emmymay-wrenmoon",
+      },
     },
   ]);
   assert.deepEqual(taskByIdCalls, []);

@@ -3,22 +3,32 @@ import type { Express, Response } from "express";
 
 import {
   assignProjectAdmin,
+  clearStaleTaskPromptMute,
   createCoordinationEvent,
   createFocusRoomForTask,
+  createTaskLease,
   createTask,
   getActiveTaskLeases,
   getActiveTaskLocks,
+  getAgentIdentityByCanonicalKey,
   getOpenTasks,
+  getStaleTaskPromptMutes,
   getTaskById,
   getTaskOwnershipState,
   getTasks,
   getTasksGitHubArtifactStatus,
+  releaseTaskLease,
+  revokeTaskLease,
+  setTaskAssignmentStateForLeaseAction,
+  upsertStaleTaskPromptMute,
   updateTask,
   type Project,
   type Task,
+  type TaskLease,
   type TaskGitHubArtifactStatus,
   type TaskStatus,
 } from "../db.js";
+import { buildLeasedBranchRef } from "../github-lease-enforcement.js";
 import {
   parseLimit,
   respondWithBadRequest,
@@ -26,13 +36,18 @@ import {
 } from "../http-helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
 import { normalizeRoomId } from "../room-routing.js";
+import { getTaskStalePromptState } from "../stale-work.js";
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
+  normalizeTaskActorInstanceId,
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
 } from "../task-ownership.js";
+import { findApplicableLock } from "../coordination-policy.js";
+import type { FocusParentBoardWriteIsolationDecision } from "../focus-room-task-write-isolation.js";
+import { buildAgentActorLabel } from "../../shared/agent-identity.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
@@ -45,6 +60,24 @@ type TaskCoordinationGuardDecision =
 type TaskAdmissionGuardDecision =
   | { kind: "allow" }
   | { kind: "deny"; code: string; error: string };
+
+type LeaseActionRequestBody = {
+  action?: string;
+  lease_id?: string;
+  reason?: string;
+  actor_label?: string;
+  actor_key?: string;
+  actor_instance_id?: string;
+  target_actor_key?: string;
+  target_actor_instance_id?: string;
+};
+
+const LEASE_RECOVERY_ACTIVE_STATUSES = new Set<TaskStatus>([
+  "assigned",
+  "in_progress",
+  "blocked",
+  "in_review",
+]);
 
 export interface RoomTaskRouteDeps {
   taskEvents: EventEmitter;
@@ -105,36 +138,71 @@ export interface RoomTaskRouteDeps {
     task: Task;
     taskOwnership: TaskOwnershipState;
     updates: TaskUpdatePatch;
-    forcedMutation?: { mutation: "focus_room_open"; leaseKind: "work" };
+    forcedMutation?: { mutation: "focus_room_open" | "task_update"; leaseKind: "work" };
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
+  enforceFocusParentBoardWriteIsolation(input: {
+    req: AuthenticatedRequest;
+    targetProject: Project;
+  }): Promise<FocusParentBoardWriteIsolationDecision>;
   emitProjectMessage(projectId: string, sender: string, text: string): Promise<unknown>;
 }
 
 async function attachTaskDetails(projectId: string, task: Task) {
-  const [leases, locks] = await Promise.all([
+  const [leases, locks, stalePromptMutes] = await Promise.all([
     getActiveTaskLeases(projectId),
     getActiveTaskLocks(projectId),
+    getStaleTaskPromptMutes(projectId, [task.id]),
   ]);
+  const stalePromptMute = stalePromptMutes[0] ?? null;
   return {
     ...task,
+    stale_prompt_state: getTaskStalePromptState({
+      task,
+      mute: stalePromptMute,
+    }),
     active_leases: leases.filter((lease) => lease.task_id === task.id),
     active_locks: locks.filter((lock) => lock.task_id === task.id || lock.scope === "room"),
   };
 }
 
 async function attachTaskListDetails(projectId: string, tasks: Task[]) {
-  const [leases, locks] = await Promise.all([
+  const [leases, locks, stalePromptMutes] = await Promise.all([
     getActiveTaskLeases(projectId),
     getActiveTaskLocks(projectId),
+    tasks.length > 0 ? getStaleTaskPromptMutes(projectId, tasks.map((task) => task.id)) : Promise.resolve([]),
   ]);
+  const stalePromptMuteByTaskId = new Map(
+    stalePromptMutes.map((mute) => [mute.task_id, mute] as const)
+  );
   return tasks.map((task) => ({
     ...task,
+    stale_prompt_state: getTaskStalePromptState({
+      task,
+      mute: stalePromptMuteByTaskId.get(task.id) ?? null,
+    }),
     active_leases: leases.filter((lease) => lease.task_id === task.id),
     active_locks: locks.filter((lock) => lock.task_id === task.id || lock.scope === "room"),
   }));
+}
+
+export function isCurrentStalePromptAction(input: {
+  taskUpdatedAt: string;
+  promptTimestamp: string | null | undefined;
+}): boolean {
+  const taskUpdatedAtMs = Date.parse(input.taskUpdatedAt);
+  const promptTimestampMs = Date.parse(input.promptTimestamp ?? "");
+  if (!Number.isFinite(taskUpdatedAtMs) || !Number.isFinite(promptTimestampMs)) {
+    return false;
+  }
+
+  return taskUpdatedAtMs <= promptTimestampMs;
+}
+
+function getActiveWorkLease(leases: readonly TaskLease[]): TaskLease | null {
+  return leases.find((lease) => lease.kind === "work") ?? null;
 }
 
 export function registerRoomTaskRoutes(
@@ -169,6 +237,15 @@ export function registerRoomTaskRoutes(
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
 
     const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = req.body as {
       title?: string;
@@ -245,6 +322,15 @@ export function registerRoomTaskRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
+
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
     const { display_name } = requestBody as { display_name?: string };
     try {
@@ -311,6 +397,390 @@ export function registerRoomTaskRoutes(
     }
   });
 
+  app.post(/^\/rooms\/(.+)\/tasks\/([^/]+)\/stale-prompt-mute$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
+
+    try {
+      const task = await getTaskById(project.id, taskId);
+      const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+      if (!task || !taskOwnership) {
+        res.status(404).json({ error: "Task not found" });
+        return;
+      }
+
+      const requestBody = (req.body ?? {}) as Record<string, unknown>;
+      const promptTimestamp = deps.normalizeOptionalString(requestBody.prompt_timestamp);
+      if (!isCurrentStalePromptAction({ taskUpdatedAt: task.updated_at, promptTimestamp })) {
+        const taskWithDetails = await attachTaskDetails(project.id, task);
+        res.status(409).json({
+          ...taskWithDetails,
+          room_id: project.id,
+          error: "This stale prompt is outdated because the task changed after it was posted.",
+          code: "STALE_PROMPT_OUTDATED",
+        });
+        return;
+      }
+
+      const coordination = await deps.enforceTaskCoordinationMutation({
+        req,
+        projectId: project.id,
+        task,
+        taskOwnership,
+        updates: {},
+        forcedMutation: { mutation: "task_update", leaseKind: "work" },
+        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+      });
+      if (coordination.kind === "deny") {
+        res.status(409).json({ error: coordination.error, code: coordination.code });
+        return;
+      }
+
+      const mutedBy = deps.normalizeOptionalString(requestBody.muted_by)
+        ?? req.sessionAccount?.display_name
+        ?? req.sessionAccount?.login
+        ?? "participant";
+
+      await upsertStaleTaskPromptMute({
+        room_id: project.id,
+        task_id: task.id,
+        task_updated_at: task.updated_at,
+        muted_by: mutedBy,
+      });
+
+      const taskWithDetails = await attachTaskDetails(project.id, task);
+      deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+      res.status(200).json({ ...taskWithDetails, room_id: project.id });
+    } catch (error) {
+      respondWithBadRequest(
+        res,
+        "POST /rooms/:room_id/tasks/:task_id/stale-prompt-mute",
+        error,
+        "Stale prompt mute could not be updated."
+      );
+    }
+  });
+
+  app.delete(/^\/rooms\/(.+)\/tasks\/([^/]+)\/stale-prompt-mute$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
+
+    try {
+      const task = await getTaskById(project.id, taskId);
+      const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+      if (!task || !taskOwnership) {
+        res.status(404).json({ error: "Task not found" });
+        return;
+      }
+
+      const requestBody = (req.body ?? {}) as Record<string, unknown>;
+      const promptTimestamp = deps.normalizeOptionalString(requestBody.prompt_timestamp);
+      if (!isCurrentStalePromptAction({ taskUpdatedAt: task.updated_at, promptTimestamp })) {
+        const taskWithDetails = await attachTaskDetails(project.id, task);
+        res.status(409).json({
+          ...taskWithDetails,
+          room_id: project.id,
+          error: "This stale prompt is outdated because the task changed after it was posted.",
+          code: "STALE_PROMPT_OUTDATED",
+        });
+        return;
+      }
+
+      const coordination = await deps.enforceTaskCoordinationMutation({
+        req,
+        projectId: project.id,
+        task,
+        taskOwnership,
+        updates: {},
+        forcedMutation: { mutation: "task_update", leaseKind: "work" },
+        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+      });
+      if (coordination.kind === "deny") {
+        res.status(409).json({ error: coordination.error, code: coordination.code });
+        return;
+      }
+
+      await clearStaleTaskPromptMute(project.id, task.id);
+
+      const taskWithDetails = await attachTaskDetails(project.id, task);
+      deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+      res.status(200).json({ ...taskWithDetails, room_id: project.id });
+    } catch (error) {
+      respondWithBadRequest(
+        res,
+        "DELETE /rooms/:room_id/tasks/:task_id/stale-prompt-mute",
+        error,
+        "Stale prompt mute could not be cleared."
+      );
+    }
+  });
+
+  app.post(/^\/rooms\/(.+)\/tasks\/([^/]+)\/lease-action$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
+
+    const task = await getTaskById(project.id, taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+
+    const requestBody = (req.body ?? {}) as LeaseActionRequestBody;
+    const action =
+      requestBody.action === "handoff"
+        ? "handoff"
+        : requestBody.action === "release"
+          ? "release"
+          : null;
+    if (!action) {
+      res.status(400).json({ error: "action must be 'release' or 'handoff'" });
+      return;
+    }
+
+    const actorLabel = normalizeTaskActorLabel(requestBody.actor_label)
+      ?? req.sessionAccount?.display_name
+      ?? req.sessionAccount?.login
+      ?? null;
+    const actorInstanceId = normalizeTaskActorInstanceId(requestBody.actor_instance_id);
+    let actorKey: string | null = null;
+    if (req.authKind === "owner_token") {
+      const actorValidation = await deps.validateOwnerTokenTaskActorKey({
+        req,
+        actorKey: normalizeTaskActorKey(requestBody.actor_key),
+      });
+      if (actorValidation.error) {
+        res.status(409).json({ error: actorValidation.error });
+        return;
+      }
+      actorKey = actorValidation.actorKey;
+    }
+
+    const [leases, locks] = await Promise.all([
+      getActiveTaskLeases(project.id, task.id),
+      getActiveTaskLocks(project.id, task.id),
+    ]);
+    const activeWorkLease = getActiveWorkLease(leases);
+    if (!activeWorkLease) {
+      res.status(409).json({
+        error: "No active work lease exists for this task",
+        code: "coordination_missing_lease",
+      });
+      return;
+    }
+
+    if (requestBody.lease_id && requestBody.lease_id.trim() !== activeWorkLease.id) {
+      res.status(409).json({
+        error: `Lease ${requestBody.lease_id} is no longer the active work lease for this task`,
+        code: "coordination_stale_lease_reference",
+      });
+      return;
+    }
+
+    const requesterIsLeaseHolder = req.authKind === "owner_token" && Boolean(
+      actorKey && normalizeTaskActorKey(activeWorkLease.agent_key) === actorKey
+    );
+    if (!requesterIsLeaseHolder) {
+      if (!(await deps.requireAdmin(req, res, project))) return;
+    }
+
+    const targetActorKeyRaw = normalizeTaskActorKey(requestBody.target_actor_key);
+    let targetActorKey: string | null = null;
+    let targetActorInstanceId: string | null = null;
+    let targetActorLabel: string | null = null;
+    if (action === "handoff") {
+      if (!targetActorKeyRaw) {
+        res.status(400).json({ error: "target_actor_key is required for handoff" });
+        return;
+      }
+
+      if (req.authKind === "owner_token") {
+        const targetValidation = await deps.validateOwnerTokenTaskActorKey({
+          req,
+          actorKey: targetActorKeyRaw,
+        });
+        if (targetValidation.error) {
+          res.status(409).json({ error: targetValidation.error });
+          return;
+        }
+        targetActorKey = targetValidation.actorKey ?? targetActorKeyRaw;
+      } else {
+        targetActorKey = targetActorKeyRaw;
+      }
+      const targetIdentity = await getAgentIdentityByCanonicalKey(targetActorKey);
+      if (!targetIdentity) {
+        res.status(404).json({ error: `Unknown target actor_key ${targetActorKey}` });
+        return;
+      }
+
+      targetActorInstanceId = normalizeTaskActorInstanceId(requestBody.target_actor_instance_id);
+      targetActorLabel = buildAgentActorLabel({
+        display_name: targetIdentity.display_name,
+        owner_label: targetIdentity.owner_label,
+      });
+    }
+
+    try {
+      if (action === "handoff" && !LEASE_RECOVERY_ACTIVE_STATUSES.has(task.status)) {
+        res.status(409).json({
+          error: `Cannot hand off a task in ${task.status} status`,
+          code: "coordination_invalid_task_status",
+        });
+        return;
+      }
+      if (action === "handoff") {
+        const lock = findApplicableLock({ locks, taskId: task.id });
+        if (lock) {
+          res.status(409).json({
+            error: `Task handoff is blocked by ${lock.reason} lock ${lock.id}.`,
+            code: "coordination_active_lock",
+          });
+          return;
+        }
+      }
+
+      const dispositionReason =
+        deps.normalizeOptionalString(requestBody.reason)
+        ?? (action === "handoff"
+          ? `Lease ${activeWorkLease.id} handed off for ${task.id}.`
+          : `Lease ${activeWorkLease.id} released for ${task.id}.`);
+      const releasedLease = requesterIsLeaseHolder
+        ? await releaseTaskLease(project.id, activeWorkLease.id)
+        : await revokeTaskLease(project.id, activeWorkLease.id, dispositionReason);
+
+      const leaseActionUpdates =
+        action === "handoff"
+          ? {
+              status: "assigned" as const,
+              assignee: targetActorLabel,
+              assignee_agent_key: targetActorKey,
+            }
+          : LEASE_RECOVERY_ACTIVE_STATUSES.has(task.status)
+            ? {
+                status: "accepted" as const,
+                assignee: null,
+                assignee_agent_key: null,
+              }
+            : {};
+      const nextTask = await setTaskAssignmentStateForLeaseAction(project.id, task.id, leaseActionUpdates);
+      if (!nextTask) {
+        res.status(404).json({ error: "Task not found" });
+        return;
+      }
+
+      let newLease: TaskLease | null = null;
+      if (action === "handoff" && targetActorKey && targetActorLabel) {
+        newLease = await createTaskLease({
+          room_id: project.id,
+          task_id: task.id,
+          kind: "work",
+          agent_key: targetActorKey,
+          agent_instance_id: targetActorInstanceId,
+          actor_label: targetActorLabel,
+          branch_ref: activeWorkLease.branch_ref ?? buildLeasedBranchRef({
+            taskId: task.id,
+            agentKey: targetActorKey,
+          }),
+          pr_url: activeWorkLease.pr_url ?? task.pr_url ?? null,
+          created_by: actorLabel ?? req.sessionAccount?.login ?? "participant",
+          output_intent: task.title,
+        });
+      }
+
+      if (nextTask.status !== task.status) {
+        await deps.emitTaskLifecycleStatusMessage(project.id, nextTask);
+      }
+
+      await createCoordinationEvent({
+        room_id: project.id,
+        task_id: task.id,
+        lease_id: newLease?.id ?? releasedLease?.id ?? activeWorkLease.id,
+        event_type: action === "handoff" ? "task_lease_handoff" : "task_lease_release",
+        decision: "record",
+        actor_label: actorLabel,
+        actor_key: actorKey,
+        actor_instance_id: actorInstanceId,
+        reason: dispositionReason,
+        metadata: {
+          action,
+          previous_lease_id: activeWorkLease.id,
+          previous_lease_status: releasedLease?.status ?? activeWorkLease.status,
+          previous_agent_key: activeWorkLease.agent_key,
+          target_actor_key: targetActorKey,
+          target_actor_label: targetActorLabel,
+          new_lease_id: newLease?.id ?? null,
+          previous_task_status: task.status,
+          next_task_status: nextTask.status,
+        },
+      });
+
+      const taskWithDetails = await attachTaskDetails(project.id, nextTask);
+      deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+      res.status(200).json({
+        room_id: project.id,
+        action,
+        task: taskWithDetails,
+        released_lease: releasedLease,
+        new_lease: newLease,
+      });
+    } catch (error) {
+      respondWithBadRequest(
+        res,
+        "POST /rooms/:room_id/tasks/:task_id/lease-action",
+        error,
+        "Task lease action could not be completed."
+      );
+    }
+  });
+
   /**
    * GET /rooms/:room/tasks/github-status
    * Returns GitHub artifact status for all tasks in a room that have linked events.
@@ -367,6 +837,15 @@ export function registerRoomTaskRoutes(
     if (!project) return;
 
     if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isolation = await deps.enforceFocusParentBoardWriteIsolation({
+      req,
+      targetProject: project,
+    });
+    if (isolation.kind === "deny") {
+      res.status(409).json({ error: isolation.error, code: isolation.code });
+      return;
+    }
 
     const task = await getTaskById(project.id, taskId);
     const taskOwnership = await getTaskOwnershipState(project.id, taskId);

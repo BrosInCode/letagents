@@ -101,6 +101,8 @@ test(
     assert.equal(presence[0]?.status, "working");
     assert.equal(presence[0]?.status_text, "working on task_58");
     assert.equal(presence[0]?.freshness, "stale");
+    assert.equal(presence[0]?.activity_state, "stale");
+    assert.deepEqual(presence[0]?.source_flags, ["presence"]);
   }
 );
 
@@ -143,6 +145,7 @@ test(
     assert.equal(presence.length, 1);
     assert.equal(presence[0]?.status, "reviewing");
     assert.equal(presence[0]?.status_text, "reviewing PR #146");
+    assert.equal(presence[0]?.activity_state, "online");
   }
 );
 
@@ -192,8 +195,10 @@ test(
 
     const livePresence = await getRoomAgentPresence(room.id);
     assert.equal(livePresence[0]?.freshness, "active");
+    assert.equal(livePresence[0]?.activity_state, "online");
     assert.equal(livePresence[0]?.status, "reviewing");
     assert.equal(livePresence[0]?.ide_label, "Codex");
+    assert.deepEqual(livePresence[0]?.source_flags, ["presence"]);
 
     await markRoomAgentDeliveryDisconnected({
       room_id: room.id,
@@ -208,6 +213,7 @@ test(
 
     const stalePresence = await getRoomAgentPresence(room.id);
     assert.equal(stalePresence[0]?.freshness, "stale");
+    assert.equal(stalePresence[0]?.activity_state, "stale");
     assert.equal(stalePresence[0]?.status_text, "reviewing task_159 backend lane");
   }
 );

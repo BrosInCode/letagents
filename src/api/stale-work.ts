@@ -1,4 +1,4 @@
-import type { Message, RoomAgentPresence, Task } from "./db.js";
+import type { Message, RoomAgentPresence, StaleTaskPromptMute, Task } from "./db.js";
 import { getAgentPrimaryLabel } from "../shared/agent-identity.js";
 
 export type StaleTaskReason =
@@ -32,6 +32,10 @@ export interface StaleWorkPromptEmitterDeps {
     projectId: string,
     options: { limit: number }
   ): Promise<RoomAgentPresence[]>;
+  getStaleTaskPromptMutes(
+    projectId: string,
+    options: { taskIds: string[] }
+  ): Promise<StaleTaskPromptMute[]>;
   emitTaskAnchoredMessage(
     projectId: string,
     sender: string,
@@ -89,6 +93,31 @@ function getStaleTaskReason(task: Task, now: number): { reason: StaleTaskReason;
   return null;
 }
 
+export function isStaleTaskPromptMuted(
+  task: Pick<Task, "updated_at">,
+  mute: Pick<StaleTaskPromptMute, "task_updated_at"> | null | undefined
+): boolean {
+  return Boolean(mute && mute.task_updated_at === task.updated_at);
+}
+
+export function getTaskStalePromptState(input: {
+  task: Task;
+  mute?: StaleTaskPromptMute | null;
+  now?: number;
+}): NonNullable<Task["stale_prompt_state"]> {
+  const stale = getStaleTaskReason(input.task, input.now ?? Date.now());
+  const muted = isStaleTaskPromptMuted(input.task, input.mute);
+
+  return {
+    is_stale: Boolean(stale),
+    reason: stale?.reason ?? null,
+    stale_for_ms: stale?.stale_for_ms ?? null,
+    muted,
+    muted_by: muted ? input.mute?.muted_by ?? null : null,
+    muted_at: muted ? input.mute?.updated_at ?? input.mute?.created_at ?? null : null,
+  };
+}
+
 function getReasonPriority(reason: StaleTaskReason): number {
   switch (reason) {
     case "accepted_unclaimed":
@@ -126,6 +155,7 @@ function buildPromptCacheKey(task: Task, reason: StaleTaskReason): string {
 export function selectStaleTaskAutoPrompt(input: {
   tasks: Task[];
   presence: RoomAgentPresence[];
+  stalePromptMutes?: readonly StaleTaskPromptMute[];
   now?: number;
 }): StaleTaskAutoPrompt | null {
   const idleAgent = input.presence.find(
@@ -136,10 +166,16 @@ export function selectStaleTaskAutoPrompt(input: {
   }
 
   const now = input.now ?? Date.now();
+  const mutedByTaskId = new Map(
+    (input.stalePromptMutes ?? []).map((mute) => [mute.task_id, mute] as const)
+  );
   const staleTasks = input.tasks
     .map((task) => {
       const stale = getStaleTaskReason(task, now);
-      return stale ? { task, ...stale } : null;
+      if (!stale || isStaleTaskPromptMuted(task, mutedByTaskId.get(task.id))) {
+        return null;
+      }
+      return { task, ...stale };
     })
     .filter((value): value is { task: Task; reason: StaleTaskReason; stale_for_ms: number } => Boolean(value))
     .sort((left, right) => {
@@ -180,11 +216,17 @@ export function createStaleWorkPromptEmitter(deps: StaleWorkPromptEmitterDeps) {
       deps.getOpenTasks(projectId, { limit: 200 }),
       deps.getRoomAgentPresence(projectId, { limit: 50 }),
     ]);
+    const stalePromptMutes = taskResult.tasks.length > 0
+      ? await deps.getStaleTaskPromptMutes(projectId, {
+        taskIds: taskResult.tasks.map((task) => task.id),
+      })
+      : [];
 
     const now = deps.now?.() ?? Date.now();
     const prompt = selectStaleTaskAutoPrompt({
       tasks: taskResult.tasks,
       presence,
+      stalePromptMutes,
       now,
     });
     if (!prompt) {

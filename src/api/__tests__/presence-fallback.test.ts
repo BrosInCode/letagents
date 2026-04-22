@@ -58,7 +58,9 @@ test("buildFallbackPresenceFromMessages keeps the latest agent status per sender
   assert.equal(presence[0]?.display_name, "HollowOtter");
   assert.equal(presence[0]?.owner_label, "EmmyMay");
   assert.equal(presence[0]?.ide_label, "Agent");
-  assert.equal(presence[0]?.freshness, "active");
+  assert.equal(presence[0]?.freshness, "stale");
+  assert.equal(presence[0]?.activity_state, "historical");
+  assert.deepEqual(presence[0]?.source_flags, ["messages"]);
 });
 
 test("buildFallbackPresenceFromMessages marks older activity as stale", () => {
@@ -78,6 +80,7 @@ test("buildFallbackPresenceFromMessages marks older activity as stale", () => {
   assert.equal(presence.length, 1);
   assert.equal(presence[0]?.status, "reviewing");
   assert.equal(presence[0]?.freshness, "stale");
+  assert.equal(presence[0]?.activity_state, "historical");
 });
 
 test("buildFallbackPresenceFromMessages treats watch-mode and task-waiting updates as idle", () => {
@@ -128,5 +131,7 @@ test("buildSyntheticPresenceEntry returns an active room presence record", () =>
   assert.equal(presence.status, "working");
   assert.equal(presence.status_text, "working on task_70");
   assert.equal(presence.freshness, "active");
+  assert.equal(presence.activity_state, "online");
   assert.equal(presence.owner_label, "EmmyMay");
+  assert.deepEqual(presence.source_flags, ["presence"]);
 });

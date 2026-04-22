@@ -13,6 +13,7 @@ function createDeps() {
   return {
     messageEvents: new EventEmitter(),
     taskEvents: new EventEmitter(),
+    reasoningEvents: new EventEmitter(),
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
     requireParticipant: unused,
@@ -25,7 +26,7 @@ function createDeps() {
 }
 
 test("registerRoomMessageRoutes preserves canonical message route order", () => {
-  const calls: Array<{ method: "get" | "post"; path: string }> = [];
+  const calls: Array<{ method: "delete" | "get" | "post"; path: string }> = [];
   const app = {
     get(path: RegExp) {
       calls.push({ method: "get", path: path.toString() });
@@ -33,12 +34,18 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     post(path: RegExp) {
       calls.push({ method: "post", path: path.toString() });
     },
+    delete(path: RegExp) {
+      calls.push({ method: "delete", path: path.toString() });
+    },
   };
 
   registerRoomMessageRoutes(app as never, createDeps() as never);
 
   assert.deepEqual(calls, [
     { method: "post", path: "/^\\/rooms\\/(.+)\\/messages$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/attachments\\/([^/]+)$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads$/" },
+    { method: "delete", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads\\/([^/]+)$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/poll$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/stream$/" },

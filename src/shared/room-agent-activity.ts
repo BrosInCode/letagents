@@ -1,0 +1,57 @@
+import type { AgentPresenceFreshness } from "./agent-presence.js";
+
+export const ROOM_AGENT_ACTIVITY_STATES = [
+  "online",
+  "stale",
+  "historical",
+  "archived",
+] as const;
+
+export type RoomAgentActivityState = (typeof ROOM_AGENT_ACTIVITY_STATES)[number];
+
+export const ROOM_ACTIVITY_SOURCE_FLAGS = [
+  "presence",
+  "messages",
+  "tasks",
+] as const;
+
+export type RoomActivitySourceFlag = (typeof ROOM_ACTIVITY_SOURCE_FLAGS)[number];
+
+export function deriveRoomAgentActivityState(input: {
+  hidden: boolean;
+  hasPresence: boolean;
+  freshness: AgentPresenceFreshness | null;
+}): RoomAgentActivityState {
+  if (input.hasPresence && input.freshness === "active") {
+    return "online";
+  }
+
+  if (input.hidden) {
+    return "archived";
+  }
+
+  if (input.hasPresence) {
+    return "stale";
+  }
+
+  return "historical";
+}
+
+export function buildRoomActivitySourceFlags(
+  flags: Iterable<RoomActivitySourceFlag | null | undefined>
+): RoomActivitySourceFlag[] {
+  const seen = new Set<RoomActivitySourceFlag>();
+  for (const flag of flags) {
+    if (flag && ROOM_ACTIVITY_SOURCE_FLAGS.includes(flag)) {
+      seen.add(flag);
+    }
+  }
+
+  return ROOM_ACTIVITY_SOURCE_FLAGS.filter((flag) => seen.has(flag));
+}
+
+export function isReachableRoomAgentActivityState(
+  value: RoomAgentActivityState | null | undefined
+): boolean {
+  return value === "online";
+}

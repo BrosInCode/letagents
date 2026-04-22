@@ -84,6 +84,30 @@ function formatServerDiagnostics(input: {
   return diagnostics.length > 0 ? `\n${diagnostics.join("\n")}` : "";
 }
 
+async function allocateLoopbackPort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => {
+    probe.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  const address = probe.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to allocate loopback port for repo room access integration test");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    probe.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  return address.port;
+}
+
 async function waitForServer(
   port: number,
   child: ChildProcessWithoutNullStreams,
@@ -127,37 +151,42 @@ async function startApiServer(githubApiBaseUrl: string): Promise<{ child: ChildP
     throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
   }
 
-  const port = 4600 + Math.floor(Math.random() * 500);
-  let stdout = "";
-  let stderr = "";
+  let lastError: unknown;
 
-  const child = spawn(tsxBinary, ["src/api/server.ts"], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      DB_URL: testDatabaseUrl,
-      HOST: "127.0.0.1",
-      PORT: String(port),
-      GITHUB_API_BASE_URL: githubApiBaseUrl,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const port = await allocateLoopbackPort();
+    let stdout = "";
+    let stderr = "";
 
-  child.stdout.on("data", (chunk: Buffer | string) => {
-    stdout += chunk.toString();
-  });
-  child.stderr.on("data", (chunk: Buffer | string) => {
-    stderr += chunk.toString();
-  });
+    const child = spawn(tsxBinary, ["src/api/server.ts"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        DB_URL: testDatabaseUrl,
+        HOST: "127.0.0.1",
+        PORT: String(port),
+        GITHUB_API_BASE_URL: githubApiBaseUrl,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-  try {
-    await waitForServer(port, child, () => ({ stdout, stderr }));
-  } catch (error) {
-    await stopChildProcess(child);
-    throw error;
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    try {
+      await waitForServer(port, child, () => ({ stdout, stderr }));
+      return { child, port };
+    } catch (error) {
+      lastError = error;
+      await stopChildProcess(child);
+    }
   }
 
-  return { child, port };
+  throw lastError ?? new Error("repo room access test server did not become ready");
 }
 
 function childHasExited(child: ChildProcessWithoutNullStreams): boolean {

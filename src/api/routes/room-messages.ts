@@ -1,13 +1,19 @@
 import type { EventEmitter } from "events";
+import crypto from "node:crypto";
 import type { Express, Request, Response } from "express";
 
 import {
+  createMessageAttachmentUpload,
+  deletePendingMessageAttachmentUpload,
   getLatestMessages,
+  getMessageAttachment,
   getMessages,
   getMessagesAfter,
   getMessagesBefore,
   type Message,
   type Project,
+  type ReasoningSession,
+  type ReasoningSessionUpdate,
   type Task,
 } from "../db.js";
 import {
@@ -23,6 +29,18 @@ import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
 } from "../../shared/room-agent-prompts.js";
+import {
+  normalizeAttachmentUploadRequest,
+  normalizeMessageAttachmentReferences,
+  type NormalizedMessageAttachmentReference,
+} from "../message-attachments.js";
+import {
+  createAttachmentObjectKey,
+  deleteAttachmentObject,
+  createPresignedAttachmentDownload,
+  createPresignedAttachmentUpload,
+  isAttachmentStorageConfigured,
+} from "../attachment-storage.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -34,9 +52,21 @@ interface TaskUpdatedEvent {
   task: Task;
 }
 
+interface ReasoningSessionUpdatedEvent {
+  projectId: string;
+  session: ReasoningSession;
+  update?: ReasoningSessionUpdate | null;
+}
+
+interface ReasoningSessionRemovedEvent {
+  projectId: string;
+  session_id: string;
+}
+
 export interface RoomMessageRouteDeps {
   messageEvents: EventEmitter;
   taskEvents: EventEmitter;
+  reasoningEvents: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
@@ -55,6 +85,7 @@ export interface RoomMessageRouteDeps {
       source?: string;
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
+      attachments?: NormalizedMessageAttachmentReference[];
     }
   ): Promise<Message>;
   rememberRoomParticipantFromMessage(input: {
@@ -79,22 +110,28 @@ export function registerRoomMessageRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const { sender, text, agent_prompt_kind, reply_to } = req.body as {
+    const { sender, text, agent_prompt_kind, reply_to, attachments: rawAttachments } = req.body as {
       sender?: string;
       text?: string;
       agent_prompt_kind?: string;
       reply_to?: string;
+      attachments?: unknown;
     };
     try {
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
+      const attachments = normalizeMessageAttachmentReferences(rawAttachments);
       const normalizedSender = typeof sender === "string" ? sender.trim() : "";
       if (
         !normalizedSender ||
         typeof text !== "string" ||
-        (!text.trim() && (!promptKind || promptKind !== "auto"))
+        (!text.trim() && attachments.length === 0 && (!promptKind || promptKind !== "auto"))
       ) {
-        res.status(400).json({ error: "sender and text are required" });
+        res.status(400).json({ error: "sender and text or attachments are required" });
+        return;
+      }
+      if (promptKind === "auto" && attachments.length > 0) {
+        res.status(400).json({ error: "auto prompt messages cannot include attachments" });
         return;
       }
       const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
@@ -102,6 +139,7 @@ export function registerRoomMessageRoutes(
         source,
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
+        attachments,
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId: project.id,
@@ -122,6 +160,124 @@ export function registerRoomMessageRoutes(
         "Message could not be created."
       );
     }
+  });
+
+  app.get(/^\/rooms\/(.+)\/messages\/([^/]+)\/attachments\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const messageId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+    const attachmentId = decodeURIComponent((req.params as Record<string, string>)[2] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const attachment = await getMessageAttachment(project.id, messageId, attachmentId);
+    if (!attachment) {
+      res.status(404).json({ error: "Attachment not found", code: "ATTACHMENT_NOT_FOUND" });
+      return;
+    }
+
+    if (!isAttachmentStorageConfigured()) {
+      res.status(503).json({ error: "Attachment object storage is not configured" });
+      return;
+    }
+
+    res.redirect(302, createPresignedAttachmentDownload(attachment));
+  });
+
+  app.post(/^\/rooms\/(.+)\/attachments\/uploads$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    if (!isAttachmentStorageConfigured()) {
+      res.status(503).json({ error: "Attachment object storage is not configured" });
+      return;
+    }
+
+    try {
+      const attachment = normalizeAttachmentUploadRequest(req.body);
+      const uploadId = `upl_${crypto.randomUUID().replace(/-/g, "")}`;
+      const objectKey = createAttachmentObjectKey({
+        roomId: project.id,
+        uploadId,
+        filename: attachment.filename,
+      });
+      const presigned = createPresignedAttachmentUpload({
+        object_key: objectKey,
+        filename: attachment.filename,
+        content_type: attachment.content_type,
+        byte_size: attachment.byte_size,
+      });
+      const upload = await createMessageAttachmentUpload({
+        upload_id: uploadId,
+        room_id: project.id,
+        filename: attachment.filename,
+        content_type: attachment.content_type,
+        byte_size: attachment.byte_size,
+        storage_provider: presigned.storage_provider,
+        bucket: presigned.bucket,
+        object_key: objectKey,
+        expires_at: presigned.expires_at,
+      });
+
+      res.status(201).json({
+        room_id: project.id,
+        upload_id: upload.upload_id,
+        upload_url: presigned.upload_url,
+        method: "PUT",
+        headers: presigned.headers,
+        expires_at: upload.expires_at,
+        attachment: {
+          filename: upload.filename,
+          file_name: upload.filename,
+          content_type: upload.content_type,
+          mime_type: upload.content_type,
+          byte_size: upload.byte_size,
+          size_bytes: upload.byte_size,
+        },
+      });
+    } catch (error) {
+      respondWithBadRequest(
+        res,
+        "POST /rooms/:room_id/attachments/uploads",
+        error,
+        "Attachment upload could not be staged."
+      );
+    }
+  });
+
+  app.delete(/^\/rooms\/(.+)\/attachments\/uploads\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const uploadId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const upload = await deletePendingMessageAttachmentUpload(project.id, uploadId);
+    if (!upload) {
+      res.status(200).json({ ok: true, upload_id: uploadId });
+      return;
+    }
+
+    if (isAttachmentStorageConfigured()) {
+      try {
+        await deleteAttachmentObject({ object_key: upload.object_key });
+      } catch {
+        // The draft row is already gone, so prefer a small object leak over reviving a raceable record.
+      }
+    }
+
+    res.status(200).json({ ok: true, upload_id: uploadId });
   });
 
   app.get(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
@@ -258,8 +414,26 @@ export function registerRoomMessageRoutes(
       res.write(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
     };
 
+    const onReasoningUpdated = (event: ReasoningSessionUpdatedEvent) => {
+      if (event.projectId !== projectId) return;
+      res.write(
+        `event: reasoning_update\ndata: ${JSON.stringify({
+          room_id: project.id,
+          session: event.session,
+          update: event.update ?? null,
+        })}\n\n`
+      );
+    };
+
+    const onReasoningRemoved = (event: ReasoningSessionRemovedEvent) => {
+      if (event.projectId !== projectId) return;
+      res.write(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
+    };
+
     deps.messageEvents.on("message:created", onMessageCreated);
     deps.taskEvents.on("task:updated", onTaskUpdated);
+    deps.reasoningEvents.on("reasoning:updated", onReasoningUpdated);
+    deps.reasoningEvents.on("reasoning:removed", onReasoningRemoved);
 
     req.on("close", () => {
       deps.messageEvents.off("message:created", onMessageCreated);
@@ -269,6 +443,8 @@ export function registerRoomMessageRoutes(
           console.error(`[room messages stream] failed to end agent delivery for ${project.id}`, error);
         });
       }
+      deps.reasoningEvents.off("reasoning:updated", onReasoningUpdated);
+      deps.reasoningEvents.off("reasoning:removed", onReasoningRemoved);
       stopSseStream(res, heartbeat);
     });
   });

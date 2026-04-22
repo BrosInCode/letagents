@@ -1,9 +1,14 @@
 import type { Express, Response } from "express";
 
 import {
+  getFocusRoomsForParent,
   getMessages,
   getRoomAgentPresence,
   getRoomParticipants,
+  getRoomParticipantsForRooms,
+  getProjectById,
+  getTasksForRooms,
+  setRoomParticipantsHidden,
   upsertRoomAgentPresence,
   type Project,
   type RoomAgentPresence,
@@ -15,6 +20,16 @@ import {
   type AuthenticatedRequest,
 } from "../http-helpers.js";
 import { buildSyntheticPresenceEntry } from "../presence-fallback.js";
+import {
+  buildRoomActivityHistoryEntries,
+  filterRoomActivityHistoryEntries,
+  paginateRoomActivityHistoryEntries,
+  type RoomActivityHistoryKind,
+} from "../room-activity-history.js";
+import {
+  decorateRoomActivityHistoryEntriesWithPresence,
+  decorateRoomParticipantsWithPresence,
+} from "../room-activity-state.js";
 import { buildFallbackRoomParticipants } from "../room-participant-fallback.js";
 import { normalizeRoomId } from "../room-routing.js";
 import {
@@ -25,6 +40,11 @@ import {
 export interface RoomPresenceRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
+  requireAdmin(
+    req: AuthenticatedRequest,
+    res: Response,
+    project: Project
+  ): Promise<boolean>;
   requireParticipant(
     req: AuthenticatedRequest,
     res: Response,
@@ -52,6 +72,25 @@ function toPublicRoomParticipant(participant: RoomParticipant): RoomParticipant 
   return {
     ...participant,
   };
+}
+
+function parsePositiveInteger(value: unknown, fallback: number): number {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeHistoryKind(value: unknown): RoomActivityHistoryKind {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "agent" || normalized === "human" ? normalized : "all";
+}
+
+function normalizeHistoryRoomId(value: unknown): string | null {
+  const normalized = normalizeRoomId(String(value ?? "").trim());
+  return normalized || null;
+}
+
+function normalizeActorLabel(value: string | null | undefined): string {
+  return String(value ?? "").trim();
 }
 
 export function registerRoomPresenceRoutes(
@@ -101,11 +140,21 @@ export function registerRoomPresenceRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined) ?? 100;
 
     try {
-      const participants = await getRoomParticipants(project.id, { limit });
-      if (participants.length > 0) {
+      const [storedParticipants, storedPresence] = await Promise.all([
+        getRoomParticipants(project.id, { limit, includeHidden: true }),
+        getRoomAgentPresence(project.id, { limit: 500 }).catch(() => []),
+      ]);
+      if (storedParticipants.length > 0) {
+        const participants = decorateRoomParticipantsWithPresence({
+          participants: storedParticipants,
+          presence: storedPresence,
+        });
         res.json({
           room_id: project.id,
-          participants: participants.map(toPublicRoomParticipant),
+          participants: participants
+            .filter((participant) => !participant.hidden_at)
+            .map(toPublicRoomParticipant),
+          hidden_count: participants.filter((participant) => Boolean(participant.hidden_at)).length,
         });
         return;
       }
@@ -113,12 +162,15 @@ export function registerRoomPresenceRoutes(
       const fallbackMessageLimit = Math.min(Math.max(limit * 4, 100), 200);
       const [messagesResult, presence] = await Promise.all([
         getMessages(project.id, { limit: fallbackMessageLimit }),
-        getRoomAgentPresence(project.id, { limit }),
+        getRoomAgentPresence(project.id, { limit }).catch(() => []),
       ]);
 
-      const participantsFromHistory = buildFallbackRoomParticipants({
-        roomId: project.id,
-        messages: messagesResult.messages,
+      const participantsFromHistory = decorateRoomParticipantsWithPresence({
+        participants: buildFallbackRoomParticipants({
+          roomId: project.id,
+          messages: messagesResult.messages,
+          presence,
+        }),
         presence,
       }).slice(0, limit);
 
@@ -126,6 +178,7 @@ export function registerRoomPresenceRoutes(
         room_id: project.id,
         participants: participantsFromHistory.map(toPublicRoomParticipant),
         fallback: "room_history",
+        hidden_count: 0,
       });
     } catch (error) {
       respondWithInternalError(
@@ -133,6 +186,116 @@ export function registerRoomPresenceRoutes(
         "GET /rooms/:room_id/participants",
         error,
         "Room participants could not be loaded."
+      );
+    }
+  });
+
+  app.get(/^\/rooms\/(.+)\/activity-history$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    try {
+      const rootRoom = project.parent_room_id
+        ? (await getProjectById(project.parent_room_id)) ?? project
+        : project;
+      const focusRooms = rootRoom.kind === "main"
+        ? await getFocusRoomsForParent(rootRoom.id)
+        : [];
+      const rooms = [rootRoom, ...focusRooms];
+      const selectedRoomId = normalizeHistoryRoomId(req.query.room_id) ?? project.id;
+      const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? project;
+      const scopedRooms = rooms.filter((room) => room.id === selectedRoom.id);
+      const scopedRoomIds = scopedRooms.map((room) => room.id);
+      const [participants, roomTasks, selectedRoomParticipants, selectedRoomPresence] = await Promise.all([
+        getRoomParticipantsForRooms(scopedRoomIds, { includeHidden: true }),
+        getTasksForRooms(scopedRoomIds),
+        getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
+        getRoomAgentPresence(selectedRoom.id, { limit: 500 }).catch(() => []),
+      ]);
+      const entries = decorateRoomActivityHistoryEntriesWithPresence({
+        entries: buildRoomActivityHistoryEntries({
+          rooms: scopedRooms,
+          participants,
+          tasks: roomTasks,
+        }),
+        presence: selectedRoomPresence,
+      });
+      const filtered = filterRoomActivityHistoryEntries(entries, {
+        roomId: selectedRoom.id,
+        kind: normalizeHistoryKind(req.query.kind),
+        query: typeof req.query.query === "string" ? req.query.query : null,
+      });
+      const paginated = paginateRoomActivityHistoryEntries(filtered, {
+        page: parsePositiveInteger(req.query.page, 1),
+        pageSize: parsePositiveInteger(req.query.page_size, 20),
+      });
+
+      res.json({
+        room_id: project.id,
+        root_room_id: rootRoom.id,
+        selected_room_id: selectedRoom.id,
+        hidden_count: selectedRoomParticipants.filter((participant) => Boolean(participant.hidden_at)).length,
+        ...paginated,
+      });
+    } catch (error) {
+      respondWithInternalError(
+        res,
+        "GET /rooms/:room_id/activity-history",
+        error,
+        "Room activity history could not be loaded."
+      );
+    }
+  });
+
+  app.post(/^\/rooms\/(.+)\/participants\/archive-disconnected$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireAdmin(req, res, project))) return;
+
+    try {
+      const [participants, presence] = await Promise.all([
+        getRoomParticipantsForRooms([project.id], { includeHidden: true }),
+        getRoomAgentPresence(project.id, { limit: 500 }),
+      ]);
+      const activeActors = new Set(
+        presence
+          .filter((entry) => entry.freshness === "active")
+          .map((entry) => normalizeActorLabel(entry.actor_label))
+          .filter(Boolean)
+      );
+      const archiveKeys = participants
+        .filter((participant) =>
+          participant.kind === "agent"
+          && !participant.hidden_at
+          && !activeActors.has(normalizeActorLabel(participant.actor_label))
+        )
+        .map((participant) => participant.participant_key);
+      const archivedCount = await setRoomParticipantsHidden({
+        room_id: project.id,
+        participant_keys: archiveKeys,
+        hidden: true,
+        hidden_by: req.sessionAccount?.login ?? "room-admin",
+      });
+
+      res.json({
+        room_id: project.id,
+        archived_count: archivedCount,
+      });
+    } catch (error) {
+      respondWithInternalError(
+        res,
+        "POST /rooms/:room_id/participants/archive-disconnected",
+        error,
+        "Disconnected participants could not be archived."
       );
     }
   });
