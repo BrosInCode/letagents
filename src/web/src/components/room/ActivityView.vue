@@ -556,7 +556,7 @@
             ? 'Non-live agents are archived from the live roster. Switch to History to inspect the full room record.'
             : historicalAgents.length > 0
               ? 'Only history-only agents are tracked right now. Switch to History to inspect the full room record.'
-              : 'Agents and humans will appear here once they join, post status, or send messages.'
+              : 'Agents and humans will appear here once they become reachable, join, or send messages.'
         }}
       </p>
     </div>
@@ -567,7 +567,7 @@
           <div class="activity-group-header">
             <div>
               <h3>Agents online</h3>
-              <p>Fresh heartbeats from this room.</p>
+              <p>Currently reachable through the room transport.</p>
             </div>
             <span class="activity-group-count">{{ onlineAgents.length }}</span>
           </div>
@@ -619,7 +619,7 @@
           <div class="activity-group-header">
             <div>
               <h3>Recently offline</h3>
-              <p>Agents with real room heartbeats that have expired.</p>
+              <p>Agents whose room reachability has expired.</p>
             </div>
             <div class="activity-group-header-actions">
               <span class="activity-group-count">{{ staleAgents.length }}</span>
@@ -996,6 +996,7 @@ import {
   type RoomTask,
   type TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
+import { buildAgentReachabilitySources, type AgentReachabilitySource } from './reachability'
 import {
   buildAgentThinkingSnapshot,
   buildAgentThinkingTimeline,
@@ -1231,22 +1232,21 @@ function isActiveReasoningSession(session: RoomReasoningSession): boolean {
   return !INACTIVE_REASONING_STATUSES.has(String(session.status || '').toLowerCase())
 }
 
-function buildAgentParticipant(participant: RoomParticipant): ActivityParticipant {
-  const actorLabel = String(participant.actor_label || participant.display_name || '').trim()
-  const presenceEntry = actorLabel ? (presenceByActor.value.get(actorLabel) || null) : null
+function buildAgentParticipant(source: AgentReachabilitySource): ActivityParticipant {
+  const { actorLabel, key, participant, presence: presenceEntry, activityState } = source
   const messages = actorLabel ? (agentMessagesByActor.value.get(actorLabel) || []) : []
   const latestMessage = messages[messages.length - 1] || null
   const latestStatusMessage = [...messages].reverse().find((message) =>
     /^\[status\]\s*/i.test(String(message.text || ''))
   ) || null
   const parsed = parseAgentIdentity(actorLabel)
-  const label = participant.display_name || presenceEntry?.display_name || latestMessage?.agent_identity?.display_name || parsed.displayName || actorLabel
-  const ownerLabel = participant.owner_label
+  const label = participant?.display_name || presenceEntry?.display_name || latestMessage?.agent_identity?.display_name || parsed.displayName || actorLabel
+  const ownerLabel = participant?.owner_label
     || presenceEntry?.owner_label
     || latestMessage?.agent_identity?.owner_label
     || parsed.ownerAttribution
     || null
-  const ideLabel = participant.ide_label || presenceEntry?.ide_label || latestMessage?.agent_identity?.ide_label || parsed.ideLabel || null
+  const ideLabel = participant?.ide_label || presenceEntry?.ide_label || latestMessage?.agent_identity?.ide_label || parsed.ideLabel || null
   const activeReasoning = sortReasoningSessions(
     props.reasoningSessions.filter((session) =>
       isActiveReasoningSession(session)
@@ -1255,7 +1255,7 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
   )
 
   const assignedTasks = props.tasks.filter((task) => participantMatchesActor({
-    key: participant.participant_key,
+    key,
     kind: 'agent',
     label,
     actorLabel,
@@ -1280,7 +1280,7 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
   ).slice(0, 8)
   const createdTasks = sortTasksByUpdated(
     props.tasks.filter((task) => participantMatchesActor({
-      key: participant.participant_key,
+      key,
       kind: 'agent',
       label,
       actorLabel,
@@ -1309,18 +1309,18 @@ function buildAgentParticipant(participant: RoomParticipant): ActivityParticipan
   const thinkingTimeline = buildAgentThinkingTimeline(messages)
 
   return {
-    key: participant.participant_key,
+    key,
     kind: 'agent',
     label,
     actorLabel,
     ownerLabel,
     ideLabel,
-    activityState: participant.activity_state || presenceEntry?.activity_state || 'historical',
+    activityState,
     status: presenceEntry?.status || null,
     statusText,
     lastSeenAt: latestTimestamp(
-      participant.last_room_activity_at,
-      participant.last_seen_at,
+      participant?.last_room_activity_at,
+      participant?.last_seen_at,
       latestMessage?.timestamp,
       presenceEntry?.last_heartbeat_at,
       reasoningTimestamp(activeReasoning[0] || {}),
@@ -1396,9 +1396,11 @@ function compareParticipants(left: ActivityParticipant | HistoryParticipant, rig
 }
 
 const agentParticipants = computed(() => {
-  return props.participants
-    .filter((participant) => participant.kind === 'agent')
-    .map((participant) => buildAgentParticipant(participant))
+  return buildAgentReachabilitySources({
+    participants: props.participants,
+    presence: props.presence,
+  })
+    .map((source) => buildAgentParticipant(source))
     .sort(compareParticipants)
 })
 
@@ -1791,7 +1793,7 @@ function participantNote(participant: ActivityParticipant | HistoryParticipant):
       return 'Recently offline'
     }
 
-    return 'No live status text'
+    return 'Reachable in room now'
   }
 
   return participant.messageCount > 0
