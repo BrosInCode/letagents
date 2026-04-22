@@ -13,6 +13,7 @@ import {
   type Message,
   type Project,
   type ReasoningSession,
+  type ReasoningSessionUpdate,
   type Task,
 } from "../db.js";
 import {
@@ -53,6 +54,7 @@ interface TaskUpdatedEvent {
 interface ReasoningSessionUpdatedEvent {
   projectId: string;
   session: ReasoningSession;
+  update?: ReasoningSessionUpdate | null;
 }
 
 interface ReasoningSessionRemovedEvent {
@@ -395,7 +397,13 @@ export function registerRoomMessageRoutes(
 
     const onReasoningUpdated = (event: ReasoningSessionUpdatedEvent) => {
       if (event.projectId !== projectId) return;
-      res.write(`event: reasoning_update\ndata: ${JSON.stringify({ room_id: project.id, session: event.session })}\n\n`);
+      res.write(
+        `event: reasoning_update\ndata: ${JSON.stringify({
+          room_id: project.id,
+          session: event.session,
+          update: event.update ?? null,
+        })}\n\n`
+      );
     };
 
     const onReasoningRemoved = (event: ReasoningSessionRemovedEvent) => {

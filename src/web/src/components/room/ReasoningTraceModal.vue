@@ -102,6 +102,50 @@ const dialogRef = ref<HTMLElement | null>(null)
 const sessionDetail = ref<RoomReasoningSession | null>(null)
 const isLoadingDetail = ref(false)
 
+function sortReasoningUpdates(updates: readonly RoomReasoningUpdate[]): RoomReasoningUpdate[] {
+  return [...updates].sort((left, right) => {
+    const leftTime = Date.parse(left.created_at || '')
+    const rightTime = Date.parse(right.created_at || '')
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return leftTime - rightTime
+    }
+    return String(left.id || '').localeCompare(String(right.id || ''))
+  })
+}
+
+function mergeReasoningUpdates(
+  existing: readonly RoomReasoningUpdate[] | null | undefined,
+  incoming: readonly RoomReasoningUpdate[] | null | undefined,
+): RoomReasoningUpdate[] {
+  const merged = new Map<string, RoomReasoningUpdate>()
+  for (const update of existing || []) {
+    if (update?.id) merged.set(update.id, update)
+  }
+  for (const update of incoming || []) {
+    if (update?.id) merged.set(update.id, update)
+  }
+  return sortReasoningUpdates([...merged.values()])
+}
+
+function mergeReasoningSessionDetail(
+  existing: RoomReasoningSession,
+  incoming: RoomReasoningSession,
+): RoomReasoningSession {
+  const mergedUpdates = mergeReasoningUpdates(existing.updates, incoming.updates)
+  const mergedEntries = Array.isArray(incoming.entries) && incoming.entries.length > 0
+    ? incoming.entries
+    : Array.isArray(existing.entries) && existing.entries.length > 0
+      ? existing.entries
+      : incoming.entries ?? existing.entries
+
+  return {
+    ...existing,
+    ...incoming,
+    ...(mergedEntries !== undefined ? { entries: mergedEntries } : {}),
+    ...(mergedUpdates.length > 0 ? { updates: mergedUpdates } : {}),
+  }
+}
+
 const activeSession = computed(() => sessionDetail.value || props.session)
 
 const titleId = computed(() => {
@@ -254,6 +298,16 @@ watch(() => props.open, (next) => {
 })
 
 watch(
+  () => props.session,
+  (nextSession) => {
+    if (!props.open || !nextSession?.id) return
+    if (sessionDetail.value?.id === nextSession.id) {
+      sessionDetail.value = mergeReasoningSessionDetail(sessionDetail.value, nextSession)
+    }
+  }
+)
+
+watch(
   () => [props.open, props.roomIdentifier, props.session?.id] as const,
   async ([isOpen, roomIdentifier, sessionId]) => {
     if (!isOpen || !roomIdentifier || !sessionId) return
@@ -280,10 +334,13 @@ watch(
 
       const data = await response.json()
       const session = (data.session || data.reasoning_session || data) as RoomReasoningSession
-      sessionDetail.value = {
+      const fetchedDetail: RoomReasoningSession = {
         ...session,
         updates: Array.isArray(data.updates) ? data.updates : session.updates,
       }
+      sessionDetail.value = props.session?.id === session.id
+        ? mergeReasoningSessionDetail(fetchedDetail, props.session)
+        : fetchedDetail
     } catch {
       sessionDetail.value = props.session
     } finally {

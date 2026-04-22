@@ -10,6 +10,7 @@ import {
   updateReasoningSession,
   type Project,
   type ReasoningSession,
+  type ReasoningSessionUpdate,
 } from "../db.js";
 import {
   parseLimit,
@@ -26,6 +27,7 @@ import type { ReasoningSnapshot } from "../db/schema.js";
 interface ReasoningSessionUpdatedEvent {
   projectId: string;
   session: ReasoningSession;
+  update?: ReasoningSessionUpdate | null;
 }
 
 interface ReasoningSessionRemovedEvent {
@@ -198,7 +200,11 @@ export function registerRoomReasoningRoutes(
 
       deps.reasoningEvents.emit(
         "reasoning:updated",
-        { projectId: project.id, session: result.session } satisfies ReasoningSessionUpdatedEvent
+        {
+          projectId: project.id,
+          session: result.session,
+          update: result.update,
+        } satisfies ReasoningSessionUpdatedEvent
       );
 
       res.status(201).json({
@@ -289,7 +295,7 @@ export function registerRoomReasoningRoutes(
       } else {
         deps.reasoningEvents.emit(
           "reasoning:updated",
-          { projectId: project.id, session } satisfies ReasoningSessionUpdatedEvent
+          { projectId: project.id, session, update: null } satisfies ReasoningSessionUpdatedEvent
         );
       }
 
@@ -336,7 +342,11 @@ export function registerRoomReasoningRoutes(
 
         deps.reasoningEvents.emit(
           "reasoning:updated",
-          { projectId: project.id, session: result.session } satisfies ReasoningSessionUpdatedEvent
+          {
+            projectId: project.id,
+            session: result.session,
+            update: result.update,
+          } satisfies ReasoningSessionUpdatedEvent
         );
 
         res.status(201).json({
