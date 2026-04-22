@@ -15,10 +15,6 @@
           <span>Humans seen</span>
         </article>
         <article class="summary-card">
-          <strong>{{ historicalAgents.length + archivedCount }}</strong>
-          <span>History only</span>
-        </article>
-        <article class="summary-card">
           <strong>{{ activeReasoningSessions.length }}</strong>
           <span>Active reasoning</span>
         </article>
@@ -554,9 +550,7 @@
         {{
           archivedCount > 0
             ? 'Non-live agents are archived from the live roster. Switch to History to inspect the full room record.'
-            : historicalAgents.length > 0
-              ? 'Only history-only agents are tracked right now. Switch to History to inspect the full room record.'
-              : 'Agents and humans will appear here once they become reachable, join, or send messages.'
+            : 'Agents and humans will appear here once they become reachable, join, or send messages.'
         }}
       </p>
     </div>
@@ -624,13 +618,13 @@
             <div class="activity-group-header-actions">
               <span class="activity-group-count">{{ staleAgents.length }}</span>
               <button
-                v-if="props.canManageParticipants && (staleAgents.length > 0 || historicalAgents.length > 0)"
+                v-if="props.canManageParticipants && staleAgents.length > 0"
                 class="activity-action-button"
                 type="button"
                 :disabled="archiveBusy"
                 @click="handleArchiveDisconnected"
               >
-                {{ archiveBusy ? 'Clearing…' : 'Clear non-live' }}
+                {{ archiveBusy ? 'Clearing…' : 'Clear disconnected' }}
               </button>
             </div>
           </div>
@@ -1421,12 +1415,6 @@ const onlineAgents = computed(() =>
 
 const staleAgents = computed(() =>
   agentParticipants.value.filter((participant) => participant.activityState === 'stale')
-)
-
-const historicalAgents = computed(() =>
-  agentParticipants.value.filter((participant) =>
-    participant.activityState === 'historical' || participant.activityState === 'archived'
-  )
 )
 
 const activeReasoningSessions = computed(() =>
