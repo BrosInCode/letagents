@@ -20,6 +20,11 @@ interface Subscription {
 interface SubscriptionTarget {
   roomId: string;
   projectId?: string | null;
+  agentIdentity?: {
+    actorLabel: string;
+    actorKey: string | null;
+    actorInstanceId?: string | null;
+  } | null;
 }
 
 export class SseClient {
@@ -93,7 +98,10 @@ export class SseClient {
     try {
       await this.openStream(
         this.withIncludePromptOnly(
-          `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`
+          this.withAgentIdentityQuery(
+            `${this.apiUrl}/rooms/${encodeRoomIdPath(target.roomId)}/messages/stream`,
+            target
+          )
         ),
         signal,
         onMessage
@@ -107,7 +115,10 @@ export class SseClient {
 
     await this.openStream(
       this.withIncludePromptOnly(
-        `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`
+        this.withAgentIdentityQuery(
+          `${this.apiUrl}/projects/${encodeURIComponent(target.projectId)}/messages/stream`,
+          target
+        )
       ),
       signal,
       onMessage
@@ -116,6 +127,23 @@ export class SseClient {
 
   private withIncludePromptOnly(url: string): string {
     return `${url}${url.includes("?") ? "&" : "?"}include_prompt_only=1`;
+  }
+
+  private withAgentIdentityQuery(url: string, target: SubscriptionTarget): string {
+    const actorLabel = target.agentIdentity?.actorLabel?.trim();
+    const actorKey = target.agentIdentity?.actorKey?.trim();
+    if (!actorLabel || !actorKey) {
+      return url;
+    }
+
+    const params = new URLSearchParams();
+    params.set("actor_label", actorLabel);
+    params.set("actor_key", actorKey);
+    if (target.agentIdentity?.actorInstanceId?.trim()) {
+      params.set("actor_instance_id", target.agentIdentity.actorInstanceId.trim());
+    }
+
+    return `${url}${url.includes("?") ? "&" : "?"}${params.toString()}`;
   }
 
   private async openStream(

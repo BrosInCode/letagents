@@ -37,6 +37,7 @@ test("registerLegacyProjectMessageRoutes preserves legacy message route order", 
 
   assert.deepEqual(calls, [
     { method: "post", path: "/projects/:id/messages" },
+    { method: "get", path: "/projects/:id/messages/:messageId/attachments/:attachmentId" },
     { method: "get", path: "/projects/:id/messages" },
     { method: "get", path: "/projects/:id/messages/stream" },
     { method: "get", path: "/projects/:id/messages/poll" },

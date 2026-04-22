@@ -18,6 +18,7 @@ import {
   message_attachments,
   messages,
   owner_tokens,
+  room_agent_delivery_sessions,
   project_admins,
   reasoning_session_updates,
   reasoning_sessions,
@@ -44,9 +45,12 @@ import {
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
 import {
+  getAgentPresenceFreshnessFromReachability,
   getAgentPresenceFreshness,
+  ROOM_AGENT_RECONNECT_GRACE_MS,
   type AgentPresenceFreshness,
   type AgentPresenceStatus,
+  type RoomAgentDeliveryTransport,
 } from "../shared/agent-presence.js";
 import {
   buildRoomActivitySourceFlags,
@@ -231,6 +235,23 @@ export interface RoomAgentPresence {
   freshness: AgentPresenceFreshness;
   activity_state: RoomAgentActivityState;
   source_flags: RoomActivitySourceFlag[];
+}
+
+export interface RoomAgentDeliverySession {
+  room_id: string;
+  actor_label: string;
+  agent_key: string | null;
+  agent_instance_id: string | null;
+  display_name: string;
+  owner_label: string | null;
+  ide_label: string | null;
+  transport: RoomAgentDeliveryTransport;
+  active_connection_count: number;
+  last_connected_at: string;
+  last_disconnected_at: string | null;
+  reconnect_grace_expires_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface RoomParticipant {
@@ -568,6 +589,23 @@ interface RoomAgentPresenceRow {
   status: AgentPresenceStatus;
   status_text: string | null;
   last_heartbeat_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RoomAgentDeliverySessionRow {
+  room_id: string;
+  actor_label: string;
+  agent_key: string | null;
+  agent_instance_id: string | null;
+  display_name: string;
+  owner_label: string | null;
+  ide_label: string | null;
+  transport: RoomAgentDeliveryTransport;
+  active_connection_count: number;
+  last_connected_at: string;
+  last_disconnected_at: string | null;
+  reconnect_grace_expires_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -964,6 +1002,102 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     }),
     source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
+}
+
+function toRoomAgentDeliverySession(row: RoomAgentDeliverySessionRow): RoomAgentDeliverySession {
+  return {
+    room_id: row.room_id,
+    actor_label: row.actor_label,
+    agent_key: row.agent_key,
+    agent_instance_id: row.agent_instance_id,
+    display_name: row.display_name,
+    owner_label: row.owner_label,
+    ide_label: row.ide_label,
+    transport: row.transport,
+    active_connection_count: row.active_connection_count,
+    last_connected_at: row.last_connected_at,
+    last_disconnected_at: row.last_disconnected_at,
+    reconnect_grace_expires_at: row.reconnect_grace_expires_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function isRoomAgentDeliverySessionReachable(
+  session: Pick<RoomAgentDeliverySession, "active_connection_count" | "reconnect_grace_expires_at">,
+  now = Date.now()
+): boolean {
+  if (session.active_connection_count > 0) {
+    return true;
+  }
+
+  const graceExpiresAt = Date.parse(session.reconnect_grace_expires_at ?? "");
+  return Number.isFinite(graceExpiresAt) && graceExpiresAt > now;
+}
+
+function getRoomAgentDeliverySessionLastSeenAt(
+  session: Pick<RoomAgentDeliverySession, "last_connected_at" | "last_disconnected_at">
+): string {
+  return session.last_disconnected_at ?? session.last_connected_at;
+}
+
+function mergeRoomAgentPresenceRecords(input: {
+  roomId: string;
+  statusEntries: readonly RoomAgentPresence[];
+  deliverySessions: readonly RoomAgentDeliverySession[];
+  now?: number;
+}): RoomAgentPresence[] {
+  const now = input.now ?? Date.now();
+  const statusByActor = new Map(input.statusEntries.map((entry) => [entry.actor_label, entry]));
+  const deliveryByActor = new Map(input.deliverySessions.map((entry) => [entry.actor_label, entry]));
+  const actorLabels = new Set<string>([
+    ...statusByActor.keys(),
+    ...deliveryByActor.keys(),
+  ]);
+
+  const merged = Array.from(actorLabels).map((actorLabel) => {
+    const statusEntry = statusByActor.get(actorLabel) ?? null;
+    const deliverySession = deliveryByActor.get(actorLabel) ?? null;
+    const isReachable = deliverySession ? isRoomAgentDeliverySessionReachable(deliverySession, now) : false;
+    const lastSeenAt = deliverySession
+      ? getRoomAgentDeliverySessionLastSeenAt(deliverySession)
+      : statusEntry?.last_heartbeat_at ?? new Date(0).toISOString();
+
+    return {
+      room_id: input.roomId,
+      actor_label: actorLabel,
+      agent_key: deliverySession?.agent_key ?? statusEntry?.agent_key ?? null,
+      display_name: deliverySession?.display_name ?? statusEntry?.display_name ?? actorLabel,
+      owner_label: deliverySession?.owner_label ?? statusEntry?.owner_label ?? null,
+      ide_label: deliverySession?.ide_label ?? statusEntry?.ide_label ?? null,
+      status: statusEntry?.status ?? "idle",
+      status_text: statusEntry?.status_text ?? null,
+      last_heartbeat_at: lastSeenAt,
+      created_at: statusEntry?.created_at ?? deliverySession?.created_at ?? lastSeenAt,
+      updated_at: deliverySession?.updated_at ?? statusEntry?.updated_at ?? lastSeenAt,
+      freshness: getAgentPresenceFreshnessFromReachability(isReachable),
+      activity_state: deriveRoomAgentActivityState({
+        hidden: false,
+        hasPresence: Boolean(statusEntry || deliverySession),
+        freshness: getAgentPresenceFreshnessFromReachability(isReachable),
+      }),
+      source_flags: buildRoomActivitySourceFlags(["presence"]),
+    } satisfies RoomAgentPresence;
+  });
+
+  return merged.sort((left, right) => {
+    if (left.freshness !== right.freshness) {
+      return left.freshness === "active" ? -1 : 1;
+    }
+
+    const leftSeenAt = Date.parse(left.last_heartbeat_at);
+    const rightSeenAt = Date.parse(right.last_heartbeat_at);
+    if (Number.isFinite(leftSeenAt) && Number.isFinite(rightSeenAt) && leftSeenAt !== rightSeenAt) {
+      return rightSeenAt - leftSeenAt;
+    }
+
+    return left.display_name.localeCompare(right.display_name);
+  });
 }
 
 function toRoomParticipant(row: RoomParticipantRow): RoomParticipant {
@@ -2540,19 +2674,125 @@ export async function upsertRoomAgentPresence(input: {
   return toRoomAgentPresence(presence as RoomAgentPresenceRow);
 }
 
+export async function markRoomAgentDeliveryConnected(input: {
+  room_id: string;
+  actor_label: string;
+  agent_key?: string | null;
+  agent_instance_id?: string | null;
+  display_name: string;
+  owner_label?: string | null;
+  ide_label?: string | null;
+  transport: RoomAgentDeliveryTransport;
+}): Promise<RoomAgentDeliverySession> {
+  const now = new Date().toISOString();
+
+  const [session] = await db
+    .insert(room_agent_delivery_sessions)
+    .values({
+      room_id: input.room_id,
+      actor_label: input.actor_label,
+      agent_key: input.agent_key ?? null,
+      agent_instance_id: input.agent_instance_id ?? null,
+      display_name: input.display_name,
+      owner_label: input.owner_label ?? null,
+      ide_label: input.ide_label ?? null,
+      transport: input.transport,
+      active_connection_count: 1,
+      last_connected_at: now,
+      last_disconnected_at: null,
+      reconnect_grace_expires_at: null,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [room_agent_delivery_sessions.room_id, room_agent_delivery_sessions.actor_label],
+      set: {
+        agent_key: input.agent_key ?? null,
+        agent_instance_id: input.agent_instance_id ?? null,
+        display_name: input.display_name,
+        owner_label: input.owner_label ?? null,
+        ide_label: input.ide_label ?? null,
+        transport: input.transport,
+        active_connection_count: sql`GREATEST(${room_agent_delivery_sessions.active_connection_count}, 0) + 1`,
+        last_connected_at: now,
+        last_disconnected_at: null,
+        reconnect_grace_expires_at: null,
+        updated_at: now,
+      },
+    })
+    .returning();
+
+  return toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow);
+}
+
+export async function markRoomAgentDeliveryDisconnected(input: {
+  room_id: string;
+  actor_label: string;
+}): Promise<RoomAgentDeliverySession | null> {
+  const now = new Date().toISOString();
+  const graceExpiresAt = new Date(Date.now() + ROOM_AGENT_RECONNECT_GRACE_MS).toISOString();
+
+  const [session] = await db
+    .update(room_agent_delivery_sessions)
+    .set({
+      active_connection_count: sql`GREATEST(${room_agent_delivery_sessions.active_connection_count} - 1, 0)`,
+      last_disconnected_at: now,
+      reconnect_grace_expires_at: sql`CASE
+        WHEN ${room_agent_delivery_sessions.active_connection_count} - 1 > 0 THEN NULL
+        ELSE ${graceExpiresAt}::timestamptz
+      END`,
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(room_agent_delivery_sessions.room_id, input.room_id),
+        eq(room_agent_delivery_sessions.actor_label, input.actor_label)
+      )
+    )
+    .returning();
+
+  return session ? toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow) : null;
+}
+
+export async function getRoomAgentDeliverySessions(
+  roomId: string,
+  options?: { limit?: number }
+): Promise<RoomAgentDeliverySession[]> {
+  const limit = clampLimit(options?.limit, 50, 200);
+  const rows = await db
+    .select()
+    .from(room_agent_delivery_sessions)
+    .where(eq(room_agent_delivery_sessions.room_id, roomId))
+    .orderBy(
+      desc(room_agent_delivery_sessions.active_connection_count),
+      desc(room_agent_delivery_sessions.last_connected_at),
+      asc(room_agent_delivery_sessions.display_name)
+    )
+    .limit(limit);
+
+  return (rows as RoomAgentDeliverySessionRow[]).map(toRoomAgentDeliverySession);
+}
+
 export async function getRoomAgentPresence(
   roomId: string,
   options?: { limit?: number }
 ): Promise<RoomAgentPresence[]> {
   const limit = clampLimit(options?.limit, 50, 200);
-  const rows = await db
-    .select()
-    .from(room_agent_presence)
-    .where(eq(room_agent_presence.room_id, roomId))
-    .orderBy(desc(room_agent_presence.last_heartbeat_at), asc(room_agent_presence.display_name))
-    .limit(limit);
+  const [statusRows, deliverySessions] = await Promise.all([
+    db
+      .select()
+      .from(room_agent_presence)
+      .where(eq(room_agent_presence.room_id, roomId))
+      .orderBy(desc(room_agent_presence.last_heartbeat_at), asc(room_agent_presence.display_name))
+      .limit(limit),
+    getRoomAgentDeliverySessions(roomId, { limit }),
+  ]);
 
-  return (rows as RoomAgentPresenceRow[]).map(toRoomAgentPresence);
+  return mergeRoomAgentPresenceRecords({
+    roomId,
+    statusEntries: (statusRows as RoomAgentPresenceRow[]).map(toRoomAgentPresence),
+    deliverySessions,
+  }).slice(0, limit);
 }
 
 export async function upsertRoomParticipant(input: {
