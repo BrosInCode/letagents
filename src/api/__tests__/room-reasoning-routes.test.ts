@@ -232,6 +232,11 @@ test("reasoning creation requires an actor label before touching storage", async
 test("reasoning creation normalizes optional ids and structured snapshot fields", async () => {
   const { app, handlers } = createRouteApp();
   let createCall: unknown = null;
+  const reasoningEvents = new EventEmitter();
+  let emittedEvent: unknown = null;
+  reasoningEvents.on("reasoning:updated", (event) => {
+    emittedEvent = event;
+  });
   const store = createStore({
     createReasoningSession: async (payload) => {
       createCall = payload;
@@ -242,7 +247,10 @@ test("reasoning creation normalizes optional ids and structured snapshot fields"
     },
   });
 
-  registerRoomReasoningRoutes(app as never, createDeps({ reasoningStore: store }) as never);
+  registerRoomReasoningRoutes(
+    app as never,
+    createDeps({ reasoningStore: store, reasoningEvents }) as never
+  );
   const handler = handlers.post.get("/^\\/rooms\\/(.+)\\/reasoning-sessions$/");
   assert.ok(handler);
 
@@ -282,6 +290,11 @@ test("reasoning creation normalizes optional ids and structured snapshot fields"
   assert.equal(res.statusCode, 201);
   assert.deepEqual(res.body, {
     room_id: "github.com/brosincode/letagents",
+    session: { id: "rsn_2", summary: "auditing coverage" },
+    update: { id: "rsu_2", summary: "auditing coverage" },
+  });
+  assert.deepEqual(emittedEvent, {
+    projectId: "github.com/brosincode/letagents",
     session: { id: "rsn_2", summary: "auditing coverage" },
     update: { id: "rsu_2", summary: "auditing coverage" },
   });
@@ -353,4 +366,59 @@ test("reasoning update route returns 404 when the target session no longer exist
   });
   assert.equal(res.statusCode, 404);
   assert.deepEqual(res.body, { error: "Reasoning session not found" });
+});
+
+test("reasoning update route emits the appended live update payload", async () => {
+  const { app, handlers } = createRouteApp();
+  const reasoningEvents = new EventEmitter();
+  let emittedEvent: unknown = null;
+  reasoningEvents.on("reasoning:updated", (event) => {
+    emittedEvent = event;
+  });
+  const store = createStore({
+    appendReasoningSessionUpdate: async () => ({
+      session: {
+        id: "rsn_live",
+        summary: "checking stream wiring",
+      },
+      update: {
+        id: "rsu_live",
+        summary: "checking stream wiring",
+        created_at: "2026-04-22T15:00:00.000Z",
+      },
+    }) as never,
+  });
+
+  registerRoomReasoningRoutes(
+    app as never,
+    createDeps({ reasoningStore: store, reasoningEvents }) as never
+  );
+  const handler = handlers.post.get("/^\\/rooms\\/(.+)\\/reasoning-sessions\\/([^/]+)\\/updates$/");
+  assert.ok(handler);
+
+  const res = createResponseRecorder();
+  await handler(
+    {
+      params: { 0: "github.com/brosincode/letagents", 1: "rsn_live" },
+      body: {
+        actor_label: "LakeAnchor | EmmyMay's agent | Agent",
+        summary: "checking stream wiring",
+      },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(emittedEvent, {
+    projectId: "github.com/brosincode/letagents",
+    session: {
+      id: "rsn_live",
+      summary: "checking stream wiring",
+    },
+    update: {
+      id: "rsu_live",
+      summary: "checking stream wiring",
+      created_at: "2026-04-22T15:00:00.000Z",
+    },
+  });
 });

@@ -469,6 +469,8 @@ const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
 const joinError = ref<RoomJoinError | null>(null)
 
+const MAX_LIVE_REASONING_UPDATES = 200
+
 let eventSource: EventSource | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectDelay = 1200
@@ -755,6 +757,61 @@ function sortReasoningSessions(sessions: readonly RoomReasoningSession[]): RoomR
   })
 }
 
+function sortReasoningUpdates(updates: readonly RoomReasoningUpdate[]): RoomReasoningUpdate[] {
+  return [...updates].sort((left, right) => {
+    const leftTime = Date.parse(left.created_at || '')
+    const rightTime = Date.parse(right.created_at || '')
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return leftTime - rightTime
+    }
+    return String(left.id || '').localeCompare(String(right.id || ''))
+  })
+}
+
+function mergeReasoningUpdates(
+  existing: readonly RoomReasoningUpdate[] | null | undefined,
+  incoming: readonly RoomReasoningUpdate[] | null | undefined,
+  appended: RoomReasoningUpdate | null | undefined,
+): RoomReasoningUpdate[] {
+  const merged = new Map<string, RoomReasoningUpdate>()
+
+  for (const update of existing || []) {
+    if (update?.id) merged.set(update.id, update)
+  }
+  for (const update of incoming || []) {
+    if (update?.id) merged.set(update.id, update)
+  }
+  if (appended?.id) {
+    merged.set(appended.id, appended)
+  }
+
+  const sorted = sortReasoningUpdates([...merged.values()])
+  if (sorted.length <= MAX_LIVE_REASONING_UPDATES) {
+    return sorted
+  }
+  return sorted.slice(-MAX_LIVE_REASONING_UPDATES)
+}
+
+function mergeReasoningSession(
+  existing: RoomReasoningSession,
+  incoming: RoomReasoningSession,
+  appendedUpdate?: RoomReasoningUpdate | null,
+): RoomReasoningSession {
+  const mergedUpdates = mergeReasoningUpdates(existing.updates, incoming.updates, appendedUpdate)
+  const mergedEntries = Array.isArray(incoming.entries) && incoming.entries.length > 0
+    ? incoming.entries
+    : Array.isArray(existing.entries) && existing.entries.length > 0
+      ? existing.entries
+      : incoming.entries ?? existing.entries
+
+  return {
+    ...existing,
+    ...incoming,
+    ...(mergedEntries !== undefined ? { entries: mergedEntries } : {}),
+    ...(mergedUpdates.length > 0 ? { updates: mergedUpdates } : {}),
+  }
+}
+
 async function fetchReasoningSessions(roomIdentifier: string): Promise<RoomReasoningSession[]> {
   const paths = [
     `${roomPath(roomIdentifier)}/reasoning-sessions`,
@@ -778,16 +835,22 @@ async function fetchReasoningSessions(roomIdentifier: string): Promise<RoomReaso
   return []
 }
 
-function upsertReasoningSession(session: RoomReasoningSession | null | undefined) {
+function upsertReasoningSession(
+  session: RoomReasoningSession | null | undefined,
+  appendedUpdate?: RoomReasoningUpdate | null,
+) {
   if (!session?.id) return
   const idx = reasoningSessions.value.findIndex((item) => item.id === session.id)
   if (idx >= 0) {
     const updated = [...reasoningSessions.value]
-    updated[idx] = session
+    updated[idx] = mergeReasoningSession(updated[idx], session, appendedUpdate)
     reasoningSessions.value = sortReasoningSessions(updated)
     return
   }
-  reasoningSessions.value = sortReasoningSessions([...reasoningSessions.value, session])
+  const nextSession = appendedUpdate?.id
+    ? mergeReasoningSession(session, session, appendedUpdate)
+    : session
+  reasoningSessions.value = sortReasoningSessions([...reasoningSessions.value, nextSession])
 }
 
 function removeReasoningSession(sessionId: string) {
@@ -1126,8 +1189,11 @@ function startStreaming(roomIdentifier: string) {
     try {
       const payload = JSON.parse(e.data)
       const session = payload?.session || payload
+      const update = payload?.update && typeof payload.update.id === 'string'
+        ? payload.update as RoomReasoningUpdate
+        : null
       if (session?.id) {
-        upsertReasoningSession(session)
+        upsertReasoningSession(session, update)
       }
     } catch { /* ignore */ }
   })
