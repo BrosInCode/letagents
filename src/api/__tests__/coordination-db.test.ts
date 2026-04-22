@@ -659,14 +659,23 @@ test(
         }
       );
 
-    const leaseAction = (taskId: string, body: Record<string, unknown>, token = ownerToken) =>
+    const leaseAction = (
+      taskId: string,
+      body: Record<string, unknown>,
+      auth: { bearerToken?: string; sessionToken?: string } = { bearerToken: ownerToken }
+    ) =>
       fetch(
         `http://127.0.0.1:${port}/rooms/${encodeURIComponent(room.id)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+            ...(auth.bearerToken
+              ? { Authorization: `Bearer ${auth.bearerToken}` }
+              : {}),
+            ...(auth.sessionToken
+              ? { Cookie: `letagents_session=${encodeURIComponent(auth.sessionToken)}` }
+              : {}),
           },
           body: JSON.stringify(body),
         }
@@ -700,9 +709,10 @@ test(
         actor_label: bayActor.actor_label,
         actor_key: bayActor.actor_key,
       },
-      sessionToken
+      { sessionToken }
     );
     assert.equal(spoofedRelease.status, 403);
+    assert.equal((await spoofedRelease.json()).error, "Admin privileges required");
 
     const stillActiveLeases = await getActiveTaskLeases(room.id, activeTask.id);
     assert.equal(stillActiveLeases.length, 1);
