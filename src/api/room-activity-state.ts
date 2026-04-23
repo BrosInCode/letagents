@@ -31,6 +31,7 @@ function mergeActivityState(input: {
     hidden: Boolean(input.hiddenAt),
     hasPresence,
     freshness: hasPresence ? input.presenceEntry?.freshness ?? null : null,
+    status: hasPresence ? input.presenceEntry?.status ?? null : null,
   });
 }
 

@@ -57,7 +57,14 @@ function isPresenceCandidateMessage(message: Message): boolean {
 
 function comparePresence(left: RoomAgentPresence, right: RoomAgentPresence): number {
   if (left.activity_state !== right.activity_state) {
-    return left.activity_state === "online" ? -1 : 1;
+    const rank = new Map([
+      ["active", 0],
+      ["away", 1],
+      ["offline", 2],
+      ["archived", 3],
+    ] as const);
+    return (rank.get(left.activity_state) ?? Number.MAX_SAFE_INTEGER)
+      - (rank.get(right.activity_state) ?? Number.MAX_SAFE_INTEGER);
   }
 
   const leftHeartbeat = Date.parse(left.last_heartbeat_at);
@@ -104,7 +111,7 @@ export function buildFallbackPresenceFromMessages(input: {
         created_at: lastHeartbeatAt,
         updated_at: lastHeartbeatAt,
         freshness: "stale",
-        activity_state: "historical" satisfies RoomAgentActivityState,
+        activity_state: "offline" satisfies RoomAgentActivityState,
         source_flags: buildRoomActivitySourceFlags(["messages"]),
       } satisfies RoomAgentPresence;
     })
@@ -136,7 +143,7 @@ export function buildSyntheticPresenceEntry(input: {
     created_at: timestamp,
     updated_at: timestamp,
     freshness: "active",
-    activity_state: "online",
+    activity_state: input.status === "idle" ? "away" : "active",
     source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
 }

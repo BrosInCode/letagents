@@ -3,12 +3,16 @@
     <div class="activity-summary">
       <template v-if="activeView === 'live'">
         <article class="summary-card">
-          <strong>{{ onlineAgents.length }}</strong>
-          <span>Agents online</span>
+          <strong>{{ activeAgents.length }}</strong>
+          <span>Active agents</span>
         </article>
         <article class="summary-card">
-          <strong>{{ staleAgents.length }}</strong>
-          <span>Recently offline</span>
+          <strong>{{ awayAgents.length }}</strong>
+          <span>Away agents</span>
+        </article>
+        <article class="summary-card">
+          <strong>{{ offlineAgents.length }}</strong>
+          <span>Offline agents</span>
         </article>
         <article class="summary-card">
           <strong>{{ humans.length }}</strong>
@@ -115,15 +119,15 @@
           <section class="activity-group">
             <div class="activity-group-header">
               <div>
-                <h3>Agents online</h3>
-                <p>Heartbeat-valid agents in the selected room.</p>
-              </div>
-              <span class="activity-group-count">{{ historyOnlineAgents.length }}</span>
+              <h3>Active in room</h3>
+              <p>Agents currently active in this room.</p>
+            </div>
+              <span class="activity-group-count">{{ historyActiveAgents.length }}</span>
             </div>
 
-            <div v-if="historyOnlineAgents.length > 0" class="activity-roster">
+            <div v-if="historyActiveAgents.length > 0" class="activity-roster">
               <button
-                v-for="participant in historyOnlineAgents"
+                v-for="participant in historyActiveAgents"
                 :key="participant.key"
                 class="activity-roster-item"
                 :data-selected="selectedHistoryParticipant?.key === participant.key"
@@ -158,22 +162,22 @@
             </div>
 
             <div v-else class="activity-group-empty">
-              No agents are online in this room right now.
+              No active agents are tracked in this room right now.
             </div>
           </section>
 
           <section class="activity-group">
             <div class="activity-group-header">
               <div>
-                <h3>Recently offline</h3>
-                <p>Agents with a real room heartbeat that has expired.</p>
+                <h3>Away but reachable</h3>
+                <p>Agents still connected to the room but not actively working in it.</p>
               </div>
-              <span class="activity-group-count">{{ historyStaleAgents.length }}</span>
+              <span class="activity-group-count">{{ historyAwayAgents.length }}</span>
             </div>
 
-            <div v-if="historyStaleAgents.length > 0" class="activity-roster">
+            <div v-if="historyAwayAgents.length > 0" class="activity-roster">
               <button
-                v-for="participant in historyStaleAgents"
+                v-for="participant in historyAwayAgents"
                 :key="participant.key"
                 class="activity-roster-item"
                 :data-selected="selectedHistoryParticipant?.key === participant.key"
@@ -189,7 +193,7 @@
                   </div>
                   <span
                     class="activity-connection-pill"
-                    :data-connection="participant.activityState || 'stale'"
+                    :data-connection="participant.activityState || 'away'"
                   >
                     {{ connectionLabel(participant) }}
                   </span>
@@ -207,22 +211,22 @@
             </div>
 
             <div v-else class="activity-group-empty">
-              No recently offline agents are tracked in this room scope.
+              No away agents are tracked in this room scope.
             </div>
           </section>
 
           <section class="activity-group">
             <div class="activity-group-header">
               <div>
-                <h3>Room history</h3>
-                <p>Agents remembered by room history but not currently reachable.</p>
+                <h3>Offline</h3>
+                <p>Agents no longer reachable in this room, including room-history-only records.</p>
               </div>
-              <span class="activity-group-count">{{ historyMemoryAgents.length }}</span>
+              <span class="activity-group-count">{{ historyOfflineAgents.length }}</span>
             </div>
 
-            <div v-if="historyMemoryAgents.length > 0" class="activity-roster">
+            <div v-if="historyOfflineAgents.length > 0" class="activity-roster">
               <button
-                v-for="participant in historyMemoryAgents"
+                v-for="participant in historyOfflineAgents"
                 :key="participant.key"
                 class="activity-roster-item"
                 :data-selected="selectedHistoryParticipant?.key === participant.key"
@@ -257,7 +261,7 @@
             </div>
 
             <div v-else class="activity-group-empty">
-              No history-only agents are tracked in this room scope.
+              No offline agents are tracked in this room scope.
             </div>
           </section>
 
@@ -545,12 +549,12 @@
     </div>
 
     <div v-else-if="participants.length === 0" class="activity-empty">
-      <h3>{{ archivedCount > 0 ? 'Live roster cleared' : 'No live room participants right now' }}</h3>
+      <h3>{{ archivedCount > 0 ? 'Live roster cleared' : 'No active room participants right now' }}</h3>
       <p>
         {{
           archivedCount > 0
-            ? 'Non-live agents are archived from the live roster. Switch to History to inspect the full room record.'
-            : 'Agents and humans will appear here once they become reachable, join, or send messages.'
+            ? 'Offline agents are archived from the live roster. Switch to History to inspect the full room record.'
+            : 'Agents and humans will appear here once they become active, go away, join, or send messages.'
         }}
       </p>
     </div>
@@ -560,15 +564,15 @@
         <section class="activity-group">
           <div class="activity-group-header">
             <div>
-              <h3>Agents online</h3>
-              <p>Currently reachable through the room transport.</p>
+              <h3>Active in room</h3>
+              <p>Agents currently active through the room transport.</p>
             </div>
-            <span class="activity-group-count">{{ onlineAgents.length }}</span>
+            <span class="activity-group-count">{{ activeAgents.length }}</span>
           </div>
 
-          <div v-if="onlineAgents.length > 0" class="activity-roster">
+          <div v-if="activeAgents.length > 0" class="activity-roster">
             <button
-              v-for="participant in onlineAgents"
+              v-for="participant in activeAgents"
               :key="participant.key"
               class="activity-roster-item"
               :data-selected="selectedParticipant?.key === participant.key"
@@ -605,20 +609,72 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            No agents are online right now.
+            No active agents are in this room right now.
           </div>
         </section>
 
         <section class="activity-group">
           <div class="activity-group-header">
             <div>
-              <h3>Recently offline</h3>
-              <p>Agents whose room reachability has expired.</p>
+              <h3>Away but reachable</h3>
+              <p>Agents still connected to this room and able to receive messages.</p>
+            </div>
+            <span class="activity-group-count">{{ awayAgents.length }}</span>
+          </div>
+
+          <div v-if="awayAgents.length > 0" class="activity-roster">
+            <button
+              v-for="participant in awayAgents"
+              :key="participant.key"
+              class="activity-roster-item"
+              :data-selected="selectedParticipant?.key === participant.key"
+              :data-kind="participant.kind"
+              :data-connection="participant.activityState"
+              type="button"
+              @click="selectedParticipantKey = participant.key"
+            >
+              <div class="activity-roster-header">
+                <div>
+                  <div class="activity-roster-name">{{ participant.label }}</div>
+                  <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
+                </div>
+                <span class="activity-connection-pill" :data-connection="participant.activityState">
+                  {{ connectionLabel(participant) }}
+                </span>
+              </div>
+              <div class="activity-roster-status">
+                <span
+                  v-if="participant.status"
+                  class="activity-status-dot"
+                  :data-status="participant.status"
+                />
+                <span>{{ participantNote(participant) }}</span>
+                <span
+                  v-if="participant.activeReasoning.length > 0"
+                  class="activity-reasoning-pill"
+                >
+                  {{ participant.activeReasoning.length === 1 ? '1 live reasoning stream' : `${participant.activeReasoning.length} live reasoning streams` }}
+                </span>
+                <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
+              </div>
+            </button>
+          </div>
+
+          <div v-else class="activity-group-empty">
+            No away agents are connected right now.
+          </div>
+        </section>
+
+        <section class="activity-group">
+          <div class="activity-group-header">
+            <div>
+              <h3>Offline</h3>
+              <p>Agents that are no longer reachable in this room.</p>
             </div>
             <div class="activity-group-header-actions">
-              <span class="activity-group-count">{{ staleAgents.length }}</span>
+              <span class="activity-group-count">{{ offlineAgents.length }}</span>
               <button
-                v-if="props.canManageParticipants && staleAgents.length > 0"
+                v-if="props.canManageParticipants && offlineAgents.length > 0"
                 class="activity-action-button"
                 type="button"
                 :disabled="archiveBusy"
@@ -629,9 +685,9 @@
             </div>
           </div>
 
-          <div v-if="staleAgents.length > 0" class="activity-roster">
+          <div v-if="offlineAgents.length > 0" class="activity-roster">
             <button
-              v-for="participant in staleAgents"
+              v-for="participant in offlineAgents"
               :key="participant.key"
               class="activity-roster-item"
               :data-selected="selectedParticipant?.key === participant.key"
@@ -668,7 +724,7 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            {{ archivedCount > 0 ? 'Non-live agents are archived from the live roster.' : 'No recently offline agents have been seen yet.' }}
+            {{ archivedCount > 0 ? 'Offline agents are archived from the live roster.' : 'No offline agents have been seen yet.' }}
           </div>
         </section>
 
@@ -1004,7 +1060,7 @@ import {
 } from './agentThinking'
 
 type ParticipantKind = 'agent' | 'human'
-type ParticipantActivityState = 'online' | 'stale' | 'historical' | 'archived'
+type ParticipantActivityState = 'active' | 'away' | 'offline' | 'archived'
 
 interface ActivityParticipant {
   key: string
@@ -1014,6 +1070,7 @@ interface ActivityParticipant {
   ownerLabel: string | null
   ideLabel: string | null
   activityState: ParticipantActivityState | null
+  hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
   statusText: string | null
   lastSeenAt: string | null
@@ -1036,6 +1093,7 @@ interface HistoryParticipant {
   ownerLabel: string | null
   ideLabel: string | null
   activityState: ParticipantActivityState | null
+  hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
   statusText: string | null
   firstSeenAt: string | null
@@ -1090,9 +1148,9 @@ const STATUS_LABELS: Record<RoomAgentPresence['status'], string> = {
   blocked: 'Blocked',
 }
 const ACTIVITY_STATE_LABELS: Record<ParticipantActivityState, string> = {
-  online: 'Online',
-  stale: 'Recently offline',
-  historical: 'In room history',
+  active: 'Active',
+  away: 'Away',
+  offline: 'Offline',
   archived: 'Archived',
 }
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -1260,6 +1318,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     ownerLabel,
     ideLabel,
     activityState: null,
+    hasCanonicalPresence: false,
     status: null,
     statusText: null,
     lastSeenAt: null,
@@ -1285,6 +1344,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
       ownerLabel,
       ideLabel,
       activityState: null,
+      hasCanonicalPresence: false,
       status: null,
       statusText: null,
       lastSeenAt: null,
@@ -1314,6 +1374,9 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     ownerLabel,
     ideLabel,
     activityState,
+    hasCanonicalPresence: Boolean(
+      participant?.source_flags?.includes('presence') || presenceEntry?.source_flags?.includes('presence')
+    ),
     status: presenceEntry?.status || null,
     statusText,
     lastSeenAt: latestTimestamp(
@@ -1360,6 +1423,7 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
     ownerLabel: null,
     ideLabel: null,
     activityState: null,
+    hasCanonicalPresence: false,
     status: null,
     statusText: latestMessage ? previewMessage(latestMessage.text) : null,
     lastSeenAt: latestTimestamp(
@@ -1409,12 +1473,18 @@ const humanParticipants = computed(() => {
     .sort(compareParticipants)
 })
 
-const onlineAgents = computed(() =>
-  agentParticipants.value.filter((participant) => participant.activityState === 'online')
+const activeAgents = computed(() =>
+  agentParticipants.value.filter((participant) => participant.activityState === 'active')
 )
 
-const staleAgents = computed(() =>
-  agentParticipants.value.filter((participant) => participant.activityState === 'stale')
+const awayAgents = computed(() =>
+  agentParticipants.value.filter((participant) => participant.activityState === 'away')
+)
+
+const offlineAgents = computed(() =>
+  agentParticipants.value.filter((participant) =>
+    participant.activityState === 'offline' && participant.hasCanonicalPresence
+  )
 )
 
 const activeReasoningSessions = computed(() =>
@@ -1424,8 +1494,9 @@ const activeReasoningSessions = computed(() =>
 const humans = computed(() => humanParticipants.value)
 
 const participants = computed(() => [
-  ...onlineAgents.value,
-  ...staleAgents.value,
+  ...activeAgents.value,
+  ...awayAgents.value,
+  ...offlineAgents.value,
   ...humans.value,
 ])
 
@@ -1592,6 +1663,9 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
         presence: isCurrentRoomEntry ? presenceEntry : null,
       })
       : null,
+    hasCanonicalPresence: Boolean(
+      entry.participant.source_flags?.includes('presence') || presenceEntry?.source_flags?.includes('presence')
+    ),
     status: entry.participant.kind === 'agent' ? (presenceEntry?.status || null) : null,
     statusText,
     firstSeenAt: entry.first_seen_at,
@@ -1623,29 +1697,29 @@ const historyAgents = computed(() =>
 const historyHumans = computed(() =>
   historyParticipants.value.filter((participant) => participant.kind === 'human')
 )
-const historyOnlineAgents = computed(() =>
-  historyAgents.value.filter((participant) => participant.activityState === 'online')
+const historyActiveAgents = computed(() =>
+  historyAgents.value.filter((participant) => participant.activityState === 'active')
 )
-const historyStaleAgents = computed(() =>
-  historyAgents.value.filter((participant) => participant.activityState === 'stale')
+const historyAwayAgents = computed(() =>
+  historyAgents.value.filter((participant) => participant.activityState === 'away')
 )
-const historyMemoryAgents = computed(() =>
+const historyOfflineAgents = computed(() =>
   historyAgents.value.filter((participant) =>
-    participant.activityState === 'historical' || participant.activityState === 'archived'
+    participant.activityState === 'offline' || participant.activityState === 'archived'
   )
 )
 const historySummaryCards = computed(() => [
   {
-    value: historyOnlineAgents.value.length,
-    label: 'Agents online',
+    value: historyActiveAgents.value.length,
+    label: 'Active agents',
   },
   {
-    value: historyStaleAgents.value.length,
-    label: 'Recently offline',
+    value: historyAwayAgents.value.length,
+    label: 'Away agents',
   },
   {
-    value: historyMemoryAgents.value.length,
-    label: 'Only in room history',
+    value: historyOfflineAgents.value.length,
+    label: 'Offline agents',
   },
   {
     value: historyOpenTaskCount.value,
@@ -1780,15 +1854,17 @@ function participantNote(participant: ActivityParticipant | HistoryParticipant):
       return 'Archived from the live roster'
     }
 
-    if (participant.activityState === 'historical') {
-      return 'Recorded in room history'
+    if (participant.activityState === 'offline') {
+      return participant.hasCanonicalPresence
+        ? 'Offline from this room right now'
+        : 'Recorded in room history'
     }
 
-    if (participant.activityState === 'stale') {
-      return 'Recently offline'
+    if (participant.activityState === 'away') {
+      return 'Away but still reachable'
     }
 
-    return 'Reachable in room now'
+    return 'Active in room right now'
   }
 
   return participant.messageCount > 0
@@ -2024,17 +2100,17 @@ function formatLastSeen(value: string | null): string {
   color: var(--activity-text-secondary);
 }
 
-.activity-connection-pill[data-connection='online'] {
+.activity-connection-pill[data-connection='active'] {
   background: var(--activity-green-dim);
   color: var(--activity-green);
 }
 
-.activity-connection-pill[data-connection='stale'] {
-  background: var(--activity-amber-dim);
-  color: var(--activity-amber);
+.activity-connection-pill[data-connection='away'] {
+  background: var(--activity-blue-dim);
+  color: var(--activity-blue);
 }
 
-.activity-connection-pill[data-connection='historical'] {
+.activity-connection-pill[data-connection='offline'] {
   background: var(--activity-surface-hover);
   color: var(--activity-text-secondary);
 }

@@ -1,9 +1,12 @@
-import type { AgentPresenceFreshness } from "./agent-presence.js";
+import type {
+  AgentPresenceFreshness,
+  AgentPresenceStatus,
+} from "./agent-presence.js";
 
 export const ROOM_AGENT_ACTIVITY_STATES = [
-  "online",
-  "stale",
-  "historical",
+  "active",
+  "away",
+  "offline",
   "archived",
 ] as const;
 
@@ -24,20 +27,21 @@ export function deriveRoomAgentActivityState(input: {
   hidden: boolean;
   hasPresence: boolean;
   freshness: AgentPresenceFreshness | null;
+  status: AgentPresenceStatus | null;
 }): RoomAgentActivityState {
-  if (input.hasPresence && input.freshness === "active") {
-    return "online";
-  }
-
   if (input.hidden) {
     return "archived";
   }
 
-  if (input.hasPresence) {
-    return "stale";
+  if (!input.hasPresence) {
+    return "offline";
   }
 
-  return "historical";
+  if (input.freshness !== "active") {
+    return "offline";
+  }
+
+  return input.status === "idle" ? "away" : "active";
 }
 
 export function buildRoomActivitySourceFlags(
@@ -56,7 +60,7 @@ export function buildRoomActivitySourceFlags(
 export function isReachableRoomAgentActivityState(
   value: RoomAgentActivityState | null | undefined
 ): boolean {
-  return value === "online";
+  return value === "active" || value === "away";
 }
 
 export function isWithinRecentlyOfflineWindow(

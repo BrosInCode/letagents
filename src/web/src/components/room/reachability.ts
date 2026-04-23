@@ -18,22 +18,39 @@ export interface AgentReachabilitySource {
   actorLabel: string
   participant: RoomParticipant | null
   presence: RoomAgentPresence | null
-  activityState: 'online' | 'stale' | 'historical' | 'archived'
+  activityState: 'active' | 'away' | 'offline' | 'archived'
 }
 
 export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined): boolean {
-  return entry?.activity_state === 'online' || entry?.freshness === 'active'
+  return entry?.freshness === 'active'
+}
+
+function normalizeRoomActivityStateValue(
+  value: string | null | undefined,
+): AgentReachabilitySource['activityState'] | null {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return null
+  if (normalized === 'online') return 'active'
+  if (normalized === 'stale' || normalized === 'historical') return 'offline'
+  if (normalized === 'active' || normalized === 'away' || normalized === 'offline' || normalized === 'archived') {
+    return normalized
+  }
+  return null
 }
 
 export function resolveAgentActivityState(input: {
   participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at'> | null
-  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags'> | null
+  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags' | 'status'> | null
 }): AgentReachabilitySource['activityState'] {
   const hasCanonicalPresence = input.presence?.source_flags?.includes('presence') || false
   if (input.participant?.hidden_at) return 'archived'
-  if (hasCanonicalPresence && input.presence?.freshness === 'active') return 'online'
-  if (hasCanonicalPresence && input.presence?.freshness === 'stale') return 'stale'
-  return input.participant?.activity_state || input.presence?.activity_state || 'historical'
+  if (hasCanonicalPresence && input.presence?.freshness === 'active') {
+    return input.presence?.status === 'idle' ? 'away' : 'active'
+  }
+  if (hasCanonicalPresence) return 'offline'
+  return normalizeRoomActivityStateValue(input.participant?.activity_state)
+    || normalizeRoomActivityStateValue(input.presence?.activity_state)
+    || 'offline'
 }
 
 export function normalizeMentionToken(value: string): string {
@@ -78,7 +95,7 @@ export function buildMentionCandidates(input: {
 }): MentionCandidate[] {
   const seen = new Set<string>()
   const candidates: MentionCandidate[] = []
-  const onlinePresenceByActor = new Map(
+  const reachablePresenceByActor = new Map(
     input.presence
       .filter((entry) => isLivePresenceEntry(entry))
       .map((entry) => [String(entry.actor_label || '').trim(), entry] as const)
@@ -90,20 +107,21 @@ export function buildMentionCandidates(input: {
 
     if (participant.kind === 'agent') {
       const actorLabel = String(participant.actor_label || '').trim()
-      const presenceEntry = actorLabel ? (onlinePresenceByActor.get(actorLabel) || null) : null
-      if (
-        !actorLabel
-        || !presenceEntry
-        || resolveAgentActivityState({ participant, presence: presenceEntry }) !== 'online'
-      ) continue
+      const presenceEntry = actorLabel ? (reachablePresenceByActor.get(actorLabel) || null) : null
+      const activityState = resolveAgentActivityState({ participant, presence: presenceEntry })
+      if (!actorLabel || !presenceEntry || (activityState !== 'active' && activityState !== 'away')) continue
 
       const label = participant.display_name
         || presenceEntry.display_name
         || parseAgentIdentity(participant.actor_label || '').displayName
-      const meta = [participant.owner_label || presenceEntry.owner_label, participant.ide_label || presenceEntry.ide_label, 'Online now']
+      const meta = [
+        participant.owner_label || presenceEntry.owner_label,
+        participant.ide_label || presenceEntry.ide_label,
+        activityState === 'active' ? 'Active in room' : 'Away but reachable',
+      ]
         .filter(Boolean)
         .join(' · ')
-      pushMentionCandidate(candidates, seen, label, label, meta, 0, [
+      pushMentionCandidate(candidates, seen, label, label, meta, activityState === 'active' ? 0 : 1, [
         participant.actor_label,
         participant.owner_label,
         participant.ide_label,
@@ -159,7 +177,8 @@ export function buildAgentReachabilitySources(input: {
 
   for (const presence of input.presence) {
     const activityState = resolveAgentActivityState({ presence })
-    if (activityState === 'historical' || activityState === 'archived') continue
+    if (activityState === 'archived') continue
+    if (activityState === 'offline' && !presence.source_flags.includes('presence')) continue
     const actorLabel = String(presence.actor_label || '').trim()
     if (!actorLabel || seenActors.has(actorLabel) || hiddenActors.has(actorLabel)) continue
     next.push({

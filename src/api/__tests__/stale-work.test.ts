@@ -48,7 +48,7 @@ function buildPresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPre
     created_at: overrides.created_at ?? isoMinutesAgo(180),
     updated_at: overrides.updated_at ?? isoMinutesAgo(1),
     freshness: overrides.freshness ?? "active",
-    activity_state: overrides.activity_state ?? "online",
+    activity_state: overrides.activity_state ?? "away",
     source_flags: overrides.source_flags ?? ["presence"],
   };
 }
@@ -76,7 +76,7 @@ function buildMute(overrides: Partial<StaleTaskPromptMute> = {}): StaleTaskPromp
   };
 }
 
-test("selectStaleTaskAutoPrompt picks an accepted unclaimed stale task for an active idle agent", () => {
+test("selectStaleTaskAutoPrompt picks an accepted unclaimed stale task for an away agent", () => {
   const prompt = selectStaleTaskAutoPrompt({
     tasks: [
       buildTask({
@@ -123,7 +123,7 @@ test("selectStaleTaskAutoPrompt prefers accepted stale work over older review ba
   assert.equal(prompt?.reason, "accepted_unclaimed");
 });
 
-test("selectStaleTaskAutoPrompt ignores stale tasks when no active idle agent is available", () => {
+test("selectStaleTaskAutoPrompt ignores stale tasks when no away agent is available", () => {
   const prompt = selectStaleTaskAutoPrompt({
     tasks: [
       buildTask({

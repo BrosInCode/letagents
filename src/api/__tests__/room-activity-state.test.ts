@@ -22,12 +22,12 @@ const presence: RoomAgentPresence[] = [
     created_at: "2026-04-21T10:20:00.000Z",
     updated_at: "2026-04-21T11:40:00.000Z",
     freshness: "active",
-    activity_state: "online",
+    activity_state: "active",
     source_flags: ["presence"],
   },
 ];
 
-test("decorateRoomParticipantsWithPresence assigns online, historical, and archived agent states", () => {
+test("decorateRoomParticipantsWithPresence assigns active, offline, and archived agent states", () => {
   const participants: RoomParticipant[] = [
     {
       room_id: "focus_14",
@@ -92,9 +92,9 @@ test("decorateRoomParticipantsWithPresence assigns online, historical, and archi
   ];
 
   const decorated = decorateRoomParticipantsWithPresence({ participants, presence });
-  assert.equal(decorated[0]?.activity_state, "online");
+  assert.equal(decorated[0]?.activity_state, "active");
   assert.equal(decorated[0]?.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");
-  assert.equal(decorated[1]?.activity_state, "historical");
+  assert.equal(decorated[1]?.activity_state, "offline");
   assert.equal(decorated[2]?.activity_state, "archived");
 });
 
@@ -134,7 +134,7 @@ test("decorateRoomActivityHistoryEntriesWithPresence carries live state into his
   ];
 
   const decorated = decorateRoomActivityHistoryEntriesWithPresence({ entries, presence });
-  assert.equal(decorated[0]?.participant.activity_state, "online");
+  assert.equal(decorated[0]?.participant.activity_state, "active");
   assert.deepEqual(decorated[0]?.participant.source_flags, ["presence", "tasks"]);
   assert.equal(decorated[0]?.participant.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");
 });

@@ -76,7 +76,7 @@ if (!requiresDatabase) {
 }
 
 test(
-  "status-only room presence is not treated as online without a live delivery channel",
+  "status-only room presence is treated as offline without a live delivery channel",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
@@ -105,7 +105,7 @@ test(
     assert.equal(presence[0]?.status, "working");
     assert.equal(presence[0]?.status_text, "working on task_58");
     assert.equal(presence[0]?.freshness, "stale");
-    assert.equal(presence[0]?.activity_state, "stale");
+    assert.equal(presence[0]?.activity_state, "offline");
     assert.deepEqual(presence[0]?.source_flags, ["presence"]);
   }
 );
@@ -131,7 +131,7 @@ test(
       owner_label: "EmmyMay",
       ide_label: "Agent",
       status: "idle",
-      status_text: "online in room",
+      status_text: "available in room",
     });
 
     await upsertRoomAgentPresence({
@@ -149,12 +149,12 @@ test(
     assert.equal(presence.length, 1);
     assert.equal(presence[0]?.status, "reviewing");
     assert.equal(presence[0]?.status_text, "reviewing PR #146");
-    assert.equal(presence[0]?.activity_state, "online");
+    assert.equal(presence[0]?.activity_state, "offline");
   }
 );
 
 test(
-  "delivery sessions drive online freshness while preserving the latest status snapshot",
+  "delivery sessions drive active and offline room activity while preserving the latest status snapshot",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
@@ -199,7 +199,7 @@ test(
 
     const livePresence = await getRoomAgentPresence(room.id);
     assert.equal(livePresence[0]?.freshness, "active");
-    assert.equal(livePresence[0]?.activity_state, "online");
+    assert.equal(livePresence[0]?.activity_state, "active");
     assert.equal(livePresence[0]?.status, "reviewing");
     assert.equal(livePresence[0]?.ide_label, "Codex");
     assert.deepEqual(livePresence[0]?.source_flags, ["presence"]);
@@ -217,7 +217,7 @@ test(
 
     const stalePresence = await getRoomAgentPresence(room.id);
     assert.equal(stalePresence[0]?.freshness, "stale");
-    assert.equal(stalePresence[0]?.activity_state, "stale");
+    assert.equal(stalePresence[0]?.activity_state, "offline");
     assert.equal(stalePresence[0]?.status_text, "reviewing task_159 backend lane");
   }
 );
@@ -244,7 +244,7 @@ test(
       owner_label: "EmmyMay",
       ide_label: "Agent",
       status: "idle",
-      status_text: "was online earlier",
+      status_text: "was active earlier",
     });
 
     const expiredHeartbeat = new Date(Date.now() - RECENTLY_OFFLINE_WINDOW_MS - 1_000).toISOString();
@@ -320,12 +320,12 @@ test(
     const afterReconnect = await getRoomAgentPresence(room.id);
     assert.equal(afterReconnect.length, 1);
     assert.equal(afterReconnect[0]?.freshness, "active");
-    assert.equal(afterReconnect[0]?.activity_state, "online");
+    assert.equal(afterReconnect[0]?.activity_state, "away");
   }
 );
 
 test(
-  "live room presence caps recently offline agents to the configured bound",
+  "live room presence caps offline agents to the configured bound",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
