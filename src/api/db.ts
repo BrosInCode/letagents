@@ -2971,6 +2971,7 @@ export async function upsertRoomParticipant(input: {
   owner_label?: string | null;
   ide_label?: string | null;
   last_seen_at?: string | null;
+  preserve_last_seen_at_on_conflict?: boolean;
 }): Promise<RoomParticipant> {
   const now = new Date().toISOString();
   const lastSeenAt = input.last_seen_at ?? now;
@@ -3005,7 +3006,9 @@ export async function upsertRoomParticipant(input: {
         ide_label: input.ide_label ?? null,
         hidden_at: null,
         hidden_by: null,
-        last_seen_at: lastSeenAt,
+        last_seen_at: input.preserve_last_seen_at_on_conflict
+          ? sql`${room_participants.last_seen_at}`
+          : lastSeenAt,
         updated_at: now,
       },
     })

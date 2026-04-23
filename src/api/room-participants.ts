@@ -16,6 +16,7 @@ export interface RoomParticipantUpsertInput {
   owner_label?: string | null;
   ide_label?: string | null;
   last_seen_at?: string | null;
+  preserve_last_seen_at_on_conflict?: boolean;
 }
 
 export type UpsertRoomParticipant = (input: RoomParticipantUpsertInput) => Promise<unknown>;
@@ -35,6 +36,7 @@ export interface RememberAgentRoomParticipantInput {
   ownerLabel?: string | null;
   ideLabel?: string | null;
   lastSeenAt?: string | null;
+  preserveLastSeenAtOnConflict?: boolean;
 }
 
 export interface RememberRoomParticipantFromMessageInput {
@@ -115,6 +117,7 @@ export function buildAgentRoomParticipantUpsert(
       || getOwnerLabelFromAttribution(parsed?.owner_attribution),
     ide_label: normalizeParticipantValue(input.ideLabel) || parsed?.ide_label || null,
     last_seen_at: input.lastSeenAt ?? null,
+    preserve_last_seen_at_on_conflict: input.preserveLastSeenAtOnConflict ?? false,
   };
 }
 

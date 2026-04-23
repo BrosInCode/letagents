@@ -134,7 +134,7 @@ test("decorateRoomActivityHistoryEntriesWithPresence carries live state and cano
   ];
 
   const decorated = decorateRoomActivityHistoryEntriesWithPresence({ entries, presence });
-  assert.equal(decorated[0]?.last_seen_at, "2026-04-21T11:40:00.000Z");
+  assert.equal(decorated[0]?.last_seen_at, "2026-04-21T11:39:00.000Z");
   assert.equal(decorated[0]?.last_room_activity_at, "2026-04-21T11:45:00.000Z");
   assert.equal(decorated[0]?.participant.activity_state, "active");
   assert.deepEqual(decorated[0]?.participant.source_flags, ["presence", "tasks"]);

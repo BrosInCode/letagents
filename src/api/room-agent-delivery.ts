@@ -59,6 +59,7 @@ export async function beginRoomAgentDelivery(input: {
       owner_label: identity.owner_label,
       ide_label: identity.ide_label,
       last_seen_at: new Date().toISOString(),
+      preserve_last_seen_at_on_conflict: true,
     });
   }
 
