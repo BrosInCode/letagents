@@ -225,7 +225,7 @@ export function registerRoomPresenceRoutes(
         : buildFallbackRoomParticipants({
           roomId: selectedRoom.id,
           messages: (await getMessages(selectedRoom.id, { limit: 200 })).messages,
-          presence: selectedRoomPresence,
+          presence: [],
         });
       const entries = decorateRoomActivityHistoryEntriesWithPresence({
         entries: buildRoomActivityHistoryEntries({
