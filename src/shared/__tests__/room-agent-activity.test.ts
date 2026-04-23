@@ -28,7 +28,7 @@ test("deriveRoomAgentActivityState separates active and away for reachable agent
   );
 });
 
-test("deriveRoomAgentActivityState separates offline and archived agents", () => {
+test("deriveRoomAgentActivityState keeps hidden agents as offline live-state entries", () => {
   assert.equal(
     deriveRoomAgentActivityState({
       hidden: false,
@@ -54,7 +54,7 @@ test("deriveRoomAgentActivityState separates offline and archived agents", () =>
       freshness: null,
       status: null,
     }),
-    "archived"
+    "offline"
   );
 });
 
@@ -69,5 +69,4 @@ test("isReachableRoomAgentActivityState only accepts active and away agents", ()
   assert.equal(isReachableRoomAgentActivityState("active"), true);
   assert.equal(isReachableRoomAgentActivityState("away"), true);
   assert.equal(isReachableRoomAgentActivityState("offline"), false);
-  assert.equal(isReachableRoomAgentActivityState("archived"), false);
 });

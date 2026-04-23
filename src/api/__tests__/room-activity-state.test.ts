@@ -27,7 +27,7 @@ const presence: RoomAgentPresence[] = [
   },
 ];
 
-test("decorateRoomParticipantsWithPresence assigns active, offline, and archived agent states", () => {
+test("decorateRoomParticipantsWithPresence assigns active and offline agent states", () => {
   const participants: RoomParticipant[] = [
     {
       room_id: "focus_14",
@@ -95,7 +95,7 @@ test("decorateRoomParticipantsWithPresence assigns active, offline, and archived
   assert.equal(decorated[0]?.activity_state, "active");
   assert.equal(decorated[0]?.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");
   assert.equal(decorated[1]?.activity_state, "offline");
-  assert.equal(decorated[2]?.activity_state, "archived");
+  assert.equal(decorated[2]?.activity_state, "offline");
 });
 
 test("decorateRoomActivityHistoryEntriesWithPresence carries live state and canonical last seen into history entries", () => {

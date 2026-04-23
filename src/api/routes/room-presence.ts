@@ -262,7 +262,7 @@ export function registerRoomPresenceRoutes(
     }
   });
 
-  app.post(/^\/rooms\/(.+)\/participants\/archive-disconnected$/, async (req: AuthenticatedRequest, res) => {
+  app.post(/^\/rooms\/(.+)\/participants\/(?:clear|archive)-disconnected$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
 
@@ -282,7 +282,7 @@ export function registerRoomPresenceRoutes(
           .map((entry) => normalizeActorLabel(entry.actor_label))
           .filter(Boolean)
       );
-      const archiveKeys = participants
+      const hiddenParticipantKeys = participants
         .filter((participant) =>
           participant.kind === "agent"
           && !participant.hidden_at
@@ -301,7 +301,7 @@ export function registerRoomPresenceRoutes(
       const [hiddenParticipantCount, suppressedCount] = await Promise.all([
         setRoomParticipantsHidden({
           room_id: project.id,
-          participant_keys: archiveKeys,
+          participant_keys: hiddenParticipantKeys,
           hidden: true,
           hidden_by: req.sessionAccount?.login ?? "room-admin",
         }),
@@ -315,16 +315,16 @@ export function registerRoomPresenceRoutes(
 
       res.json({
         room_id: project.id,
-        archived_count: hiddenParticipantCount,
+        cleared_count: hiddenParticipantCount + suppressedCount,
         participant_hidden_count: hiddenParticipantCount,
         suppressed_count: suppressedCount,
       });
     } catch (error) {
       respondWithInternalError(
         res,
-        "POST /rooms/:room_id/participants/archive-disconnected",
+        "POST /rooms/:room_id/participants/clear-disconnected",
         error,
-        "Disconnected participants could not be archived."
+        "Disconnected participants could not be cleared from the live roster."
       );
     }
   });

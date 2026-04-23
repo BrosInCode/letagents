@@ -298,7 +298,7 @@ export interface RoomAgentPresence {
   created_at: string
   updated_at: string
   freshness: 'active' | 'stale'
-  activity_state: 'active' | 'away' | 'offline' | 'archived'
+  activity_state: 'active' | 'away' | 'offline'
   source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
 }
 
@@ -317,7 +317,7 @@ export interface RoomParticipant {
   last_seen_at: string
   last_room_activity_at: string | null
   last_live_heartbeat_at: string | null
-  activity_state: 'active' | 'away' | 'offline' | 'archived' | null
+  activity_state: 'active' | 'away' | 'offline' | null
   source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
   created_at: string
   updated_at: string
@@ -359,7 +359,7 @@ export interface RoomActivityHistoryEntry {
     hidden_at: string | null
     hidden_by: string | null
     last_live_heartbeat_at: string | null
-    activity_state: 'active' | 'away' | 'offline' | 'archived' | null
+    activity_state: 'active' | 'away' | 'offline' | null
     source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
   }
   first_seen_at: string
@@ -963,11 +963,11 @@ async function loadActivityHistory(options?: {
   }
 }
 
-async function archiveDisconnectedParticipants(): Promise<number> {
+async function clearDisconnectedParticipants(): Promise<number> {
   if (!room.value) return 0
 
   try {
-    const response = await apiFetch(`${roomPath(room.value.identifier)}/participants/archive-disconnected`, {
+    const response = await apiFetch(`${roomPath(room.value.identifier)}/participants/clear-disconnected`, {
       method: 'POST',
     })
     await Promise.all([
@@ -980,7 +980,7 @@ async function archiveDisconnectedParticipants(): Promise<number> {
         roomId: room.value.identifier,
       })
     }
-    return Number(response.archived_count || 0)
+    return Number(response.cleared_count || response.suppressed_count || response.participant_hidden_count || 0)
   } catch {
     return 0
   }
@@ -1889,7 +1889,7 @@ export function useRoom() {
     refreshFocusRooms,
     refreshRoomPresence,
     loadActivityHistory,
-    archiveDisconnectedParticipants,
+    clearDisconnectedParticipants,
     refreshReasoningSessions,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,

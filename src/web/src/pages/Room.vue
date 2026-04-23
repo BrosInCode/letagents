@@ -97,7 +97,7 @@
           :focusRooms="focusRooms"
           :messages="messages"
           :participants="participants"
-          :liveArchivedCount="participantHiddenCount"
+          :liveClearedCount="participantHiddenCount"
           :presence="presence"
           :reasoningSessions="reasoningSessions"
           :tasks="tasks"
@@ -106,7 +106,7 @@
           :activityHistoryError="activityHistoryError"
           :canManageParticipants="room?.role === 'admin'"
           :loadActivityHistory="loadActivityHistory"
-          :archiveDisconnectedParticipants="archiveDisconnectedParticipants"
+          :clearDisconnectedParticipants="clearDisconnectedParticipants"
           :taskGithubStatus="taskGithubStatus"
         />
 
@@ -294,7 +294,7 @@ const {
   renameRoom,
   loadOlderMessages,
   loadActivityHistory,
-  archiveDisconnectedParticipants,
+  clearDisconnectedParticipants,
   refreshRoomGitHubEvents,
 } = useRoom()
 const auth = useAuth()

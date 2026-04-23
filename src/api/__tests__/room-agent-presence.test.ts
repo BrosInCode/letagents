@@ -76,7 +76,7 @@ if (!requiresDatabase) {
 }
 
 test(
-  "status-only room presence is treated as offline without a live delivery channel",
+  "fresh status-only room presence is treated as away during delivery rollout",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
@@ -104,8 +104,8 @@ test(
     assert.equal(presence[0]?.actor_label, "MapleRidge | EmmyMay's agent | Agent");
     assert.equal(presence[0]?.status, "working");
     assert.equal(presence[0]?.status_text, "working on task_58");
-    assert.equal(presence[0]?.freshness, "stale");
-    assert.equal(presence[0]?.activity_state, "offline");
+    assert.equal(presence[0]?.freshness, "active");
+    assert.equal(presence[0]?.activity_state, "away");
     assert.deepEqual(presence[0]?.source_flags, ["presence"]);
   }
 );
@@ -149,7 +149,7 @@ test(
     assert.equal(presence.length, 1);
     assert.equal(presence[0]?.status, "reviewing");
     assert.equal(presence[0]?.status_text, "reviewing PR #146");
-    assert.equal(presence[0]?.activity_state, "offline");
+    assert.equal(presence[0]?.activity_state, "away");
   }
 );
 
@@ -270,8 +270,10 @@ test(
   async () => {
     if (
       !createProjectWithName ||
+      !db ||
       !getRoomAgentPresence ||
       !markRoomAgentDeliveryConnected ||
+      !room_agent_presence ||
       !setRoomLiveAgentSuppressed ||
       !upsertRoomAgentPresence
     ) {
@@ -291,6 +293,15 @@ test(
       status: "idle",
       status_text: "polling in room",
     });
+
+    const recentlyStaleHeartbeat = new Date(Date.now() - 120_000).toISOString();
+    await db
+      .update(room_agent_presence)
+      .set({
+        last_heartbeat_at: recentlyStaleHeartbeat,
+        updated_at: recentlyStaleHeartbeat,
+      })
+      .where(sql`${room_agent_presence.room_id} = ${room.id} AND ${room_agent_presence.actor_label} = ${actorLabel}`);
 
     const beforeSuppression = await getRoomAgentPresence(room.id);
     assert.equal(beforeSuppression.length, 1);
