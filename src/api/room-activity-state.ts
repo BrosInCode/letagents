@@ -115,12 +115,6 @@ export function decorateRoomActivityHistoryEntriesWithPresence(input: {
 
     return {
       ...entry,
-      last_seen_at: latestTimestamp(
-        entry.last_seen_at,
-        presenceEntry?.source_flags?.includes("presence")
-          ? presenceEntry.last_heartbeat_at
-          : null
-      ),
       participant: {
         ...entry.participant,
         last_live_heartbeat_at:

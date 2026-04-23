@@ -1428,10 +1428,7 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
     status: null,
     statusText: entry.participant.hidden_at ? 'Archived from the live roster' : null,
     firstSeenAt: entry.first_seen_at,
-    lastSeenAt: latestTimestamp(
-      entry.last_room_activity_at,
-      entry.last_seen_at
-    ),
+    lastSeenAt: entry.last_seen_at,
     messageCount: 0,
     currentTasks: entry.current_tasks,
     completedTasks: entry.completed_tasks,
