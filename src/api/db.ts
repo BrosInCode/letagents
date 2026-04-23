@@ -1075,7 +1075,13 @@ function mergeRoomAgentPresenceRecords(input: {
   const merged = Array.from(actorLabels).map((actorLabel) => {
     const statusEntry = statusByActor.get(actorLabel) ?? null;
     const deliverySession = deliveryByActor.get(actorLabel) ?? null;
-    const isReachable = deliverySession ? isRoomAgentDeliverySessionReachable(deliverySession, now) : false;
+    const statusFreshness = statusEntry
+      ? getAgentPresenceFreshness(statusEntry.last_heartbeat_at, now)
+      : "stale";
+    const isReachable = deliverySession
+      ? isRoomAgentDeliverySessionReachable(deliverySession, now)
+      : statusFreshness === "active";
+    const status = statusEntry?.status ?? "idle";
     const lastSeenAt = deliverySession
       ? getRoomAgentDeliverySessionLastSeenAt(deliverySession)
       : statusEntry?.last_heartbeat_at ?? new Date(0).toISOString();
@@ -1087,7 +1093,7 @@ function mergeRoomAgentPresenceRecords(input: {
       display_name: deliverySession?.display_name ?? statusEntry?.display_name ?? actorLabel,
       owner_label: deliverySession?.owner_label ?? statusEntry?.owner_label ?? null,
       ide_label: deliverySession?.ide_label ?? statusEntry?.ide_label ?? null,
-      status: statusEntry?.status ?? "idle",
+      status,
       status_text: statusEntry?.status_text ?? null,
       last_heartbeat_at: lastSeenAt,
       created_at: statusEntry?.created_at ?? deliverySession?.created_at ?? lastSeenAt,
@@ -1097,7 +1103,7 @@ function mergeRoomAgentPresenceRecords(input: {
         hidden: false,
         hasPresence: Boolean(statusEntry || deliverySession),
         freshness: getAgentPresenceFreshnessFromReachability(isReachable),
-        status: statusEntry?.status ?? "idle",
+        status: deliverySession ? status : "idle",
       }),
       source_flags: buildRoomActivitySourceFlags(["presence"]),
     } satisfies RoomAgentPresence;

@@ -80,7 +80,7 @@ function mergeParticipantActivityState(
 
   const hidden = Boolean(primary.hidden_at || secondary.hidden_at);
   if (hidden) {
-    return "archived";
+    return "offline";
   }
 
   if (primary.activity_state === "active" || secondary.activity_state === "active") {

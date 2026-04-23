@@ -36,7 +36,7 @@ test("registerRoomPresenceRoutes preserves canonical presence route order", () =
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/presence$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/participants$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/activity-history$/" },
-    { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/archive-disconnected$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/(?:clear|archive)-disconnected$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/presence$/" },
   ]);
 });

@@ -61,7 +61,6 @@ function comparePresence(left: RoomAgentPresence, right: RoomAgentPresence): num
       ["active", 0],
       ["away", 1],
       ["offline", 2],
-      ["archived", 3],
     ] as const);
     return (rank.get(left.activity_state) ?? Number.MAX_SAFE_INTEGER)
       - (rank.get(right.activity_state) ?? Number.MAX_SAFE_INTEGER);

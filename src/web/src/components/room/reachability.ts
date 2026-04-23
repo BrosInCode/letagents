@@ -18,7 +18,7 @@ export interface AgentReachabilitySource {
   actorLabel: string
   participant: RoomParticipant | null
   presence: RoomAgentPresence | null
-  activityState: 'active' | 'away' | 'offline' | 'archived'
+  activityState: 'active' | 'away' | 'offline'
 }
 
 export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined): boolean {
@@ -32,7 +32,7 @@ function normalizeRoomActivityStateValue(
   if (!normalized) return null
   if (normalized === 'online') return 'active'
   if (normalized === 'stale' || normalized === 'historical') return 'offline'
-  if (normalized === 'active' || normalized === 'away' || normalized === 'offline' || normalized === 'archived') {
+  if (normalized === 'active' || normalized === 'away' || normalized === 'offline') {
     return normalized
   }
   return null
@@ -43,7 +43,7 @@ export function resolveAgentActivityState(input: {
   presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags' | 'status'> | null
 }): AgentReachabilitySource['activityState'] {
   const hasCanonicalPresence = input.presence?.source_flags?.includes('presence') || false
-  if (input.participant?.hidden_at) return 'archived'
+  if (input.participant?.hidden_at) return 'offline'
   if (hasCanonicalPresence && input.presence?.freshness === 'active') {
     return input.presence?.status === 'idle' ? 'away' : 'active'
   }
@@ -177,7 +177,6 @@ export function buildAgentReachabilitySources(input: {
 
   for (const presence of input.presence) {
     const activityState = resolveAgentActivityState({ presence })
-    if (activityState === 'archived') continue
     if (activityState === 'offline' && !presence.source_flags.includes('presence')) continue
     const actorLabel = String(presence.actor_label || '').trim()
     if (!actorLabel || seenActors.has(actorLabel) || hiddenActors.has(actorLabel)) continue

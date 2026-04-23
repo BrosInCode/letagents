@@ -7,7 +7,6 @@ export const ROOM_AGENT_ACTIVITY_STATES = [
   "active",
   "away",
   "offline",
-  "archived",
 ] as const;
 
 export const RECENTLY_OFFLINE_WINDOW_MS = 15 * 60 * 1000;
@@ -30,7 +29,7 @@ export function deriveRoomAgentActivityState(input: {
   status: AgentPresenceStatus | null;
 }): RoomAgentActivityState {
   if (input.hidden) {
-    return "archived";
+    return "offline";
   }
 
   if (!input.hasPresence) {

@@ -55,8 +55,8 @@
         </button>
       </div>
 
-      <p v-if="activeView === 'live' && archivedCount > 0" class="activity-toolbar-note">
-        {{ archivedCount }} archived from the live roster.
+      <p v-if="activeView === 'live' && clearedLiveCount > 0" class="activity-toolbar-note">
+        {{ clearedLiveCount }} cleared from the live roster.
       </p>
     </div>
 
@@ -140,13 +140,6 @@
                     <div class="activity-roster-name">{{ participant.label }}</div>
                     <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                   </div>
-                  <span
-                    v-if="participant.archived"
-                    class="activity-connection-pill"
-                    data-connection="archived"
-                  >
-                    Archived
-                  </span>
                 </div>
                 <div class="activity-roster-status">
                   <span>{{ historyParticipantNote(participant) }}</span>
@@ -210,13 +203,6 @@
             <div class="activity-detail-badges">
               <span class="activity-history-room-pill">
                 {{ selectedHistoryRoomOption?.kind === 'focus' ? 'Focus room' : 'Main room' }}
-              </span>
-              <span
-                v-if="selectedHistoryParticipant.kind === 'agent' && selectedHistoryParticipant.archived"
-                class="activity-connection-pill"
-                data-connection="archived"
-              >
-                Archived
               </span>
             </div>
           </div>
@@ -364,11 +350,11 @@
     </div>
 
     <div v-else-if="participants.length === 0" class="activity-empty">
-      <h3>{{ archivedCount > 0 ? 'Live roster cleared' : 'No active room participants right now' }}</h3>
+      <h3>{{ clearedLiveCount > 0 ? 'Live roster cleared' : 'No active room participants right now' }}</h3>
       <p>
         {{
-          archivedCount > 0
-            ? 'Offline agents are archived from the live roster. Switch to History to inspect the full room record.'
+          clearedLiveCount > 0
+            ? 'Offline agents were cleared from the live roster. Switch to History to inspect the full room record.'
             : 'Agents and humans will appear here once they become active, go away, join, or send messages.'
         }}
       </p>
@@ -492,10 +478,10 @@
                 v-if="props.canManageParticipants && offlineAgents.length > 0"
                 class="activity-action-button"
                 type="button"
-                :disabled="archiveBusy"
-                @click="handleArchiveDisconnected"
+                :disabled="clearBusy"
+                @click="handleClearDisconnected"
               >
-                {{ archiveBusy ? 'Clearing…' : 'Clear disconnected' }}
+                {{ clearBusy ? 'Clearing…' : 'Clear disconnected' }}
               </button>
             </div>
           </div>
@@ -539,7 +525,7 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            {{ archivedCount > 0 ? 'Offline agents are archived from the live roster.' : 'No offline agents have been seen yet.' }}
+            {{ clearedLiveCount > 0 ? 'Offline agents were cleared from the live roster.' : 'No offline agents have been seen yet.' }}
           </div>
         </section>
 
@@ -875,7 +861,7 @@ import {
 } from './agentThinking'
 
 type ParticipantKind = 'agent' | 'human'
-type ParticipantActivityState = 'active' | 'away' | 'offline' | 'archived'
+type ParticipantActivityState = 'active' | 'away' | 'offline'
 
 interface ActivityParticipant {
   key: string
@@ -920,7 +906,6 @@ interface HistoryParticipant {
   recentMessages: RoomMessage[]
   thinkingSnapshot: AgentThinkingCardData | null
   thinkingTimeline: AgentThinkingTimelineEntry[]
-  archived: boolean
 }
 
 interface HistoryRoomOption {
@@ -936,7 +921,7 @@ const props = defineProps<{
   focusRooms: readonly FocusRoomInfo[]
   messages: readonly RoomMessage[]
   participants: readonly RoomParticipant[]
-  liveArchivedCount: number
+  liveClearedCount: number
   presence: readonly RoomAgentPresence[]
   reasoningSessions: readonly RoomReasoningSession[]
   tasks: readonly RoomTask[]
@@ -951,7 +936,7 @@ const props = defineProps<{
     kind?: RoomActivityHistoryKind
     roomId?: string
   }) => Promise<boolean>
-  archiveDisconnectedParticipants?: () => Promise<number>
+  clearDisconnectedParticipants?: () => Promise<number>
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
 }>()
 
@@ -966,7 +951,6 @@ const ACTIVITY_STATE_LABELS: Record<ParticipantActivityState, string> = {
   active: 'Active',
   away: 'Away',
   offline: 'Offline',
-  archived: 'Archived',
 }
 const TASK_STATUS_LABELS: Record<string, string> = {
   proposed: 'Proposed',
@@ -990,7 +974,7 @@ const selectedReasoningId = ref<string | null>(null)
 const historyQuery = ref('')
 const historyKind = ref<RoomActivityHistoryKind>('all')
 const historyRoomId = ref('')
-const archiveBusy = ref(false)
+const clearBusy = ref(false)
 let historySearchTimer: ReturnType<typeof setTimeout> | null = null
 
 function isAgentIdentityValue(value: string | null | undefined): boolean {
@@ -1317,7 +1301,7 @@ const participants = computed(() => [
 
 const currentRoomIdentifier = computed(() => props.currentRoom?.identifier || props.roomIdentifier)
 const historyEntries = computed(() => props.activityHistory?.entries || [])
-const archivedCount = computed(() => props.liveArchivedCount || 0)
+const clearedLiveCount = computed(() => props.liveClearedCount || 0)
 const historyRoomOptions = computed<HistoryRoomOption[]>(() => {
   const options: HistoryRoomOption[] = []
   const seen = new Set<string>()
@@ -1421,12 +1405,10 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
       : actorLabel,
     ownerLabel,
     ideLabel,
-    activityState: entry.participant.kind === 'agent'
-      ? (entry.participant.hidden_at ? 'archived' : null)
-      : null,
+    activityState: null,
     hasCanonicalPresence: false,
     status: null,
-    statusText: entry.participant.hidden_at ? 'Archived from the live roster' : null,
+    statusText: null,
     firstSeenAt: entry.first_seen_at,
     lastSeenAt: entry.last_seen_at,
     messageCount: 0,
@@ -1436,7 +1418,6 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
     recentMessages: [],
     thinkingSnapshot: null,
     thinkingTimeline: [],
-    archived: Boolean(entry.participant.hidden_at),
   }
 }
 
@@ -1451,9 +1432,6 @@ const historyAgents = computed(() =>
 const historyHumans = computed(() =>
   historyParticipants.value.filter((participant) => participant.kind === 'human')
 )
-const historyArchivedAgents = computed(() =>
-  historyAgents.value.filter((participant) => participant.archived)
-)
 const showHistoryAgentSection = computed(() => historyKind.value !== 'human')
 const showHistoryHumanSection = computed(() => historyKind.value !== 'agent')
 const historySummaryCards = computed(() => [
@@ -1464,10 +1442,6 @@ const historySummaryCards = computed(() => [
   {
     value: historyHumans.value.length,
     label: 'Humans in history',
-  },
-  {
-    value: historyArchivedAgents.value.length,
-    label: 'Archived agents',
   },
   {
     value: historyOpenTaskCount.value,
@@ -1598,10 +1572,6 @@ function participantNote(participant: ActivityParticipant | HistoryParticipant):
   }
 
   if (participant.kind === 'agent') {
-    if (participant.activityState === 'archived' || ('archived' in participant && participant.archived)) {
-      return 'Archived from the live roster'
-    }
-
     if (participant.activityState === 'offline') {
       return participant.hasCanonicalPresence
         ? 'Offline from this room right now'
@@ -1630,10 +1600,6 @@ function historyParticipantNote(participant: HistoryParticipant): string {
     return 'Seen via browser room history'
   }
 
-  if (participant.archived) {
-    return 'Archived from the live roster'
-  }
-
   if (!participant.firstSeenAt) {
     return 'Recorded in room history'
   }
@@ -1644,10 +1610,6 @@ function historyParticipantNote(participant: HistoryParticipant): string {
 function historyDetailNote(participant: HistoryParticipant): string {
   if (participant.kind === 'human') {
     return 'History stays focused on room participation and linked work. Use the Live tab for current browser activity.'
-  }
-
-  if (participant.archived) {
-    return 'This agent is archived from the live roster. History keeps the room record of when they were last here and what work they touched.'
   }
 
   return 'History stays focused on room participation and linked work. Use the Live tab to inspect current active, away, or offline state.'
@@ -1709,16 +1671,16 @@ function changeHistoryPage(page: number): void {
   void requestHistory(page)
 }
 
-async function handleArchiveDisconnected(): Promise<void> {
-  if (!props.archiveDisconnectedParticipants || archiveBusy.value) return
-  archiveBusy.value = true
+async function handleClearDisconnected(): Promise<void> {
+  if (!props.clearDisconnectedParticipants || clearBusy.value) return
+  clearBusy.value = true
   try {
-    await props.archiveDisconnectedParticipants()
+    await props.clearDisconnectedParticipants()
     if (activeView.value === 'history') {
       await requestHistory(props.activityHistory?.page || 1)
     }
   } finally {
-    archiveBusy.value = false
+    clearBusy.value = false
   }
 }
 
@@ -1894,11 +1856,6 @@ function formatLastSeen(value: string | null): string {
 .activity-connection-pill[data-connection='offline'] {
   background: var(--activity-surface-hover);
   color: var(--activity-text-secondary);
-}
-
-.activity-connection-pill[data-connection='archived'] {
-  background: var(--activity-red-dim);
-  color: var(--activity-red);
 }
 
 .activity-status-pill[data-status='idle'] { background: var(--activity-surface-hover); color: var(--activity-text-secondary); }
