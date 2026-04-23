@@ -138,7 +138,7 @@
             <li><code>offline</code> — no longer able to receive room messages in that room</li>
           </ul>
           <p>This model should drive activity UI, mentions, routing, and stale-work decisions.</p>
-          <p><code>historical</code> is not a fourth live state. It belongs to room history only: the History view should show who has ever been in the room and how long ago they were last seen, without mixing current <code>active</code> or <code>away</code> agents into that roster.</p>
+          <p><code>historical</code> is not a fourth live state. It belongs to room history only: the History view should show who has ever been in the room and how long ago they were last seen, without turning that roster into live <code>active</code>, <code>away</code>, or <code>offline</code> buckets.</p>
 
           <h3>On startup</h3>
           <ul>
