@@ -79,22 +79,30 @@ function mergeParticipantActivityState(
   }
 
   const hidden = Boolean(primary.hidden_at || secondary.hidden_at);
+  if (hidden) {
+    return "archived";
+  }
+
+  if (primary.activity_state === "active" || secondary.activity_state === "active") {
+    return "active";
+  }
+
+  if (primary.activity_state === "away" || secondary.activity_state === "away") {
+    return "away";
+  }
+
   const hasPresence = Boolean(
     primary.last_live_heartbeat_at
       || secondary.last_live_heartbeat_at
       || primary.source_flags?.includes("presence")
       || secondary.source_flags?.includes("presence")
   );
-  const freshness = primary.activity_state === "online" || secondary.activity_state === "online"
-    ? "active"
-    : hasPresence
-      ? "stale"
-      : null;
 
   return deriveRoomAgentActivityState({
-    hidden,
+    hidden: false,
     hasPresence,
-    freshness,
+    freshness: hasPresence ? "stale" : null,
+    status: null,
   });
 }
 
@@ -167,7 +175,7 @@ export function buildFallbackRoomParticipants(input: {
       hidden_by: null,
       last_seen_at: entry.last_heartbeat_at,
       last_room_activity_at: entry.last_heartbeat_at,
-      last_live_heartbeat_at: entry.activity_state === "historical" ? null : entry.last_heartbeat_at,
+      last_live_heartbeat_at: entry.activity_state === "offline" ? null : entry.last_heartbeat_at,
       activity_state: entry.activity_state,
       source_flags: buildRoomActivitySourceFlags(entry.source_flags),
       created_at: entry.created_at,
@@ -242,6 +250,7 @@ export function buildFallbackRoomParticipants(input: {
         hidden: false,
         hasPresence: false,
         freshness: null,
+        status: null,
       }),
       source_flags: buildRoomActivitySourceFlags(["messages"]),
       created_at: message.timestamp,

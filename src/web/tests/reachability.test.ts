@@ -27,7 +27,7 @@ function makePresence(overrides: Partial<RoomAgentPresence>): RoomAgentPresence 
     created_at: '2026-04-22T17:00:00.000Z',
     updated_at: '2026-04-22T17:00:00.000Z',
     freshness: 'active',
-    activity_state: 'online',
+    activity_state: 'active',
     source_flags: ['presence'],
     ...overrides,
   }
@@ -49,7 +49,7 @@ function makeParticipant(overrides: Partial<RoomParticipant>): RoomParticipant {
     last_seen_at: '2026-04-22T17:00:00.000Z',
     last_room_activity_at: '2026-04-22T17:00:00.000Z',
     last_live_heartbeat_at: '2026-04-22T17:00:00.000Z',
-    activity_state: 'online',
+    activity_state: 'active',
     source_flags: ['presence'],
     created_at: '2026-04-22T17:00:00.000Z',
     updated_at: '2026-04-22T17:00:00.000Z',
@@ -60,12 +60,12 @@ function makeParticipant(overrides: Partial<RoomParticipant>): RoomParticipant {
 test('buildMentionCandidates only includes live non-hidden agents and visible humans', () => {
   const candidates = buildMentionCandidates({
     participants: [
-      makeParticipant({ display_name: 'LiveOak', activity_state: 'online' }),
+      makeParticipant({ display_name: 'LiveOak', activity_state: 'active' }),
       makeParticipant({
         participant_key: 'agent:ghostash | emmymay\'s agent | agent',
         actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
         display_name: 'GhostAsh',
-        activity_state: 'stale',
+        activity_state: 'away',
       }),
       makeParticipant({
         participant_key: 'human:login:emmymay',
@@ -85,14 +85,16 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
         actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
         display_name: 'LiveOak',
         freshness: 'active',
-        activity_state: 'online',
+        activity_state: 'active',
         source_flags: ['presence'],
       }),
       makePresence({
         actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
         display_name: 'GhostAsh',
-        freshness: 'stale',
-        activity_state: 'stale',
+        status: 'idle',
+        status_text: 'available in room',
+        freshness: 'active',
+        activity_state: 'away',
         source_flags: ['presence'],
       }),
     ],
@@ -101,22 +103,23 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
 
   assert.deepEqual(
     candidates.map((candidate) => candidate.label),
-    ['@LiveOak', '@EmmyMay'],
+    ['@LiveOak', '@GhostAsh', '@EmmyMay'],
   )
-  assert.equal(candidates[0]?.meta.includes('Online now'), true)
+  assert.equal(candidates[0]?.meta.includes('Active in room'), true)
+  assert.equal(candidates[1]?.meta.includes('Away but reachable'), true)
 })
 
-test('buildMentionCandidates treats active presence as online even when participant history is stale', () => {
+test('buildMentionCandidates treats active presence as reachable even when participant history is offline', () => {
   const candidates = buildMentionCandidates({
     participants: [
       makeParticipant({
-        activity_state: 'historical',
+        activity_state: 'offline',
       }),
     ],
     presence: [
       makePresence({
         freshness: 'active',
-        activity_state: 'historical',
+        activity_state: 'active',
       }),
     ],
     senderName: 'OwlSolar',
@@ -135,7 +138,7 @@ test('buildAgentReachabilitySources merges live presence into participant histor
         participant_key: 'agent:ghostash | emmymay\'s agent | agent',
         actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
         display_name: 'GhostAsh',
-        activity_state: 'stale',
+        activity_state: 'offline',
       }),
     ],
     presence: [
@@ -143,14 +146,14 @@ test('buildAgentReachabilitySources merges live presence into participant histor
         actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
         display_name: 'GhostAsh',
         freshness: 'stale',
-        activity_state: 'stale',
+        activity_state: 'offline',
         source_flags: ['presence'],
       }),
       makePresence({
         actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
         display_name: 'LiveOak',
         freshness: 'active',
-        activity_state: 'online',
+        activity_state: 'active',
         source_flags: ['presence'],
       }),
     ],
@@ -159,25 +162,25 @@ test('buildAgentReachabilitySources merges live presence into participant histor
   assert.deepEqual(
     sources.map((source) => [source.actorLabel, source.activityState]),
     [
-      ['GhostAsh | EmmyMay\'s agent | Agent', 'stale'],
-      ['LiveOak | EmmyMay\'s agent | Agent', 'online'],
+      ['GhostAsh | EmmyMay\'s agent | Agent', 'offline'],
+      ['LiveOak | EmmyMay\'s agent | Agent', 'active'],
     ],
   )
   assert.equal(sources[1]?.participant, null)
 })
 
-test('buildAgentReachabilitySources keeps stale presence in the recently offline lane', () => {
+test('buildAgentReachabilitySources keeps stale presence in the offline lane', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
       makeParticipant({
-        activity_state: 'historical',
+        activity_state: 'offline',
         source_flags: ['messages'],
       }),
     ],
     presence: [
       makePresence({
         freshness: 'stale',
-        activity_state: 'historical',
+        activity_state: 'offline',
         source_flags: ['presence'],
       }),
     ],
@@ -185,17 +188,17 @@ test('buildAgentReachabilitySources keeps stale presence in the recently offline
 
   assert.deepEqual(
     sources.map((source) => [source.actorLabel, source.activityState]),
-    [['LiveOak | EmmyMay\'s agent | Agent', 'stale']],
+    [['LiveOak | EmmyMay\'s agent | Agent', 'offline']],
   )
 })
 
-test('buildAgentReachabilitySources keeps canonical stale presence without a participant row', () => {
+test('buildAgentReachabilitySources keeps canonical offline presence without a participant row', () => {
   const sources = buildAgentReachabilitySources({
     participants: [],
     presence: [
       makePresence({
         freshness: 'stale',
-        activity_state: 'historical',
+        activity_state: 'offline',
         source_flags: ['presence'],
       }),
     ],
@@ -203,18 +206,47 @@ test('buildAgentReachabilitySources keeps canonical stale presence without a par
 
   assert.deepEqual(
     sources.map((source) => [source.actorLabel, source.activityState]),
-    [['LiveOak | EmmyMay\'s agent | Agent', 'stale']],
+    [['LiveOak | EmmyMay\'s agent | Agent', 'offline']],
   )
   assert.equal(sources[0]?.participant, null)
 })
 
-test('buildAgentReachabilitySources does not surface message-only fallback ghosts as stale', () => {
+test('buildAgentReachabilitySources normalizes legacy participant-only offline states', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [
+      makeParticipant({
+        activity_state: 'offline' as RoomParticipant['activity_state'],
+        source_flags: ['messages'],
+      }),
+      {
+        ...makeParticipant({
+          participant_key: 'agent:ghostash | emmymay\'s agent | agent',
+          actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
+          display_name: 'GhostAsh',
+          source_flags: ['messages'],
+        }),
+        activity_state: 'historical' as RoomParticipant['activity_state'],
+      },
+    ],
+    presence: [],
+  })
+
+  assert.deepEqual(
+    sources.map((source) => [source.actorLabel, source.activityState]),
+    [
+      ['LiveOak | EmmyMay\'s agent | Agent', 'offline'],
+      ['GhostAsh | EmmyMay\'s agent | Agent', 'offline'],
+    ],
+  )
+})
+
+test('buildAgentReachabilitySources does not surface message-only fallback ghosts as offline', () => {
   const sources = buildAgentReachabilitySources({
     participants: [],
     presence: [
       makePresence({
         freshness: 'stale',
-        activity_state: 'historical',
+        activity_state: 'offline',
         source_flags: ['messages'],
       }),
     ],
