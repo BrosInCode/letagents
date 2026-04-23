@@ -5,6 +5,7 @@ import {
   buildRoomActivityHistoryEntries,
   filterRoomActivityHistoryEntries,
   paginateRoomActivityHistoryEntries,
+  sortRoomActivityHistoryEntries,
 } from "../room-activity-history.js";
 import type { Project, RoomParticipant, Task } from "../db.js";
 
@@ -174,6 +175,57 @@ test("filterRoomActivityHistoryEntries searches tasks beyond the displayed top f
   assert.equal(filterRoomActivityHistoryEntries(entries, { query: "legacy archive migration" }).length, 1);
 });
 
+test("buildRoomActivityHistoryEntries sorts by canonical last-seen time, not task churn", () => {
+  const entries = buildRoomActivityHistoryEntries({
+    rooms,
+    participants: [
+      ...participants,
+      {
+        room_id: "github.com/BrosInCode/letagents",
+        participant_key: "agent:cedar",
+        kind: "agent",
+        actor_label: "Cedar | EmmyMay's agent | Codex",
+        agent_key: "emmymay/cedar",
+        github_login: null,
+        display_name: "Cedar",
+        owner_label: "EmmyMay",
+        ide_label: "Codex",
+        hidden_at: null,
+        hidden_by: null,
+        last_seen_at: "2026-04-21T11:50:00.000Z",
+        last_room_activity_at: "2026-04-21T11:50:00.000Z",
+        last_live_heartbeat_at: null,
+        activity_state: null,
+        source_flags: [],
+        created_at: "2026-04-21T10:15:00.000Z",
+        updated_at: "2026-04-21T11:50:00.000Z",
+      },
+    ],
+    tasks: [
+      ...tasks,
+      {
+        id: "task_143",
+        room_id: "github.com/BrosInCode/letagents",
+        title: "Late task churn",
+        description: "",
+        status: "in_review",
+        assignee: "Cedar | EmmyMay's agent | Codex",
+        assignee_agent_key: "emmymay/cedar",
+        created_by: "EmmyMay",
+        source_message_id: null,
+        pr_url: null,
+        workflow_artifacts: [],
+        workflow_refs: [],
+        created_at: "2026-04-21T11:55:00.000Z",
+        updated_at: "2026-04-21T12:45:00.000Z",
+      },
+    ],
+  });
+
+  assert.equal(entries[0]?.participant.display_name, "Thicket");
+  assert.equal(entries[1]?.participant.display_name, "Cedar");
+});
+
 test("paginateRoomActivityHistoryEntries returns bounded pages", () => {
   const entries = buildRoomActivityHistoryEntries({ rooms, participants, tasks });
   const paginated = paginateRoomActivityHistoryEntries(entries, { page: 2, pageSize: 1 });
@@ -182,4 +234,74 @@ test("paginateRoomActivityHistoryEntries returns bounded pages", () => {
   assert.equal(paginated.page_count, 2);
   assert.equal(paginated.page, 2);
   assert.equal(paginated.entries.length, 1);
+});
+
+test("sortRoomActivityHistoryEntries reorders decorated entries by last_seen_at", () => {
+  const sorted = sortRoomActivityHistoryEntries([
+    {
+      id: "focus_14:agent:maple",
+      room: {
+        id: "focus_14",
+        display_name: "Attachment Work",
+        kind: "focus",
+        focus_status: "active",
+        source_task_id: "task_142",
+      },
+      participant: {
+        participant_key: "agent:maple",
+        kind: "agent",
+        actor_label: "Maple | EmmyMay's agent | Codex",
+        agent_key: "emmymay/maple",
+        github_login: null,
+        display_name: "Maple",
+        owner_label: "EmmyMay",
+        ide_label: "Codex",
+        hidden_at: null,
+        hidden_by: null,
+        last_live_heartbeat_at: null,
+        activity_state: "offline",
+        source_flags: ["messages"],
+      },
+      first_seen_at: "2026-04-21T10:20:00.000Z",
+      last_seen_at: "2026-04-21T11:40:00.000Z",
+      last_room_activity_at: "2026-04-21T12:10:00.000Z",
+      current_tasks: [],
+      completed_tasks: [],
+      created_tasks: [],
+    },
+    {
+      id: "github.com/BrosInCode/letagents:agent:thicket",
+      room: {
+        id: "github.com/BrosInCode/letagents",
+        display_name: "LetAgents",
+        kind: "main",
+        focus_status: null,
+        source_task_id: null,
+      },
+      participant: {
+        participant_key: "agent:thicket",
+        kind: "agent",
+        actor_label: "Thicket | EmmyMay's agent | Codex",
+        agent_key: "emmymay/thicket",
+        github_login: null,
+        display_name: "Thicket",
+        owner_label: "EmmyMay",
+        ide_label: "Codex",
+        hidden_at: null,
+        hidden_by: null,
+        last_live_heartbeat_at: null,
+        activity_state: "offline",
+        source_flags: ["messages"],
+      },
+      first_seen_at: "2026-04-21T10:10:00.000Z",
+      last_seen_at: "2026-04-21T12:00:00.000Z",
+      last_room_activity_at: "2026-04-21T12:00:00.000Z",
+      current_tasks: [],
+      completed_tasks: [],
+      created_tasks: [],
+    },
+  ]);
+
+  assert.equal(sorted[0]?.participant.display_name, "Thicket");
+  assert.equal(sorted[1]?.participant.display_name, "Maple");
 });

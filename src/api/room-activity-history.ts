@@ -90,6 +90,30 @@ function toTaskSummary(task: Task): RoomActivityHistoryTaskSummary {
   };
 }
 
+function compareRoomActivityHistoryEntries(
+  left: RoomActivityHistoryEntry,
+  right: RoomActivityHistoryEntry
+): number {
+  const leftTime = Date.parse(left.last_seen_at);
+  const rightTime = Date.parse(right.last_seen_at);
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+
+  const roomDelta = left.room.display_name.localeCompare(right.room.display_name);
+  if (roomDelta !== 0) {
+    return roomDelta;
+  }
+
+  return left.participant.display_name.localeCompare(right.participant.display_name);
+}
+
+export function sortRoomActivityHistoryEntries(
+  entries: readonly RoomActivityHistoryEntry[]
+): RoomActivityHistoryEntry[] {
+  return [...entries].sort(compareRoomActivityHistoryEntries);
+}
+
 function participantMatchesAssignee(participant: RoomParticipant, task: Task): boolean {
   if (participant.kind === "agent") {
     const assigneeAgentKey = normalize(task.assignee_agent_key);
@@ -274,20 +298,7 @@ export function buildRoomActivityHistoryEntries(input: {
       return entry;
     })
     .filter((entry): entry is RoomActivityHistoryEntry => entry !== null)
-    .sort((left, right) => {
-      const leftTime = Date.parse(left.last_room_activity_at);
-      const rightTime = Date.parse(right.last_room_activity_at);
-      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-        return rightTime - leftTime;
-      }
-
-      const roomDelta = left.room.display_name.localeCompare(right.room.display_name);
-      if (roomDelta !== 0) {
-        return roomDelta;
-      }
-
-      return left.participant.display_name.localeCompare(right.participant.display_name);
-    });
+    .sort(compareRoomActivityHistoryEntries);
 }
 
 export function filterRoomActivityHistoryEntries(

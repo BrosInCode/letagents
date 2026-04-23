@@ -98,7 +98,7 @@ test("decorateRoomParticipantsWithPresence assigns active, offline, and archived
   assert.equal(decorated[2]?.activity_state, "archived");
 });
 
-test("decorateRoomActivityHistoryEntriesWithPresence carries live state into history entries", () => {
+test("decorateRoomActivityHistoryEntriesWithPresence carries live state and canonical last seen into history entries", () => {
   const entries: RoomActivityHistoryEntry[] = [
     {
       id: "focus_14:agent:maple",
@@ -134,6 +134,8 @@ test("decorateRoomActivityHistoryEntriesWithPresence carries live state into his
   ];
 
   const decorated = decorateRoomActivityHistoryEntriesWithPresence({ entries, presence });
+  assert.equal(decorated[0]?.last_seen_at, "2026-04-21T11:40:00.000Z");
+  assert.equal(decorated[0]?.last_room_activity_at, "2026-04-21T11:45:00.000Z");
   assert.equal(decorated[0]?.participant.activity_state, "active");
   assert.deepEqual(decorated[0]?.participant.source_flags, ["presence", "tasks"]);
   assert.equal(decorated[0]?.participant.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");

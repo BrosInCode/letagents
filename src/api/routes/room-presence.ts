@@ -26,6 +26,7 @@ import {
   buildRoomActivityHistoryEntries,
   filterRoomActivityHistoryEntries,
   paginateRoomActivityHistoryEntries,
+  sortRoomActivityHistoryEntries,
   type RoomActivityHistoryKind,
 } from "../room-activity-history.js";
 import {
@@ -213,17 +214,22 @@ export function registerRoomPresenceRoutes(
       const selectedRoomId = normalizeHistoryRoomId(req.query.room_id) ?? project.id;
       const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? project;
       const scopedRooms = rooms.filter((room) => room.id === selectedRoom.id);
-      const scopedRoomIds = scopedRooms.map((room) => room.id);
-      const [participants, roomTasks, selectedRoomParticipants, selectedRoomPresence] = await Promise.all([
-        getRoomParticipantsForRooms(scopedRoomIds, { includeHidden: true }),
-        getTasksForRooms(scopedRoomIds),
+      const [selectedRoomParticipants, roomTasks, selectedRoomPresence] = await Promise.all([
         getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
-        getRoomAgentPresence(selectedRoom.id, { limit: 500 }).catch(() => []),
+        getTasksForRooms([selectedRoom.id]),
+        getRoomAgentPresenceSnapshot(selectedRoom.id).catch(() => []),
       ]);
+      const historyParticipants = selectedRoomParticipants.length > 0
+        ? selectedRoomParticipants
+        : buildFallbackRoomParticipants({
+          roomId: selectedRoom.id,
+          messages: (await getMessages(selectedRoom.id, { limit: 200 })).messages,
+          presence: selectedRoomPresence,
+        });
       const entries = decorateRoomActivityHistoryEntriesWithPresence({
         entries: buildRoomActivityHistoryEntries({
           rooms: scopedRooms,
-          participants,
+          participants: historyParticipants,
           tasks: roomTasks,
         }),
         presence: selectedRoomPresence,
@@ -233,7 +239,7 @@ export function registerRoomPresenceRoutes(
         kind: normalizeHistoryKind(req.query.kind),
         query: typeof req.query.query === "string" ? req.query.query : null,
       });
-      const paginated = paginateRoomActivityHistoryEntries(filtered, {
+      const paginated = paginateRoomActivityHistoryEntries(sortRoomActivityHistoryEntries(filtered), {
         page: parsePositiveInteger(req.query.page, 1),
         pageSize: parsePositiveInteger(req.query.page_size, 20),
       });
@@ -242,7 +248,7 @@ export function registerRoomPresenceRoutes(
         room_id: project.id,
         root_room_id: rootRoom.id,
         selected_room_id: selectedRoom.id,
-        hidden_count: selectedRoomParticipants.filter((participant) => Boolean(participant.hidden_at)).length,
+        hidden_count: historyParticipants.filter((participant) => Boolean(participant.hidden_at)).length,
         ...paginated,
       });
     } catch (error) {
