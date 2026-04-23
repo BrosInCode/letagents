@@ -62,6 +62,7 @@ export interface RoomPresenceRouteDeps {
     ownerLabel?: string | null;
     ideLabel?: string | null;
     lastSeenAt?: string | null;
+    preserveLastSeenAtOnConflict?: boolean;
   }): Promise<void>;
   maybeEmitStaleWorkPrompt(projectId: string): Promise<unknown>;
 }
@@ -389,6 +390,7 @@ export function registerRoomPresenceRoutes(
         ownerLabel: presence.owner_label,
         ideLabel: presence.ide_label,
         lastSeenAt: presence.last_heartbeat_at,
+        preserveLastSeenAtOnConflict: true,
       });
 
       await deps.maybeEmitStaleWorkPrompt(project.id);
