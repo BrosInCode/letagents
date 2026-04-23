@@ -1269,7 +1269,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
     );
     await syncRoomPresence(room.room_id, agentIdentity, {
       status: "idle",
-      status_text: "online in room",
+      status_text: "available in room",
     });
     return {
       room,
@@ -1306,7 +1306,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
     );
     await syncRoomPresence(room.room_id, agentIdentity, {
       status: "idle",
-      status_text: "online in room",
+      status_text: "available in room",
     });
     return {
       room,
@@ -1346,7 +1346,7 @@ async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Pro
   );
   await syncRoomPresence(room.room_id, agentIdentity, {
     status: "idle",
-    status_text: "online in room",
+    status_text: "available in room",
   });
   return {
     room,
@@ -1383,7 +1383,7 @@ async function createInviteRoom(): Promise<{
   const agentIdentity = await ensureAgentIdentity();
   await syncRoomPresence(room.room_id, agentIdentity, {
     status: "idle",
-    status_text: "online in room",
+    status_text: "available in room",
   });
 
   return {

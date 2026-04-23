@@ -9,6 +9,21 @@ function normalizeActorLabel(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
 
+function latestTimestamp(...values: Array<string | null | undefined>): string {
+  let best = "";
+  let bestValue = Number.NEGATIVE_INFINITY;
+
+  for (const value of values) {
+    const parsed = Date.parse(String(value ?? ""));
+    if (Number.isFinite(parsed) && parsed > bestValue) {
+      bestValue = parsed;
+      best = String(value ?? "");
+    }
+  }
+
+  return best;
+}
+
 function buildPresenceIndex(
   presence: readonly RoomAgentPresence[]
 ): Map<string, RoomAgentPresence> {
@@ -31,6 +46,7 @@ function mergeActivityState(input: {
     hidden: Boolean(input.hiddenAt),
     hasPresence,
     freshness: hasPresence ? input.presenceEntry?.freshness ?? null : null,
+    status: hasPresence ? input.presenceEntry?.status ?? null : null,
   });
 }
 
@@ -99,6 +115,12 @@ export function decorateRoomActivityHistoryEntriesWithPresence(input: {
 
     return {
       ...entry,
+      last_seen_at: latestTimestamp(
+        entry.last_seen_at,
+        presenceEntry?.source_flags?.includes("presence")
+          ? presenceEntry.last_heartbeat_at
+          : null
+      ),
       participant: {
         ...entry.participant,
         last_live_heartbeat_at:

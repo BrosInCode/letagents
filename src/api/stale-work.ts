@@ -8,7 +8,7 @@ export type StaleTaskReason =
 
 export interface StaleTaskAutoPrompt {
   task: Task;
-  idle_agent: RoomAgentPresence;
+  away_agent: RoomAgentPresence;
   reason: StaleTaskReason;
   stale_for_ms: number;
   prompt_text: string;
@@ -131,20 +131,20 @@ function getReasonPriority(reason: StaleTaskReason): number {
 
 function buildPromptText(
   task: Task,
-  idleAgent: RoomAgentPresence,
+  awayAgent: RoomAgentPresence,
   reason: StaleTaskReason,
   staleForMs: number
 ): string {
-  const idleAgentLabel = getAgentPrimaryLabel(idleAgent.actor_label);
+  const awayAgentLabel = getAgentPrimaryLabel(awayAgent.actor_label);
   const staleFor = formatStaleDuration(staleForMs);
 
   switch (reason) {
     case "accepted_unclaimed":
-      return `[status] Stale work detected on ${task.id}: ${task.title}. It has been accepted and unclaimed for ${staleFor}. ${idleAgentLabel}, please pick it up if you're available.`;
+      return `[status] Stale work detected on ${task.id}: ${task.title}. It has been accepted and unclaimed for ${staleFor}. ${awayAgentLabel}, please pick it up if you're available.`;
     case "in_review_no_follow_up":
-      return `[status] Stale review detected on ${task.id}: ${task.title}. It has been in review for ${staleFor} with no follow-up. ${idleAgentLabel}, please review it or move it forward if you're available.`;
+      return `[status] Stale review detected on ${task.id}: ${task.title}. It has been in review for ${staleFor} with no follow-up. ${awayAgentLabel}, please review it or move it forward if you're available.`;
     case "blocked_no_follow_up":
-      return `[status] Stale blocked task detected on ${task.id}: ${task.title}. It has been blocked for ${staleFor} with no follow-up. ${idleAgentLabel}, please help unblock it if you're available.`;
+      return `[status] Stale blocked task detected on ${task.id}: ${task.title}. It has been blocked for ${staleFor} with no follow-up. ${awayAgentLabel}, please help unblock it if you're available.`;
   }
 }
 
@@ -158,10 +158,10 @@ export function selectStaleTaskAutoPrompt(input: {
   stalePromptMutes?: readonly StaleTaskPromptMute[];
   now?: number;
 }): StaleTaskAutoPrompt | null {
-  const idleAgent = input.presence.find(
-    (entry) => entry.freshness === "active" && entry.status === "idle"
+  const awayAgent = input.presence.find(
+    (entry) => entry.activity_state === "away" && entry.status === "idle"
   );
-  if (!idleAgent) {
+  if (!awayAgent) {
     return null;
   }
 
@@ -194,8 +194,8 @@ export function selectStaleTaskAutoPrompt(input: {
 
   return {
     ...selected,
-    idle_agent: idleAgent,
-    prompt_text: buildPromptText(selected.task, idleAgent, selected.reason, selected.stale_for_ms),
+    away_agent: awayAgent,
+    prompt_text: buildPromptText(selected.task, awayAgent, selected.reason, selected.stale_for_ms),
     cache_key: buildPromptCacheKey(selected.task, selected.reason),
   };
 }

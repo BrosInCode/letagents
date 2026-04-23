@@ -59,7 +59,7 @@ test("buildFallbackPresenceFromMessages keeps the latest agent status per sender
   assert.equal(presence[0]?.owner_label, "EmmyMay");
   assert.equal(presence[0]?.ide_label, "Agent");
   assert.equal(presence[0]?.freshness, "stale");
-  assert.equal(presence[0]?.activity_state, "historical");
+  assert.equal(presence[0]?.activity_state, "offline");
   assert.deepEqual(presence[0]?.source_flags, ["messages"]);
 });
 
@@ -80,7 +80,7 @@ test("buildFallbackPresenceFromMessages marks older activity as stale", () => {
   assert.equal(presence.length, 1);
   assert.equal(presence[0]?.status, "reviewing");
   assert.equal(presence[0]?.freshness, "stale");
-  assert.equal(presence[0]?.activity_state, "historical");
+  assert.equal(presence[0]?.activity_state, "offline");
 });
 
 test("buildFallbackPresenceFromMessages treats watch-mode and task-waiting updates as idle", () => {
@@ -115,7 +115,7 @@ test("buildFallbackPresenceFromMessages treats watch-mode and task-waiting updat
   assert.equal(byActor.get("GardenFern | EmmyMay's agent | Agent")?.status, "blocked");
 });
 
-test("buildSyntheticPresenceEntry returns an active room presence record", () => {
+test("buildSyntheticPresenceEntry returns an away room presence record for idle agents", () => {
   const presence = buildSyntheticPresenceEntry({
     roomId: "github.com/brosincode/letagents",
     actorLabel: "HollowOtter | EmmyMay's agent | Agent",
@@ -123,15 +123,15 @@ test("buildSyntheticPresenceEntry returns an active room presence record", () =>
     displayName: "HollowOtter",
     ownerLabel: "EmmyMay",
     ideLabel: "Agent",
-    status: "working",
-    statusText: "working on task_70",
+    status: "idle",
+    statusText: "available in room",
     now: Date.parse("2026-04-08T01:45:00.000Z"),
   });
 
-  assert.equal(presence.status, "working");
-  assert.equal(presence.status_text, "working on task_70");
+  assert.equal(presence.status, "idle");
+  assert.equal(presence.status_text, "available in room");
   assert.equal(presence.freshness, "active");
-  assert.equal(presence.activity_state, "online");
+  assert.equal(presence.activity_state, "away");
   assert.equal(presence.owner_label, "EmmyMay");
   assert.deepEqual(presence.source_flags, ["presence"]);
 });

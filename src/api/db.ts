@@ -1011,6 +1011,7 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
       hidden: false,
       hasPresence: true,
       freshness,
+      status: row.status,
     }),
     source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
@@ -1096,6 +1097,7 @@ function mergeRoomAgentPresenceRecords(input: {
         hidden: false,
         hasPresence: Boolean(statusEntry || deliverySession),
         freshness: getAgentPresenceFreshnessFromReachability(isReachable),
+        status: statusEntry?.status ?? "idle",
       }),
       source_flags: buildRoomActivitySourceFlags(["presence"]),
     } satisfies RoomAgentPresence;

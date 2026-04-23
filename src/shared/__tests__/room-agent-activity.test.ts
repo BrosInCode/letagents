@@ -7,28 +7,53 @@ import {
   isReachableRoomAgentActivityState,
 } from "../room-agent-activity.js";
 
-test("deriveRoomAgentActivityState keeps live presence authoritative", () => {
+test("deriveRoomAgentActivityState separates active and away for reachable agents", () => {
   assert.equal(
-    deriveRoomAgentActivityState({ hidden: false, hasPresence: true, freshness: "active" }),
-    "online"
+    deriveRoomAgentActivityState({
+      hidden: false,
+      hasPresence: true,
+      freshness: "active",
+      status: "working",
+    }),
+    "active"
   );
   assert.equal(
-    deriveRoomAgentActivityState({ hidden: true, hasPresence: true, freshness: "active" }),
-    "online"
+    deriveRoomAgentActivityState({
+      hidden: false,
+      hasPresence: true,
+      freshness: "active",
+      status: "idle",
+    }),
+    "away"
   );
 });
 
-test("deriveRoomAgentActivityState separates stale, historical, and archived", () => {
+test("deriveRoomAgentActivityState separates offline and archived agents", () => {
   assert.equal(
-    deriveRoomAgentActivityState({ hidden: false, hasPresence: true, freshness: "stale" }),
-    "stale"
+    deriveRoomAgentActivityState({
+      hidden: false,
+      hasPresence: true,
+      freshness: "stale",
+      status: "working",
+    }),
+    "offline"
   );
   assert.equal(
-    deriveRoomAgentActivityState({ hidden: false, hasPresence: false, freshness: null }),
-    "historical"
+    deriveRoomAgentActivityState({
+      hidden: false,
+      hasPresence: false,
+      freshness: null,
+      status: null,
+    }),
+    "offline"
   );
   assert.equal(
-    deriveRoomAgentActivityState({ hidden: true, hasPresence: false, freshness: null }),
+    deriveRoomAgentActivityState({
+      hidden: true,
+      hasPresence: false,
+      freshness: null,
+      status: null,
+    }),
     "archived"
   );
 });
@@ -40,9 +65,9 @@ test("buildRoomActivitySourceFlags is ordered and deduplicated", () => {
   );
 });
 
-test("isReachableRoomAgentActivityState only accepts online agents", () => {
-  assert.equal(isReachableRoomAgentActivityState("online"), true);
-  assert.equal(isReachableRoomAgentActivityState("stale"), false);
-  assert.equal(isReachableRoomAgentActivityState("historical"), false);
+test("isReachableRoomAgentActivityState only accepts active and away agents", () => {
+  assert.equal(isReachableRoomAgentActivityState("active"), true);
+  assert.equal(isReachableRoomAgentActivityState("away"), true);
+  assert.equal(isReachableRoomAgentActivityState("offline"), false);
   assert.equal(isReachableRoomAgentActivityState("archived"), false);
 });
