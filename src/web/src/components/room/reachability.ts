@@ -56,6 +56,29 @@ export function resolveAgentActivityState(input: {
   return 'offline'
 }
 
+export function describeAgentReachability(input: {
+  activityState: AgentReachabilitySource['activityState'] | null
+  hasCanonicalPresence: boolean
+  statusText?: string | null
+}): string {
+  if (input.activityState === 'offline') {
+    return input.hasCanonicalPresence
+      ? 'Delivery session expired'
+      : 'Recorded in room history'
+  }
+
+  const statusText = String(input.statusText || '').trim()
+  if (statusText) {
+    return statusText
+  }
+
+  if (input.activityState === 'away') {
+    return 'Away but still reachable'
+  }
+
+  return 'Active in room right now'
+}
+
 export function normalizeMentionToken(value: string): string {
   return String(value || '')
     .trim()
