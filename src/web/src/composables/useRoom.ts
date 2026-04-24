@@ -462,6 +462,9 @@ const githubEventsAvailable = ref(false)
 const githubEventsHasMore = ref(false)
 const githubEventsError = ref<RoomGitHubEventsError | null>(null)
 const githubEventsLoading = ref(false)
+const boardLoading = ref(false)
+const activityLoading = ref(false)
+const focusRoomsLoading = ref(false)
 const room = ref<RoomInfo | null>(null)
 const lastSendError = ref('')
 const isConnected = ref(false)
@@ -992,6 +995,16 @@ async function refreshRoomPresence(): Promise<boolean> {
   return true
 }
 
+async function refreshRoomMessages(): Promise<boolean> {
+  if (!room.value) return false
+  const roomIdentifier = room.value.identifier
+  const page = await fetchMessages(roomIdentifier)
+  if (room.value?.identifier !== roomIdentifier) return false
+  messages.value = mergeMessages(messages.value, page.messages)
+  messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
+  return true
+}
+
 function schedulePresenceRefresh(roomIdentifier: string) {
   if (presenceRefreshDebounceTimer) return
   presenceRefreshDebounceTimer = setTimeout(() => {
@@ -1108,6 +1121,87 @@ async function refreshFocusRooms(): Promise<boolean> {
   if (!room.value) return false
   focusRooms.value = await fetchFocusRooms(room.value.identifier)
   return true
+}
+
+async function refreshRoomBoard(): Promise<boolean> {
+  if (!room.value) return false
+  const roomIdentifier = room.value.identifier
+  boardLoading.value = true
+  try {
+    const [nextTasks, nextGithubStatus] = await Promise.all([
+      fetchTasks(roomIdentifier),
+      fetchTaskGithubStatus(roomIdentifier),
+    ])
+    if (room.value?.identifier !== roomIdentifier) return false
+    tasks.value = nextTasks
+    taskGithubStatus.value = nextGithubStatus
+    return true
+  } finally {
+    boardLoading.value = false
+  }
+}
+
+async function refreshRoomActivity(): Promise<boolean> {
+  if (!room.value) return false
+  const roomIdentifier = room.value.identifier
+  const historyRequest = {
+    ...lastActivityHistoryRequest,
+    roomId: lastActivityHistoryRequest.roomId ?? roomIdentifier,
+  }
+  activityLoading.value = true
+  try {
+    const [
+      messagePage,
+      nextPresence,
+      nextParticipantsPage,
+      nextReasoningSessions,
+      nextActivityHistory,
+      nextTasks,
+      nextGithubStatus,
+    ] = await Promise.all([
+      fetchMessages(roomIdentifier),
+      fetchPresence(roomIdentifier),
+      fetchParticipants(roomIdentifier),
+      fetchReasoningSessions(roomIdentifier),
+      fetchActivityHistory(roomIdentifier, historyRequest),
+      fetchTasks(roomIdentifier),
+      fetchTaskGithubStatus(roomIdentifier),
+    ])
+    if (room.value?.identifier !== roomIdentifier) return false
+    messages.value = mergeMessages(messages.value, messagePage.messages)
+    messagesHasOlder.value = messagePage.hasOlder || messagesHasOlder.value
+    presence.value = nextPresence
+    participants.value = nextParticipantsPage.participants
+    participantHiddenCount.value = nextParticipantsPage.hidden_count
+    reasoningSessions.value = nextReasoningSessions
+    if (nextActivityHistory) {
+      activityHistory.value = nextActivityHistory
+      activityHistoryError.value = ''
+    }
+    tasks.value = nextTasks
+    taskGithubStatus.value = nextGithubStatus
+    return true
+  } finally {
+    activityLoading.value = false
+  }
+}
+
+async function refreshRoomFocusRooms(): Promise<boolean> {
+  if (!room.value) return false
+  const roomIdentifier = room.value.identifier
+  focusRoomsLoading.value = true
+  try {
+    const [nextFocusRooms, nextTasks] = await Promise.all([
+      fetchFocusRooms(roomIdentifier),
+      fetchTasks(roomIdentifier),
+    ])
+    if (room.value?.identifier !== roomIdentifier) return false
+    focusRooms.value = nextFocusRooms
+    tasks.value = nextTasks
+    return true
+  } finally {
+    focusRoomsLoading.value = false
+  }
 }
 
 function upsertFocusRoom(focusRoom: FocusRoomInfo) {
@@ -1865,6 +1959,9 @@ export function useRoom() {
     githubEventsError: readonly(githubEventsError),
     githubEventsSupported,
     githubEventsLoading: readonly(githubEventsLoading),
+    boardLoading: readonly(boardLoading),
+    activityLoading: readonly(activityLoading),
+    focusRoomsLoading: readonly(focusRoomsLoading),
     room: readonly(room),
     lastSendError: readonly(lastSendError),
     isConnected: readonly(isConnected),
@@ -1887,10 +1984,14 @@ export function useRoom() {
     shareFocusRoomResult,
     updateFocusRoomSettings,
     refreshFocusRooms,
+    refreshRoomMessages,
     refreshRoomPresence,
     loadActivityHistory,
     clearDisconnectedParticipants,
     refreshReasoningSessions,
+    refreshRoomActivity,
+    refreshRoomBoard,
+    refreshRoomFocusRooms,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
     renameRoom,

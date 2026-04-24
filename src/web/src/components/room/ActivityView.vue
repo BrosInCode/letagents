@@ -1,5 +1,10 @@
 <template>
-  <div class="activity-panel">
+  <div class="activity-panel" :data-loading="isLoading">
+    <div v-if="isLoading" class="activity-refresh-indicator" role="status" aria-live="polite">
+      <span class="activity-spinner" aria-hidden="true" />
+      <span>Refreshing activity…</span>
+    </div>
+
     <div class="activity-summary">
       <template v-if="activeView === 'live'">
         <article class="summary-card">
@@ -938,6 +943,7 @@ const props = defineProps<{
   }) => Promise<boolean>
   clearDisconnectedParticipants?: () => Promise<number>
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
+  isLoading?: boolean
 }>()
 
 const STATUS_ORDER = ['working', 'reviewing', 'blocked', 'idle'] as const
@@ -1723,6 +1729,37 @@ function formatLastSeen(value: string | null): string {
   height: 100%;
   overflow-y: auto;
   padding: var(--space-lg, 24px);
+}
+
+.activity-refresh-indicator {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-bottom: var(--space-sm, 8px);
+  padding: 8px 10px;
+  border: 1px solid var(--activity-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--activity-surface) 88%, transparent);
+  color: var(--activity-text-secondary);
+  font-size: 0.78rem;
+  backdrop-filter: blur(10px);
+}
+
+.activity-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--activity-blue) 22%, transparent);
+  border-top-color: var(--activity-blue);
+  border-radius: 999px;
+  animation: activity-spin 0.8s linear infinite;
+}
+
+@keyframes activity-spin {
+  to { transform: rotate(360deg); }
 }
 
 .activity-summary {
