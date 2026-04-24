@@ -73,6 +73,9 @@ export function decorateRoomParticipantsWithPresence(input: {
       presenceEntry?.source_flags?.length
         ? []
         : (["messages"] as const);
+    const participantSourceFlags = (participant.source_flags ?? []).filter(
+      (flag) => flag !== "delivery"
+    );
 
     return {
       ...participant,
@@ -83,7 +86,7 @@ export function decorateRoomParticipantsWithPresence(input: {
           : participant.last_live_heartbeat_at,
       activity_state: activityState,
       source_flags: buildRoomActivitySourceFlags([
-        ...(participant.source_flags ?? []),
+        ...participantSourceFlags,
         ...(presenceEntry?.source_flags ?? []),
         ...fallbackSource,
       ]),
