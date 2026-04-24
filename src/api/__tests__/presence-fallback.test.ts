@@ -115,7 +115,7 @@ test("buildFallbackPresenceFromMessages treats watch-mode and task-waiting updat
   assert.equal(byActor.get("GardenFern | EmmyMay's agent | Agent")?.status, "blocked");
 });
 
-test("buildSyntheticPresenceEntry returns an away room presence record for idle agents", () => {
+test("buildSyntheticPresenceEntry does not mark status-only fallback agents reachable", () => {
   const presence = buildSyntheticPresenceEntry({
     roomId: "github.com/brosincode/letagents",
     actorLabel: "HollowOtter | EmmyMay's agent | Agent",
@@ -130,8 +130,8 @@ test("buildSyntheticPresenceEntry returns an away room presence record for idle 
 
   assert.equal(presence.status, "idle");
   assert.equal(presence.status_text, "available in room");
-  assert.equal(presence.freshness, "active");
-  assert.equal(presence.activity_state, "away");
+  assert.equal(presence.freshness, "stale");
+  assert.equal(presence.activity_state, "offline");
   assert.equal(presence.owner_label, "EmmyMay");
   assert.deepEqual(presence.source_flags, ["presence"]);
 });

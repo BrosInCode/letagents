@@ -20,11 +20,11 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createProjectWithName = dbModule?.createProjectWithName;
 const getRoomAgentPresence = dbModule?.getRoomAgentPresence;
+const getRoomAgentPresenceSnapshot = dbModule?.getRoomAgentPresenceSnapshot;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
 const setRoomLiveAgentSuppressed = dbModule?.setRoomLiveAgentSuppressed;
 const upsertRoomAgentPresence = dbModule?.upsertRoomAgentPresence;
-const room_agent_presence = schemaModule?.room_agent_presence;
 const room_agent_delivery_sessions = schemaModule?.room_agent_delivery_sessions;
 const { RECENTLY_OFFLINE_MAX_AGENTS, RECENTLY_OFFLINE_WINDOW_MS } = roomAgentActivityModule;
 
@@ -76,13 +76,13 @@ if (!requiresDatabase) {
 }
 
 test(
-  "fresh status-only room presence is treated as away during delivery rollout",
+  "fresh status-only room presence stays out of the reachable live roster",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
   },
   async () => {
-    if (!createProjectWithName || !getRoomAgentPresence || !upsertRoomAgentPresence) {
+    if (!createProjectWithName || !getRoomAgentPresence || !getRoomAgentPresenceSnapshot || !upsertRoomAgentPresence) {
       throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
     }
 
@@ -99,14 +99,16 @@ test(
       status_text: "working on task_58",
     });
 
-    const presence = await getRoomAgentPresence(room.id);
-    assert.equal(presence.length, 1);
-    assert.equal(presence[0]?.actor_label, "MapleRidge | EmmyMay's agent | Agent");
-    assert.equal(presence[0]?.status, "working");
-    assert.equal(presence[0]?.status_text, "working on task_58");
-    assert.equal(presence[0]?.freshness, "active");
-    assert.equal(presence[0]?.activity_state, "away");
-    assert.deepEqual(presence[0]?.source_flags, ["presence"]);
+    assert.deepEqual(await getRoomAgentPresence(room.id), []);
+
+    const snapshot = await getRoomAgentPresenceSnapshot(room.id);
+    assert.equal(snapshot.length, 1);
+    assert.equal(snapshot[0]?.actor_label, "MapleRidge | EmmyMay's agent | Agent");
+    assert.equal(snapshot[0]?.status, "working");
+    assert.equal(snapshot[0]?.status_text, "working on task_58");
+    assert.equal(snapshot[0]?.freshness, "stale");
+    assert.equal(snapshot[0]?.activity_state, "offline");
+    assert.deepEqual(snapshot[0]?.source_flags, ["presence"]);
   }
 );
 
@@ -117,7 +119,7 @@ test(
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
   },
   async () => {
-    if (!createProjectWithName || !getRoomAgentPresence || !upsertRoomAgentPresence) {
+    if (!createProjectWithName || !getRoomAgentPresence || !getRoomAgentPresenceSnapshot || !upsertRoomAgentPresence) {
       throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
     }
 
@@ -145,11 +147,13 @@ test(
       status_text: "reviewing PR #146",
     });
 
-    const presence = await getRoomAgentPresence(room.id);
-    assert.equal(presence.length, 1);
-    assert.equal(presence[0]?.status, "reviewing");
-    assert.equal(presence[0]?.status_text, "reviewing PR #146");
-    assert.equal(presence[0]?.activity_state, "away");
+    assert.deepEqual(await getRoomAgentPresence(room.id), []);
+
+    const snapshot = await getRoomAgentPresenceSnapshot(room.id);
+    assert.equal(snapshot.length, 1);
+    assert.equal(snapshot[0]?.status, "reviewing");
+    assert.equal(snapshot[0]?.status_text, "reviewing PR #146");
+    assert.equal(snapshot[0]?.activity_state, "offline");
   }
 );
 
@@ -202,12 +206,19 @@ test(
     assert.equal(livePresence[0]?.activity_state, "active");
     assert.equal(livePresence[0]?.status, "reviewing");
     assert.equal(livePresence[0]?.ide_label, "Codex");
-    assert.deepEqual(livePresence[0]?.source_flags, ["presence"]);
+    assert.deepEqual(livePresence[0]?.source_flags, ["delivery", "presence"]);
 
     await markRoomAgentDeliveryDisconnected({
       room_id: room.id,
       actor_label: actorLabel,
     });
+
+    const disconnectedInGracePresence = await getRoomAgentPresence(room.id);
+    assert.equal(disconnectedInGracePresence[0]?.freshness, "stale");
+    assert.equal(disconnectedInGracePresence[0]?.activity_state, "offline");
+    assert.equal(disconnectedInGracePresence[0]?.status_text, "reviewing task_159 backend lane");
+    assert.deepEqual(disconnectedInGracePresence[0]?.source_flags, ["delivery", "presence"]);
+
     await db
       .update(room_agent_delivery_sessions)
       .set({
@@ -229,7 +240,7 @@ test(
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
   },
   async () => {
-    if (!createProjectWithName || !db || !getRoomAgentPresence || !upsertRoomAgentPresence || !room_agent_presence) {
+    if (!createProjectWithName || !db || !getRoomAgentPresence || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryDisconnected || !room_agent_delivery_sessions || !upsertRoomAgentPresence) {
       throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
     }
 
@@ -247,14 +258,30 @@ test(
       status_text: "was active earlier",
     });
 
-    const expiredHeartbeat = new Date(Date.now() - RECENTLY_OFFLINE_WINDOW_MS - 1_000).toISOString();
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/oldpine",
+      agent_instance_id: "instance-oldpine",
+      display_name: "OldPine",
+      owner_label: "EmmyMay",
+      ide_label: "Agent",
+      transport: "long_poll",
+    });
+    await markRoomAgentDeliveryDisconnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+    });
+
+    const expiredTimestamp = new Date(Date.now() - RECENTLY_OFFLINE_WINDOW_MS - 1_000).toISOString();
     await db
-      .update(room_agent_presence)
+      .update(room_agent_delivery_sessions)
       .set({
-        last_heartbeat_at: expiredHeartbeat,
-        updated_at: expiredHeartbeat,
+        last_disconnected_at: expiredTimestamp,
+        reconnect_grace_expires_at: "2026-04-01T00:00:00.000Z",
+        updated_at: expiredTimestamp,
       })
-      .where(sql`${room_agent_presence.room_id} = ${room.id} AND ${room_agent_presence.actor_label} = ${actorLabel}`);
+      .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id} AND ${room_agent_delivery_sessions.actor_label} = ${actorLabel}`);
 
     const presence = await getRoomAgentPresence(room.id, { limit: 50 });
     assert.deepEqual(presence, []);
@@ -273,7 +300,8 @@ test(
       !db ||
       !getRoomAgentPresence ||
       !markRoomAgentDeliveryConnected ||
-      !room_agent_presence ||
+      !markRoomAgentDeliveryDisconnected ||
+      !room_agent_delivery_sessions ||
       !setRoomLiveAgentSuppressed ||
       !upsertRoomAgentPresence
     ) {
@@ -294,14 +322,30 @@ test(
       status_text: "polling in room",
     });
 
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/mapleridge",
+      agent_instance_id: "instance-suppression-stale",
+      display_name: "MapleRidge",
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+      transport: "long_poll",
+    });
+    await markRoomAgentDeliveryDisconnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+    });
+
     const recentlyStaleHeartbeat = new Date(Date.now() - 120_000).toISOString();
     await db
-      .update(room_agent_presence)
+      .update(room_agent_delivery_sessions)
       .set({
-        last_heartbeat_at: recentlyStaleHeartbeat,
+        last_disconnected_at: recentlyStaleHeartbeat,
+        reconnect_grace_expires_at: "2026-04-01T00:00:00.000Z",
         updated_at: recentlyStaleHeartbeat,
       })
-      .where(sql`${room_agent_presence.room_id} = ${room.id} AND ${room_agent_presence.actor_label} = ${actorLabel}`);
+      .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id} AND ${room_agent_delivery_sessions.actor_label} = ${actorLabel}`);
 
     const beforeSuppression = await getRoomAgentPresence(room.id);
     assert.equal(beforeSuppression.length, 1);
@@ -332,6 +376,7 @@ test(
     assert.equal(afterReconnect.length, 1);
     assert.equal(afterReconnect[0]?.freshness, "active");
     assert.equal(afterReconnect[0]?.activity_state, "away");
+    assert.deepEqual(afterReconnect[0]?.source_flags, ["delivery", "presence"]);
   }
 );
 
@@ -342,16 +387,17 @@ test(
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
   },
   async () => {
-    if (!createProjectWithName || !getRoomAgentPresence || !upsertRoomAgentPresence) {
+    if (!createProjectWithName || !db || !getRoomAgentPresence || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryDisconnected || !room_agent_delivery_sessions || !upsertRoomAgentPresence) {
       throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
     }
 
     const room = await createProjectWithName("github.com/brosincode/letagents");
 
     for (let index = 0; index < RECENTLY_OFFLINE_MAX_AGENTS + 5; index += 1) {
+      const actorLabel = `Agent${index} | EmmyMay's agent | Agent`;
       await upsertRoomAgentPresence({
         room_id: room.id,
-        actor_label: `Agent${index} | EmmyMay's agent | Agent`,
+        actor_label: actorLabel,
         agent_key: `EmmyMay/agent${index}`,
         display_name: `Agent${index}`,
         owner_label: "EmmyMay",
@@ -359,6 +405,29 @@ test(
         status: "idle",
         status_text: `idle ${index}`,
       });
+      await markRoomAgentDeliveryConnected({
+        room_id: room.id,
+        actor_label: actorLabel,
+        agent_key: `EmmyMay/agent${index}`,
+        agent_instance_id: `instance-agent-${index}`,
+        display_name: `Agent${index}`,
+        owner_label: "EmmyMay",
+        ide_label: "Agent",
+        transport: "long_poll",
+      });
+      await markRoomAgentDeliveryDisconnected({
+        room_id: room.id,
+        actor_label: actorLabel,
+      });
+      const disconnectedAt = new Date(Date.now() - index * 1_000).toISOString();
+      await db
+        .update(room_agent_delivery_sessions)
+        .set({
+          last_disconnected_at: disconnectedAt,
+          reconnect_grace_expires_at: "2026-04-01T00:00:00.000Z",
+          updated_at: disconnectedAt,
+        })
+        .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id} AND ${room_agent_delivery_sessions.actor_label} = ${actorLabel}`);
     }
 
     const presence = await getRoomAgentPresence(room.id, { limit: 200 });

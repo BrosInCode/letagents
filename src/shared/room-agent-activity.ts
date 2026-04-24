@@ -15,6 +15,7 @@ export const RECENTLY_OFFLINE_MAX_AGENTS = 20;
 export type RoomAgentActivityState = (typeof ROOM_AGENT_ACTIVITY_STATES)[number];
 
 export const ROOM_ACTIVITY_SOURCE_FLAGS = [
+  "delivery",
   "presence",
   "messages",
   "tasks",

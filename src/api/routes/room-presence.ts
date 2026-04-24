@@ -98,6 +98,40 @@ function normalizeActorLabel(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
 
+export function buildRoomActivityHistoryParticipants(input: {
+  roomId: string;
+  storedParticipants: readonly RoomParticipant[];
+  presence: readonly RoomAgentPresence[];
+  fallbackMessages?: Awaited<ReturnType<typeof getMessages>>["messages"];
+}): RoomParticipant[] {
+  const participantsByKey = new Map<string, RoomParticipant>();
+  for (const participant of input.storedParticipants) {
+    participantsByKey.set(participant.participant_key, participant);
+  }
+
+  const fallbackParticipants = buildFallbackRoomParticipants({
+    roomId: input.roomId,
+    messages: input.fallbackMessages ?? [],
+    presence: input.presence,
+  });
+  for (const participant of fallbackParticipants) {
+    if (!participantsByKey.has(participant.participant_key)) {
+      participantsByKey.set(participant.participant_key, participant);
+    }
+  }
+
+  return Array.from(participantsByKey.values());
+}
+
+export function isSuppressibleDisconnectedPresence(
+  entry: RoomAgentPresence,
+  now = Date.now()
+): boolean {
+  return entry.source_flags.includes("delivery")
+    && entry.freshness !== "active"
+    && isWithinRecentlyOfflineWindow(entry.last_heartbeat_at, now);
+}
+
 export function registerRoomPresenceRoutes(
   app: Express,
   deps: RoomPresenceRouteDeps
@@ -220,13 +254,15 @@ export function registerRoomPresenceRoutes(
         getTasksForRooms([selectedRoom.id]),
         getRoomAgentPresenceSnapshot(selectedRoom.id).catch(() => []),
       ]);
-      const historyParticipants = selectedRoomParticipants.length > 0
-        ? selectedRoomParticipants
-        : buildFallbackRoomParticipants({
-          roomId: selectedRoom.id,
-          messages: (await getMessages(selectedRoom.id, { limit: 200 })).messages,
-          presence: [],
-        });
+      const fallbackMessages = selectedRoomParticipants.length > 0
+        ? []
+        : (await getMessages(selectedRoom.id, { limit: 200 })).messages;
+      const historyParticipants = buildRoomActivityHistoryParticipants({
+        roomId: selectedRoom.id,
+        storedParticipants: selectedRoomParticipants,
+        presence: selectedRoomPresence,
+        fallbackMessages,
+      });
       const entries = decorateRoomActivityHistoryEntriesWithPresence({
         entries: buildRoomActivityHistoryEntries({
           rooms: scopedRooms,
@@ -278,7 +314,7 @@ export function registerRoomPresenceRoutes(
       ]);
       const activeActors = new Set(
         presence
-          .filter((entry) => entry.freshness === "active")
+          .filter((entry) => entry.freshness === "active" && entry.source_flags.includes("delivery"))
           .map((entry) => normalizeActorLabel(entry.actor_label))
           .filter(Boolean)
       );
@@ -291,10 +327,7 @@ export function registerRoomPresenceRoutes(
         .map((participant) => participant.participant_key);
       const suppressedActorLabels = Array.from(new Set(
         presence
-          .filter((entry) =>
-            entry.freshness !== "active"
-            && isWithinRecentlyOfflineWindow(entry.last_heartbeat_at)
-          )
+          .filter((entry) => isSuppressibleDisconnectedPresence(entry))
           .map((entry) => normalizeActorLabel(entry.actor_label))
           .filter(Boolean)
       ));

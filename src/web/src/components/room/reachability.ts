@@ -22,7 +22,7 @@ export interface AgentReachabilitySource {
 }
 
 export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined): boolean {
-  return entry?.freshness === 'active'
+  return entry?.freshness === 'active' && entry.source_flags.includes('delivery')
 }
 
 function normalizeRoomActivityStateValue(
@@ -39,18 +39,23 @@ function normalizeRoomActivityStateValue(
 }
 
 export function resolveAgentActivityState(input: {
-  participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at'> | null
+  participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at' | 'source_flags'> | null
   presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags' | 'status'> | null
 }): AgentReachabilitySource['activityState'] {
-  const hasCanonicalPresence = input.presence?.source_flags?.includes('presence') || false
+  const hasDelivery = Boolean(
+    input.presence?.source_flags?.includes('delivery')
+      || input.participant?.source_flags?.includes('delivery')
+  )
   if (input.participant?.hidden_at) return 'offline'
-  if (hasCanonicalPresence && input.presence?.freshness === 'active') {
+  if (hasDelivery && input.presence?.freshness === 'active') {
     return input.presence?.status === 'idle' ? 'away' : 'active'
   }
-  if (hasCanonicalPresence) return 'offline'
-  return normalizeRoomActivityStateValue(input.participant?.activity_state)
-    || normalizeRoomActivityStateValue(input.presence?.activity_state)
-    || 'offline'
+  if (hasDelivery) {
+    return normalizeRoomActivityStateValue(input.participant?.activity_state)
+      || normalizeRoomActivityStateValue(input.presence?.activity_state)
+      || 'offline'
+  }
+  return 'offline'
 }
 
 export function normalizeMentionToken(value: string): string {
@@ -177,7 +182,7 @@ export function buildAgentReachabilitySources(input: {
 
   for (const presence of input.presence) {
     const activityState = resolveAgentActivityState({ presence })
-    if (activityState === 'offline' && !presence.source_flags.includes('presence')) continue
+    if (activityState === 'offline' && !presence.source_flags.includes('delivery')) continue
     const actorLabel = String(presence.actor_label || '').trim()
     if (!actorLabel || seenActors.has(actorLabel) || hiddenActors.has(actorLabel)) continue
     next.push({

@@ -23,7 +23,7 @@ const presence: RoomAgentPresence[] = [
     updated_at: "2026-04-21T11:40:00.000Z",
     freshness: "active",
     activity_state: "active",
-    source_flags: ["presence"],
+    source_flags: ["delivery", "presence"],
   },
 ];
 
@@ -137,6 +137,6 @@ test("decorateRoomActivityHistoryEntriesWithPresence carries live state and cano
   assert.equal(decorated[0]?.last_seen_at, "2026-04-21T11:39:00.000Z");
   assert.equal(decorated[0]?.last_room_activity_at, "2026-04-21T11:45:00.000Z");
   assert.equal(decorated[0]?.participant.activity_state, "active");
-  assert.deepEqual(decorated[0]?.participant.source_flags, ["presence", "tasks"]);
+  assert.deepEqual(decorated[0]?.participant.source_flags, ["delivery", "presence", "tasks"]);
   assert.equal(decorated[0]?.participant.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");
 });

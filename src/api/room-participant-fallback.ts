@@ -83,19 +83,21 @@ function mergeParticipantActivityState(
     return "offline";
   }
 
-  if (primary.activity_state === "active" || secondary.activity_state === "active") {
+  const hasDelivery = Boolean(
+    primary.source_flags?.includes("delivery")
+      || secondary.source_flags?.includes("delivery")
+  );
+
+  if (hasDelivery && (primary.activity_state === "active" || secondary.activity_state === "active")) {
     return "active";
   }
 
-  if (primary.activity_state === "away" || secondary.activity_state === "away") {
+  if (hasDelivery && (primary.activity_state === "away" || secondary.activity_state === "away")) {
     return "away";
   }
 
   const hasPresence = Boolean(
-    primary.last_live_heartbeat_at
-      || secondary.last_live_heartbeat_at
-      || primary.source_flags?.includes("presence")
-      || secondary.source_flags?.includes("presence")
+    hasDelivery
   );
 
   return deriveRoomAgentActivityState({
@@ -175,7 +177,10 @@ export function buildFallbackRoomParticipants(input: {
       hidden_by: null,
       last_seen_at: entry.last_heartbeat_at,
       last_room_activity_at: entry.last_heartbeat_at,
-      last_live_heartbeat_at: entry.activity_state === "offline" ? null : entry.last_heartbeat_at,
+      last_live_heartbeat_at:
+        entry.activity_state === "offline" || !entry.source_flags.includes("delivery")
+          ? null
+          : entry.last_heartbeat_at,
       activity_state: entry.activity_state,
       source_flags: buildRoomActivitySourceFlags(entry.source_flags),
       created_at: entry.created_at,

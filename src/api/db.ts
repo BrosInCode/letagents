@@ -47,7 +47,6 @@ import {
 } from "../shared/room-agent-prompts.js";
 import {
   getAgentPresenceFreshnessFromReachability,
-  getAgentPresenceFreshness,
   ROOM_AGENT_RECONNECT_GRACE_MS,
   type AgentPresenceFreshness,
   type AgentPresenceStatus,
@@ -993,7 +992,6 @@ function toCoordinationEvent(row: CoordinationEventRow): CoordinationEvent {
 }
 
 function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
-  const freshness = getAgentPresenceFreshness(row.last_heartbeat_at);
   return {
     room_id: row.room_id,
     actor_label: row.actor_label,
@@ -1006,12 +1004,12 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     last_heartbeat_at: row.last_heartbeat_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
-    freshness,
+    freshness: "stale",
     activity_state: deriveRoomAgentActivityState({
       hidden: false,
-      hasPresence: true,
-      freshness,
-      status: row.status,
+      hasPresence: false,
+      freshness: "stale",
+      status: null,
     }),
     source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
@@ -1041,15 +1039,9 @@ function normalizeRoomActorLabel(value: string | null | undefined): string {
 }
 
 function isRoomAgentDeliverySessionReachable(
-  session: Pick<RoomAgentDeliverySession, "active_connection_count" | "reconnect_grace_expires_at">,
-  now = Date.now()
+  session: Pick<RoomAgentDeliverySession, "active_connection_count">
 ): boolean {
-  if (session.active_connection_count > 0) {
-    return true;
-  }
-
-  const graceExpiresAt = Date.parse(session.reconnect_grace_expires_at ?? "");
-  return Number.isFinite(graceExpiresAt) && graceExpiresAt > now;
+  return session.active_connection_count > 0;
 }
 
 function getRoomAgentDeliverySessionLastSeenAt(
@@ -1062,9 +1054,7 @@ function mergeRoomAgentPresenceRecords(input: {
   roomId: string;
   statusEntries: readonly RoomAgentPresence[];
   deliverySessions: readonly RoomAgentDeliverySession[];
-  now?: number;
 }): RoomAgentPresence[] {
-  const now = input.now ?? Date.now();
   const statusByActor = new Map(input.statusEntries.map((entry) => [entry.actor_label, entry]));
   const deliveryByActor = new Map(input.deliverySessions.map((entry) => [entry.actor_label, entry]));
   const actorLabels = new Set<string>([
@@ -1075,12 +1065,9 @@ function mergeRoomAgentPresenceRecords(input: {
   const merged = Array.from(actorLabels).map((actorLabel) => {
     const statusEntry = statusByActor.get(actorLabel) ?? null;
     const deliverySession = deliveryByActor.get(actorLabel) ?? null;
-    const statusFreshness = statusEntry
-      ? getAgentPresenceFreshness(statusEntry.last_heartbeat_at, now)
-      : "stale";
     const isReachable = deliverySession
-      ? isRoomAgentDeliverySessionReachable(deliverySession, now)
-      : statusFreshness === "active";
+      ? isRoomAgentDeliverySessionReachable(deliverySession)
+      : false;
     const status = statusEntry?.status ?? "idle";
     const lastSeenAt = deliverySession
       ? getRoomAgentDeliverySessionLastSeenAt(deliverySession)
@@ -1105,7 +1092,10 @@ function mergeRoomAgentPresenceRecords(input: {
         freshness: getAgentPresenceFreshnessFromReachability(isReachable),
         status: deliverySession ? status : "idle",
       }),
-      source_flags: buildRoomActivitySourceFlags(["presence"]),
+      source_flags: buildRoomActivitySourceFlags([
+        deliverySession ? "delivery" : null,
+        statusEntry ? "presence" : null,
+      ]),
     } satisfies RoomAgentPresence;
   });
 
@@ -1150,6 +1140,10 @@ function filterRoomAgentPresenceForLiveRoster(input: {
     }
 
     if (!isWithinRecentlyOfflineWindow(entry.last_heartbeat_at, now, staleWithinMs)) {
+      continue;
+    }
+
+    if (!entry.source_flags.includes("delivery")) {
       continue;
     }
 

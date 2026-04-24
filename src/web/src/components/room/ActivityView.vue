@@ -1180,7 +1180,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     ideLabel,
     activityState,
     hasCanonicalPresence: Boolean(
-      participant?.source_flags?.includes('presence') || presenceEntry?.source_flags?.includes('presence')
+      participant?.source_flags?.includes('delivery') || presenceEntry?.source_flags?.includes('delivery')
     ),
     status: presenceEntry?.status || null,
     statusText,

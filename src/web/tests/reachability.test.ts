@@ -28,7 +28,7 @@ function makePresence(overrides: Partial<RoomAgentPresence>): RoomAgentPresence 
     updated_at: '2026-04-22T17:00:00.000Z',
     freshness: 'active',
     activity_state: 'active',
-    source_flags: ['presence'],
+    source_flags: ['delivery', 'presence'],
     ...overrides,
   }
 }
@@ -50,7 +50,7 @@ function makeParticipant(overrides: Partial<RoomParticipant>): RoomParticipant {
     last_room_activity_at: '2026-04-22T17:00:00.000Z',
     last_live_heartbeat_at: '2026-04-22T17:00:00.000Z',
     activity_state: 'active',
-    source_flags: ['presence'],
+    source_flags: ['delivery', 'presence'],
     created_at: '2026-04-22T17:00:00.000Z',
     updated_at: '2026-04-22T17:00:00.000Z',
     ...overrides,
@@ -86,7 +86,7 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
         display_name: 'LiveOak',
         freshness: 'active',
         activity_state: 'active',
-        source_flags: ['presence'],
+        source_flags: ['delivery', 'presence'],
       }),
       makePresence({
         actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
@@ -95,7 +95,7 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
         status_text: 'available in room',
         freshness: 'active',
         activity_state: 'away',
-        source_flags: ['presence'],
+        source_flags: ['delivery', 'presence'],
       }),
     ],
     senderName: 'OwlSolar',
@@ -131,6 +131,34 @@ test('buildMentionCandidates treats active presence as reachable even when parti
   )
 })
 
+test('buildMentionCandidates excludes status-only presence without delivery reachability', () => {
+  const candidates = buildMentionCandidates({
+    participants: [
+      makeParticipant({
+        participant_key: 'agent:ghostash | emmymay\'s agent | agent',
+        actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
+        display_name: 'GhostAsh',
+        activity_state: 'away',
+        source_flags: ['presence'],
+      }),
+    ],
+    presence: [
+      makePresence({
+        actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
+        display_name: 'GhostAsh',
+        status: 'idle',
+        status_text: 'available in room',
+        freshness: 'active',
+        activity_state: 'away',
+        source_flags: ['presence'],
+      }),
+    ],
+    senderName: 'OwlSolar',
+  })
+
+  assert.deepEqual(candidates, [])
+})
+
 test('buildAgentReachabilitySources merges live presence into participant history', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
@@ -147,14 +175,14 @@ test('buildAgentReachabilitySources merges live presence into participant histor
         display_name: 'GhostAsh',
         freshness: 'stale',
         activity_state: 'offline',
-        source_flags: ['presence'],
+        source_flags: ['delivery', 'presence'],
       }),
       makePresence({
         actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
         display_name: 'LiveOak',
         freshness: 'active',
         activity_state: 'active',
-        source_flags: ['presence'],
+        source_flags: ['delivery', 'presence'],
       }),
     ],
   })
@@ -169,6 +197,34 @@ test('buildAgentReachabilitySources merges live presence into participant histor
   assert.equal(sources[1]?.participant, null)
 })
 
+test('buildAgentReachabilitySources treats status-only active presence as offline history', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [
+      makeParticipant({
+        participant_key: 'agent:ghostash | emmymay\'s agent | agent',
+        actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
+        display_name: 'GhostAsh',
+        activity_state: 'away',
+        source_flags: ['presence'],
+      }),
+    ],
+    presence: [
+      makePresence({
+        actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
+        display_name: 'GhostAsh',
+        freshness: 'active',
+        activity_state: 'away',
+        source_flags: ['presence'],
+      }),
+    ],
+  })
+
+  assert.deepEqual(
+    sources.map((source) => [source.actorLabel, source.activityState]),
+    [['GhostAsh | EmmyMay\'s agent | Agent', 'offline']],
+  )
+})
+
 test('buildAgentReachabilitySources keeps stale presence in the offline lane', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
@@ -181,7 +237,7 @@ test('buildAgentReachabilitySources keeps stale presence in the offline lane', (
       makePresence({
         freshness: 'stale',
         activity_state: 'offline',
-        source_flags: ['presence'],
+        source_flags: ['delivery', 'presence'],
       }),
     ],
   })
@@ -199,7 +255,7 @@ test('buildAgentReachabilitySources keeps canonical offline presence without a p
       makePresence({
         freshness: 'stale',
         activity_state: 'offline',
-        source_flags: ['presence'],
+        source_flags: ['delivery', 'presence'],
       }),
     ],
   })
