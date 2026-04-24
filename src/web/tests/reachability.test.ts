@@ -197,7 +197,7 @@ test('buildAgentReachabilitySources merges live presence into participant histor
   assert.equal(sources[1]?.participant, null)
 })
 
-test('buildAgentReachabilitySources treats status-only active presence as offline history', () => {
+test('buildAgentReachabilitySources excludes status-only presence from live reachability', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
       makeParticipant({
@@ -219,10 +219,7 @@ test('buildAgentReachabilitySources treats status-only active presence as offlin
     ],
   })
 
-  assert.deepEqual(
-    sources.map((source) => [source.actorLabel, source.activityState]),
-    [['GhostAsh | EmmyMay\'s agent | Agent', 'offline']],
-  )
+  assert.deepEqual(sources, [])
 })
 
 test('buildAgentReachabilitySources keeps stale presence in the offline lane', () => {
@@ -267,7 +264,7 @@ test('buildAgentReachabilitySources keeps canonical offline presence without a p
   assert.equal(sources[0]?.participant, null)
 })
 
-test('buildAgentReachabilitySources normalizes legacy participant-only offline states', () => {
+test('buildAgentReachabilitySources excludes participant-only history from live reachability', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
       makeParticipant({
@@ -287,13 +284,22 @@ test('buildAgentReachabilitySources normalizes legacy participant-only offline s
     presence: [],
   })
 
-  assert.deepEqual(
-    sources.map((source) => [source.actorLabel, source.activityState]),
-    [
-      ['LiveOak | EmmyMay\'s agent | Agent', 'offline'],
-      ['GhostAsh | EmmyMay\'s agent | Agent', 'offline'],
+  assert.deepEqual(sources, [])
+})
+
+test('buildAgentReachabilitySources does not treat historical delivery flags as current reachability', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [
+      makeParticipant({
+        activity_state: 'away',
+        source_flags: ['delivery', 'presence'],
+        last_live_heartbeat_at: '2026-04-22T12:00:00.000Z',
+      }),
     ],
-  )
+    presence: [],
+  })
+
+  assert.deepEqual(sources, [])
 })
 
 test('buildAgentReachabilitySources does not surface message-only fallback ghosts as offline', () => {

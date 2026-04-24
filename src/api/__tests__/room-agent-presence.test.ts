@@ -14,6 +14,7 @@ if (testDatabaseUrl) {
 const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
+const agentPresenceModule = await import("../../shared/agent-presence.js");
 const roomAgentActivityModule = await import("../../shared/room-agent-activity.js");
 
 const db = dbClientModule?.db;
@@ -26,6 +27,7 @@ const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconn
 const setRoomLiveAgentSuppressed = dbModule?.setRoomLiveAgentSuppressed;
 const upsertRoomAgentPresence = dbModule?.upsertRoomAgentPresence;
 const room_agent_delivery_sessions = schemaModule?.room_agent_delivery_sessions;
+const { ACTIVE_AGENT_DELIVERY_WINDOW_MS } = agentPresenceModule;
 const { RECENTLY_OFFLINE_MAX_AGENTS, RECENTLY_OFFLINE_WINDOW_MS } = roomAgentActivityModule;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
@@ -207,6 +209,19 @@ test(
     assert.equal(livePresence[0]?.status, "reviewing");
     assert.equal(livePresence[0]?.ide_label, "Codex");
     assert.deepEqual(livePresence[0]?.source_flags, ["delivery", "presence"]);
+
+    const staleHeartbeat = new Date(Date.now() - ACTIVE_AGENT_DELIVERY_WINDOW_MS - 1_000).toISOString();
+    await db
+      .update(room_agent_delivery_sessions)
+      .set({
+        updated_at: staleHeartbeat,
+      })
+      .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id} AND ${room_agent_delivery_sessions.actor_label} = ${actorLabel}`);
+
+    const staleActiveConnectionPresence = await getRoomAgentPresence(room.id);
+    assert.equal(staleActiveConnectionPresence[0]?.freshness, "stale");
+    assert.equal(staleActiveConnectionPresence[0]?.activity_state, "offline");
+    assert.equal(staleActiveConnectionPresence[0]?.status_text, "reviewing task_159 backend lane");
 
     await markRoomAgentDeliveryDisconnected({
       room_id: room.id,

@@ -42,17 +42,15 @@ export function resolveAgentActivityState(input: {
   participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at' | 'source_flags'> | null
   presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags' | 'status'> | null
 }): AgentReachabilitySource['activityState'] {
-  const hasDelivery = Boolean(
+  const hasCurrentDelivery = Boolean(
     input.presence?.source_flags?.includes('delivery')
-      || input.participant?.source_flags?.includes('delivery')
   )
   if (input.participant?.hidden_at) return 'offline'
-  if (hasDelivery && input.presence?.freshness === 'active') {
+  if (hasCurrentDelivery && input.presence?.freshness === 'active') {
     return input.presence?.status === 'idle' ? 'away' : 'active'
   }
-  if (hasDelivery) {
-    return normalizeRoomActivityStateValue(input.participant?.activity_state)
-      || normalizeRoomActivityStateValue(input.presence?.activity_state)
+  if (hasCurrentDelivery) {
+    return normalizeRoomActivityStateValue(input.presence?.activity_state)
       || 'offline'
   }
   return 'offline'
@@ -168,6 +166,7 @@ export function buildAgentReachabilitySources(input: {
     }
 
     const presence = actorLabel ? (presenceByActor.get(actorLabel) || null) : null
+    if (!presence?.source_flags.includes('delivery')) continue
     next.push({
       key: participant.participant_key,
       actorLabel,

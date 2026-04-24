@@ -63,9 +63,9 @@ test("decorateRoomParticipantsWithPresence assigns active and offline agent stat
       hidden_by: null,
       last_seen_at: "2026-04-21T10:00:00.000Z",
       last_room_activity_at: "2026-04-21T10:00:00.000Z",
-      last_live_heartbeat_at: null,
-      activity_state: null,
-      source_flags: [],
+      last_live_heartbeat_at: "2026-04-21T10:00:00.000Z",
+      activity_state: "away",
+      source_flags: ["delivery", "presence"],
       created_at: "2026-04-21T09:00:00.000Z",
       updated_at: "2026-04-21T10:00:00.000Z",
     },
@@ -95,6 +95,7 @@ test("decorateRoomParticipantsWithPresence assigns active and offline agent stat
   assert.equal(decorated[0]?.activity_state, "active");
   assert.equal(decorated[0]?.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");
   assert.equal(decorated[1]?.activity_state, "offline");
+  assert.deepEqual(decorated[1]?.source_flags, ["presence", "messages"]);
   assert.equal(decorated[2]?.activity_state, "offline");
 });
 

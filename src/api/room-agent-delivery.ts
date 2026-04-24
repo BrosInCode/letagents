@@ -1,8 +1,10 @@
 import { buildAgentRoomParticipantKey } from "../shared/room-participant.js";
 import type { RoomAgentDeliveryTransport } from "../shared/agent-presence.js";
+import { ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS } from "../shared/agent-presence.js";
 import {
   markRoomAgentDeliveryConnected,
   markRoomAgentDeliveryDisconnected,
+  markRoomAgentDeliveryHeartbeat,
   upsertRoomParticipant,
 } from "./db.js";
 import type { AuthenticatedRequest } from "./http-helpers.js";
@@ -63,6 +65,16 @@ export async function beginRoomAgentDelivery(input: {
     });
   }
 
+  const heartbeat = setInterval(() => {
+    void markRoomAgentDeliveryHeartbeat({
+      room_id: input.roomId,
+      actor_label: identity.actor_label,
+    }).catch((error: unknown) => {
+      console.error(`[room agent delivery] failed to refresh delivery heartbeat for ${input.roomId}`, error);
+    });
+  }, ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref?.();
+
   let ended = false;
   return async () => {
     if (ended) {
@@ -70,6 +82,7 @@ export async function beginRoomAgentDelivery(input: {
     }
 
     ended = true;
+    clearInterval(heartbeat);
     await markRoomAgentDeliveryDisconnected({
       room_id: input.roomId,
       actor_label: identity.actor_label,

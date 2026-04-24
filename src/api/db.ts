@@ -46,7 +46,9 @@ import {
   type AgentPromptKind,
 } from "../shared/room-agent-prompts.js";
 import {
+  ACTIVE_AGENT_DELIVERY_WINDOW_MS,
   getAgentPresenceFreshnessFromReachability,
+  isAgentDeliverySessionReachable,
   ROOM_AGENT_RECONNECT_GRACE_MS,
   type AgentPresenceFreshness,
   type AgentPresenceStatus,
@@ -1039,22 +1041,28 @@ function normalizeRoomActorLabel(value: string | null | undefined): string {
 }
 
 function isRoomAgentDeliverySessionReachable(
-  session: Pick<RoomAgentDeliverySession, "active_connection_count">
+  session: Pick<RoomAgentDeliverySession, "active_connection_count" | "updated_at">,
+  now = Date.now()
 ): boolean {
-  return session.active_connection_count > 0;
+  return isAgentDeliverySessionReachable({
+    activeConnectionCount: session.active_connection_count,
+    updatedAt: session.updated_at,
+  }, now);
 }
 
 function getRoomAgentDeliverySessionLastSeenAt(
-  session: Pick<RoomAgentDeliverySession, "last_connected_at" | "last_disconnected_at">
+  session: Pick<RoomAgentDeliverySession, "last_connected_at" | "last_disconnected_at" | "updated_at">
 ): string {
-  return session.last_disconnected_at ?? session.last_connected_at;
+  return session.last_disconnected_at ?? session.updated_at ?? session.last_connected_at;
 }
 
 function mergeRoomAgentPresenceRecords(input: {
   roomId: string;
   statusEntries: readonly RoomAgentPresence[];
   deliverySessions: readonly RoomAgentDeliverySession[];
+  now?: number;
 }): RoomAgentPresence[] {
+  const now = input.now ?? Date.now();
   const statusByActor = new Map(input.statusEntries.map((entry) => [entry.actor_label, entry]));
   const deliveryByActor = new Map(input.deliverySessions.map((entry) => [entry.actor_label, entry]));
   const actorLabels = new Set<string>([
@@ -1066,7 +1074,7 @@ function mergeRoomAgentPresenceRecords(input: {
     const statusEntry = statusByActor.get(actorLabel) ?? null;
     const deliverySession = deliveryByActor.get(actorLabel) ?? null;
     const isReachable = deliverySession
-      ? isRoomAgentDeliverySessionReachable(deliverySession)
+      ? isRoomAgentDeliverySessionReachable(deliverySession, now)
       : false;
     const status = statusEntry?.status ?? "idle";
     const lastSeenAt = deliverySession
@@ -1173,6 +1181,7 @@ async function getMergedRoomAgentPresenceRecords(
     .from(room_agent_delivery_sessions)
     .where(eq(room_agent_delivery_sessions.room_id, roomId))
     .orderBy(
+      desc(room_agent_delivery_sessions.updated_at),
       desc(room_agent_delivery_sessions.active_connection_count),
       desc(room_agent_delivery_sessions.last_connected_at),
       asc(room_agent_delivery_sessions.display_name)
@@ -2775,6 +2784,7 @@ export async function markRoomAgentDeliveryConnected(input: {
   transport: RoomAgentDeliveryTransport;
 }): Promise<RoomAgentDeliverySession> {
   const now = new Date().toISOString();
+  const staleConnectionCutoff = new Date(Date.now() - ACTIVE_AGENT_DELIVERY_WINDOW_MS).toISOString();
 
   const [session] = await db
     .insert(room_agent_delivery_sessions)
@@ -2803,7 +2813,10 @@ export async function markRoomAgentDeliveryConnected(input: {
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
         transport: input.transport,
-        active_connection_count: sql`GREATEST(${room_agent_delivery_sessions.active_connection_count}, 0) + 1`,
+        active_connection_count: sql`CASE
+          WHEN ${room_agent_delivery_sessions.updated_at} < ${staleConnectionCutoff}::timestamptz THEN 1
+          ELSE GREATEST(${room_agent_delivery_sessions.active_connection_count}, 0) + 1
+        END`,
         last_connected_at: now,
         last_disconnected_at: null,
         reconnect_grace_expires_at: null,
@@ -2819,6 +2832,25 @@ export async function markRoomAgentDeliveryConnected(input: {
   });
 
   return toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow);
+}
+
+export async function markRoomAgentDeliveryHeartbeat(input: {
+  room_id: string;
+  actor_label: string;
+}): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .update(room_agent_delivery_sessions)
+    .set({
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(room_agent_delivery_sessions.room_id, input.room_id),
+        eq(room_agent_delivery_sessions.actor_label, input.actor_label),
+        sql`${room_agent_delivery_sessions.active_connection_count} > 0`
+      )
+    );
 }
 
 export async function markRoomAgentDeliveryDisconnected(input: {
@@ -2860,6 +2892,7 @@ export async function getRoomAgentDeliverySessions(
     .from(room_agent_delivery_sessions)
     .where(eq(room_agent_delivery_sessions.room_id, roomId))
     .orderBy(
+      desc(room_agent_delivery_sessions.updated_at),
       desc(room_agent_delivery_sessions.active_connection_count),
       desc(room_agent_delivery_sessions.last_connected_at),
       asc(room_agent_delivery_sessions.display_name)
