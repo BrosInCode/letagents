@@ -67,16 +67,11 @@ export function describeAgentReachability(input: {
       : 'Recorded in room history'
   }
 
-  const statusText = String(input.statusText || '').trim()
-  if (statusText) {
-    return statusText
+  if (input.activityState === 'active' || input.activityState === 'away') {
+    return 'Can receive room messages now'
   }
 
-  if (input.activityState === 'away') {
-    return 'Away but still reachable'
-  }
-
-  return 'Active in room right now'
+  return 'Recorded in room history'
 }
 
 export function normalizeMentionToken(value: string): string {
@@ -143,7 +138,7 @@ export function buildMentionCandidates(input: {
       const meta = [
         participant.owner_label || presenceEntry.owner_label,
         participant.ide_label || presenceEntry.ide_label,
-        activityState === 'active' ? 'Active in room' : 'Away but reachable',
+        'Connected',
       ]
         .filter(Boolean)
         .join(' · ')
