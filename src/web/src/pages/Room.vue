@@ -108,6 +108,7 @@
           :loadActivityHistory="loadActivityHistory"
           :clearDisconnectedParticipants="clearDisconnectedParticipants"
           :taskGithubStatus="taskGithubStatus"
+          :isLoading="activityLoading"
         />
 
         <FocusRoomsView
@@ -274,6 +275,7 @@ const {
   githubEventsError,
   githubEventsSupported,
   githubEventsLoading,
+  activityLoading,
   room,
   lastSendError,
   isConnected,
@@ -295,6 +297,10 @@ const {
   loadOlderMessages,
   loadActivityHistory,
   clearDisconnectedParticipants,
+  refreshRoomMessages,
+  refreshRoomActivity,
+  refreshRoomBoard,
+  refreshRoomFocusRooms,
   refreshRoomGitHubEvents,
 } = useRoom()
 const auth = useAuth()
@@ -748,8 +754,31 @@ watch(activeTab, async (tab) => {
   if (tab !== 'chat') {
     closeImageViewer()
   }
-  if (tab === 'events' && isConnected.value && githubEventsSupported.value) {
+
+  if (!isConnected.value) return
+
+  if (tab === 'chat') {
+    await refreshRoomMessages()
+    return
+  }
+
+  if (tab === 'events' && githubEventsSupported.value) {
     await refreshRoomGitHubEvents()
+    return
+  }
+
+  if (tab === 'board') {
+    await refreshRoomBoard()
+    return
+  }
+
+  if (tab === 'activity') {
+    await refreshRoomActivity()
+    return
+  }
+
+  if (tab === 'rooms') {
+    await refreshRoomFocusRooms()
   }
 })
 
