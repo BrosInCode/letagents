@@ -299,7 +299,7 @@ export interface RoomAgentPresence {
   updated_at: string
   freshness: 'active' | 'stale'
   activity_state: 'active' | 'away' | 'offline'
-  source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
+  source_flags: ReadonlyArray<'delivery' | 'presence' | 'messages' | 'tasks'>
 }
 
 export interface RoomParticipant {
@@ -318,7 +318,7 @@ export interface RoomParticipant {
   last_room_activity_at: string | null
   last_live_heartbeat_at: string | null
   activity_state: 'active' | 'away' | 'offline' | null
-  source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
+  source_flags: ReadonlyArray<'delivery' | 'presence' | 'messages' | 'tasks'>
   created_at: string
   updated_at: string
 }
@@ -360,7 +360,7 @@ export interface RoomActivityHistoryEntry {
     hidden_by: string | null
     last_live_heartbeat_at: string | null
     activity_state: 'active' | 'away' | 'offline' | null
-    source_flags: ReadonlyArray<'presence' | 'messages' | 'tasks'>
+    source_flags: ReadonlyArray<'delivery' | 'presence' | 'messages' | 'tasks'>
   }
   first_seen_at: string
   last_seen_at: string

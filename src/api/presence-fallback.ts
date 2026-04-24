@@ -141,8 +141,8 @@ export function buildSyntheticPresenceEntry(input: {
     last_heartbeat_at: timestamp,
     created_at: timestamp,
     updated_at: timestamp,
-    freshness: "active",
-    activity_state: input.status === "idle" ? "away" : "active",
+    freshness: "stale",
+    activity_state: "offline",
     source_flags: buildRoomActivitySourceFlags(["presence"]),
   };
 }

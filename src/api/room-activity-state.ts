@@ -38,15 +38,15 @@ function mergeActivityState(input: {
   hiddenAt: string | null | undefined;
   presenceEntry: RoomAgentPresence | null;
 }) {
-  const hasPresence = Boolean(
-    input.presenceEntry?.source_flags?.includes("presence")
+  const hasDelivery = Boolean(
+    input.presenceEntry?.source_flags?.includes("delivery")
   );
 
   return deriveRoomAgentActivityState({
     hidden: Boolean(input.hiddenAt),
-    hasPresence,
-    freshness: hasPresence ? input.presenceEntry?.freshness ?? null : null,
-    status: hasPresence ? input.presenceEntry?.status ?? null : null,
+    hasPresence: hasDelivery,
+    freshness: hasDelivery ? input.presenceEntry?.freshness ?? null : null,
+    status: hasDelivery ? input.presenceEntry?.status ?? null : null,
   });
 }
 
@@ -78,7 +78,7 @@ export function decorateRoomParticipantsWithPresence(input: {
       ...participant,
       last_room_activity_at: participant.last_room_activity_at ?? participant.last_seen_at,
       last_live_heartbeat_at:
-        presenceEntry?.source_flags?.includes("presence")
+        presenceEntry?.source_flags?.includes("delivery")
           ? presenceEntry.last_heartbeat_at
           : participant.last_live_heartbeat_at,
       activity_state: activityState,
@@ -118,7 +118,7 @@ export function decorateRoomActivityHistoryEntriesWithPresence(input: {
       participant: {
         ...entry.participant,
         last_live_heartbeat_at:
-          presenceEntry?.source_flags?.includes("presence")
+          presenceEntry?.source_flags?.includes("delivery")
             ? presenceEntry.last_heartbeat_at
             : entry.participant.last_live_heartbeat_at,
         activity_state: activityState,

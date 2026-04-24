@@ -31,7 +31,7 @@ function makePresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPres
     updated_at: overrides.updated_at ?? "2026-04-08T15:04:00.000Z",
     freshness: overrides.freshness ?? "active",
     activity_state: overrides.activity_state ?? "away",
-    source_flags: overrides.source_flags ?? ["presence"],
+    source_flags: overrides.source_flags ?? ["delivery", "presence"],
   };
 }
 
@@ -81,7 +81,7 @@ test("buildFallbackRoomParticipants preserves presence-backed reachability when 
         last_heartbeat_at: "2026-04-08T15:04:00.000Z",
         updated_at: "2026-04-08T15:04:00.000Z",
         activity_state: "away",
-        source_flags: ["presence"],
+        source_flags: ["delivery", "presence"],
       }),
     ],
     messages: [
@@ -101,5 +101,5 @@ test("buildFallbackRoomParticipants preserves presence-backed reachability when 
   assert.equal(participants[0]?.last_live_heartbeat_at, "2026-04-08T15:04:00.000Z");
   assert.equal(participants[0]?.last_room_activity_at, "2026-04-08T15:05:00.000Z");
   assert.equal(participants[0]?.last_seen_at, "2026-04-08T15:05:00.000Z");
-  assert.deepEqual(participants[0]?.source_flags, ["presence", "messages"]);
+  assert.deepEqual(participants[0]?.source_flags, ["delivery", "presence", "messages"]);
 });
