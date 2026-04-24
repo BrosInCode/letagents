@@ -637,10 +637,10 @@
         </section>
 
         <p
-          v-else-if="selectedParticipant.statusText"
+          v-else-if="selectedParticipant.kind === 'agent' || selectedParticipant.statusText"
           class="activity-detail-description"
         >
-          {{ selectedParticipant.statusText }}
+          {{ participantNote(selectedParticipant) }}
         </p>
 
         <section
@@ -854,6 +854,7 @@ import {
 } from '@/composables/useRoom'
 import {
   buildAgentReachabilitySources,
+  describeAgentReachability,
   resolveAgentActivityState,
   type AgentReachabilitySource,
 } from './reachability'
@@ -1163,7 +1164,8 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
       thinkingTimeline: [],
     }, task.created_by))
   ).slice(0, 8)
-  const statusText = presenceEntry?.status_text || (latestStatusMessage ? extractStatusText(latestStatusMessage.text || '') : null) || null
+  const rawStatusText = presenceEntry?.status_text || (latestStatusMessage ? extractStatusText(latestStatusMessage.text || '') : null) || null
+  const statusText = activityState === 'offline' ? null : rawStatusText
   const thinkingSnapshot = buildAgentThinkingSnapshot({
     messages,
     status: presenceEntry?.status || null,
@@ -1573,22 +1575,16 @@ function participantMeta(participant: ActivityParticipant | HistoryParticipant):
 }
 
 function participantNote(participant: ActivityParticipant | HistoryParticipant): string {
-  if (participant.statusText) {
-    return participant.statusText
+  if (participant.kind === 'agent') {
+    return describeAgentReachability({
+      activityState: participant.activityState,
+      hasCanonicalPresence: participant.hasCanonicalPresence,
+      statusText: participant.statusText,
+    })
   }
 
-  if (participant.kind === 'agent') {
-    if (participant.activityState === 'offline') {
-      return participant.hasCanonicalPresence
-        ? 'Offline from this room right now'
-        : 'Recorded in room history'
-    }
-
-    if (participant.activityState === 'away') {
-      return 'Away but still reachable'
-    }
-
-    return 'Active in room right now'
+  if (participant.statusText) {
+    return participant.statusText
   }
 
   return participant.messageCount > 0

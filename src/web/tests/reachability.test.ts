@@ -11,7 +11,11 @@ Object.assign(globalThis, {
   },
 })
 
-const { buildAgentReachabilitySources, buildMentionCandidates } = await import('../src/components/room/reachability')
+const {
+  buildAgentReachabilitySources,
+  buildMentionCandidates,
+  describeAgentReachability,
+} = await import('../src/components/room/reachability')
 
 function makePresence(overrides: Partial<RoomAgentPresence>): RoomAgentPresence {
   return {
@@ -315,4 +319,26 @@ test('buildAgentReachabilitySources does not surface message-only fallback ghost
   })
 
   assert.deepEqual(sources, [])
+})
+
+test('describeAgentReachability does not show stale status text for offline agents', () => {
+  assert.equal(
+    describeAgentReachability({
+      activityState: 'offline',
+      hasCanonicalPresence: true,
+      statusText: 'available in room',
+    }),
+    'Delivery session expired',
+  )
+})
+
+test('describeAgentReachability keeps status text for reachable agents', () => {
+  assert.equal(
+    describeAgentReachability({
+      activityState: 'away',
+      hasCanonicalPresence: true,
+      statusText: 'available in room',
+    }),
+    'available in room',
+  )
 })
