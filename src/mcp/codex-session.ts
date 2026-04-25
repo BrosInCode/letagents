@@ -89,6 +89,23 @@ export interface StartLocalCodexSessionResult {
 /** Track spawned server PIDs for cleanup on process exit. */
 const spawnedServerPids = new Set<number>();
 
+function terminateSpawnedProcess(pid: number): void {
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-pid, "SIGTERM");
+      return;
+    }
+  } catch {
+    // Fall back to the direct process below.
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // Already gone.
+  }
+}
+
 let cleanupRegistered = false;
 function registerProcessCleanup(): void {
   if (cleanupRegistered) return;
@@ -96,11 +113,7 @@ function registerProcessCleanup(): void {
 
   const cleanup = () => {
     for (const pid of spawnedServerPids) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        // Already dead — ignore.
-      }
+      terminateSpawnedProcess(pid);
     }
     spawnedServerPids.clear();
   };
@@ -446,13 +459,8 @@ function killOwnedAppServer(session: CodexLiveSessionState): void {
     return;
   }
 
-  try {
-    process.kill(session.server_pid, "SIGTERM");
-  } catch {
-    // Already gone.
-  } finally {
-    spawnedServerPids.delete(session.server_pid);
-  }
+  terminateSpawnedProcess(session.server_pid);
+  spawnedServerPids.delete(session.server_pid);
 }
 
 async function waitForWorkerStartup(session: CodexLiveSessionState): Promise<CodexLiveSessionState> {
