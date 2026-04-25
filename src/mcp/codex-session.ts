@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
+import { createServer } from "net";
 import { resolve } from "path";
 import {
   getCurrentCodexLiveSession,
@@ -10,9 +11,11 @@ import {
 } from "./local-state.js";
 import type { JoinedVia } from "./room-id.js";
 
-const DEFAULT_SERVER_URL = "ws://127.0.0.1:8765";
+const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_STOP_PHRASE = "/stop-codex-room";
 const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_STARTUP_OBSERVATION_MS = 8_000;
+const STARTUP_POLL_INTERVAL_MS = 500;
 
 function getWebSocketCtor(): typeof WebSocket {
   const ctor = globalThis.WebSocket;
@@ -234,6 +237,44 @@ async function waitForServer(serverUrl: string, timeoutMs = DEFAULT_TIMEOUT_MS):
   return false;
 }
 
+async function allocateLoopbackServerUrl(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, DEFAULT_SERVER_HOST, () => resolve());
+  });
+
+  const address = server.address();
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  if (!address || typeof address === "string") {
+    throw new Error("Unable to allocate a loopback Codex app-server port.");
+  }
+
+  return `ws://${DEFAULT_SERVER_HOST}:${address.port}`;
+}
+
+async function resolveCodexServerUrl(explicitServerUrl?: string): Promise<string> {
+  if (explicitServerUrl) {
+    return explicitServerUrl;
+  }
+
+  const configuredServerUrl = process.env.LETAGENTS_CODEX_SERVER_URL?.trim();
+  if (configuredServerUrl) {
+    return configuredServerUrl;
+  }
+
+  return allocateLoopbackServerUrl();
+}
+
 function launchAppServer(serverUrl: string, codexBin: string): number | null {
   const child = spawn(codexBin, ["app-server", "--listen", serverUrl], {
     detached: true,
@@ -348,12 +389,16 @@ function summarizeItems(items: ThreadReadTurnItem[] | undefined): Array<Record<s
   });
 }
 
-function mapSessionStatus(
+export function deriveCodexLiveSessionStatus(
   session: CodexLiveSessionState,
   serverReachable: boolean,
   threadStatus: string | null,
   turnStatus: string | null
 ): CodexLiveSessionState["status"] {
+  if (threadStatus === "systemError" || threadStatus === "error" || turnStatus === "failed") {
+    return "failed";
+  }
+
   if (turnStatus === "completed") {
     return "completed";
   }
@@ -377,6 +422,68 @@ function mapSessionStatus(
   }
 
   return session.status;
+}
+
+function isTerminalStartupStatus(status: CodexLiveSessionState["status"]): boolean {
+  return status === "completed" || status === "interrupted" || status === "failed";
+}
+
+function parseStartupObservationMs(): number {
+  const parsed = Number.parseInt(process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_STARTUP_OBSERVATION_MS;
+  }
+
+  return parsed;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function killOwnedAppServer(session: CodexLiveSessionState): void {
+  if (!session.launched_server || !session.server_pid) {
+    return;
+  }
+
+  try {
+    process.kill(session.server_pid, "SIGTERM");
+  } catch {
+    // Already gone.
+  } finally {
+    spawnedServerPids.delete(session.server_pid);
+  }
+}
+
+async function waitForWorkerStartup(session: CodexLiveSessionState): Promise<CodexLiveSessionState> {
+  const observationMs = parseStartupObservationMs();
+  const deadline = Date.now() + observationMs;
+  let latest = session;
+
+  while (Date.now() < deadline) {
+    await sleep(Math.min(STARTUP_POLL_INTERVAL_MS, Math.max(deadline - Date.now(), 0)));
+    const inspected = await inspectLocalCodexSession(session.session_id);
+    if (!inspected) {
+      continue;
+    }
+
+    latest = inspected.session;
+    if (isTerminalStartupStatus(latest.status)) {
+      const reason = latest.status === "completed"
+        ? "turn completed before entering the room polling loop"
+        : `turn entered ${latest.status}`;
+      const failed =
+        updateCodexLiveSession(session.session_id, (current) => ({
+          ...current,
+          status: "failed",
+          last_error: reason,
+          updated_at: new Date().toISOString(),
+        })) ?? latest;
+      throw new Error(`Codex worker exited during startup: ${failed.last_error ?? reason}`);
+    }
+  }
+
+  return latest;
 }
 
 function toSessionState(input: {
@@ -471,7 +578,7 @@ export async function inspectLocalCodexSession(
     const updated =
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
-        status: mapSessionStatus(current, false, null, null),
+        status: deriveCodexLiveSessionStatus(current, false, null, null),
         updated_at: new Date().toISOString(),
       })) ?? session;
 
@@ -507,7 +614,7 @@ export async function inspectLocalCodexSession(
     const updated =
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
-        status: mapSessionStatus(current, true, threadStatus, turnStatus),
+        status: deriveCodexLiveSessionStatus(current, true, threadStatus, turnStatus),
         last_error: null,
         updated_at: new Date().toISOString(),
       })) ?? session;
@@ -560,7 +667,7 @@ export async function startLocalCodexSession(
     }
   }
 
-  const serverUrl = input.server_url || DEFAULT_SERVER_URL;
+  const serverUrl = await resolveCodexServerUrl(input.server_url);
   const stopPhrase = input.stop_phrase || DEFAULT_STOP_PHRASE;
   const maxMinutes = Number.isFinite(input.max_minutes) ? Math.max(0, input.max_minutes ?? 0) : 0;
   const codexBin = input.codex_bin || process.env.LETAGENTS_CODEX_BIN || "codex";
@@ -636,7 +743,13 @@ export async function startLocalCodexSession(
       })
     );
 
-    return { session, reused: false };
+    try {
+      const verifiedSession = await waitForWorkerStartup(session);
+      return { session: verifiedSession, reused: false };
+    } catch (error) {
+      killOwnedAppServer(session);
+      throw error;
+    }
   } finally {
     client.close();
   }
@@ -682,14 +795,8 @@ export async function stopLocalCodexSession(options?: {
       updated_at: new Date().toISOString(),
     })) ?? session;
 
-  if (options?.shutdown_server && updated.server_pid) {
-    try {
-      process.kill(updated.server_pid, "SIGTERM");
-      spawnedServerPids.delete(updated.server_pid);
-    } catch {
-      // Process already dead — ignore.
-      spawnedServerPids.delete(updated.server_pid);
-    }
+  if (options?.shutdown_server || updated.launched_server) {
+    killOwnedAppServer(updated);
   }
 
   return updated;
