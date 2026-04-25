@@ -683,23 +683,25 @@ export async function startLocalCodexSession(
   const deadline = formatDeadline(maxMinutes);
   const launchedServer = !(await isServerReady(serverUrl));
   let serverPid: number | null = null;
-
-  if (launchedServer) {
-    serverPid = launchAppServer(serverUrl, codexBin);
-    if (serverPid) {
-      spawnedServerPids.add(serverPid);
-      registerProcessCleanup();
-    }
-    const ready = await waitForServer(serverUrl);
-    if (!ready) {
-      throw new Error(`Timed out waiting for codex app-server at ${serverUrl}`);
-    }
-  }
-
-  const client = new RpcClient(serverUrl);
-  await client.connect();
+  let client: RpcClient | null = null;
+  let startupSucceeded = false;
 
   try {
+    if (launchedServer) {
+      serverPid = launchAppServer(serverUrl, codexBin);
+      if (serverPid) {
+        spawnedServerPids.add(serverPid);
+        registerProcessCleanup();
+      }
+      const ready = await waitForServer(serverUrl);
+      if (!ready) {
+        throw new Error(`Timed out waiting for codex app-server at ${serverUrl}`);
+      }
+    }
+
+    client = new RpcClient(serverUrl);
+    await client.connect();
+
     const threadStart = await client.request<ThreadStartResult>("thread/start", {});
     const threadId = threadStart.thread?.id;
     if (!threadId) {
@@ -753,13 +755,20 @@ export async function startLocalCodexSession(
 
     try {
       const verifiedSession = await waitForWorkerStartup(session);
+      startupSucceeded = true;
       return { session: verifiedSession, reused: false };
     } catch (error) {
       killOwnedAppServer(session);
       throw error;
     }
+  } catch (error) {
+    if (!startupSucceeded && launchedServer && serverPid) {
+      terminateSpawnedProcess(serverPid);
+      spawnedServerPids.delete(serverPid);
+    }
+    throw error;
   } finally {
-    client.close();
+    client?.close();
   }
 }
 
