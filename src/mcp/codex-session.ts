@@ -497,6 +497,10 @@ function scheduleOwnedSessionMonitor(session: CodexLiveSessionState): void {
         }
       })
       .catch(() => {
+        const latest = getStoredCodexLiveSession(session.session_id);
+        if (latest?.launched_server) {
+          killOwnedAppServer(latest);
+        }
         clearSessionMonitor(session.session_id);
       });
   }, SESSION_MONITOR_INTERVAL_MS);
@@ -659,9 +663,8 @@ export async function inspectLocalCodexSession(
   }
 
   const client = new RpcClient(session.server_url);
-  await client.connect();
-
   try {
+    await client.connect();
     let read: ThreadReadResult | null = null;
     try {
       read = await client.request<ThreadReadResult>("thread/read", {

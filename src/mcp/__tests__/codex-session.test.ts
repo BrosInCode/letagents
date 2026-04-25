@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import type { AddressInfo } from "node:net";
 
-import { deriveCodexLiveSessionStatus } from "../codex-session.js";
-import type { CodexLiveSessionState } from "../local-state.js";
+import { deriveCodexLiveSessionStatus, inspectLocalCodexSession } from "../codex-session.js";
+import { saveCodexLiveSession, type CodexLiveSessionState } from "../local-state.js";
 
 const baseSession: CodexLiveSessionState = {
   session_id: "session_1",
@@ -38,4 +43,45 @@ test("deriveCodexLiveSessionStatus preserves normal completed turns", () => {
     deriveCodexLiveSessionStatus(baseSession, true, "active", "completed"),
     "completed"
   );
+});
+
+test("inspectLocalCodexSession marks ready servers with failed websocket handshakes unknown", async () => {
+  const previousStatePath = process.env.LETAGENTS_STATE_PATH;
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-codex-session-"));
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+
+  const server = createServer((request, response) => {
+    response.statusCode = request.url === "/readyz" ? 200 : 404;
+    response.end();
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = server.address() as AddressInfo;
+    saveCodexLiveSession({
+      ...baseSession,
+      session_id: "connect_failure_session",
+      server_url: `ws://127.0.0.1:${address.port}`,
+      launched_server: true,
+      status: "running",
+    });
+
+    const inspected = await inspectLocalCodexSession("connect_failure_session");
+    assert.ok(inspected);
+    assert.equal(inspected.server_reachable, true);
+    assert.equal(inspected.session.status, "unknown");
+    assert.match(inspected.session.last_error ?? "", /WebSocket|fetch failed|closed/i);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (previousStatePath === undefined) {
+      delete process.env.LETAGENTS_STATE_PATH;
+    } else {
+      process.env.LETAGENTS_STATE_PATH = previousStatePath;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
