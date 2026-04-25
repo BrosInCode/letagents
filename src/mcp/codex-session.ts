@@ -16,6 +16,7 @@ const DEFAULT_STOP_PHRASE = "/stop-codex-room";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_STARTUP_OBSERVATION_MS = 8_000;
 const STARTUP_POLL_INTERVAL_MS = 500;
+const SESSION_MONITOR_INTERVAL_MS = 30_000;
 
 function getWebSocketCtor(): typeof WebSocket {
   const ctor = globalThis.WebSocket;
@@ -88,6 +89,7 @@ export interface StartLocalCodexSessionResult {
 
 /** Track spawned server PIDs for cleanup on process exit. */
 const spawnedServerPids = new Set<number>();
+const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 function terminateSpawnedProcess(pid: number): void {
   try {
@@ -112,6 +114,11 @@ function registerProcessCleanup(): void {
   cleanupRegistered = true;
 
   const cleanup = () => {
+    for (const timer of sessionMonitorTimers.values()) {
+      clearInterval(timer);
+    }
+    sessionMonitorTimers.clear();
+
     for (const pid of spawnedServerPids) {
       terminateSpawnedProcess(pid);
     }
@@ -437,7 +444,7 @@ export function deriveCodexLiveSessionStatus(
   return session.status;
 }
 
-function isTerminalStartupStatus(status: CodexLiveSessionState["status"]): boolean {
+function isTerminalCodexSessionStatus(status: CodexLiveSessionState["status"]): boolean {
   return status === "completed" || status === "interrupted" || status === "failed";
 }
 
@@ -454,6 +461,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function clearSessionMonitor(sessionId: string): void {
+  const timer = sessionMonitorTimers.get(sessionId);
+  if (!timer) {
+    return;
+  }
+
+  clearInterval(timer);
+  sessionMonitorTimers.delete(sessionId);
+}
+
 function killOwnedAppServer(session: CodexLiveSessionState): void {
   if (!session.launched_server || !session.server_pid) {
     return;
@@ -461,6 +478,30 @@ function killOwnedAppServer(session: CodexLiveSessionState): void {
 
   terminateSpawnedProcess(session.server_pid);
   spawnedServerPids.delete(session.server_pid);
+}
+
+function scheduleOwnedSessionMonitor(session: CodexLiveSessionState): void {
+  if (!session.launched_server || sessionMonitorTimers.has(session.session_id)) {
+    return;
+  }
+
+  const timer = setInterval(() => {
+    void inspectLocalCodexSession(session.session_id)
+      .then((status) => {
+        if (
+          !status ||
+          !status.server_reachable ||
+          isTerminalCodexSessionStatus(status.session.status)
+        ) {
+          clearSessionMonitor(session.session_id);
+        }
+      })
+      .catch(() => {
+        clearSessionMonitor(session.session_id);
+      });
+  }, SESSION_MONITOR_INTERVAL_MS);
+  timer.unref?.();
+  sessionMonitorTimers.set(session.session_id, timer);
 }
 
 async function waitForWorkerStartup(session: CodexLiveSessionState): Promise<CodexLiveSessionState> {
@@ -476,7 +517,21 @@ async function waitForWorkerStartup(session: CodexLiveSessionState): Promise<Cod
     }
 
     latest = inspected.session;
-    if (isTerminalStartupStatus(latest.status)) {
+    if (!inspected.server_reachable || latest.status === "unknown") {
+      const reason = !inspected.server_reachable
+        ? "app-server became unreachable during startup"
+        : "worker status became unknown during startup";
+      const failed =
+        updateCodexLiveSession(session.session_id, (current) => ({
+          ...current,
+          status: "failed",
+          last_error: reason,
+          updated_at: new Date().toISOString(),
+        })) ?? latest;
+      throw new Error(`Codex worker exited during startup: ${failed.last_error ?? reason}`);
+    }
+
+    if (isTerminalCodexSessionStatus(latest.status)) {
       const reason = latest.status === "completed"
         ? "turn completed before entering the room polling loop"
         : `turn entered ${latest.status}`;
@@ -589,6 +644,10 @@ export async function inspectLocalCodexSession(
         status: deriveCodexLiveSessionStatus(current, false, null, null),
         updated_at: new Date().toISOString(),
       })) ?? session;
+    if (updated.launched_server) {
+      killOwnedAppServer(updated);
+      clearSessionMonitor(updated.session_id);
+    }
 
     return {
       session: updated,
@@ -626,6 +685,10 @@ export async function inspectLocalCodexSession(
         last_error: null,
         updated_at: new Date().toISOString(),
       })) ?? session;
+    if (isTerminalCodexSessionStatus(updated.status)) {
+      killOwnedAppServer(updated);
+      clearSessionMonitor(updated.session_id);
+    }
 
     return {
       session: updated,
@@ -642,6 +705,10 @@ export async function inspectLocalCodexSession(
         last_error: error instanceof Error ? error.message : String(error),
         updated_at: new Date().toISOString(),
       })) ?? session;
+    if (updated.launched_server) {
+      killOwnedAppServer(updated);
+      clearSessionMonitor(updated.session_id);
+    }
 
     return {
       session: updated,
@@ -671,6 +738,7 @@ export async function startLocalCodexSession(
       inspected &&
       (inspected.session.status === "running" || inspected.session.status === "starting")
     ) {
+      scheduleOwnedSessionMonitor(inspected.session);
       return { session: inspected.session, reused: true };
     }
   }
@@ -755,6 +823,7 @@ export async function startLocalCodexSession(
 
     try {
       const verifiedSession = await waitForWorkerStartup(session);
+      scheduleOwnedSessionMonitor(verifiedSession);
       startupSucceeded = true;
       return { session: verifiedSession, reused: false };
     } catch (error) {
@@ -815,6 +884,7 @@ export async function stopLocalCodexSession(options?: {
   if (options?.shutdown_server || updated.launched_server) {
     killOwnedAppServer(updated);
   }
+  clearSessionMonitor(updated.session_id);
 
   return updated;
 }
