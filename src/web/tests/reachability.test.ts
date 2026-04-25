@@ -109,8 +109,8 @@ test('buildMentionCandidates only includes live non-hidden agents and visible hu
     candidates.map((candidate) => candidate.label),
     ['@LiveOak', '@GhostAsh', '@EmmyMay'],
   )
-  assert.equal(candidates[0]?.meta.includes('Active in room'), true)
-  assert.equal(candidates[1]?.meta.includes('Away but reachable'), true)
+  assert.equal(candidates[0]?.meta.includes('Connected'), true)
+  assert.equal(candidates[1]?.meta.includes('Connected'), true)
 })
 
 test('buildMentionCandidates treats active presence as reachable even when participant history is offline', () => {
@@ -332,13 +332,13 @@ test('describeAgentReachability does not show stale status text for offline agen
   )
 })
 
-test('describeAgentReachability keeps status text for reachable agents', () => {
+test('describeAgentReachability keeps reachability separate from status text', () => {
   assert.equal(
     describeAgentReachability({
       activityState: 'away',
       hasCanonicalPresence: true,
       statusText: 'available in room',
     }),
-    'available in room',
+    'Can receive room messages now',
   )
 })

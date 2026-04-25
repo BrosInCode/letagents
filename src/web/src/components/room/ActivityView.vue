@@ -8,16 +8,16 @@
     <div class="activity-summary">
       <template v-if="activeView === 'live'">
         <article class="summary-card">
-          <strong>{{ activeAgents.length }}</strong>
-          <span>Active agents</span>
+          <strong>{{ connectedAgents.length }}</strong>
+          <span>Connected agents</span>
         </article>
         <article class="summary-card">
-          <strong>{{ awayAgents.length }}</strong>
-          <span>Away agents</span>
+          <strong>{{ workingAgents.length }}</strong>
+          <span>Work signals</span>
         </article>
         <article class="summary-card">
-          <strong>{{ offlineAgents.length }}</strong>
-          <span>Offline agents</span>
+          <strong>{{ recentlyDisconnectedAgents.length }}</strong>
+          <span>Recently disconnected</span>
         </article>
         <article class="summary-card">
           <strong>{{ humans.length }}</strong>
@@ -355,12 +355,12 @@
     </div>
 
     <div v-else-if="participants.length === 0" class="activity-empty">
-      <h3>{{ clearedLiveCount > 0 ? 'Live roster cleared' : 'No active room participants right now' }}</h3>
+      <h3>{{ clearedLiveCount > 0 ? 'Live roster cleared' : 'No live room participants right now' }}</h3>
       <p>
         {{
           clearedLiveCount > 0
-            ? 'Offline agents were cleared from the live roster. Switch to History to inspect the full room record.'
-            : 'Agents and humans will appear here once they become active, go away, join, or send messages.'
+            ? 'Disconnected agents were cleared from the live roster. Switch to History to inspect the full room record.'
+            : 'Agents and humans will appear here once they connect, disconnect recently, join, or send messages.'
         }}
       </p>
     </div>
@@ -370,15 +370,15 @@
         <section class="activity-group">
           <div class="activity-group-header">
             <div>
-              <h3>Active in room</h3>
-              <p>Agents currently active through the room transport.</p>
+              <h3>Connected</h3>
+              <p>Agents with a fresh room transport. They can receive the next room message.</p>
             </div>
-            <span class="activity-group-count">{{ activeAgents.length }}</span>
+            <span class="activity-group-count">{{ connectedAgents.length }}</span>
           </div>
 
-          <div v-if="activeAgents.length > 0" class="activity-roster">
+          <div v-if="connectedAgents.length > 0" class="activity-roster">
             <button
-              v-for="participant in activeAgents"
+              v-for="participant in connectedAgents"
               :key="participant.key"
               class="activity-roster-item"
               :data-selected="selectedParticipant?.key === participant.key"
@@ -392,61 +392,18 @@
                   <div class="activity-roster-name">{{ participant.label }}</div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
-                <span class="activity-connection-pill" :data-connection="participant.activityState">
-                  {{ connectionLabel(participant) }}
-                </span>
-              </div>
-              <div class="activity-roster-status">
-                <span
-                  v-if="participant.status"
-                  class="activity-status-dot"
-                  :data-status="participant.status"
-                />
-                <span>{{ participantNote(participant) }}</span>
-                <span
-                  v-if="participant.activeReasoning.length > 0"
-                  class="activity-reasoning-pill"
-                >
-                  {{ participant.activeReasoning.length === 1 ? '1 live reasoning stream' : `${participant.activeReasoning.length} live reasoning streams` }}
-                </span>
-                <span class="activity-roster-seen">{{ formatLastSeen(participant.lastSeenAt) }}</span>
-              </div>
-            </button>
-          </div>
-
-          <div v-else class="activity-group-empty">
-            No active agents are in this room right now.
-          </div>
-        </section>
-
-        <section class="activity-group">
-          <div class="activity-group-header">
-            <div>
-              <h3>Away but reachable</h3>
-              <p>Agents still connected to this room and able to receive messages.</p>
-            </div>
-            <span class="activity-group-count">{{ awayAgents.length }}</span>
-          </div>
-
-          <div v-if="awayAgents.length > 0" class="activity-roster">
-            <button
-              v-for="participant in awayAgents"
-              :key="participant.key"
-              class="activity-roster-item"
-              :data-selected="selectedParticipant?.key === participant.key"
-              :data-kind="participant.kind"
-              :data-connection="participant.activityState"
-              type="button"
-              @click="selectedParticipantKey = participant.key"
-            >
-              <div class="activity-roster-header">
-                <div>
-                  <div class="activity-roster-name">{{ participant.label }}</div>
-                  <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
+                <div class="activity-roster-badges">
+                  <span class="activity-connection-pill" :data-connection="participant.activityState">
+                    {{ connectionLabel(participant) }}
+                  </span>
+                  <span
+                    v-if="participant.workSignal"
+                    class="activity-work-pill"
+                    :data-work-state="participant.workSignal.state"
+                  >
+                    {{ participant.workSignal.label }}
+                  </span>
                 </div>
-                <span class="activity-connection-pill" :data-connection="participant.activityState">
-                  {{ connectionLabel(participant) }}
-                </span>
               </div>
               <div class="activity-roster-status">
                 <span
@@ -455,6 +412,12 @@
                   :data-status="participant.status"
                 />
                 <span>{{ participantNote(participant) }}</span>
+                <span
+                  v-if="participant.workSignal?.detail"
+                  class="activity-work-detail"
+                >
+                  {{ participant.workSignal.detail }}
+                </span>
                 <span
                   v-if="participant.activeReasoning.length > 0"
                   class="activity-reasoning-pill"
@@ -467,20 +430,20 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            No away agents are connected right now.
+            No agents are connected to this room right now.
           </div>
         </section>
 
         <section class="activity-group">
           <div class="activity-group-header">
             <div>
-              <h3>Offline</h3>
-              <p>Agents that are no longer reachable in this room.</p>
+              <h3>Recently disconnected</h3>
+              <p>Agents whose delivery channel expired recently. They are not currently reachable.</p>
             </div>
             <div class="activity-group-header-actions">
-              <span class="activity-group-count">{{ offlineAgents.length }}</span>
+              <span class="activity-group-count">{{ recentlyDisconnectedAgents.length }}</span>
               <button
-                v-if="props.canManageParticipants && offlineAgents.length > 0"
+                v-if="props.canManageParticipants && recentlyDisconnectedAgents.length > 0"
                 class="activity-action-button"
                 type="button"
                 :disabled="clearBusy"
@@ -491,9 +454,9 @@
             </div>
           </div>
 
-          <div v-if="offlineAgents.length > 0" class="activity-roster">
+          <div v-if="recentlyDisconnectedAgents.length > 0" class="activity-roster">
             <button
-              v-for="participant in offlineAgents"
+              v-for="participant in recentlyDisconnectedAgents"
               :key="participant.key"
               class="activity-roster-item"
               :data-selected="selectedParticipant?.key === participant.key"
@@ -507,9 +470,18 @@
                   <div class="activity-roster-name">{{ participant.label }}</div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
-                <span class="activity-connection-pill" :data-connection="participant.activityState">
-                  {{ connectionLabel(participant) }}
-                </span>
+                <div class="activity-roster-badges">
+                  <span class="activity-connection-pill" :data-connection="participant.activityState">
+                    {{ connectionLabel(participant) }}
+                  </span>
+                  <span
+                    v-if="participant.workSignal"
+                    class="activity-work-pill"
+                    :data-work-state="participant.workSignal.state"
+                  >
+                    {{ participant.workSignal.label }}
+                  </span>
+                </div>
               </div>
               <div class="activity-roster-status">
                 <span
@@ -518,6 +490,12 @@
                   :data-status="participant.status"
                 />
                 <span>{{ participantNote(participant) }}</span>
+                <span
+                  v-if="participant.workSignal?.detail"
+                  class="activity-work-detail"
+                >
+                  {{ participant.workSignal.detail }}
+                </span>
                 <span
                   v-if="participant.activeReasoning.length > 0"
                   class="activity-reasoning-pill"
@@ -530,7 +508,7 @@
           </div>
 
           <div v-else class="activity-group-empty">
-            {{ clearedLiveCount > 0 ? 'Offline agents were cleared from the live roster.' : 'No offline agents have been seen yet.' }}
+            {{ clearedLiveCount > 0 ? 'Disconnected agents were cleared from the live roster.' : 'No recently disconnected agents have been seen yet.' }}
           </div>
         </section>
 
@@ -592,11 +570,11 @@
               {{ connectionLabel(selectedParticipant) }}
             </span>
             <span
-              v-if="selectedParticipant.status"
-              class="activity-status-pill"
-              :data-status="selectedParticipant.status"
+              v-if="selectedParticipant.workSignal"
+              class="activity-work-pill"
+              :data-work-state="selectedParticipant.workSignal.state"
             >
-              {{ STATUS_LABELS[selectedParticipant.status] }}
+              {{ selectedParticipant.workSignal.label }}
             </span>
           </div>
         </div>
@@ -868,6 +846,13 @@ import {
 
 type ParticipantKind = 'agent' | 'human'
 type ParticipantActivityState = 'active' | 'away' | 'offline'
+type ParticipantWorkState = 'working' | 'reviewing' | 'blocked' | 'responding'
+
+interface ParticipantWorkSignal {
+  state: ParticipantWorkState
+  label: string
+  detail: string | null
+}
 
 interface ActivityParticipant {
   key: string
@@ -880,6 +865,7 @@ interface ActivityParticipant {
   hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
   statusText: string | null
+  workSignal: ParticipantWorkSignal | null
   lastSeenAt: string | null
   messageCount: number
   activeReasoning: RoomReasoningSession[]
@@ -903,6 +889,7 @@ interface HistoryParticipant {
   hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
   statusText: string | null
+  workSignal: ParticipantWorkSignal | null
   firstSeenAt: string | null
   lastSeenAt: string | null
   messageCount: number
@@ -955,9 +942,9 @@ const STATUS_LABELS: Record<RoomAgentPresence['status'], string> = {
   blocked: 'Blocked',
 }
 const ACTIVITY_STATE_LABELS: Record<ParticipantActivityState, string> = {
-  active: 'Active',
-  away: 'Away',
-  offline: 'Offline',
+  active: 'Connected',
+  away: 'Connected',
+  offline: 'Recently disconnected',
 }
 const TASK_STATUS_LABELS: Record<string, string> = {
   proposed: 'Proposed',
@@ -1094,6 +1081,35 @@ function isActiveReasoningSession(session: RoomReasoningSession): boolean {
   return !INACTIVE_REASONING_STATUSES.has(String(session.status || '').toLowerCase())
 }
 
+function buildWorkSignal(input: {
+  status: RoomAgentPresence['status'] | null
+  statusText: string | null
+  currentTasks: ReadonlyArray<unknown>
+  activeReasoning: ReadonlyArray<unknown>
+}): ParticipantWorkSignal | null {
+  if (input.status === 'blocked') {
+    return { state: 'blocked', label: 'Blocked', detail: input.statusText }
+  }
+
+  if (input.status === 'reviewing') {
+    return { state: 'reviewing', label: 'Reviewing', detail: input.statusText }
+  }
+
+  if (input.status === 'working') {
+    return { state: 'working', label: 'Working', detail: input.statusText }
+  }
+
+  if (input.activeReasoning.length > 0) {
+    return { state: 'responding', label: 'Responding', detail: 'Visible reasoning stream active' }
+  }
+
+  if (input.currentTasks.length > 0) {
+    return { state: 'working', label: 'Working', detail: `${input.currentTasks.length} open task${input.currentTasks.length === 1 ? '' : 's'} assigned` }
+  }
+
+  return null
+}
+
 function buildAgentParticipant(source: AgentReachabilitySource): ActivityParticipant {
   const { actorLabel, key, participant, presence: presenceEntry, activityState } = source
   const messages = actorLabel ? (agentMessagesByActor.value.get(actorLabel) || []) : []
@@ -1127,6 +1143,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     hasCanonicalPresence: false,
     status: null,
     statusText: null,
+    workSignal: null,
     lastSeenAt: null,
     messageCount: messages.length,
     activeReasoning: [],
@@ -1153,6 +1170,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
       hasCanonicalPresence: false,
       status: null,
       statusText: null,
+      workSignal: null,
       lastSeenAt: null,
       messageCount: messages.length,
       activeReasoning: [],
@@ -1166,6 +1184,12 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
   ).slice(0, 8)
   const rawStatusText = presenceEntry?.status_text || (latestStatusMessage ? extractStatusText(latestStatusMessage.text || '') : null) || null
   const statusText = activityState === 'offline' ? null : rawStatusText
+  const workSignal = buildWorkSignal({
+    status: presenceEntry?.status || null,
+    statusText,
+    currentTasks,
+    activeReasoning,
+  })
   const thinkingSnapshot = buildAgentThinkingSnapshot({
     messages,
     status: presenceEntry?.status || null,
@@ -1186,6 +1210,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     ),
     status: presenceEntry?.status || null,
     statusText,
+    workSignal,
     lastSeenAt: latestTimestamp(
       participant?.last_room_activity_at,
       participant?.last_seen_at,
@@ -1233,6 +1258,7 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
     hasCanonicalPresence: false,
     status: null,
     statusText: latestMessage ? previewMessage(latestMessage.text) : null,
+    workSignal: null,
     lastSeenAt: latestTimestamp(
       participant.last_room_activity_at,
       participant.last_seen_at,
@@ -1280,15 +1306,17 @@ const humanParticipants = computed(() => {
     .sort(compareParticipants)
 })
 
-const activeAgents = computed(() =>
-  agentParticipants.value.filter((participant) => participant.activityState === 'active')
+const connectedAgents = computed(() =>
+  agentParticipants.value.filter((participant) =>
+    participant.activityState === 'active' || participant.activityState === 'away'
+  )
 )
 
-const awayAgents = computed(() =>
-  agentParticipants.value.filter((participant) => participant.activityState === 'away')
+const workingAgents = computed(() =>
+  connectedAgents.value.filter((participant) => Boolean(participant.workSignal))
 )
 
-const offlineAgents = computed(() =>
+const recentlyDisconnectedAgents = computed(() =>
   agentParticipants.value.filter((participant) =>
     participant.activityState === 'offline' && participant.hasCanonicalPresence
   )
@@ -1301,9 +1329,8 @@ const activeReasoningSessions = computed(() =>
 const humans = computed(() => humanParticipants.value)
 
 const participants = computed(() => [
-  ...activeAgents.value,
-  ...awayAgents.value,
-  ...offlineAgents.value,
+  ...connectedAgents.value,
+  ...recentlyDisconnectedAgents.value,
   ...humans.value,
 ])
 
@@ -1417,6 +1444,7 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
     hasCanonicalPresence: false,
     status: null,
     statusText: null,
+    workSignal: null,
     firstSeenAt: entry.first_seen_at,
     lastSeenAt: entry.last_seen_at,
     messageCount: 0,
@@ -1614,7 +1642,7 @@ function historyDetailNote(participant: HistoryParticipant): string {
     return 'History stays focused on room participation and linked work. Use the Live tab for current browser activity.'
   }
 
-  return 'History stays focused on room participation and linked work. Use the Live tab to inspect current active, away, or offline state.'
+  return 'History stays focused on room participation and linked work. Use the Live tab to inspect current reachability and work signals.'
 }
 
 function reasoningCardTitle(session: RoomReasoningSession): string {
@@ -1856,7 +1884,8 @@ function formatLastSeen(value: string | null): string {
 .activity-group-count,
 .activity-kind-pill,
 .activity-connection-pill,
-.activity-status-pill {
+.activity-status-pill,
+.activity-work-pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1896,6 +1925,31 @@ function formatLastSeen(value: string | null): string {
 .activity-status-pill[data-status='reviewing'] { background: var(--activity-amber-dim); color: var(--activity-amber); }
 .activity-status-pill[data-status='blocked'] { background: var(--activity-red-dim); color: var(--activity-red); }
 
+.activity-work-pill {
+  background: var(--activity-surface-hover);
+  color: var(--activity-text-secondary);
+}
+
+.activity-work-pill[data-work-state='working'] {
+  background: var(--activity-blue-dim);
+  color: var(--activity-blue);
+}
+
+.activity-work-pill[data-work-state='reviewing'] {
+  background: var(--activity-amber-dim);
+  color: var(--activity-amber);
+}
+
+.activity-work-pill[data-work-state='blocked'] {
+  background: var(--activity-red-dim);
+  color: var(--activity-red);
+}
+
+.activity-work-pill[data-work-state='responding'] {
+  background: var(--activity-green-dim);
+  color: var(--activity-green);
+}
+
 .activity-roster {
   display: grid;
   gap: var(--space-sm, 8px);
@@ -1925,6 +1979,13 @@ function formatLastSeen(value: string | null): string {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.activity-roster-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .activity-roster-name {
@@ -1963,6 +2024,12 @@ function formatLastSeen(value: string | null): string {
   color: #93c5fd;
   font-size: 0.68rem;
   font-weight: 700;
+}
+
+.activity-work-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .activity-roster-seen {
