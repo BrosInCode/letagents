@@ -4,6 +4,7 @@ import {
   createRoomAgentSession,
   endRoomAgentSession,
   getFocusRoomsForParent,
+  getActiveRoomAgentSessionForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getMessages,
   getRoomAgentPresence,
@@ -431,9 +432,40 @@ export function registerRoomPresenceRoutes(
       );
       const requestedDisplayName = typeof display_name === "string" ? display_name.trim() : "";
       const sessionDisplayName = requestedDisplayName || agent.display_name;
+      const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
+      const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
+      if (requestedSessionKind === "worker") {
+        const activeSession = await getActiveRoomAgentSessionForWorkerIdentity({
+          room_id: project.id,
+          agent_key: agent.canonical_key,
+        });
+        if (activeSession) {
+          const sameAgentInstance = Boolean(
+            normalizedAgentInstanceId &&
+            activeSession.agent_instance_id &&
+            activeSession.agent_instance_id === normalizedAgentInstanceId
+          );
+          if (sameAgentInstance) {
+            await endRoomAgentSession({
+              session_id: activeSession.session_id,
+              room_id: project.id,
+              owner_account_id: req.sessionAccount.account_id,
+            });
+          } else {
+            res.status(409).json({
+              error: `${activeSession.display_name} is already registered as an active worker in this room. Use a different agent identity or disconnect the existing worker first.`,
+              code: "agent_identity_already_active",
+              active_agent_session_id: activeSession.session_id,
+              active_display_name: activeSession.display_name,
+              active_runtime: activeSession.runtime,
+            });
+            return;
+          }
+        }
+      }
       const session = await createRoomAgentSession({
         room_id: project.id,
-        session_kind: normalizeRoomAgentSessionKind(session_kind || "worker"),
+        session_kind: requestedSessionKind,
         runtime: normalizeRuntime(runtime || resolvedIdeLabel),
         actor_label: buildAgentActorLabel({
           display_name: sessionDisplayName,
@@ -441,7 +473,7 @@ export function registerRoomPresenceRoutes(
           ide_label: resolvedIdeLabel,
         }),
         agent_key: agent.canonical_key,
-        agent_instance_id: typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null,
+        agent_instance_id: normalizedAgentInstanceId,
         display_name: sessionDisplayName,
         owner_account_id: req.sessionAccount.account_id,
         owner_label: agent.owner_label,

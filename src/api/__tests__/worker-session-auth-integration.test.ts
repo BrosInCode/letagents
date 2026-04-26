@@ -372,6 +372,96 @@ async function invoke(
 }
 
 test(
+  "agent session registration rejects active worker identity reuse by another instance",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, worker } = await seedHarness();
+    const handlers = registerRoutesForRoom(room);
+    const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+
+    const conflictingRegistration = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          actor_key: worker.agent_key,
+          actor_label: worker.actor_label,
+          display_name: worker.display_name,
+          ide_label: "Antigravity",
+          agent_instance_id: "different-antigravity-instance",
+          session_kind: "worker",
+          runtime: "antigravity",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+
+    assert.equal(conflictingRegistration.statusCode, 409);
+    assert.deepEqual(
+      {
+        code: (conflictingRegistration.body as { code?: string }).code,
+        active_agent_session_id: (conflictingRegistration.body as { active_agent_session_id?: string }).active_agent_session_id,
+      },
+      {
+        code: "agent_identity_already_active",
+        active_agent_session_id: worker.session_id,
+      }
+    );
+
+    const sameInstanceRegistration = await invoke(
+      registerHandler,
+      ownerTokenRequest(
+        {
+          actor_key: worker.agent_key,
+          actor_label: worker.actor_label,
+          display_name: worker.display_name,
+          ide_label: "Codex",
+          agent_instance_id: worker.agent_instance_id,
+          session_kind: "worker",
+          runtime: "codex",
+        },
+        { params: { 0: room.id } }
+      )
+    );
+
+    assert.equal(sameInstanceRegistration.statusCode, 201, JSON.stringify(sameInstanceRegistration.body));
+    const replacementSession = sameInstanceRegistration.body as {
+      session_id?: string;
+      session_token?: string;
+    };
+    assert.ok(replacementSession.session_id);
+    assert.notEqual(replacementSession.session_id, worker.session_id);
+
+    const oldSessionMessage = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/messages$/"),
+      ownerTokenRequest(
+        {
+          text: "old worker session should be ended by reconnect",
+          ...sessionCredentials(worker),
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(oldSessionMessage.statusCode, 401);
+
+    const replacementMessage = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/messages$/"),
+      ownerTokenRequest(
+        {
+          text: "replacement worker session can write",
+          agent_session_id: replacementSession.session_id,
+          agent_session_token: replacementSession.session_token,
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(replacementMessage.statusCode, 201);
+  }
+);
+
+test(
   "registered worker sessions can write messages, presence, reasoning, and task updates",
   {
     concurrency: false,
