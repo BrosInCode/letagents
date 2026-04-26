@@ -447,8 +447,8 @@ export function registerRoomPresenceRoutes(
       );
       const requestedDisplayName = typeof display_name === "string" ? display_name.trim() : "";
       const genericKeywords = new Set(["antigravity", "codex", "agent", "worker", "local", "claude", "cursor", "cline", "roo"]);
-      resolvedIdeLabel.toLowerCase().split(/[\\s_-]+/).forEach(t => { if (t) genericKeywords.add(t); });
-      const requestedTokens = requestedDisplayName.toLowerCase().split(/[\\s_-]+/).filter(t => t.length > 0);
+      resolvedIdeLabel.toLowerCase().split(/[\s_-]+/).forEach(t => { if (t) genericKeywords.add(t); });
+      const requestedTokens = requestedDisplayName.toLowerCase().split(/[\s_-]+/).filter(t => t.length > 0);
       const isGenericName = !requestedDisplayName || requestedTokens.every(t => genericKeywords.has(t));
       
       let baseDisplayName = isGenericName ? pickLocalCodename(agent.canonical_key).display_name : (requestedDisplayName || agent.display_name);
