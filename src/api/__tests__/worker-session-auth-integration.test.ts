@@ -402,21 +402,25 @@ test(
       transport: "long_poll",
     });
 
-    const secondRegistration = await invoke(
-      registerHandler,
-      ownerTokenRequest(
-        {
-          actor_key: worker.agent_key,
-          actor_label: worker.actor_label,
-          display_name: worker.display_name,
-          ide_label: "Antigravity",
-          agent_instance_id: "different-antigravity-instance",
-          session_kind: "worker",
-          runtime: "antigravity",
-        },
-        { params: { 0: room.id } }
-      )
-    );
+    const registrationBody = {
+      actor_key: worker.agent_key,
+      actor_label: worker.actor_label,
+      display_name: worker.display_name,
+      ide_label: "Antigravity",
+      agent_instance_id: "different-antigravity-instance",
+      session_kind: "worker",
+      runtime: "antigravity",
+    };
+    const [secondRegistration, thirdRegistration] = await Promise.all([
+      invoke(
+        registerHandler,
+        ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+      ),
+      invoke(
+        registerHandler,
+        ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+      ),
+    ]);
 
     assert.equal(secondRegistration.statusCode, 201, JSON.stringify(secondRegistration.body));
     const secondSession = secondRegistration.body as {
@@ -426,23 +430,6 @@ test(
     };
     assert.ok(secondSession.session_id);
     assert.notEqual(secondSession.session_id, worker.session_id);
-    assert.equal(secondSession.display_name, "OwlSolar 1");
-
-    const thirdRegistration = await invoke(
-      registerHandler,
-      ownerTokenRequest(
-        {
-          actor_key: worker.agent_key,
-          actor_label: worker.actor_label,
-          display_name: worker.display_name,
-          ide_label: "Codex",
-          agent_instance_id: worker.agent_instance_id,
-          session_kind: "worker",
-          runtime: "codex",
-        },
-        { params: { 0: room.id } }
-      )
-    );
 
     assert.equal(thirdRegistration.statusCode, 201, JSON.stringify(thirdRegistration.body));
     const thirdSession = thirdRegistration.body as {
@@ -453,7 +440,10 @@ test(
     assert.ok(thirdSession.session_id);
     assert.notEqual(thirdSession.session_id, worker.session_id);
     assert.notEqual(thirdSession.session_id, secondSession.session_id);
-    assert.equal(thirdSession.display_name, "OwlSolar 2");
+    assert.deepEqual(
+      [secondSession.display_name, thirdSession.display_name].sort(),
+      ["OwlSolar 1", "OwlSolar 2"]
+    );
 
     const oldDeliverySession = (await getRoomAgentDeliverySessions(room.id))
       .find((session) => session.agent_session_id === worker.session_id);

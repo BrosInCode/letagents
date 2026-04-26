@@ -112,6 +112,20 @@ function normalizeRuntime(value: unknown): string {
   return normalized || "unknown";
 }
 
+function isActiveWorkerActorLabelConflict(error: unknown): boolean {
+  const cause = typeof error === "object" && error !== null && "cause" in error
+    ? (error as { cause?: unknown }).cause
+    : error;
+  const code = typeof cause === "object" && cause !== null && "code" in cause
+    ? (cause as { code?: unknown }).code
+    : null;
+  const constraint = typeof cause === "object" && cause !== null && "constraint" in cause
+    ? (cause as { constraint?: unknown }).constraint
+    : null;
+
+  return code === "23505" && constraint === "room_agent_sessions_active_worker_actor_label_idx";
+}
+
 export function buildRoomActivityHistoryParticipants(input: {
   roomId: string;
   storedParticipants: readonly RoomParticipant[];
@@ -438,8 +452,6 @@ export function registerRoomPresenceRoutes(
       const isGenericName = !requestedDisplayName || requestedTokens.every(t => genericKeywords.has(t));
       
       let baseDisplayName = isGenericName ? pickLocalCodename(agent.canonical_key).display_name : (requestedDisplayName || agent.display_name);
-      let sessionDisplayName = baseDisplayName;
-
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
       const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
@@ -450,33 +462,63 @@ export function registerRoomPresenceRoutes(
             })
           : Promise.resolve([]),
       ]);
+      const usedDisplayNames = new Set([
+        ...activeParticipants.map(p => p.display_name),
+        ...activeSessionsForIdentity.map(session => session.display_name),
+      ]);
+      const pickSessionDisplayName = (suffixOffset: number): string => (
+        suffixOffset === 0
+          ? baseDisplayName
+          : isGenericName
+            ? pickLocalCodename(`${agent.canonical_key}:${suffixOffset}`).display_name
+            : `${baseDisplayName} ${suffixOffset}`
+      );
+
       let offset = 0;
-      while (
-        activeParticipants.some(p => p.display_name === sessionDisplayName)
-        || activeSessionsForIdentity.some(session => session.display_name === sessionDisplayName)
-      ) {
-        offset++;
-        sessionDisplayName = isGenericName ? pickLocalCodename(`${agent.canonical_key}:${offset}`).display_name : `${baseDisplayName} ${offset}`;
-      }
       const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
-      const session = await createRoomAgentSession({
-        room_id: project.id,
-        session_kind: requestedSessionKind,
-        runtime: normalizeRuntime(runtime || resolvedIdeLabel),
-        actor_label: buildAgentActorLabel({
+      const maxRegistrationAttempts = 25;
+      for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
+        let sessionDisplayName = pickSessionDisplayName(offset);
+        while (usedDisplayNames.has(sessionDisplayName)) {
+          offset++;
+          sessionDisplayName = pickSessionDisplayName(offset);
+        }
+        const actorLabel = buildAgentActorLabel({
           display_name: sessionDisplayName,
           owner_label: agent.owner_label,
           ide_label: resolvedIdeLabel,
-        }),
-        agent_key: agent.canonical_key,
-        agent_instance_id: normalizedAgentInstanceId,
-        display_name: sessionDisplayName,
-        owner_account_id: req.sessionAccount.account_id,
-        owner_label: agent.owner_label,
-        ide_label: resolvedIdeLabel,
-      });
+        });
 
-      res.status(201).json(session);
+        try {
+          const session = await createRoomAgentSession({
+            room_id: project.id,
+            session_kind: requestedSessionKind,
+            runtime: normalizeRuntime(runtime || resolvedIdeLabel),
+            actor_label: actorLabel,
+            agent_key: agent.canonical_key,
+            agent_instance_id: normalizedAgentInstanceId,
+            display_name: sessionDisplayName,
+            owner_account_id: req.sessionAccount.account_id,
+            owner_label: agent.owner_label,
+            ide_label: resolvedIdeLabel,
+          });
+
+          res.status(201).json(session);
+          return;
+        } catch (error) {
+          if (requestedSessionKind === "worker" && isActiveWorkerActorLabelConflict(error)) {
+            usedDisplayNames.add(sessionDisplayName);
+            offset++;
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      res.status(409).json({
+        error: "Could not allocate a unique active worker display name for this room.",
+        code: "agent_session_display_name_exhausted",
+      });
     } catch (error) {
       respondWithInternalError(
         res,
