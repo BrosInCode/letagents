@@ -67,10 +67,12 @@ export function getAgentPresenceFreshnessFromReachability(
 export function isAgentDeliverySessionReachable(input: {
   activeConnectionCount: number;
   updatedAt: string | null | undefined;
+  reconnectGraceExpiresAt?: string | null | undefined;
 }, now = Date.now()): boolean {
-  if (input.activeConnectionCount <= 0) {
-    return false;
+  if (input.activeConnectionCount > 0 && getAgentPresenceFreshness(input.updatedAt ?? "", now) === "active") {
+    return true;
   }
 
-  return getAgentPresenceFreshness(input.updatedAt ?? "", now) === "active";
+  const graceExpiresAt = new Date(input.reconnectGraceExpiresAt ?? "").getTime();
+  return Number.isFinite(graceExpiresAt) && graceExpiresAt >= now;
 }

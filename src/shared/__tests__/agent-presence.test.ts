@@ -37,10 +37,12 @@ test("getAgentPresenceFreshness reports old or invalid heartbeats as stale", () 
   assert.equal(getAgentPresenceFreshness("not-a-date", now), "stale");
 });
 
-test("isAgentDeliverySessionReachable requires an active and fresh delivery heartbeat", () => {
+test("isAgentDeliverySessionReachable accepts active heartbeats and reconnect grace", () => {
   const now = Date.parse("2026-04-24T05:00:00.000Z");
   const freshHeartbeat = new Date(now - ACTIVE_AGENT_DELIVERY_WINDOW_MS + 1000).toISOString();
   const staleHeartbeat = new Date(now - ACTIVE_AGENT_DELIVERY_WINDOW_MS - 1000).toISOString();
+  const activeGrace = new Date(now + 1000).toISOString();
+  const expiredGrace = new Date(now - 1000).toISOString();
 
   assert.equal(
     isAgentDeliverySessionReachable({
@@ -53,6 +55,15 @@ test("isAgentDeliverySessionReachable requires an active and fresh delivery hear
     isAgentDeliverySessionReachable({
       activeConnectionCount: 0,
       updatedAt: freshHeartbeat,
+      reconnectGraceExpiresAt: activeGrace,
+    }, now),
+    true
+  );
+  assert.equal(
+    isAgentDeliverySessionReachable({
+      activeConnectionCount: 0,
+      updatedAt: freshHeartbeat,
+      reconnectGraceExpiresAt: expiredGrace,
     }, now),
     false
   );

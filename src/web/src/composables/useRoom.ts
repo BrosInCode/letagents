@@ -998,6 +998,20 @@ async function refreshRoomPresence(): Promise<boolean> {
   return true
 }
 
+async function refreshRoomReachability(): Promise<boolean> {
+  if (!room.value) return false
+  const roomIdentifier = room.value.identifier
+  const [nextPresence, nextParticipantsPage] = await Promise.all([
+    fetchPresence(roomIdentifier),
+    fetchParticipants(roomIdentifier),
+  ])
+  if (room.value?.identifier !== roomIdentifier) return false
+  presence.value = nextPresence
+  participants.value = nextParticipantsPage.participants
+  participantHiddenCount.value = nextParticipantsPage.hidden_count
+  return true
+}
+
 async function refreshRoomMessages(): Promise<boolean> {
   if (!room.value) return false
   const roomIdentifier = room.value.identifier
@@ -1989,6 +2003,7 @@ export function useRoom() {
     refreshFocusRooms,
     refreshRoomMessages,
     refreshRoomPresence,
+    refreshRoomReachability,
     loadActivityHistory,
     clearDisconnectedParticipants,
     refreshReasoningSessions,

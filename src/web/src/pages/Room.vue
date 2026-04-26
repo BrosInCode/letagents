@@ -157,6 +157,7 @@
       :messages="messages"
       :presence="presence"
       :participants="participants"
+      :refreshReachability="refreshRoomReachability"
       :isSignedIn="auth.isSignedIn.value"
       @clearReply="selectedReply = null"
       @signIn="handleSignIn"
@@ -299,6 +300,7 @@ const {
   clearDisconnectedParticipants,
   refreshRoomMessages,
   refreshRoomActivity,
+  refreshRoomReachability,
   refreshRoomBoard,
   refreshRoomFocusRooms,
   refreshRoomGitHubEvents,
