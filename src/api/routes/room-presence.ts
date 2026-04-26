@@ -4,6 +4,7 @@ import {
   createRoomAgentSession,
   endRoomAgentSession,
   getFocusRoomsForParent,
+  getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getMessages,
   getRoomAgentPresence,
@@ -108,6 +109,20 @@ function normalizeActorLabel(value: string | null | undefined): string {
 function normalizeRuntime(value: unknown): string {
   const normalized = String(value ?? "").trim().toLowerCase();
   return normalized || "unknown";
+}
+
+function isActiveWorkerIdentityConflict(error: unknown): boolean {
+  const cause = typeof error === "object" && error !== null && "cause" in error
+    ? (error as { cause?: unknown }).cause
+    : error;
+  const code = typeof cause === "object" && cause !== null && "code" in cause
+    ? (cause as { code?: unknown }).code
+    : null;
+  const constraint = typeof cause === "object" && cause !== null && "constraint" in cause
+    ? (cause as { constraint?: unknown }).constraint
+    : null;
+
+  return code === "23505" && constraint === "room_agent_sessions_active_worker_identity_idx";
 }
 
 export function buildRoomActivityHistoryParticipants(input: {
@@ -431,24 +446,81 @@ export function registerRoomPresenceRoutes(
       );
       const requestedDisplayName = typeof display_name === "string" ? display_name.trim() : "";
       const sessionDisplayName = requestedDisplayName || agent.display_name;
-      const session = await createRoomAgentSession({
-        room_id: project.id,
-        session_kind: normalizeRoomAgentSessionKind(session_kind || "worker"),
-        runtime: normalizeRuntime(runtime || resolvedIdeLabel),
-        actor_label: buildAgentActorLabel({
+      const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
+      const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
+      if (requestedSessionKind === "worker") {
+        const activeSessions = await getActiveRoomAgentSessionsForWorkerIdentity({
+          room_id: project.id,
+          agent_key: agent.canonical_key,
+        });
+        if (activeSessions.length > 0) {
+          const conflictingSession = activeSessions.find((activeSession) => !(
+            normalizedAgentInstanceId &&
+            activeSession.agent_instance_id &&
+            activeSession.agent_instance_id === normalizedAgentInstanceId
+          ));
+          if (!conflictingSession) {
+            for (const activeSession of activeSessions) {
+              await disconnectRoomAgentDeliverySession({
+                room_id: project.id,
+                agent_session_id: activeSession.session_id,
+              });
+            }
+            for (const activeSession of activeSessions) {
+              await endRoomAgentSession({
+                session_id: activeSession.session_id,
+                room_id: project.id,
+                owner_account_id: req.sessionAccount.account_id,
+              });
+            }
+          } else {
+            res.status(409).json({
+              error: `${conflictingSession.display_name} is already registered as an active worker in this room. Use a different agent identity or disconnect the existing worker first.`,
+              code: "agent_identity_already_active",
+              active_agent_session_id: conflictingSession.session_id,
+              active_display_name: conflictingSession.display_name,
+              active_runtime: conflictingSession.runtime,
+            });
+            return;
+          }
+        }
+      }
+      try {
+        const session = await createRoomAgentSession({
+          room_id: project.id,
+          session_kind: requestedSessionKind,
+          runtime: normalizeRuntime(runtime || resolvedIdeLabel),
+          actor_label: buildAgentActorLabel({
+            display_name: sessionDisplayName,
+            owner_label: agent.owner_label,
+            ide_label: resolvedIdeLabel,
+          }),
+          agent_key: agent.canonical_key,
+          agent_instance_id: normalizedAgentInstanceId,
           display_name: sessionDisplayName,
+          owner_account_id: req.sessionAccount.account_id,
           owner_label: agent.owner_label,
           ide_label: resolvedIdeLabel,
-        }),
-        agent_key: agent.canonical_key,
-        agent_instance_id: typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null,
-        display_name: sessionDisplayName,
-        owner_account_id: req.sessionAccount.account_id,
-        owner_label: agent.owner_label,
-        ide_label: resolvedIdeLabel,
-      });
+        });
 
-      res.status(201).json(session);
+        res.status(201).json(session);
+      } catch (error) {
+        if (isActiveWorkerIdentityConflict(error)) {
+          const [activeSession] = await getActiveRoomAgentSessionsForWorkerIdentity({
+            room_id: project.id,
+            agent_key: agent.canonical_key,
+          });
+          res.status(409).json({
+            error: `${activeSession?.display_name ?? agent.display_name} is already registered as an active worker in this room. Use a different agent identity or disconnect the existing worker first.`,
+            code: "agent_identity_already_active",
+            active_agent_session_id: activeSession?.session_id ?? null,
+            active_display_name: activeSession?.display_name ?? agent.display_name,
+            active_runtime: activeSession?.runtime ?? null,
+          });
+          return;
+        }
+        throw error;
+      }
     } catch (error) {
       respondWithInternalError(
         res,
