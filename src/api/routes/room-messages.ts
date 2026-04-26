@@ -33,6 +33,7 @@ import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
 } from "../../shared/room-agent-prompts.js";
+import { parseAgentActorLabel } from "../../shared/agent-identity.js";
 import {
   normalizeAttachmentUploadRequest,
   normalizeMessageAttachmentReferences,
@@ -65,6 +66,25 @@ interface ReasoningSessionUpdatedEvent {
 interface ReasoningSessionRemovedEvent {
   projectId: string;
   session_id: string;
+}
+
+function hasAgentSessionCredentials(input: {
+  agent_session_id?: string;
+  agent_session_token?: string;
+}): boolean {
+  return Boolean(
+    (typeof input.agent_session_id === "string" && input.agent_session_id.trim())
+      || (typeof input.agent_session_token === "string" && input.agent_session_token.trim())
+  );
+}
+
+function isAgentLikeSender(sender: unknown): boolean {
+  if (typeof sender !== "string") {
+    return false;
+  }
+
+  const parsed = parseAgentActorLabel(sender);
+  return Boolean(parsed && (parsed.structured || parsed.owner_attribution || parsed.ide_label));
 }
 
 export interface RoomMessageRouteDeps {
@@ -135,7 +155,10 @@ export function registerRoomMessageRoutes(
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
       const attachments = normalizeMessageAttachmentReferences(rawAttachments);
-      const agentSessionIdentity = req.authKind === "owner_token"
+      const requiresWorkerSession = req.authKind === "owner_token"
+        || hasAgentSessionCredentials({ agent_session_id, agent_session_token })
+        || isAgentLikeSender(sender);
+      const agentSessionIdentity = requiresWorkerSession
         ? await requireWorkerRequestAgentIdentity({
           req,
           body: { agent_session_id, agent_session_token },
@@ -161,9 +184,11 @@ export function registerRoomMessageRoutes(
         res.status(400).json({ error: "auto prompt messages cannot include attachments" });
         return;
       }
-      const source = req.authKind === "session"
+      const source = workerIdentity
+        ? "agent"
+        : req.authKind === "session"
         ? "browser"
-        : req.authKind === "owner_token" ? "agent" : undefined;
+        : undefined;
       const message = await deps.emitProjectMessage(project.id, normalizedSender, text, {
         source,
         agent_prompt_kind: promptKind,

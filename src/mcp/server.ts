@@ -2332,6 +2332,13 @@ server.tool(
     const sender = identity.actor_label;
     const statusText = `[status] ${status}`;
 
+    await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
+      status: classifyPresenceStatusText(
+        status,
+        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
+      ),
+      status_text: status,
+    }, agentSession);
     const message = await roomScopedApiCall<Record<string, unknown>>({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -2347,13 +2354,6 @@ server.tool(
       },
     });
     touchCurrentRoom(typeof message.id === "string" ? message.id : undefined);
-    await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
-      status: classifyPresenceStatusText(
-        status,
-        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
-      ),
-      status_text: status,
-    }, agentSession);
 
     return {
       content: [

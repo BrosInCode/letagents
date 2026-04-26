@@ -28,6 +28,7 @@ import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
 } from "../../shared/room-agent-prompts.js";
+import { parseAgentActorLabel } from "../../shared/agent-identity.js";
 import {
   normalizeMessageAttachmentReferences,
   type NormalizedMessageAttachmentReference,
@@ -40,6 +41,25 @@ import {
 interface MessageCreatedEvent {
   projectId: string;
   message: Message;
+}
+
+function hasAgentSessionCredentials(input: {
+  agent_session_id?: string;
+  agent_session_token?: string;
+}): boolean {
+  return Boolean(
+    (typeof input.agent_session_id === "string" && input.agent_session_id.trim())
+      || (typeof input.agent_session_token === "string" && input.agent_session_token.trim())
+  );
+}
+
+function isAgentLikeSender(sender: unknown): boolean {
+  if (typeof sender !== "string") {
+    return false;
+  }
+
+  const parsed = parseAgentActorLabel(sender);
+  return Boolean(parsed && (parsed.structured || parsed.owner_attribution || parsed.ide_label));
 }
 
 export interface LegacyProjectMessageRouteDeps {
@@ -109,7 +129,10 @@ export function registerLegacyProjectMessageRoutes(
     };
 
     try {
-      const workerIdentity = req.authKind === "owner_token"
+      const requiresWorkerSession = req.authKind === "owner_token"
+        || hasAgentSessionCredentials({ agent_session_id, agent_session_token })
+        || isAgentLikeSender(sender);
+      const workerIdentity = requiresWorkerSession
         ? await requireWorkerRequestAgentIdentity({
           req,
           body: { agent_session_id, agent_session_token },
@@ -139,7 +162,7 @@ export function registerLegacyProjectMessageRoutes(
         res.status(400).json({ error: "auto prompt messages cannot include attachments" });
         return;
       }
-      const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
+      const source = workerIdentity?.ok ? "agent" : req.authKind === "session" ? "browser" : undefined;
       const message = await deps.emitProjectMessage(projectId, normalizedSender, text, {
         source,
         agent_prompt_kind: promptKind,
