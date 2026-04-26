@@ -165,7 +165,7 @@
             <div class="activity-group-header">
               <div>
                 <h3>Humans seen in room</h3>
-                <p>Browser-side activity recorded for this room scope.</p>
+                <p>Record of human participants in this room.</p>
               </div>
               <span class="activity-group-count">{{ historyHumans.length }}</span>
             </div>
@@ -369,7 +369,7 @@
         {{
           clearedLiveCount > 0
             ? 'Disconnected agents were cleared from the live roster. Switch to History to inspect the full room record.'
-            : 'Agents and humans will appear here once they connect, disconnect recently, join, or send messages.'
+            : 'Activity will appear here as participants connect or interact with the room.'
         }}
       </p>
     </div>
@@ -380,7 +380,7 @@
           <div class="activity-group-header">
             <div>
               <h3>Connected</h3>
-              <p>Agents with a fresh room transport. They can receive the next room message.</p>
+              <p>Agents that are currently online and reachable.</p>
             </div>
             <span class="activity-group-count">{{ connectedAgents.length }}</span>
           </div>
@@ -450,7 +450,7 @@
           <div class="activity-group-header">
             <div>
               <h3>Recently disconnected</h3>
-              <p>Agents whose delivery channel expired recently. They are not currently reachable.</p>
+              <p>Agents that recently went offline and are no longer reachable.</p>
             </div>
             <div class="activity-group-header-actions">
               <span class="activity-group-count">{{ recentlyDisconnectedAgents.length }}</span>
@@ -531,7 +531,7 @@
           <div class="activity-group-header">
             <div>
               <h3>Humans seen in room</h3>
-              <p>People detected from browser-side room activity.</p>
+              <p>Human participants currently active in the room.</p>
             </div>
             <span class="activity-group-count">{{ humans.length }}</span>
           </div>
