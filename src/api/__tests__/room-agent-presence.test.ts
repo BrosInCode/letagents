@@ -231,8 +231,8 @@ test(
     });
 
     const disconnectedInGracePresence = await getRoomAgentPresence(room.id);
-    assert.equal(disconnectedInGracePresence[0]?.freshness, "stale");
-    assert.equal(disconnectedInGracePresence[0]?.activity_state, "offline");
+    assert.equal(disconnectedInGracePresence[0]?.freshness, "active");
+    assert.equal(disconnectedInGracePresence[0]?.activity_state, "active");
     assert.equal(disconnectedInGracePresence[0]?.status_text, "reviewing task_159 backend lane");
     assert.deepEqual(disconnectedInGracePresence[0]?.source_flags, ["delivery", "presence"]);
 

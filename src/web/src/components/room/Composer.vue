@@ -223,6 +223,7 @@ const props = withDefaults(defineProps<{
   messages?: readonly RoomMessage[]
   presence?: readonly RoomAgentPresence[]
   participants?: readonly RoomParticipant[]
+  refreshReachability?: () => Promise<unknown> | unknown
 }>(), {
   senderName: 'anonymous',
   disabled: false,
@@ -255,6 +256,8 @@ const mentionQuery = ref('')
 const mentionStart = ref(-1)
 const mentionEnd = ref(-1)
 const mentionActiveIndex = ref(0)
+let mentionReachabilityRefreshAt = 0
+let mentionReachabilityRefreshInFlight = false
 const isSending = ref(false)
 
 let keepPollingTimer: ReturnType<typeof setInterval> | null = null
@@ -433,6 +436,21 @@ function resetMentionContext() {
   mentionActiveIndex.value = 0
 }
 
+function requestMentionReachabilityRefresh() {
+  if (!props.refreshReachability || mentionReachabilityRefreshInFlight) return
+
+  const now = Date.now()
+  if (now - mentionReachabilityRefreshAt < 2000) return
+
+  mentionReachabilityRefreshAt = now
+  mentionReachabilityRefreshInFlight = true
+  Promise.resolve(props.refreshReachability())
+    .catch(() => undefined)
+    .finally(() => {
+      mentionReachabilityRefreshInFlight = false
+    })
+}
+
 function syncMentionContext() {
   const textarea = textareaEl.value
   if (!textarea) {
@@ -448,10 +466,14 @@ function syncMentionContext() {
     return
   }
 
+  const wasClosed = mentionStart.value < 0
   mentionQuery.value = (match[2] || '').toLowerCase()
   mentionStart.value = cursor - mentionQuery.value.length - 1
   mentionEnd.value = cursor
   mentionActiveIndex.value = 0
+  if (wasClosed) {
+    requestMentionReachabilityRefresh()
+  }
 }
 
 function moveMentionSelection(direction: number) {

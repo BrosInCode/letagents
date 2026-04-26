@@ -1125,12 +1125,13 @@ function normalizeRoomActorLabel(value: string | null | undefined): string {
 }
 
 function isRoomAgentDeliverySessionReachable(
-  session: Pick<RoomAgentDeliverySession, "active_connection_count" | "updated_at">,
+  session: Pick<RoomAgentDeliverySession, "active_connection_count" | "updated_at" | "reconnect_grace_expires_at">,
   now = Date.now()
 ): boolean {
   return isAgentDeliverySessionReachable({
     activeConnectionCount: session.active_connection_count,
     updatedAt: session.updated_at,
+    reconnectGraceExpiresAt: session.reconnect_grace_expires_at,
   }, now);
 }
 
