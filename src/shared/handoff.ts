@@ -159,7 +159,8 @@ export const HANDOFF_DEFAULT_GRANT_TTL_MS: Record<HandoffOutputType, number> = {
 export type HandoffPolicyErrorCode =
   | "unsupported_execution_mode"
   | "permission_profile_mismatch"
-  | "recursive_handoff_forbidden";
+  | "recursive_handoff_forbidden"
+  | "invalid_scope_or_branch";
 
 export interface HandoffPolicyRequest {
   outputType: HandoffOutputType;
@@ -248,6 +249,17 @@ export function evaluateHandoffPolicy(input: HandoffPolicyRequest): HandoffPolic
     };
   }
 
+  const repoScope = input.repoScope.trim();
+  const targetBranch = input.targetBranch.trim();
+  if (!repoScope || !targetBranch) {
+    return {
+      ok: false,
+      code: "invalid_scope_or_branch",
+      message:
+        "repoScope and targetBranch must be non-empty after trimming (structured handoff requires a repo and branch).",
+    };
+  }
+
   const permissionProfile = resolveHandoffPermissionProfile(
     input.outputType,
     input.permissionProfile
@@ -265,8 +277,8 @@ export function evaluateHandoffPolicy(input: HandoffPolicyRequest): HandoffPolic
     outputType: input.outputType,
     permissionProfile,
     executionMode,
-    repoScope: input.repoScope,
-    targetBranch: input.targetBranch,
+    repoScope,
+    targetBranch,
   });
 
   return { ok: true, permissionProfile, executionMode, manifest };
