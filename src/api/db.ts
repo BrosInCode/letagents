@@ -3869,11 +3869,11 @@ export async function createRoomAgentSession(input: {
   };
 }
 
-export async function getActiveRoomAgentSessionForWorkerIdentity(input: {
+export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
   room_id: string;
   agent_key: string;
-}): Promise<RoomAgentSession | null> {
-  const [row] = await db
+}): Promise<RoomAgentSession[]> {
+  const rows = await db
     .select()
     .from(room_agent_sessions)
     .where(and(
@@ -3883,9 +3883,8 @@ export async function getActiveRoomAgentSessionForWorkerIdentity(input: {
       isNull(room_agent_sessions.ended_at)
     ))
     .orderBy(desc(room_agent_sessions.last_seen_at))
-    .limit(1);
 
-  return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
+  return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
 }
 
 export async function getRoomAgentSessionByCredentials(input: {

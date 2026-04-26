@@ -232,6 +232,13 @@
       "when": 1777150800000,
       "tag": "0032_agent_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1777225579313,
+      "tag": "0033_active_worker_identity_unique",
+      "breakpoints": true
     }
   ]
 }
