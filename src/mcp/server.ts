@@ -18,7 +18,7 @@ import {
   hashStringToIndex,
   codenameFromIndex,
   pickLocalCodename,
-} from "./codenames.js";
+} from "../shared/codenames.js";
 import {
   clearPendingDeviceAuth,
   clearStoredAuth,

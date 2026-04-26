@@ -142,7 +142,10 @@
               >
                 <div class="activity-roster-header">
                   <div>
-                    <div class="activity-roster-name">{{ participant.label }}</div>
+                    <div class="activity-roster-name">
+                      {{ participant.label }}
+                      <span v-if="participant.ideLabel" class="activity-ide-pill">{{ participant.ideLabel }}</span>
+                    </div>
                     <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                   </div>
                 </div>
@@ -179,7 +182,10 @@
               >
                 <div class="activity-roster-header">
                   <div>
-                    <div class="activity-roster-name">{{ participant.label }}</div>
+                    <div class="activity-roster-name">
+                      {{ participant.label }}
+                      <span v-if="participant.ideLabel" class="activity-ide-pill">{{ participant.ideLabel }}</span>
+                    </div>
                     <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                   </div>
                   <span class="activity-kind-pill">Human</span>
@@ -201,7 +207,10 @@
           <div class="activity-detail-header">
             <div>
               <div class="activity-detail-kicker">History detail</div>
-              <h3>{{ selectedHistoryParticipant.label }}</h3>
+              <h3>
+                {{ selectedHistoryParticipant.label }}
+                <span v-if="selectedHistoryParticipant.ideLabel" class="activity-ide-pill">{{ selectedHistoryParticipant.ideLabel }}</span>
+              </h3>
               <p>{{ selectedHistoryRoomOption?.label }} · {{ participantMeta(selectedHistoryParticipant) }}</p>
             </div>
 
@@ -389,7 +398,10 @@
             >
               <div class="activity-roster-header">
                 <div>
-                  <div class="activity-roster-name">{{ participant.label }}</div>
+                  <div class="activity-roster-name">
+                    {{ participant.label }}
+                    <span v-if="participant.ideLabel" class="activity-ide-pill">{{ participant.ideLabel }}</span>
+                  </div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
                 <div class="activity-roster-badges">
@@ -467,7 +479,10 @@
             >
               <div class="activity-roster-header">
                 <div>
-                  <div class="activity-roster-name">{{ participant.label }}</div>
+                  <div class="activity-roster-name">
+                    {{ participant.label }}
+                    <span v-if="participant.ideLabel" class="activity-ide-pill">{{ participant.ideLabel }}</span>
+                  </div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
                 <div class="activity-roster-badges">
@@ -533,7 +548,10 @@
             >
               <div class="activity-roster-header">
                 <div>
-                  <div class="activity-roster-name">{{ participant.label }}</div>
+                  <div class="activity-roster-name">
+                    {{ participant.label }}
+                    <span v-if="participant.ideLabel" class="activity-ide-pill">{{ participant.ideLabel }}</span>
+                  </div>
                   <div class="activity-roster-meta">{{ participantMeta(participant) }}</div>
                 </div>
                 <span class="activity-kind-pill">Human</span>
@@ -557,7 +575,10 @@
             <div class="activity-detail-kicker">
               {{ selectedParticipant.kind === 'agent' ? 'Agent detail' : 'Human detail' }}
             </div>
-            <h3>{{ selectedParticipant.label }}</h3>
+            <h3>
+              {{ selectedParticipant.label }}
+              <span v-if="selectedParticipant.ideLabel" class="activity-ide-pill">{{ selectedParticipant.ideLabel }}</span>
+            </h3>
             <p>{{ participantMeta(selectedParticipant) }}</p>
           </div>
 
@@ -1598,8 +1619,7 @@ function participantMeta(participant: ActivityParticipant | HistoryParticipant):
     return 'Human participant'
   }
 
-  const bits = [participant.ownerLabel, participant.ideLabel].filter(Boolean)
-  return bits.join(' · ') || 'Agent'
+  return participant.ownerLabel || 'Agent'
 }
 
 function participantNote(participant: ActivityParticipant | HistoryParticipant): string {
@@ -1871,6 +1891,24 @@ function formatLastSeen(value: string | null): string {
   margin: 0;
   font-size: 0.92rem;
   color: var(--text, #fafafa);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-ide-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: var(--activity-surface-hover);
+  color: var(--activity-text-secondary);
+  border: 1px solid var(--activity-border);
 }
 
 .activity-group-header p,
@@ -1993,6 +2031,9 @@ function formatLastSeen(value: string | null): string {
   font-weight: 700;
   color: var(--text, #fafafa);
   line-height: 1.35;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .activity-roster-meta {
