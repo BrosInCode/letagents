@@ -47,6 +47,7 @@ import {
   type AgentPresenceStatus,
 } from "../../shared/agent-presence.js";
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../shared/agent-identity.js";
+import { pickLocalCodename } from "../../shared/codenames.js";
 import { isWithinRecentlyOfflineWindow } from "../../shared/room-agent-activity.js";
 
 export interface RoomPresenceRouteDeps {
@@ -445,7 +446,20 @@ export function registerRoomPresenceRoutes(
           : parsedActorLabel?.ide_label ?? "Agent"
       );
       const requestedDisplayName = typeof display_name === "string" ? display_name.trim() : "";
-      const sessionDisplayName = requestedDisplayName || agent.display_name;
+      const genericKeywords = new Set(["antigravity", "codex", "agent", "worker", "local", "claude", "cursor", "cline", "roo"]);
+      resolvedIdeLabel.toLowerCase().split(/[\s_-]+/).forEach(t => { if (t) genericKeywords.add(t); });
+      const requestedTokens = requestedDisplayName.toLowerCase().split(/[\s_-]+/).filter(t => t.length > 0);
+      const isGenericName = !requestedDisplayName || requestedTokens.every(t => genericKeywords.has(t));
+      
+      let baseDisplayName = isGenericName ? pickLocalCodename(agent.canonical_key).display_name : (requestedDisplayName || agent.display_name);
+      let sessionDisplayName = baseDisplayName;
+
+      const activeParticipants = await getRoomParticipants(project.id, { limit: 200 });
+      let offset = 0;
+      while (activeParticipants.some(p => p.display_name === sessionDisplayName && p.agent_key !== agent.canonical_key)) {
+        offset++;
+        sessionDisplayName = isGenericName ? pickLocalCodename(`${agent.canonical_key}:${offset}`).display_name : `${baseDisplayName} ${offset}`;
+      }
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
       const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
       if (requestedSessionKind === "worker") {
