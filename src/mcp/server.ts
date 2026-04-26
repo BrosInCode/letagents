@@ -26,7 +26,6 @@ import {
   getCurrentCodexLiveSession,
   getLocalStatePath,
   getPendingDeviceAuth,
-  getCurrentAgentSession,
   getStoredAgentSession,
   getStoredAgentIdentity,
   getStoredAuth,
@@ -1197,7 +1196,7 @@ function resolveAgentSession(
   sessionId?: string | null
 ): StoredAgentSessionState | null {
   if (!sessionId) {
-    return getCurrentAgentSession(roomId);
+    return null;
   }
   const session = getStoredAgentSession(sessionId);
   if (!session) {
@@ -1235,7 +1234,7 @@ function requireWorkerAgentSession(
   if (!session) {
     throw new Error(
       "Registered worker agent_session_id is required for this write action. " +
-        "Call register_agent_session for this room first, then pass the returned agent_session_id."
+        "Call register_agent_session for this room first, then pass the returned agent_session_id explicitly."
     );
   }
   if (session.session_kind !== "worker") {
@@ -1868,7 +1867,7 @@ server.tool(
               success: true,
               agent_session: toPublicAgentSession(session),
               agent_session_id: session.session_id,
-              use_agent_session_id: "Pass this agent_session_id to wait_for_messages, send_message, post_status, and task tools for this specific worker.",
+              use_agent_session_id: "Pass this exact agent_session_id to wait_for_messages, send_message, post_status, and task tools for this specific worker. Do not rely on a shared current session.",
             },
             null,
             2
@@ -1883,16 +1882,16 @@ server.tool(
 
 server.tool(
   "disconnect_agent_session",
-  "Disconnect/end a registered worker session from a room. Defaults to the current worker session; admins may pass another agent_session_id.",
+  "Disconnect/end a registered worker session from a room. Pass the exact agent_session_id for the worker to disconnect.",
   {
     room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room or the stored session room."),
-    agent_session_id: z.string().optional().describe("Registered agent session to disconnect. Defaults to the current session for the room."),
+    agent_session_id: z.string().optional().describe("Registered agent session to disconnect."),
   },
   async ({ room_id, agent_session_id }) => {
     let targetRoomId = getTargetRoomId(room_id);
     const localSession = agent_session_id
       ? getStoredAgentSession(agent_session_id)
-      : getCurrentAgentSession(targetRoomId ?? currentRoom?.room_id ?? null);
+      : null;
     if (!targetRoomId && localSession) {
       targetRoomId = localSession.room_id;
     }
@@ -1924,8 +1923,8 @@ server.tool(
             text: JSON.stringify(
               {
                 success: false,
-                error: "No registered agent session was found for this room.",
-                hint: "Pass agent_session_id or call register_agent_session first.",
+                error: "agent_session_id is required to disconnect a worker session.",
+                hint: "Pass the exact agent_session_id returned by register_agent_session.",
               },
               null,
               2
@@ -2299,7 +2298,7 @@ server.tool(
     agent_session_id: z
       .string()
       .optional()
-      .describe("Registered agent session to use for this status update."),
+      .describe("Registered agent session to use for this status update. Required for worker status."),
   },
   async ({ sender: _sender, status, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -2403,7 +2402,7 @@ server.tool(
     agent_session_id: z
       .string()
       .optional()
-      .describe("Registered agent session to use for this reasoning update."),
+      .describe("Registered agent session to use for this reasoning update. Required for worker reasoning."),
   },
   async ({
     summary,
@@ -2631,7 +2630,7 @@ server.tool(
     source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
-    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action. Required for worker task writes."),
   },
   async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -2810,7 +2809,7 @@ server.tool(
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
-    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action. Required for worker task writes."),
   },
   async ({ task_id, assignee: _assignee, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -2900,7 +2899,7 @@ server.tool(
       .describe("Persisted provider-neutral task workflow artifacts to attach to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
-    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action. Required for worker task writes."),
   },
   async ({ task_id, status, assignee, pr_url, workflow_artifacts, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -2983,7 +2982,7 @@ server.tool(
     pr_url: z.string().optional().describe("GitHub PR URL for the work"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
-    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action. Required for worker task writes."),
   },
   async ({ task_id, pr_url, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -3053,7 +3052,7 @@ server.tool(
     reason: z.string().optional().describe("Why the lease is being released"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
-    agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action. Required for worker lease writes."),
   },
   async ({ task_id, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -3125,7 +3124,7 @@ server.tool(
     reason: z.string().optional().describe("Why the lane is being handed off"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
-    agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action. Required for worker lease writes."),
   },
   async ({ task_id, target_agent_key, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -3400,7 +3399,7 @@ server.tool(
     agent_session_id: z
       .string()
       .optional()
-      .describe("Registered agent session to use for this message."),
+      .describe("Registered agent session to use for this message. Required for worker messages."),
   },
   async ({ room_id, sender: _sender, text, reply_to, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
@@ -3540,7 +3539,7 @@ server.tool(
     agent_session_id: z
       .string()
       .optional()
-      .describe("Registered agent session to use. Without this, the MCP transport is treated as a controller and is hidden from connected-agent activity."),
+      .describe("Registered agent session to use. Without this, the MCP transport is treated as controller traffic and is hidden from connected-agent activity."),
   },
   async ({ room_id, after_message_id, timeout, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);

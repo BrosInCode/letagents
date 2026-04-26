@@ -239,6 +239,13 @@
       "when": 1777225579313,
       "tag": "0033_active_worker_identity_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1777241609065,
+      "tag": "0034_independent_agent_sessions",
+      "breakpoints": true
     }
   ]
 }

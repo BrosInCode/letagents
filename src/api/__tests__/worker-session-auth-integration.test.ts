@@ -375,7 +375,7 @@ async function invoke(
 }
 
 test(
-  "agent session registration rejects active worker identity reuse by another instance",
+  "agent session registration creates independent workers for reused MCP identity",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
@@ -384,34 +384,6 @@ test(
     const { room, worker } = await seedHarness();
     const handlers = registerRoutesForRoom(room);
     const registerHandler = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
-
-    const conflictingRegistration = await invoke(
-      registerHandler,
-      ownerTokenRequest(
-        {
-          actor_key: worker.agent_key,
-          actor_label: worker.actor_label,
-          display_name: worker.display_name,
-          ide_label: "Antigravity",
-          agent_instance_id: "different-antigravity-instance",
-          session_kind: "worker",
-          runtime: "antigravity",
-        },
-        { params: { 0: room.id } }
-      )
-    );
-
-    assert.equal(conflictingRegistration.statusCode, 409);
-    assert.deepEqual(
-      {
-        code: (conflictingRegistration.body as { code?: string }).code,
-        active_agent_session_id: (conflictingRegistration.body as { active_agent_session_id?: string }).active_agent_session_id,
-      },
-      {
-        code: "agent_identity_already_active",
-        active_agent_session_id: worker.session_id,
-      }
-    );
 
     if (!markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions) {
       throw new Error("DB-backed worker session tests require TEST_DB_URL");
@@ -430,59 +402,78 @@ test(
       transport: "long_poll",
     });
 
-    const sameInstanceRegistration = await invoke(
-      registerHandler,
-      ownerTokenRequest(
-        {
-          actor_key: worker.agent_key,
-          actor_label: worker.actor_label,
-          display_name: worker.display_name,
-          ide_label: "Codex",
-          agent_instance_id: worker.agent_instance_id,
-          session_kind: "worker",
-          runtime: "codex",
-        },
-        { params: { 0: room.id } }
-      )
-    );
+    const registrationBody = {
+      actor_key: worker.agent_key,
+      actor_label: worker.actor_label,
+      display_name: worker.display_name,
+      ide_label: "Antigravity",
+      agent_instance_id: "different-antigravity-instance",
+      session_kind: "worker",
+      runtime: "antigravity",
+    };
+    const [secondRegistration, thirdRegistration] = await Promise.all([
+      invoke(
+        registerHandler,
+        ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+      ),
+      invoke(
+        registerHandler,
+        ownerTokenRequest(registrationBody, { params: { 0: room.id } })
+      ),
+    ]);
 
-    assert.equal(sameInstanceRegistration.statusCode, 201, JSON.stringify(sameInstanceRegistration.body));
-    const replacementSession = sameInstanceRegistration.body as {
+    assert.equal(secondRegistration.statusCode, 201, JSON.stringify(secondRegistration.body));
+    const secondSession = secondRegistration.body as {
       session_id?: string;
       session_token?: string;
+      display_name?: string;
     };
-    assert.ok(replacementSession.session_id);
-    assert.notEqual(replacementSession.session_id, worker.session_id);
+    assert.ok(secondSession.session_id);
+    assert.notEqual(secondSession.session_id, worker.session_id);
+
+    assert.equal(thirdRegistration.statusCode, 201, JSON.stringify(thirdRegistration.body));
+    const thirdSession = thirdRegistration.body as {
+      session_id?: string;
+      session_token?: string;
+      display_name?: string;
+    };
+    assert.ok(thirdSession.session_id);
+    assert.notEqual(thirdSession.session_id, worker.session_id);
+    assert.notEqual(thirdSession.session_id, secondSession.session_id);
+    assert.deepEqual(
+      [secondSession.display_name, thirdSession.display_name].sort(),
+      ["OwlSolar 1", "OwlSolar 2"]
+    );
 
     const oldDeliverySession = (await getRoomAgentDeliverySessions(room.id))
       .find((session) => session.agent_session_id === worker.session_id);
-    assert.equal(oldDeliverySession?.active_connection_count, 0);
-    assert.equal(oldDeliverySession?.reconnect_grace_expires_at, oldDeliverySession?.updated_at);
+    assert.equal(oldDeliverySession?.active_connection_count, 1);
+    assert.equal(oldDeliverySession?.reconnect_grace_expires_at, null);
 
     const oldSessionMessage = await invoke(
       handlers.post.get("/^\\/rooms\\/(.+)\\/messages$/"),
       ownerTokenRequest(
         {
-          text: "old worker session should be ended by reconnect",
+          text: "original worker session can still write",
           ...sessionCredentials(worker),
         },
         { params: { 0: room.id } }
       )
     );
-    assert.equal(oldSessionMessage.statusCode, 401);
+    assert.equal(oldSessionMessage.statusCode, 201);
 
-    const replacementMessage = await invoke(
+    const thirdMessage = await invoke(
       handlers.post.get("/^\\/rooms\\/(.+)\\/messages$/"),
       ownerTokenRequest(
         {
-          text: "replacement worker session can write",
-          agent_session_id: replacementSession.session_id,
-          agent_session_token: replacementSession.session_token,
+          text: "new worker session can write independently",
+          agent_session_id: thirdSession.session_id,
+          agent_session_token: thirdSession.session_token,
         },
         { params: { 0: room.id } }
       )
     );
-    assert.equal(replacementMessage.statusCode, 201);
+    assert.equal(thirdMessage.statusCode, 201);
   }
 );
 
