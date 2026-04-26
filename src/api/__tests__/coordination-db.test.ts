@@ -19,6 +19,7 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createOwnerToken = dbModule?.createOwnerToken;
 const createProjectWithName = dbModule?.createProjectWithName;
+const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createSession = dbModule?.createSession;
 const createTask = dbModule?.createTask;
 const createTaskLease = dbModule?.createTaskLease;
@@ -138,6 +139,42 @@ async function stopChildProcess(child: ChildProcessWithoutNullStreams): Promise<
   }
 }
 
+type CoordinationTestActor = {
+  actor_label: string;
+  actor_key: string;
+  actor_instance_id: string;
+  display_name: string;
+};
+
+async function createWorkerSessionCredentials(input: {
+  roomId: string;
+  ownerAccountId: string;
+  ownerLabel: string;
+  actor: CoordinationTestActor;
+}): Promise<{ agent_session_id: string; agent_session_token: string }> {
+  if (!createRoomAgentSession) {
+    throw new Error("DB-backed coordination tests require TEST_DB_URL or DB_URL");
+  }
+
+  const session = await createRoomAgentSession({
+    room_id: input.roomId,
+    session_kind: "worker",
+    runtime: "codex",
+    actor_label: input.actor.actor_label,
+    agent_key: input.actor.actor_key,
+    agent_instance_id: input.actor.actor_instance_id,
+    display_name: input.actor.display_name,
+    owner_account_id: input.ownerAccountId,
+    owner_label: input.ownerLabel,
+    ide_label: "Codex",
+  });
+
+  return {
+    agent_session_id: session.session_id,
+    agent_session_token: session.session_token,
+  };
+}
+
 if (!requiresDatabase) {
   test.beforeEach(async () => {
     await resetDatabase();
@@ -205,6 +242,7 @@ test(
     if (
       !createOwnerToken ||
       !createProjectWithName ||
+      !createRoomAgentSession ||
       !createTask ||
       !createTaskLock ||
       !getActiveTaskLeases ||
@@ -256,7 +294,32 @@ test(
       display_name: "DawnWinter",
     });
 
+    const bayActor = {
+      actor_label: "BayOtter | Emmy May's agent | Agent",
+      actor_key: "EmmyMay/bayotter",
+      actor_instance_id: "instance:bayotter-1",
+      display_name: "BayOtter",
+    };
+    const dawnActor = {
+      actor_label: "DawnWinter | Emmy May's agent | Agent",
+      actor_key: "EmmyMay/dawnwinter",
+      actor_instance_id: "instance:dawn-1",
+      display_name: "DawnWinter",
+    };
     const room = await createProjectWithName("coordination-api-routes");
+    const ownerLabel = owner.display_name ?? owner.login;
+    const bayCredentials = await createWorkerSessionCredentials({
+      roomId: room.id,
+      ownerAccountId: owner.id,
+      ownerLabel,
+      actor: bayActor,
+    });
+    const dawnCredentials = await createWorkerSessionCredentials({
+      roomId: room.id,
+      ownerAccountId: owner.id,
+      ownerLabel,
+      actor: dawnActor,
+    });
     const task = await createTask(room.id, "Publish only with the work lease", "Human");
     await updateTask(room.id, task.id, { status: "accepted" });
 
@@ -282,22 +345,12 @@ test(
         }
       );
 
-    const bayActor = {
-      actor_label: "BayOtter | Emmy May's agent | Agent",
-      actor_key: "EmmyMay/bayotter",
-      actor_instance_id: "instance:bayotter-1",
-    };
-    const dawnActor = {
-      actor_label: "DawnWinter | Emmy May's agent | Agent",
-      actor_key: "EmmyMay/dawnwinter",
-      actor_instance_id: "instance:dawn-1",
-    };
-
     const claim = await patchTask(task.id, {
       status: "assigned",
       assignee: bayActor.actor_label,
       assignee_agent_key: bayActor.actor_key,
       ...bayActor,
+      ...bayCredentials,
     });
     assert.equal(claim.status, 200);
 
@@ -311,11 +364,12 @@ test(
       {
         pr_url: "https://github.com/BrosInCode/letagents/pull/998",
         ...bayActor,
+        ...bayCredentials,
       },
       otherOwnerToken
     );
-    assert.equal(spoofedPublish.status, 409);
-    assert.equal((await spoofedPublish.json()).code, "coordination_invalid_actor");
+    assert.equal(spoofedPublish.status, 401);
+    assert.equal((await spoofedPublish.json()).error, "Invalid agent session credentials.");
 
     const duplicateAdmission = await fetch(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(room.id)}/tasks`,
@@ -329,6 +383,7 @@ test(
           title: task.title,
           created_by: dawnActor.actor_label,
           ...dawnActor,
+          ...dawnCredentials,
         }),
       }
     );
@@ -338,6 +393,7 @@ test(
     const dawnPublish = await patchTask(task.id, {
       pr_url: "https://github.com/BrosInCode/letagents/pull/999",
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(dawnPublish.status, 409);
     assert.equal((await dawnPublish.json()).code, "coordination_wrong_actor");
@@ -348,6 +404,7 @@ test(
     const leaselessPublish = await patchTask(unclaimedTask.id, {
       pr_url: "https://github.com/BrosInCode/letagents/pull/1000",
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(leaselessPublish.status, 409);
     assert.equal((await leaselessPublish.json()).code, "coordination_missing_lease");
@@ -364,6 +421,7 @@ test(
     const lockedMove = await patchTask(task.id, {
       status: "in_progress",
       ...bayActor,
+      ...bayCredentials,
     });
     assert.equal(lockedMove.status, 409);
     assert.equal((await lockedMove.json()).code, "coordination_active_lock");
@@ -388,6 +446,7 @@ test(
           title: "Admission should wait",
           created_by: bayActor.actor_label,
           ...bayActor,
+          ...bayCredentials,
         }),
       }
     );
@@ -407,6 +466,7 @@ test(
       !assignProjectAdmin ||
       !createOwnerToken ||
       !createProjectWithName ||
+      !createRoomAgentSession ||
       !createTask ||
       !getActiveTaskLeases ||
       !registerAgentIdentity ||
@@ -444,8 +504,33 @@ test(
       display_name: "DawnWinter",
     });
 
+    const bayActor = {
+      actor_label: "BayOtter | Emmy May's agent | Agent",
+      actor_key: "EmmyMay/bayotter",
+      actor_instance_id: "instance:bayotter-1",
+      display_name: "BayOtter",
+    };
+    const dawnActor = {
+      actor_label: "DawnWinter | Emmy May's agent | Agent",
+      actor_key: "EmmyMay/dawnwinter",
+      actor_instance_id: "instance:dawn-1",
+      display_name: "DawnWinter",
+    };
     const room = await createProjectWithName("coordination-lease-actions");
     await assignProjectAdmin(room.id, owner.id);
+    const ownerLabel = owner.display_name ?? owner.login;
+    const bayCredentials = await createWorkerSessionCredentials({
+      roomId: room.id,
+      ownerAccountId: owner.id,
+      ownerLabel,
+      actor: bayActor,
+    });
+    const dawnCredentials = await createWorkerSessionCredentials({
+      roomId: room.id,
+      ownerAccountId: owner.id,
+      ownerLabel,
+      actor: dawnActor,
+    });
     const task = await createTask(room.id, "Recover a stale lease", "Human");
     await updateTask(room.id, task.id, { status: "accepted" });
 
@@ -480,22 +565,12 @@ test(
         }
       );
 
-    const bayActor = {
-      actor_label: "BayOtter | Emmy May's agent | Agent",
-      actor_key: "EmmyMay/bayotter",
-      actor_instance_id: "instance:bayotter-1",
-    };
-    const dawnActor = {
-      actor_label: "DawnWinter | Emmy May's agent | Agent",
-      actor_key: "EmmyMay/dawnwinter",
-      actor_instance_id: "instance:dawn-1",
-    };
-
     const claimByBay = await patchTask(task.id, {
       status: "assigned",
       assignee: bayActor.actor_label,
       assignee_agent_key: bayActor.actor_key,
       ...bayActor,
+      ...bayCredentials,
     });
     assert.equal(claimByBay.status, 200);
 
@@ -503,6 +578,7 @@ test(
       action: "release",
       reason: "BayOtter worker is gone; clear the stale lane.",
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(forcedRelease.status, 200);
     const forcedReleaseBody = await forcedRelease.json();
@@ -520,12 +596,14 @@ test(
       assignee: dawnActor.actor_label,
       assignee_agent_key: dawnActor.actor_key,
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(claimByDawn.status, 200);
     const boundPrUrl = "https://github.com/BrosInCode/letagents/pull/1200";
     const bindPr = await patchTask(task.id, {
       pr_url: boundPrUrl,
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(bindPr.status, 200);
 
@@ -534,6 +612,7 @@ test(
       reason: "Return the lane to BayOtter on a fresh lease.",
       target_actor_key: bayActor.actor_key,
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(handoff.status, 200);
     const handoffBody = await handoff.json();
@@ -558,6 +637,7 @@ test(
       assignee: dawnActor.actor_label,
       assignee_agent_key: dawnActor.actor_key,
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(lockedClaim.status, 200);
     await createTaskLock({
@@ -573,6 +653,7 @@ test(
       reason: "Attempting to bypass the stop lock.",
       target_actor_key: bayActor.actor_key,
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(lockedHandoff.status, 409);
     assert.equal((await lockedHandoff.json()).code, "coordination_active_lock");
@@ -590,6 +671,7 @@ test(
       !assignProjectAdmin ||
       !createOwnerToken ||
       !createProjectWithName ||
+      !createRoomAgentSession ||
       !createSession ||
       !createTask ||
       !getActiveTaskLeases ||
@@ -638,8 +720,33 @@ test(
       display_name: "DawnWinter",
     });
 
+    const bayActor = {
+      actor_label: "BayOtter | Emmy May's agent | Agent",
+      actor_key: "EmmyMay/bayotter",
+      actor_instance_id: "instance:bayotter-1",
+      display_name: "BayOtter",
+    };
+    const dawnActor = {
+      actor_label: "DawnWinter | Emmy May's agent | Agent",
+      actor_key: "EmmyMay/dawnwinter",
+      actor_instance_id: "instance:dawn-1",
+      display_name: "DawnWinter",
+    };
     const room = await createProjectWithName("coordination-lease-actions-session");
     await assignProjectAdmin(room.id, owner.id);
+    const ownerLabel = owner.display_name ?? owner.login;
+    const bayCredentials = await createWorkerSessionCredentials({
+      roomId: room.id,
+      ownerAccountId: owner.id,
+      ownerLabel,
+      actor: bayActor,
+    });
+    const dawnCredentials = await createWorkerSessionCredentials({
+      roomId: room.id,
+      ownerAccountId: owner.id,
+      ownerLabel,
+      actor: dawnActor,
+    });
 
     const { child, port } = await startApiServer();
     t.after(async () => {
@@ -681,17 +788,6 @@ test(
         }
       );
 
-    const bayActor = {
-      actor_label: "BayOtter | Emmy May's agent | Agent",
-      actor_key: "EmmyMay/bayotter",
-      actor_instance_id: "instance:bayotter-1",
-    };
-    const dawnActor = {
-      actor_label: "DawnWinter | Emmy May's agent | Agent",
-      actor_key: "EmmyMay/dawnwinter",
-      actor_instance_id: "instance:dawn-1",
-    };
-
     const activeTask = await createTask(room.id, "Spoofed release should fail", "Human");
     await updateTask(room.id, activeTask.id, { status: "accepted" });
     const claimByBay = await patchTask(activeTask.id, {
@@ -699,6 +795,7 @@ test(
       assignee: bayActor.actor_label,
       assignee_agent_key: bayActor.actor_key,
       ...bayActor,
+      ...bayCredentials,
     });
     assert.equal(claimByBay.status, 200);
 
@@ -725,11 +822,13 @@ test(
       assignee: bayActor.actor_label,
       assignee_agent_key: bayActor.actor_key,
       ...bayActor,
+      ...bayCredentials,
     });
     assert.equal(mergedClaim.status, 200);
     const mergedReview = await patchTask(mergedTask.id, {
       status: "in_review",
       ...bayActor,
+      ...bayCredentials,
     });
     assert.equal(mergedReview.status, 200);
     const mergedState = await updateTask(room.id, mergedTask.id, { status: "merged" });
@@ -740,6 +839,7 @@ test(
       target_actor_key: dawnActor.actor_key,
       reason: "This should not reassign merged work.",
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(mergedHandoff.status, 409);
     assert.equal((await mergedHandoff.json()).code, "coordination_invalid_task_status");
@@ -748,6 +848,7 @@ test(
       action: "release",
       reason: "Clean up the stale merged lease without reopening.",
       ...dawnActor,
+      ...dawnCredentials,
     });
     assert.equal(mergedRelease.status, 200);
     const mergedReleaseBody = await mergedRelease.json();
