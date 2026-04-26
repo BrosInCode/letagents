@@ -413,9 +413,11 @@ export const room_agent_sessions = pgTable(
     room_idx: index("room_agent_sessions_room_id_idx").on(table.room_id),
     room_kind_idx: index("room_agent_sessions_room_kind_idx").on(table.room_id, table.session_kind),
     agent_key_idx: index("room_agent_sessions_agent_key_idx").on(table.agent_key),
-    active_worker_identity_idx: uniqueIndex("room_agent_sessions_active_worker_identity_idx")
-      .on(table.room_id, table.agent_key)
-      .where(sql`${table.session_kind} = 'worker' AND ${table.ended_at} IS NULL`),
+    room_agent_active_idx: index("room_agent_sessions_room_agent_active_idx").on(
+      table.room_id,
+      table.agent_key,
+      table.ended_at
+    ),
   })
 );
 
