@@ -18,6 +18,7 @@ import {
   type AuthenticatedRequest,
 } from "../http-helpers.js";
 import { normalizeRoomId } from "../room-routing.js";
+import { requireWorkerRequestAgentIdentity } from "../request-agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
   type AgentPresenceStatus,
@@ -182,7 +183,15 @@ export function registerRoomReasoningRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const actor_label = normalizeOptionalString(body.actor_label);
+    const agentSessionIdentity = req.authKind === "owner_token"
+      ? await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id })
+      : null;
+    if (agentSessionIdentity && !agentSessionIdentity.ok) {
+      res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+      return;
+    }
+    const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
+    const actor_label = workerIdentity?.actor_label ?? normalizeOptionalString(body.actor_label);
     if (!actor_label) {
       res.status(400).json({ error: "actor_label is required" });
       return;
@@ -194,7 +203,7 @@ export function registerRoomReasoningRoutes(
         task_id: normalizeOptionalString(body.task_id),
         anchor_message_id: normalizeOptionalString(body.anchor_message_id),
         actor_label,
-        agent_key: normalizeOptionalString(body.agent_key),
+        agent_key: workerIdentity?.agent_key ?? normalizeOptionalString(body.agent_key),
         snapshot: parseReasoningSnapshot(body),
       });
 
@@ -259,6 +268,13 @@ export function registerRoomReasoningRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
+    const agentSessionIdentity = req.authKind === "owner_token"
+      ? await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id })
+      : null;
+    if (agentSessionIdentity && !agentSessionIdentity.ok) {
+      res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+      return;
+    }
     const hasChanges =
       hasOwn(body, "task_id") ||
       hasOwn(body, "anchor_message_id") ||
@@ -326,12 +342,20 @@ export function registerRoomReasoningRoutes(
       if (!(await deps.requireParticipant(req, res, project))) return;
 
       const body = (req.body ?? {}) as Record<string, unknown>;
+      const agentSessionIdentity = req.authKind === "owner_token"
+        ? await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id })
+        : null;
+      if (agentSessionIdentity && !agentSessionIdentity.ok) {
+        res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+        return;
+      }
+      const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
 
       try {
         const result = await reasoningStore.appendReasoningSessionUpdate({
           room_id: project.id,
           session_id: sessionId,
-          actor_label: normalizeOptionalString(body.actor_label),
+          actor_label: workerIdentity?.actor_label ?? normalizeOptionalString(body.actor_label),
           snapshot: parseReasoningSnapshot(body),
         });
 

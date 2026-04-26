@@ -289,6 +289,9 @@ export interface RoomAgentPresence {
   room_id: string
   actor_label: string
   agent_key: string | null
+  agent_session_id: string | null
+  session_kind: 'controller' | 'worker'
+  runtime: string
   display_name: string
   owner_label: string | null
   ide_label: string | null

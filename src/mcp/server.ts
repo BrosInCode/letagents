@@ -22,15 +22,19 @@ import {
 import {
   clearPendingDeviceAuth,
   clearStoredAuth,
+  endStoredAgentSession,
   getCurrentCodexLiveSession,
   getLocalStatePath,
   getPendingDeviceAuth,
+  getCurrentAgentSession,
+  getStoredAgentSession,
   getStoredAgentIdentity,
   getStoredAuth,
   getStoredCurrentRoom,
   getStoredRoomSession,
   listStoredCodexLiveSessions,
   readLocalState,
+  saveAgentSession,
   saveRoomSession,
   setStoredAgentIdentity,
   setPendingDeviceAuth,
@@ -40,6 +44,7 @@ import {
   type PendingDeviceAuthState,
   type RoomSessionState,
   type StoredAgentIdentityState,
+  type StoredAgentSessionState,
   type StoredAccount,
 } from "./local-state.js";
 import {
@@ -59,7 +64,11 @@ import {
   buildRoomAgentPrompt,
   normalizeAgentPromptKind,
 } from "../shared/room-agent-prompts.js";
-import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../shared/request-headers.js";
+import {
+  LETAGENTS_AGENT_SESSION_ID_HEADER,
+  LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
+  LETAGENTS_ORIGIN_ROOM_ID_HEADER,
+} from "../shared/request-headers.js";
 import {
   inspectLocalCodexSession,
   startLocalCodexSession,
@@ -75,6 +84,7 @@ import { buildRoomEventsQueryString } from "./room-events-query.js";
 import {
   AGENT_PRESENCE_STATUSES,
   type AgentPresenceStatus,
+  type RoomAgentSessionKind,
 } from "../shared/agent-presence.js";
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 
@@ -1066,14 +1076,16 @@ function getRememberedRoomPresence(
 async function syncRoomPresence(
   roomId: string | null | undefined,
   identity: StoredAgentIdentityState | null | undefined,
-  presence: { status: AgentPresenceStatus; status_text: string | null }
+  presence: { status: AgentPresenceStatus; status_text: string | null },
+  agentSession?: StoredAgentSessionState | null
 ): Promise<void> {
-  if (!roomId || !identity) {
+  const resolvedIdentity = agentSession ? identityFromAgentSession(agentSession) : identity;
+  if (!roomId || !resolvedIdentity || !agentSession) {
     return;
   }
 
   roomPresenceByIdentity.set(
-    getRoomIdentityPresenceCacheKey(roomId, identity.actor_label),
+    getRoomIdentityPresenceCacheKey(roomId, resolvedIdentity.actor_label),
     presence
   );
 
@@ -1081,13 +1093,14 @@ async function syncRoomPresence(
     await apiCall(`/rooms/${encodeRoomIdPath(roomId)}/presence`, {
       method: "POST",
       body: JSON.stringify({
-        actor_label: identity.actor_label,
-        agent_key: identity.canonical_key,
-        display_name: identity.display_name,
-        owner_label: identity.owner_label,
-        ide_label: identity.ide_label,
+        actor_label: resolvedIdentity.actor_label,
+        agent_key: resolvedIdentity.canonical_key,
+        display_name: resolvedIdentity.display_name,
+        owner_label: resolvedIdentity.owner_label,
+        ide_label: resolvedIdentity.ide_label,
         status: presence.status,
         status_text: presence.status_text,
+        ...agentSessionCredentials(agentSession),
       }),
     });
     touchRoomSession(roomId);
@@ -1106,17 +1119,17 @@ async function heartbeatRoomPresence(
   await syncRoomPresence(roomId, identity, getRememberedRoomPresence(roomId, identity));
 }
 
-function appendAgentDeliveryQuery(
-  params: URLSearchParams,
-  identity: StoredAgentIdentityState | null | undefined
-): void {
-  if (!identity?.actor_label || !identity.canonical_key) {
-    return;
+function buildAgentDeliveryHeaders(
+  agentSession?: StoredAgentSessionState | null
+): Record<string, string> {
+  if (!agentSession) {
+    return {};
   }
 
-  params.set("actor_label", identity.actor_label);
-  params.set("actor_key", identity.canonical_key);
-  params.set("actor_instance_id", AGENT_INSTANCE_UUID);
+  return {
+    [LETAGENTS_AGENT_SESSION_ID_HEADER]: agentSession.session_id,
+    [LETAGENTS_AGENT_SESSION_TOKEN_HEADER]: agentSession.session_token,
+  };
 }
 
 function getTargetRoomId(roomId?: string): string | null {
@@ -1154,6 +1167,102 @@ function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
 function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {
   const session = getCurrentCodexLiveSession(roomId);
   return session ? toPublicCodexLiveSession(session) : null;
+}
+
+function toPublicAgentSession(session: StoredAgentSessionState | null): Record<string, unknown> | null {
+  if (!session) {
+    return null;
+  }
+
+  return {
+    session_id: session.session_id,
+    room_id: session.room_id,
+    session_kind: session.session_kind,
+    runtime: session.runtime,
+    actor_label: session.actor_label,
+    agent_key: session.agent_key,
+    agent_instance_id: session.agent_instance_id ?? null,
+    display_name: session.display_name,
+    owner_label: session.owner_label,
+    ide_label: session.ide_label,
+    created_at: session.created_at,
+    updated_at: session.updated_at,
+    last_seen_at: session.last_seen_at,
+    ended_at: session.ended_at ?? null,
+  };
+}
+
+function resolveAgentSession(
+  roomId: string | null | undefined,
+  sessionId?: string | null
+): StoredAgentSessionState | null {
+  if (!sessionId) {
+    return getCurrentAgentSession(roomId);
+  }
+  const session = getStoredAgentSession(sessionId);
+  if (!session) {
+    throw new Error(`Unknown agent_session_id: ${sessionId}`);
+  }
+  if (session.ended_at) {
+    throw new Error(`agent_session_id ${sessionId} ended at ${session.ended_at}`);
+  }
+  if (roomId && session.room_id !== roomId) {
+    throw new Error(`agent_session_id ${sessionId} is registered for ${session.room_id}, not ${roomId}`);
+  }
+  return session;
+}
+
+function identityFromAgentSession(session: StoredAgentSessionState): StoredAgentIdentityState {
+  return {
+    name: normalizeAgentBaseName(session.display_name),
+    display_name: session.display_name,
+    owner_label: session.owner_label,
+    owner_attribution: formatOwnerAttribution(session.owner_label),
+    ide_label: session.ide_label,
+    actor_label: session.actor_label,
+    canonical_key: session.agent_key,
+    runtime_key: `agent_session:${session.session_id}`,
+    source: "api",
+    resolved_at: session.updated_at,
+  };
+}
+
+function requireWorkerAgentSession(
+  roomId: string | null | undefined,
+  sessionId?: string | null
+): StoredAgentSessionState {
+  const session = resolveAgentSession(roomId, sessionId);
+  if (!session) {
+    throw new Error(
+      "Registered worker agent_session_id is required for this write action. " +
+        "Call register_agent_session for this room first, then pass the returned agent_session_id."
+    );
+  }
+  if (session.session_kind !== "worker") {
+    throw new Error("Worker agent_session_id is required for this write action.");
+  }
+  return session;
+}
+
+async function resolveWorkerToolIdentity(input: {
+  roomId?: string | null;
+  agentSessionId?: string | null;
+}): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
+  const agentSession = requireWorkerAgentSession(input.roomId, input.agentSessionId);
+  return {
+    identity: identityFromAgentSession(agentSession),
+    agentSession,
+  };
+}
+
+function agentSessionCredentials(agentSession: StoredAgentSessionState): {
+  agent_session_id: string;
+  agent_session_token: string;
+} {
+  return {
+    agent_session_id: agentSession.session_id,
+    agent_session_token: agentSession.session_token,
+  };
 }
 
 function toAgentReadableMessage(message: unknown): unknown {
@@ -1647,6 +1756,248 @@ server.tool(
   }
 );
 
+// -- register_agent_session -------------------------------------------------
+
+server.tool(
+  "register_agent_session",
+  "Register this MCP client as an explicit room agent session. Unregistered MCP traffic is treated as controller traffic and stays out of the connected-agent roster.",
+  {
+    room_id: z
+      .string()
+      .optional()
+      .describe("Canonical room ID. Defaults to the current room."),
+    session_kind: z
+      .enum(["worker", "controller"])
+      .optional()
+      .describe("Agent session kind. Workers appear in connected agent activity; controllers do not. Defaults to worker."),
+    runtime: z
+      .string()
+      .optional()
+      .describe("Runtime label such as codex, antigravity, or custom harness name."),
+    display_name: z
+      .string()
+      .optional()
+      .describe("Human-readable label for this worker session. Use distinct labels when one MCP process controls multiple workers."),
+  },
+  async ({ room_id, session_kind, runtime, display_name }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    if (!targetRoomId) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "No room_id provided and not currently in a room.",
+                hint: "Join a room first, or pass room_id explicitly.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const identity = await ensureAgentIdentity();
+    if (!identity.canonical_key) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "Authenticated agent identity is required before registering an agent session.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const created = await apiCall<Record<string, unknown>>(
+      `/rooms/${encodeRoomIdPath(targetRoomId)}/agent-sessions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          actor_key: identity.canonical_key,
+          actor_label: identity.actor_label,
+          ide_label: identity.ide_label ?? detectAgentIdeLabel(),
+          agent_instance_id: AGENT_INSTANCE_UUID,
+          display_name: display_name?.trim() || identity.display_name,
+          session_kind: session_kind ?? "worker",
+          runtime: runtime?.trim() || detectAgentIdeLabel().toLowerCase(),
+        }),
+      }
+    );
+
+    const sessionId = typeof created.session_id === "string" ? created.session_id : "";
+    const sessionToken = typeof created.session_token === "string" ? created.session_token : "";
+    if (!sessionId || !sessionToken) {
+      throw new Error("Agent session registration response was missing session credentials.");
+    }
+
+    const session = saveAgentSession({
+      session_id: sessionId,
+      session_token: sessionToken,
+      room_id: typeof created.room_id === "string" ? created.room_id : targetRoomId,
+      session_kind: created.session_kind === "controller" ? "controller" : "worker",
+      runtime: typeof created.runtime === "string" ? created.runtime : "unknown",
+      actor_label: typeof created.actor_label === "string" ? created.actor_label : identity.actor_label,
+      agent_key: typeof created.agent_key === "string" ? created.agent_key : identity.canonical_key,
+      agent_instance_id: typeof created.agent_instance_id === "string" ? created.agent_instance_id : AGENT_INSTANCE_UUID,
+      display_name: typeof created.display_name === "string" ? created.display_name : identity.display_name,
+      owner_label: typeof created.owner_label === "string" ? created.owner_label : identity.owner_label,
+      ide_label: typeof created.ide_label === "string" ? created.ide_label : identity.ide_label ?? detectAgentIdeLabel(),
+      created_at: typeof created.created_at === "string" ? created.created_at : new Date().toISOString(),
+      updated_at: typeof created.updated_at === "string" ? created.updated_at : new Date().toISOString(),
+      last_seen_at: typeof created.last_seen_at === "string" ? created.last_seen_at : new Date().toISOString(),
+      ended_at: typeof created.ended_at === "string" ? created.ended_at : null,
+    });
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              agent_session: toPublicAgentSession(session),
+              agent_session_id: session.session_id,
+              use_agent_session_id: "Pass this agent_session_id to wait_for_messages, send_message, post_status, and task tools for this specific worker.",
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+// -- disconnect_agent_session ----------------------------------------------
+
+server.tool(
+  "disconnect_agent_session",
+  "Disconnect/end a registered worker session from a room. Defaults to the current worker session; admins may pass another agent_session_id.",
+  {
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room or the stored session room."),
+    agent_session_id: z.string().optional().describe("Registered agent session to disconnect. Defaults to the current session for the room."),
+  },
+  async ({ room_id, agent_session_id }) => {
+    let targetRoomId = getTargetRoomId(room_id);
+    const localSession = agent_session_id
+      ? getStoredAgentSession(agent_session_id)
+      : getCurrentAgentSession(targetRoomId ?? currentRoom?.room_id ?? null);
+    if (!targetRoomId && localSession) {
+      targetRoomId = localSession.room_id;
+    }
+    if (!targetRoomId) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "No room_id provided and not currently in a room.",
+                hint: "Join a room first, pass room_id, or pass a locally stored agent_session_id.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const targetSessionId = agent_session_id || localSession?.session_id;
+    if (!targetSessionId) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: false,
+                error: "No registered agent session was found for this room.",
+                hint: "Pass agent_session_id or call register_agent_session first.",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    if (localSession?.ended_at) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                already_ended: true,
+                agent_session: toPublicAgentSession(localSession),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    const requestBody =
+      localSession?.session_id === targetSessionId && localSession.session_kind === "worker"
+        ? agentSessionCredentials(localSession)
+        : {};
+
+    const result = await apiCall<Record<string, unknown>>(
+      `/rooms/${encodeRoomIdPath(targetRoomId)}/agent-sessions/${encodeURIComponent(targetSessionId)}/disconnect`,
+      {
+        method: "POST",
+        body: JSON.stringify(requestBody),
+      }
+    );
+
+    const endedAt =
+      result.agent_session && typeof result.agent_session === "object" && "ended_at" in result.agent_session
+        ? String((result.agent_session as { ended_at?: unknown }).ended_at ?? new Date().toISOString())
+        : new Date().toISOString();
+    const endedLocalSession =
+      localSession?.session_id === targetSessionId
+        ? endStoredAgentSession(targetSessionId, endedAt)
+        : null;
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              room_id: targetRoomId,
+              agent_session_id: targetSessionId,
+              agent_session: result.agent_session ?? toPublicAgentSession(endedLocalSession),
+              delivery_session: result.delivery_session ?? null,
+              local_state: endedLocalSession ? "ended" : "unchanged",
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
 // -- local Codex live sessions ---------------------------------------------
 
 server.tool(
@@ -1944,9 +2295,13 @@ server.tool(
     conversation_id: z
       .string()
       .optional()
-      .describe("Optional conversation ID for per-conversation identity scoping."),
+      .describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z
+      .string()
+      .optional()
+      .describe("Registered agent session to use for this status update."),
   },
-  async ({ sender: _sender, status, room_id, conversation_id }) => {
+  async ({ sender: _sender, status, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
 
@@ -1971,7 +2326,10 @@ server.tool(
 
     // Status messages use a reserved prefix so the UI (and agents) can distinguish
     // them from normal chat messages without changing the data model.
-    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+    const { identity, agentSession } = await resolveWorkerToolIdentity({
+      roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+      agentSessionId: agent_session_id,
+    });
     const sender = identity.actor_label;
     const statusText = `[status] ${status}`;
 
@@ -1982,7 +2340,11 @@ server.tool(
       project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
       options: {
         method: "POST",
-        body: JSON.stringify({ sender, text: statusText }),
+        body: JSON.stringify({
+          sender,
+          text: statusText,
+          ...agentSessionCredentials(agentSession),
+        }),
       },
     });
     touchCurrentRoom(typeof message.id === "string" ? message.id : undefined);
@@ -1992,7 +2354,7 @@ server.tool(
         getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status
       ),
       status_text: status,
-    });
+    }, agentSession);
 
     return {
       content: [
@@ -2037,7 +2399,11 @@ server.tool(
     conversation_id: z
       .string()
       .optional()
-      .describe("Optional conversation ID for per-conversation identity scoping."),
+      .describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z
+      .string()
+      .optional()
+      .describe("Registered agent session to use for this reasoning update."),
   },
   async ({
     summary,
@@ -2050,7 +2416,8 @@ server.tool(
     confidence,
     status,
     room_id,
-    conversation_id,
+    conversation_id: _conversation_id,
+    agent_session_id,
   }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
@@ -2086,7 +2453,10 @@ server.tool(
       };
     }
 
-    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+    const { identity, agentSession } = await resolveWorkerToolIdentity({
+      roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+      agentSessionId: agent_session_id,
+    });
     const snapshot = {
       summary: normalizedSummary,
       goal: normalizeOptionalToolString(goal),
@@ -2151,6 +2521,7 @@ server.tool(
           method: "POST",
           body: JSON.stringify({
             actor_label: identity.actor_label,
+            ...agentSessionCredentials(agentSession),
             ...snapshot,
           }),
         },
@@ -2172,6 +2543,7 @@ server.tool(
           body: JSON.stringify({
             actor_label: identity.actor_label,
             agent_key: identity.canonical_key,
+            ...agentSessionCredentials(agentSession),
             ...snapshot,
           }),
         },
@@ -2191,6 +2563,7 @@ server.tool(
           body: JSON.stringify({
             sender: identity.actor_label,
             text: normalizedMilestone,
+            ...agentSessionCredentials(agentSession),
           }),
         },
       });
@@ -2203,9 +2576,14 @@ server.tool(
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status,
         status_text: normalizedSummary,
-      });
+      }, agentSession);
     } else {
-      await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+      await syncRoomPresence(
+        targetRoomId ?? currentRoom?.room_id ?? null,
+        identity,
+        getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity),
+        agentSession
+      );
     }
 
     return {
@@ -2252,9 +2630,10 @@ server.tool(
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
   },
-  async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id }) => {
+  async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2263,7 +2642,10 @@ server.tool(
       };
     }
 
-    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+    const { identity, agentSession } = await resolveWorkerToolIdentity({
+      roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+      agentSessionId: agent_session_id,
+    });
     const task = await roomScopedApiCall({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -2277,12 +2659,18 @@ server.tool(
           created_by: identity.actor_label,
           actor_label: identity.actor_label,
           actor_key: identity.canonical_key,
-          actor_instance_id: AGENT_INSTANCE_UUID,
+          actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
           source_message_id,
+          ...agentSessionCredentials(agentSession),
         }),
       },
     });
-    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    await syncRoomPresence(
+      targetRoomId ?? currentRoom?.room_id ?? null,
+      identity,
+      getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity),
+      agentSession
+    );
 
     return {
       content: [
@@ -2421,9 +2809,10 @@ server.tool(
       .optional()
       .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
   },
-  async ({ task_id, assignee: _assignee, room_id, conversation_id }) => {
+  async ({ task_id, assignee: _assignee, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2433,7 +2822,10 @@ server.tool(
     }
 
     try {
-      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+        agentSessionId: agent_session_id,
+      });
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -2446,15 +2838,16 @@ server.tool(
             assignee: identity.actor_label,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
-            actor_instance_id: AGENT_INSTANCE_UUID,
+            actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
             assignee_agent_key: identity.canonical_key,
+            ...agentSessionCredentials(agentSession),
           }),
         },
       });
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status: "working",
         status_text: `claimed ${task_id}`,
-      });
+      }, agentSession);
 
       return {
         content: [
@@ -2506,9 +2899,10 @@ server.tool(
       .optional()
       .describe("Persisted provider-neutral task workflow artifacts to attach to the task"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
   },
-  async ({ task_id, status, assignee, pr_url, workflow_artifacts, room_id, conversation_id }) => {
+  async ({ task_id, status, assignee, pr_url, workflow_artifacts, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2518,7 +2912,10 @@ server.tool(
     }
 
     try {
-      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+        agentSessionId: agent_session_id,
+      });
       const nextAssignee = status === "assigned" && !assignee ? identity.actor_label : assignee;
       const nextAssigneeAgentKey =
         nextAssignee === identity.actor_label ? identity.canonical_key : undefined;
@@ -2537,7 +2934,8 @@ server.tool(
             workflow_artifacts,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
-            actor_instance_id: AGENT_INSTANCE_UUID,
+            actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
+            ...agentSessionCredentials(agentSession),
           }),
         },
       });
@@ -2549,7 +2947,7 @@ server.tool(
         status_text: status
           ? `${task_id} -> ${status}`
           : getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity).status_text,
-      });
+      }, agentSession);
 
       return {
         content: [
@@ -2584,9 +2982,10 @@ server.tool(
     task_id: z.string().describe("The task ID to submit for review"),
     pr_url: z.string().optional().describe("GitHub PR URL for the work"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this task action."),
   },
-  async ({ task_id, pr_url, room_id, conversation_id }) => {
+  async ({ task_id, pr_url, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
@@ -2596,7 +2995,10 @@ server.tool(
     }
 
     try {
-      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+        agentSessionId: agent_session_id,
+      });
       const updated = await roomScopedApiCall({
         room_id: targetRoomId,
         project_id: targetProjectId,
@@ -2609,14 +3011,15 @@ server.tool(
             pr_url,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
-            actor_instance_id: AGENT_INSTANCE_UUID,
+            actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
+            ...agentSessionCredentials(agentSession),
           }),
         },
       });
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status: "reviewing",
         status_text: `${task_id} -> in_review`,
-      });
+      }, agentSession);
 
       return {
         content: [{
@@ -2649,9 +3052,10 @@ server.tool(
     lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
     reason: z.string().optional().describe("Why the lease is being released"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action."),
   },
-  async ({ task_id, lease_id, reason, room_id, conversation_id }) => {
+  async ({ task_id, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     if (!targetRoomId) {
       return {
@@ -2660,7 +3064,10 @@ server.tool(
     }
 
     try {
-      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId,
+        agentSessionId: agent_session_id,
+      });
       const result = await apiCall<{
         action: "release";
         task: Record<string, unknown>;
@@ -2675,14 +3082,15 @@ server.tool(
             reason,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
-            actor_instance_id: AGENT_INSTANCE_UUID,
+            actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
+            ...agentSessionCredentials(agentSession),
           }),
         }
       );
       await syncRoomPresence(targetRoomId, identity, {
         status: "working",
         status_text: `released lease on ${task_id}`,
-      });
+      }, agentSession);
 
       return {
         content: [{
@@ -2716,9 +3124,10 @@ server.tool(
     lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
     reason: z.string().optional().describe("Why the lane is being handed off"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
-    conversation_id: z.string().optional().describe("Optional conversation ID for per-conversation identity scoping."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action."),
   },
-  async ({ task_id, target_agent_key, lease_id, reason, room_id, conversation_id }) => {
+  async ({ task_id, target_agent_key, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     if (!targetRoomId) {
       return {
@@ -2727,7 +3136,10 @@ server.tool(
     }
 
     try {
-      const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId,
+        agentSessionId: agent_session_id,
+      });
       const result = await apiCall<{
         action: "handoff";
         task: Record<string, unknown>;
@@ -2744,14 +3156,15 @@ server.tool(
             target_actor_key: target_agent_key,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
-            actor_instance_id: AGENT_INSTANCE_UUID,
+            actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
+            ...agentSessionCredentials(agentSession),
           }),
         }
       );
       await syncRoomPresence(targetRoomId, identity, {
         status: "working",
         status_text: `handed off ${task_id} to ${target_agent_key}`,
-      });
+      }, agentSession);
 
       return {
         content: [{
@@ -2983,16 +3396,23 @@ server.tool(
     conversation_id: z
       .string()
       .optional()
-      .describe("Optional conversation ID for per-conversation identity scoping."),
+      .describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z
+      .string()
+      .optional()
+      .describe("Registered agent session to use for this message."),
   },
-  async ({ room_id, sender: _sender, text, reply_to, conversation_id }) => {
+  async ({ room_id, sender: _sender, text, reply_to, conversation_id: _conversation_id, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     if (!targetRoomId && !targetProjectId) {
       throw new Error("No room is currently selected. Join a room first or pass room_id.");
     }
 
-    const identity = getConversationIdentity(conversation_id) ?? await ensureAgentIdentity();
+    const { identity, agentSession } = await resolveWorkerToolIdentity({
+      roomId: targetRoomId ?? currentRoom?.room_id ?? null,
+      agentSessionId: agent_session_id,
+    });
     const message = await roomScopedApiCall<Record<string, unknown>>({
       room_id: targetRoomId,
       project_id: targetProjectId,
@@ -3000,11 +3420,21 @@ server.tool(
       project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
       options: {
         method: "POST",
-        body: JSON.stringify({ sender: identity.actor_label, text, reply_to }),
+        body: JSON.stringify({
+          sender: identity.actor_label,
+          text,
+          reply_to,
+          ...agentSessionCredentials(agentSession),
+        }),
       },
     });
     touchCurrentRoom(typeof (message as { id?: string }).id === "string" ? (message as { id: string }).id : undefined);
-    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    await syncRoomPresence(
+      targetRoomId ?? currentRoom?.room_id ?? null,
+      identity,
+      getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity),
+      agentSession
+    );
     return {
       content: [
         {
@@ -3107,12 +3537,22 @@ server.tool(
       .describe(
         "Maximum wait time in milliseconds (min 1000, capped by LETAGENTS_POLL_MAX_MS / server). If set to 0, the default timeout will be used."
       ),
+    agent_session_id: z
+      .string()
+      .optional()
+      .describe("Registered agent session to use. Without this, the MCP transport is treated as a controller and is hidden from connected-agent activity."),
   },
-  async ({ room_id, after_message_id, timeout }) => {
+  async ({ room_id, after_message_id, timeout, agent_session_id }) => {
     const targetRoomId = getTargetRoomId(room_id);
     const targetProjectId = getFallbackProjectId();
     const identity = await ensureAgentIdentity();
-    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    const agentSession = resolveAgentSession(targetRoomId ?? currentRoom?.room_id ?? null, agent_session_id);
+    await syncRoomPresence(
+      targetRoomId ?? currentRoom?.room_id ?? null,
+      identity,
+      getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
+      agentSession
+    );
     const maxPollMs = getPollTimeoutCapMs();
     const serverTimeout = Math.min(
       Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
@@ -3124,9 +3564,9 @@ server.tool(
     const params = new URLSearchParams();
     if (after_message_id) params.set("after", after_message_id);
     params.set("timeout", String(serverTimeout));
-    appendAgentDeliveryQuery(params, identity);
 
     const queryString = params.toString();
+    const deliveryHeaders = buildAgentDeliveryHeaders(agentSession);
     const firstResult = await roomScopedApiCall<{
       messages?: Array<{ id?: string }>;
       has_more?: boolean;
@@ -3139,7 +3579,10 @@ server.tool(
         `/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`,
       project_path: (targetProjectId) =>
         `/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`,
-      options: { signal: AbortSignal.timeout(clientTimeout) },
+      options: {
+        signal: AbortSignal.timeout(clientTimeout),
+        headers: deliveryHeaders,
+      },
     });
 
     const allMessages: unknown[] = [...(firstResult.messages ?? [])];
@@ -3183,7 +3626,12 @@ server.tool(
     if (targetRoomId) {
       touchRoomSession(targetRoomId, getLastMessageId(output));
     }
-    await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity);
+    await syncRoomPresence(
+      targetRoomId ?? currentRoom?.room_id ?? null,
+      identity,
+      getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
+      agentSession
+    );
     return {
       content: [
         {

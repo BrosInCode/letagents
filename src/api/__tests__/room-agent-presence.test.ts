@@ -197,6 +197,8 @@ test(
       actor_label: actorLabel,
       agent_key: "EmmyMay/mapleridge",
       agent_instance_id: "instance-room-agent-presence-test",
+      session_kind: "worker",
+      runtime: "codex",
       display_name: "MapleRidge",
       owner_label: "EmmyMay",
       ide_label: "Codex",
@@ -249,6 +251,38 @@ test(
 );
 
 test(
+  "controller delivery sessions stay out of the reachable live roster",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!createProjectWithName || !getRoomAgentPresence || !getRoomAgentPresenceSnapshot || !markRoomAgentDeliveryConnected) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const actorLabel = "ControllerOak | EmmyMay's agent | Agent";
+
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/controlleroak",
+      agent_instance_id: "instance-controlleroak",
+      display_name: "ControllerOak",
+      owner_label: "EmmyMay",
+      ide_label: "Agent",
+      transport: "long_poll",
+    });
+
+    assert.deepEqual(await getRoomAgentPresence(room.id), []);
+    const snapshot = await getRoomAgentPresenceSnapshot(room.id);
+    assert.equal(snapshot[0]?.session_kind, "controller");
+    assert.equal(snapshot[0]?.freshness, "active");
+  }
+);
+
+test(
   "old stale room presence ages out of the live roster window",
   {
     concurrency: false,
@@ -278,6 +312,8 @@ test(
       actor_label: actorLabel,
       agent_key: "EmmyMay/oldpine",
       agent_instance_id: "instance-oldpine",
+      session_kind: "worker",
+      runtime: "codex",
       display_name: "OldPine",
       owner_label: "EmmyMay",
       ide_label: "Agent",
@@ -342,6 +378,8 @@ test(
       actor_label: actorLabel,
       agent_key: "EmmyMay/mapleridge",
       agent_instance_id: "instance-suppression-stale",
+      session_kind: "worker",
+      runtime: "codex",
       display_name: "MapleRidge",
       owner_label: "EmmyMay",
       ide_label: "Codex",
@@ -381,6 +419,8 @@ test(
       actor_label: actorLabel,
       agent_key: "EmmyMay/mapleridge",
       agent_instance_id: "instance-suppression-reset",
+      session_kind: "worker",
+      runtime: "codex",
       display_name: "MapleRidge",
       owner_label: "EmmyMay",
       ide_label: "Codex",
@@ -425,6 +465,8 @@ test(
         actor_label: actorLabel,
         agent_key: `EmmyMay/agent${index}`,
         agent_instance_id: `instance-agent-${index}`,
+        session_kind: "worker",
+        runtime: "codex",
         display_name: `Agent${index}`,
         owner_label: "EmmyMay",
         ide_label: "Agent",

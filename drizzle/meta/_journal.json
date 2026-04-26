@@ -225,6 +225,13 @@
       "when": 1776868800000,
       "tag": "0031_room_live_agent_suppressions",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1777150800000,
+      "tag": "0032_agent_sessions",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,10 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../http-helpers.js";
+import {
+  requireWorkerRequestAgentIdentity,
+  type ResolvedRequestAgentIdentity,
+} from "../request-agent-identity.js";
 import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
 import { normalizeRoomId } from "../room-routing.js";
 import {
@@ -34,6 +38,34 @@ type TaskCoordinationGuardDecision =
   | { kind: "deny"; code: string; error: string };
 
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
+
+type OwnerTokenWorkerWriteIdentity =
+  | { kind: "not_owner_token" }
+  | { kind: "worker"; identity: ResolvedRequestAgentIdentity }
+  | { kind: "responded" };
+
+async function resolveOwnerTokenWorkerWriteIdentity(input: {
+  req: AuthenticatedRequest;
+  res: Response;
+  room_id: string;
+  body: Record<string, unknown>;
+}): Promise<OwnerTokenWorkerWriteIdentity> {
+  if (input.req.authKind !== "owner_token") {
+    return { kind: "not_owner_token" };
+  }
+
+  const result = await requireWorkerRequestAgentIdentity({
+    req: input.req,
+    body: input.body,
+    room_id: input.room_id,
+  });
+  if (!result.ok) {
+    input.res.status(result.status).json({ error: result.error });
+    return { kind: "responded" };
+  }
+
+  return { kind: "worker", identity: result.identity };
+}
 
 export interface LegacyProjectTaskRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -101,7 +133,17 @@ export function registerLegacyProjectTaskRoutes(
       return;
     }
 
-    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = req.body as {
+    const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: projectId,
+      body: requestBody,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
+
+    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = requestBody as {
       title?: string;
       description?: string;
       created_by?: string;
@@ -111,7 +153,12 @@ export function registerLegacyProjectTaskRoutes(
       actor_instance_id?: string;
     };
 
-    if (!title || !created_by) {
+    const createdBy = workerIdentity?.actor_label ?? created_by ?? null;
+    const effectiveActorLabel = workerIdentity?.actor_label ?? actor_label ?? createdBy;
+    const effectiveActorKey = workerIdentity?.agent_key ?? actor_key ?? null;
+    const effectiveActorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(actor_instance_id);
+
+    if (!title || !createdBy) {
       res.status(400).json({ error: "title and created_by are required" });
       return;
     }
@@ -134,16 +181,16 @@ export function registerLegacyProjectTaskRoutes(
       projectId,
       title,
       sourceMessageId: source_message_id ?? null,
-      actorLabel: actor_label ?? created_by,
-      actorKey: actor_key ?? null,
-      actorInstanceId: deps.normalizeOptionalString(actor_instance_id),
+      actorLabel: effectiveActorLabel,
+      actorKey: effectiveActorKey,
+      actorInstanceId: effectiveActorInstanceId,
     });
     if (admission.kind === "deny") {
       res.status(409).json({ error: admission.error, code: admission.code });
       return;
     }
 
-    const task = await createTask(projectId, title, created_by, description, source_message_id);
+    const task = await createTask(projectId, title, createdBy, description, source_message_id);
 
     if (req.authKind === "owner_token") {
       await createCoordinationEvent({
@@ -151,16 +198,16 @@ export function registerLegacyProjectTaskRoutes(
         task_id: task.id,
         event_type: "task_admit",
         decision: "record",
-        actor_label: created_by,
-        actor_key: normalizeTaskActorKey(actor_key),
-        actor_instance_id: deps.normalizeOptionalString(actor_instance_id),
+        actor_label: effectiveActorLabel,
+        actor_key: normalizeTaskActorKey(effectiveActorKey),
+        actor_instance_id: effectiveActorInstanceId,
         reason: "Agent-created task requires coordinator acceptance before it is claimable.",
       });
       res.status(201).json(task);
       return;
     }
 
-    if (!(await deps.isTrustedAgentCreator(projectId, created_by))) {
+    if (!(await deps.isTrustedAgentCreator(projectId, createdBy))) {
       res.status(201).json(task);
       return;
     }
@@ -252,14 +299,28 @@ export function registerLegacyProjectTaskRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: projectId,
+      body: requestBody,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
     const workflow_artifacts = validateTaskWorkflowArtifactsInput(
       requestBody.workflow_artifacts
     );
-    const { updates, actorLabel, actorKey } = buildTaskUpdatePatch({
+    const patch = buildTaskUpdatePatch({
       body: requestBody,
       workflowArtifacts: workflow_artifacts,
     });
-    const actorInstanceId = deps.normalizeOptionalString(requestBody.actor_instance_id);
+    const { updates } = patch;
+    const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
+    const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
+    const actorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id);
+    if (workerIdentity && updates.assignee === workerIdentity.actor_label && !updates.assignee_agent_key) {
+      updates.assignee_agent_key = workerIdentity.agent_key;
+    }
 
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);

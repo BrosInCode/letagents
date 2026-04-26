@@ -24,7 +24,11 @@ import {
 } from "../http-helpers.js";
 import { normalizeRoomId } from "../room-routing.js";
 import { startSseStream, stopSseStream } from "../sse.js";
-import { beginRoomAgentDelivery } from "../room-agent-delivery.js";
+import {
+  beginRoomAgentDelivery,
+  InvalidRoomAgentDeliverySessionError,
+} from "../room-agent-delivery.js";
+import { requireWorkerRequestAgentIdentity } from "../request-agent-identity.js";
 import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
@@ -110,18 +114,41 @@ export function registerRoomMessageRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const { sender, text, agent_prompt_kind, reply_to, attachments: rawAttachments } = req.body as {
+    const {
+      sender,
+      text,
+      agent_prompt_kind,
+      reply_to,
+      attachments: rawAttachments,
+      agent_session_id,
+      agent_session_token,
+    } = req.body as {
       sender?: string;
       text?: string;
       agent_prompt_kind?: string;
       reply_to?: string;
       attachments?: unknown;
+      agent_session_id?: string;
+      agent_session_token?: string;
     };
     try {
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
       const attachments = normalizeMessageAttachmentReferences(rawAttachments);
-      const normalizedSender = typeof sender === "string" ? sender.trim() : "";
+      const agentSessionIdentity = req.authKind === "owner_token"
+        ? await requireWorkerRequestAgentIdentity({
+          req,
+          body: { agent_session_id, agent_session_token },
+          room_id: project.id,
+        })
+        : null;
+      if (agentSessionIdentity && !agentSessionIdentity.ok) {
+        res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+        return;
+      }
+      const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
+      const normalizedSender = workerIdentity?.actor_label
+        || (typeof sender === "string" ? sender.trim() : "");
       if (
         !normalizedSender ||
         typeof text !== "string" ||
@@ -134,7 +161,9 @@ export function registerRoomMessageRoutes(
         res.status(400).json({ error: "auto prompt messages cannot include attachments" });
         return;
       }
-      const source = req.authKind === "session" ? "browser" : req.authKind === "owner_token" ? "agent" : undefined;
+      const source = req.authKind === "session"
+        ? "browser"
+        : req.authKind === "owner_token" ? "agent" : undefined;
       const message = await deps.emitProjectMessage(project.id, normalizedSender, text, {
         source,
         agent_prompt_kind: promptKind,
@@ -325,15 +354,31 @@ export function registerRoomMessageRoutes(
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-    const endDelivery = await beginRoomAgentDelivery({
-      req,
-      roomId: project.id,
-      transport: "long_poll",
-    });
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let endDelivery: (() => Promise<void>) | null = null;
+    try {
+      endDelivery = await beginRoomAgentDelivery({
+        req,
+        roomId: project.id,
+        transport: "long_poll",
+        onSessionDisconnected: () => resolveRequest([]),
+      });
+    } catch (error) {
+      if (error instanceof InvalidRoomAgentDeliverySessionError) {
+        res.status(401).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
     const existing = await getMessagesAfter(projectId, after, {
       limit,
       include_prompt_only: includePromptOnly,
     });
+
+    if (settled) {
+      return;
+    }
 
     if (existing.messages.length > 0) {
       await endDelivery?.().catch((error: unknown) => {
@@ -343,42 +388,42 @@ export function registerRoomMessageRoutes(
       return;
     }
 
-    let settled = false;
-
-    const cleanup = () => {
-      clearTimeout(timeout);
+    function cleanup() {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       deps.messageEvents.off("message:created", onMessageCreated);
       req.off("close", onClientClose);
       if (endDelivery) {
         void endDelivery().catch((error: unknown) => {
-          console.error(`[room messages poll] failed to end agent delivery for ${project.id}`, error);
+          console.error(`[room messages poll] failed to end agent delivery for ${projectId}`, error);
         });
       }
-    };
+    }
 
-    const resolveRequest = (msgs: Message[], hasMore = false) => {
+    function resolveRequest(msgs: Message[], hasMore = false) {
       if (settled) return;
       settled = true;
       cleanup();
-      res.json({ room_id: project.id, messages: msgs, has_more: hasMore });
-    };
+      res.json({ room_id: projectId, messages: msgs, has_more: hasMore });
+    }
 
-    const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
+    async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {
       if (eventProjectId !== projectId) return;
       const next = await getMessagesAfter(projectId, after, {
         limit,
         include_prompt_only: includePromptOnly,
       });
       if (next.messages.length > 0) resolveRequest(next.messages, next.has_more);
-    };
+    }
 
-    const onClientClose = () => {
+    function onClientClose() {
       if (settled) return;
       settled = true;
       cleanup();
-    };
+    }
 
-    const timeout = setTimeout(() => resolveRequest([]), timeoutMs);
+    timeout = setTimeout(() => resolveRequest([]), timeoutMs);
     deps.messageEvents.on("message:created", onMessageCreated);
     req.on("close", onClientClose);
   });
@@ -393,11 +438,24 @@ export function registerRoomMessageRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const projectId = project.id;
-    const endDelivery = await beginRoomAgentDelivery({
-      req,
-      roomId: project.id,
-      transport: "sse",
-    });
+    let endDelivery: (() => Promise<void>) | null = null;
+    try {
+      endDelivery = await beginRoomAgentDelivery({
+        req,
+        roomId: project.id,
+        transport: "sse",
+        onSessionDisconnected: () => {
+          res.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`);
+          res.end();
+        },
+      });
+    } catch (error) {
+      if (error instanceof InvalidRoomAgentDeliverySessionError) {
+        res.status(401).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
 
     const heartbeat = startSseStream(res);
 

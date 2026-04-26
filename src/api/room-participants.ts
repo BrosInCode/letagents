@@ -106,7 +106,7 @@ export function buildAgentRoomParticipantUpsert(
     || parsed?.display_name
     || actorLabel;
 
-  return {
+  const participant: RoomParticipantUpsertInput = {
     room_id: input.projectId,
     participant_key: participantKey,
     kind: "agent",
@@ -117,8 +117,11 @@ export function buildAgentRoomParticipantUpsert(
       || getOwnerLabelFromAttribution(parsed?.owner_attribution),
     ide_label: normalizeParticipantValue(input.ideLabel) || parsed?.ide_label || null,
     last_seen_at: input.lastSeenAt ?? null,
-    preserve_last_seen_at_on_conflict: input.preserveLastSeenAtOnConflict ?? false,
   };
+  if (input.preserveLastSeenAtOnConflict) {
+    participant.preserve_last_seen_at_on_conflict = true;
+  }
+  return participant;
 }
 
 export function buildRoomParticipantUpsertFromMessage(
@@ -127,6 +130,10 @@ export function buildRoomParticipantUpsertFromMessage(
   const normalizedSender = normalizeParticipantValue(input.sender);
   const normalizedSource = normalizeParticipantValue(input.source).toLowerCase();
   if (!normalizedSender) {
+    return null;
+  }
+
+  if (normalizedSource === "controller") {
     return null;
   }
 

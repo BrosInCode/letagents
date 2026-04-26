@@ -22,6 +22,9 @@ function makePresence(overrides: Partial<RoomAgentPresence>): RoomAgentPresence 
     room_id: 'focus_16',
     actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
     agent_key: 'EmmyMay/liveoak',
+    agent_session_id: 'agent_session_1',
+    session_kind: 'worker',
+    runtime: 'codex',
     display_name: 'LiveOak',
     owner_label: 'EmmyMay',
     ide_label: 'Agent',
@@ -163,6 +166,29 @@ test('buildMentionCandidates excludes status-only presence without delivery reac
   assert.deepEqual(candidates, [])
 })
 
+test('buildMentionCandidates excludes controller delivery sessions', () => {
+  const candidates = buildMentionCandidates({
+    participants: [
+      makeParticipant({
+        display_name: 'ControllerOak',
+        actor_label: 'ControllerOak | EmmyMay\'s agent | Agent',
+      }),
+    ],
+    presence: [
+      makePresence({
+        display_name: 'ControllerOak',
+        actor_label: 'ControllerOak | EmmyMay\'s agent | Agent',
+        session_kind: 'controller',
+        freshness: 'active',
+        activity_state: 'active',
+        source_flags: ['delivery', 'presence'],
+      }),
+    ],
+  })
+
+  assert.deepEqual(candidates, [])
+})
+
 test('buildAgentReachabilitySources merges live presence into participant history', () => {
   const sources = buildAgentReachabilitySources({
     participants: [
@@ -177,6 +203,7 @@ test('buildAgentReachabilitySources merges live presence into participant histor
       makePresence({
         actor_label: 'GhostAsh | EmmyMay\'s agent | Agent',
         display_name: 'GhostAsh',
+        agent_session_id: 'agent_session_ghost',
         freshness: 'stale',
         activity_state: 'offline',
         source_flags: ['delivery', 'presence'],
@@ -184,6 +211,7 @@ test('buildAgentReachabilitySources merges live presence into participant histor
       makePresence({
         actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
         display_name: 'LiveOak',
+        agent_session_id: 'agent_session_live',
         freshness: 'active',
         activity_state: 'active',
         source_flags: ['delivery', 'presence'],
@@ -199,6 +227,54 @@ test('buildAgentReachabilitySources merges live presence into participant histor
     ],
   )
   assert.equal(sources[1]?.participant, null)
+})
+
+test('buildAgentReachabilitySources excludes controller delivery sessions from live sources', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [],
+    presence: [
+      makePresence({
+        actor_label: 'ControllerOak | EmmyMay\'s agent | Agent',
+        display_name: 'ControllerOak',
+        session_kind: 'controller',
+        freshness: 'active',
+        activity_state: 'active',
+      }),
+    ],
+  })
+
+  assert.deepEqual(sources, [])
+})
+
+test('buildAgentReachabilitySources counts distinct worker sessions for the same actor label', () => {
+  const sources = buildAgentReachabilitySources({
+    participants: [
+      makeParticipant({
+        participant_key: 'agent:liveoak | emmymay\'s agent | agent',
+        actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
+        display_name: 'LiveOak',
+      }),
+    ],
+    presence: [
+      makePresence({
+        actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
+        display_name: 'LiveOak',
+        agent_session_id: 'agent_session_1',
+      }),
+      makePresence({
+        actor_label: 'LiveOak | EmmyMay\'s agent | Agent',
+        display_name: 'LiveOak',
+        agent_session_id: 'agent_session_2',
+      }),
+    ],
+  })
+
+  assert.deepEqual(
+    sources.map((source) => source.key),
+    ['agent:agent_session_1', 'agent:agent_session_2'],
+  )
+  assert.equal(sources[0]?.participant?.participant_key, 'agent:liveoak | emmymay\'s agent | agent')
+  assert.equal(sources[1]?.participant?.participant_key, 'agent:liveoak | emmymay\'s agent | agent')
 })
 
 test('buildAgentReachabilitySources excludes status-only presence from live reachability', () => {

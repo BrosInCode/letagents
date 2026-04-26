@@ -26,6 +26,17 @@ export const ROOM_AGENT_DELIVERY_TRANSPORTS = [
 
 export type RoomAgentDeliveryTransport = (typeof ROOM_AGENT_DELIVERY_TRANSPORTS)[number];
 
+export const ROOM_AGENT_SESSION_KINDS = [
+  "controller",
+  "worker",
+] as const;
+
+export type RoomAgentSessionKind = (typeof ROOM_AGENT_SESSION_KINDS)[number];
+
+export function normalizeRoomAgentSessionKind(value: unknown): RoomAgentSessionKind {
+  return String(value || "").trim().toLowerCase() === "worker" ? "worker" : "controller";
+}
+
 export function normalizeAgentPresenceStatus(value: unknown): AgentPresenceStatus | null {
   const normalized = String(value || "").trim().toLowerCase();
   return AGENT_PRESENCE_STATUSES.includes(normalized as AgentPresenceStatus)

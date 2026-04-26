@@ -22,7 +22,9 @@ export interface AgentReachabilitySource {
 }
 
 export function isLivePresenceEntry(entry: RoomAgentPresence | null | undefined): boolean {
-  return entry?.freshness === 'active' && entry.source_flags.includes('delivery')
+  return entry?.freshness === 'active'
+    && entry.session_kind === 'worker'
+    && entry.source_flags.includes('delivery')
 }
 
 function normalizeRoomActivityStateValue(
@@ -40,9 +42,11 @@ function normalizeRoomActivityStateValue(
 
 export function resolveAgentActivityState(input: {
   participant?: Pick<RoomParticipant, 'activity_state' | 'hidden_at' | 'source_flags'> | null
-  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags' | 'status'> | null
+  presence?: Pick<RoomAgentPresence, 'freshness' | 'activity_state' | 'source_flags' | 'status' | 'session_kind'> | null
 }): AgentReachabilitySource['activityState'] {
   const hasCurrentDelivery = Boolean(
+    input.presence?.session_kind === 'worker'
+    &&
     input.presence?.source_flags?.includes('delivery')
   )
   if (input.participant?.hidden_at) return 'offline'
@@ -171,41 +175,36 @@ export function buildAgentReachabilitySources(input: {
   presence: readonly RoomAgentPresence[]
 }): AgentReachabilitySource[] {
   const next: AgentReachabilitySource[] = []
-  const presenceByActor = new Map(input.presence.map((entry) => [entry.actor_label, entry]))
-  const seenActors = new Set<string>()
+  const participantByActor = new Map(
+    input.participants
+      .filter((participant) => participant.kind === 'agent' && !participant.hidden_at)
+      .map((participant) => [getParticipantActorLabel(participant), participant] as const)
+      .filter(([actorLabel]) => Boolean(actorLabel))
+  )
+  const seenPresenceKeys = new Set<string>()
   const hiddenActors = new Set<string>()
 
   for (const participant of input.participants) {
-    if (participant.kind !== 'agent') continue
-    const actorLabel = getParticipantActorLabel(participant)
-    if (participant.hidden_at) {
+    if (participant.kind === 'agent' && participant.hidden_at) {
+      const actorLabel = getParticipantActorLabel(participant)
       if (actorLabel) hiddenActors.add(actorLabel)
-      continue
-    }
-
-    const presence = actorLabel ? (presenceByActor.get(actorLabel) || null) : null
-    if (!presence?.source_flags.includes('delivery')) continue
-    next.push({
-      key: participant.participant_key,
-      actorLabel,
-      participant,
-      presence,
-      activityState: resolveAgentActivityState({ participant, presence }),
-    })
-    if (actorLabel) {
-      seenActors.add(actorLabel)
     }
   }
 
   for (const presence of input.presence) {
     const activityState = resolveAgentActivityState({ presence })
     if (activityState === 'offline' && !presence.source_flags.includes('delivery')) continue
+    if (presence.session_kind !== 'worker') continue
     const actorLabel = String(presence.actor_label || '').trim()
-    if (!actorLabel || seenActors.has(actorLabel) || hiddenActors.has(actorLabel)) continue
+    if (!actorLabel || hiddenActors.has(actorLabel)) continue
+    const presenceKey = presence.agent_session_id || actorLabel
+    if (seenPresenceKeys.has(presenceKey)) continue
+    seenPresenceKeys.add(presenceKey)
+    const participant = participantByActor.get(actorLabel) || null
     next.push({
-      key: `agent:${actorLabel.toLowerCase()}`,
+      key: `agent:${presenceKey.toLowerCase()}`,
       actorLabel,
-      participant: null,
+      participant,
       presence,
       activityState,
     })

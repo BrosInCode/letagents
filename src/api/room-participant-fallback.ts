@@ -158,6 +158,10 @@ export function buildFallbackRoomParticipants(input: {
   };
 
   for (const entry of input.presence) {
+    if (entry.session_kind !== "worker") {
+      continue;
+    }
+
     const participantKey = buildAgentRoomParticipantKey(entry.actor_label);
     if (!participantKey) {
       continue;
@@ -191,6 +195,9 @@ export function buildFallbackRoomParticipants(input: {
   for (const message of input.messages) {
     const sender = normalizeValue(message.sender);
     if (!sender) {
+      continue;
+    }
+    if (normalizeValue(message.source).toLowerCase() === "controller") {
       continue;
     }
 

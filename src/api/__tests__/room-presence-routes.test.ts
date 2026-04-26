@@ -42,6 +42,8 @@ test("registerRoomPresenceRoutes preserves canonical presence route order", () =
     { method: "get", path: "/^\\/rooms\\/(.+)\\/participants$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/activity-history$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/(?:clear|archive)-disconnected$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/presence$/" },
   ]);
 });
@@ -51,6 +53,9 @@ function makePresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPres
     room_id: "room_1",
     actor_label: "StatusOnly | EmmyMay's agent | Agent",
     agent_key: "EmmyMay/statusonly",
+    agent_session_id: "session_status_only",
+    session_kind: "worker",
+    runtime: "codex",
     display_name: "StatusOnly",
     owner_label: "EmmyMay",
     ide_label: "Agent",
