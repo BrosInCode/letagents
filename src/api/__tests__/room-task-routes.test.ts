@@ -143,6 +143,43 @@ test("room task creation denies parent board writes from hard-isolated Focus Roo
   assert.equal(admissionCalled, false);
 });
 
+test("owner-token task creation requires a registered worker session", async () => {
+  const { app, handlers } = createRouteApp();
+  let admissionCalled = false;
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async () => ({ id: "github.com/brosincode/letagents" }),
+    requireParticipant: async () => true,
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" as const }),
+    enforceTaskAdmissionCoordination: async () => {
+      admissionCalled = true;
+      return { kind: "allow" as const };
+    },
+  };
+
+  registerRoomTaskRoutes(app as never, deps as never);
+  const handler = handlers.post.get("/^\\/rooms\\/(.+)\\/tasks$/");
+  assert.ok(handler);
+
+  const res = createResponseRecorder();
+  await handler(
+    {
+      params: { 0: "github.com/brosincode/letagents" },
+      body: { title: "Close presence gap", created_by: "FakeAgent" },
+      authKind: "owner_token",
+      sessionAccount: { account_id: "acct_1" },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Registered worker session is required for agent write actions.",
+  });
+  assert.equal(admissionCalled, false);
+});
+
 test("room task updates deny parent board writes from hard-isolated Focus Rooms before task lookup", async () => {
   const { app, handlers } = createRouteApp();
   let coordinationCalled = false;

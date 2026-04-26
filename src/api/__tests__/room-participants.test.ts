@@ -100,6 +100,16 @@ test("buildRoomParticipantUpsertFromMessage classifies agents, humans, and syste
   });
   assert.equal(human?.kind, "human");
   assert.equal(human?.participant_key, "human:login:emmymay");
+
+  assert.equal(
+    buildRoomParticipantUpsertFromMessage({
+      projectId: "focus_5",
+      sender: "GardenFern | EmmyMay's agent | Agent",
+      source: "controller",
+      timestamp: seenAt,
+    }),
+    null
+  );
 });
 
 test("createRoomParticipantRecorder upserts valid participants and skips ignored messages", async () => {

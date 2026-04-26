@@ -17,7 +17,11 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../http-helpers.js";
-import { beginRoomAgentDelivery } from "../room-agent-delivery.js";
+import { requireWorkerRequestAgentIdentity } from "../request-agent-identity.js";
+import {
+  beginRoomAgentDelivery,
+  InvalidRoomAgentDeliverySessionError,
+} from "../room-agent-delivery.js";
 import { normalizeRoomId } from "../room-routing.js";
 import { startSseStream, stopSseStream } from "../sse.js";
 import {
@@ -86,19 +90,43 @@ export function registerLegacyProjectMessageRoutes(
       return;
     }
 
-    const { sender, text, agent_prompt_kind, reply_to, attachments: rawAttachments } = req.body as {
+    const {
+      sender,
+      text,
+      agent_prompt_kind,
+      reply_to,
+      attachments: rawAttachments,
+      agent_session_id,
+      agent_session_token,
+    } = req.body as {
       sender?: string;
       text?: string;
       agent_prompt_kind?: string;
       reply_to?: string;
       attachments?: unknown;
+      agent_session_id?: string;
+      agent_session_token?: string;
     };
 
     try {
+      const workerIdentity = req.authKind === "owner_token"
+        ? await requireWorkerRequestAgentIdentity({
+          req,
+          body: { agent_session_id, agent_session_token },
+          room_id: projectId,
+        })
+        : null;
+      if (workerIdentity && !workerIdentity.ok) {
+        res.status(workerIdentity.status).json({ error: workerIdentity.error });
+        return;
+      }
+
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
       const attachments = normalizeMessageAttachmentReferences(rawAttachments);
-      const normalizedSender = typeof sender === "string" ? sender.trim() : "";
+      const normalizedSender = workerIdentity?.ok
+        ? workerIdentity.identity.actor_label
+        : typeof sender === "string" ? sender.trim() : "";
       if (
         !normalizedSender ||
         typeof text !== "string" ||
@@ -215,11 +243,24 @@ export function registerLegacyProjectMessageRoutes(
       return;
     }
 
-    const endDelivery = await beginRoomAgentDelivery({
-      req,
-      roomId: project.id,
-      transport: "sse",
-    });
+    let endDelivery: (() => Promise<void>) | null = null;
+    try {
+      endDelivery = await beginRoomAgentDelivery({
+        req,
+        roomId: project.id,
+        transport: "sse",
+        onSessionDisconnected: () => {
+          res.write(`event: session_disconnect\ndata: ${JSON.stringify({ project_id: projectId })}\n\n`);
+          res.end();
+        },
+      });
+    } catch (error) {
+      if (error instanceof InvalidRoomAgentDeliverySessionError) {
+        res.status(401).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
     const heartbeat = startSseStream(res);
 
     const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
@@ -263,15 +304,31 @@ export function registerLegacyProjectMessageRoutes(
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-    const endDelivery = await beginRoomAgentDelivery({
-      req,
-      roomId: project.id,
-      transport: "long_poll",
-    });
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let endDelivery: (() => Promise<void>) | null = null;
+    try {
+      endDelivery = await beginRoomAgentDelivery({
+        req,
+        roomId: project.id,
+        transport: "long_poll",
+        onSessionDisconnected: () => resolveRequest([]),
+      });
+    } catch (error) {
+      if (error instanceof InvalidRoomAgentDeliverySessionError) {
+        res.status(401).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
     const existing = await getMessagesAfter(projectId, after, {
       limit,
       include_prompt_only: includePromptOnly,
     });
+
+    if (settled) {
+      return;
+    }
 
     if (existing.messages.length > 0) {
       await endDelivery?.().catch((error: unknown) => {
@@ -281,20 +338,20 @@ export function registerLegacyProjectMessageRoutes(
       return;
     }
 
-    let settled = false;
-
-    const cleanup = () => {
-      clearTimeout(timeout);
+    function cleanup() {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       deps.messageEvents.off("message:created", onMessageCreated);
       req.off("close", onClientClose);
       if (endDelivery) {
         void endDelivery().catch((error: unknown) => {
-          console.error(`[legacy messages poll] failed to end agent delivery for ${project.id}`, error);
+          console.error(`[legacy messages poll] failed to end agent delivery for ${projectId}`, error);
         });
       }
-    };
+    }
 
-    const resolveRequest = (msgs: Message[], hasMore = false) => {
+    function resolveRequest(msgs: Message[], hasMore = false) {
       if (settled) {
         return;
       }
@@ -302,9 +359,9 @@ export function registerLegacyProjectMessageRoutes(
       settled = true;
       cleanup();
       res.json({ project_id: projectId, messages: msgs, has_more: hasMore });
-    };
+    }
 
-    const onMessageCreated = async ({ projectId: eventProjectId }: MessageCreatedEvent) => {
+    async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {
       if (eventProjectId !== projectId) {
         return;
       }
@@ -316,18 +373,18 @@ export function registerLegacyProjectMessageRoutes(
       if (next.messages.length > 0) {
         resolveRequest(next.messages, next.has_more);
       }
-    };
+    }
 
-    const onClientClose = () => {
+    function onClientClose() {
       if (settled) {
         return;
       }
 
       settled = true;
       cleanup();
-    };
+    }
 
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
       resolveRequest([]);
     }, timeoutMs);
 

@@ -21,6 +21,9 @@ function makePresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPres
     room_id: overrides.room_id ?? "github.com/brosincode/letagents",
     actor_label: overrides.actor_label ?? "CrestPine | EmmyMay's agent | Agent",
     agent_key: overrides.agent_key ?? "EmmyMay/crestpine",
+    agent_session_id: overrides.agent_session_id ?? "agent_session_1",
+    session_kind: overrides.session_kind ?? "worker",
+    runtime: overrides.runtime ?? "codex",
     display_name: overrides.display_name ?? "CrestPine",
     owner_label: overrides.owner_label ?? "EmmyMay",
     ide_label: overrides.ide_label ?? "Agent",
@@ -102,4 +105,25 @@ test("buildFallbackRoomParticipants preserves presence-backed reachability when 
   assert.equal(participants[0]?.last_room_activity_at, "2026-04-08T15:05:00.000Z");
   assert.equal(participants[0]?.last_seen_at, "2026-04-08T15:05:00.000Z");
   assert.deepEqual(participants[0]?.source_flags, ["delivery", "presence", "messages"]);
+});
+
+test("buildFallbackRoomParticipants skips controller presence and messages", () => {
+  const participants = buildFallbackRoomParticipants({
+    roomId: "github.com/brosincode/letagents",
+    presence: [
+      makePresence({
+        actor_label: "ControllerOak | EmmyMay's agent | Agent",
+        display_name: "ControllerOak",
+        session_kind: "controller",
+      }),
+    ],
+    messages: [
+      makeMessage({
+        sender: "ControllerOak | EmmyMay's agent | Agent",
+        source: "controller",
+      }),
+    ],
+  });
+
+  assert.deepEqual(participants, []);
 });

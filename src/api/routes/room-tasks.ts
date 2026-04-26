@@ -34,6 +34,10 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../http-helpers.js";
+import {
+  requireWorkerRequestAgentIdentity,
+  type ResolvedRequestAgentIdentity,
+} from "../request-agent-identity.js";
 import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
 import { normalizeRoomId } from "../room-routing.js";
 import { getTaskStalePromptState } from "../stale-work.js";
@@ -60,6 +64,11 @@ type TaskCoordinationGuardDecision =
 type TaskAdmissionGuardDecision =
   | { kind: "allow" }
   | { kind: "deny"; code: string; error: string };
+
+type OwnerTokenWorkerWriteIdentity =
+  | { kind: "not_owner_token" }
+  | { kind: "worker"; identity: ResolvedRequestAgentIdentity }
+  | { kind: "responded" };
 
 type LeaseActionRequestBody = {
   action?: string;
@@ -205,6 +214,29 @@ function getActiveWorkLease(leases: readonly TaskLease[]): TaskLease | null {
   return leases.find((lease) => lease.kind === "work") ?? null;
 }
 
+async function resolveOwnerTokenWorkerWriteIdentity(input: {
+  req: AuthenticatedRequest;
+  res: Response;
+  room_id: string;
+  body: Record<string, unknown>;
+}): Promise<OwnerTokenWorkerWriteIdentity> {
+  if (input.req.authKind !== "owner_token") {
+    return { kind: "not_owner_token" };
+  }
+
+  const result = await requireWorkerRequestAgentIdentity({
+    req: input.req,
+    body: input.body,
+    room_id: input.room_id,
+  });
+  if (!result.ok) {
+    input.res.status(result.status).json({ error: result.error });
+    return { kind: "responded" };
+  }
+
+  return { kind: "worker", identity: result.identity };
+}
+
 export function registerRoomTaskRoutes(
   app: Express,
   deps: RoomTaskRouteDeps
@@ -247,7 +279,17 @@ export function registerRoomTaskRoutes(
       return;
     }
 
-    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = req.body as {
+    const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: project.id,
+      body: requestBody,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
+
+    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = requestBody as {
       title?: string;
       description?: string;
       created_by?: string;
@@ -257,7 +299,12 @@ export function registerRoomTaskRoutes(
       actor_instance_id?: string;
     };
 
-    if (!title || !created_by) {
+    const createdBy = workerIdentity?.actor_label ?? created_by ?? null;
+    const effectiveActorLabel = workerIdentity?.actor_label ?? actor_label ?? createdBy;
+    const effectiveActorKey = workerIdentity?.agent_key ?? actor_key ?? null;
+    const effectiveActorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(actor_instance_id);
+
+    if (!title || !createdBy) {
       res.status(400).json({ error: "title and created_by are required" });
       return;
     }
@@ -267,16 +314,16 @@ export function registerRoomTaskRoutes(
       projectId: project.id,
       title,
       sourceMessageId: source_message_id ?? null,
-      actorLabel: actor_label ?? created_by,
-      actorKey: actor_key ?? null,
-      actorInstanceId: deps.normalizeOptionalString(actor_instance_id),
+      actorLabel: effectiveActorLabel,
+      actorKey: effectiveActorKey,
+      actorInstanceId: effectiveActorInstanceId,
     });
     if (admission.kind === "deny") {
       res.status(409).json({ error: admission.error, code: admission.code });
       return;
     }
 
-    const task = await createTask(project.id, title, created_by, description, source_message_id);
+    const task = await createTask(project.id, title, createdBy, description, source_message_id);
 
     if (req.authKind === "owner_token") {
       await createCoordinationEvent({
@@ -284,16 +331,16 @@ export function registerRoomTaskRoutes(
         task_id: task.id,
         event_type: "task_admit",
         decision: "record",
-        actor_label: created_by,
-        actor_key: normalizeTaskActorKey(actor_key),
-        actor_instance_id: deps.normalizeOptionalString(actor_instance_id),
+        actor_label: effectiveActorLabel,
+        actor_key: normalizeTaskActorKey(effectiveActorKey),
+        actor_instance_id: effectiveActorInstanceId,
         reason: "Agent-created task requires coordinator acceptance before it is claimable.",
       });
       res.status(201).json({ ...task, room_id: project.id });
       return;
     }
 
-    if (!(await deps.isTrustedAgentCreator(project.id, created_by))) {
+    if (!(await deps.isTrustedAgentCreator(project.id, createdBy))) {
       res.status(201).json({ ...task, room_id: project.id });
       return;
     }
@@ -332,6 +379,14 @@ export function registerRoomTaskRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: project.id,
+      body: requestBody,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
     const { display_name } = requestBody as { display_name?: string };
     try {
       const task = await getTaskById(project.id, taskId);
@@ -348,9 +403,9 @@ export function registerRoomTaskRoutes(
         taskOwnership,
         updates: {},
         forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
-        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
-        actorKey: normalizeTaskActorKey(requestBody.actor_key),
-        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+        actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
@@ -425,6 +480,14 @@ export function registerRoomTaskRoutes(
       }
 
       const requestBody = (req.body ?? {}) as Record<string, unknown>;
+      const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+        req,
+        res,
+        room_id: project.id,
+        body: requestBody,
+      });
+      if (workerWriteIdentity.kind === "responded") return;
+      const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
       const promptTimestamp = deps.normalizeOptionalString(requestBody.prompt_timestamp);
       if (!isCurrentStalePromptAction({ taskUpdatedAt: task.updated_at, promptTimestamp })) {
         const taskWithDetails = await attachTaskDetails(project.id, task);
@@ -444,16 +507,17 @@ export function registerRoomTaskRoutes(
         taskOwnership,
         updates: {},
         forcedMutation: { mutation: "task_update", leaseKind: "work" },
-        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
-        actorKey: normalizeTaskActorKey(requestBody.actor_key),
-        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+        actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
 
-      const mutedBy = deps.normalizeOptionalString(requestBody.muted_by)
+      const mutedBy = workerIdentity?.actor_label
+        ?? deps.normalizeOptionalString(requestBody.muted_by)
         ?? req.sessionAccount?.display_name
         ?? req.sessionAccount?.login
         ?? "participant";
@@ -506,6 +570,14 @@ export function registerRoomTaskRoutes(
       }
 
       const requestBody = (req.body ?? {}) as Record<string, unknown>;
+      const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+        req,
+        res,
+        room_id: project.id,
+        body: requestBody,
+      });
+      if (workerWriteIdentity.kind === "responded") return;
+      const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
       const promptTimestamp = deps.normalizeOptionalString(requestBody.prompt_timestamp);
       if (!isCurrentStalePromptAction({ taskUpdatedAt: task.updated_at, promptTimestamp })) {
         const taskWithDetails = await attachTaskDetails(project.id, task);
@@ -525,9 +597,9 @@ export function registerRoomTaskRoutes(
         taskOwnership,
         updates: {},
         forcedMutation: { mutation: "task_update", leaseKind: "work" },
-        actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
-        actorKey: normalizeTaskActorKey(requestBody.actor_key),
-        actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+        actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
+        actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
+        actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
@@ -575,6 +647,14 @@ export function registerRoomTaskRoutes(
     }
 
     const requestBody = (req.body ?? {}) as LeaseActionRequestBody;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: project.id,
+      body: requestBody as Record<string, unknown>,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
     const action =
       requestBody.action === "handoff"
         ? "handoff"
@@ -586,13 +666,14 @@ export function registerRoomTaskRoutes(
       return;
     }
 
-    const actorLabel = normalizeTaskActorLabel(requestBody.actor_label)
+    const actorLabel = workerIdentity?.actor_label
+      ?? normalizeTaskActorLabel(requestBody.actor_label)
       ?? req.sessionAccount?.display_name
       ?? req.sessionAccount?.login
       ?? null;
-    const actorInstanceId = normalizeTaskActorInstanceId(requestBody.actor_instance_id);
-    let actorKey: string | null = null;
-    if (req.authKind === "owner_token") {
+    const actorInstanceId = workerIdentity?.agent_instance_id ?? normalizeTaskActorInstanceId(requestBody.actor_instance_id);
+    let actorKey: string | null = workerIdentity?.agent_key ?? null;
+    if (req.authKind === "owner_token" && !workerIdentity) {
       const actorValidation = await deps.validateOwnerTokenTaskActorKey({
         req,
         actorKey: normalizeTaskActorKey(requestBody.actor_key),
@@ -855,14 +936,28 @@ export function registerRoomTaskRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: project.id,
+      body: requestBody,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
     const workflow_artifacts = validateTaskWorkflowArtifactsInput(
       requestBody.workflow_artifacts
     );
-    const { updates, actorLabel, actorKey } = buildTaskUpdatePatch({
+    const patch = buildTaskUpdatePatch({
       body: requestBody,
       workflowArtifacts: workflow_artifacts,
     });
-    const actorInstanceId = deps.normalizeOptionalString(requestBody.actor_instance_id);
+    const { updates } = patch;
+    const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
+    const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
+    const actorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id);
+    if (workerIdentity && updates.assignee === workerIdentity.actor_label && !updates.assignee_agent_key) {
+      updates.assignee_agent_key = workerIdentity.agent_key;
+    }
 
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);

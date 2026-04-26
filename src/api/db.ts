@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, desc, eq, inArray, lte, notInArray, sql, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, notInArray, sql, or } from "drizzle-orm";
 
 import { db } from "./db/client.js";
 import {
@@ -19,6 +19,7 @@ import {
   messages,
   owner_tokens,
   room_agent_delivery_sessions,
+  room_agent_sessions,
   room_live_agent_suppressions,
   project_admins,
   reasoning_session_updates,
@@ -52,6 +53,7 @@ import {
   ROOM_AGENT_RECONNECT_GRACE_MS,
   type AgentPresenceFreshness,
   type AgentPresenceStatus,
+  type RoomAgentSessionKind,
   type RoomAgentDeliveryTransport,
 } from "../shared/agent-presence.js";
 import {
@@ -229,6 +231,9 @@ export interface RoomAgentPresence {
   room_id: string;
   actor_label: string;
   agent_key: string | null;
+  agent_session_id: string | null;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
@@ -244,9 +249,13 @@ export interface RoomAgentPresence {
 
 export interface RoomAgentDeliverySession {
   room_id: string;
+  delivery_key: string;
   actor_label: string;
   agent_key: string | null;
   agent_instance_id: string | null;
+  agent_session_id: string | null;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
@@ -257,6 +266,28 @@ export interface RoomAgentDeliverySession {
   reconnect_grace_expires_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RoomAgentSession {
+  session_id: string;
+  room_id: string;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  display_name: string;
+  owner_account_id: string;
+  owner_label: string;
+  ide_label: string;
+  created_at: string;
+  updated_at: string;
+  last_seen_at: string;
+  ended_at: string | null;
+}
+
+export interface CreatedRoomAgentSession extends RoomAgentSession {
+  session_token: string;
 }
 
 export interface RoomParticipant {
@@ -588,6 +619,9 @@ interface RoomAgentPresenceRow {
   room_id: string;
   actor_label: string;
   agent_key: string | null;
+  agent_session_id: string | null;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
@@ -600,9 +634,13 @@ interface RoomAgentPresenceRow {
 
 interface RoomAgentDeliverySessionRow {
   room_id: string;
+  delivery_key: string;
   actor_label: string;
   agent_key: string | null;
   agent_instance_id: string | null;
+  agent_session_id: string | null;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
@@ -613,6 +651,25 @@ interface RoomAgentDeliverySessionRow {
   reconnect_grace_expires_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface RoomAgentSessionRow {
+  session_id: string;
+  room_id: string;
+  token_hash: string;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  display_name: string;
+  owner_account_id: string;
+  owner_label: string;
+  ide_label: string;
+  created_at: string;
+  updated_at: string;
+  last_seen_at: string;
+  ended_at: string | null;
 }
 
 interface RoomLiveAgentSuppressionRow {
@@ -998,6 +1055,9 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     room_id: row.room_id,
     actor_label: row.actor_label,
     agent_key: row.agent_key,
+    agent_session_id: row.agent_session_id,
+    session_kind: row.session_kind,
+    runtime: row.runtime,
     display_name: row.display_name,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
@@ -1020,9 +1080,13 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
 function toRoomAgentDeliverySession(row: RoomAgentDeliverySessionRow): RoomAgentDeliverySession {
   return {
     room_id: row.room_id,
+    delivery_key: row.delivery_key,
     actor_label: row.actor_label,
     agent_key: row.agent_key,
     agent_instance_id: row.agent_instance_id,
+    agent_session_id: row.agent_session_id,
+    session_kind: row.session_kind,
+    runtime: row.runtime,
     display_name: row.display_name,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
@@ -1033,6 +1097,26 @@ function toRoomAgentDeliverySession(row: RoomAgentDeliverySessionRow): RoomAgent
     reconnect_grace_expires_at: row.reconnect_grace_expires_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function toRoomAgentSession(row: RoomAgentSessionRow): RoomAgentSession {
+  return {
+    session_id: row.session_id,
+    room_id: row.room_id,
+    session_kind: row.session_kind,
+    runtime: row.runtime,
+    actor_label: row.actor_label,
+    agent_key: row.agent_key,
+    agent_instance_id: row.agent_instance_id,
+    display_name: row.display_name,
+    owner_account_id: row.owner_account_id,
+    owner_label: row.owner_label,
+    ide_label: row.ide_label,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    last_seen_at: row.last_seen_at,
+    ended_at: row.ended_at,
   };
 }
 
@@ -1064,15 +1148,13 @@ function mergeRoomAgentPresenceRecords(input: {
 }): RoomAgentPresence[] {
   const now = input.now ?? Date.now();
   const statusByActor = new Map(input.statusEntries.map((entry) => [entry.actor_label, entry]));
-  const deliveryByActor = new Map(input.deliverySessions.map((entry) => [entry.actor_label, entry]));
-  const actorLabels = new Set<string>([
-    ...statusByActor.keys(),
-    ...deliveryByActor.keys(),
-  ]);
+  const statusActorsWithDelivery = new Set<string>();
 
-  const merged = Array.from(actorLabels).map((actorLabel) => {
-    const statusEntry = statusByActor.get(actorLabel) ?? null;
-    const deliverySession = deliveryByActor.get(actorLabel) ?? null;
+  const buildEntry = (
+    actorLabel: string,
+    statusEntry: RoomAgentPresence | null,
+    deliverySession: RoomAgentDeliverySession | null
+  ): RoomAgentPresence => {
     const isReachable = deliverySession
       ? isRoomAgentDeliverySessionReachable(deliverySession, now)
       : false;
@@ -1085,6 +1167,9 @@ function mergeRoomAgentPresenceRecords(input: {
       room_id: input.roomId,
       actor_label: actorLabel,
       agent_key: deliverySession?.agent_key ?? statusEntry?.agent_key ?? null,
+      agent_session_id: deliverySession?.agent_session_id ?? statusEntry?.agent_session_id ?? null,
+      session_kind: deliverySession?.session_kind ?? statusEntry?.session_kind ?? "controller",
+      runtime: deliverySession?.runtime ?? statusEntry?.runtime ?? "unknown",
       display_name: deliverySession?.display_name ?? statusEntry?.display_name ?? actorLabel,
       owner_label: deliverySession?.owner_label ?? statusEntry?.owner_label ?? null,
       ide_label: deliverySession?.ide_label ?? statusEntry?.ide_label ?? null,
@@ -1105,7 +1190,20 @@ function mergeRoomAgentPresenceRecords(input: {
         statusEntry ? "presence" : null,
       ]),
     } satisfies RoomAgentPresence;
-  });
+  };
+
+  const merged: RoomAgentPresence[] = [];
+  for (const deliverySession of input.deliverySessions) {
+    const actorLabel = deliverySession.actor_label;
+    statusActorsWithDelivery.add(actorLabel);
+    merged.push(buildEntry(actorLabel, statusByActor.get(actorLabel) ?? null, deliverySession));
+  }
+  for (const statusEntry of input.statusEntries) {
+    if (statusActorsWithDelivery.has(statusEntry.actor_label)) {
+      continue;
+    }
+    merged.push(buildEntry(statusEntry.actor_label, statusEntry, null));
+  }
 
   return merged.sort((left, right) => {
     if (left.freshness !== right.freshness) {
@@ -1137,6 +1235,10 @@ function filterRoomAgentPresenceForLiveRoster(input: {
   const stale: RoomAgentPresence[] = [];
 
   for (const entry of input.presence) {
+    if (entry.session_kind !== "worker") {
+      continue;
+    }
+
     if (entry.freshness === "active") {
       active.push(entry);
       continue;
@@ -2732,6 +2834,9 @@ export async function upsertRoomAgentPresence(input: {
   room_id: string;
   actor_label: string;
   agent_key?: string | null;
+  agent_session_id?: string | null;
+  session_kind?: RoomAgentSessionKind;
+  runtime?: string | null;
   display_name: string;
   owner_label?: string | null;
   ide_label?: string | null;
@@ -2746,6 +2851,9 @@ export async function upsertRoomAgentPresence(input: {
       room_id: input.room_id,
       actor_label: input.actor_label,
       agent_key: input.agent_key ?? null,
+      agent_session_id: input.agent_session_id ?? null,
+      session_kind: input.session_kind ?? "controller",
+      runtime: input.runtime ?? "unknown",
       display_name: input.display_name,
       owner_label: input.owner_label ?? null,
       ide_label: input.ide_label ?? null,
@@ -2759,6 +2867,9 @@ export async function upsertRoomAgentPresence(input: {
       target: [room_agent_presence.room_id, room_agent_presence.actor_label],
       set: {
         agent_key: input.agent_key ?? null,
+        agent_session_id: input.agent_session_id ?? null,
+        session_kind: input.session_kind ?? "controller",
+        runtime: input.runtime ?? "unknown",
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
@@ -2773,11 +2884,23 @@ export async function upsertRoomAgentPresence(input: {
   return toRoomAgentPresence(presence as RoomAgentPresenceRow);
 }
 
+function buildRoomAgentDeliveryKey(input: {
+  actor_label: string;
+  agent_session_id?: string | null;
+}): string {
+  return input.agent_session_id
+    ? `agent_session:${input.agent_session_id}`
+    : `controller:${input.actor_label}`;
+}
+
 export async function markRoomAgentDeliveryConnected(input: {
   room_id: string;
   actor_label: string;
   agent_key?: string | null;
   agent_instance_id?: string | null;
+  agent_session_id?: string | null;
+  session_kind?: RoomAgentSessionKind;
+  runtime?: string | null;
   display_name: string;
   owner_label?: string | null;
   ide_label?: string | null;
@@ -2785,14 +2908,19 @@ export async function markRoomAgentDeliveryConnected(input: {
 }): Promise<RoomAgentDeliverySession> {
   const now = new Date().toISOString();
   const staleConnectionCutoff = new Date(Date.now() - ACTIVE_AGENT_DELIVERY_WINDOW_MS).toISOString();
+  const deliveryKey = buildRoomAgentDeliveryKey(input);
 
   const [session] = await db
     .insert(room_agent_delivery_sessions)
     .values({
       room_id: input.room_id,
+      delivery_key: deliveryKey,
       actor_label: input.actor_label,
       agent_key: input.agent_key ?? null,
       agent_instance_id: input.agent_instance_id ?? null,
+      agent_session_id: input.agent_session_id ?? null,
+      session_kind: input.session_kind ?? "controller",
+      runtime: input.runtime ?? "unknown",
       display_name: input.display_name,
       owner_label: input.owner_label ?? null,
       ide_label: input.ide_label ?? null,
@@ -2805,10 +2933,14 @@ export async function markRoomAgentDeliveryConnected(input: {
       updated_at: now,
     })
     .onConflictDoUpdate({
-      target: [room_agent_delivery_sessions.room_id, room_agent_delivery_sessions.actor_label],
+      target: [room_agent_delivery_sessions.room_id, room_agent_delivery_sessions.delivery_key],
       set: {
+        actor_label: input.actor_label,
         agent_key: input.agent_key ?? null,
         agent_instance_id: input.agent_instance_id ?? null,
+        agent_session_id: input.agent_session_id ?? null,
+        session_kind: input.session_kind ?? "controller",
+        runtime: input.runtime ?? "unknown",
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
@@ -2825,11 +2957,13 @@ export async function markRoomAgentDeliveryConnected(input: {
     })
     .returning();
 
-  await setRoomLiveAgentSuppressed({
-    room_id: input.room_id,
-    actor_labels: [input.actor_label],
-    suppressed: false,
-  });
+  if ((input.session_kind ?? "controller") === "worker") {
+    await setRoomLiveAgentSuppressed({
+      room_id: input.room_id,
+      actor_labels: [input.actor_label],
+      suppressed: false,
+    });
+  }
 
   return toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow);
 }
@@ -2837,8 +2971,10 @@ export async function markRoomAgentDeliveryConnected(input: {
 export async function markRoomAgentDeliveryHeartbeat(input: {
   room_id: string;
   actor_label: string;
+  agent_session_id?: string | null;
 }): Promise<void> {
   const now = new Date().toISOString();
+  const deliveryKey = buildRoomAgentDeliveryKey(input);
   await db
     .update(room_agent_delivery_sessions)
     .set({
@@ -2847,7 +2983,7 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
     .where(
       and(
         eq(room_agent_delivery_sessions.room_id, input.room_id),
-        eq(room_agent_delivery_sessions.actor_label, input.actor_label),
+        eq(room_agent_delivery_sessions.delivery_key, deliveryKey),
         sql`${room_agent_delivery_sessions.active_connection_count} > 0`
       )
     );
@@ -2856,9 +2992,11 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
 export async function markRoomAgentDeliveryDisconnected(input: {
   room_id: string;
   actor_label: string;
+  agent_session_id?: string | null;
 }): Promise<RoomAgentDeliverySession | null> {
   const now = new Date().toISOString();
   const graceExpiresAt = new Date(Date.now() + ROOM_AGENT_RECONNECT_GRACE_MS).toISOString();
+  const deliveryKey = buildRoomAgentDeliveryKey(input);
 
   const [session] = await db
     .update(room_agent_delivery_sessions)
@@ -2874,7 +3012,36 @@ export async function markRoomAgentDeliveryDisconnected(input: {
     .where(
       and(
         eq(room_agent_delivery_sessions.room_id, input.room_id),
-        eq(room_agent_delivery_sessions.actor_label, input.actor_label)
+        eq(room_agent_delivery_sessions.delivery_key, deliveryKey)
+      )
+    )
+    .returning();
+
+  return session ? toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow) : null;
+}
+
+export async function forceDisconnectRoomAgentDeliverySession(input: {
+  room_id: string;
+  agent_session_id: string;
+}): Promise<RoomAgentDeliverySession | null> {
+  const now = new Date().toISOString();
+  const deliveryKey = buildRoomAgentDeliveryKey({
+    actor_label: "",
+    agent_session_id: input.agent_session_id,
+  });
+
+  const [session] = await db
+    .update(room_agent_delivery_sessions)
+    .set({
+      active_connection_count: 0,
+      last_disconnected_at: now,
+      reconnect_grace_expires_at: now,
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(room_agent_delivery_sessions.room_id, input.room_id),
+        eq(room_agent_delivery_sessions.delivery_key, deliveryKey)
       )
     )
     .returning();
@@ -3652,6 +3819,120 @@ export async function getAgentIdentitiesForOwner(ownerAccountId: string): Promis
     .from(agents)
     .where(eq(agents.owner_account_id, ownerAccountId))
     .orderBy(asc(agents.name));
+}
+
+function makeAgentSessionToken(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+export async function createRoomAgentSession(input: {
+  room_id: string;
+  session_kind: RoomAgentSessionKind;
+  runtime: string;
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id?: string | null;
+  display_name: string;
+  owner_account_id: string;
+  owner_label: string;
+  ide_label: string;
+}): Promise<CreatedRoomAgentSession> {
+  const now = new Date().toISOString();
+  const sessionToken = makeAgentSessionToken();
+  const session = {
+    session_id: await nextPrefixedId("room_agent_sessions", "agent_session"),
+    room_id: input.room_id,
+    token_hash: hashToken(sessionToken),
+    session_kind: input.session_kind,
+    runtime: input.runtime || "unknown",
+    actor_label: input.actor_label,
+    agent_key: input.agent_key,
+    agent_instance_id: input.agent_instance_id ?? null,
+    display_name: input.display_name,
+    owner_account_id: input.owner_account_id,
+    owner_label: input.owner_label,
+    ide_label: input.ide_label,
+    created_at: now,
+    updated_at: now,
+    last_seen_at: now,
+    ended_at: null,
+  };
+
+  const [created] = await db
+    .insert(room_agent_sessions)
+    .values(session)
+    .returning();
+
+  return {
+    ...toRoomAgentSession(created as RoomAgentSessionRow),
+    session_token: sessionToken,
+  };
+}
+
+export async function getRoomAgentSessionByCredentials(input: {
+  session_id: string;
+  session_token: string;
+  room_id?: string | null;
+  owner_account_id?: string | null;
+}): Promise<RoomAgentSession | null> {
+  const tokenHash = hashToken(input.session_token);
+  const conditions = [
+    eq(room_agent_sessions.session_id, input.session_id),
+    eq(room_agent_sessions.token_hash, tokenHash),
+    sql`${room_agent_sessions.ended_at} IS NULL`,
+  ];
+  if (input.room_id) {
+    conditions.push(eq(room_agent_sessions.room_id, input.room_id));
+  }
+  if (input.owner_account_id) {
+    conditions.push(eq(room_agent_sessions.owner_account_id, input.owner_account_id));
+  }
+
+  const [row] = await db
+    .select()
+    .from(room_agent_sessions)
+    .where(and(...conditions))
+    .limit(1);
+
+  return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
+}
+
+export async function touchRoomAgentSession(sessionId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .update(room_agent_sessions)
+    .set({
+      updated_at: now,
+      last_seen_at: now,
+    })
+    .where(eq(room_agent_sessions.session_id, sessionId));
+}
+
+export async function endRoomAgentSession(input: {
+  session_id: string;
+  room_id?: string | null;
+  owner_account_id?: string | null;
+}): Promise<RoomAgentSession | null> {
+  const now = new Date().toISOString();
+  const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
+  if (input.room_id) {
+    conditions.push(eq(room_agent_sessions.room_id, input.room_id));
+  }
+  if (input.owner_account_id) {
+    conditions.push(eq(room_agent_sessions.owner_account_id, input.owner_account_id));
+  }
+
+  const [row] = await db
+    .update(room_agent_sessions)
+    .set({
+      ended_at: now,
+      updated_at: now,
+      last_seen_at: now,
+    })
+    .where(and(...conditions))
+    .returning();
+
+  return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
 }
 
 export async function assignProjectAdmin(projectId: string, accountId: string): Promise<void> {

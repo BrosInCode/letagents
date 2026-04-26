@@ -114,6 +114,13 @@ jobs:
           --test
           src/api/__tests__/coordination-db.test.ts
 
+      - name: Run worker session auth tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/worker-session-auth-integration.test.ts
+
       - name: Run focus room tests
         timeout-minutes: 5
         run: >-

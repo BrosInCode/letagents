@@ -51,3 +51,59 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/stream$/" },
   ]);
 });
+
+test("owner-token message writes require a registered worker session", async () => {
+  let messageCreated = false;
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get() {},
+    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    emitProjectMessage: async () => {
+      messageCreated = true;
+      return { id: "msg_1", timestamp: new Date().toISOString() };
+    },
+    rememberRoomParticipantFromMessage: async () => undefined,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+
+  const res = {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.body = body;
+      return this;
+    },
+  };
+
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages$/");
+  assert.ok(handler);
+  await handler(
+    {
+      params: { 0: "room_1" },
+      body: { sender: "FakeAgent", text: "hello" },
+      authKind: "owner_token",
+      sessionAccount: { account_id: "acct_1" },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Registered worker session is required for agent write actions.",
+  });
+  assert.equal(messageCreated, false);
+});

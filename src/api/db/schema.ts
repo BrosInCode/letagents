@@ -8,6 +8,7 @@ import type {
 } from "../focus-room-settings.js";
 import {
   AGENT_PRESENCE_STATUSES,
+  ROOM_AGENT_SESSION_KINDS,
   ROOM_AGENT_DELIVERY_TRANSPORTS,
 } from "../../shared/agent-presence.js";
 import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
@@ -29,6 +30,10 @@ export const agentPresenceStatusEnum = pgEnum("agent_presence_status", AGENT_PRE
 export const roomAgentDeliveryTransportEnum = pgEnum(
   "room_agent_delivery_transport",
   ROOM_AGENT_DELIVERY_TRANSPORTS
+);
+export const roomAgentSessionKindEnum = pgEnum(
+  "room_agent_session_kind",
+  ROOM_AGENT_SESSION_KINDS
 );
 export const taskLeaseKindEnum = pgEnum("task_lease_kind", ["work", "review"]);
 export const taskLeaseStatusEnum = pgEnum("task_lease_status", [
@@ -352,6 +357,12 @@ export const room_agent_presence = pgTable(
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     actor_label: text("actor_label").notNull(),
     agent_key: text("agent_key"),
+    agent_session_id: text("agent_session_id").references(() => room_agent_sessions.session_id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    session_kind: roomAgentSessionKindEnum("session_kind").notNull().default("controller"),
+    runtime: text("runtime").notNull().default("unknown"),
     display_name: text("display_name").notNull(),
     owner_label: text("owner_label"),
     ide_label: text("ide_label"),
@@ -370,6 +381,38 @@ export const room_agent_presence = pgTable(
       table.last_heartbeat_at
     ),
     room_agent_key_idx: index("room_agent_presence_room_agent_key_idx").on(table.room_id, table.agent_key),
+    room_session_kind_idx: index("room_agent_presence_room_session_kind_idx").on(table.room_id, table.session_kind),
+  })
+);
+
+export const room_agent_sessions = pgTable(
+  "room_agent_sessions",
+  {
+    session_id: text("session_id").primaryKey(),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    token_hash: text("token_hash").notNull().unique(),
+    session_kind: roomAgentSessionKindEnum("session_kind").notNull(),
+    runtime: text("runtime").notNull(),
+    actor_label: text("actor_label").notNull(),
+    agent_key: text("agent_key").notNull(),
+    agent_instance_id: text("agent_instance_id"),
+    display_name: text("display_name").notNull(),
+    owner_account_id: text("owner_account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    owner_label: text("owner_label").notNull(),
+    ide_label: text("ide_label").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+    last_seen_at: timestamp("last_seen_at", { mode: "string", withTimezone: true }).notNull(),
+    ended_at: timestamp("ended_at", { mode: "string", withTimezone: true }),
+  },
+  (table) => ({
+    room_idx: index("room_agent_sessions_room_id_idx").on(table.room_id),
+    room_kind_idx: index("room_agent_sessions_room_kind_idx").on(table.room_id, table.session_kind),
+    agent_key_idx: index("room_agent_sessions_agent_key_idx").on(table.agent_key),
   })
 );
 
@@ -379,12 +422,19 @@ export const room_agent_delivery_sessions = pgTable(
     room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    delivery_key: text("delivery_key").notNull(),
     actor_label: text("actor_label").notNull(),
     agent_key: text("agent_key"),
     agent_instance_id: text("agent_instance_id"),
     display_name: text("display_name").notNull(),
     owner_label: text("owner_label"),
     ide_label: text("ide_label"),
+    agent_session_id: text("agent_session_id").references(() => room_agent_sessions.session_id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    session_kind: roomAgentSessionKindEnum("session_kind").notNull().default("controller"),
+    runtime: text("runtime").notNull().default("unknown"),
     transport: roomAgentDeliveryTransportEnum("transport").notNull(),
     active_connection_count: integer("active_connection_count").notNull().default(0),
     last_connected_at: timestamp("last_connected_at", { mode: "string", withTimezone: true }).notNull(),
@@ -397,8 +447,12 @@ export const room_agent_delivery_sessions = pgTable(
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
-    pk: primaryKey({ name: "room_agent_delivery_sessions_pk", columns: [table.room_id, table.actor_label] }),
+    pk: primaryKey({ name: "room_agent_delivery_sessions_pk", columns: [table.room_id, table.delivery_key] }),
     room_idx: index("room_agent_delivery_sessions_room_id_idx").on(table.room_id),
+    room_actor_idx: index("room_agent_delivery_sessions_room_actor_idx").on(
+      table.room_id,
+      table.actor_label
+    ),
     room_active_idx: index("room_agent_delivery_sessions_room_active_idx").on(
       table.room_id,
       table.active_connection_count
@@ -410,6 +464,10 @@ export const room_agent_delivery_sessions = pgTable(
     room_agent_key_idx: index("room_agent_delivery_sessions_room_agent_key_idx").on(
       table.room_id,
       table.agent_key
+    ),
+    room_session_kind_idx: index("room_agent_delivery_sessions_room_session_kind_idx").on(
+      table.room_id,
+      table.session_kind
     ),
     active_count_check: check(
       "room_agent_delivery_sessions_active_connection_count_check",

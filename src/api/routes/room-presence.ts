@@ -1,7 +1,10 @@
 import type { Express, Response } from "express";
 
 import {
+  createRoomAgentSession,
+  endRoomAgentSession,
   getFocusRoomsForParent,
+  getAgentIdentityByCanonicalKey,
   getMessages,
   getRoomAgentPresence,
   getRoomAgentPresenceSnapshot,
@@ -34,11 +37,15 @@ import {
   decorateRoomParticipantsWithPresence,
 } from "../room-activity-state.js";
 import { buildFallbackRoomParticipants } from "../room-participant-fallback.js";
+import { disconnectRoomAgentDeliverySession } from "../room-agent-delivery.js";
 import { normalizeRoomId } from "../room-routing.js";
+import { requireWorkerRequestAgentIdentity } from "../request-agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
+  normalizeRoomAgentSessionKind,
   type AgentPresenceStatus,
 } from "../../shared/agent-presence.js";
+import { buildAgentActorLabel, parseAgentActorLabel } from "../../shared/agent-identity.js";
 import { isWithinRecentlyOfflineWindow } from "../../shared/room-agent-activity.js";
 
 export interface RoomPresenceRouteDeps {
@@ -98,6 +105,11 @@ function normalizeActorLabel(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
 
+function normalizeRuntime(value: unknown): string {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized || "unknown";
+}
+
 export function buildRoomActivityHistoryParticipants(input: {
   roomId: string;
   storedParticipants: readonly RoomParticipant[];
@@ -127,7 +139,8 @@ export function isSuppressibleDisconnectedPresence(
   entry: RoomAgentPresence,
   now = Date.now()
 ): boolean {
-  return entry.source_flags.includes("delivery")
+  return entry.session_kind === "worker"
+    && entry.source_flags.includes("delivery")
     && entry.freshness !== "active"
     && isWithinRecentlyOfflineWindow(entry.last_heartbeat_at, now);
 }
@@ -314,7 +327,11 @@ export function registerRoomPresenceRoutes(
       ]);
       const activeActors = new Set(
         presence
-          .filter((entry) => entry.freshness === "active" && entry.source_flags.includes("delivery"))
+          .filter((entry) =>
+            entry.session_kind === "worker"
+            && entry.freshness === "active"
+            && entry.source_flags.includes("delivery")
+          )
           .map((entry) => normalizeActorLabel(entry.actor_label))
           .filter(Boolean)
       );
@@ -362,6 +379,159 @@ export function registerRoomPresenceRoutes(
     }
   });
 
+  app.post(/^\/rooms\/(.+)\/agent-sessions$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+    if (!req.sessionAccount?.account_id) {
+      res.status(401).json({ error: "Agent session registration requires authenticated owner context." });
+      return;
+    }
+
+    const {
+      actor_key,
+      actor_label,
+      display_name,
+      ide_label,
+      agent_instance_id,
+      session_kind,
+      runtime,
+    } = req.body as {
+      actor_key?: string;
+      actor_label?: string;
+      display_name?: string;
+      ide_label?: string;
+      agent_instance_id?: string | null;
+      session_kind?: string;
+      runtime?: string;
+    };
+
+    const actorKey = typeof actor_key === "string" ? actor_key.trim() : "";
+    if (!actorKey) {
+      res.status(400).json({ error: "actor_key is required" });
+      return;
+    }
+
+    try {
+      const agent = await getAgentIdentityByCanonicalKey(actorKey);
+      if (!agent || agent.owner_account_id !== req.sessionAccount.account_id) {
+        res.status(403).json({ error: "actor_key is not owned by this account" });
+        return;
+      }
+
+      const parsedActorLabel = parseAgentActorLabel(actor_label);
+      const resolvedIdeLabel = (
+        typeof ide_label === "string" && ide_label.trim()
+          ? ide_label.trim()
+          : parsedActorLabel?.ide_label ?? "Agent"
+      );
+      const requestedDisplayName = typeof display_name === "string" ? display_name.trim() : "";
+      const sessionDisplayName = requestedDisplayName || agent.display_name;
+      const session = await createRoomAgentSession({
+        room_id: project.id,
+        session_kind: normalizeRoomAgentSessionKind(session_kind || "worker"),
+        runtime: normalizeRuntime(runtime || resolvedIdeLabel),
+        actor_label: buildAgentActorLabel({
+          display_name: sessionDisplayName,
+          owner_label: agent.owner_label,
+          ide_label: resolvedIdeLabel,
+        }),
+        agent_key: agent.canonical_key,
+        agent_instance_id: typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null,
+        display_name: sessionDisplayName,
+        owner_account_id: req.sessionAccount.account_id,
+        owner_label: agent.owner_label,
+        ide_label: resolvedIdeLabel,
+      });
+
+      res.status(201).json(session);
+    } catch (error) {
+      respondWithInternalError(
+        res,
+        "POST /rooms/:room_id/agent-sessions",
+        error,
+        "Agent session could not be registered."
+      );
+    }
+  });
+
+  app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/disconnect$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!targetSessionId) {
+      res.status(400).json({ error: "agent_session_id is required" });
+      return;
+    }
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const body = req.body as {
+      agent_session_id?: string;
+      agent_session_token?: string;
+    };
+    const hasSelfCredentials =
+      typeof body.agent_session_id === "string" || typeof body.agent_session_token === "string";
+    let ownerAccountScope: string | null = null;
+
+    if (hasSelfCredentials) {
+      const agentSessionIdentity = await requireWorkerRequestAgentIdentity({
+        req,
+        body,
+        room_id: project.id,
+      });
+      if (!agentSessionIdentity.ok) {
+        res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+        return;
+      }
+      if (agentSessionIdentity.identity.agent_session_id !== targetSessionId) {
+        res.status(403).json({ error: "Worker sessions can only disconnect themselves." });
+        return;
+      }
+      ownerAccountScope = req.sessionAccount?.account_id ?? null;
+    } else if (!(await deps.requireAdmin(req, res, project))) {
+      return;
+    }
+
+    try {
+      const endedSession = await endRoomAgentSession({
+        session_id: targetSessionId,
+        room_id: project.id,
+        owner_account_id: ownerAccountScope,
+      });
+      if (!endedSession) {
+        res.status(404).json({ error: "Agent session not found" });
+        return;
+      }
+
+      const deliverySession = await disconnectRoomAgentDeliverySession({
+        room_id: project.id,
+        agent_session_id: targetSessionId,
+      });
+
+      res.json({
+        room_id: project.id,
+        agent_session: endedSession,
+        delivery_session: deliverySession,
+      });
+    } catch (error) {
+      respondWithInternalError(
+        res,
+        "POST /rooms/:room_id/agent-sessions/:agent_session_id/disconnect",
+        error,
+        "Agent session could not be disconnected."
+      );
+    }
+  });
+
   app.post(/^\/rooms\/(.+)\/presence$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -371,29 +541,28 @@ export function registerRoomPresenceRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const {
-      actor_label,
-      agent_key,
-      display_name,
-      owner_label,
-      ide_label,
-      status,
-      status_text,
-    } = req.body as {
-      actor_label?: string;
-      agent_key?: string | null;
-      display_name?: string;
-      owner_label?: string | null;
-      ide_label?: string | null;
+    const { status, status_text, agent_session_id, agent_session_token } = req.body as {
       status?: string;
       status_text?: string | null;
+      agent_session_id?: string;
+      agent_session_token?: string;
     };
 
-    const actorLabel = typeof actor_label === "string" ? actor_label.trim() : "";
-    const displayName = typeof display_name === "string" ? display_name.trim() : "";
-    const agentKey = typeof agent_key === "string" ? agent_key.trim() || null : null;
-    const ownerLabel = typeof owner_label === "string" ? owner_label.trim() || null : null;
-    const ideLabel = typeof ide_label === "string" ? ide_label.trim() || null : null;
+    const agentSessionIdentity = await requireWorkerRequestAgentIdentity({
+      req,
+      body: { agent_session_id, agent_session_token },
+      room_id: project.id,
+    });
+    if (!agentSessionIdentity.ok) {
+      res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+      return;
+    }
+
+    const actorLabel = agentSessionIdentity.identity.actor_label;
+    const displayName = agentSessionIdentity.identity.display_name;
+    const agentKey = agentSessionIdentity.identity.agent_key;
+    const ownerLabel = agentSessionIdentity.identity.owner_label;
+    const ideLabel = agentSessionIdentity.identity.ide_label;
     const statusText = typeof status_text === "string" ? status_text.trim() || null : null;
     const normalizedStatus = normalizeAgentPresenceStatus(status);
 
@@ -409,6 +578,9 @@ export function registerRoomPresenceRoutes(
         room_id: project.id,
         actor_label: actorLabel,
         agent_key: agentKey,
+        agent_session_id: agentSessionIdentity.identity.agent_session_id,
+        session_kind: agentSessionIdentity.identity.session_kind,
+        runtime: agentSessionIdentity.identity.runtime,
         display_name: displayName,
         owner_label: ownerLabel,
         ide_label: ideLabel,
