@@ -112,6 +112,60 @@
             rows="3"
             class="focus-result-textarea"
           />
+          <div v-if="requiresCloseoutDetails || conclusionDetails" class="focus-closeout-grid">
+            <label>
+              <span>Artifact or decision</span>
+              <input
+                v-model="closeoutDetails.artifact"
+                :disabled="isConcluded || isSharingFocusResult"
+                placeholder="PR #316, commit, doc, decision, or investigation result"
+              />
+            </label>
+            <label>
+              <span>Review state</span>
+              <AppSelect v-model="closeoutDetails.review_state" :disabled="isConcluded || isSharingFocusResult">
+                <option
+                  v-for="option in reviewStateOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </AppSelect>
+            </label>
+            <label>
+              <span>Blockers</span>
+              <AppSelect v-model="closeoutDetails.blocker_state" :disabled="isConcluded || isSharingFocusResult">
+                <option
+                  v-for="option in blockerStateOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </AppSelect>
+            </label>
+            <label>
+              <span>Parent task next</span>
+              <AppSelect v-model="closeoutDetails.parent_task_next" :disabled="isConcluded || isSharingFocusResult">
+                <option
+                  v-for="option in parentTaskNextOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </AppSelect>
+            </label>
+            <label>
+              <span>Next owner</span>
+              <input
+                v-model="closeoutDetails.next_owner"
+                :disabled="isConcluded || isSharingFocusResult"
+                placeholder="Agent, human, or reviewer responsible next"
+              />
+            </label>
+          </div>
           <div class="focus-share-footer">
             <p>{{ shareHelpText }}</p>
             <button
@@ -317,6 +371,32 @@
               <p>{{ selectedFocusRoom.conclusion_summary || 'No result summary has been shared back yet.' }}</p>
             </section>
 
+            <section v-if="selectedFocusRoom.conclusion_details" class="focus-audit-card">
+              <p class="focus-eyebrow">Closeout record</p>
+              <dl class="focus-closeout-facts">
+                <div>
+                  <dt>Artifact</dt>
+                  <dd>{{ selectedFocusRoom.conclusion_details.artifact }}</dd>
+                </div>
+                <div>
+                  <dt>Review</dt>
+                  <dd>{{ reviewStateLabel(selectedFocusRoom.conclusion_details.review_state) }}</dd>
+                </div>
+                <div>
+                  <dt>Blockers</dt>
+                  <dd>{{ blockerStateLabel(selectedFocusRoom.conclusion_details.blocker_state) }}</dd>
+                </div>
+                <div>
+                  <dt>Parent next</dt>
+                  <dd>{{ parentTaskNextLabel(selectedFocusRoom.conclusion_details.parent_task_next) }}</dd>
+                </div>
+                <div>
+                  <dt>Next owner</dt>
+                  <dd>{{ selectedFocusRoom.conclusion_details.next_owner }}</dd>
+                </div>
+              </dl>
+            </section>
+
             <section class="focus-audit-card">
               <p class="focus-eyebrow">Audit trail</p>
               <ul class="focus-audit-list">
@@ -458,7 +538,11 @@ import {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   focusRoomSettingsFrom,
   type FocusActivityScope,
+  type FocusRoomBlockerState,
+  type FocusRoomConclusionDetails,
   type FocusGitHubEventRouting,
+  type FocusRoomParentTaskNextAction,
+  type FocusRoomReviewState,
   type FocusParentVisibility,
   type FocusRoomInfo,
   type FocusRoomSettings,
@@ -477,6 +561,7 @@ const props = defineProps<{
   focusStatus: 'active' | 'concluded' | null
   focusSettings: FocusRoomSettings
   conclusionSummary: string | null
+  conclusionDetails: FocusRoomConclusionDetails | null
   isCreatingFocusRoom: boolean
   isCreatingAdHocFocusRoom: boolean
   isSharingFocusResult: boolean
@@ -489,13 +574,14 @@ const emit = defineEmits<{
   createAdHocFocusRoom: [title: string]
   openFocusRoom: [focusKey: string]
   openParentRoom: []
-  shareResults: [summary: string]
+  shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
 }>()
 
 const resultSummary = ref('')
 const shareAttempted = ref(false)
 const settingsDraft = ref<FocusRoomSettings>({ ...DEFAULT_FOCUS_ROOM_SETTINGS })
+const closeoutDetails = ref<FocusRoomConclusionDetails>(createEmptyCloseoutDetails())
 const adHocTitle = ref('')
 const adHocAttempted = ref(false)
 const selectedFocusRoomId = ref<string | null>(null)
@@ -517,6 +603,23 @@ const githubEventRoutingOptions: Array<{ value: FocusGitHubEventRouting; label: 
   { value: 'task_only', label: 'Only task mentions' },
   { value: 'all_parent_repo', label: 'All repo activity' },
   { value: 'off', label: 'No code activity' },
+]
+const reviewStateOptions: Array<{ value: FocusRoomReviewState; label: string }> = [
+  { value: 'reviewed', label: 'Reviewed' },
+  { value: 'needs_review', label: 'Needs review' },
+  { value: 'not_required', label: 'Review not required' },
+]
+const blockerStateOptions: Array<{ value: FocusRoomBlockerState; label: string }> = [
+  { value: 'none', label: 'No blockers' },
+  { value: 'resolved', label: 'Blockers resolved' },
+  { value: 'blocked', label: 'Still blocked' },
+]
+const parentTaskNextOptions: Array<{ value: FocusRoomParentTaskNextAction; label: string }> = [
+  { value: 'keep_open', label: 'Keep open' },
+  { value: 'move_to_review', label: 'Move to review' },
+  { value: 'mark_blocked', label: 'Mark blocked' },
+  { value: 'mark_done', label: 'Mark done' },
+  { value: 'follow_up', label: 'Create follow-up' },
 ]
 
 const candidateTasks = computed(() =>
@@ -587,6 +690,12 @@ const settingsTarget = computed(() => {
 
 const isConcluded = computed(() => props.focusStatus === 'concluded')
 const conclusionSummaryText = computed(() => props.conclusionSummary?.trim() || '')
+const conclusionDetails = computed(() => props.conclusionDetails)
+const requiresCloseoutDetails = computed(() => props.isFocusRoom && Boolean(props.sourceTaskId))
+const closeoutDetailsComplete = computed(() =>
+  closeoutDetails.value.artifact.trim().length > 0 &&
+  closeoutDetails.value.next_owner.trim().length > 0
+)
 const focusStatusLabel = computed(() => props.focusStatus ? taskStatusLabel(props.focusStatus) : 'active')
 const focusContextCopy = computed(() =>
   isConcluded.value
@@ -599,7 +708,10 @@ const sharePlaceholder = computed(() =>
     : 'Summarize the decision, implementation, blocker, or next action for the parent room.'
 )
 const canShareResults = computed(() =>
-  !isConcluded.value && !props.isSharingFocusResult && resultSummary.value.trim().length > 0
+  !isConcluded.value &&
+  !props.isSharingFocusResult &&
+  resultSummary.value.trim().length > 0 &&
+  (!requiresCloseoutDetails.value || closeoutDetailsComplete.value)
 )
 const shareButtonLabel = computed(() => {
   if (isConcluded.value) return 'Results shared'
@@ -614,10 +726,15 @@ const shareHelpText = computed(() => {
   if (shareAttempted.value && !resultSummary.value.trim()) {
     return 'Write a short outcome before sharing.'
   }
+  if (shareAttempted.value && requiresCloseoutDetails.value && !closeoutDetailsComplete.value) {
+    return 'Add the artifact and next owner before concluding this task room.'
+  }
   if (settingsDraft.value.parent_visibility === 'silent') {
     return 'Conclude this Focus Room without posting the summary into the parent room.'
   }
-  return 'Send a concise outcome to the parent room.'
+  return requiresCloseoutDetails.value
+    ? 'Close the loop with artifact, review state, blocker state, parent task next step, and next owner.'
+    : 'Send a concise outcome to the parent room.'
 })
 const canCreateAdHocFocusRoom = computed(() =>
   !props.isCreatingAdHocFocusRoom && adHocTitle.value.trim().length > 0
@@ -715,6 +832,14 @@ watch(
 )
 
 watch(
+  () => props.conclusionDetails,
+  (details) => {
+    closeoutDetails.value = details ? { ...details } : createEmptyCloseoutDetails()
+  },
+  { immediate: true }
+)
+
+watch(
   settingsTarget,
   (target) => {
     settingsDraft.value = target
@@ -736,8 +861,30 @@ watch(
 function submitShareResults() {
   shareAttempted.value = true
   const trimmedSummary = resultSummary.value.trim()
-  if (!trimmedSummary || isConcluded.value || props.isSharingFocusResult) return
-  emit('shareResults', trimmedSummary)
+  if (
+    !trimmedSummary ||
+    isConcluded.value ||
+    props.isSharingFocusResult ||
+    (requiresCloseoutDetails.value && !closeoutDetailsComplete.value)
+  ) return
+  const details = requiresCloseoutDetails.value
+    ? {
+        ...closeoutDetails.value,
+        artifact: closeoutDetails.value.artifact.trim(),
+        next_owner: closeoutDetails.value.next_owner.trim(),
+      }
+    : null
+  emit('shareResults', trimmedSummary, details)
+}
+
+function createEmptyCloseoutDetails(): FocusRoomConclusionDetails {
+  return {
+    artifact: '',
+    review_state: 'needs_review',
+    blocker_state: 'none',
+    parent_task_next: 'keep_open',
+    next_owner: '',
+  }
 }
 
 function submitFocusSettings() {
@@ -781,6 +928,18 @@ function activityScopeLabel(value: FocusActivityScope): string {
 
 function githubRoutingLabel(value: FocusGitHubEventRouting): string {
   return githubEventRoutingOptions.find(option => option.value === value)?.label || 'Related code activity'
+}
+
+function reviewStateLabel(value: FocusRoomReviewState): string {
+  return reviewStateOptions.find(option => option.value === value)?.label || value
+}
+
+function blockerStateLabel(value: FocusRoomBlockerState): string {
+  return blockerStateOptions.find(option => option.value === value)?.label || value
+}
+
+function parentTaskNextLabel(value: FocusRoomParentTaskNextAction): string {
+  return parentTaskNextOptions.find(option => option.value === value)?.label || value
 }
 
 function taskStatusLabel(status: string): string {
@@ -1121,6 +1280,54 @@ function formatAuditTime(value: string | null | undefined): string {
   opacity: 0.72;
 }
 
+.focus-closeout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(96, 165, 250, 0.05), transparent 42%),
+    var(--bg-0, #09090b);
+}
+
+.focus-closeout-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.focus-closeout-grid label:first-child,
+.focus-closeout-grid label:last-child {
+  grid-column: 1 / -1;
+}
+
+.focus-closeout-grid span {
+  color: var(--text, #fafafa);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.focus-closeout-grid input {
+  width: 100%;
+  min-height: 38px;
+  padding: 9px 10px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text, #fafafa);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.focus-closeout-grid :deep(.app-select__control) {
+  --app-select-border: var(--line, #27272a);
+  --app-select-bg: rgba(255, 255, 255, 0.02);
+  --app-select-text: var(--text, #fafafa);
+  --app-select-focus: rgba(96, 165, 250, 0.28);
+  --app-select-radius: 8px;
+}
+
 .focus-share-footer {
   display: flex;
   align-items: center;
@@ -1368,6 +1575,31 @@ function formatAuditTime(value: string | null | undefined): string {
   transform: translateY(-50%);
 }
 
+.focus-closeout-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.focus-closeout-facts div {
+  display: grid;
+  gap: 4px;
+}
+
+.focus-closeout-facts dt {
+  color: var(--muted, #71717a);
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.focus-closeout-facts dd {
+  margin: 0;
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
 .focus-primary {
   width: 100%;
   padding: 10px 12px;
@@ -1521,8 +1753,14 @@ function formatAuditTime(value: string | null | undefined): string {
 
   .focus-settings-heading,
   .focus-panel-header,
+  .focus-closeout-grid,
   .focus-settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .focus-closeout-grid label:first-child,
+  .focus-closeout-grid label:last-child {
+    grid-column: auto;
   }
 
   .focus-settings-heading,

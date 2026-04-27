@@ -31,6 +31,7 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     focus_github_event_routing: overrides.focus_github_event_routing ?? null,
     concluded_at: overrides.concluded_at ?? null,
     conclusion_summary: overrides.conclusion_summary ?? null,
+    conclusion_details: overrides.conclusion_details ?? null,
     created_at: overrides.created_at ?? "2026-04-20T17:00:00.000Z",
   };
 }

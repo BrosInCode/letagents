@@ -130,6 +130,7 @@
             github_event_routing: room?.focusGitHubEventRouting || 'task_and_branch',
           }"
           :conclusionSummary="room?.conclusionSummary || null"
+          :conclusionDetails="room?.conclusionDetails || null"
           :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
           :isCreatingAdHocFocusRoom="creatingAdHocFocusRoom"
           :isSharingFocusResult="sharingFocusResult"
@@ -247,6 +248,7 @@ import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import { collectMessageImageAttachments } from '@/components/room/messageAttachments'
 import { useToast } from '@/composables/useToast'
 import type {
+  FocusRoomConclusionDetails,
   FocusRoomInfo,
   FocusRoomSettingsPatch,
   OutgoingMessageAttachment,
@@ -619,7 +621,7 @@ async function handleCreateAdHocFocusRoom(title: string) {
   }
 }
 
-async function handleShareFocusResults(summary: string) {
+async function handleShareFocusResults(summary: string, conclusionDetails: FocusRoomConclusionDetails | null) {
   const trimmedSummary = summary.trim()
   if (!trimmedSummary) {
     toast.error('Write a result summary first.')
@@ -628,7 +630,7 @@ async function handleShareFocusResults(summary: string) {
 
   sharingFocusResult.value = true
   try {
-    const result = await shareFocusRoomResult(trimmedSummary)
+    const result = await shareFocusRoomResult(trimmedSummary, conclusionDetails)
     if (!result) {
       toast.error('Result could not be shared.')
       return

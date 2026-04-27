@@ -35,6 +35,13 @@ const tsxBinary = path.resolve(
   process.platform === "win32" ? "tsx.cmd" : "tsx"
 );
 const SERVER_READY_ATTEMPTS = 120;
+const conclusionDetails = {
+  artifact: "PR #316",
+  review_state: "reviewed",
+  blocker_state: "resolved",
+  parent_task_next: "mark_done",
+  next_owner: "EmmyMay",
+} as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -250,17 +257,19 @@ test(
     const focus = await createFocusRoomForTask(parent.id, task.id);
     assert.ok(focus);
 
-    const concluded = await concludeFocusRoom(parent.id, task.id, "Result summary");
+    const concluded = await concludeFocusRoom(parent.id, task.id, "Result summary", conclusionDetails);
     assert.ok(concluded);
     assert.equal(concluded.updated, true);
     assert.equal(concluded.task?.id, task.id);
     assert.equal(concluded.room.focus_status, "concluded");
     assert.equal(concluded.room.conclusion_summary, "Result summary");
+    assert.deepEqual(concluded.room.conclusion_details, conclusionDetails);
     assert.ok(concluded.room.concluded_at);
 
     const stored = await getFocusRoomByKey(parent.id, task.id);
     assert.equal(stored?.focus_status, "concluded");
     assert.equal(stored?.conclusion_summary, "Result summary");
+    assert.deepEqual(stored?.conclusion_details, conclusionDetails);
 
     const repeated = await concludeFocusRoom(parent.id, task.id, "Different summary");
     assert.ok(repeated);
@@ -295,7 +304,10 @@ test(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ summary: "Result summary" }),
+        body: JSON.stringify({
+          summary: "Result summary",
+          conclusion_details: conclusionDetails,
+        }),
       }
     );
 
@@ -304,7 +316,18 @@ test(
     assert.equal(payload.shared, true);
     assert.equal(payload.focus_room.focus_status, "concluded");
     assert.equal(payload.focus_room.conclusion_summary, "Result summary");
-    assert.equal(payload.message.text, `[status] Focus Room concluded for ${task.id}: ${task.title}. Result: Result summary`);
+    assert.deepEqual(payload.focus_room.conclusion_details, conclusionDetails);
+    assert.equal(
+      payload.message.text,
+      [
+        `[status] Focus Room concluded for ${task.id}: ${task.title}. Result: Result summary`,
+        "Artifact: PR #316",
+        "Review: reviewed",
+        "Blockers: resolved",
+        "Parent task next: mark done",
+        "Next owner: EmmyMay",
+      ].join("\n")
+    );
 
     const messages = (await getMessages(parent.id)).messages;
     assert.equal(
@@ -331,6 +354,42 @@ test(
       messagesAfterRepeat.filter((message) => message.text.includes("Focus Room concluded")).length,
       1
     );
+  }
+);
+
+test(
+  "focus room conclude route requires structured closeout for task rooms",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName || !createTask || !createFocusRoomForTask) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-results-closeout-required");
+    const task = await createTask(parent.id, "Share Focus Room structured closeout", "FoxSage");
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+
+    const { child, port } = await startApiServer();
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary: "Result summary" }),
+      }
+    );
+
+    assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.match(payload.error, /conclusion_details is required/);
   }
 );
 
@@ -420,7 +479,10 @@ test(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ summary: "Private result" }),
+        body: JSON.stringify({
+          summary: "Private result",
+          conclusion_details: conclusionDetails,
+        }),
       }
     );
 

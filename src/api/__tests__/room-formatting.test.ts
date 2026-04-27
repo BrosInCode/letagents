@@ -35,6 +35,7 @@ function project(overrides: Partial<Project> = {}): Project {
     focus_github_event_routing: null,
     concluded_at: null,
     conclusion_summary: null,
+    conclusion_details: null,
     created_at: "2026-04-20 00:00:00+00",
     ...overrides,
   };
@@ -82,6 +83,7 @@ test("toRoomResponse preserves non-focus room response shape", () => {
       focus_settings: null,
       concluded_at: null,
       conclusion_summary: null,
+      conclusion_details: null,
       created_at: "2026-04-20 00:00:00+00",
       role: "participant",
       authenticated: true,
@@ -130,6 +132,7 @@ test("toRoomResponse normalizes focus settings into flat and nested fields", () 
     },
     concluded_at: null,
     conclusion_summary: "Done",
+    conclusion_details: null,
     created_at: "2026-04-20 00:00:00+00",
     authenticated: false,
   });
@@ -160,8 +163,22 @@ test("focus room messages preserve task and fallback labels", () => {
       focusRoom,
       task: task(),
       summary: "Merged safely",
+      details: {
+        artifact: "PR #316",
+        review_state: "reviewed",
+        blocker_state: "resolved",
+        parent_task_next: "mark_done",
+        next_owner: "CrestRaven",
+      },
     }),
-    "[status] Focus Room concluded for task_1: Refactor server. Result: Merged safely"
+    [
+      "[status] Focus Room concluded for task_1: Refactor server. Result: Merged safely",
+      "Artifact: PR #316",
+      "Review: reviewed",
+      "Blockers: resolved",
+      "Parent task next: mark done",
+      "Next owner: CrestRaven",
+    ].join("\n")
   );
   assert.equal(
     formatFocusRoomConclusionMessage({
