@@ -95,6 +95,7 @@ export function sanitizeRedirectPath(
 const SAFE_BAD_REQUEST_PATTERNS = [
   /^Invalid transition:/,
   /^display_name must be between 2 and 64 characters$/,
+  /^conclusion_details(?:\.|\s)/,
 ];
 
 function logServerError(context: string, error: unknown): void {
