@@ -161,7 +161,7 @@
           <div class="focus-section-header">
             <div>
               <h3>Open Focus Rooms</h3>
-              <p>Active task rooms ready to enter.</p>
+              <p>Select a room to inspect its live work record.</p>
             </div>
             <span class="focus-badge">{{ openFocusRooms.length }}</span>
           </div>
@@ -176,8 +176,12 @@
               v-for="focusRoom in openFocusRooms"
               :key="focusRoom.room_id"
               class="focus-task focus-room-link"
+              :data-selected="selectedFocusRoom?.room_id === focusRoom.room_id"
+              :aria-pressed="selectedFocusRoom?.room_id === focusRoom.room_id"
+              :aria-label="`Inspect ${focusRoom.display_name} room audit details`"
+              aria-controls="focus-room-detail-panel"
               type="button"
-              @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+              @click="selectFocusRoom(focusRoom)"
             >
               <div>
                 <strong>{{ focusRoom.display_name }}</strong>
@@ -192,7 +196,7 @@
           <div class="focus-section-header">
             <div>
               <h3>Shared results</h3>
-              <p>Concluded task rooms with outcomes in the parent room.</p>
+              <p>Concluded rooms kept as parent-room audit evidence.</p>
             </div>
             <span class="focus-badge">{{ concludedFocusRooms.length }}</span>
           </div>
@@ -203,8 +207,12 @@
               :key="focusRoom.room_id"
               class="focus-task focus-room-link"
               data-concluded="true"
+              :data-selected="selectedFocusRoom?.room_id === focusRoom.room_id"
+              :aria-pressed="selectedFocusRoom?.room_id === focusRoom.room_id"
+              :aria-label="`Inspect ${focusRoom.display_name} shared result details`"
+              aria-controls="focus-room-detail-panel"
               type="button"
-              @click="emit('openFocusRoom', focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id)"
+              @click="selectFocusRoom(focusRoom)"
             >
               <div>
                 <strong>{{ focusRoom.display_name }}</strong>
@@ -234,9 +242,11 @@
               v-for="task in candidateTasks"
               :key="task.id"
               class="focus-task"
-              :data-selected="task.id === currentTask?.id"
+              :data-selected="!selectedFocusRoom && task.id === currentTask?.id"
+              :aria-pressed="!selectedFocusRoom && task.id === currentTask?.id"
+              aria-controls="focus-room-detail-panel"
               type="button"
-              @click="emit('selectTask', task.id)"
+              @click="selectTask(task.id)"
             >
               <div>
                 <strong>{{ task.title }}</strong>
@@ -248,114 +258,194 @@
         </div>
       </section>
 
-      <aside class="focus-detail">
-        <template v-if="currentTask">
-          <p class="focus-eyebrow">Selected task</p>
-          <h4>{{ currentTask.title }}</h4>
-          <p class="focus-detail-copy">
-            Open a Focus Room when this task needs its own discussion, agents, logs, or decisions.
-          </p>
+      <aside
+        id="focus-room-detail-panel"
+        class="focus-detail"
+        role="region"
+        :aria-label="selectedFocusRoom ? 'Focus room audit details' : 'Focus task details'"
+      >
+        <Transition name="focus-detail-swap" mode="out-in">
+          <div v-if="selectedFocusRoom" :key="selectedFocusRoom.room_id" class="focus-detail-inner">
+            <div class="focus-detail-header">
+              <p class="focus-eyebrow">Room audit</p>
+              <span class="focus-room-state" :data-state="selectedFocusRoom.focus_status || 'active'">
+                {{ selectedFocusRoom.focus_status || 'active' }}
+              </span>
+            </div>
+            <h4>{{ selectedFocusRoom.display_name }}</h4>
+            <p class="focus-detail-copy">
+              {{ selectedFocusRoomDetailCopy }}
+            </p>
 
-          <dl class="focus-facts">
-            <div>
-              <dt>Parent</dt>
-              <dd>{{ roomLabel }}</dd>
-            </div>
-            <div>
-              <dt>Status</dt>
-              <dd>{{ taskStatusLabel(currentTask.status) }}</dd>
-            </div>
-            <div>
-              <dt>Share back</dt>
-              <dd>{{ shareBackLabel }}</dd>
-            </div>
-            <div v-if="currentFocusRoom">
-              <dt>Parent room</dt>
-              <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
-            </div>
-          </dl>
-
-          <form
-            v-if="settingsTarget"
-            class="focus-settings-form compact"
-            @submit.prevent="submitFocusSettings"
-          >
-            <div class="focus-settings-heading">
+            <dl class="focus-facts">
               <div>
-                <p class="focus-eyebrow">Sharing</p>
-                <h4>What the parent room sees</h4>
+                <dt>Source task</dt>
+                <dd>{{ selectedFocusRoom.source_task_id || 'Ad-hoc room' }}</dd>
               </div>
-              <button
-                class="focus-secondary"
-                type="submit"
-                :disabled="!canSaveSettings"
-              >
-                {{ settingsButtonLabel }}
-              </button>
-            </div>
-            <div class="focus-settings-grid compact">
-              <label>
-                <span>Parent room</span>
-                <AppSelect v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
-                  <option
-                    v-for="option in parentVisibilityOptions"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </option>
-                </AppSelect>
-                <small>{{ parentVisibilityDescription }}</small>
-              </label>
-              <label>
-                <span>What counts</span>
-                <AppSelect v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
-                  <option
-                    v-for="option in activityScopeOptions"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </option>
-                </AppSelect>
-                <small>{{ activityScopeDescription }}</small>
-              </label>
-              <label>
-                <span>Code updates</span>
-                <AppSelect v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
-                  <option
-                    v-for="option in githubEventRoutingOptions"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </option>
-                </AppSelect>
-                <small>{{ githubEventRoutingDescription }}</small>
-              </label>
-            </div>
-          </form>
+              <div>
+                <dt>Created</dt>
+                <dd>{{ formatAuditTime(selectedFocusRoom.created_at) }}</dd>
+              </div>
+              <div>
+                <dt>Concluded</dt>
+                <dd>{{ selectedFocusRoom.concluded_at ? formatAuditTime(selectedFocusRoom.concluded_at) : 'Not concluded yet' }}</dd>
+              </div>
+              <div>
+                <dt>Focus key</dt>
+                <dd>{{ selectedFocusRoom.focus_key || 'Not assigned' }}</dd>
+              </div>
+              <div>
+                <dt>Room id</dt>
+                <dd>{{ selectedFocusRoom.room_id }}</dd>
+              </div>
+              <div>
+                <dt>Parent visibility</dt>
+                <dd>{{ parentVisibilityLabel(selectedFocusRoomSettings.parent_visibility) }}</dd>
+              </div>
+              <div>
+                <dt>Activity scope</dt>
+                <dd>{{ activityScopeLabel(selectedFocusRoomSettings.activity_scope) }}</dd>
+              </div>
+              <div>
+                <dt>Code routing</dt>
+                <dd>{{ githubRoutingLabel(selectedFocusRoomSettings.github_event_routing) }}</dd>
+              </div>
+            </dl>
 
-          <button
-            class="focus-primary"
-            type="button"
-            :disabled="isFocusRoom || isCreatingFocusRoom"
-            @click="currentFocusRoom ? emit('openFocusRoom', currentFocusRoom.focus_key || currentTask.id) : emit('createFocusRoom', currentTask.id)"
-          >
-            {{ actionLabel }}
-          </button>
-          <p class="focus-note">
-            {{ actionNote }}
-          </p>
-        </template>
+            <section class="focus-audit-card">
+              <p class="focus-eyebrow">Outcome</p>
+              <p>{{ selectedFocusRoom.conclusion_summary || 'No result summary has been shared back yet.' }}</p>
+            </section>
 
-        <template v-else>
-          <p class="focus-eyebrow">No task selected</p>
-          <h4>Choose a task to focus.</h4>
-          <p class="focus-detail-copy">
-            Start from the board or pick a candidate here.
-          </p>
-        </template>
+            <section class="focus-audit-card">
+              <p class="focus-eyebrow">Audit trail</p>
+              <ul class="focus-audit-list">
+                <li>{{ selectedFocusRoom.source_task_id ? 'Linked to a parent task.' : 'Created from an ad-hoc intent.' }}</li>
+                <li>{{ selectedFocusRoom.focus_status === 'concluded' ? 'Outcome has been shared or saved.' : 'Still open for work.' }}</li>
+                <li>{{ parentVisibilityLabel(selectedFocusRoomSettings.parent_visibility) }} controls parent-room updates.</li>
+              </ul>
+            </section>
+
+            <button
+              class="focus-primary"
+              type="button"
+              @click="openSelectedFocusRoom"
+            >
+              Open Focus Room
+            </button>
+            <p class="focus-note">
+              Room cards select details first. Use this explicit action when you want to enter the room.
+            </p>
+          </div>
+
+          <div v-else-if="currentTask" :key="currentTask.id" class="focus-detail-inner">
+            <p class="focus-eyebrow">Selected task</p>
+            <h4>{{ currentTask.title }}</h4>
+            <p class="focus-detail-copy">
+              Open a Focus Room when this task needs its own discussion, agents, logs, or decisions.
+            </p>
+
+            <dl class="focus-facts">
+              <div>
+                <dt>Parent</dt>
+                <dd>{{ roomLabel }}</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd>{{ taskStatusLabel(currentTask.status) }}</dd>
+              </div>
+              <div>
+                <dt>Share back</dt>
+                <dd>{{ shareBackLabel }}</dd>
+              </div>
+              <div v-if="currentFocusRoom">
+                <dt>Parent room</dt>
+                <dd>{{ parentVisibilityLabel(settingsDraft.parent_visibility) }}</dd>
+              </div>
+            </dl>
+
+            <form
+              v-if="settingsTarget"
+              class="focus-settings-form compact"
+              @submit.prevent="submitFocusSettings"
+            >
+              <div class="focus-settings-heading">
+                <div>
+                  <p class="focus-eyebrow">Sharing</p>
+                  <h4>What the parent room sees</h4>
+                </div>
+                <button
+                  class="focus-secondary"
+                  type="submit"
+                  :disabled="!canSaveSettings"
+                >
+                  {{ settingsButtonLabel }}
+                </button>
+              </div>
+              <div class="focus-settings-grid compact">
+                <label>
+                  <span>Parent room</span>
+                  <AppSelect v-model="settingsDraft.parent_visibility" :disabled="isUpdatingFocusSettings">
+                    <option
+                      v-for="option in parentVisibilityOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </AppSelect>
+                  <small>{{ parentVisibilityDescription }}</small>
+                </label>
+                <label>
+                  <span>What counts</span>
+                  <AppSelect v-model="settingsDraft.activity_scope" :disabled="isUpdatingFocusSettings">
+                    <option
+                      v-for="option in activityScopeOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </AppSelect>
+                  <small>{{ activityScopeDescription }}</small>
+                </label>
+                <label>
+                  <span>Code updates</span>
+                  <AppSelect v-model="settingsDraft.github_event_routing" :disabled="isUpdatingFocusSettings">
+                    <option
+                      v-for="option in githubEventRoutingOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </AppSelect>
+                  <small>{{ githubEventRoutingDescription }}</small>
+                </label>
+              </div>
+            </form>
+
+            <button
+              class="focus-primary"
+              type="button"
+              :disabled="isFocusRoom || isCreatingFocusRoom"
+              @click="currentFocusRoom ? emit('openFocusRoom', focusRoomOpenKey(currentFocusRoom) || currentTask.id) : emit('createFocusRoom', currentTask.id)"
+            >
+              {{ actionLabel }}
+            </button>
+            <p class="focus-note">
+              {{ actionNote }}
+            </p>
+          </div>
+
+          <div v-else key="empty" class="focus-detail-inner">
+            <p class="focus-eyebrow">No task selected</p>
+            <h4>Choose a task to focus.</h4>
+            <p class="focus-detail-copy">
+              Start from the board or pick a candidate here.
+            </p>
+          </div>
+        </Transition>
       </aside>
     </div>
   </div>
@@ -408,6 +498,7 @@ const shareAttempted = ref(false)
 const settingsDraft = ref<FocusRoomSettings>({ ...DEFAULT_FOCUS_ROOM_SETTINGS })
 const adHocTitle = ref('')
 const adHocAttempted = ref(false)
+const selectedFocusRoomId = ref<string | null>(null)
 
 const parentVisibilityOptions: Array<{ value: FocusParentVisibility; label: string }> = [
   { value: 'summary_only', label: 'Only the final note' },
@@ -439,6 +530,27 @@ const openFocusRooms = computed(() =>
 const concludedFocusRooms = computed(() =>
   props.focusRooms.filter(room => room.kind === 'focus' && room.focus_status === 'concluded')
 )
+
+const selectedFocusRoom = computed(() =>
+  selectedFocusRoomId.value
+    ? props.focusRooms.find(room => room.room_id === selectedFocusRoomId.value) ?? null
+    : null
+)
+
+const selectedFocusRoomSettings = computed(() =>
+  selectedFocusRoom.value
+    ? focusRoomSettingsFrom(selectedFocusRoom.value)
+    : DEFAULT_FOCUS_ROOM_SETTINGS
+)
+
+const selectedFocusRoomDetailCopy = computed(() => {
+  const room = selectedFocusRoom.value
+  if (!room) return ''
+  if (room.focus_status === 'concluded') {
+    return 'This Focus Room is closed; review the outcome before relying on the parent-room summary.'
+  }
+  return 'This Focus Room is still active; inspect the record first, then enter the room when you need the live thread.'
+})
 
 const focusRoomByTask = computed(() => {
   const entries = props.focusRooms
@@ -612,6 +724,15 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => props.focusRooms,
+  (rooms) => {
+    if (selectedFocusRoomId.value && !rooms.some(room => room.room_id === selectedFocusRoomId.value)) {
+      selectedFocusRoomId.value = null
+    }
+  }
+)
+
 function submitShareResults() {
   shareAttempted.value = true
   const trimmedSummary = resultSummary.value.trim()
@@ -636,8 +757,44 @@ function submitAdHocFocusRoom() {
   emit('createAdHocFocusRoom', trimmedTitle)
 }
 
+function selectFocusRoom(focusRoom: FocusRoomInfo) {
+  selectedFocusRoomId.value = focusRoom.room_id
+}
+
+function selectTask(taskId: string) {
+  selectedFocusRoomId.value = null
+  emit('selectTask', taskId)
+}
+
+function focusRoomOpenKey(focusRoom: FocusRoomInfo): string {
+  return focusRoom.focus_key || focusRoom.source_task_id || focusRoom.room_id
+}
+
+function openSelectedFocusRoom() {
+  if (!selectedFocusRoom.value) return
+  emit('openFocusRoom', focusRoomOpenKey(selectedFocusRoom.value))
+}
+
+function activityScopeLabel(value: FocusActivityScope): string {
+  return activityScopeOptions.find(option => option.value === value)?.label || 'Task and linked code'
+}
+
+function githubRoutingLabel(value: FocusGitHubEventRouting): string {
+  return githubEventRoutingOptions.find(option => option.value === value)?.label || 'Related code activity'
+}
+
 function taskStatusLabel(status: string): string {
   return status.replace(/_/g, ' ')
+}
+
+function formatAuditTime(value: string | null | undefined): string {
+  if (!value) return 'Unknown'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
 }
 </script>
 
@@ -1033,8 +1190,14 @@ function taskStatusLabel(status: string): string {
   color: var(--text-secondary, #d4d4d8);
   cursor: pointer;
   text-align: left;
-  transition: all 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    border-color 220ms ease,
+    background 220ms ease,
+    box-shadow 220ms ease,
+    color 180ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
   letter-spacing: 0;
+  animation: focus-card-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .focus-task:hover,
@@ -1043,6 +1206,15 @@ function taskStatusLabel(status: string): string {
   background: rgba(96, 165, 250, 0.06);
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.focus-task[data-selected="true"] {
+  background:
+    linear-gradient(135deg, rgba(96, 165, 250, 0.14), rgba(96, 165, 250, 0.04)),
+    rgba(255, 255, 255, 0.02);
+  box-shadow:
+    0 12px 24px rgba(0, 0, 0, 0.22),
+    inset 3px 0 0 rgba(96, 165, 250, 0.8);
 }
 
 .focus-task[data-concluded="true"] small {
@@ -1089,6 +1261,37 @@ function taskStatusLabel(status: string): string {
   position: sticky;
   top: 0;
   align-self: start;
+  overflow: hidden;
+}
+
+.focus-detail-inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.focus-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.focus-room-state {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.focus-room-state[data-state="concluded"] {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
 }
 
 .focus-facts {
@@ -1113,6 +1316,58 @@ function taskStatusLabel(status: string): string {
   overflow-wrap: anywhere;
 }
 
+.focus-audit-card {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at top right, rgba(96, 165, 250, 0.08), transparent 44%),
+    var(--bg-0, #09090b);
+}
+
+.focus-audit-card p {
+  margin: 0;
+  color: var(--text-tertiary, #a1a1aa);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.focus-audit-card .focus-eyebrow {
+  margin: 0;
+}
+
+.focus-audit-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.focus-audit-list li {
+  position: relative;
+  padding-left: 14px;
+  color: var(--text-tertiary, #a1a1aa);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.focus-audit-list li::before {
+  content: "";
+  position: absolute;
+  top: 0.65em;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: #60a5fa;
+  transform: translateY(-50%);
+}
+
 .focus-primary {
   width: 100%;
   padding: 10px 12px;
@@ -1123,7 +1378,10 @@ function taskStatusLabel(status: string): string {
   font-size: 0.82rem;
   font-weight: 800;
   cursor: pointer;
-  transition: opacity 150ms;
+  transition:
+    opacity 160ms ease,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 180ms ease;
 }
 
 .focus-secondary {
@@ -1144,6 +1402,8 @@ function taskStatusLabel(status: string): string {
 
 .focus-primary:hover {
   opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px rgba(96, 165, 250, 0.14);
 }
 
 .focus-primary:disabled {
@@ -1165,6 +1425,50 @@ function taskStatusLabel(status: string): string {
   padding: 14px;
   border: 1px dashed var(--line, #27272a);
   border-radius: 8px;
+}
+
+.focus-detail-swap-enter-active,
+.focus-detail-swap-leave-active {
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.focus-detail-swap-enter-from {
+  opacity: 0;
+  transform: translateY(8px) scale(0.99);
+}
+
+.focus-detail-swap-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.99);
+}
+
+@keyframes focus-card-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-task,
+  .focus-primary,
+  .focus-detail-swap-enter-active,
+  .focus-detail-swap-leave-active {
+    animation: none;
+    transition: none;
+  }
+
+  .focus-task:hover,
+  .focus-task[data-selected="true"],
+  .focus-primary:hover {
+    transform: none;
+  }
 }
 
 @media (max-width: 860px) {
