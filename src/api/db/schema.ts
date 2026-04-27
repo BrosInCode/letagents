@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { check, foreignKey, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
+import type { FocusRoomConclusionDetails } from "../focus-room-conclusion.js";
 import type {
   FocusActivityScope,
   FocusGitHubEventRouting,
@@ -79,6 +80,7 @@ export const rooms = pgTable(
     focus_github_event_routing: text("focus_github_event_routing").$type<FocusGitHubEventRouting>(),
     concluded_at: timestamp("concluded_at", { mode: "string", withTimezone: true }),
     conclusion_summary: text("conclusion_summary"),
+    conclusion_details: jsonb("conclusion_details").$type<FocusRoomConclusionDetails>(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
@@ -121,6 +123,7 @@ export const rooms = pgTable(
         AND ${table.focus_status} IS NULL
         AND ${table.concluded_at} IS NULL
         AND ${table.conclusion_summary} IS NULL
+        AND ${table.conclusion_details} IS NULL
       ) OR (
         ${table.kind} = 'focus'
         AND ${table.parent_room_id} IS NOT NULL

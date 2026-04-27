@@ -66,6 +66,7 @@ test(
           "focus_status" text,
           "concluded_at" timestamp with time zone,
           "conclusion_summary" text,
+          "conclusion_details" jsonb,
           "created_at" timestamp with time zone NOT NULL
         )
       `);
@@ -78,6 +79,7 @@ test(
           AND "rooms"."focus_status" IS NULL
           AND "rooms"."concluded_at" IS NULL
           AND "rooms"."conclusion_summary" IS NULL
+          AND "rooms"."conclusion_details" IS NULL
         ) OR (
           "rooms"."kind" = 'focus'
           AND "rooms"."parent_room_id" IS NOT NULL

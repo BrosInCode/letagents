@@ -25,6 +25,7 @@ const rooms: Project[] = [
     focus_github_event_routing: null,
     concluded_at: null,
     conclusion_summary: null,
+    conclusion_details: null,
     created_at: "2026-04-21T10:00:00.000Z",
   },
   {
@@ -41,6 +42,7 @@ const rooms: Project[] = [
     focus_github_event_routing: null,
     concluded_at: null,
     conclusion_summary: null,
+    conclusion_details: null,
     created_at: "2026-04-21T10:05:00.000Z",
   } as Project,
 ];

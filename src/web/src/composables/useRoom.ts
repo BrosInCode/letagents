@@ -227,6 +227,24 @@ export interface RoomInfo {
   focusGitHubEventRouting: FocusGitHubEventRouting | null
   concludedAt: string | null
   conclusionSummary: string | null
+  conclusionDetails: FocusRoomConclusionDetails | null
+}
+
+export type FocusRoomReviewState = 'reviewed' | 'needs_review' | 'not_required'
+export type FocusRoomBlockerState = 'none' | 'resolved' | 'blocked'
+export type FocusRoomParentTaskNextAction =
+  | 'keep_open'
+  | 'move_to_review'
+  | 'mark_blocked'
+  | 'mark_done'
+  | 'follow_up'
+
+export interface FocusRoomConclusionDetails {
+  artifact: string
+  review_state: FocusRoomReviewState
+  blocker_state: FocusRoomBlockerState
+  parent_task_next: FocusRoomParentTaskNextAction
+  next_owner: string
 }
 
 export interface FocusRoomInfo {
@@ -246,6 +264,7 @@ export interface FocusRoomInfo {
   focus_settings?: FocusRoomSettings | null
   concluded_at: string | null
   conclusion_summary: string | null
+  conclusion_details: FocusRoomConclusionDetails | null
   created_at: string
   role?: string
   authenticated?: boolean
@@ -1571,7 +1590,10 @@ async function createAdHocFocusRoom(title: string): Promise<FocusRoomInfo | null
   }
 }
 
-async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: FocusRoomInfo; parentMessagePosted: boolean } | null> {
+async function shareFocusRoomResult(
+  summary: string,
+  conclusionDetails: FocusRoomConclusionDetails | null = null
+): Promise<{ focusRoom: FocusRoomInfo; parentMessagePosted: boolean } | null> {
   if (!room.value || room.value.kind !== 'focus') return null
   const trimmedSummary = summary.trim()
   const parentRoomId = room.value.parentRoomId
@@ -1583,7 +1605,10 @@ async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: Focus
       `${roomPath(parentRoomId)}/focus/${encodeURIComponent(focusKey)}/conclude`,
       {
         method: 'POST',
-        body: JSON.stringify({ summary: trimmedSummary }),
+        body: JSON.stringify({
+          summary: trimmedSummary,
+          conclusion_details: conclusionDetails,
+        }),
       }
     )
     const focusRoom = (data.focus_room || data.room) as FocusRoomInfo | undefined
@@ -1600,6 +1625,7 @@ async function shareFocusRoomResult(summary: string): Promise<{ focusRoom: Focus
       focusGitHubEventRouting: focusRoom.focus_github_event_routing || room.value.focusGitHubEventRouting,
       concludedAt: focusRoom.concluded_at || room.value.concludedAt,
       conclusionSummary: focusRoom.conclusion_summary || trimmedSummary,
+      conclusionDetails: focusRoom.conclusion_details || conclusionDetails,
     }
 
     return {
@@ -1785,6 +1811,7 @@ async function joinRoom(roomIdentifier: string) {
       focusGitHubEventRouting: project.focus_github_event_routing || project.focus_settings?.github_event_routing || null,
       concludedAt: project.concluded_at || null,
       conclusionSummary: project.conclusion_summary || null,
+      conclusionDetails: project.conclusion_details || null,
     }
     room.value = joinedRoom
     isConnected.value = true

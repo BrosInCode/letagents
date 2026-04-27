@@ -1,6 +1,12 @@
 import type { Project, Task } from "./db.js";
 import { isAttachmentStorageConfigured } from "./attachment-storage.js";
 import {
+  focusRoomBlockerStateLabel,
+  focusRoomParentTaskNextLabel,
+  focusRoomReviewStateLabel,
+  type FocusRoomConclusionDetails,
+} from "./focus-room-conclusion.js";
+import {
   normalizeFocusRoomSettings,
   type FocusRoomSettings,
 } from "./focus-room-settings.js";
@@ -41,6 +47,7 @@ export function toRoomResponse(
     focus_settings: focusSettings,
     concluded_at: project.concluded_at,
     conclusion_summary: project.conclusion_summary,
+    conclusion_details: project.conclusion_details,
     created_at: project.created_at,
     ...(options?.role ? { role: options.role } : {}),
     ...(options ? { authenticated: Boolean(options.authenticated) } : {}),
@@ -51,11 +58,23 @@ export function formatFocusRoomConclusionMessage(input: {
   focusRoom: Project;
   task?: Task;
   summary: string;
+  details?: FocusRoomConclusionDetails | null;
 }): string {
   const taskLabel = input.task
     ? `${input.task.id}: ${input.task.title}`
     : input.focusRoom.source_task_id || input.focusRoom.focus_key || input.focusRoom.id;
-  return `[status] Focus Room concluded for ${taskLabel}. Result: ${input.summary}`;
+  const details = input.details ?? input.focusRoom.conclusion_details;
+  const lines = [`[status] Focus Room concluded for ${taskLabel}. Result: ${input.summary}`];
+  if (details) {
+    lines.push(
+      `Artifact: ${details.artifact}`,
+      `Review: ${focusRoomReviewStateLabel(details.review_state)}`,
+      `Blockers: ${focusRoomBlockerStateLabel(details.blocker_state)}`,
+      `Parent task next: ${focusRoomParentTaskNextLabel(details.parent_task_next)}`,
+      `Next owner: ${details.next_owner}`
+    );
+  }
+  return lines.join("\n");
 }
 
 export function formatFocusRoomReference(focusRoom: Project): string {

@@ -21,6 +21,10 @@ import {
   shouldPostFocusRoomEventToParent,
   validateFocusRoomSettingsPatch,
 } from "../focus-room-settings.js";
+import {
+  normalizeFocusRoomConclusionDetails,
+  type FocusRoomConclusionDetails,
+} from "../focus-room-conclusion.js";
 import { normalizeRoomId } from "../room-routing.js";
 import {
   normalizeTaskActorKey,
@@ -72,6 +76,7 @@ export interface RoomFocusRouteDeps {
     focusRoom: Project;
     task?: Task;
     summary: string;
+    details?: FocusRoomConclusionDetails | null;
   }): string;
 }
 
@@ -234,6 +239,11 @@ export function registerRoomFocusRoutes(
         return;
       }
 
+      const conclusionDetails = normalizeFocusRoomConclusionDetails(
+        requestBody.conclusion_details,
+        { required: Boolean(focusRoom.source_task_id && focusRoom.focus_status !== "concluded") }
+      );
+
       if (focusRoom.source_task_id) {
         const task = await getTaskById(project.id, focusRoom.source_task_id);
         const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
@@ -254,7 +264,7 @@ export function registerRoomFocusRoutes(
         }
       }
 
-      const result = await concludeFocusRoom(project.id, focusKey, summary);
+      const result = await concludeFocusRoom(project.id, focusKey, summary, conclusionDetails);
       if (!result) {
         res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
         return;
@@ -276,6 +286,7 @@ export function registerRoomFocusRoutes(
               focusRoom: result.room,
               task: result.task,
               summary: result.room.conclusion_summary || summary.trim(),
+              details: result.room.conclusion_details,
             })
           )
         : null;

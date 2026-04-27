@@ -39,6 +39,7 @@ import type {
   GitHubRoomEventType,
   ReasoningSnapshot,
 } from "./db/schema.js";
+import type { FocusRoomConclusionDetails } from "./focus-room-conclusion.js";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "./room-display-name.js";
 import { isInviteCode, normalizeRoomId, normalizeRoomName } from "./room-routing.js";
 import {
@@ -100,6 +101,7 @@ export interface Project {
   focus_github_event_routing: FocusGitHubEventRouting | null;
   concluded_at: string | null;
   conclusion_summary: string | null;
+  conclusion_details: FocusRoomConclusionDetails | null;
   created_at: string;
 }
 
@@ -775,6 +777,7 @@ function toProject(row: typeof rooms.$inferSelect): Project {
     focus_github_event_routing: row.focus_github_event_routing,
     concluded_at: row.concluded_at,
     conclusion_summary: row.conclusion_summary,
+    conclusion_details: row.conclusion_details ?? null,
     created_at: row.created_at,
   };
 }
@@ -1434,6 +1437,7 @@ export async function createProject(): Promise<Project> {
         focus_github_event_routing: null,
         concluded_at: null,
         conclusion_summary: null,
+        conclusion_details: null,
         created_at,
       };
     } catch (error) {
@@ -1494,6 +1498,7 @@ export async function getOrCreateCanonicalRoom(
         focus_github_event_routing: null,
         concluded_at: null,
         conclusion_summary: null,
+        conclusion_details: null,
         created_at,
       },
       created: true,
@@ -1616,6 +1621,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
         focus_github_event_routing: project.focus_github_event_routing,
         concluded_at: project.concluded_at,
         conclusion_summary: project.conclusion_summary,
+        conclusion_details: project.conclusion_details,
         created_at: project.created_at,
       };
     } catch (error) {
@@ -1741,7 +1747,8 @@ export async function getFocusRoomByKey(
 export async function concludeFocusRoom(
   parentRoomId: string,
   focusKey: string,
-  summary: string
+  summary: string,
+  details: FocusRoomConclusionDetails | null = null
 ): Promise<{ room: Project; task: Task | undefined; updated: boolean } | null> {
   const normalizedSummary = summary.trim();
   if (!normalizedSummary) {
@@ -1767,6 +1774,7 @@ export async function concludeFocusRoom(
       focus_status: "concluded",
       concluded_at: new Date().toISOString(),
       conclusion_summary: normalizedSummary,
+      conclusion_details: details,
     })
     .where(and(eq(rooms.id, focusRoom.id), eq(rooms.focus_status, "active")))
     .returning();

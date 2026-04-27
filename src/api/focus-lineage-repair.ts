@@ -22,6 +22,7 @@ export async function repairAdHocFocusLineage(db: RepairPool): Promise<void> {
         AND "rooms"."focus_status" IS NULL
         AND "rooms"."concluded_at" IS NULL
         AND "rooms"."conclusion_summary" IS NULL
+        AND "rooms"."conclusion_details" IS NULL
       ) OR (
         "rooms"."kind" = 'focus'
         AND "rooms"."parent_room_id" IS NOT NULL
