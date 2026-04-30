@@ -88,6 +88,7 @@
           @addTask="handleAddTask"
           @updateTask="handleUpdateTask"
           @leaseAction="handleTaskLeaseAction"
+          @reviewLeaseAction="handleTaskReviewLeaseAction"
           @focusTask="handleFocusTask"
         />
 
@@ -295,6 +296,7 @@ const {
   addTask,
   updateTask,
   updateTaskLease,
+  updateTaskReviewLease,
   setTaskStalePromptMute,
   createFocusRoom,
   createAdHocFocusRoom,
@@ -454,7 +456,10 @@ async function handleAddTask(title: string) {
 }
 
 async function handleUpdateTask(taskId: string, updates: { status: string }) {
-  await updateTask(taskId, updates as any)
+  const updated = await updateTask(taskId, updates as any)
+  if (!updated) {
+    toast.error('Task status could not be updated.')
+  }
 }
 
 async function handleTaskLeaseAction(payload: {
@@ -481,6 +486,35 @@ async function handleTaskLeaseAction(payload: {
     }
   } catch {
     toast.error('Task lease could not be updated.')
+  } finally {
+    payload.onSettled?.()
+  }
+}
+
+async function handleTaskReviewLeaseAction(payload: {
+  taskId: string
+  action: 'assign' | 'release'
+  lease_id?: string | null
+  target_actor_key?: string | null
+  target_actor_instance_id?: string | null
+  target_agent_session_id?: string | null
+  reason?: string | null
+  onSettled?: () => void
+}) {
+  try {
+    const updated = await updateTaskReviewLease(payload.taskId, {
+      action: payload.action,
+      lease_id: payload.lease_id ?? null,
+      target_actor_key: payload.target_actor_key ?? null,
+      target_actor_instance_id: payload.target_actor_instance_id ?? null,
+      target_agent_session_id: payload.target_agent_session_id ?? null,
+      reason: payload.reason ?? null,
+    })
+    if (!updated) {
+      toast.error('Task review authority could not be updated.')
+    }
+  } catch {
+    toast.error('Task review authority could not be updated.')
   } finally {
     payload.onSettled?.()
   }

@@ -35,6 +35,10 @@
         <span class="signal-value">{{ prStateSignal }}</span>
         <span class="signal-label">PR state</span>
       </div>
+      <div class="merge-readiness-signal">
+        <span class="signal-value">{{ boardReviewSignal }}</span>
+        <span class="signal-label">Board review</span>
+      </div>
     </div>
 
     <ul v-if="readiness.blockers.length" class="merge-readiness-blockers">
@@ -56,7 +60,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { type TaskGitHubArtifactStatus } from '@/composables/useRoom'
+import { type RoomTask, type TaskGitHubArtifactStatus } from '@/composables/useRoom'
 
 type ReadinessTone = 'ready' | 'blocked' | 'pending' | 'merged' | 'neutral'
 
@@ -69,6 +73,7 @@ interface ReadinessVerdict {
 
 const props = defineProps<{
   status: TaskGitHubArtifactStatus
+  task?: RoomTask
 }>()
 
 const status = computed(() => props.status)
@@ -84,6 +89,20 @@ const prAuthor = computed(() => normalized(status.value.pr_author || status.valu
 const approvedReviews = computed(() => (
   status.value.reviews.filter(review => normalized(review.state) === 'approved')
 ))
+const workLease = computed(() => props.task?.active_leases?.find(lease => lease.kind === 'work') ?? null)
+const reviewLeases = computed(() => props.task?.active_leases?.filter(lease => lease.kind === 'review') ?? [])
+const validBoardReviewLeases = computed(() =>
+  reviewLeases.value.filter(lease => !workLease.value || !leasesMatchActor(lease, workLease.value))
+)
+const boardReviewRequired = computed(() => props.task?.status === 'in_review')
+const boardReviewBlocker = computed(() => {
+  if (!boardReviewRequired.value) return null
+  if (validBoardReviewLeases.value.length > 0) return null
+  if (reviewLeases.value.length > 0) {
+    return 'LetAgents board reviewer conflicts with the active work holder.'
+  }
+  return 'Assign a LetAgents board reviewer before merge handoff.'
+})
 
 const hasNonAuthorApproval = computed(() => {
   if (!approvedReviews.value.length) return false
@@ -102,6 +121,15 @@ const readiness = computed<ReadinessVerdict>(() => {
       blockers: [status.value.checks.length || status.value.reviews.length
         ? 'Refresh the PR webhook event or link the PR directly to this task.'
         : 'Link a PR before reviewing merge readiness.'],
+    }
+  }
+
+  if ((status.value.pr_merged || prState.value === 'merged') && boardReviewBlocker.value) {
+    return {
+      label: 'Board review required',
+      summary: 'The linked PR has merged, but the LetAgents board still needs a separate reviewer before task merge handoff.',
+      tone: 'pending',
+      blockers: [boardReviewBlocker.value],
     }
   }
 
@@ -127,6 +155,9 @@ const readiness = computed<ReadinessVerdict>(() => {
   const checks = status.value.check_summary
   const reviews = status.value.review_summary
 
+  if (boardReviewBlocker.value) {
+    blockers.push(boardReviewBlocker.value)
+  }
   if (status.value.pr_draft || prState.value === 'draft') {
     blockers.push('PR is still draft.')
   }
@@ -162,7 +193,9 @@ const readiness = computed<ReadinessVerdict>(() => {
 
   return {
     label: 'Merge eligible',
-    summary: 'Checks are green and a non-author approval is present.',
+    summary: boardReviewRequired.value
+      ? 'Checks are green, GitHub approval is present, and board review authority is assigned.'
+      : 'Checks are green and a non-author approval is present.',
     tone: 'ready',
     blockers: [],
   }
@@ -190,6 +223,15 @@ const prStateSignal = computed(() => {
   return labelize(status.value.pr_state || 'unknown')
 })
 
+const boardReviewSignal = computed(() => {
+  if (!boardReviewRequired.value) return 'Not required'
+  if (validBoardReviewLeases.value.length > 0) {
+    return `${validBoardReviewLeases.value.length} assigned`
+  }
+  if (reviewLeases.value.length > 0) return 'Conflict'
+  return 'Unassigned'
+})
+
 function normalized(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase()
 }
@@ -214,6 +256,13 @@ function labelize(value: string): string {
   return normalizedValue
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, char => char.toUpperCase())
+}
+
+function leasesMatchActor(
+  left: NonNullable<RoomTask['active_leases']>[number],
+  right: NonNullable<RoomTask['active_leases']>[number]
+): boolean {
+  return left.agent_key === right.agent_key
 }
 
 function plural(count: number, singular: string): string {
@@ -332,7 +381,7 @@ function plural(count: number, singular: string): string {
 
 .merge-readiness-signals {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 

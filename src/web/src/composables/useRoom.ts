@@ -183,6 +183,15 @@ export interface TaskLeaseActionInput {
   reason?: string | null
 }
 
+export interface TaskReviewLeaseActionInput {
+  action: 'assign' | 'claim' | 'release'
+  lease_id?: string | null
+  target_actor_key?: string | null
+  target_actor_instance_id?: string | null
+  target_agent_session_id?: string | null
+  reason?: string | null
+}
+
 export interface StalePromptTaskState {
   isStale: boolean
   muted: boolean
@@ -1772,6 +1781,38 @@ async function updateTaskLease(taskId: string, input: TaskLeaseActionInput): Pro
   }
 }
 
+async function updateTaskReviewLease(taskId: string, input: TaskReviewLeaseActionInput): Promise<boolean> {
+  if (!room.value) return false
+  try {
+    const data = await apiFetch(
+      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    )
+    const updatedTask = data.task || (data.id ? data : null)
+    if (updatedTask) {
+      const idx = tasks.value.findIndex(t => t.id === taskId)
+      if (idx >= 0) {
+        const updated = [...tasks.value]
+        updated[idx] = updatedTask
+        tasks.value = updated
+      }
+    }
+    const [nextTasks, nextPresence] = await Promise.all([
+      fetchTasks(room.value.identifier),
+      fetchPresence(room.value.identifier),
+    ])
+    tasks.value = nextTasks
+    presence.value = nextPresence
+    boardHandoffPresence.value = nextPresence
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function setTaskStalePromptMute(
   taskId: string,
   muted: boolean,
@@ -2096,6 +2137,7 @@ export function useRoom() {
     addTask,
     updateTask,
     updateTaskLease,
+    updateTaskReviewLease,
     setTaskStalePromptMute,
     createFocusRoom,
     createAdHocFocusRoom,

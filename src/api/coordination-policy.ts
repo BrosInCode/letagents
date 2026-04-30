@@ -513,6 +513,24 @@ export function evaluateReviewLeaseRouting(input: {
   };
 }
 
+export function findBoardReviewLeaseForMerge(input: {
+  taskId: string;
+  leases: readonly CoordinationLeaseLike[];
+  now?: Date;
+}): CoordinationLeaseLike | null {
+  const now = input.now ?? new Date();
+  const activeTaskLeases = input.leases.filter((lease) =>
+    lease.task_id === input.taskId && isActiveCoordinationLease(lease, now)
+  );
+  const activeWorkLease =
+    activeTaskLeases.find((lease) => lease.kind === "work") ?? null;
+
+  return activeTaskLeases.find((lease) =>
+    lease.kind === "review" &&
+    (!activeWorkLease || lease.agent_key !== activeWorkLease.agent_key)
+  ) ?? null;
+}
+
 function normalizeWorkflowRef(value: string | null | undefined): string | null {
   if (!value) {
     return null;
