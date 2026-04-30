@@ -89,6 +89,7 @@ export interface LegacyProjectTaskRouteDeps {
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
+    actorSessionId: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
   isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean>;
   emitTaskLifecycleStatusMessage(
@@ -113,6 +114,7 @@ export interface LegacyProjectTaskRouteDeps {
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
+    actorSessionId: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
   enforceFocusParentBoardWriteIsolation(input: {
     req: AuthenticatedRequest;
@@ -157,6 +159,7 @@ export function registerLegacyProjectTaskRoutes(
     const effectiveActorLabel = workerIdentity?.actor_label ?? actor_label ?? createdBy;
     const effectiveActorKey = workerIdentity?.agent_key ?? actor_key ?? null;
     const effectiveActorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(actor_instance_id);
+    const effectiveActorSessionId = workerIdentity?.agent_session_id ?? null;
 
     if (!title || !createdBy) {
       res.status(400).json({ error: "title and created_by are required" });
@@ -184,6 +187,7 @@ export function registerLegacyProjectTaskRoutes(
       actorLabel: effectiveActorLabel,
       actorKey: effectiveActorKey,
       actorInstanceId: effectiveActorInstanceId,
+      actorSessionId: effectiveActorSessionId,
     });
     if (admission.kind === "deny") {
       res.status(409).json({ error: admission.error, code: admission.code });
@@ -318,6 +322,7 @@ export function registerLegacyProjectTaskRoutes(
     const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
     const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
     const actorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id);
+    const actorSessionId = workerIdentity?.agent_session_id ?? null;
     if (workerIdentity && updates.assignee === workerIdentity.actor_label && !updates.assignee_agent_key) {
       updates.assignee_agent_key = workerIdentity.agent_key;
     }
@@ -378,6 +383,7 @@ export function registerLegacyProjectTaskRoutes(
         actorLabel,
         actorKey: verifiedActorKey,
         actorInstanceId,
+        actorSessionId,
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });

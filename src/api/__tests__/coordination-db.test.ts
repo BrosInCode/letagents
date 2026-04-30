@@ -26,6 +26,7 @@ const createTaskLease = dbModule?.createTaskLease;
 const createTaskLock = dbModule?.createTaskLock;
 const assignProjectAdmin = dbModule?.assignProjectAdmin;
 const getActiveTaskLeases = dbModule?.getActiveTaskLeases;
+const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const registerAgentIdentity = dbModule?.registerAgentIdentity;
 const updateTask = dbModule?.updateTask;
 const upsertAccount = dbModule?.upsertAccount;
@@ -167,6 +168,19 @@ async function createWorkerSessionCredentials(input: {
     owner_account_id: input.ownerAccountId,
     owner_label: input.ownerLabel,
     ide_label: "Codex",
+  });
+  await markRoomAgentDeliveryConnected?.({
+    room_id: input.roomId,
+    actor_label: session.actor_label,
+    agent_key: session.agent_key,
+    agent_instance_id: session.agent_instance_id,
+    agent_session_id: session.session_id,
+    session_kind: session.session_kind,
+    runtime: session.runtime,
+    display_name: session.display_name,
+    owner_label: session.owner_label,
+    ide_label: session.ide_label,
+    transport: "long_poll",
   });
 
   return {

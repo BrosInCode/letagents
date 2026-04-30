@@ -119,6 +119,7 @@ export interface RoomTask {
   description: string
   status: string
   assignee: string | null
+  assignee_agent_key: string | null
   created_by: string | null
   pr_url: string | null
   workflow_artifacts: ReadonlyArray<{
@@ -152,9 +153,10 @@ export interface RoomTask {
     room_id: string
     task_id: string
     kind: "work" | "review" | "coordination"
-    status: "active" | "released" | "expired"
+    status: "active" | "released" | "revoked" | "expired"
     agent_key: string
     agent_instance_id: string | null
+    agent_session_id: string | null
     actor_label: string
     branch_ref: string | null
     pr_url: string | null
@@ -170,6 +172,15 @@ export interface RoomTask {
     created_by: string
     cleared_at: string | null
   }>
+}
+
+export interface TaskLeaseActionInput {
+  action: 'release' | 'handoff'
+  lease_id?: string | null
+  target_actor_key?: string | null
+  target_actor_instance_id?: string | null
+  target_agent_session_id?: string | null
+  reason?: string | null
 }
 
 export interface StalePromptTaskState {
@@ -308,6 +319,7 @@ export interface RoomAgentPresence {
   room_id: string
   actor_label: string
   agent_key: string | null
+  agent_instance_id: string | null
   agent_session_id: string | null
   session_kind: 'controller' | 'worker'
   runtime: string
@@ -470,6 +482,7 @@ const messages = ref<RoomMessage[]>([])
 const messagesHasOlder = ref(false)
 const isLoadingOlderMessages = ref(false)
 const presence = ref<RoomAgentPresence[]>([])
+const boardHandoffPresence = ref<RoomAgentPresence[]>([])
 const participants = ref<RoomParticipant[]>([])
 const participantHiddenCount = ref(0)
 const activityHistory = ref<RoomActivityHistoryPage | null>(null)
@@ -514,6 +527,7 @@ let lastActivityHistoryRequest: {
 let activityHistoryRequestSequence = 0
 const PRESENCE_REFRESH_INTERVAL_MS = 30000
 const MESSAGE_HISTORY_PAGE_SIZE = 150
+const HANDOFF_PRESENCE_PAGE_SIZE = 500
 
 /** ── Color Palette ── */
 const OWNER_COLORS = [
@@ -737,9 +751,17 @@ function mergeMessages(current: readonly RoomMessage[], incoming: readonly RoomM
   })
 }
 
-async function fetchPresence(roomIdentifier: string): Promise<RoomAgentPresence[]> {
+async function fetchPresence(
+  roomIdentifier: string,
+  limit: number = HANDOFF_PRESENCE_PAGE_SIZE
+): Promise<RoomAgentPresence[]> {
   try {
-    const data = await apiFetch(`${roomPath(roomIdentifier)}/presence`)
+    const params = new URLSearchParams()
+    if (limit) {
+      params.set('limit', String(limit))
+    }
+    const query = params.toString()
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/presence${query ? `?${query}` : ''}`)
     return data.presence || []
   } catch {
     return []
@@ -940,7 +962,9 @@ async function fetchGitHubEvents(roomIdentifier: string): Promise<{
 }
 
 async function refreshPresence(roomIdentifier: string) {
-  presence.value = await fetchPresence(roomIdentifier)
+  const nextPresence = await fetchPresence(roomIdentifier)
+  presence.value = nextPresence
+  boardHandoffPresence.value = nextPresence
 }
 
 async function refreshParticipants(roomIdentifier: string) {
@@ -1026,6 +1050,7 @@ async function refreshRoomReachability(): Promise<boolean> {
   ])
   if (room.value?.identifier !== roomIdentifier) return false
   presence.value = nextPresence
+  boardHandoffPresence.value = nextPresence
   participants.value = nextParticipantsPage.participants
   participantHiddenCount.value = nextParticipantsPage.hidden_count
   return true
@@ -1164,13 +1189,15 @@ async function refreshRoomBoard(): Promise<boolean> {
   const roomIdentifier = room.value.identifier
   boardLoading.value = true
   try {
-    const [nextTasks, nextGithubStatus] = await Promise.all([
+    const [nextTasks, nextGithubStatus, nextPresence] = await Promise.all([
       fetchTasks(roomIdentifier),
       fetchTaskGithubStatus(roomIdentifier),
+      fetchPresence(roomIdentifier, HANDOFF_PRESENCE_PAGE_SIZE),
     ])
     if (room.value?.identifier !== roomIdentifier) return false
     tasks.value = nextTasks
     taskGithubStatus.value = nextGithubStatus
+    boardHandoffPresence.value = nextPresence
     return true
   } finally {
     boardLoading.value = false
@@ -1207,6 +1234,7 @@ async function refreshRoomActivity(): Promise<boolean> {
     messages.value = mergeMessages(messages.value, messagePage.messages)
     messagesHasOlder.value = messagePage.hasOlder || messagesHasOlder.value
     presence.value = nextPresence
+    boardHandoffPresence.value = nextPresence
     participants.value = nextParticipantsPage.participants
     participantHiddenCount.value = nextParticipantsPage.hidden_count
     reasoningSessions.value = nextReasoningSessions
@@ -1696,7 +1724,45 @@ async function updateTask(taskId: string, updates: Partial<RoomTask>): Promise<b
       }
     }
     // Re-fetch to stay in sync (like legacy refreshBoard)
-    tasks.value = await fetchTasks(room.value.identifier)
+    const [nextTasks, nextPresence] = await Promise.all([
+      fetchTasks(room.value.identifier),
+      fetchPresence(room.value.identifier),
+    ])
+    tasks.value = nextTasks
+    presence.value = nextPresence
+    boardHandoffPresence.value = nextPresence
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function updateTaskLease(taskId: string, input: TaskLeaseActionInput): Promise<boolean> {
+  if (!room.value) return false
+  try {
+    const data = await apiFetch(
+      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    )
+    const updatedTask = data.task || (data.id ? data : null)
+    if (updatedTask) {
+      const idx = tasks.value.findIndex(t => t.id === taskId)
+      if (idx >= 0) {
+        const updated = [...tasks.value]
+        updated[idx] = updatedTask
+        tasks.value = updated
+      }
+    }
+    const [nextTasks, nextPresence] = await Promise.all([
+      fetchTasks(room.value.identifier),
+      fetchPresence(room.value.identifier),
+    ])
+    tasks.value = nextTasks
+    presence.value = nextPresence
+    boardHandoffPresence.value = nextPresence
     return true
   } catch {
     return false
@@ -1770,6 +1836,7 @@ async function joinRoom(roomIdentifier: string) {
   tasks.value = []
   focusRooms.value = []
   presence.value = []
+  boardHandoffPresence.value = []
   participants.value = []
   participantHiddenCount.value = 0
   activityHistory.value = null
@@ -1839,6 +1906,7 @@ async function joinRoom(roomIdentifier: string) {
     tasks.value = tsks
     focusRooms.value = focused
     presence.value = prs
+    boardHandoffPresence.value = prs
     participants.value = roomParticipantsPage.participants
     participantHiddenCount.value = roomParticipantsPage.hidden_count
     reasoningSessions.value = reasoning
@@ -1924,6 +1992,7 @@ function leaveRoom() {
   tasks.value = []
   focusRooms.value = []
   presence.value = []
+  boardHandoffPresence.value = []
   participants.value = []
   participantHiddenCount.value = 0
   activityHistory.value = null
@@ -1990,6 +2059,7 @@ export function useRoom() {
     tasks: readonly(tasks),
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
+    boardHandoffPresence: readonly(boardHandoffPresence),
     participants: readonly(participants),
     participantHiddenCount: readonly(participantHiddenCount),
     activityHistory: readonly(activityHistory),
@@ -2022,6 +2092,7 @@ export function useRoom() {
     discardAttachmentUpload,
     addTask,
     updateTask,
+    updateTaskLease,
     setTaskStalePromptMute,
     createFocusRoom,
     createAdHocFocusRoom,

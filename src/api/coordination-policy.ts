@@ -13,6 +13,7 @@ export interface CoordinationActor {
   actorLabel: string | null;
   agentKey: string | null;
   agentInstanceId?: string | null;
+  agentSessionId?: string | null;
 }
 
 export interface CoordinationLeaseLike {
@@ -23,6 +24,7 @@ export interface CoordinationLeaseLike {
   status: TaskLeaseStatus;
   agent_key: string;
   agent_instance_id: string | null;
+  agent_session_id?: string | null;
   actor_label: string;
   branch_ref?: string | null;
   pr_url?: string | null;
@@ -244,6 +246,9 @@ export function leaseMatchesActor(
 ): boolean {
   if (!actor.agentKey || lease.agent_key !== actor.agentKey) {
     return false;
+  }
+  if (lease.agent_session_id) {
+    return lease.agent_session_id === (actor.agentSessionId ?? null);
   }
   if (lease.agent_instance_id) {
     return lease.agent_instance_id === (actor.agentInstanceId ?? null);

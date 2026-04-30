@@ -3116,17 +3116,29 @@ server.tool(
 server.tool(
   "handoff_task_lease",
   "Transfer the active work lease on a task to another agent. " +
-    "This reassigns the task and mints a fresh work lease for the target agent key.",
+    "This reassigns the task and mints a fresh work lease for the target worker session.",
   {
     task_id: z.string().describe("The task whose active work lease should be transferred"),
     target_agent_key: z.string().describe("Canonical agent key to receive the new work lease"),
+    target_actor_instance_id: z.string().optional().describe("Optional target agent instance id when selecting among active sessions for the same agent key"),
+    target_agent_session_id: z.string().optional().describe("Optional target registered agent session id. Required when the target agent key has multiple active worker sessions."),
     lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
     reason: z.string().optional().describe("Why the lane is being handed off"),
     room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
     agent_session_id: z.string().optional().describe("Registered agent session to use for this lease action. Required for worker lease writes."),
   },
-  async ({ task_id, target_agent_key, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
+  async ({
+    task_id,
+    target_agent_key,
+    target_actor_instance_id,
+    target_agent_session_id,
+    lease_id,
+    reason,
+    room_id,
+    conversation_id: _conversation_id,
+    agent_session_id,
+  }) => {
     const targetRoomId = getTargetRoomId(room_id);
     if (!targetRoomId) {
       return {
@@ -3153,6 +3165,8 @@ server.tool(
             lease_id: lease_id ?? undefined,
             reason,
             target_actor_key: target_agent_key,
+            target_actor_instance_id: target_actor_instance_id ?? undefined,
+            target_agent_session_id: target_agent_session_id ?? undefined,
             actor_label: identity.actor_label,
             actor_key: identity.canonical_key,
             actor_instance_id: agentSession?.agent_instance_id || AGENT_INSTANCE_UUID,
