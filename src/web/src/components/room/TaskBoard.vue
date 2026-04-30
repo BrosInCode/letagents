@@ -103,42 +103,10 @@
               Focus on this
             </button>
           </div>
-          <!-- GitHub Artifact Status -->
-          <div v-if="getGithubStatus(task.id)" class="gh-status-section">
-            <div class="gh-status-header">
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" class="gh-status-icon">
-                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-              </svg>
-              <span class="gh-status-label">GitHub Status</span>
-            </div>
-            <div v-if="getGithubStatus(task.id)!.pr_state" class="gh-pr-state">
-              <span class="gh-pr-badge" :data-state="getGithubStatus(task.id)!.pr_state">
-                {{ prStateLabel(getGithubStatus(task.id)!.pr_state!) }}
-              </span>
-              <span v-if="getGithubStatus(task.id)!.pr_number" class="gh-pr-number">
-                PR #{{ getGithubStatus(task.id)!.pr_number }}
-              </span>
-            </div>
-            <div v-if="getGithubStatus(task.id)!.checks.length > 0" class="gh-checks-row">
-              <span class="gh-checks-summary">
-                <span v-if="getGithubStatus(task.id)!.check_summary.success > 0" class="gh-check-count success">
-                  ✓ {{ getGithubStatus(task.id)!.check_summary.success }}
-                </span>
-                <span v-if="getGithubStatus(task.id)!.check_summary.failure > 0" class="gh-check-count failure">
-                  ✗ {{ getGithubStatus(task.id)!.check_summary.failure }}
-                </span>
-                <span v-if="getGithubStatus(task.id)!.check_summary.pending > 0" class="gh-check-count pending">
-                  ◷ {{ getGithubStatus(task.id)!.check_summary.pending }}
-                </span>
-                <span class="gh-checks-label">checks</span>
-              </span>
-            </div>
-            <div v-if="getGithubStatus(task.id)!.reviews.length > 0" class="gh-reviews-row">
-              <span v-for="(review, idx) in getGithubStatus(task.id)!.reviews" :key="idx" class="gh-review-chip" :data-state="review.state?.toLowerCase()">
-                {{ review.actor || 'reviewer' }}: {{ reviewStateLabel(review.state) }}
-              </span>
-            </div>
-          </div>
+          <TaskMergeReadiness
+            v-if="getGithubStatus(task.id)"
+            :status="getGithubStatus(task.id)!"
+          />
           <div v-if="getTaskActions(task).length" class="task-actions">
             <button
               v-for="action in getTaskActions(task)"
@@ -161,6 +129,7 @@ import { ref, computed } from 'vue'
 import { type RoomAgentPresence, type RoomTask, type TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import AppButton from '@/components/ui/AppButton.vue'
 import TaskLeaseAuthority from './TaskLeaseAuthority.vue'
+import TaskMergeReadiness from './TaskMergeReadiness.vue'
 import TaskPersonChip from './TaskPersonChip.vue'
 
 const props = defineProps<{
@@ -342,26 +311,6 @@ function getGithubStatus(taskId: string): TaskGitHubArtifactStatus | null {
   return props.taskGithubStatus[taskId] ?? null
 }
 
-function prStateLabel(state: string): string {
-  switch (state.toLowerCase()) {
-    case 'open': return '⬤ Open'
-    case 'closed': return '⬤ Closed'
-    case 'merged': return '⬤ Merged'
-    default: return state
-  }
-}
-
-function reviewStateLabel(state: string | null): string {
-  if (!state) return 'Pending'
-  switch (state.toLowerCase()) {
-    case 'approved': return 'Approved'
-    case 'changes_requested': return 'Changes Requested'
-    case 'commented': return 'Commented'
-    case 'dismissed': return 'Dismissed'
-    default: return state
-  }
-}
-
 const groupedTasks = computed(() => {
   const groups = new Map<string, RoomTask[]>()
   for (const task of props.tasks) {
@@ -529,106 +478,6 @@ const groupedTasks = computed(() => {
   color: var(--text-secondary, #d4d4d8);
 }
 
-/* — GitHub Artifact Status — */
-.gh-status-section {
-  margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(96, 165, 250, 0.15);
-  background: rgba(96, 165, 250, 0.04);
-}
-
-.gh-status-header {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-bottom: 6px;
-  color: var(--muted, #a1a1aa);
-}
-
-.gh-status-icon { opacity: 0.6; }
-
-.gh-status-label {
-  font-size: 0.66rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.gh-pr-state {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 5px;
-}
-
-.gh-pr-badge {
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 0.66rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.gh-pr-badge[data-state="open"] { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
-.gh-pr-badge[data-state="closed"] { color: #ef4444; background: rgba(239, 68, 68, 0.12); }
-.gh-pr-badge[data-state="merged"] { color: #a855f7; background: rgba(168, 85, 247, 0.12); }
-
-.gh-pr-number {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--muted, #a1a1aa);
-}
-
-.gh-checks-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-
-.gh-checks-summary {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.7rem;
-}
-
-.gh-check-count {
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-weight: 700;
-  font-size: 0.66rem;
-}
-
-.gh-check-count.success { color: #22c55e; background: rgba(34, 197, 94, 0.12); }
-.gh-check-count.failure { color: #ef4444; background: rgba(239, 68, 68, 0.12); }
-.gh-check-count.pending { color: #f59e0b; background: rgba(245, 158, 11, 0.12); }
-
-.gh-checks-label {
-  color: var(--muted, #71717a);
-  font-size: 0.66rem;
-}
-
-.gh-reviews-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.gh-review-chip {
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 0.64rem;
-  font-weight: 600;
-  background: rgba(113, 113, 122, 0.12);
-  color: var(--muted, #a1a1aa);
-}
-
-.gh-review-chip[data-state="approved"] { color: #22c55e; background: rgba(34, 197, 94, 0.1); }
-.gh-review-chip[data-state="changes_requested"] { color: #f87171; background: rgba(248, 113, 113, 0.1); }
-.gh-review-chip[data-state="commented"] { color: #60a5fa; background: rgba(96, 165, 250, 0.1); }
-
 .task-actions { display: flex; gap: 4px; margin-top: 8px; }
 .task-action-btn {
   padding: 3px 8px; border-radius: 6px;
@@ -667,7 +516,5 @@ const groupedTasks = computed(() => {
   .task-description { font-size: 0.78rem; }
   .task-actions { flex-wrap: wrap; }
   .task-action-btn { flex: 1; text-align: center; min-width: 60px; }
-  .gh-status-section { padding: 6px 8px; }
-  .gh-pr-state { flex-wrap: wrap; }
 }
 </style>

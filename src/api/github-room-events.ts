@@ -17,7 +17,7 @@ const SUPPORTED_PULL_REQUEST_ACTIONS = new Set([
 
 const SUPPORTED_ISSUE_ACTIONS = new Set(["opened", "reopened", "closed"]);
 const SUPPORTED_ISSUE_COMMENT_ACTIONS = new Set(["created"]);
-const SUPPORTED_PULL_REQUEST_REVIEW_ACTIONS = new Set(["submitted"]);
+const SUPPORTED_PULL_REQUEST_REVIEW_ACTIONS = new Set(["submitted", "dismissed"]);
 const SUPPORTED_CHECK_RUN_ACTIONS = new Set(["completed"]);
 const SUPPORTED_REPOSITORY_ACTIONS = new Set(["renamed", "transferred"]);
 const SUPPORTED_INSTALLATION_REPOSITORY_ACTIONS = new Set(["added", "removed"]);
@@ -285,8 +285,10 @@ export function materializeGitHubWebhookEvent(
         actor_login: actorLogin ?? pullRequest.authorLogin ?? null,
         metadata: {
           body: pullRequest.body ?? null,
+          author_login: pullRequest.authorLogin ?? null,
           draft: payload.pull_request?.draft ?? null,
           merged: payload.pull_request?.merged ?? null,
+          merged_by_login: pullRequest.mergedByLogin ?? null,
           head_ref: payload.pull_request?.head?.ref ?? null,
           head_sha: payload.pull_request?.head?.sha ?? null,
         },
@@ -377,20 +379,25 @@ export function materializeGitHubWebhookEvent(
         return null;
       }
 
+      const reviewState = action === "dismissed" ? "dismissed" : payload.review.state;
+      const reviewActorLogin = payload.review.user?.login ?? actorLogin ?? null;
+
       return {
         event_type: "pull_request_review",
         action,
         idempotency_key: buildDeliveryScopedKey(
-          `${repoIdentity}:review:${payload.review.id}:submitted`,
+          `${repoIdentity}:review:${payload.review.id}:${action}`,
           normalizedDeliveryId
         ),
         github_object_id: String(pullRequest.number),
         github_object_url: payload.review.html_url,
         title: pullRequest.title,
-        state: payload.review.state,
-        actor_login: actorLogin ?? payload.review.user?.login ?? null,
+        state: reviewState,
+        actor_login: reviewActorLogin,
         metadata: {
           body: payload.review.body ?? null,
+          dismissed_by_login: action === "dismissed" ? actorLogin : null,
+          pull_request_author_login: pullRequest.authorLogin ?? null,
         },
         roomEvent: {
           ...base,
@@ -398,7 +405,7 @@ export function materializeGitHubWebhookEvent(
           pullRequest,
           review: {
             id: String(payload.review.id),
-            state: payload.review.state,
+            state: reviewState,
             url: payload.review.html_url,
             body: payload.review.body,
           },
