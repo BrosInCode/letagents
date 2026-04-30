@@ -46,6 +46,11 @@ test("materializeGitHubWebhookEvent maps pull_request_review into a persisted ro
     "brosincode/letagents:review:9001:submitted:delivery:delivery-review-1"
   );
   assert.equal(event?.state, "approved");
+  assert.deepEqual(event?.metadata, {
+    body: "Looks good",
+    dismissed_by_login: null,
+    pull_request_author_login: null,
+  });
   assert.equal(event?.roomEvent?.kind, "pull_request_review");
   assert.deepEqual(buildRepoRoomEventArtifactMatches(event!.roomEvent!), [
     {
@@ -74,6 +79,56 @@ test("materializeGitHubWebhookEvent maps pull_request_review into a persisted ro
     "Review body fallback",
     "Looks good",
   ]);
+});
+
+test("materializeGitHubWebhookEvent maps dismissed review to original reviewer", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request_review",
+    {
+      action: "dismissed",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "maintainer" },
+      pull_request: {
+        number: 42,
+        title: "task_7: add review handling",
+        body: "Review body fallback",
+        html_url: "https://github.com/BrosInCode/letagents/pull/42",
+        user: { login: "author" },
+      },
+      review: {
+        id: 9001,
+        state: "changes_requested",
+        body: "Old blocker",
+        html_url: "https://github.com/BrosInCode/letagents/pull/42#pullrequestreview-9001",
+        user: { login: "reviewer" },
+      },
+    },
+    "delivery-review-dismissed-1"
+  );
+
+  assert.ok(event);
+  assert.equal(event?.event_type, "pull_request_review");
+  assert.equal(
+    event?.idempotency_key,
+    "brosincode/letagents:review:9001:dismissed:delivery:delivery-review-dismissed-1"
+  );
+  assert.equal(event?.state, "dismissed");
+  assert.equal(event?.actor_login, "reviewer");
+  assert.deepEqual(event?.metadata, {
+    body: "Old blocker",
+    dismissed_by_login: "maintainer",
+    pull_request_author_login: "author",
+  });
+  assert.equal(event?.roomEvent?.kind, "pull_request_review");
+  assert.equal(
+    event?.roomEvent?.kind === "pull_request_review" ? event.roomEvent.review.state : null,
+    "dismissed"
+  );
 });
 
 test("materializeGitHubWebhookEvent maps pull_request into a persisted room event", () => {
@@ -106,6 +161,15 @@ test("materializeGitHubWebhookEvent maps pull_request into a persisted room even
     "brosincode/letagents:pr:98:opened:delivery:delivery-pr-open-1"
   );
   assert.equal(event?.state, "open");
+  assert.deepEqual(event?.metadata, {
+    body: "Follow-up details",
+    author_login: "EmmyMay",
+    draft: null,
+    merged: null,
+    merged_by_login: null,
+    head_ref: null,
+    head_sha: null,
+  });
   assert.equal(
     formatRepoRoomEventMessage({ event: event!.roomEvent!, linkedTaskId: "task_22" }),
     "PR #98 opened by EmmyMay in BrosInCode/letagents linked to task_22: task_22: add webhook ingestion https://github.com/BrosInCode/letagents/pull/98"

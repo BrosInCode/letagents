@@ -5059,7 +5059,10 @@ export interface TaskGitHubArtifactStatus {
   pr_title: string | null;
   pr_url: string | null;
   pr_number: string | null;
+  pr_author: string | null;
   pr_actor: string | null;
+  pr_draft: boolean | null;
+  pr_merged: boolean | null;
   checks: Array<{
     name: string;
     conclusion: string | null;
@@ -5113,6 +5116,43 @@ export async function getTasksGitHubArtifactStatus(
 
   const statusMap = new Map<string, TaskGitHubArtifactStatus>();
 
+  function metadataRecord(value: GitHubRoomEventMetadata | null): Record<string, unknown> {
+    return value && typeof value === "object" ? value : {};
+  }
+
+  function metadataString(
+    value: Record<string, unknown>,
+    key: string
+  ): string | null {
+    const raw = value[key];
+    return typeof raw === "string" && raw.trim() ? raw : null;
+  }
+
+  function metadataBoolean(
+    value: Record<string, unknown>,
+    key: string
+  ): boolean | null {
+    const raw = value[key];
+    return typeof raw === "boolean" ? raw : null;
+  }
+
+  function normalizedReviewState(value: string | null): string | null {
+    const normalized = value?.trim().toLowerCase();
+    return normalized || null;
+  }
+
+  function isDecisiveReviewState(value: string | null): boolean {
+    const state = normalizedReviewState(value);
+    return state === "approved" || state === "changes_requested" || state === "dismissed";
+  }
+
+  function reviewUrlToPullRequestUrl(value: string | null): string | null {
+    if (!value) return null;
+    const marker = "#pullrequestreview-";
+    if (!value.includes(marker)) return value;
+    return value.slice(0, value.indexOf(marker));
+  }
+
   for (const row of queryResults) {
     const event = row.event;
     const taskId = row.taskId;
@@ -5124,7 +5164,10 @@ export async function getTasksGitHubArtifactStatus(
         pr_title: null,
         pr_url: null,
         pr_number: null,
+        pr_author: null,
         pr_actor: null,
+        pr_draft: null,
+        pr_merged: null,
         checks: [],
         reviews: [],
         check_summary: { total: 0, success: 0, failure: 0, pending: 0 },
@@ -5135,33 +5178,52 @@ export async function getTasksGitHubArtifactStatus(
     const status = statusMap.get(taskId)!;
 
     if (event.event_type === "pull_request" && status.pr_state === null) {
+      const metadata = metadataRecord(event.metadata);
       status.pr_state = event.state;
       status.pr_title = event.title;
       status.pr_url = event.github_object_url;
       status.pr_number = event.github_object_id;
+      status.pr_author = metadataString(metadata, "author_login");
       status.pr_actor = event.actor_login;
+      status.pr_draft = metadataBoolean(metadata, "draft");
+      status.pr_merged = metadataBoolean(metadata, "merged");
     }
 
     if (event.event_type === "check_run") {
       const checkName = event.title ?? event.github_object_id ?? "unknown";
       if (!status.checks.some((c) => c.name === checkName)) {
-        const conclusion = event.state ?? (event.metadata as Record<string, unknown> | null)?.conclusion as string | null ?? null;
+        const metadata = metadataRecord(event.metadata);
+        const conclusion = metadataString(metadata, "conclusion") ?? event.state;
+        const checkState = metadataString(metadata, "status") ?? event.action;
         status.checks.push({
           name: checkName,
           conclusion,
-          state: event.action,
+          state: checkState,
           actor: event.actor_login,
         });
       }
     }
 
     if (event.event_type === "pull_request_review") {
+      const metadata = metadataRecord(event.metadata);
+      status.pr_title ??= event.title;
+      status.pr_number ??= event.github_object_id;
+      status.pr_url ??= reviewUrlToPullRequestUrl(event.github_object_url);
+      status.pr_author ??= metadataString(metadata, "pull_request_author_login");
+
       const actor = event.actor_login;
-      if (!status.reviews.some((r) => r.actor === actor)) {
+      const incomingState = event.state ?? event.action;
+      const existingReview = status.reviews.find((r) => r.actor === actor);
+      if (!existingReview) {
         status.reviews.push({
           actor,
-          state: event.state ?? event.action,
+          state: incomingState,
         });
+      } else if (
+        !isDecisiveReviewState(existingReview.state)
+        && isDecisiveReviewState(incomingState)
+      ) {
+        existingReview.state = incomingState;
       }
     }
   }
@@ -5170,8 +5232,8 @@ export async function getTasksGitHubArtifactStatus(
     status.check_summary.total = status.checks.length;
     for (const check of status.checks) {
       const conclusion = check.conclusion?.toLowerCase();
-      if (conclusion === "success") status.check_summary.success++;
-      else if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "cancelled") status.check_summary.failure++;
+      if (conclusion === "success" || conclusion === "neutral" || conclusion === "skipped") status.check_summary.success++;
+      else if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "cancelled" || conclusion === "action_required") status.check_summary.failure++;
       else status.check_summary.pending++;
     }
 

@@ -195,7 +195,10 @@ export interface TaskGitHubArtifactStatus {
   pr_title: string | null
   pr_url: string | null
   pr_number: string | null
+  pr_author: string | null
   pr_actor: string | null
+  pr_draft: boolean | null
+  pr_merged: boolean | null
   checks: ReadonlyArray<{
     name: string
     conclusion: string | null
