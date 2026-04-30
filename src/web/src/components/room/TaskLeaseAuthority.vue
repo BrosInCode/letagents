@@ -23,7 +23,7 @@
 
     <p class="lease-authority__detail">{{ authority.detail }}</p>
 
-    <div v-if="workLease && leaseArtifacts.length" class="lease-authority__artifacts">
+    <div v-if="workLease && hasLeaseArtifacts" class="lease-authority__artifacts">
       <span v-for="artifact in leaseArtifacts" :key="artifact.key">
         {{ artifact.label }}
       </span>
@@ -155,6 +155,9 @@ const leaseArtifacts = computed(() => {
     lease.output_intent ? { key: 'intent', label: lease.output_intent } : null,
   ].filter((item): item is { key: string; label: string } => Boolean(item))
 })
+const hasLeaseArtifacts = computed(() =>
+  Boolean(workLease.value?.pr_url || leaseArtifacts.value.length)
+)
 
 const handoffCandidates = computed(() =>
   props.presence
