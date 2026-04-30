@@ -75,6 +75,7 @@ export interface TaskCoordinationEnforcementDeps {
     actor_label: string;
     created_by: string;
     agent_instance_id?: string | null;
+    agent_session_id?: string | null;
     branch_ref?: string | null;
     pr_url?: string | null;
     output_intent?: string | null;
@@ -97,6 +98,7 @@ export interface TaskCoordinationMutationInput {
   actorLabel: string | null;
   actorKey: string | null;
   actorInstanceId: string | null;
+  actorSessionId: string | null;
 }
 
 function taskIsAssignedToActor(input: {
@@ -256,6 +258,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     actorLabel: string;
     actorKey: string;
     actorInstanceId: string | null;
+    actorSessionId: string | null;
     mutation: CoordinationMutationKind;
     outputIntent?: string | null;
   }) {
@@ -265,6 +268,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       kind: "work",
       agent_key: input.actorKey,
       agent_instance_id: input.actorInstanceId,
+      agent_session_id: input.actorSessionId,
       actor_label: input.actorLabel,
       branch_ref: buildLeasedBranchRef({
         taskId: input.taskId,
@@ -335,6 +339,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         actorLabel,
         agentKey: actorKey,
         agentInstanceId: input.actorInstanceId,
+        agentSessionId: input.actorSessionId,
       },
       leases,
       locks,
@@ -366,6 +371,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           actorLabel,
           actorKey,
           actorInstanceId: input.actorInstanceId,
+          actorSessionId: input.actorSessionId,
           mutation: classified.mutation,
           outputIntent: input.task.title,
         });
@@ -389,6 +395,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           actorLabel,
           actorKey,
           actorInstanceId: input.actorInstanceId,
+          actorSessionId: input.actorSessionId,
           mutation: classified.mutation,
           outputIntent: input.task.title,
         });

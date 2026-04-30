@@ -21,6 +21,7 @@ function makePresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPres
     room_id: overrides.room_id ?? "github.com/brosincode/letagents",
     actor_label: overrides.actor_label ?? "CrestPine | EmmyMay's agent | Agent",
     agent_key: overrides.agent_key ?? "EmmyMay/crestpine",
+    agent_instance_id: overrides.agent_instance_id ?? "instance_1",
     agent_session_id: overrides.agent_session_id ?? "agent_session_1",
     session_kind: overrides.session_kind ?? "worker",
     runtime: overrides.runtime ?? "codex",

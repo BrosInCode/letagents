@@ -755,6 +755,10 @@ export const task_leases = pgTable(
     status: taskLeaseStatusEnum("status").notNull().default("active"),
     agent_key: text("agent_key").notNull(),
     agent_instance_id: text("agent_instance_id"),
+    agent_session_id: text("agent_session_id").references(() => room_agent_sessions.session_id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
     actor_label: text("actor_label").notNull(),
     branch_ref: text("branch_ref"),
     pr_url: text("pr_url"),
@@ -769,6 +773,7 @@ export const task_leases = pgTable(
   (table) => ({
     room_task_idx: index("task_leases_room_task_idx").on(table.room_id, table.task_id),
     room_agent_idx: index("task_leases_room_agent_idx").on(table.room_id, table.agent_key),
+    room_agent_session_idx: index("task_leases_room_agent_session_idx").on(table.room_id, table.agent_session_id),
     active_work_task_idx: uniqueIndex("task_leases_active_work_task_idx")
       .on(table.room_id, table.task_id)
       .where(sql`${table.kind} = 'work' AND ${table.status} = 'active'`),

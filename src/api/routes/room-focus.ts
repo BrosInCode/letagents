@@ -27,6 +27,10 @@ import {
 } from "../focus-room-conclusion.js";
 import { normalizeRoomId } from "../room-routing.js";
 import {
+  requireWorkerRequestAgentIdentity,
+  type ResolvedRequestAgentIdentity,
+} from "../request-agent-identity.js";
+import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
 } from "../task-ownership.js";
@@ -37,6 +41,11 @@ type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnership
 type FocusConclusionGuardDecision =
   | { kind: "allow" }
   | { kind: "deny"; code: string; error: string };
+
+type OwnerTokenWorkerWriteIdentity =
+  | { kind: "not_owner_token" }
+  | { kind: "worker"; identity: ResolvedRequestAgentIdentity }
+  | { kind: "responded" };
 
 export interface RoomFocusRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -70,6 +79,7 @@ export interface RoomFocusRouteDeps {
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
+    actorSessionId: string | null;
   }): Promise<FocusConclusionGuardDecision>;
   emitProjectMessage(projectId: string, sender: string, text: string): Promise<unknown>;
   formatFocusRoomConclusionMessage(input: {
@@ -78,6 +88,29 @@ export interface RoomFocusRouteDeps {
     summary: string;
     details?: FocusRoomConclusionDetails | null;
   }): string;
+}
+
+async function resolveOwnerTokenWorkerWriteIdentity(input: {
+  req: AuthenticatedRequest;
+  res: Response;
+  room_id: string;
+  body: Record<string, unknown>;
+}): Promise<OwnerTokenWorkerWriteIdentity> {
+  if (input.req.authKind !== "owner_token") {
+    return { kind: "not_owner_token" };
+  }
+
+  const result = await requireWorkerRequestAgentIdentity({
+    req: input.req,
+    body: input.body,
+    room_id: input.room_id,
+  });
+  if (!result.ok) {
+    input.res.status(result.status).json({ error: result.error });
+    return { kind: "responded" };
+  }
+
+  return { kind: "worker", identity: result.identity };
 }
 
 export function registerRoomFocusRoutes(
@@ -226,6 +259,14 @@ export function registerRoomFocusRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
+      req,
+      res,
+      room_id: project.id,
+      body: requestBody,
+    });
+    if (workerWriteIdentity.kind === "responded") return;
+    const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
     const { summary } = requestBody as { summary?: unknown };
     if (typeof summary !== "string" || !summary.trim()) {
       res.status(400).json({ error: "summary is required" });
@@ -253,9 +294,10 @@ export function registerRoomFocusRoutes(
             projectId: project.id,
             task,
             taskOwnership,
-            actorLabel: normalizeTaskActorLabel(requestBody.actor_label),
-            actorKey: normalizeTaskActorKey(requestBody.actor_key),
-            actorInstanceId: deps.normalizeOptionalString(requestBody.actor_instance_id),
+            actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
+            actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
+            actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
+            actorSessionId: workerIdentity?.agent_session_id ?? null,
           });
           if (coordination.kind === "deny") {
             res.status(409).json({ error: coordination.error, code: coordination.code });

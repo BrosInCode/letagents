@@ -13,6 +13,8 @@ const presence: RoomAgentPresence[] = [
     room_id: "focus_14",
     actor_label: "Maple | EmmyMay's agent | Codex",
     agent_key: "emmymay/maple",
+    agent_instance_id: "instance-maple",
+    agent_session_id: "session-maple",
     display_name: "Maple",
     owner_label: "EmmyMay",
     ide_label: "Codex",

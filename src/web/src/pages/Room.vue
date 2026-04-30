@@ -82,9 +82,12 @@
           key="board"
           class="room-tab-panel"
           :tasks="tasks"
+          :presence="boardHandoffPresence"
+          :canManageLeases="room?.role === 'admin'"
           :taskGithubStatus="taskGithubStatus"
           @addTask="handleAddTask"
           @updateTask="handleUpdateTask"
+          @leaseAction="handleTaskLeaseAction"
           @focusTask="handleFocusTask"
         />
 
@@ -265,6 +268,7 @@ const {
   tasks,
   focusRooms,
   presence,
+  boardHandoffPresence,
   participants,
   reasoningSessions,
   participantHiddenCount,
@@ -290,6 +294,7 @@ const {
   discardAttachmentUpload,
   addTask,
   updateTask,
+  updateTaskLease,
   setTaskStalePromptMute,
   createFocusRoom,
   createAdHocFocusRoom,
@@ -450,6 +455,35 @@ async function handleAddTask(title: string) {
 
 async function handleUpdateTask(taskId: string, updates: { status: string }) {
   await updateTask(taskId, updates as any)
+}
+
+async function handleTaskLeaseAction(payload: {
+  taskId: string
+  action: 'release' | 'handoff'
+  lease_id?: string | null
+  target_actor_key?: string | null
+  target_actor_instance_id?: string | null
+  target_agent_session_id?: string | null
+  reason?: string | null
+  onSettled?: () => void
+}) {
+  try {
+    const updated = await updateTaskLease(payload.taskId, {
+      action: payload.action,
+      lease_id: payload.lease_id ?? null,
+      target_actor_key: payload.target_actor_key ?? null,
+      target_actor_instance_id: payload.target_actor_instance_id ?? null,
+      target_agent_session_id: payload.target_agent_session_id ?? null,
+      reason: payload.reason ?? null,
+    })
+    if (!updated) {
+      toast.error('Task lease could not be updated.')
+    }
+  } catch {
+    toast.error('Task lease could not be updated.')
+  } finally {
+    payload.onSettled?.()
+  }
 }
 
 async function handleToggleStalePromptMute(payload: {

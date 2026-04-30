@@ -53,6 +53,7 @@ function makePresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPres
     room_id: "room_1",
     actor_label: "StatusOnly | EmmyMay's agent | Agent",
     agent_key: "EmmyMay/statusonly",
+    agent_instance_id: "instance_status_only",
     agent_session_id: "session_status_only",
     session_kind: "worker",
     runtime: "codex",

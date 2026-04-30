@@ -233,6 +233,7 @@ export interface RoomAgentPresence {
   room_id: string;
   actor_label: string;
   agent_key: string | null;
+  agent_instance_id: string | null;
   agent_session_id: string | null;
   session_kind: RoomAgentSessionKind;
   runtime: string;
@@ -446,6 +447,7 @@ export interface TaskLease {
   status: TaskLeaseStatus;
   agent_key: string;
   agent_instance_id: string | null;
+  agent_session_id: string | null;
   actor_label: string;
   branch_ref: string | null;
   pr_url: string | null;
@@ -567,6 +569,7 @@ interface TaskLeaseRow {
   status: TaskLeaseStatus;
   agent_key: string;
   agent_instance_id: string | null;
+  agent_session_id: string | null;
   actor_label: string;
   branch_ref: string | null;
   pr_url: string | null;
@@ -1007,6 +1010,7 @@ function toTaskLease(row: TaskLeaseRow): TaskLease {
     status: row.status,
     agent_key: row.agent_key,
     agent_instance_id: row.agent_instance_id,
+    agent_session_id: row.agent_session_id,
     actor_label: row.actor_label,
     branch_ref: row.branch_ref,
     pr_url: row.pr_url,
@@ -1058,6 +1062,7 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
     room_id: row.room_id,
     actor_label: row.actor_label,
     agent_key: row.agent_key,
+    agent_instance_id: null,
     agent_session_id: row.agent_session_id,
     session_kind: row.session_kind,
     runtime: row.runtime,
@@ -1171,6 +1176,7 @@ function mergeRoomAgentPresenceRecords(input: {
       room_id: input.roomId,
       actor_label: actorLabel,
       agent_key: deliverySession?.agent_key ?? statusEntry?.agent_key ?? null,
+      agent_instance_id: deliverySession?.agent_instance_id ?? statusEntry?.agent_instance_id ?? null,
       agent_session_id: deliverySession?.agent_session_id ?? statusEntry?.agent_session_id ?? null,
       session_kind: deliverySession?.session_kind ?? statusEntry?.session_kind ?? "controller",
       runtime: deliverySession?.runtime ?? statusEntry?.runtime ?? "unknown",
@@ -3078,6 +3084,29 @@ export async function getRoomAgentDeliverySessions(
   return (rows as RoomAgentDeliverySessionRow[]).map(toRoomAgentDeliverySession);
 }
 
+export async function getReachableWorkerDeliverySessionForAgentSession(input: {
+  room_id: string;
+  agent_session_id: string;
+}): Promise<RoomAgentDeliverySession | null> {
+  const [row] = await db
+    .select()
+    .from(room_agent_delivery_sessions)
+    .where(and(
+      eq(room_agent_delivery_sessions.room_id, input.room_id),
+      eq(room_agent_delivery_sessions.agent_session_id, input.agent_session_id),
+      eq(room_agent_delivery_sessions.session_kind, "worker" as RoomAgentSessionKind)
+    ))
+    .orderBy(desc(room_agent_delivery_sessions.updated_at))
+    .limit(1);
+
+  if (!row) {
+    return null;
+  }
+
+  const session = toRoomAgentDeliverySession(row as RoomAgentDeliverySessionRow);
+  return isRoomAgentDeliverySessionReachable(session) ? session : null;
+}
+
 async function getRoomLiveAgentSuppressionActorLabels(roomId: string): Promise<Set<string>> {
   const rows = await db
     .select({
@@ -3147,7 +3176,7 @@ export async function getRoomAgentPresence(
   roomId: string,
   options?: { limit?: number; staleLimit?: number; staleWithinMs?: number }
 ): Promise<RoomAgentPresence[]> {
-  const limit = clampLimit(options?.limit, 50, 200);
+  const limit = clampLimit(options?.limit, 50, MAX_LIST_LIMIT);
   const [presence, suppressedActors] = await Promise.all([
     getMergedRoomAgentPresenceRecords(roomId, {
       statusLimit: limit,
@@ -4348,6 +4377,7 @@ export async function createTaskLease(input: {
   actor_label: string;
   created_by: string;
   agent_instance_id?: string | null;
+  agent_session_id?: string | null;
   branch_ref?: string | null;
   pr_url?: string | null;
   output_intent?: string | null;
@@ -4363,6 +4393,7 @@ export async function createTaskLease(input: {
     status: "active",
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,
+    agent_session_id: input.agent_session_id ?? null,
     actor_label: input.actor_label,
     branch_ref: input.branch_ref ?? null,
     pr_url: input.pr_url ?? null,
@@ -4507,6 +4538,218 @@ export async function releaseTaskLease(
     .limit(1)) as TaskLeaseRow[];
 
   return row ? toTaskLease(row) : null;
+}
+
+export type TaskWorkLeaseActionConflict = "task_not_found" | "lease_not_active" | "target_unreachable";
+
+export async function applyTaskWorkLeaseAction(input: {
+  room_id: string;
+  task_id: string;
+  active_lease_id: string;
+  disposition_status: "released" | "revoked";
+  disposition_reason?: string | null;
+  task_updates: {
+    status?: TaskStatus;
+    assignee?: string | null;
+    assignee_agent_key?: string | null;
+  };
+  new_lease?: {
+    agent_key: string;
+    actor_label: string;
+    created_by: string;
+    agent_instance_id?: string | null;
+    agent_session_id?: string | null;
+    branch_ref?: string | null;
+    pr_url?: string | null;
+    output_intent?: string | null;
+    expires_at?: string | null;
+  } | null;
+}): Promise<{
+  task: Task | null;
+  released_lease: TaskLease | null;
+  new_lease: TaskLease | null;
+  conflict: TaskWorkLeaseActionConflict | null;
+}> {
+  const taskNumber = parseScopedId(input.task_id, "task");
+  if (!taskNumber) {
+    return {
+      task: null,
+      released_lease: null,
+      new_lease: null,
+      conflict: "task_not_found",
+    };
+  }
+
+  const now = new Date().toISOString();
+  const deliveryFreshCutoff = new Date(
+    Date.parse(now) - ACTIVE_AGENT_DELIVERY_WINDOW_MS
+  ).toISOString();
+  return db.transaction(async (tx) => {
+    const [taskRow] = (await tx
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.room_id, input.room_id), eq(tasks.number, taskNumber)))
+      .limit(1)) as TaskRow[];
+
+    if (!taskRow) {
+      return {
+        task: null,
+        released_lease: null,
+        new_lease: null,
+        conflict: "task_not_found" as const,
+      };
+    }
+
+    if (input.new_lease?.agent_session_id) {
+      const [reachableTargetDeliveryRow] = await tx
+        .update(room_agent_delivery_sessions)
+        .set({
+          updated_at: sql`${room_agent_delivery_sessions.updated_at}`,
+        })
+        .where(
+          and(
+            eq(room_agent_delivery_sessions.room_id, input.room_id),
+            eq(room_agent_delivery_sessions.agent_session_id, input.new_lease.agent_session_id),
+            eq(room_agent_delivery_sessions.session_kind, "worker" as RoomAgentSessionKind),
+            or(
+              and(
+                sql`${room_agent_delivery_sessions.active_connection_count} > 0`,
+                sql`${room_agent_delivery_sessions.updated_at} >= ${deliveryFreshCutoff}::timestamptz`
+              ),
+              sql`${room_agent_delivery_sessions.reconnect_grace_expires_at} >= ${now}::timestamptz`
+            )
+          )
+        )
+        .returning({ delivery_key: room_agent_delivery_sessions.delivery_key });
+
+      if (!reachableTargetDeliveryRow) {
+        return {
+          task: null,
+          released_lease: null,
+          new_lease: null,
+          conflict: "target_unreachable" as const,
+        };
+      }
+    }
+
+    await tx
+      .update(task_leases)
+      .set({
+        status: "expired",
+        updated_at: now,
+      })
+      .where(
+        and(
+          eq(task_leases.room_id, input.room_id),
+          eq(task_leases.status, "active" as TaskLeaseStatus),
+          sql`${task_leases.expires_at} IS NOT NULL`,
+          lte(task_leases.expires_at, now)
+        )
+      );
+
+    const [releasedLeaseRow] = (await tx
+      .update(task_leases)
+      .set({
+        status: input.disposition_status,
+        revoked_reason: input.disposition_status === "revoked"
+          ? input.disposition_reason ?? null
+          : null,
+        updated_at: now,
+      })
+      .where(
+        and(
+          eq(task_leases.room_id, input.room_id),
+          eq(task_leases.task_id, input.task_id),
+          eq(task_leases.id, input.active_lease_id),
+          eq(task_leases.kind, "work" as TaskLeaseKind),
+          eq(task_leases.status, "active" as TaskLeaseStatus),
+          sql`(${task_leases.expires_at} IS NULL OR ${task_leases.expires_at} > ${now})`
+        )
+      )
+      .returning()) as TaskLeaseRow[];
+
+    if (!releasedLeaseRow) {
+      return {
+        task: null,
+        released_lease: null,
+        new_lease: null,
+        conflict: "lease_not_active" as const,
+      };
+    }
+
+    const newStatus = input.task_updates.status ?? taskRow.status;
+    const hasAssigneeUpdate = Object.prototype.hasOwnProperty.call(input.task_updates, "assignee");
+    const hasAssigneeAgentKeyUpdate = Object.prototype.hasOwnProperty.call(
+      input.task_updates,
+      "assignee_agent_key"
+    );
+    const newAssignee = hasAssigneeUpdate
+      ? input.task_updates.assignee ?? null
+      : taskRow.assignee;
+    const newAssigneeAgentKey = hasAssigneeUpdate
+      ? hasAssigneeAgentKeyUpdate
+        ? input.task_updates.assignee_agent_key ?? null
+        : null
+      : hasAssigneeAgentKeyUpdate
+        ? input.task_updates.assignee_agent_key ?? null
+        : taskRow.assignee_agent_key;
+
+    const [updatedTaskRow] = (await tx
+      .update(tasks)
+      .set({
+        status: newStatus,
+        assignee: newAssignee,
+        assignee_agent_key: newAssigneeAgentKey,
+        updated_at: now,
+      })
+      .where(and(eq(tasks.room_id, input.room_id), eq(tasks.number, taskNumber)))
+      .returning()) as TaskRow[];
+
+    if (!updatedTaskRow) {
+      return {
+        task: null,
+        released_lease: null,
+        new_lease: null,
+        conflict: "task_not_found" as const,
+      };
+    }
+
+    let newLeaseRow: TaskLeaseRow | null = null;
+    if (input.new_lease) {
+      const row: TaskLeaseRow = {
+        id: coordinationId("tl"),
+        room_id: input.room_id,
+        task_id: input.task_id,
+        kind: "work",
+        status: "active",
+        agent_key: input.new_lease.agent_key,
+        agent_instance_id: input.new_lease.agent_instance_id ?? null,
+        agent_session_id: input.new_lease.agent_session_id ?? null,
+        actor_label: input.new_lease.actor_label,
+        branch_ref: input.new_lease.branch_ref ?? null,
+        pr_url: input.new_lease.pr_url ?? null,
+        output_intent: input.new_lease.output_intent ?? null,
+        expires_at: input.new_lease.expires_at ?? null,
+        last_heartbeat_at: now,
+        revoked_reason: null,
+        created_by: input.new_lease.created_by,
+        created_at: now,
+        updated_at: now,
+      };
+      const [createdLeaseRow] = (await tx
+        .insert(task_leases)
+        .values(row)
+        .returning()) as TaskLeaseRow[];
+      newLeaseRow = createdLeaseRow ?? null;
+    }
+
+    return {
+      task: toTask(updatedTaskRow),
+      released_lease: toTaskLease(releasedLeaseRow),
+      new_lease: newLeaseRow ? toTaskLease(newLeaseRow) : null,
+      conflict: null,
+    };
+  });
 }
 
 export async function updateTaskLeaseWorkflowRefs(

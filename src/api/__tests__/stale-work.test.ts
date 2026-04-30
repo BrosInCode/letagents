@@ -39,6 +39,8 @@ function buildPresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPre
     room_id: overrides.room_id ?? "github.com/brosincode/letagents",
     actor_label: overrides.actor_label ?? "MapleRidge | EmmyMay's agent | Agent",
     agent_key: overrides.agent_key ?? "EmmyMay/mapleridge",
+    agent_instance_id: overrides.agent_instance_id ?? "instance-mapleridge",
+    agent_session_id: overrides.agent_session_id ?? "session-mapleridge",
     display_name: overrides.display_name ?? "MapleRidge",
     owner_label: overrides.owner_label ?? "EmmyMay",
     ide_label: overrides.ide_label ?? "Agent",

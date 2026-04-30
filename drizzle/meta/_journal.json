@@ -253,6 +253,13 @@
       "when": 1777250369708,
       "tag": "0035_focus_room_conclusion_details",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1777478400000,
+      "tag": "0036_task_lease_agent_sessions",
+      "breakpoints": true
     }
   ]
 }

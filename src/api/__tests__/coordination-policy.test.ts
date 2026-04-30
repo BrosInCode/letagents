@@ -88,6 +88,28 @@ test("leaseMatchesActor binds an instance-scoped lease to the exact worker insta
   );
 });
 
+test("leaseMatchesActor prefers a server-issued session id over a reused instance id", () => {
+  const sessionScopedLease = lease({ agent_session_id: "agent_session_1" });
+  assert.equal(
+    leaseMatchesActor(sessionScopedLease, {
+      actorLabel: "BayOtter | EmmyMay's agent | Agent",
+      agentKey: "EmmyMay/bayotter",
+      agentInstanceId: "instance:bayotter-1",
+      agentSessionId: "agent_session_1",
+    }),
+    true
+  );
+  assert.equal(
+    leaseMatchesActor(sessionScopedLease, {
+      actorLabel: "BayOtter | EmmyMay's agent | Agent",
+      agentKey: "EmmyMay/bayotter",
+      agentInstanceId: "instance:bayotter-1",
+      agentSessionId: "agent_session_2",
+    }),
+    false
+  );
+});
+
 test("findApplicableLock applies room locks to every task and task locks only to the task", () => {
   assert.equal(
     findApplicableLock({
