@@ -62,11 +62,26 @@
         </header>
 
         <figure class="image-viewer-stage">
-          <img
-            class="image-viewer-image"
-            :src="activeImage.href"
-            :alt="activeImage.name"
+          <div
+            class="image-viewer-image-shell"
+            :data-image-state="imageError ? 'error' : imageLoading ? 'loading' : 'ready'"
           >
+            <img
+              class="image-viewer-image"
+              :class="{ 'is-pending': imageLoading && !imageError }"
+              :src="activeImage.href"
+              :alt="activeImage.name"
+              @load="handleImageLoad"
+              @error="handleImageError"
+            >
+            <div v-if="imageLoading" class="image-viewer-loading" role="status" aria-live="polite">
+              <span class="image-viewer-spinner" aria-hidden="true" />
+              <span>Loading image...</span>
+            </div>
+            <div v-else-if="imageError" class="image-viewer-loading error" role="status" aria-live="polite">
+              <span>Image could not be loaded.</span>
+            </div>
+          </div>
           <figcaption class="image-viewer-caption">
             <span>{{ activeImage.name }}</span>
             <span>{{ activeImage.metaLabel }}</span>
@@ -78,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { MessageImageAttachment } from './messageAttachments'
 
 const props = defineProps<{
@@ -97,6 +112,8 @@ const closeButtonRef = ref<HTMLElement | null>(null)
 const titleId = `image-viewer-title-${Math.random().toString(36).slice(2, 10)}`
 let previousActiveElement: HTMLElement | null = null
 let previousBodyOverflow = ''
+const imageLoading = ref(true)
+const imageError = ref(false)
 
 const activeIndex = computed(() => props.images.findIndex((image) => image.id === props.activeImageId))
 const activeImage = computed(() => props.images[activeIndex.value] || props.images[0])
@@ -106,6 +123,11 @@ const captionLabel = computed(() => {
   const parts = [activeImage.value.metaLabel, formatTimestamp(activeImage.value.timestamp)]
     .filter(Boolean)
   return parts.join(' • ')
+})
+
+watch(() => activeImage.value.id, () => {
+  imageLoading.value = true
+  imageError.value = false
 })
 
 onMounted(() => {
@@ -163,6 +185,16 @@ function handleKeydown(event: KeyboardEvent) {
     event.preventDefault()
     first.focus()
   }
+}
+
+function handleImageLoad() {
+  imageLoading.value = false
+  imageError.value = false
+}
+
+function handleImageError() {
+  imageLoading.value = false
+  imageError.value = true
 }
 
 function getFocusableElements(): HTMLElement[] {
@@ -298,12 +330,13 @@ function formatTimestamp(value: string): string {
   padding: clamp(14px, 2vw, 24px);
 }
 
-.image-viewer-image {
-  width: 100%;
-  max-height: calc(100vh - 220px);
-  min-height: 0;
-  object-fit: contain;
+.image-viewer-image-shell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: clamp(280px, 58vh, 760px);
   border-radius: 14px;
+  overflow: hidden;
   background:
     linear-gradient(135deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
     repeating-linear-gradient(
@@ -315,6 +348,52 @@ function formatTimestamp(value: string): string {
     ),
     var(--bg-1, #111113);
   border: 1px solid color-mix(in srgb, var(--line, #27272a) 85%, white 6%);
+}
+
+.image-viewer-image {
+  width: 100%;
+  max-height: calc(100vh - 220px);
+  min-height: 0;
+  object-fit: contain;
+}
+
+.image-viewer-image.is-pending {
+  visibility: hidden;
+}
+
+.image-viewer-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  align-content: center;
+  justify-items: center;
+  padding: 24px;
+  color: var(--text, #fafafa);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: center;
+  background: radial-gradient(circle at center, rgba(24, 24, 27, 0.86), rgba(9, 9, 11, 0.92));
+}
+
+.image-viewer-loading.error {
+  color: color-mix(in srgb, var(--danger, #f87171) 82%, white 18%);
+}
+
+.image-viewer-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--text, #fafafa);
+  animation: image-viewer-spin 0.8s linear infinite;
+}
+
+@keyframes image-viewer-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .image-viewer-caption {
