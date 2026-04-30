@@ -3043,6 +3043,145 @@ server.tool(
 );
 
 server.tool(
+  "claim_task_review",
+  "Claim board review authority for a task in review. This creates a review lease " +
+    "for the registered worker session and is rejected if the worker holds the active work lease.",
+  {
+    task_id: z.string().describe("The task to review, e.g. 'task_1'"),
+    reason: z.string().optional().describe("Why this worker is taking review authority"),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this review action. Required for worker review writes."),
+  },
+  async ({ task_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    if (!targetRoomId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a canonical room." }) }],
+      };
+    }
+
+    try {
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId,
+        agentSessionId: agent_session_id,
+      });
+      const result = await apiCall<{
+        action: "claim";
+        task: Record<string, unknown>;
+        lease: Record<string, unknown> | null;
+      }>(
+        `/rooms/${encodeRoomIdPath(targetRoomId)}/tasks/${encodeURIComponent(task_id)}/review-lease-action`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            action: "claim",
+            reason,
+            actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
+            actor_instance_id: agentSession.agent_instance_id || AGENT_INSTANCE_UUID,
+            ...agentSessionCredentials(agentSession),
+          }),
+        }
+      );
+      await syncRoomPresence(targetRoomId, identity, {
+        status: "reviewing",
+        status_text: `reviewing ${task_id}`,
+      }, agentSession);
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              ...result,
+              agent_identity: toPublicAgentIdentity(identity),
+            },
+            null,
+            2
+          ),
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "release_task_review",
+  "Release this worker's active review lease on a task. Room admins can pass a specific lease_id to clear another review lease.",
+  {
+    task_id: z.string().describe("The task whose review lease should be released"),
+    lease_id: z.string().optional().describe("Optional review lease id. Required for admin release of another reviewer."),
+    reason: z.string().optional().describe("Why review authority is being released"),
+    room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    conversation_id: z.string().optional().describe("Deprecated for worker writes; registered worker session identity is used."),
+    agent_session_id: z.string().optional().describe("Registered agent session to use for this review action. Required for worker review writes."),
+  },
+  async ({ task_id, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
+    const targetRoomId = getTargetRoomId(room_id);
+    if (!targetRoomId) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: "Not in a canonical room." }) }],
+      };
+    }
+
+    try {
+      const { identity, agentSession } = await resolveWorkerToolIdentity({
+        roomId: targetRoomId,
+        agentSessionId: agent_session_id,
+      });
+      const result = await apiCall<{
+        action: "release";
+        task: Record<string, unknown>;
+        released_lease: Record<string, unknown> | null;
+      }>(
+        `/rooms/${encodeRoomIdPath(targetRoomId)}/tasks/${encodeURIComponent(task_id)}/review-lease-action`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            action: "release",
+            lease_id: lease_id ?? undefined,
+            reason,
+            actor_label: identity.actor_label,
+            actor_key: identity.canonical_key,
+            actor_instance_id: agentSession.agent_instance_id || AGENT_INSTANCE_UUID,
+            ...agentSessionCredentials(agentSession),
+          }),
+        }
+      );
+      await syncRoomPresence(targetRoomId, identity, {
+        status: "idle",
+        status_text: `released review on ${task_id}`,
+      }, agentSession);
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              success: true,
+              ...result,
+              agent_identity: toPublicAgentIdentity(identity),
+            },
+            null,
+            2
+          ),
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: String(error) }) }],
+      };
+    }
+  }
+);
+
+server.tool(
   "release_task_lease",
   "Release or forcibly clear the active work lease on a task so it can be claimed again. " +
     "Use this when the current worker is blocked, gone, or needs to give the lane back to the room.",

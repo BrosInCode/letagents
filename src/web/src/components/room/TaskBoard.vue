@@ -73,6 +73,15 @@
             @leaseAction="handleLeaseAction"
           />
 
+          <TaskReviewAuthority
+            v-if="shouldShowReviewAuthority(task)"
+            :task="task"
+            :presence="presence"
+            :canManageReviewLeases="canManageLeases"
+            :updating="updatingReviewLeaseTask === task.id"
+            @reviewLeaseAction="handleReviewLeaseAction"
+          />
+
           <!-- Leases and Locks Coordination Data -->
           <div v-if="getSecondaryLeases(task).length || task.active_locks?.length" class="task-coordination">
             <div v-for="lease in getSecondaryLeases(task)" :key="lease.id" class="coordination-badge lease">
@@ -106,6 +115,7 @@
           <TaskMergeReadiness
             v-if="getGithubStatus(task.id)"
             :status="getGithubStatus(task.id)!"
+            :task="task"
           />
           <div v-if="getTaskActions(task).length" class="task-actions">
             <button
@@ -131,6 +141,7 @@ import AppButton from '@/components/ui/AppButton.vue'
 import TaskLeaseAuthority from './TaskLeaseAuthority.vue'
 import TaskMergeReadiness from './TaskMergeReadiness.vue'
 import TaskPersonChip from './TaskPersonChip.vue'
+import TaskReviewAuthority from './TaskReviewAuthority.vue'
 
 const props = defineProps<{
   tasks: readonly RoomTask[]
@@ -152,12 +163,23 @@ const emit = defineEmits<{
     reason?: string | null
     onSettled?: () => void
   }]
+  reviewLeaseAction: [payload: {
+    taskId: string
+    action: 'assign' | 'release'
+    lease_id?: string | null
+    target_actor_key?: string | null
+    target_actor_instance_id?: string | null
+    target_agent_session_id?: string | null
+    reason?: string | null
+    onSettled?: () => void
+  }]
   focusTask: [taskId: string]
 }>()
 
 const newTaskTitle = ref('')
 const updatingTask = ref<string | null>(null)
 const updatingLeaseTask = ref<string | null>(null)
+const updatingReviewLeaseTask = ref<string | null>(null)
 const collapsedGroups = ref(new Set<string>())
 
 function toggleGroup(status: string) {
@@ -217,7 +239,6 @@ function getTaskActions(task: RoomTask): TaskAction[] {
       break
     case 'in_review':
       actions.push({ label: 'Mark Merged', cls: 'merge', status: 'merged' })
-      actions.push({ label: 'Needs Work', cls: 'cancel', status: 'in_progress' })
       break
     case 'merged':
       actions.push({ label: 'Mark Done', cls: 'merge', status: 'done' })
@@ -245,11 +266,18 @@ function getWorkLease(task: RoomTask): TaskLease | null {
 }
 
 function getSecondaryLeases(task: RoomTask): TaskLease[] {
-  return (task.active_leases ?? []).filter(lease => lease.kind !== 'work')
+  return (task.active_leases ?? []).filter(lease => lease.kind !== 'work' && lease.kind !== 'review')
 }
 
 function shouldShowAuthority(task: RoomTask): boolean {
   return Boolean(getWorkLease(task) || task.assignee || LEASE_AUTHORITY_STATUSES.has(task.status))
+}
+
+function shouldShowReviewAuthority(task: RoomTask): boolean {
+  return Boolean(
+    task.active_leases?.some(lease => lease.kind === 'review')
+    || ['in_review', 'blocked'].includes(task.status)
+  )
 }
 
 function settleLeaseBusy(taskId: string) {
@@ -273,6 +301,32 @@ function handleLeaseAction(payload: {
     ...payload,
     onSettled: () => {
       settleLeaseBusy(payload.taskId)
+      payload.onSettled?.()
+    },
+  })
+}
+
+function settleReviewLeaseBusy(taskId: string) {
+  if (updatingReviewLeaseTask.value === taskId) {
+    updatingReviewLeaseTask.value = null
+  }
+}
+
+function handleReviewLeaseAction(payload: {
+  taskId: string
+  action: 'assign' | 'release'
+  lease_id?: string | null
+  target_actor_key?: string | null
+  target_actor_instance_id?: string | null
+  target_agent_session_id?: string | null
+  reason?: string | null
+  onSettled?: () => void
+}) {
+  updatingReviewLeaseTask.value = payload.taskId
+  emit('reviewLeaseAction', {
+    ...payload,
+    onSettled: () => {
+      settleReviewLeaseBusy(payload.taskId)
       payload.onSettled?.()
     },
   })

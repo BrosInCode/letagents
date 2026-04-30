@@ -7,6 +7,7 @@ import {
   evaluateTaskAdmission,
   evaluateWorkflowArtifactMutation,
   findApplicableLock,
+  findBoardReviewLeaseForMerge,
   findWorkflowArtifactLease,
   isActiveCoordinationLease,
   leaseMatchesActor,
@@ -209,6 +210,34 @@ test("evaluateCoordinationMutation does not let a review lease satisfy work publ
 
   assert.equal(result.kind, "deny");
   assert.equal(result.kind === "deny" ? result.code : null, "wrong_lease_kind");
+});
+
+test("evaluateCoordinationMutation lets a review lease drive review decisions", () => {
+  const result = evaluateCoordinationMutation({
+    mutation: "task_update",
+    taskId: "task_90",
+    requiredLeaseKind: "review",
+    actor: {
+      actorLabel: "StoneCloud | EmmyMay's agent | Agent",
+      agentKey: "EmmyMay/stonecloud",
+      agentInstanceId: "instance:stone-1",
+    },
+    leases: [
+      lease(),
+      lease({
+        id: "tl_review",
+        kind: "review",
+        agent_key: "EmmyMay/stonecloud",
+        agent_instance_id: "instance:stone-1",
+        actor_label: "StoneCloud | EmmyMay's agent | Agent",
+      }),
+    ],
+    locks: [],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "allow");
+  assert.equal(result.kind === "allow" ? result.lease.id : null, "tl_review");
 });
 
 test("evaluateTaskAdmission routes source-message duplicates to review", () => {
@@ -487,4 +516,44 @@ test("evaluateReviewLeaseRouting rejects unassigned reviewers when routing is sc
 
   assert.equal(result.kind, "deny");
   assert.equal(result.kind === "deny" ? result.code : null, "unassigned_reviewer");
+});
+
+test("findBoardReviewLeaseForMerge requires a reviewer separate from the work holder", () => {
+  const now = new Date("2026-04-19T19:00:00.000Z");
+  const workLease = lease({
+    id: "tl_work",
+    agent_key: "EmmyMay/bayotter",
+    agent_instance_id: "instance:bayotter-1",
+    actor_label: "BayOtter | EmmyMay's agent | Agent",
+  });
+  const sameAgentReviewLease = lease({
+    id: "tl_review_same",
+    kind: "review",
+    agent_key: "EmmyMay/bayotter",
+    agent_instance_id: "instance:bayotter-review",
+    actor_label: "BayOtter | EmmyMay's agent | Agent",
+  });
+  const separateReviewLease = lease({
+    id: "tl_review_other",
+    kind: "review",
+    agent_key: "EmmyMay/stonecloud",
+    agent_instance_id: "instance:stone-1",
+    actor_label: "StoneCloud | EmmyMay's agent | Agent",
+  });
+
+  assert.equal(findBoardReviewLeaseForMerge({
+    taskId: "task_90",
+    leases: [workLease],
+    now,
+  }), null);
+  assert.equal(findBoardReviewLeaseForMerge({
+    taskId: "task_90",
+    leases: [workLease, sameAgentReviewLease],
+    now,
+  }), null);
+  assert.equal(findBoardReviewLeaseForMerge({
+    taskId: "task_90",
+    leases: [workLease, sameAgentReviewLease, separateReviewLease],
+    now,
+  })?.id, "tl_review_other");
 });
