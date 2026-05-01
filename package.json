@@ -15,13 +15,15 @@
   "scripts": {
     "build": "tsc",
     "build:web": "cd src/web && npm install && npx vite build",
+    "build:desktop": "npm --prefix apps/desktop run build",
     "build:all": "npm run build && npm run build:web",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/api/migrate.ts",
     "db:studio": "drizzle-kit studio",
     "prepublishOnly": "npm run build",
     "dev:api": "tsx src/api/server.ts",
-    "dev:mcp": "tsx src/mcp/server.ts"
+    "dev:mcp": "tsx src/mcp/server.ts",
+    "dev:desktop": "npm --prefix apps/desktop run dev"
   },
   "keywords": [
     "mcp",
