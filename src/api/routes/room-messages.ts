@@ -87,6 +87,20 @@ function isAgentLikeSender(sender: unknown): boolean {
   return Boolean(parsed && (parsed.structured || parsed.owner_attribution || parsed.ide_label));
 }
 
+function isDesktopHumanWrite(req: AuthenticatedRequest, input: {
+  agent_session_id?: string;
+  agent_session_token?: string;
+}): boolean {
+  return isDesktopHumanClient(req)
+    && !hasAgentSessionCredentials(input)
+    && req.authKind === "owner_token";
+}
+
+function isDesktopHumanClient(req: AuthenticatedRequest): boolean {
+  return req.authKind === "owner_token"
+    && req.headers?.["x-letagents-desktop-client"] === "1";
+}
+
 export interface RoomMessageRouteDeps {
   messageEvents: EventEmitter;
   taskEvents: EventEmitter;
@@ -155,9 +169,13 @@ export function registerRoomMessageRoutes(
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
       const attachments = normalizeMessageAttachmentReferences(rawAttachments);
-      const requiresWorkerSession = req.authKind === "owner_token"
+      const desktopHumanWrite = isDesktopHumanWrite(req, {
+        agent_session_id,
+        agent_session_token,
+      });
+      const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
         || hasAgentSessionCredentials({ agent_session_id, agent_session_token })
-        || isAgentLikeSender(sender);
+        || isAgentLikeSender(sender));
       const agentSessionIdentity = requiresWorkerSession
         ? await requireWorkerRequestAgentIdentity({
           req,
@@ -186,7 +204,7 @@ export function registerRoomMessageRoutes(
       }
       const source = workerIdentity
         ? "agent"
-        : req.authKind === "session"
+        : req.authKind === "session" || desktopHumanWrite
         ? "browser"
         : undefined;
       const message = await deps.emitProjectMessage(project.id, normalizedSender, text, {
@@ -464,22 +482,24 @@ export function registerRoomMessageRoutes(
 
     const projectId = project.id;
     let endDelivery: (() => Promise<void>) | null = null;
-    try {
-      endDelivery = await beginRoomAgentDelivery({
-        req,
-        roomId: project.id,
-        transport: "sse",
-        onSessionDisconnected: () => {
-          res.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`);
-          res.end();
-        },
-      });
-    } catch (error) {
-      if (error instanceof InvalidRoomAgentDeliverySessionError) {
-        res.status(401).json({ error: error.message });
-        return;
+    if (!isDesktopHumanClient(req)) {
+      try {
+        endDelivery = await beginRoomAgentDelivery({
+          req,
+          roomId: project.id,
+          transport: "sse",
+          onSessionDisconnected: () => {
+            res.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`);
+            res.end();
+          },
+        });
+      } catch (error) {
+        if (error instanceof InvalidRoomAgentDeliverySessionError) {
+          res.status(401).json({ error: error.message });
+          return;
+        }
+        throw error;
       }
-      throw error;
     }
 
     const heartbeat = startSseStream(res);

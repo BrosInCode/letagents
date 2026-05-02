@@ -131,6 +131,8 @@ import type {
   DesktopRoomAccess,
   DesktopRoomInfo,
   DesktopRoomSnapshot,
+  DesktopRoomStreamEvent,
+  DesktopTaskSummary,
   DiagnosticsSnapshot,
   RepoStatus,
   WorkerSnapshot,
@@ -167,6 +169,7 @@ const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("mcp");
 let authPollTimer: number | null = null;
+let unsubscribeRoomStream: (() => void) | null = null;
 
 const setupEntry: SystemEntry = {
   id: "system:setup",
@@ -253,6 +256,11 @@ const selectedAccess = computed<DesktopRoomAccess>(() => {
 
 const selectedNeedsAccess = computed(() => {
   return selectedAccess.value.status !== "ready";
+});
+
+const selectedRoomIdentifier = computed(() => {
+  if (selectedNeedsAccess.value) return null;
+  return selectedRoomInfo.value.identifier || selectedSnapshot.value?.roomIdentifier || null;
 });
 
 const showMcpInstaller = computed(() => {
@@ -504,6 +512,54 @@ async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | n
   }
 
   selectedSnapshot.value = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+}
+
+function selectedSnapshotMatchesRoom(roomIdentifier: string | null): boolean {
+  if (!roomIdentifier || !selectedSnapshot.value) return false;
+  return selectedSnapshot.value.roomIdentifier === roomIdentifier
+    || selectedSnapshot.value.room?.identifier === roomIdentifier;
+}
+
+function upsertSelectedTask(task: DesktopTaskSummary): void {
+  if (!selectedSnapshot.value) return;
+  const existingIndex = selectedSnapshot.value.tasks.findIndex((existing) => existing.id === task.id);
+  const tasks = [...selectedSnapshot.value.tasks];
+  if (existingIndex >= 0) {
+    tasks.splice(existingIndex, 1, { ...tasks[existingIndex], ...task });
+  } else {
+    tasks.unshift(task);
+  }
+  selectedSnapshot.value = {
+    ...selectedSnapshot.value,
+    tasks,
+  };
+}
+
+function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  if (!selectedSnapshotMatchesRoom(event.roomIdentifier)) return;
+
+  if (event.type === "message") {
+    const messages = selectedSnapshot.value?.messages || [];
+    if (messages.some((message) => message.id === event.message.id)) return;
+    selectedSnapshot.value = {
+      ...selectedSnapshot.value!,
+      messages: [...messages, event.message],
+    };
+    return;
+  }
+
+  if (event.type === "task_update") {
+    upsertSelectedTask(event.task);
+  }
+}
+
+async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
+  if (!window.letagentsDesktop?.room?.startStream) return;
+  if (!roomIdentifier) {
+    await window.letagentsDesktop.room.stopStream();
+    return;
+  }
+  await window.letagentsDesktop.room.startStream(roomIdentifier);
 }
 
 async function loadFirstRunRoomContext(): Promise<void> {
@@ -821,6 +877,13 @@ watch(
 );
 
 watch(
+  () => selectedRoomIdentifier.value,
+  (roomIdentifier) => {
+    void syncSelectedRoomStream(roomIdentifier);
+  }
+);
+
+watch(
   () => authStatus.value?.pendingDeviceAuth?.requestId,
   (requestId) => {
     if (requestId) {
@@ -832,10 +895,14 @@ watch(
 );
 
 onMounted(() => {
+  unsubscribeRoomStream = window.letagentsDesktop.room.onStreamEvent(handleRoomStreamEvent);
   void loadFirstRunSetup();
 });
 
 onBeforeUnmount(() => {
   clearAuthPollTimer();
+  unsubscribeRoomStream?.();
+  unsubscribeRoomStream = null;
+  void window.letagentsDesktop.room.stopStream();
 });
 </script>

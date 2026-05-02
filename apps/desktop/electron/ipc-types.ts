@@ -150,6 +150,16 @@ export interface DesktopTaskSummary {
   title: string;
   status: string;
   assignee: string | null;
+  prUrl: string | null;
+  activeLeases: Array<{
+    id: string;
+    kind: "work" | "review" | string;
+    holderLabel: string | null;
+    agentKey: string | null;
+    agentSessionId: string | null;
+    status: string;
+    updatedAt: string | null;
+  }>;
   updatedAt: string;
 }
 
@@ -184,16 +194,39 @@ export interface DesktopRoomMessageReply {
   id: string;
   sender: string;
   text: string;
+  source: string | null;
   timestamp: string;
+}
+
+export interface DesktopRoomMessageAttachment {
+  id: string | null;
+  name: string | null;
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  url: string | null;
+  downloadUrl: string | null;
+  dataUrl: string | null;
+  contentBase64: string | null;
 }
 
 export interface DesktopRoomMessage {
   id: string;
   sender: string;
   text: string;
+  attachments: DesktopRoomMessageAttachment[];
+  agentPromptKind: string | null;
   source: string | null;
   timestamp: string;
   actorLabel: string | null;
+  agentIdentity: {
+    name: string | null;
+    displayName: string | null;
+    ownerLabel: string | null;
+    ownerAttribution: string | null;
+    ideLabel: string | null;
+    actorLabel: string | null;
+  } | null;
   replyTo: DesktopRoomMessageReply | null;
 }
 
@@ -212,6 +245,39 @@ export interface DesktopSendRoomMessageResult {
   message: DesktopRoomMessage;
 }
 
+export interface DesktopRoomMessagesPage {
+  messages: DesktopRoomMessage[];
+  hasOlder: boolean;
+}
+
+export type DesktopRoomStreamEvent =
+  | {
+      type: "open";
+      roomIdentifier: string;
+    }
+  | {
+      type: "message";
+      roomIdentifier: string;
+      message: DesktopRoomMessage;
+    }
+  | {
+      type: "task_update";
+      roomIdentifier: string;
+      task: DesktopTaskSummary;
+    }
+  | {
+      type: "session_disconnect" | "error";
+      roomIdentifier: string;
+      message: string | null;
+    };
+
+export interface DesktopStagedAttachment {
+  uploadId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export interface DesktopRepoRoomSelection {
   canceled: boolean;
   repoPath: string | null;
@@ -228,7 +294,18 @@ export interface DesktopApi {
   };
   room: {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
-    sendMessage: (roomIdentifier: string, text: string) => Promise<DesktopSendRoomMessageResult>;
+    getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
+    pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
+    discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
+    startStream: (roomIdentifier: string) => Promise<void>;
+    stopStream: (roomIdentifier?: string | null) => Promise<void>;
+    onStreamEvent: (callback: (event: DesktopRoomStreamEvent) => void) => () => void;
+    sendMessage: (
+      roomIdentifier: string,
+      text: string,
+      replyTo?: string | null,
+      attachments?: Array<{ upload_id: string }>
+    ) => Promise<DesktopSendRoomMessageResult>;
   };
   auth: {
     getStatus: () => Promise<DesktopAuthStatus>;
