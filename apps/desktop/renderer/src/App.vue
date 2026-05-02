@@ -573,7 +573,6 @@ function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
 
 function handleMessageSent(message: DesktopRoomMessage): void {
   appendSelectedMessage(message);
-  void refreshSelectedSnapshot();
 }
 
 async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {

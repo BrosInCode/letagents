@@ -102,6 +102,7 @@ const activeTab = ref<RoomTabId>("chat");
 const sendingMessage = ref(false);
 const sendError = ref<string | null>(null);
 const olderMessages = ref<DesktopRoomMessage[]>([]);
+const pendingMessages = ref<DesktopRoomMessage[]>([]);
 const hasOlderMessages = ref(true);
 const loadingOlderMessages = ref(false);
 let refreshInterval: number | null = null;
@@ -119,7 +120,7 @@ const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null
 ]);
 const visibleMessages = computed(() => {
   const seen = new Set<string>();
-  return [...olderMessages.value, ...props.messages].filter((message) => {
+  return [...olderMessages.value, ...props.messages, ...pendingMessages.value].filter((message) => {
     if (seen.has(message.id)) return false;
     seen.add(message.id);
     return true;
@@ -148,12 +149,37 @@ async function sendRoomMessage(text: string, replyTo: string | null = null, atta
   const trimmedText = text.trim();
   if (!trimmedText && attachments.length === 0) return;
 
+  const pendingId = `desktop-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const replyMessage = visibleMessages.value.find((message) => message.id === replyTo) || null;
+  const pendingMessage: DesktopRoomMessage = {
+    id: pendingId,
+    sender: "LetAgents Desktop",
+    text: trimmedText,
+    attachments: [],
+    agentPromptKind: null,
+    source: "browser",
+    timestamp: new Date().toISOString(),
+    actorLabel: null,
+    agentIdentity: null,
+    replyTo: replyMessage
+      ? {
+          id: replyMessage.id,
+          sender: replyMessage.sender,
+          text: replyMessage.text,
+          source: replyMessage.source,
+          timestamp: replyMessage.timestamp,
+        }
+      : null,
+  };
+  pendingMessages.value = [...pendingMessages.value, pendingMessage];
   sendingMessage.value = true;
   sendError.value = null;
   try {
     const result = await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText, replyTo, attachments);
+    pendingMessages.value = pendingMessages.value.filter((message) => message.id !== pendingId);
     emit("message-sent", result.message);
   } catch (error) {
+    pendingMessages.value = pendingMessages.value.filter((message) => message.id !== pendingId);
     sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
   } finally {
     sendingMessage.value = false;

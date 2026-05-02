@@ -59,7 +59,7 @@
           class="desktop-composer-input"
           rows="3"
           placeholder="Write a message..."
-          :disabled="sending || !roomIdentifier"
+          :disabled="!roomIdentifier"
           data-testid="desktop-composer-input"
           @input="syncMentionQuery"
           @keydown.down.prevent="moveMentionSelection(1)"
@@ -236,7 +236,7 @@ watch(
 
 function submitMessage(): void {
   const text = draft.value.trim();
-  if ((!text && attachmentDrafts.value.length === 0) || props.sending) return;
+  if (!text && attachmentDrafts.value.length === 0) return;
   emit(
     "send-message",
     text,
