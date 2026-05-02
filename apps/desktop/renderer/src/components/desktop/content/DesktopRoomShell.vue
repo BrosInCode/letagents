@@ -73,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopFocusRoomInfo,
@@ -102,7 +102,7 @@ const activeTab = ref<RoomTabId>("chat");
 const sendingMessage = ref(false);
 const sendError = ref<string | null>(null);
 const olderMessages = ref<DesktopRoomMessage[]>([]);
-const pendingMessages = ref<DesktopRoomMessage[]>([]);
+const localMessages = ref<DesktopRoomMessage[]>([]);
 const hasOlderMessages = ref(true);
 const loadingOlderMessages = ref(false);
 let refreshInterval: number | null = null;
@@ -119,13 +119,16 @@ const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
 ]);
 const visibleMessages = computed(() => {
-  const seen = new Set<string>();
-  return [...olderMessages.value, ...props.messages, ...pendingMessages.value].filter((message) => {
-    if (seen.has(message.id)) return false;
-    seen.add(message.id);
-    return true;
-  });
+  return mergeRoomMessages([...olderMessages.value, ...props.messages], localMessages.value);
 });
+
+watch(
+  () => props.messages.map((message) => message.id).join("|"),
+  () => {
+    const serverIds = new Set(props.messages.map((message) => message.id));
+    localMessages.value = localMessages.value.filter((message) => !serverIds.has(message.id));
+  }
+);
 
 function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
@@ -171,19 +174,44 @@ async function sendRoomMessage(text: string, replyTo: string | null = null, atta
         }
       : null,
   };
-  pendingMessages.value = [...pendingMessages.value, pendingMessage];
+  localMessages.value = mergeRoomMessages(localMessages.value, [pendingMessage]);
   sendingMessage.value = true;
   sendError.value = null;
   try {
     const result = await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText, replyTo, attachments);
-    pendingMessages.value = pendingMessages.value.filter((message) => message.id !== pendingId);
-    emit("message-sent", result.message);
+    localMessages.value = mergeRoomMessages(
+      localMessages.value.filter((message) => message.id !== pendingId),
+      [result.message]
+    );
   } catch (error) {
-    pendingMessages.value = pendingMessages.value.filter((message) => message.id !== pendingId);
+    localMessages.value = localMessages.value.filter((message) => message.id !== pendingId);
     sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
   } finally {
     sendingMessage.value = false;
   }
+}
+
+function mergeRoomMessages(current: readonly DesktopRoomMessage[], incoming: readonly DesktopRoomMessage[]): DesktopRoomMessage[] {
+  const byId = new Map<string, DesktopRoomMessage>();
+  for (const message of current) byId.set(message.id, message);
+  for (const message of incoming) byId.set(message.id, message);
+  return [...byId.values()].sort(compareRoomMessages);
+}
+
+function compareRoomMessages(left: DesktopRoomMessage, right: DesktopRoomMessage): number {
+  const leftNumber = messageNumber(left.id);
+  const rightNumber = messageNumber(right.id);
+  if (leftNumber && rightNumber && leftNumber !== rightNumber) return leftNumber - rightNumber;
+  const leftTime = Date.parse(left.timestamp || "");
+  const rightTime = Date.parse(right.timestamp || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  if (leftNumber && !rightNumber) return -1;
+  if (!leftNumber && rightNumber) return 1;
+  return left.id.localeCompare(right.id);
+}
+
+function messageNumber(messageId: string): number {
+  return Number(/^msg_(\d+)$/.exec(messageId)?.[1] || 0);
 }
 
 async function discardAttachment(uploadId: string): Promise<void> {
