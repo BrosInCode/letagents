@@ -26,6 +26,7 @@ import type {
   DesktopRoomAccess,
   DesktopRoomMessage,
   DesktopRepoRoomSelection,
+  DesktopSendRoomMessageResult,
   DesktopParticipantSummary,
   DesktopRoomInfo,
   DesktopRoomSnapshot,
@@ -1102,6 +1103,83 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
   }
 }
 
+function mapRoomMessagePayload(message: {
+  id: string;
+  sender: string;
+  text: string;
+  source?: string | null;
+  timestamp: string;
+  reply_to?: {
+    id: string;
+    sender: string;
+    text: string;
+    timestamp: string;
+  } | null;
+  agent_identity?: {
+    actor_label?: string | null;
+  } | null;
+}): DesktopRoomMessage {
+  return {
+    id: message.id,
+    sender: message.sender,
+    text: message.text,
+    source: message.source || null,
+    timestamp: message.timestamp,
+    actorLabel: message.agent_identity?.actor_label || null,
+    replyTo: message.reply_to
+      ? {
+          id: message.reply_to.id,
+          sender: message.reply_to.sender,
+          text: message.reply_to.text,
+          timestamp: message.reply_to.timestamp,
+        }
+      : null,
+  };
+}
+
+async function sendDesktopRoomMessage(roomIdentifier: string, text: string): Promise<DesktopSendRoomMessageResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedText = text.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before sending a message.");
+  }
+  if (!trimmedText) {
+    throw new Error("Write a message before sending.");
+  }
+
+  const storedAuth = await readStoredAuth();
+  const sender = storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
+  const message = await apiFetch<{
+    id: string;
+    sender: string;
+    text: string;
+    source?: string | null;
+    timestamp: string;
+    reply_to?: {
+      id: string;
+      sender: string;
+      text: string;
+      timestamp: string;
+    } | null;
+    agent_identity?: {
+      actor_label?: string | null;
+    } | null;
+  }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      sender,
+      text: trimmedText,
+    }),
+  });
+
+  return {
+    message: mapRoomMessagePayload(message),
+  };
+}
+
 async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
   const options: Electron.OpenDialogOptions = {
     title: "Choose a repository",
@@ -1328,6 +1406,11 @@ ipcMain.handle("desktop:app:get-info", async (): Promise<DesktopAppInfo> => ({
 ipcMain.handle(
   "desktop:room:get-snapshot",
   async (_event, roomIdentifier?: string | null): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier)
+);
+ipcMain.handle(
+  "desktop:room:send-message",
+  async (_event, roomIdentifier: string, text: string): Promise<DesktopSendRoomMessageResult> =>
+    sendDesktopRoomMessage(roomIdentifier, text)
 );
 ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
 ipcMain.handle(

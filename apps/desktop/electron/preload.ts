@@ -7,6 +7,8 @@ const api: DesktopApi = {
   },
   room: {
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
+    sendMessage: (roomIdentifier: string, text: string) =>
+      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text),
   },
   auth: {
     getStatus: () => ipcRenderer.invoke("desktop:auth:get-status"),

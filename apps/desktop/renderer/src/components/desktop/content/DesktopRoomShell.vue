@@ -19,7 +19,7 @@
             role="tab"
             :aria-selected="activeTab === tab.id"
             type="button"
-            @click="activeTab = tab.id"
+            @click="selectTab(tab.id)"
           >
             <span>{{ tab.label }}</span>
             <small v-if="tab.count !== null">{{ tab.count }}</small>
@@ -38,6 +38,10 @@
         v-if="activeTab === 'chat'"
         key="chat"
         :messages="messages"
+        :room-identifier="room.identifier"
+        :sending="sendingMessage"
+        :send-error="sendError"
+        @send-message="sendRoomMessage"
       />
 
       <RoomBoardView
@@ -90,6 +94,13 @@ const props = defineProps<{
 }>();
 
 const activeTab = ref<RoomTabId>("chat");
+const sendingMessage = ref(false);
+const sendError = ref<string | null>(null);
+
+const emit = defineEmits<{
+  "message-sent": [];
+  "refresh-room": [];
+}>();
 
 const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null }>>(() => [
   { id: "chat", label: "Chat", count: props.messages.length },
@@ -97,4 +108,25 @@ const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null
   { id: "activity", label: "Activity", count: props.participants.length },
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
 ]);
+
+function selectTab(tabId: RoomTabId): void {
+  activeTab.value = tabId;
+  emit("refresh-room");
+}
+
+async function sendRoomMessage(text: string): Promise<void> {
+  const trimmedText = text.trim();
+  if (!trimmedText) return;
+
+  sendingMessage.value = true;
+  sendError.value = null;
+  try {
+    await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText);
+    emit("message-sent");
+  } catch (error) {
+    sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
+  } finally {
+    sendingMessage.value = false;
+  }
+}
 </script>

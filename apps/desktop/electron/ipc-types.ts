@@ -208,6 +208,10 @@ export interface DesktopRoomSnapshot {
   messages: DesktopRoomMessage[];
 }
 
+export interface DesktopSendRoomMessageResult {
+  message: DesktopRoomMessage;
+}
+
 export interface DesktopRepoRoomSelection {
   canceled: boolean;
   repoPath: string | null;
@@ -224,6 +228,7 @@ export interface DesktopApi {
   };
   room: {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
+    sendMessage: (roomIdentifier: string, text: string) => Promise<DesktopSendRoomMessageResult>;
   };
   auth: {
     getStatus: () => Promise<DesktopAuthStatus>;

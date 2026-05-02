@@ -98,6 +98,8 @@
           :participants="selectedSnapshot?.participants || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
+          @message-sent="refreshSelectedSnapshot()"
+          @refresh-room="refreshSelectedSnapshot()"
         />
       </template>
 
@@ -152,6 +154,7 @@ const repoStatus = ref<RepoStatus | null>(null);
 const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
+const selectedRootRoomIdentifier = ref<string | null>(null);
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
 const authBusy = ref(false);
@@ -424,7 +427,7 @@ async function refresh(): Promise<void> {
       window.letagentsDesktop.app.getInfo(),
       window.letagentsDesktop.repos.getStatus(),
       window.letagentsDesktop.workers.list(),
-      window.letagentsDesktop.room.getSnapshot(),
+      window.letagentsDesktop.room.getSnapshot(selectedRootRoomIdentifier.value),
       window.letagentsDesktop.diagnostics.getSnapshot(),
       window.letagentsDesktop.auth.getStatus(),
       window.letagentsDesktop.setup.getMcpInstallState(),
@@ -433,6 +436,7 @@ async function refresh(): Promise<void> {
     repoStatus.value = nextRepoStatus;
     workers.value = nextWorkers;
     rootRoomSnapshot.value = nextRootRoomSnapshot;
+    selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
     diagnostics.value = nextDiagnostics;
     authStatus.value = nextAuthStatus;
     mcpInstallState.value = nextMcpInstallState;
@@ -513,6 +517,7 @@ async function loadFirstRunRoomContext(): Promise<void> {
     repoStatus.value = nextRepoStatus;
     rootRoomSnapshot.value = nextRootRoomSnapshot;
     selectedSnapshot.value = nextRootRoomSnapshot;
+    selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
   } catch {
     // First-run should still be usable if room preview is unavailable before auth.
   }
@@ -688,6 +693,7 @@ async function pickRepoRoom(): Promise<void> {
     }
     rootRoomSnapshot.value = result.snapshot;
     selectedSnapshot.value = result.snapshot;
+    selectedRootRoomIdentifier.value = result.snapshot.roomIdentifier;
     const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
     authFeedback.value = result.warning
       ? `${result.warning} Room selected: ${roomLabel}.`
@@ -711,6 +717,7 @@ async function joinRoomCode(roomCode: string): Promise<void> {
     const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
     rootRoomSnapshot.value = snapshot;
     selectedSnapshot.value = snapshot;
+    selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
     authFeedback.value = snapshot.access.status === "ready"
       ? "Room selected. Open it when you are ready."
       : snapshot.access.message;
