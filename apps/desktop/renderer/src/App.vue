@@ -48,8 +48,9 @@
       @toggle-project="toggleProject"
     />
 
-    <section class="app-main" data-testid="desktop-main">
+    <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
+        v-if="activeEntry.type !== 'room'"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
