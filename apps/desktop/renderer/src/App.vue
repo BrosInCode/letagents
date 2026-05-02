@@ -504,17 +504,20 @@ async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | n
   }
 
   if (activeEntry.value.type !== "room") {
-    selectedSnapshot.value = baseRootSnapshot;
+    selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, baseRootSnapshot);
     return;
   }
 
   const roomIdentifier = resolveSelectedRoomIdentifier(baseRootSnapshot);
   if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
-    selectedSnapshot.value = baseRootSnapshot;
+    selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, baseRootSnapshot);
     return;
   }
 
-  selectedSnapshot.value = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+  selectedSnapshot.value = mergeRoomSnapshotMessages(
+    selectedSnapshot.value,
+    await window.letagentsDesktop.room.getSnapshot(roomIdentifier)
+  );
 }
 
 function selectedSnapshotMatchesRoom(roomIdentifier: string | null): boolean {
@@ -545,12 +548,71 @@ function upsertSelectedTask(task: DesktopTaskSummary): void {
 
 function appendSelectedMessage(message: DesktopRoomMessage): void {
   if (!selectedSnapshot.value) return;
-  const messages = selectedSnapshot.value.messages || [];
-  if (messages.some((existing) => existing.id === message.id)) return;
   selectedSnapshot.value = {
     ...selectedSnapshot.value,
-    messages: [...messages, message],
+    messages: mergeDesktopRoomMessages(selectedSnapshot.value.messages || [], [message]),
   };
+}
+
+function mergeRoomSnapshotMessages(
+  current: DesktopRoomSnapshot | null,
+  incoming: DesktopRoomSnapshot
+): DesktopRoomSnapshot {
+  if (!current || !roomSnapshotsMatch(current, incoming)) return incoming;
+  return {
+    ...incoming,
+    messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
+  };
+}
+
+function roomSnapshotsMatch(left: DesktopRoomSnapshot, right: DesktopRoomSnapshot): boolean {
+  const leftIdentifiers = [
+    left.roomIdentifier,
+    left.room?.identifier,
+    left.room?.name,
+    left.room?.code,
+  ].map(normalizeRoomIdentifier).filter(Boolean);
+  const rightIdentifiers = [
+    right.roomIdentifier,
+    right.room?.identifier,
+    right.room?.name,
+    right.room?.code,
+  ].map(normalizeRoomIdentifier).filter(Boolean);
+  return leftIdentifiers.some((identifier) => rightIdentifiers.includes(identifier));
+}
+
+function mergeDesktopRoomMessages(
+  current: readonly DesktopRoomMessage[],
+  incoming: readonly DesktopRoomMessage[]
+): DesktopRoomMessage[] {
+  const byId = new Map<string, DesktopRoomMessage>();
+  for (const message of current) byId.set(message.id, message);
+  for (const message of incoming) {
+    if (!isPromptOnlyDesktopMessage(message)) {
+      byId.set(message.id, message);
+    }
+  }
+  return [...byId.values()].sort(compareDesktopRoomMessages);
+}
+
+function isPromptOnlyDesktopMessage(message: DesktopRoomMessage): boolean {
+  return message.agentPromptKind === "auto" && !message.text.trim();
+}
+
+function compareDesktopRoomMessages(left: DesktopRoomMessage, right: DesktopRoomMessage): number {
+  const leftNumber = desktopMessageNumber(left.id);
+  const rightNumber = desktopMessageNumber(right.id);
+  if (leftNumber && rightNumber && leftNumber !== rightNumber) return leftNumber - rightNumber;
+  const leftTime = Date.parse(left.timestamp || "");
+  const rightTime = Date.parse(right.timestamp || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  if (leftNumber && !rightNumber) return -1;
+  if (!leftNumber && rightNumber) return 1;
+  return left.id.localeCompare(right.id);
+}
+
+function desktopMessageNumber(messageId: string): number {
+  return Number(/^msg_(\d+)$/.exec(messageId)?.[1] || 0);
 }
 
 function normalizeRoomIdentifier(value: string | null | undefined): string | null {

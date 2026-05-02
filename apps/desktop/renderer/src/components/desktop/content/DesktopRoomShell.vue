@@ -183,6 +183,7 @@ async function sendRoomMessage(text: string, replyTo: string | null = null, atta
       localMessages.value.filter((message) => message.id !== pendingId),
       [result.message]
     );
+    emit("message-sent", result.message);
   } catch (error) {
     localMessages.value = localMessages.value.filter((message) => message.id !== pendingId);
     sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
