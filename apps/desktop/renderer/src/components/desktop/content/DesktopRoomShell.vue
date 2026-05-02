@@ -107,7 +107,7 @@ const loadingOlderMessages = ref(false);
 let refreshInterval: number | null = null;
 
 const emit = defineEmits<{
-  "message-sent": [];
+  "message-sent": [message: DesktopRoomMessage];
   "refresh-room": [];
 }>();
 
@@ -151,8 +151,8 @@ async function sendRoomMessage(text: string, replyTo: string | null = null, atta
   sendingMessage.value = true;
   sendError.value = null;
   try {
-    await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText, replyTo, attachments);
-    emit("message-sent");
+    const result = await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText, replyTo, attachments);
+    emit("message-sent", result.message);
   } catch (error) {
     sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
   } finally {

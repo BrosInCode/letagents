@@ -98,7 +98,7 @@
           :participants="selectedSnapshot?.participants || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
-          @message-sent="refreshSelectedSnapshot()"
+          @message-sent="handleMessageSent"
           @refresh-room="refreshSelectedSnapshot()"
         />
       </template>
@@ -130,6 +130,7 @@ import type {
   DesktopMcpInstallTargetId,
   DesktopRoomAccess,
   DesktopRoomInfo,
+  DesktopRoomMessage,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
@@ -516,8 +517,13 @@ async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | n
 
 function selectedSnapshotMatchesRoom(roomIdentifier: string | null): boolean {
   if (!roomIdentifier || !selectedSnapshot.value) return false;
-  return selectedSnapshot.value.roomIdentifier === roomIdentifier
-    || selectedSnapshot.value.room?.identifier === roomIdentifier;
+  const eventRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  return [
+    selectedSnapshot.value.roomIdentifier,
+    selectedSnapshot.value.room?.identifier,
+    selectedSnapshot.value.room?.name,
+    selectedSnapshot.value.room?.code,
+  ].some((candidate) => normalizeRoomIdentifier(candidate) === eventRoomIdentifier);
 }
 
 function upsertSelectedTask(task: DesktopTaskSummary): void {
@@ -535,22 +541,37 @@ function upsertSelectedTask(task: DesktopTaskSummary): void {
   };
 }
 
+function appendSelectedMessage(message: DesktopRoomMessage): void {
+  if (!selectedSnapshot.value) return;
+  const messages = selectedSnapshot.value.messages || [];
+  if (messages.some((existing) => existing.id === message.id)) return;
+  selectedSnapshot.value = {
+    ...selectedSnapshot.value,
+    messages: [...messages, message],
+  };
+}
+
+function normalizeRoomIdentifier(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || null;
+}
+
 function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (!selectedSnapshotMatchesRoom(event.roomIdentifier)) return;
 
   if (event.type === "message") {
-    const messages = selectedSnapshot.value?.messages || [];
-    if (messages.some((message) => message.id === event.message.id)) return;
-    selectedSnapshot.value = {
-      ...selectedSnapshot.value!,
-      messages: [...messages, event.message],
-    };
+    appendSelectedMessage(event.message);
     return;
   }
 
   if (event.type === "task_update") {
     upsertSelectedTask(event.task);
   }
+}
+
+function handleMessageSent(message: DesktopRoomMessage): void {
+  appendSelectedMessage(message);
+  void refreshSelectedSnapshot();
 }
 
 async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
