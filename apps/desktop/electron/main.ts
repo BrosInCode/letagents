@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, protocol, safeStorage, shell } from "electron";
 import { execFile } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
@@ -46,6 +47,19 @@ const workspaceRoot = join(desktopRoot, "..", "..");
 const rendererDistPath = join(desktopRoot, "dist-renderer", "index.html");
 const devServerUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim() || null;
 const apiUrl = process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
+const attachmentProtocolScheme = "letagents-attachment";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: attachmentProtocolScheme,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
+  },
+]);
 
 let mainWindow: BrowserWindow | null = null;
 let activeRoomStream: {
@@ -1210,17 +1224,71 @@ function mapRoomMessageAttachmentPayload(attachment: {
   data_url?: string | null;
   content_base64?: string | null;
 }): DesktopRoomMessage["attachments"][number] {
+  const rawUrl = attachment.url || null;
+  const rawDownloadUrl = attachment.download_url || null;
   return {
     id: attachment.id || null,
     name: attachment.name || null,
     fileName: attachment.file_name || attachment.filename || null,
     mimeType: attachment.mime_type || attachment.content_type || null,
     sizeBytes: attachment.size_bytes ?? attachment.byte_size ?? null,
-    url: attachment.url || null,
-    downloadUrl: attachment.download_url || null,
+    url: rawUrl ? proxiedAttachmentUrl(rawUrl) : null,
+    downloadUrl: rawDownloadUrl ? proxiedAttachmentUrl(rawDownloadUrl) : null,
     dataUrl: attachment.data_url || null,
     contentBase64: attachment.content_base64 || null,
   };
+}
+
+function proxiedAttachmentUrl(rawUrl: string): string {
+  if (!shouldProxyAttachmentUrl(rawUrl)) return rawUrl;
+  const encoded = Buffer.from(rawUrl, "utf8").toString("base64url");
+  return `${attachmentProtocolScheme}://download/${encoded}`;
+}
+
+function shouldProxyAttachmentUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("/")) return true;
+  try {
+    const target = new URL(trimmed);
+    return target.origin === new URL(apiUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function resolveAttachmentProxyTarget(rawUrl: string): URL {
+  const apiOrigin = new URL(apiUrl).origin;
+  const target = rawUrl.startsWith("/")
+    ? new URL(rawUrl, apiOrigin)
+    : new URL(rawUrl);
+  if (target.origin !== apiOrigin) {
+    throw new Error("Attachment proxy target is outside LetAgents API.");
+  }
+  return target;
+}
+
+async function handleAttachmentProtocolRequest(request: Request): Promise<Response> {
+  try {
+    const requestUrl = new URL(request.url);
+    const encodedTarget = requestUrl.pathname.replace(/^\/+/, "");
+    if (!encodedTarget) {
+      return new Response("Missing attachment target.", { status: 400 });
+    }
+
+    const rawTarget = Buffer.from(encodedTarget, "base64url").toString("utf8");
+    const target = resolveAttachmentProxyTarget(rawTarget);
+    const storedAuth = await readStoredAuth();
+    const headers = new Headers();
+    if (storedAuth.token) {
+      headers.set("Authorization", `Bearer ${storedAuth.token}`);
+    }
+
+    const response = await fetch(target, { headers });
+    return response;
+  } catch (error) {
+    return new Response(error instanceof Error ? error.message : "Attachment unavailable.", { status: 502 });
+  }
 }
 
 function mapRoomMessageAgentIdentity(identity: {
@@ -1980,6 +2048,7 @@ ipcMain.handle(
 );
 
 app.whenReady().then(() => {
+  protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
   createWindow();
 
   app.on("activate", () => {
