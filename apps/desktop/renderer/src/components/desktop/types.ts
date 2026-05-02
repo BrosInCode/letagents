@@ -10,7 +10,7 @@ export type RoomEntry = {
 };
 
 export type SystemEntry = {
-  id: "system:repos" | "system:workers" | "system:diagnostics";
+  id: "system:setup" | "system:repos" | "system:workers" | "system:diagnostics";
   type: "system";
   title: string;
   description: string;

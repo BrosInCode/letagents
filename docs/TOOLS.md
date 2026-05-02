@@ -222,7 +222,7 @@ Create a `.letagents.json` config file in the repo root for auto-join.
 
 ### `check_repo`
 
-Inspect repository context: git root, `.letagents.json`, auto-derived room name, current room state.
+Inspect repository context: git root, `.letagents.json`, auto-derived room name, and current room state. If the inspected directory is not inside a git repo, `current_room` is reported only as the existing joined MCP session, not as a room derived from that directory.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

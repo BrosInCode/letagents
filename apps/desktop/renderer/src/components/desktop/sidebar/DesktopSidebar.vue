@@ -46,18 +46,20 @@
         <span class="sidebar-heading">Pinned</span>
         <span class="toggle-glyph" :data-collapsed="collapsedSections.pinned">⌄</span>
       </button>
-      <button
-        v-if="!collapsedSections.pinned"
-        class="pinned-room"
-        :data-active="activeEntry.id === pinnedRoom.id"
-        type="button"
-        data-testid="sidebar-pinned-room"
-        @click="$emit('select-entry', pinnedRoom)"
-      >
-        <div class="pin-mark">⌘</div>
-        <span class="pinned-title">{{ pinnedRoom.title }}</span>
-        <small class="pinned-meta">{{ pinnedRoom.meta }}</small>
-      </button>
+      <Transition name="sidebar-reveal">
+        <button
+          v-if="!collapsedSections.pinned"
+          class="pinned-room"
+          :data-active="activeEntry.id === pinnedRoom.id"
+          type="button"
+          data-testid="sidebar-pinned-room"
+          @click="$emit('select-entry', pinnedRoom)"
+        >
+          <div class="pin-mark">⌘</div>
+          <span class="pinned-title">{{ pinnedRoom.title }}</span>
+          <small class="pinned-meta">{{ pinnedRoom.meta }}</small>
+        </button>
+      </Transition>
     </section>
 
     <section v-if="sidebarMode === 'expanded'" class="sidebar-section" data-testid="sidebar-section-rooms">
@@ -70,7 +72,8 @@
         <span class="sidebar-heading">Rooms</span>
         <span class="toggle-glyph" :data-collapsed="collapsedSections.projects">⌄</span>
       </button>
-      <div v-if="!collapsedSections.projects" class="project-list">
+      <Transition name="sidebar-reveal">
+        <div v-if="!collapsedSections.projects" class="project-list">
         <article
           v-for="project in projectEntries"
           :key="project.id"
@@ -98,7 +101,8 @@
             </span>
           </button>
 
-          <div v-if="!collapsedProjects[project.id]" class="project-room-list">
+          <Transition name="sidebar-reveal">
+            <div v-if="!collapsedProjects[project.id]" class="project-room-list">
             <button
               v-for="focusRoom in project.focusRooms"
               :key="focusRoom.id"
@@ -115,9 +119,11 @@
             <p v-if="!project.focusRooms.length" class="room-empty" data-testid="focus-room-empty">
               No focus rooms yet.
             </p>
-          </div>
+            </div>
+          </Transition>
         </article>
-      </div>
+        </div>
+      </Transition>
     </section>
 
     <section
@@ -134,18 +140,20 @@
         <span class="sidebar-heading">System</span>
         <span class="toggle-glyph" :data-collapsed="collapsedSections.system">⌄</span>
       </button>
-      <button
-        v-for="item in !collapsedSections.system ? systemEntries : []"
-        :key="item.id"
-        class="sidebar-row"
-        :data-active="activeEntry.id === item.id"
-        type="button"
-        :data-testid="`system-entry-${item.id}`"
-        @click="$emit('select-entry', item)"
-      >
-        <span>{{ item.title }}</span>
-        <small>{{ item.description }}</small>
-      </button>
+      <TransitionGroup name="sidebar-list" tag="div" class="sidebar-list-motion">
+        <button
+          v-for="item in !collapsedSections.system ? systemEntries : []"
+          :key="item.id"
+          class="sidebar-row"
+          :data-active="activeEntry.id === item.id"
+          type="button"
+          :data-testid="`system-entry-${item.id}`"
+          @click="$emit('select-entry', item)"
+        >
+          <span>{{ item.title }}</span>
+          <small>{{ item.description }}</small>
+        </button>
+      </TransitionGroup>
     </section>
 
     <div v-else class="sidebar-collapsed-actions" data-testid="sidebar-rail">
