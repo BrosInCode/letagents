@@ -75,19 +75,18 @@
 
         <div v-if="message.attachments.length" class="room-message-attachments">
           <template v-for="attachment in message.attachments" :key="attachmentKey(attachment)">
-            <a
+            <button
               v-if="isImageAttachment(attachment)"
               class="room-message-attachment is-image"
-              :href="attachmentHref(attachment)"
-              target="_blank"
-              rel="noopener noreferrer"
+              type="button"
+              @click="$emit('open-image', imageAttachmentId(attachment))"
             >
               <img :src="attachmentHref(attachment)" :alt="attachmentName(attachment)">
               <span>
                 <strong>{{ attachmentName(attachment) }}</strong>
                 <small>{{ attachmentMeta(attachment) }}</small>
               </span>
-            </a>
+            </button>
             <a
               v-else
               class="room-message-attachment"
@@ -148,6 +147,7 @@ const props = defineProps<{
 defineEmits<{
   reply: [message: DesktopRoomMessage];
   "scroll-to-message": [messageId: string | null];
+  "open-image": [imageId: string];
 }>();
 
 const identity = computed(() => parseSenderIdentity(props.message));
@@ -382,6 +382,10 @@ function attachmentHref(attachment: DesktopRoomMessageAttachment): string {
 
 function attachmentKey(attachment: DesktopRoomMessageAttachment): string {
   return attachment.id || `${attachmentName(attachment)}-${attachment.sizeBytes || 0}-${attachmentMimeType(attachment)}`;
+}
+
+function imageAttachmentId(attachment: DesktopRoomMessageAttachment): string {
+  return `${props.message.id}:${attachmentKey(attachment)}`;
 }
 
 function isImageAttachment(attachment: DesktopRoomMessageAttachment): boolean {

@@ -276,6 +276,7 @@ export interface DesktopStagedAttachment {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
+  previewDataUrl: string | null;
 }
 
 export interface DesktopRepoRoomSelection {
@@ -297,7 +298,7 @@ export interface DesktopApi {
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
-    startStream: (roomIdentifier: string) => Promise<void>;
+    startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     stopStream: (roomIdentifier?: string | null) => Promise<void>;
     onStreamEvent: (callback: (event: DesktopRoomStreamEvent) => void) => () => void;
     sendMessage: (

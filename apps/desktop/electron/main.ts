@@ -52,7 +52,9 @@ let activeRoomStream: {
   roomIdentifier: string;
   abortController: AbortController;
   reconnectTimer: NodeJS.Timeout | null;
+  pollAbortController: AbortController | null;
   retryMs: number;
+  lastMessageId: string | null;
   stopped: boolean;
 } | null = null;
 
@@ -1399,6 +1401,9 @@ async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<D
       fileName,
       mimeType,
       sizeBytes: fileBuffer.byteLength,
+      previewDataUrl: mimeType.startsWith("image/")
+        ? `data:${mimeType};base64,${fileBuffer.toString("base64")}`
+        : null,
     });
   }
   return staged;
@@ -1494,11 +1499,67 @@ function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: 
   }
 
   if (eventName === "message") {
+    if (activeRoomStream?.roomIdentifier === roomIdentifier && typeof payload.id === "string") {
+      activeRoomStream.lastMessageId = payload.id;
+    }
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier: eventRoomIdentifier,
       message: mapRoomMessagePayload(payload as Parameters<typeof mapRoomMessagePayload>[0]),
     });
+  }
+}
+
+async function pollDesktopRoomMessages(stream: NonNullable<typeof activeRoomStream>): Promise<void> {
+  while (!stream.stopped) {
+    const after = stream.lastMessageId;
+    if (!after) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      continue;
+    }
+
+    const pollAbortController = new AbortController();
+    stream.pollAbortController = pollAbortController;
+    try {
+      const storedAuth = await readStoredAuth();
+      const requestHeaders = new Headers({
+        Accept: "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      });
+      if (storedAuth.token) {
+        requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
+      }
+      const response = await fetch(
+        `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=24&timeout=25000&after=${encodeURIComponent(after)}`,
+        { headers: requestHeaders, signal: pollAbortController.signal },
+      );
+      if (!response.ok) {
+        throw new Error(`Room poll failed with HTTP ${response.status}.`);
+      }
+      const page = await response.json() as { room_id?: string; messages?: Parameters<typeof mapRoomMessagePayload>[0][] };
+      for (const rawMessage of page.messages || []) {
+        if (typeof rawMessage.id === "string") {
+          stream.lastMessageId = rawMessage.id;
+        }
+        emitRoomStreamEvent({
+          type: "message",
+          roomIdentifier: page.room_id || stream.roomIdentifier,
+          message: mapRoomMessagePayload(rawMessage),
+        });
+      }
+    } catch (error) {
+      if (stream.stopped || pollAbortController.signal.aborted) return;
+      emitRoomStreamEvent({
+        type: "error",
+        roomIdentifier: stream.roomIdentifier,
+        message: error instanceof Error ? error.message : "Room polling disconnected.",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    } finally {
+      if (stream.pollAbortController === pollAbortController) {
+        stream.pollAbortController = null;
+      }
+    }
   }
 }
 
@@ -1576,13 +1637,16 @@ async function openDesktopRoomStream(stream: NonNullable<typeof activeRoomStream
   }
 }
 
-async function startDesktopRoomStream(roomIdentifier: string): Promise<void> {
+async function startDesktopRoomStream(roomIdentifier: string, afterMessageId?: string | null): Promise<void> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before opening the live stream.");
   }
 
   if (activeRoomStream?.roomIdentifier === trimmedRoomIdentifier && !activeRoomStream.stopped) {
+    if (afterMessageId) {
+      activeRoomStream.lastMessageId = afterMessageId;
+    }
     return;
   }
 
@@ -1591,10 +1655,13 @@ async function startDesktopRoomStream(roomIdentifier: string): Promise<void> {
     roomIdentifier: trimmedRoomIdentifier,
     abortController: new AbortController(),
     reconnectTimer: null,
+    pollAbortController: null,
     retryMs: 1000,
+    lastMessageId: afterMessageId || null,
     stopped: false,
   };
   void openDesktopRoomStream(activeRoomStream);
+  void pollDesktopRoomMessages(activeRoomStream);
 }
 
 async function stopDesktopRoomStream(roomIdentifier?: string | null): Promise<void> {
@@ -1603,6 +1670,7 @@ async function stopDesktopRoomStream(roomIdentifier?: string | null): Promise<vo
 
   activeRoomStream.stopped = true;
   activeRoomStream.abortController.abort();
+  activeRoomStream.pollAbortController?.abort();
   if (activeRoomStream.reconnectTimer) {
     clearTimeout(activeRoomStream.reconnectTimer);
   }
@@ -1851,7 +1919,8 @@ ipcMain.handle(
 );
 ipcMain.handle(
   "desktop:room:start-stream",
-  async (_event, roomIdentifier: string): Promise<void> => startDesktopRoomStream(roomIdentifier)
+  async (_event, roomIdentifier: string, afterMessageId?: string | null): Promise<void> =>
+    startDesktopRoomStream(roomIdentifier, afterMessageId)
 );
 ipcMain.handle(
   "desktop:room:stop-stream",

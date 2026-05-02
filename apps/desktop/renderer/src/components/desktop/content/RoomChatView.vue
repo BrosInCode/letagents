@@ -22,6 +22,7 @@
             :latest-thread-message-id="latestThreadMessageId(message.id)"
             @reply="startReply"
             @scroll-to-message="scrollToMessage"
+            @open-image="openImageViewer"
           />
 
           <article v-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
@@ -43,7 +44,7 @@
       <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
         <div class="desktop-composer-identity">
           <span>Sending from LetAgents Desktop</span>
-          <span class="desktop-composer-shortcut">⌘↵ to send</span>
+          <span class="desktop-composer-shortcut">Enter to send · ⌘↵ for a new line</span>
         </div>
         <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
           <div>
@@ -53,6 +54,7 @@
           <button type="button" @click="replyTo = null">Cancel</button>
         </div>
         <textarea
+          ref="textareaElement"
           v-model="draft"
           class="desktop-composer-input"
           rows="3"
@@ -60,8 +62,6 @@
           :disabled="sending || !roomIdentifier"
           data-testid="desktop-composer-input"
           @input="syncMentionQuery"
-          @keydown.meta.enter.prevent="submitMessage"
-          @keydown.ctrl.enter.prevent="submitMessage"
           @keydown.down.prevent="moveMentionSelection(1)"
           @keydown.up.prevent="moveMentionSelection(-1)"
           @keydown.enter="handleEnterKey"
@@ -75,6 +75,7 @@
             data-testid="desktop-attachment-draft"
           >
             <span>
+              <img v-if="attachment.previewDataUrl" class="desktop-attachment-preview" :src="attachment.previewDataUrl" alt="">
               <strong>{{ attachment.fileName }}</strong>
               <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }}</small>
             </span>
@@ -117,6 +118,14 @@
           </button>
         </div>
       </form>
+      <DesktopImageViewerModal
+        v-if="activeImageId && roomImages.length"
+        :images="roomImages"
+        :active-image-id="activeImageId"
+        @close="activeImageId = null"
+        @next="shiftImage(1)"
+        @previous="shiftImage(-1)"
+      />
     </div>
   </section>
 </template>
@@ -125,6 +134,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import type { DesktopParticipantSummary, DesktopRoomMessage, DesktopStagedAttachment } from "../../../../../electron/ipc-types";
 import DesktopChatMessage from "./DesktopChatMessage.vue";
+import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
 
 const props = defineProps<{
   messages: DesktopRoomMessage[];
@@ -143,8 +153,10 @@ const emit = defineEmits<{
 }>();
 
 const draft = ref("");
+const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const messagesElement = ref<HTMLElement | null>(null);
 const replyTo = ref<DesktopRoomMessage | null>(null);
+const activeImageId = ref<string | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const attachmentDrafts = ref<DesktopStagedAttachment[]>([]);
@@ -178,6 +190,23 @@ const threadSummaries = computed(() => {
     summaries.set(parentId, summary);
   }
   return summaries;
+});
+const roomImages = computed<DesktopMessageImage[]>(() => {
+  const images: DesktopMessageImage[] = [];
+  for (const message of props.messages) {
+    for (const attachment of message.attachments || []) {
+      if (!isImageAttachment(attachment)) continue;
+      images.push({
+        id: `${message.id}:${attachmentKey(attachment)}`,
+        href: attachmentHref(attachment),
+        name: attachmentName(attachment),
+        meta: attachmentMeta(attachment),
+        sender: displaySender(message.sender),
+        time: formatDateTime(message.timestamp),
+      });
+    }
+  }
+  return images;
 });
 
 watch(
@@ -219,6 +248,21 @@ function submitMessage(): void {
   attachmentDrafts.value = [];
 }
 
+function insertNewlineAtCursor(): void {
+  const input = textareaElement.value;
+  if (!input) {
+    draft.value = `${draft.value}\n`;
+    return;
+  }
+  const start = input.selectionStart ?? draft.value.length;
+  const end = input.selectionEnd ?? draft.value.length;
+  draft.value = `${draft.value.slice(0, start)}\n${draft.value.slice(end)}`;
+  void nextTick(() => {
+    input.selectionStart = start + 1;
+    input.selectionEnd = start + 1;
+  });
+}
+
 async function pickAttachments(): Promise<void> {
   if (attaching.value || !props.roomIdentifier) return;
   attaching.value = true;
@@ -236,10 +280,17 @@ async function removeAttachment(uploadId: string): Promise<void> {
 }
 
 function handleEnterKey(event: KeyboardEvent): void {
-  if (!mentionOpen.value) return;
   event.preventDefault();
-  const candidate = mentionCandidates.value[activeMentionIndex.value];
-  if (candidate) insertMention(candidate.displayName);
+  if (mentionOpen.value) {
+    const candidate = mentionCandidates.value[activeMentionIndex.value];
+    if (candidate) insertMention(candidate.displayName);
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.shiftKey) {
+    insertNewlineAtCursor();
+    return;
+  }
+  submitMessage();
 }
 
 function scrollToBottom(): void {
@@ -254,6 +305,7 @@ function scrollToBottom(): void {
 
 function startReply(message: DesktopRoomMessage): void {
   replyTo.value = message;
+  void nextTick(() => textareaElement.value?.focus());
 }
 
 function syncMentionQuery(): void {
@@ -308,6 +360,57 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
   return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function attachmentName(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return attachment.fileName || attachment.name || "attachment";
+}
+
+function attachmentMimeType(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return attachment.mimeType || "application/octet-stream";
+}
+
+function attachmentHref(attachment: DesktopRoomMessage["attachments"][number]): string {
+  if (attachment.url) return attachment.url;
+  if (attachment.downloadUrl) return attachment.downloadUrl;
+  if (attachment.dataUrl) return attachment.dataUrl;
+  if (attachment.contentBase64) return `data:${attachmentMimeType(attachment)};base64,${attachment.contentBase64}`;
+  return "#";
+}
+
+function attachmentKey(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return attachment.id || `${attachmentName(attachment)}-${attachment.sizeBytes || 0}-${attachmentMimeType(attachment)}`;
+}
+
+function attachmentMeta(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return [attachmentMimeType(attachment), formatBytes(attachment.sizeBytes || 0)].filter(Boolean).join(" · ");
+}
+
+function isImageAttachment(attachment: DesktopRoomMessage["attachments"][number]): boolean {
+  return attachmentMimeType(attachment).startsWith("image/") && attachmentHref(attachment) !== "#";
+}
+
+function openImageViewer(imageId: string): void {
+  if (!roomImages.value.some((image) => image.id === imageId)) return;
+  activeImageId.value = imageId;
+}
+
+function shiftImage(direction: 1 | -1): void {
+  if (!roomImages.value.length || !activeImageId.value) return;
+  const currentIndex = Math.max(0, roomImages.value.findIndex((image) => image.id === activeImageId.value));
+  const nextIndex = (currentIndex + direction + roomImages.value.length) % roomImages.value.length;
+  activeImageId.value = roomImages.value[nextIndex].id;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function threadCount(messageId: string): number {

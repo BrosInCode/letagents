@@ -264,6 +264,7 @@ const selectedRoomIdentifier = computed(() => {
   if (selectedNeedsAccess.value) return null;
   return selectedRoomInfo.value.identifier || selectedSnapshot.value?.roomIdentifier || null;
 });
+const latestSelectedMessageId = computed(() => selectedSnapshot.value?.messages.at(-1)?.id || null);
 
 const showMcpInstaller = computed(() => {
   if (!mcpInstallState.value) return false;
@@ -581,7 +582,8 @@ async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<vo
     await window.letagentsDesktop.room.stopStream();
     return;
   }
-  await window.letagentsDesktop.room.startStream(roomIdentifier);
+  const latestMessageId = selectedSnapshot.value?.messages.at(-1)?.id || null;
+  await window.letagentsDesktop.room.startStream(roomIdentifier, latestMessageId);
 }
 
 async function loadFirstRunRoomContext(): Promise<void> {
@@ -902,6 +904,14 @@ watch(
   () => selectedRoomIdentifier.value,
   (roomIdentifier) => {
     void syncSelectedRoomStream(roomIdentifier);
+  }
+);
+
+watch(
+  () => latestSelectedMessageId.value,
+  () => {
+    if (!selectedRoomIdentifier.value) return;
+    void syncSelectedRoomStream(selectedRoomIdentifier.value);
   }
 );
 

@@ -1479,15 +1479,25 @@ code {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.035);
   color: var(--text);
+  font: inherit;
   text-decoration: none;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
 }
 
 .room-message-attachment:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.055);
   border-color: color-mix(in srgb, var(--avatar-color, #71717a) 38%, rgba(255, 255, 255, 0.12));
 }
 
@@ -1704,8 +1714,20 @@ code {
 
 .desktop-attachment-draft span {
   display: grid;
-  gap: 2px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 9px;
   min-width: 0;
+}
+
+.desktop-attachment-preview {
+  grid-row: span 2;
+  width: 42px;
+  height: 42px;
+  border-radius: 9px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.28);
 }
 
 .desktop-attachment-draft strong,
@@ -1805,6 +1827,130 @@ code {
 .desktop-composer-send:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.desktop-image-viewer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 30% 8%, rgba(255, 255, 255, 0.08), transparent 28%),
+    rgba(5, 5, 5, 0.86);
+  backdrop-filter: blur(18px);
+  animation: room-panel-in 160ms var(--ease-out);
+}
+
+.desktop-image-viewer-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1100px, calc(100vw - 48px));
+  max-height: min(90vh, 920px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.08), transparent 32%),
+    rgba(13, 13, 13, 0.98);
+  box-shadow: 0 32px 100px rgba(0, 0, 0, 0.58);
+}
+
+.desktop-image-viewer-dialog:focus {
+  outline: none;
+}
+
+.desktop-image-viewer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.desktop-image-viewer-header p,
+.desktop-image-viewer-header h2,
+.desktop-image-viewer-header span,
+.desktop-image-viewer-stage,
+.desktop-image-viewer-stage figcaption {
+  margin: 0;
+}
+
+.desktop-image-viewer-header p {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.desktop-image-viewer-header h2 {
+  margin-top: 4px;
+  max-width: min(56vw, 720px);
+  overflow: hidden;
+  font-size: 1.05rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-image-viewer-header span,
+.desktop-image-viewer-stage figcaption {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+}
+
+.desktop-image-viewer-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.desktop-image-viewer-actions button,
+.desktop-image-viewer-actions a {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 850;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.desktop-image-viewer-actions button:hover,
+.desktop-image-viewer-actions a:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.desktop-image-viewer-stage {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 0;
+  padding: 18px;
+}
+
+.desktop-image-viewer-stage img {
+  justify-self: center;
+  align-self: center;
+  max-width: 100%;
+  max-height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.desktop-image-viewer-stage figcaption {
+  justify-self: center;
 }
 
 @keyframes message-enter {
