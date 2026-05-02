@@ -2245,6 +2245,17 @@ server.tool(
     }
 
     const derivedRoom = repoRoot ? getGitRemoteIdentity(repoRoot) : null;
+    const configuredRoom = repoRoot ? getRoomFromConfig(startDir) : null;
+    const detectedRoom = configuredRoom || derivedRoom;
+    const publicCurrentRoom = toPublicRoomState(currentRoom);
+    const currentRoomMatchesContext = Boolean(
+      currentRoom && detectedRoom && currentRoom.room_id === detectedRoom
+    );
+    const currentRoomScope = !currentRoom
+      ? "none"
+      : currentRoomMatchesContext
+        ? "matches_detected_repo_context"
+        : "existing_joined_session_not_derived_from_inspected_cwd";
 
     return {
       content: [
@@ -2253,16 +2264,29 @@ server.tool(
           text: JSON.stringify(
             {
               cwd: startDir,
+              repo_context_status: repoRoot
+                ? "git_repo_detected"
+                : "not_inside_git_repo",
               git_repo_root: repoRoot ?? null,
               config_file: configPath ?? null,
               config_contents: configContents,
+              configured_room_from_file: configuredRoom ?? null,
               derived_room_from_git: derivedRoom ?? null,
-              current_room: toPublicRoomState(currentRoom),
-              join_hint: !currentRoom
-                ? repoRoot
-                  ? "Run initialize_repo to set up .letagents.json, or use join_room/join_code to connect."
-                  : "Not inside a git repo. Use create_room, join_code, or join_room to connect manually."
-                : null,
+              detected_room_from_context: detectedRoom ?? null,
+              current_room: publicCurrentRoom,
+              current_room_scope: currentRoomScope,
+              warning: !repoRoot && currentRoom
+                ? "The inspected cwd is not inside a git repo. current_room is only the previously joined MCP room session, not a room derived from this cwd."
+                : repoRoot && currentRoom && detectedRoom && !currentRoomMatchesContext
+                  ? "The current joined room differs from the room detected for this repo context."
+                  : null,
+              join_hint: repoRoot
+                ? detectedRoom
+                  ? currentRoomMatchesContext
+                    ? null
+                    : "Use join_room with detected_room_from_context to switch this MCP session to the repo room."
+                  : "Run initialize_repo to set up .letagents.json, or use join_room/join_code to connect."
+                : "Not inside a git repo. Use create_room, join_code, or join_room to connect manually.",
             },
             null,
             2

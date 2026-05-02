@@ -37,6 +37,90 @@ export interface DiagnosticsSnapshot {
   notes: string[];
 }
 
+export type DesktopMcpInstallTargetId = "claude-code" | "antigravity" | "cursor" | "codex";
+
+export interface DesktopMcpInstallTarget {
+  id: DesktopMcpInstallTargetId;
+  name: string;
+  description: string;
+  configPath: string;
+  status: "not_installed" | "installed" | "needs_attention";
+  lastInstalledAt: string | null;
+  restartHint: string;
+}
+
+export interface DesktopMcpInstallState {
+  completed: boolean;
+  completedAt: string | null;
+  selectedTargetId: DesktopMcpInstallTargetId | null;
+  targets: DesktopMcpInstallTarget[];
+}
+
+export interface DesktopMcpInstallResult {
+  success: boolean;
+  target: DesktopMcpInstallTarget;
+  installState: DesktopMcpInstallState;
+  message: string;
+}
+
+export interface DesktopMcpInstallManyResult {
+  success: boolean;
+  targets: DesktopMcpInstallTarget[];
+  installState: DesktopMcpInstallState;
+  message: string;
+}
+
+export interface DesktopAuthAccount {
+  id: string;
+  provider: string;
+  providerUserId: string;
+  login: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export interface DesktopPendingDeviceAuth {
+  requestId: string;
+  userCode: string;
+  verificationUri: string;
+  expiresAt: string;
+  intervalSeconds: number;
+  roomIdentifier: string | null;
+  startedAt: string;
+}
+
+export interface DesktopAuthStatus {
+  authenticated: boolean;
+  account: DesktopAuthAccount | null;
+  pendingDeviceAuth: DesktopPendingDeviceAuth | null;
+  apiUrl: string | null;
+  tokenStored: boolean;
+  error: string | null;
+}
+
+export interface DesktopAuthStartResult {
+  pendingDeviceAuth: DesktopPendingDeviceAuth;
+  authStatus: DesktopAuthStatus;
+}
+
+export interface DesktopAuthPollResult {
+  status: "pending" | "slow_down" | "authorized" | "denied" | "expired" | "unknown";
+  intervalSeconds: number | null;
+  expiresInSeconds: number | null;
+  authStatus: DesktopAuthStatus;
+  error: string | null;
+}
+
+export interface DesktopRoomAccess {
+  status: "ready" | "missing_room" | "auth_required" | "forbidden" | "unavailable";
+  title: string;
+  message: string;
+  roomIdentifier: string | null;
+  deviceFlowUrl: string | null;
+  code: string | null;
+  httpStatus: number | null;
+}
+
 export interface DesktopRoomInfo {
   identifier: string;
   code: string;
@@ -115,12 +199,23 @@ export interface DesktopRoomMessage {
 
 export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
+  access: DesktopRoomAccess;
   room: DesktopRoomInfo | null;
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
   recentActivity: DesktopActivityEntry[];
   messages: DesktopRoomMessage[];
+}
+
+export interface DesktopRepoRoomSelection {
+  canceled: boolean;
+  repoPath: string | null;
+  roomIdentifier: string | null;
+  source: "configured" | "git_remote" | "local_fallback" | null;
+  snapshot: DesktopRoomSnapshot | null;
+  error: string | null;
+  warning: string | null;
 }
 
 export interface DesktopApi {
@@ -130,8 +225,22 @@ export interface DesktopApi {
   room: {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
   };
+  auth: {
+    getStatus: () => Promise<DesktopAuthStatus>;
+    startDeviceFlow: (roomIdentifier?: string | null) => Promise<DesktopAuthStartResult>;
+    pollDeviceFlow: (requestId?: string | null) => Promise<DesktopAuthPollResult>;
+    openVerification: (url: string) => Promise<void>;
+    signOut: () => Promise<DesktopAuthStatus>;
+  };
+  setup: {
+    getMcpInstallState: () => Promise<DesktopMcpInstallState>;
+    installMcpServer: (targetId: DesktopMcpInstallTargetId) => Promise<DesktopMcpInstallResult>;
+    installMcpServers: (targetIds: DesktopMcpInstallTargetId[]) => Promise<DesktopMcpInstallManyResult>;
+    completeMcpOnboarding: () => Promise<DesktopMcpInstallState>;
+  };
   repos: {
     getStatus: () => Promise<RepoStatus>;
+    pickRoom: () => Promise<DesktopRepoRoomSelection>;
   };
   workers: {
     list: () => Promise<WorkerSnapshot[]>;

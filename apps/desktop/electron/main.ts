@@ -1,16 +1,31 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type {
   DesktopActivityEntry,
+  DesktopAuthAccount,
+  DesktopAuthPollResult,
+  DesktopAuthStartResult,
+  DesktopAuthStatus,
   DesktopAppInfo,
   DiagnosticsSnapshot,
   DesktopFocusRoomInfo,
+  DesktopMcpInstallManyResult,
+  DesktopMcpInstallResult,
+  DesktopMcpInstallState,
+  DesktopMcpInstallTarget,
+  DesktopMcpInstallTargetId,
+  DesktopPendingDeviceAuth,
+  DesktopRoomAccess,
   DesktopRoomMessage,
+  DesktopRepoRoomSelection,
   DesktopParticipantSummary,
   DesktopRoomInfo,
   DesktopRoomSnapshot,
@@ -22,17 +37,111 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const workspaceRoot = join(__dirname, "..", "..");
-const rendererDistPath = join(__dirname, "..", "dist-renderer", "index.html");
+const desktopRoot = join(__dirname, "..");
+const workspaceRoot = join(desktopRoot, "..", "..");
+const rendererDistPath = join(desktopRoot, "dist-renderer", "index.html");
 const devServerUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim() || null;
 const apiUrl = process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
 
 let mainWindow: BrowserWindow | null = null;
 
+type ApiErrorPayload = {
+  error?: string;
+  code?: string;
+  message?: string;
+  room_id?: string;
+  device_flow_url?: string;
+  interval?: number;
+  expires_in?: number;
+  status?: string;
+};
+
+type StoredDesktopAuth = {
+  token: string | null;
+  ownerTokenId: string | null;
+  oauthTokenExpiresAt: string | null;
+  account: DesktopAuthAccount | null;
+  pendingDeviceAuth: DesktopPendingDeviceAuth | null;
+  savedAt: string;
+};
+
+type PersistedDesktopAuth = Omit<StoredDesktopAuth, "token"> & {
+  encryptedToken?: string | null;
+  token?: string | null;
+};
+
+type StoredMcpInstallSetup = {
+  completed: boolean;
+  completedAt: string | null;
+  selectedTargetId: DesktopMcpInstallTargetId | null;
+  installs: Partial<Record<DesktopMcpInstallTargetId, { lastInstalledAt: string }>>;
+};
+
+const mcpInstallTargetIds: DesktopMcpInstallTargetId[] = ["claude-code", "antigravity", "cursor", "codex"];
+
+type McpServerJsonConfig = {
+  mcpServers?: Record<string, {
+    command?: string;
+    args?: string[];
+    cwd?: string;
+    env?: Record<string, string>;
+    [key: string]: unknown;
+  }>;
+  [key: string]: unknown;
+};
+
+type McpInstallConfigFormat = "json" | "codex_toml";
+
+type McpInstallTargetDefinition = Omit<DesktopMcpInstallTarget, "status" | "lastInstalledAt"> & {
+  configFormat: McpInstallConfigFormat;
+};
+
+type DeviceAuthStartResponse = {
+  request_id: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+};
+
+type DeviceAuthPollResponse = {
+  status: "pending" | "slow_down" | "authorized" | "denied" | "expired";
+  interval?: number;
+  expires_in?: number;
+  letagents_token?: string;
+  owner_token_id?: string;
+  oauth_token_expires_at?: string | null;
+  account?: {
+    id: string;
+    provider: string;
+    provider_user_id: string;
+    login: string;
+    display_name?: string | null;
+    avatar_url?: string | null;
+  };
+};
+
+class DesktopApiError extends Error {
+  readonly status: number;
+  readonly payload: ApiErrorPayload | null;
+
+  constructor(status: number, payload: ApiErrorPayload | null) {
+    super(payload?.message || payload?.error || `API request failed: ${status}`);
+    this.name = "DesktopApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 async function runGit(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd: workspaceRoot,
   });
+  return stdout;
+}
+
+async function runGitInPath(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd });
   return stdout;
 }
 
@@ -130,6 +239,17 @@ function readConfiguredRoomIdentifier(): string | null {
   }
 }
 
+function readConfiguredRoomIdentifierAt(repoRoot: string): string | null {
+  try {
+    const configPath = join(repoRoot, ".letagents.json");
+    if (!existsSync(configPath)) return null;
+    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as { room?: string };
+    return parsed.room?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveRoomIdentifier(): Promise<string | null> {
   const configured = readConfiguredRoomIdentifier();
   if (configured) return configured;
@@ -142,17 +262,605 @@ async function resolveRoomIdentifier(): Promise<string | null> {
   }
 }
 
+function slugifyLocalProjectName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "project";
+}
+
+function createLocalRoomIdentifier(projectPath: string): string {
+  const normalizedPath = resolve(projectPath);
+  const folderName = slugifyLocalProjectName(basename(normalizedPath));
+  const pathHash = createHash("sha256").update(normalizedPath).digest("hex").slice(0, 10);
+  return `local-${folderName}-${pathHash}`;
+}
+
+async function resolveRoomIdentifierFromPath(folderPath: string): Promise<{
+  repoRoot: string | null;
+  roomIdentifier: string;
+  source: DesktopRepoRoomSelection["source"];
+  warning: string | null;
+}> {
+  let repoRoot: string | null = null;
+  try {
+    const stdout = await runGitInPath(folderPath, ["rev-parse", "--show-toplevel"]);
+    repoRoot = stdout.trim() || null;
+  } catch {
+    return {
+      repoRoot: null,
+      roomIdentifier: createLocalRoomIdentifier(folderPath),
+      source: "local_fallback",
+      warning: "This folder is not a Git repository yet. LetAgents opened a local room that you can attach to GitHub later.",
+    };
+  }
+
+  if (!repoRoot) {
+    return {
+      repoRoot: null,
+      roomIdentifier: createLocalRoomIdentifier(folderPath),
+      source: "local_fallback",
+      warning: "This folder is not a Git repository yet. LetAgents opened a local room that you can attach to GitHub later.",
+    };
+  }
+
+  const configured = readConfiguredRoomIdentifierAt(repoRoot);
+  if (configured) return { repoRoot, roomIdentifier: configured, source: "configured", warning: null };
+
+  try {
+    const stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"]);
+    const roomIdentifier = normalizeGitRemoteToRoomIdentifier(stdout);
+    if (roomIdentifier) return { repoRoot, roomIdentifier, source: "git_remote", warning: null };
+  } catch {
+    // Fall through to the local room fallback below.
+  }
+
+  return {
+    repoRoot,
+    roomIdentifier: createLocalRoomIdentifier(repoRoot),
+    source: "local_fallback",
+    warning: "This repo is only on your Mac. LetAgents opened a local room; attach it to GitHub after you add a remote.",
+  };
+}
+
+function getSetupStorePath(): string {
+  return join(app.getPath("userData"), "letagents-desktop-setup.json");
+}
+
+function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
+  const home = homedir();
+  return [
+    {
+      id: "claude-code",
+      name: "Claude Code",
+      description: "Add the MCP connection Claude Code needs to join rooms.",
+      configPath: join(home, ".claude", "settings.json"),
+      configFormat: "json",
+      restartHint: "Restart Claude Code or reload its MCP servers after installing.",
+    },
+    {
+      id: "antigravity",
+      name: "Antigravity",
+      description: "Add the MCP connection Antigravity needs to join rooms.",
+      configPath: join(home, ".gemini", "settings.json"),
+      configFormat: "json",
+      restartHint: "Restart Antigravity so it picks up the updated MCP settings.",
+    },
+    {
+      id: "cursor",
+      name: "Cursor",
+      description: "Add the MCP connection Cursor needs to join rooms.",
+      configPath: join(home, ".cursor", "mcp.json"),
+      configFormat: "json",
+      restartHint: "Reload Cursor or restart its MCP server after installing.",
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      description: "Add the MCP connection Codex needs to join rooms.",
+      configPath: join(home, ".codex", "config.toml"),
+      configFormat: "codex_toml",
+      restartHint: "Restart Codex so it discovers the LetAgents MCP server.",
+    },
+  ];
+}
+
+function createLetAgentsMcpServerConfig(): NonNullable<McpServerJsonConfig["mcpServers"]>[string] {
+  return {
+    command: "npx",
+    args: ["-y", "letagents"],
+    cwd: workspaceRoot,
+    env: {
+      LETAGENTS_API_URL: apiUrl,
+    },
+  };
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlStringArray(values: string[]): string {
+  return `[${values.map((value) => tomlString(value)).join(", ")}]`;
+}
+
+function removeTomlTable(source: string, tableName: string): string {
+  const tablePattern = new RegExp(
+    `(?:^|\\n)\\[${escapeRegExp(tableName)}\\]\\n[\\s\\S]*?(?=\\n\\[[^\\]]+\\]|$)`,
+    "g"
+  );
+  return source.replace(tablePattern, "\n");
+}
+
+function getTomlTableBody(source: string, tableName: string): string | null {
+  const tablePattern = new RegExp(
+    `(?:^|\\n)\\[${escapeRegExp(tableName)}\\]\\n([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`
+  );
+  return tablePattern.exec(source)?.[1] ?? null;
+}
+
+function getTomlStringValue(tableBody: string, key: string): string | null {
+  const match = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*"((?:\\\\.|[^"\\\\])*)"\\s*$`, "m").exec(tableBody);
+  if (!match) return null;
+  try {
+    return JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return null;
+  }
+}
+
+function getTomlStringArrayValue(tableBody: string, key: string): string[] | null {
+  const match = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*(\\[[^\\n]*\\])\\s*$`, "m").exec(tableBody);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as unknown;
+    return Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readStoredMcpSetup(): Promise<StoredMcpInstallSetup> {
+  try {
+    const raw = await readFile(getSetupStorePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<StoredMcpInstallSetup>;
+    return {
+      completed: Boolean(parsed.completed),
+      completedAt: parsed.completedAt || null,
+      selectedTargetId: parsed.selectedTargetId || null,
+      installs: parsed.installs || {},
+    };
+  } catch {
+    return {
+      completed: false,
+      completedAt: null,
+      selectedTargetId: null,
+      installs: {},
+    };
+  }
+}
+
+async function writeStoredMcpSetup(nextSetup: StoredMcpInstallSetup): Promise<void> {
+  await mkdir(dirname(getSetupStorePath()), { recursive: true });
+  await writeFile(getSetupStorePath(), `${JSON.stringify(nextSetup, null, 2)}\n`, "utf8");
+}
+
+async function readMcpJsonConfig(configPath: string): Promise<McpServerJsonConfig> {
+  try {
+    const raw = await readFile(configPath, "utf8");
+    if (!raw.trim()) return {};
+    return JSON.parse(raw) as McpServerJsonConfig;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+function getJsonLetAgentsMcpInstallStatus(configPath: string): DesktopMcpInstallTarget["status"] {
+  try {
+    const raw = readFileSync(configPath, "utf8");
+    if (!raw.trim()) return "not_installed";
+    const parsed = JSON.parse(raw) as McpServerJsonConfig;
+    const server = parsed.mcpServers?.letagents;
+    if (!server) return "not_installed";
+
+    const expected = createLetAgentsMcpServerConfig();
+    const env = isStringRecord(server.env) ? server.env : {};
+    const matchesExpected =
+      server.command === expected.command
+      && Array.isArray(server.args)
+      && JSON.stringify(server.args) === JSON.stringify(expected.args)
+      && server.cwd === expected.cwd
+      && env.LETAGENTS_API_URL === expected.env?.LETAGENTS_API_URL;
+
+    return matchesExpected ? "installed" : "needs_attention";
+  } catch {
+    return "not_installed";
+  }
+}
+
+function getCodexTomlLetAgentsMcpInstallStatus(configPath: string): DesktopMcpInstallTarget["status"] {
+  try {
+    const raw = readFileSync(configPath, "utf8");
+    if (!raw.trim()) return "not_installed";
+
+    const serverBody = getTomlTableBody(raw, "mcp_servers.letagents");
+    if (!serverBody) return "not_installed";
+
+    const envBody = getTomlTableBody(raw, "mcp_servers.letagents.env");
+    const expected = createLetAgentsMcpServerConfig();
+    const matchesExpected =
+      getTomlStringValue(serverBody, "command") === expected.command
+      && JSON.stringify(getTomlStringArrayValue(serverBody, "args")) === JSON.stringify(expected.args)
+      && getTomlStringValue(serverBody, "cwd") === expected.cwd
+      && envBody !== null
+      && getTomlStringValue(envBody, "LETAGENTS_API_URL") === expected.env?.LETAGENTS_API_URL;
+
+    return matchesExpected ? "installed" : "needs_attention";
+  } catch {
+    return "not_installed";
+  }
+}
+
+function getLetAgentsMcpInstallStatus(target: McpInstallTargetDefinition): DesktopMcpInstallTarget["status"] {
+  if (target.configFormat === "codex_toml") {
+    return getCodexTomlLetAgentsMcpInstallStatus(target.configPath);
+  }
+  return getJsonLetAgentsMcpInstallStatus(target.configPath);
+}
+
+async function writeMcpJsonConfig(configPath: string, config: McpServerJsonConfig): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+async function writeCodexTomlMcpConfig(configPath: string): Promise<void> {
+  let currentConfig = "";
+  try {
+    currentConfig = await readFile(configPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const expected = createLetAgentsMcpServerConfig();
+  const withoutLetAgentsTables = removeTomlTable(
+    removeTomlTable(currentConfig, "mcp_servers.letagents.env"),
+    "mcp_servers.letagents"
+  ).trimEnd();
+  const letAgentsTable = [
+    "[mcp_servers.letagents]",
+    `command = ${tomlString(expected.command || "npx")}`,
+    `args = ${tomlStringArray(expected.args || ["-y", "letagents"])}`,
+    `cwd = ${tomlString(expected.cwd || workspaceRoot)}`,
+    "",
+    "[mcp_servers.letagents.env]",
+    `LETAGENTS_API_URL = ${tomlString(expected.env?.LETAGENTS_API_URL || apiUrl)}`,
+  ].join("\n");
+
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(
+    configPath,
+    `${withoutLetAgentsTables ? `${withoutLetAgentsTables}\n\n` : ""}${letAgentsTable}\n`,
+    "utf8"
+  );
+}
+
+async function buildMcpInstallState(): Promise<DesktopMcpInstallState> {
+  const storedSetup = await readStoredMcpSetup();
+  const targets = getMcpInstallTargetDefinitions().map<DesktopMcpInstallTarget>((target) => {
+    const status = getLetAgentsMcpInstallStatus(target);
+    const { configFormat: _configFormat, ...publicTarget } = target;
+    return {
+      ...publicTarget,
+      status,
+      lastInstalledAt: storedSetup.installs[target.id]?.lastInstalledAt || null,
+    };
+  });
+  const firstInstalledTarget = targets.find((target) => target.status === "installed");
+  return {
+    completed: storedSetup.completed,
+    completedAt: storedSetup.completedAt,
+    selectedTargetId: storedSetup.selectedTargetId || firstInstalledTarget?.id || null,
+    targets,
+  };
+}
+
+function assertMcpInstallTargetId(targetId: string): asserts targetId is DesktopMcpInstallTargetId {
+  if (!mcpInstallTargetIds.includes(targetId as DesktopMcpInstallTargetId)) {
+    throw new Error(`Unknown MCP install target: ${targetId}`);
+  }
+}
+
+async function writeLetAgentsMcpServerForTarget(targetDefinition: McpInstallTargetDefinition): Promise<void> {
+  if (targetDefinition.configFormat === "codex_toml") {
+    await writeCodexTomlMcpConfig(targetDefinition.configPath);
+    return;
+  }
+
+  const currentConfig = await readMcpJsonConfig(targetDefinition.configPath);
+  const nextConfig: McpServerJsonConfig = {
+    ...currentConfig,
+    mcpServers: {
+      ...(currentConfig.mcpServers || {}),
+      letagents: createLetAgentsMcpServerConfig(),
+    },
+  };
+  await writeMcpJsonConfig(targetDefinition.configPath, nextConfig);
+}
+
+async function installLetAgentsMcpServers(targetIds: DesktopMcpInstallTargetId[]): Promise<DesktopMcpInstallManyResult> {
+  if (!targetIds.length) {
+    throw new Error("Choose at least one app for MCP setup.");
+  }
+
+  const uniqueTargetIds = [...new Set(targetIds)];
+  uniqueTargetIds.forEach(assertMcpInstallTargetId);
+  const targetDefinitions = getMcpInstallTargetDefinitions().filter((target) => uniqueTargetIds.includes(target.id));
+
+  for (const targetDefinition of targetDefinitions) {
+    await writeLetAgentsMcpServerForTarget(targetDefinition);
+  }
+
+  const now = new Date().toISOString();
+  const storedSetup = await readStoredMcpSetup();
+  const installs = { ...storedSetup.installs };
+  for (const targetId of uniqueTargetIds) {
+    installs[targetId] = { lastInstalledAt: now };
+  }
+
+  await writeStoredMcpSetup({
+    completed: storedSetup.completed,
+    completedAt: storedSetup.completedAt,
+    selectedTargetId: uniqueTargetIds[0] || storedSetup.selectedTargetId,
+    installs,
+  });
+
+  const installState = await buildMcpInstallState();
+  const targets = installState.targets.filter((candidate) => uniqueTargetIds.includes(candidate.id));
+  const targetNames = targets.map((target) => target.name).join(", ");
+
+  return {
+    success: true,
+    targets,
+    installState,
+    message: `LetAgents was added to ${targetNames}. Restart or reload those apps so the MCP connection is available.`,
+  };
+}
+
+async function installLetAgentsMcpServer(targetId: DesktopMcpInstallTargetId): Promise<DesktopMcpInstallResult> {
+  const targetDefinition = getMcpInstallTargetDefinitions().find((target) => target.id === targetId);
+  if (!targetDefinition) {
+    throw new Error(`Unknown MCP install target: ${targetId}`);
+  }
+
+  const result = await installLetAgentsMcpServers([targetId]);
+  const installState = result.installState;
+  const target = installState.targets.find((candidate) => candidate.id === targetId);
+  if (!target) {
+    throw new Error(`Installed target disappeared: ${targetId}`);
+  }
+
+  return {
+    success: true,
+    target,
+    installState,
+    message: `LetAgents was added to ${target.name}. ${target.restartHint}`,
+  };
+}
+
+async function completeMcpOnboarding(): Promise<DesktopMcpInstallState> {
+  const current = await readStoredMcpSetup();
+  await writeStoredMcpSetup({
+    ...current,
+    completed: true,
+    completedAt: current.completedAt || new Date().toISOString(),
+  });
+  return buildMcpInstallState();
+}
+
+function getAuthStorePath(): string {
+  return join(app.getPath("userData"), "letagents-desktop-auth.json");
+}
+
+function normalizeAuthAccount(account: DeviceAuthPollResponse["account"] | null | undefined): DesktopAuthAccount | null {
+  if (!account) return null;
+
+  return {
+    id: String(account.id),
+    provider: account.provider,
+    providerUserId: account.provider_user_id,
+    login: account.login,
+    displayName: account.display_name || null,
+    avatarUrl: account.avatar_url || null,
+  };
+}
+
+function encryptTokenForStorage(token: string | null): string | null {
+  if (!token) return null;
+  if (!safeStorage.isEncryptionAvailable()) {
+    return `plain:${token}`;
+  }
+  return `safe:${safeStorage.encryptString(token).toString("base64")}`;
+}
+
+function decryptTokenFromStorage(parsed: Partial<PersistedDesktopAuth>): string | null {
+  const encryptedToken = parsed.encryptedToken || null;
+  if (!encryptedToken) return parsed.token || null;
+
+  if (encryptedToken.startsWith("plain:")) {
+    return encryptedToken.slice("plain:".length) || null;
+  }
+
+  if (!encryptedToken.startsWith("safe:") || !safeStorage.isEncryptionAvailable()) {
+    return null;
+  }
+
+  try {
+    return safeStorage.decryptString(Buffer.from(encryptedToken.slice("safe:".length), "base64"));
+  } catch {
+    return null;
+  }
+}
+
+async function readStoredAuth(): Promise<StoredDesktopAuth> {
+  try {
+    const raw = await readFile(getAuthStorePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<PersistedDesktopAuth>;
+    return {
+      token: decryptTokenFromStorage(parsed),
+      ownerTokenId: parsed.ownerTokenId || null,
+      oauthTokenExpiresAt: parsed.oauthTokenExpiresAt || null,
+      account: parsed.account || null,
+      pendingDeviceAuth: parsed.pendingDeviceAuth || null,
+      savedAt: parsed.savedAt || new Date(0).toISOString(),
+    };
+  } catch {
+    return {
+      token: null,
+      ownerTokenId: null,
+      oauthTokenExpiresAt: null,
+      account: null,
+      pendingDeviceAuth: null,
+      savedAt: new Date(0).toISOString(),
+    };
+  }
+}
+
+async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
+  const persistedAuth: PersistedDesktopAuth = {
+    ownerTokenId: nextAuth.ownerTokenId,
+    oauthTokenExpiresAt: nextAuth.oauthTokenExpiresAt,
+    account: nextAuth.account,
+    pendingDeviceAuth: nextAuth.pendingDeviceAuth,
+    savedAt: nextAuth.savedAt,
+    encryptedToken: encryptTokenForStorage(nextAuth.token),
+  };
+  await mkdir(dirname(getAuthStorePath()), { recursive: true });
+  await writeFile(getAuthStorePath(), `${JSON.stringify(persistedAuth, null, 2)}\n`, "utf8");
+}
+
+async function updateStoredAuth(update: Partial<StoredDesktopAuth>): Promise<StoredDesktopAuth> {
+  const current = await readStoredAuth();
+  const nextAuth: StoredDesktopAuth = {
+    ...current,
+    ...update,
+    savedAt: new Date().toISOString(),
+  };
+  await writeStoredAuth(nextAuth);
+  return nextAuth;
+}
+
+async function clearStoredAuth(): Promise<void> {
+  await rm(getAuthStorePath(), { force: true });
+}
+
+function buildAuthStatus(input: {
+  storedAuth: StoredDesktopAuth;
+  account?: DesktopAuthAccount | null;
+  error?: string | null;
+}): DesktopAuthStatus {
+  const account = input.account ?? input.storedAuth.account;
+  return {
+    authenticated: Boolean(input.storedAuth.token && account),
+    account: account || null,
+    pendingDeviceAuth: input.storedAuth.pendingDeviceAuth || null,
+    apiUrl,
+    tokenStored: Boolean(input.storedAuth.token),
+    error: input.error || null,
+  };
+}
+
+async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
+  const storedAuth = await readStoredAuth();
+  if (!storedAuth.token) {
+    return buildAuthStatus({ storedAuth });
+  }
+
+  try {
+    const session = await apiFetch<{
+      authenticated: boolean;
+      account?: {
+        id: string;
+        provider: string;
+        provider_user_id: string;
+        login: string;
+        display_name?: string | null;
+        avatar_url?: string | null;
+      };
+    }>("/auth/session");
+    const account = normalizeAuthAccount(session.account);
+    if (session.authenticated && account) {
+      await updateStoredAuth({ account });
+      return buildAuthStatus({ storedAuth: await readStoredAuth(), account });
+    }
+
+    await updateStoredAuth({ token: null, ownerTokenId: null, oauthTokenExpiresAt: null, account: null });
+    return buildAuthStatus({
+      storedAuth: await readStoredAuth(),
+      error: "Your saved sign-in expired. Connect again to open private rooms.",
+    });
+  } catch (error) {
+    return buildAuthStatus({
+      storedAuth,
+      error: error instanceof Error ? error.message : "Could not check sign-in right now.",
+    });
+  }
+}
+
+function createRoomAccess(input: Partial<DesktopRoomAccess>): DesktopRoomAccess {
+  return {
+    status: input.status || "ready",
+    title: input.title || "Room ready",
+    message: input.message || "",
+    roomIdentifier: input.roomIdentifier || null,
+    deviceFlowUrl: input.deviceFlowUrl || null,
+    code: input.code || null,
+    httpStatus: input.httpStatus || null,
+  };
+}
+
+async function parseApiErrorPayload(response: Response): Promise<ApiErrorPayload | null> {
+  try {
+    const text = await response.text();
+    if (!text) return null;
+    return JSON.parse(text) as ApiErrorPayload;
+  } catch {
+    return null;
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const storedAuth = await readStoredAuth();
+  const requestHeaders = new Headers(init?.headers);
+  requestHeaders.set("Accept", "application/json");
+  if (storedAuth.token && !requestHeaders.has("Authorization")) {
+    requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
+  }
+
   const response = await fetch(`${apiUrl}${path}`, {
     ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init?.headers || {}),
-    },
+    headers: requestHeaders,
   });
 
   if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`);
+    throw new DesktopApiError(response.status, await parseApiErrorPayload(response));
   }
 
   return (await response.json()) as T;
@@ -163,6 +871,11 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
   if (!roomIdentifier) {
     return {
       roomIdentifier: null,
+      access: createRoomAccess({
+        status: "missing_room",
+        title: "Choose a room to begin",
+        message: "LetAgents could not find a room from this folder yet. Create or join a room to continue.",
+      }),
       room: null,
       focusRooms: [],
       tasks: [],
@@ -327,6 +1040,10 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
 
     return {
       roomIdentifier,
+      access: createRoomAccess({
+        status: "ready",
+        roomIdentifier,
+      }),
       room,
       focusRooms,
       tasks,
@@ -334,15 +1051,219 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       recentActivity,
       messages,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof DesktopApiError) {
+      const payload = error.payload;
+      const accessStatus = payload?.error === "auth_required"
+        ? "auth_required"
+        : payload?.error === "private_repo_no_access"
+          ? "forbidden"
+          : "unavailable";
+
+      return {
+        roomIdentifier,
+        access: createRoomAccess({
+          status: accessStatus,
+          title: accessStatus === "auth_required"
+            ? "Connect GitHub to open this room"
+            : accessStatus === "forbidden"
+              ? "This account cannot open the room"
+              : "Room unavailable",
+          message: payload?.message || error.message,
+          roomIdentifier: payload?.room_id || roomIdentifier,
+          deviceFlowUrl: payload?.device_flow_url || null,
+          code: payload?.code || null,
+          httpStatus: error.status,
+        }),
+        room: null,
+        focusRooms: [],
+        tasks: [],
+        participants: [],
+        recentActivity: [],
+        messages: [],
+      };
+    }
+
     return {
       roomIdentifier,
+      access: createRoomAccess({
+        status: "unavailable",
+        title: "Room unavailable",
+        message: error instanceof Error ? error.message : "LetAgents could not load this room.",
+        roomIdentifier,
+      }),
       room: null,
       focusRooms: [],
       tasks: [],
       participants: [],
       recentActivity: [],
       messages: [],
+    };
+  }
+}
+
+async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
+  const options: Electron.OpenDialogOptions = {
+    title: "Choose a repository",
+    buttonLabel: "Open",
+    properties: ["openDirectory"],
+  };
+  mainWindow?.show();
+  mainWindow?.focus();
+  const result = await dialog.showOpenDialog(options);
+
+  if (result.canceled || !result.filePaths[0]) {
+    return {
+      canceled: true,
+      repoPath: null,
+      roomIdentifier: null,
+      source: null,
+      snapshot: null,
+      error: null,
+      warning: null,
+    };
+  }
+
+  const selectedPath = result.filePaths[0];
+  const resolved = await resolveRoomIdentifierFromPath(selectedPath);
+  return {
+    canceled: false,
+    repoPath: resolved.repoRoot || selectedPath,
+    roomIdentifier: resolved.roomIdentifier,
+    source: resolved.source,
+    snapshot: await fetchRoomSnapshot(resolved.roomIdentifier),
+    error: null,
+    warning: resolved.warning,
+  };
+}
+
+async function startDeviceAuthFlow(roomIdentifier?: string | null): Promise<DesktopAuthStartResult> {
+  const trimmedRoomIdentifier = roomIdentifier?.trim() || await resolveRoomIdentifier();
+  const path = trimmedRoomIdentifier
+    ? `/auth/device/start?room_id=${encodeURIComponent(trimmedRoomIdentifier)}`
+    : "/auth/device/start";
+  const response = await apiFetch<DeviceAuthStartResponse>(path, {
+    method: "POST",
+  });
+  const now = Date.now();
+  const pendingDeviceAuth: DesktopPendingDeviceAuth = {
+    requestId: response.request_id,
+    userCode: response.user_code,
+    verificationUri: response.verification_uri,
+    expiresAt: new Date(now + response.expires_in * 1000).toISOString(),
+    intervalSeconds: response.interval,
+    roomIdentifier: trimmedRoomIdentifier || null,
+    startedAt: new Date(now).toISOString(),
+  };
+  const storedAuth = await updateStoredAuth({ pendingDeviceAuth });
+  return {
+    pendingDeviceAuth,
+    authStatus: buildAuthStatus({ storedAuth }),
+  };
+}
+
+async function pollDeviceAuthFlow(requestId?: string | null): Promise<DesktopAuthPollResult> {
+  const storedAuth = await readStoredAuth();
+  const pending = requestId
+    ? {
+        ...(storedAuth.pendingDeviceAuth || {
+          userCode: "",
+          verificationUri: "",
+          expiresAt: "",
+          intervalSeconds: 5,
+          roomIdentifier: null,
+          startedAt: new Date().toISOString(),
+        }),
+        requestId,
+      }
+    : storedAuth.pendingDeviceAuth;
+
+  if (!pending?.requestId) {
+    return {
+      status: "unknown",
+      intervalSeconds: null,
+      expiresInSeconds: null,
+      authStatus: buildAuthStatus({ storedAuth }),
+      error: "Start GitHub approval first.",
+    };
+  }
+
+  try {
+    const response = await apiFetch<DeviceAuthPollResponse>(
+      `/auth/device/poll/${encodeURIComponent(pending.requestId)}`
+    );
+
+    if (response.status === "authorized") {
+      const account = normalizeAuthAccount(response.account);
+      if (!response.letagents_token || !account) {
+        return {
+          status: "unknown",
+          intervalSeconds: null,
+          expiresInSeconds: null,
+          authStatus: buildAuthStatus({ storedAuth }),
+          error: "GitHub approved the request, but LetAgents did not return a usable session.",
+        };
+      }
+
+      const nextAuth = await updateStoredAuth({
+        token: response.letagents_token,
+        ownerTokenId: response.owner_token_id || null,
+        oauthTokenExpiresAt: response.oauth_token_expires_at || null,
+        account,
+        pendingDeviceAuth: null,
+      });
+      return {
+        status: "authorized",
+        intervalSeconds: null,
+        expiresInSeconds: null,
+        authStatus: buildAuthStatus({ storedAuth: nextAuth, account }),
+        error: null,
+      };
+    }
+
+    const nextPending: DesktopPendingDeviceAuth = {
+      ...pending,
+      intervalSeconds: response.interval || pending.intervalSeconds,
+    };
+    const nextAuth = await updateStoredAuth({ pendingDeviceAuth: nextPending });
+    return {
+      status: response.status,
+      intervalSeconds: nextPending.intervalSeconds,
+      expiresInSeconds: response.expires_in ?? null,
+      authStatus: buildAuthStatus({ storedAuth: nextAuth }),
+      error: null,
+    };
+  } catch (error) {
+    if (error instanceof DesktopApiError) {
+      const status = error.payload?.status === "denied" || error.status === 403
+        ? "denied"
+        : error.payload?.status === "expired" || error.status === 410 || error.status === 404
+          ? "expired"
+          : error.status === 429
+            ? "slow_down"
+            : "unknown";
+      const pendingDeviceAuth = status === "denied" || status === "expired"
+        ? null
+        : {
+            ...pending,
+            intervalSeconds: error.payload?.interval || pending.intervalSeconds,
+          };
+      const nextAuth = await updateStoredAuth({ pendingDeviceAuth });
+      return {
+        status,
+        intervalSeconds: pendingDeviceAuth?.intervalSeconds || error.payload?.interval || null,
+        expiresInSeconds: error.payload?.expires_in ?? null,
+        authStatus: buildAuthStatus({ storedAuth: nextAuth }),
+        error: error.message,
+      };
+    }
+
+    return {
+      status: "unknown",
+      intervalSeconds: pending.intervalSeconds,
+      expiresInSeconds: null,
+      authStatus: buildAuthStatus({ storedAuth }),
+      error: error instanceof Error ? error.message : "Could not check GitHub approval.",
     };
   }
 }
@@ -374,6 +1295,7 @@ function createWindow(): void {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: false,
       preload: join(__dirname, "preload.js"),
     },
   });
@@ -407,7 +1329,42 @@ ipcMain.handle(
   "desktop:room:get-snapshot",
   async (_event, roomIdentifier?: string | null): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier)
 );
+ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
+ipcMain.handle(
+  "desktop:auth:start-device-flow",
+  async (_event, roomIdentifier?: string | null): Promise<DesktopAuthStartResult> => startDeviceAuthFlow(roomIdentifier)
+);
+ipcMain.handle(
+  "desktop:auth:poll-device-flow",
+  async (_event, requestId?: string | null): Promise<DesktopAuthPollResult> => pollDeviceAuthFlow(requestId)
+);
+ipcMain.handle("desktop:auth:open-verification", async (_event, url: string): Promise<void> => {
+  await shell.openExternal(url);
+});
+ipcMain.handle("desktop:auth:sign-out", async (): Promise<DesktopAuthStatus> => {
+  await clearStoredAuth();
+  return getDesktopAuthStatus();
+});
+ipcMain.handle("desktop:setup:get-mcp-install-state", async (): Promise<DesktopMcpInstallState> => {
+  return buildMcpInstallState();
+});
+ipcMain.handle(
+  "desktop:setup:install-mcp-server",
+  async (_event, targetId: DesktopMcpInstallTargetId): Promise<DesktopMcpInstallResult> => {
+    return installLetAgentsMcpServer(targetId);
+  }
+);
+ipcMain.handle(
+  "desktop:setup:install-mcp-servers",
+  async (_event, targetIds: DesktopMcpInstallTargetId[]): Promise<DesktopMcpInstallManyResult> => {
+    return installLetAgentsMcpServers(targetIds);
+  }
+);
+ipcMain.handle("desktop:setup:complete-mcp-onboarding", async (): Promise<DesktopMcpInstallState> => {
+  return completeMcpOnboarding();
+});
 ipcMain.handle("desktop:repos:get-status", async (): Promise<RepoStatus> => buildRepoStatus());
+ipcMain.handle("desktop:repos:pick-room", async (): Promise<DesktopRepoRoomSelection> => pickRepoRoom());
 ipcMain.handle("desktop:workers:list", async (): Promise<WorkerSnapshot[]> => buildWorkerSnapshots());
 ipcMain.handle(
   "desktop:diagnostics:get-snapshot",

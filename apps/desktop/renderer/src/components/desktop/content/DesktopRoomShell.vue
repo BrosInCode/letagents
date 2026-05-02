@@ -33,27 +33,33 @@
       </div>
     </header>
 
-    <RoomChatView
-      v-if="activeTab === 'chat'"
-      :messages="messages"
-    />
+    <Transition name="room-panel" mode="out-in">
+      <RoomChatView
+        v-if="activeTab === 'chat'"
+        key="chat"
+        :messages="messages"
+      />
 
-    <RoomBoardView
-      v-else-if="activeTab === 'board'"
-      :tasks="tasks"
-    />
+      <RoomBoardView
+        v-else-if="activeTab === 'board'"
+        key="board"
+        :tasks="tasks"
+      />
 
-    <RoomActivityTabView
-      v-else-if="activeTab === 'activity'"
-      :recent-activity="recentActivity"
-      :participants="participants"
-    />
+      <RoomActivityTabView
+        v-else-if="activeTab === 'activity'"
+        key="activity"
+        :recent-activity="recentActivity"
+        :participants="participants"
+      />
 
-    <RoomDetailsView
-      v-else
-      :focus-rooms="focusRooms"
-      :tasks="tasks"
-    />
+      <RoomDetailsView
+        v-else
+        key="rooms"
+        :focus-rooms="focusRooms"
+        :tasks="tasks"
+      />
+    </Transition>
   </section>
 </template>
 
