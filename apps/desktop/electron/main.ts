@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import type {
   DesktopActivityEntry,
+  DesktopAgentPresence,
   DesktopAuthAccount,
   DesktopAuthPollResult,
   DesktopAuthStartResult,
@@ -26,6 +27,7 @@ import type {
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
   DesktopPendingDeviceAuth,
+  DesktopReasoningSession,
   DesktopRoomAccess,
   DesktopRoomMessage,
   DesktopRepoRoomSelection,
@@ -947,6 +949,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      presence: [],
+      reasoningSessions: [],
       recentActivity: [],
       messages: [],
     };
@@ -957,7 +961,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       method: "POST",
     });
 
-    const [focusRoomsData, tasksData, participantsData, activityHistoryData, messagesData] = await Promise.all([
+    const [focusRoomsData, tasksData, participantsData, presenceData, reasoningData, activityHistoryData, messagesData] = await Promise.all([
       apiFetch<{ focus_rooms?: Array<{
         room_id: string;
         name: string | null;
@@ -972,7 +976,14 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         title: string;
         status: string;
         assignee: string | null;
+        created_by?: string | null;
         pr_url?: string | null;
+        workflow_refs?: Array<{
+          provider?: string;
+          kind?: string;
+          label?: string;
+          url?: string;
+        }> | null;
         active_leases?: Array<{
           id?: string;
           kind?: string;
@@ -990,20 +1001,101 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         kind: "human" | "agent";
         display_name: string;
         actor_label: string | null;
+        agent_key?: string | null;
+        github_login?: string | null;
+        owner_label?: string | null;
+        ide_label?: string | null;
+        hidden_at?: string | null;
         activity_state: "active" | "away" | "offline" | null;
         last_seen_at: string;
+        last_room_activity_at?: string | null;
+        last_live_heartbeat_at?: string | null;
+        source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
       }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/participants`).catch(() => ({ participants: [] })),
+      apiFetch<{ presence?: Array<{
+        room_id: string;
+        actor_label: string;
+        agent_key: string | null;
+        agent_instance_id: string | null;
+        agent_session_id: string | null;
+        session_kind: "controller" | "worker";
+        runtime: string;
+        display_name: string;
+        owner_label: string | null;
+        ide_label: string | null;
+        status: "idle" | "working" | "reviewing" | "blocked";
+        status_text: string | null;
+        last_heartbeat_at: string;
+        freshness: "active" | "stale";
+        activity_state: "active" | "away" | "offline";
+        source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/presence?limit=100`).catch(() => ({ presence: [] })),
+      apiFetch<{ sessions?: Array<{
+        id: string;
+        room_id?: string | null;
+        actor_label?: string | null;
+        agent_key?: string | null;
+        task_id?: string | null;
+        title?: string | null;
+        status?: string | null;
+        summary?: string | null;
+        latest_payload?: DesktopReasoningSession["latestPayload"];
+        goal?: string | null;
+        checking?: string | null;
+        hypothesis?: string | null;
+        blocker?: string | null;
+        next_action?: string | null;
+        milestone?: string | null;
+        confidence?: number | null;
+        closed_at?: string | null;
+        created_at?: string | null;
+        updated_at?: string | null;
+      }>; reasoning_sessions?: Array<{
+        id: string;
+        room_id?: string | null;
+        actor_label?: string | null;
+        agent_key?: string | null;
+        task_id?: string | null;
+        title?: string | null;
+        status?: string | null;
+        summary?: string | null;
+        latest_payload?: DesktopReasoningSession["latestPayload"];
+        goal?: string | null;
+        checking?: string | null;
+        hypothesis?: string | null;
+        blocker?: string | null;
+        next_action?: string | null;
+        milestone?: string | null;
+        confidence?: number | null;
+        closed_at?: string | null;
+        created_at?: string | null;
+        updated_at?: string | null;
+      }>;
+      }>(`/rooms/${encodeURIComponent(roomIdentifier)}/reasoning-sessions`).catch(() => ({ sessions: [], reasoning_sessions: [] })),
       apiFetch<{ entries?: Array<{
         id: string;
+        room?: {
+          id: string;
+          display_name: string;
+          kind: "main" | "focus";
+          focus_status: "active" | "concluded" | null;
+          source_task_id: string | null;
+        };
         participant: {
           display_name: string;
           kind: "human" | "agent";
+          actor_label?: string | null;
+          owner_label?: string | null;
+          ide_label?: string | null;
           activity_state: "active" | "away" | "offline" | null;
         };
+        first_seen_at?: string | null;
+        last_seen_at?: string | null;
         last_room_activity_at: string;
-        current_tasks: Array<{ id: string; title: string; status: string }>;
-        completed_tasks: Array<{ id: string; title: string; status: string }>;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/activity-history?page_size=5`).catch(() => ({ entries: [] })),
+        current_tasks: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
+        completed_tasks: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
+        created_tasks?: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/activity-history?page_size=20`).catch(() => ({ entries: [] })),
       apiFetch<{ messages?: Array<{
         id: string;
         sender: string;
@@ -1049,26 +1141,107 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       kind: participant.kind,
       displayName: participant.display_name,
       actorLabel: participant.actor_label || null,
+      agentKey: participant.agent_key || null,
+      githubLogin: participant.github_login || null,
+      ownerLabel: participant.owner_label || null,
+      ideLabel: participant.ide_label || null,
+      hiddenAt: participant.hidden_at || null,
       activityState: participant.activity_state || null,
       lastSeenAt: participant.last_seen_at,
+      lastRoomActivityAt: participant.last_room_activity_at || null,
+      lastLiveHeartbeatAt: participant.last_live_heartbeat_at || null,
+      sourceFlags: participant.source_flags || [],
     }));
+
+    const presence: DesktopAgentPresence[] = (presenceData.presence || []).map((entry) => ({
+      roomId: entry.room_id,
+      actorLabel: entry.actor_label,
+      agentKey: entry.agent_key || null,
+      agentInstanceId: entry.agent_instance_id || null,
+      agentSessionId: entry.agent_session_id || null,
+      sessionKind: entry.session_kind,
+      runtime: entry.runtime,
+      displayName: entry.display_name,
+      ownerLabel: entry.owner_label || null,
+      ideLabel: entry.ide_label || null,
+      status: entry.status,
+      statusText: entry.status_text || null,
+      lastHeartbeatAt: entry.last_heartbeat_at,
+      freshness: entry.freshness,
+      activityState: entry.activity_state,
+      sourceFlags: entry.source_flags || [],
+    }));
+
+    const reasoningSessions: DesktopReasoningSession[] = [
+      ...(reasoningData.sessions || reasoningData.reasoning_sessions || []),
+    ].map((session) => ({
+      id: session.id,
+      roomId: session.room_id || null,
+      actorLabel: session.actor_label || null,
+      agentKey: session.agent_key || null,
+      taskId: session.task_id || null,
+      title: session.title || null,
+      status: session.status || null,
+      summary: session.summary || null,
+      latestPayload: session.latest_payload || null,
+      goal: session.goal || null,
+      checking: session.checking || null,
+      hypothesis: session.hypothesis || null,
+      blocker: session.blocker || null,
+      nextAction: session.next_action || null,
+      milestone: session.milestone || null,
+      confidence: session.confidence ?? null,
+      closedAt: session.closed_at || null,
+      createdAt: session.created_at || null,
+      updatedAt: session.updated_at || null,
+    })).sort((left, right) => {
+      const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
+      const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
+      return (Number.isFinite(rightTime) ? rightTime : -1) - (Number.isFinite(leftTime) ? leftTime : -1);
+    });
+
+    const mapActivityTask = (task: {
+      id: string;
+      title: string;
+      status: string;
+      updated_at?: string | null;
+      workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }>;
+    }) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      updatedAt: task.updated_at || null,
+      workflowRefs: (task.workflow_refs || []).map((ref) => ({
+        provider: ref.provider,
+        kind: ref.kind,
+        label: ref.label,
+        url: ref.url,
+      })),
+    });
 
     const recentActivity: DesktopActivityEntry[] = (activityHistoryData.entries || []).map((entry) => ({
       id: entry.id,
+      room: entry.room
+        ? {
+            id: entry.room.id,
+            displayName: entry.room.display_name,
+            kind: entry.room.kind,
+            focusStatus: entry.room.focus_status,
+            sourceTaskId: entry.room.source_task_id,
+          }
+        : null,
       participantDisplayName: entry.participant.display_name,
       participantKind: entry.participant.kind,
+      participantActorLabel: entry.participant.actor_label || null,
+      participantOwnerLabel: entry.participant.owner_label || null,
+      participantIdeLabel: entry.participant.ide_label || null,
       activityState: entry.participant.activity_state || null,
+      firstSeenAt: entry.first_seen_at || null,
+      lastSeenAt: entry.last_seen_at || null,
       lastRoomActivityAt: entry.last_room_activity_at,
-      currentTasks: (entry.current_tasks || []).map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-      })),
-      completedTasks: (entry.completed_tasks || []).map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-      })),
+      currentTasks: (entry.current_tasks || []).map(mapActivityTask),
+      completedTasks: (entry.completed_tasks || []).map(mapActivityTask),
+      createdTasks: (entry.created_tasks || []).map(mapActivityTask),
     }));
 
     const messages: DesktopRoomMessage[] = [...(messagesData.messages || [])]
@@ -1108,6 +1281,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms,
       tasks,
       participants,
+      presence,
+      reasoningSessions,
       recentActivity,
       messages,
     };
@@ -1139,6 +1314,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         focusRooms: [],
         tasks: [],
         participants: [],
+        presence: [],
+        reasoningSessions: [],
         recentActivity: [],
         messages: [],
       };
@@ -1156,6 +1333,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      presence: [],
+      reasoningSessions: [],
       recentActivity: [],
       messages: [],
     };
@@ -1326,7 +1505,14 @@ function mapDesktopTaskSummaryPayload(task: {
   title?: string;
   status?: string;
   assignee?: string | null;
+  created_by?: string | null;
   pr_url?: string | null;
+  workflow_refs?: Array<{
+    provider?: string;
+    kind?: string;
+    label?: string;
+    url?: string;
+  }> | null;
   active_leases?: Array<{
     id?: string;
     kind?: string;
@@ -1345,7 +1531,16 @@ function mapDesktopTaskSummaryPayload(task: {
     title: task.title || task.id,
     status: task.status || "proposed",
     assignee: task.assignee || null,
+    createdBy: task.created_by || null,
     prUrl: task.pr_url || null,
+    workflowRefs: (task.workflow_refs || [])
+      .map((ref) => ({
+        provider: ref.provider || "unknown",
+        kind: ref.kind || "artifact",
+        label: ref.label || ref.url || "Workflow",
+        url: ref.url || "",
+      }))
+      .filter((ref) => Boolean(ref.url)),
     activeLeases: (task.active_leases || []).map((lease) => ({
       id: lease.id || "",
       kind: lease.kind || "work",
@@ -1589,7 +1784,9 @@ function mapRoomStreamTaskPayload(task: {
   title?: string;
   status?: string;
   assignee?: string | null;
+  created_by?: string | null;
   pr_url?: string | null;
+  workflow_refs?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["workflow_refs"];
   active_leases?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["active_leases"];
   updated_at?: string;
   updatedAt?: string;

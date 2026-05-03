@@ -150,7 +150,14 @@ export interface DesktopTaskSummary {
   title: string;
   status: string;
   assignee: string | null;
+  createdBy: string | null;
   prUrl: string | null;
+  workflowRefs: Array<{
+    provider: string;
+    kind: string;
+    label: string;
+    url: string;
+  }>;
   activeLeases: Array<{
     id: string;
     kind: "work" | "review" | string;
@@ -168,25 +175,124 @@ export interface DesktopParticipantSummary {
   kind: "human" | "agent";
   displayName: string;
   actorLabel: string | null;
+  agentKey: string | null;
+  githubLogin: string | null;
+  ownerLabel: string | null;
+  ideLabel: string | null;
+  hiddenAt: string | null;
   activityState: "active" | "away" | "offline" | null;
   lastSeenAt: string;
+  lastRoomActivityAt: string | null;
+  lastLiveHeartbeatAt: string | null;
+  sourceFlags: Array<"delivery" | "presence" | "messages" | "tasks">;
+}
+
+export interface DesktopAgentPresence {
+  roomId: string;
+  actorLabel: string;
+  agentKey: string | null;
+  agentInstanceId: string | null;
+  agentSessionId: string | null;
+  sessionKind: "controller" | "worker";
+  runtime: string;
+  displayName: string;
+  ownerLabel: string | null;
+  ideLabel: string | null;
+  status: "idle" | "working" | "reviewing" | "blocked";
+  statusText: string | null;
+  lastHeartbeatAt: string;
+  freshness: "active" | "stale";
+  activityState: "active" | "away" | "offline";
+  sourceFlags: Array<"delivery" | "presence" | "messages" | "tasks">;
+}
+
+export interface DesktopReasoningSnapshot {
+  summary: string;
+  goal?: string | null;
+  checking?: string | null;
+  hypothesis?: string | null;
+  blocker?: string | null;
+  next_action?: string | null;
+  milestone?: string | null;
+  status?: string | null;
+  confidence?: number | null;
+}
+
+export interface DesktopReasoningSession {
+  id: string;
+  roomId: string | null;
+  actorLabel: string | null;
+  agentKey: string | null;
+  taskId: string | null;
+  title: string | null;
+  status: string | null;
+  summary: string | null;
+  latestPayload: DesktopReasoningSnapshot | null;
+  goal: string | null;
+  checking: string | null;
+  hypothesis: string | null;
+  blocker: string | null;
+  nextAction: string | null;
+  milestone: string | null;
+  confidence: number | null;
+  closedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface DesktopActivityEntry {
   id: string;
+  room: {
+    id: string;
+    displayName: string;
+    kind: "main" | "focus";
+    focusStatus: "active" | "concluded" | null;
+    sourceTaskId: string | null;
+  } | null;
   participantDisplayName: string;
   participantKind: "human" | "agent";
+  participantActorLabel: string | null;
+  participantOwnerLabel: string | null;
+  participantIdeLabel: string | null;
   activityState: "active" | "away" | "offline" | null;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
   lastRoomActivityAt: string;
   currentTasks: Array<{
     id: string;
     title: string;
     status: string;
+    updatedAt: string | null;
+    workflowRefs: Array<{
+      provider: string;
+      kind: string;
+      label: string;
+      url: string;
+    }>;
   }>;
   completedTasks: Array<{
     id: string;
     title: string;
     status: string;
+    updatedAt: string | null;
+    workflowRefs: Array<{
+      provider: string;
+      kind: string;
+      label: string;
+      url: string;
+    }>;
+  }>;
+  createdTasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    updatedAt: string | null;
+    workflowRefs: Array<{
+      provider: string;
+      kind: string;
+      label: string;
+      url: string;
+    }>;
   }>;
 }
 
@@ -252,6 +358,8 @@ export interface DesktopRoomSnapshot {
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
+  presence: DesktopAgentPresence[];
+  reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   messages: DesktopRoomMessage[];
 }

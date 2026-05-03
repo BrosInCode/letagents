@@ -140,6 +140,11 @@
         key="activity"
         :recent-activity="recentActivity"
         :participants="participants"
+        :presence="presence"
+        :reasoning-sessions="reasoningSessions"
+        :tasks="tasks"
+        :messages="visibleMessages"
+        :workers="workers"
       />
 
       <RoomDetailsView
@@ -161,12 +166,15 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type {
   DesktopActivityEntry,
+  DesktopAgentPresence,
   DesktopFocusRoomInfo,
   DesktopGitHubIntegrationStatus,
   DesktopParticipantSummary,
   DesktopRoomInfo,
   DesktopRoomMessage,
+  DesktopReasoningSession,
   DesktopTaskSummary,
+  WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
@@ -182,8 +190,11 @@ const props = defineProps<{
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
+  presence: DesktopAgentPresence[];
+  reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   messages: DesktopRoomMessage[];
+  workers: WorkerSnapshot[];
 }>();
 
 const activeTab = ref<RoomTabId>("chat");
