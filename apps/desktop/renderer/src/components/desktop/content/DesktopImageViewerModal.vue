@@ -16,11 +16,25 @@
             <span>{{ activeImage.meta }}</span>
           </div>
           <div class="desktop-image-viewer-actions">
-            <button v-if="images.length > 1" type="button" @click="$emit('previous')">Previous</button>
-            <button v-if="images.length > 1" type="button" @click="$emit('next')">Next</button>
-            <a :href="activeImage.href" :download="activeImage.name">Download</a>
-            <a :href="activeImage.href" target="_blank" rel="noopener noreferrer">Open original</a>
-            <button type="button" @click="$emit('close')">Close</button>
+            <button
+              v-if="images.length > 1"
+              class="desktop-image-viewer-action is-subtle"
+              type="button"
+              @click="$emit('previous')"
+            >
+              Previous
+            </button>
+            <button
+              v-if="images.length > 1"
+              class="desktop-image-viewer-action is-subtle"
+              type="button"
+              @click="$emit('next')"
+            >
+              Next
+            </button>
+            <a class="desktop-image-viewer-action" :href="activeImage.href" :download="activeImage.name">Download</a>
+            <a class="desktop-image-viewer-action" :href="activeImage.href" target="_blank" rel="noopener noreferrer">Open original</a>
+            <button class="desktop-image-viewer-action is-primary" type="button" @click="$emit('close')">Close</button>
           </div>
         </header>
         <figure class="desktop-image-viewer-stage">

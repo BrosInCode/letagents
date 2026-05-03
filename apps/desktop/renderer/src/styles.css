@@ -1863,10 +1863,10 @@ code {
 
 .desktop-image-viewer-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 16px 18px;
+  padding: 18px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -1906,28 +1906,60 @@ code {
   align-items: center;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
 }
 
-.desktop-image-viewer-actions button,
-.desktop-image-viewer-actions a {
-  min-height: 32px;
-  padding: 0 11px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+.desktop-image-viewer-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 15px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
-  color: var(--text-secondary);
-  font-size: 0.76rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.035));
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.82rem;
   font-weight: 850;
+  line-height: 1;
   text-decoration: none;
   cursor: pointer;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
+  transition:
+    transform 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background 140ms var(--ease-out),
+    color 140ms var(--ease-out);
 }
 
-.desktop-image-viewer-actions button:hover,
-.desktop-image-viewer-actions a:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.09);
+.desktop-image-viewer-action:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
   color: var(--text);
+}
+
+.desktop-image-viewer-action:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 2px;
+}
+
+.desktop-image-viewer-action.is-subtle {
+  min-width: 76px;
+  color: var(--text-secondary);
+}
+
+.desktop-image-viewer-action.is-primary {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.92);
+  color: #0b0b0c;
+}
+
+.desktop-image-viewer-action.is-primary:hover {
+  background: #ffffff;
+  color: #000000;
 }
 
 .desktop-image-viewer-stage {
