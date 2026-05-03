@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +31,7 @@ import type {
   DesktopRepoRoomSelection,
   DesktopSendRoomMessageResult,
   DesktopParticipantSummary,
+  DesktopDroppedAttachmentContent,
   DesktopRoomInfo,
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
@@ -1439,29 +1440,31 @@ async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<D
   return staged;
 }
 
-async function captureAndStageDesktopScreenshot(roomIdentifier: string): Promise<DesktopStagedAttachment[]> {
+async function stageDroppedDesktopAttachmentContents(
+  roomIdentifier: string,
+  files: DesktopDroppedAttachmentContent[]
+): Promise<DesktopStagedAttachment[]> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
-    throw new Error("Choose a room before adding a screenshot.");
-  }
-  if (process.platform !== "darwin") {
-    throw new Error("Screenshot capture is only wired for macOS in this desktop build.");
+    throw new Error("Choose a room before attaching files.");
   }
 
-  const captureDir = join(tmpdir(), "letagents-desktop-screenshots");
-  await mkdir(captureDir, { recursive: true });
-  const filePath = join(captureDir, `letagents-screenshot-${Date.now()}.png`);
+  const droppedFiles = files
+    .map((file) => ({
+      fileName: file.fileName?.trim() || "attachment",
+      mimeType: file.mimeType?.trim() || guessMimeType(file.fileName || "attachment"),
+      sizeBytes: file.sizeBytes,
+      contentBase64: file.contentBase64,
+    }))
+    .filter((file) => file.contentBase64);
+  if (droppedFiles.length === 0) return [];
 
-  try {
-    await execFileAsync("screencapture", ["-i", "-t", "png", filePath]);
-    if (!existsSync(filePath)) return [];
-    return [await stageDesktopAttachmentFile(trimmedRoomIdentifier, filePath, "Screenshot.png")];
-  } catch (error) {
-    if (!existsSync(filePath)) return [];
-    throw error;
-  } finally {
-    await rm(filePath, { force: true }).catch(() => undefined);
+  const staged: DesktopStagedAttachment[] = [];
+  for (const file of droppedFiles) {
+    const fileBuffer = Buffer.from(file.contentBase64, "base64");
+    staged.push(await stageDesktopAttachmentBuffer(trimmedRoomIdentifier, fileBuffer, file.fileName, file.mimeType || guessMimeType(file.fileName)));
   }
+  return staged;
 }
 
 async function stageDesktopAttachmentFile(
@@ -1472,6 +1475,15 @@ async function stageDesktopAttachmentFile(
   const fileBuffer = await readFile(filePath);
   const fileName = displayFileName || basename(filePath);
   const mimeType = guessMimeType(fileName);
+  return stageDesktopAttachmentBuffer(roomIdentifier, fileBuffer, fileName, mimeType);
+}
+
+async function stageDesktopAttachmentBuffer(
+  roomIdentifier: string,
+  fileBuffer: Buffer,
+  fileName: string,
+  mimeType: string
+): Promise<DesktopStagedAttachment> {
   const target = await apiFetch<{
     upload_id?: string;
     upload_url?: string;
@@ -1499,10 +1511,11 @@ async function stageDesktopAttachmentFile(
   if (![...uploadHeaders.keys()].some((key) => key.toLowerCase() === "content-type")) {
     uploadHeaders.set("Content-Type", mimeType);
   }
+  const uploadBody = new Uint8Array(fileBuffer).buffer;
   const uploadResponse = await fetch(uploadUrl, {
     method: target.method || "PUT",
     headers: uploadHeaders,
-    body: fileBuffer,
+    body: uploadBody,
   });
   if (!uploadResponse.ok) {
     await discardDesktopAttachment(roomIdentifier, uploadId).catch(() => undefined);
@@ -2090,8 +2103,12 @@ ipcMain.handle(
   async (_event, roomIdentifier: string): Promise<DesktopStagedAttachment[]> => pickAndStageDesktopAttachments(roomIdentifier)
 );
 ipcMain.handle(
-  "desktop:room:capture-screenshot",
-  async (_event, roomIdentifier: string): Promise<DesktopStagedAttachment[]> => captureAndStageDesktopScreenshot(roomIdentifier)
+  "desktop:room:stage-dropped-attachment-contents",
+  async (
+    _event,
+    roomIdentifier: string,
+    files: DesktopDroppedAttachmentContent[]
+  ): Promise<DesktopStagedAttachment[]> => stageDroppedDesktopAttachmentContents(roomIdentifier, files)
 );
 ipcMain.handle(
   "desktop:room:discard-attachment",

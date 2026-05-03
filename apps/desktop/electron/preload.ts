@@ -10,7 +10,8 @@ const api: DesktopApi = {
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
-    captureScreenshot: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:capture-screenshot", roomIdentifier),
+    stageDroppedAttachmentContents: (roomIdentifier, files) =>
+      ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
     startStream: (roomIdentifier: string, afterMessageId?: string | null) =>

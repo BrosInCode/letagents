@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1180" viewBox="0 0 720 1180" fill="none">
+  <defs>
+    <linearGradient id="shell" x1="80" y1="30" x2="620" y2="1120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2b2b2d" stop-opacity="0.72"/>
+      <stop offset="0.45" stop-color="#111112" stop-opacity="0.84"/>
+      <stop offset="1" stop-color="#09090a" stop-opacity="0.92"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ffffff" stop-opacity="0.13"/>
+      <stop offset="0.56" stop-color="#ffffff" stop-opacity="0.035"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.012"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect width="720" height="1180" fill="#050505"/>
+  <rect x="42" y="34" width="636" height="1112" rx="34" fill="url(#shell)" stroke="#ffffff" stroke-opacity="0.13"/>
+  <path d="M88 276V1088" stroke="#ffffff" stroke-opacity="0.13"/>
+
+  <circle cx="96" cy="96" r="38" fill="#ffffff" fill-opacity="0.045" stroke="#ffffff" stroke-opacity="0.18" stroke-width="2"/>
+  <path d="M89 80L106 97L89 114" stroke="#d7d7dc" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="152" y="82" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="38" font-weight="900">LetAgents</text>
+  <text x="154" y="113" fill="#777680" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="760">Active rooms</text>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="172" width="576" height="70" rx="24" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.2" stroke-width="2"/>
+    <circle cx="116" cy="207" r="22" fill="#ffffff" fill-opacity="0.07"/>
+    <text x="106" y="221" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="30" font-weight="850">+</text>
+    <text x="158" y="221" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="31" font-weight="900">New room</text>
+  </g>
+
+  <text x="72" y="316" fill="#8d8c96" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="900" letter-spacing="6">PINNED</text>
+  <text x="630" y="316" fill="#d4d4d8" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="850">v</text>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="360" width="576" height="58" rx="19" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.24" stroke-width="2"/>
+    <text x="112" y="398" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="25" font-weight="850">⌘</text>
+    <text x="156" y="398" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="27" font-weight="820">sky-lake - current</text>
+    <text x="548" y="397" fill="#92919b" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="22" font-weight="760">now</text>
+  </g>
+
+  <text x="72" y="500" fill="#8d8c96" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="900" letter-spacing="6">ROOMS</text>
+  <text x="630" y="500" fill="#d4d4d8" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="850">v</text>
+
+  <text x="82" y="566" fill="#d9d9de" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="25" font-weight="820">⌂</text>
+  <text x="126" y="566" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="31" font-weight="900">sky-lake</text>
+  <text x="626" y="566" fill="#d4d4d8" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="850">v</text>
+
+  <g>
+    <rect x="112" y="604" width="536" height="64" rx="18" fill="#ffffff" fill-opacity="0.014" stroke="#ffffff" stroke-opacity="0.09" stroke-width="2"/>
+    <text x="136" y="640" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="780">Focus: Handoff UX and review</text>
+    <text x="136" y="666" fill="#7e7d87" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="760">task_78</text>
+
+    <rect x="112" y="682" width="536" height="64" rx="18" fill="#ffffff" fill-opacity="0.014" stroke="#ffffff" stroke-opacity="0.09" stroke-width="2"/>
+    <text x="136" y="718" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="780">Plan room manager coordination</text>
+    <text x="136" y="744" fill="#7e7d87" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="760">task_91</text>
+
+    <rect x="112" y="760" width="536" height="64" rx="18" fill="#ffffff" fill-opacity="0.014" stroke="#ffffff" stroke-opacity="0.09" stroke-width="2"/>
+    <text x="136" y="796" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="780">Refactor oversized server task</text>
+    <text x="136" y="822" fill="#7e7d87" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="760">task_114</text>
+
+    <rect x="112" y="838" width="536" height="64" rx="18" fill="#ffffff" fill-opacity="0.014" stroke="#ffffff" stroke-opacity="0.09" stroke-width="2"/>
+    <text x="136" y="874" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="780">Attachment Work</text>
+    <text x="136" y="900" fill="#7e7d87" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="760">task_140</text>
+
+    <rect x="112" y="916" width="536" height="64" rx="18" fill="#ffffff" fill-opacity="0.014" stroke="#ffffff" stroke-opacity="0.09" stroke-width="2"/>
+    <text x="136" y="952" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="780">Reason streaming</text>
+    <text x="136" y="978" fill="#7e7d87" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="18" font-weight="760">Focus room</text>
+  </g>
+
+  <rect x="72" y="1034" width="576" height="66" rx="21" fill="#34d399" fill-opacity="0.06" stroke="#34d399" stroke-opacity="0.18" stroke-width="2"/>
+  <text x="98" y="1075" fill="#86efac" font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="900">Picked direction: Quiet Outline List</text>
+</svg>

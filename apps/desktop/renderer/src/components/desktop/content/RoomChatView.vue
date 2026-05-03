@@ -1,6 +1,17 @@
 <template>
-  <section class="room-tab-page room-chat-page" data-testid="room-chat-view">
+  <section
+    class="room-tab-page room-chat-page"
+    :data-dragging-attachments="isDraggingAttachment"
+    data-testid="room-chat-view"
+    @dragenter.prevent="handleAttachmentDragEnter"
+    @dragover.prevent="handleAttachmentDragOver"
+    @dragleave.prevent="handleAttachmentDragLeave"
+    @drop.prevent="handleAttachmentDrop"
+  >
     <div class="room-chat-layout">
+      <div v-if="isDraggingAttachment" class="room-attachment-drop-overlay" data-testid="room-attachment-drop-overlay">
+        <span>Drop files to attach</span>
+      </div>
       <div class="room-message-viewport" data-testid="room-chat-viewport">
         <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
           <button
@@ -45,7 +56,7 @@
 
       <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
         <div class="desktop-composer-identity">
-          <span>Sending from LetAgents Desktop</span>
+          <span>Message the room</span>
           <span class="desktop-composer-shortcut">Enter to send · ⌘↵ for a new line</span>
         </div>
         <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
@@ -69,7 +80,29 @@
           @keydown.enter="handleEnterKey"
           @keydown.escape="mentionOpen = false"
         />
-        <div v-if="attachmentDrafts.length" class="desktop-attachment-drafts" data-testid="desktop-attachment-drafts">
+        <div
+          v-if="attachmentDrafts.length || pendingAttachmentDrafts.length"
+          class="desktop-attachment-drafts"
+          data-testid="desktop-attachment-drafts"
+        >
+          <div
+            v-for="attachment in pendingAttachmentDrafts"
+            :key="attachment.localId"
+            class="desktop-attachment-draft is-pending"
+            data-testid="desktop-attachment-draft-pending"
+          >
+            <span>
+              <img
+                v-if="attachment.previewDataUrl"
+                class="desktop-attachment-preview"
+                :src="attachment.previewDataUrl"
+                alt=""
+              >
+              <span v-else class="desktop-attachment-pending-icon" aria-hidden="true"></span>
+              <strong>{{ attachment.fileName }}</strong>
+              <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }} · Uploading...</small>
+            </span>
+          </div>
           <div
             v-for="attachment in attachmentDrafts"
             :key="attachment.uploadId"
@@ -107,19 +140,15 @@
             class="desktop-composer-attach"
             type="button"
             :disabled="sending || !roomIdentifier || attaching"
+            :title="attaching ? 'Attaching' : 'Attach files'"
+            :aria-label="attaching ? 'Attaching files' : 'Attach files'"
             data-testid="desktop-composer-attach"
             @click="pickAttachments"
           >
-            {{ attaching ? "Attaching..." : "Attach" }}
-          </button>
-          <button
-            class="desktop-composer-attach"
-            type="button"
-            :disabled="sending || !roomIdentifier || attaching"
-            data-testid="desktop-composer-screenshot"
-            @click="captureScreenshot"
-          >
-            Screenshot
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
           </button>
           <button
             class="desktop-composer-send"
@@ -145,7 +174,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { DesktopParticipantSummary, DesktopRoomMessage, DesktopStagedAttachment } from "../../../../../electron/ipc-types";
+import type {
+  DesktopDroppedAttachmentContent,
+  DesktopParticipantSummary,
+  DesktopRoomMessage,
+  DesktopStagedAttachment,
+} from "../../../../../electron/ipc-types";
 import DesktopChatMessage from "./DesktopChatMessage.vue";
 import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
 
@@ -175,11 +209,22 @@ const activeImageId = ref<string | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const attachmentDrafts = ref<DesktopStagedAttachment[]>([]);
+const pendingAttachmentDrafts = ref<PendingAttachmentDraft[]>([]);
 const attachmentError = ref<string | null>(null);
 const attaching = ref(false);
+const isDraggingAttachment = ref(false);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 let isScrolledToBottom = true;
+let attachmentDragDepth = 0;
+
+interface PendingAttachmentDraft {
+  localId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  previewDataUrl: string | null;
+}
 
 const canSend = computed(() => Boolean(props.roomIdentifier && (draft.value.trim() || attachmentDrafts.value.length > 0)));
 const mentionOpen = computed({
@@ -302,21 +347,39 @@ async function pickAttachments(): Promise<void> {
   }
 }
 
-async function captureScreenshot(): Promise<void> {
-  if (attaching.value || !props.roomIdentifier) return;
+async function stageDroppedAttachments(files: File[]): Promise<void> {
+  if (attaching.value || files.length === 0) return;
+  if (!props.roomIdentifier) {
+    attachmentError.value = "Choose a room before attaching files.";
+    return;
+  }
+  const pendingDrafts = files.map(toPendingAttachmentDraft);
+  pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
   attaching.value = true;
   attachmentError.value = null;
   try {
-    const roomBridge = window.letagentsDesktop?.room as Partial<typeof window.letagentsDesktop.room> | undefined;
-    if (typeof roomBridge?.captureScreenshot !== "function") {
-      attachmentError.value = "Restart LetAgents Desktop to enable screenshots.";
-      return;
+    const stageDroppedAttachmentContents = window.letagentsDesktop.room.stageDroppedAttachmentContents;
+    if (!stageDroppedAttachmentContents) {
+      throw new Error("Restart LetAgents Desktop to enable drag and drop attachments.");
     }
-    const staged = await roomBridge.captureScreenshot(props.roomIdentifier);
+    const droppedFiles = await Promise.all(files.map(readDroppedAttachmentContent));
+    pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.map((attachment) => {
+      const draftIndex = pendingDrafts.findIndex((draft) => draft.localId === attachment.localId);
+      if (draftIndex < 0) return attachment;
+      const droppedFile = droppedFiles[draftIndex];
+      if (!droppedFile?.contentBase64 || !droppedFile.mimeType.startsWith("image/")) return attachment;
+      return {
+        ...attachment,
+        previewDataUrl: `data:${droppedFile.mimeType};base64,${droppedFile.contentBase64}`,
+      };
+    });
+    const staged = await stageDroppedAttachmentContents(props.roomIdentifier, droppedFiles);
     attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
   } catch (error) {
-    attachmentError.value = error instanceof Error ? error.message : "Screenshot could not be added.";
+    attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
   } finally {
+    const pendingIds = new Set(pendingDrafts.map((attachment) => attachment.localId));
+    pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.filter((attachment) => !pendingIds.has(attachment.localId));
     attaching.value = false;
   }
 }
@@ -324,6 +387,68 @@ async function captureScreenshot(): Promise<void> {
 async function removeAttachment(uploadId: string): Promise<void> {
   attachmentDrafts.value = attachmentDrafts.value.filter((attachment) => attachment.uploadId !== uploadId);
   emit("discard-attachment", uploadId);
+}
+
+function handleAttachmentDragEnter(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  attachmentDragDepth += 1;
+  isDraggingAttachment.value = true;
+}
+
+function handleAttachmentDragOver(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = props.roomIdentifier ? "copy" : "none";
+  isDraggingAttachment.value = true;
+}
+
+function handleAttachmentDragLeave(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+  if (attachmentDragDepth === 0) {
+    isDraggingAttachment.value = false;
+  }
+}
+
+function handleAttachmentDrop(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  attachmentDragDepth = 0;
+  isDraggingAttachment.value = false;
+  const files = Array.from(event.dataTransfer?.files || []);
+  void stageDroppedAttachments(files);
+}
+
+function hasDraggedFiles(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
+function toPendingAttachmentDraft(file: File): PendingAttachmentDraft {
+  return {
+    localId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    fileName: file.name || "attachment",
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    previewDataUrl: null,
+  };
+}
+
+async function readDroppedAttachmentContent(file: File): Promise<DesktopDroppedAttachmentContent> {
+  const dataUrl = await readFileAsDataUrl(file);
+  const [, contentBase64 = ""] = dataUrl.split(",", 2);
+  return {
+    fileName: file.name || "attachment",
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    contentBase64,
+  };
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error || new Error(`${file.name || "Attachment"} could not be read.`)));
+    reader.readAsDataURL(file);
+  });
 }
 
 function handleEnterKey(event: KeyboardEvent): void {

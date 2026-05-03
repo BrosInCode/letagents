@@ -1,5 +1,5 @@
 <template>
-  <section class="desktop-room-shell" data-testid="desktop-room-shell">
+  <section class="desktop-room-shell" :data-liquid-glass="liquidGlassEnabled" data-testid="desktop-room-shell">
     <header class="desktop-room-header" data-testid="desktop-room-header">
       <div class="desktop-room-heading">
         <h3>{{ room.displayName }}</h3>
@@ -32,7 +32,7 @@
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
             </svg>
-            Details
+            Settings
           </button>
         </div>
 
@@ -69,6 +69,7 @@
         :sound-enabled="soundEnabled"
         :notifications-enabled="notificationsEnabled"
         :notification-permission="notificationPermission"
+        :liquid-glass-enabled="liquidGlassEnabled"
         :rename-busy="renameBusy"
         :rename-error="renameError"
         :github-status="githubStatus"
@@ -79,6 +80,7 @@
         @open-rules="openRules"
         @toggle-sound="toggleSound"
         @toggle-notifications="toggleNotifications"
+        @toggle-liquid-glass="toggleLiquidGlass"
         @rename-room="renameRoom"
         @refresh-github="refreshGitHubIntegration"
         @install-github="installGitHubIntegration"
@@ -206,6 +208,7 @@ const githubBusy = ref(false);
 const githubError = ref<string | null>(null);
 const soundEnabled = ref(readSoundEnabled());
 const notificationsEnabled = ref(readNotificationsEnabled());
+const liquidGlassEnabled = ref(readLiquidGlassEnabled());
 const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
 const messageHistoryPageSize = 150;
 let refreshInterval: number | null = null;
@@ -315,7 +318,7 @@ async function sendRoomMessage(text: string, replyTo: string | null = null, atta
   const replyMessage = visibleMessages.value.find((message) => message.id === replyTo) || null;
   const pendingMessage: DesktopRoomMessage = {
     id: pendingId,
-    sender: "LetAgents Desktop",
+    sender: "You",
     text: trimmedText,
     attachments: [],
     agentPromptKind: null,
@@ -465,6 +468,11 @@ async function toggleNotifications(): Promise<void> {
   window.localStorage.setItem("letagents-desktop:notifications", notificationsEnabled.value ? "on" : "off");
 }
 
+function toggleLiquidGlass(): void {
+  liquidGlassEnabled.value = !liquidGlassEnabled.value;
+  window.localStorage.setItem("letagents-desktop:liquid-glass", liquidGlassEnabled.value ? "on" : "off");
+}
+
 function exportChat(): void {
   if (!visibleMessages.value.length) return;
   const lines = visibleMessages.value.map((message) =>
@@ -554,6 +562,14 @@ function readNotificationsEnabled(): boolean {
     return window.localStorage.getItem("letagents-desktop:notifications") === "on";
   } catch {
     return false;
+  }
+}
+
+function readLiquidGlassEnabled(): boolean {
+  try {
+    return window.localStorage.getItem("letagents-desktop:liquid-glass") !== "off";
+  } catch {
+    return true;
   }
 }
 

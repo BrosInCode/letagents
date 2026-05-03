@@ -51,17 +51,51 @@
           <span class="room-message-reply-text">{{ replyPreviewText }}</span>
         </button>
 
-        <div v-if="githubEvent" class="desktop-github-event" :data-tone="githubEvent.tone">
-          <div class="desktop-github-event-kicker">
-            <span>{{ githubEvent.kindLabel }}</span>
-            <span v-if="githubEvent.statusLabel">{{ githubEvent.statusLabel }}</span>
+        <div v-if="githubEvent" class="desktop-github-event" :data-tone="githubEvent.tone" :data-kind="githubEvent.kind">
+          <div class="desktop-github-event-icon" aria-hidden="true">
+            <svg v-if="githubEvent.kind === 'pull-request'" viewBox="0 0 16 16" fill="none">
+              <circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3" />
+              <circle cx="12" cy="12" r="2" stroke="currentColor" stroke-width="1.3" />
+              <path d="M5.5 5.5l5 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+              <path d="M11 7V4h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <svg v-else-if="githubEvent.kind === 'issue'" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.3" />
+              <line x1="8" y1="5" x2="8" y2="9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              <circle cx="8" cy="11.5" r="0.9" fill="currentColor" />
+            </svg>
+            <svg v-else-if="githubEvent.kind === 'review'" viewBox="0 0 16 16" fill="none">
+              <path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H8l-3 2v-2H4.5A1.5 1.5 0 0 1 3 9.5v-5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+              <path d="M6 7.8l1.2 1.2L10 6.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <svg v-else-if="githubEvent.kind === 'comment'" viewBox="0 0 16 16" fill="none">
+              <path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H8l-3 2v-2H4.5A1.5 1.5 0 0 1 3 9.5v-5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+              <line x1="5.5" y1="6.5" x2="10.5" y2="6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+              <line x1="5.5" y1="8.8" x2="9.5" y2="8.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+            </svg>
+            <svg v-else-if="githubEvent.kind === 'check'" viewBox="0 0 16 16" fill="none">
+              <rect x="2.5" y="2.5" width="11" height="11" rx="3" stroke="currentColor" stroke-width="1.3" />
+              <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            </svg>
+            <svg v-else-if="githubEvent.kind === 'repository'" viewBox="0 0 16 16" fill="none">
+              <path d="M3 5.5A1.5 1.5 0 0 1 4.5 4h2l1 1h4A1.5 1.5 0 0 1 13 6.5v4A1.5 1.5 0 0 1 11.5 12h-7A1.5 1.5 0 0 1 3 10.5v-5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+            </svg>
+            <svg v-else viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.3" />
+              <path d="M8 5.2v2.8M8 10.7h.01" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            </svg>
           </div>
-          <strong>{{ githubEvent.headline }}</strong>
-          <p v-if="githubEvent.detail">{{ githubEvent.detail }}</p>
-          <div class="desktop-github-event-meta">
-            <span v-if="githubEvent.repository">{{ githubEvent.repository }}</span>
-            <span v-if="githubEvent.taskId">{{ githubEvent.taskId }}</span>
-            <a v-if="githubEvent.url" :href="githubEvent.url" target="_blank" rel="noopener noreferrer">
+          <div class="desktop-github-event-content">
+            <div class="desktop-github-event-chips">
+              <span class="desktop-github-chip is-brand">GitHub</span>
+              <span class="desktop-github-chip">{{ githubEvent.kindLabel }}</span>
+              <span v-if="githubEvent.statusLabel" class="desktop-github-chip is-status">{{ githubEvent.statusLabel }}</span>
+              <span v-if="githubEvent.repository" class="desktop-github-chip is-repo">{{ githubEvent.repository }}</span>
+              <span v-if="githubEvent.taskId" class="desktop-github-chip is-task">{{ githubEvent.taskId }}</span>
+            </div>
+            <strong>{{ githubEvent.headline }}</strong>
+            <p v-if="githubEvent.detail">{{ githubEvent.detail }}</p>
+            <a v-if="githubEvent.url" class="desktop-github-event-link" :href="githubEvent.url" target="_blank" rel="noopener noreferrer">
               {{ githubEvent.urlLabel }}
             </a>
           </div>
@@ -95,12 +129,6 @@
               target="_blank"
               rel="noopener noreferrer"
             >
-              <span class="room-message-attachment-icon" aria-hidden="true">
-                <svg viewBox="0 0 16 16" fill="none">
-                  <path d="M4 2.5h5l3 3v8H4v-11Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                  <path d="M9 2.5v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                </svg>
-              </span>
               <span>
                 <strong>{{ attachmentName(attachment) }}</strong>
                 <small>{{ attachmentMeta(attachment) }}</small>
@@ -128,6 +156,7 @@ import type { DesktopRoomMessage, DesktopRoomMessageAttachment } from "../../../
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 
 interface GitHubEventPresentation {
+  kind: "pull-request" | "issue" | "review" | "comment" | "check" | "repository" | "generic";
   tone: "violet" | "amber" | "emerald" | "rose" | "sky" | "slate";
   kindLabel: string;
   statusLabel: string | null;
@@ -283,6 +312,7 @@ function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresentation 
   if (reviewMatch) {
     const action = reviewMatch[2].trim();
     return {
+      kind: "review",
       tone: action === "approved" ? "emerald" : action === "requested changes on" ? "rose" : "sky",
       kindLabel: "Review",
       statusLabel: action === "requested changes on" ? "changes requested" : action,
@@ -297,6 +327,7 @@ function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresentation 
   const commentMatch = /^(.+?)\s+commented on\s+(PR #\d+|Issue #\d+)\s+in\s+([^\s]+?)(?:\s+linked to\s+(task_\d+))?:\s+"([\s\S]*)"$/i.exec(body);
   if (commentMatch) {
     return {
+      kind: "comment",
       tone: "sky",
       kindLabel: "Comment",
       statusLabel: "new comment",
@@ -313,6 +344,7 @@ function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresentation 
     const conclusion = checkMatch[3].trim();
     const conclusionLabel = titleCase(conclusion);
     return {
+      kind: "check",
       tone: checkTone(conclusion),
       kindLabel: "Check run",
       statusLabel: conclusionLabel,
@@ -324,23 +356,28 @@ function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresentation 
       urlLabel: "Open check",
     };
   }
-  const prMatch = /^(PR #\d+|Issue #\d+)\s+(.+?)\s+in\s+([^\s]+?)(?:\s+linked to\s+(task_\d+))?:\s+([\s\S]+)$/i.exec(body);
+  const prMatch = /^(PR #\d+|Issue #\d+)\s+(.+?)\s+in\s+([^\s:]+)(?:\s+linked to\s+(task_\d+))?(?::\s*([\s\S]*))?$/i.exec(body);
   if (prMatch) {
     const kindLabel = prMatch[1].startsWith("PR ") ? "Pull request" : "Issue";
     const action = prMatch[2].trim();
+    const kind = kindLabel === "Pull request" ? "pull-request" : "issue";
     return {
-      tone: action.includes("merged") ? "emerald" : action.includes("closed") ? "slate" : kindLabel === "Issue" ? "amber" : "violet",
+      kind,
+      tone: artifactTone(kind, action),
       kindLabel,
       statusLabel: summarizeAction(action),
       headline: `${prMatch[1]} ${action}`,
-      detail: prMatch[5].trim(),
+      detail: prMatch[5]?.trim() || null,
       repository: prMatch[3],
       taskId: prMatch[4] || null,
       url,
       urlLabel: kindLabel === "Pull request" ? "Open pull request" : "Open issue",
     };
   }
+  const repositoryEvent = parseRepositoryEvent(body, url);
+  if (repositoryEvent) return repositoryEvent;
   return {
+    kind: "generic",
     tone: "slate",
     kindLabel: "GitHub event",
     statusLabel: null,
@@ -358,10 +395,42 @@ function summarizeAction(action: string): string | null {
   if (normalized.includes("ready for review")) return "ready";
   if (normalized.includes("merged")) return "merged";
   if (normalized.includes("closed")) return "closed";
+  if (normalized.includes("reopened")) return "reopened";
   if (normalized.includes("opened")) return "opened";
-  if (normalized.includes("draft")) return "draft";
+  if (normalized.includes("converted to draft") || normalized.includes("draft")) return "draft";
   if (normalized.includes("commits")) return "updated";
   return null;
+}
+
+function artifactTone(kind: GitHubEventPresentation["kind"], action: string): GitHubEventPresentation["tone"] {
+  const normalized = action.trim().toLowerCase();
+  if (normalized.includes("merged")) return "emerald";
+  if (normalized.includes("closed")) return "slate";
+  if (normalized.includes("converted to draft")) return "amber";
+  if (normalized.includes("received new commits")) return "sky";
+  if (kind === "issue") return "amber";
+  return "violet";
+}
+
+function parseRepositoryEvent(body: string, url: string | null): GitHubEventPresentation | null {
+  if (!/^Repository\b/i.test(body)) return null;
+  const statusLabel = /\brenamed\b/i.test(body)
+    ? "renamed"
+    : /\btransferred\b/i.test(body)
+      ? "transferred"
+      : null;
+  return {
+    kind: "repository",
+    tone: "sky",
+    kindLabel: "Repository",
+    statusLabel,
+    headline: body,
+    detail: null,
+    repository: null,
+    taskId: null,
+    url,
+    urlLabel: "Open repository",
+  };
 }
 
 function titleCase(value: string): string {

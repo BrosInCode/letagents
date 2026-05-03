@@ -294,6 +294,13 @@ export interface DesktopStagedAttachment {
   previewDataUrl: string | null;
 }
 
+export interface DesktopDroppedAttachmentContent {
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  contentBase64: string;
+}
+
 export interface DesktopRepoRoomSelection {
   canceled: boolean;
   repoPath: string | null;
@@ -312,7 +319,10 @@ export interface DesktopApi {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
-    captureScreenshot: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
+    stageDroppedAttachmentContents?: (
+      roomIdentifier: string,
+      files: DesktopDroppedAttachmentContent[]
+    ) => Promise<DesktopStagedAttachment[]>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     stopStream: (roomIdentifier?: string | null) => Promise<void>;
