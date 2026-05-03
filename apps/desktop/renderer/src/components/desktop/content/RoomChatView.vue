@@ -99,7 +99,9 @@
           </button>
         </div>
         <div class="desktop-composer-footer">
-          <p v-if="sendError" class="desktop-composer-error" data-testid="desktop-composer-error">{{ sendError }}</p>
+          <p v-if="sendError || attachmentError" class="desktop-composer-error" data-testid="desktop-composer-error">
+            {{ sendError || attachmentError }}
+          </p>
           <p v-else class="desktop-composer-hint">Use @ to bring a person or agent into the thread.</p>
           <button
             class="desktop-composer-attach"
@@ -173,6 +175,7 @@ const activeImageId = ref<string | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const attachmentDrafts = ref<DesktopStagedAttachment[]>([]);
+const attachmentError = ref<string | null>(null);
 const attaching = ref(false);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
@@ -288,9 +291,12 @@ function insertNewlineAtCursor(): void {
 async function pickAttachments(): Promise<void> {
   if (attaching.value || !props.roomIdentifier) return;
   attaching.value = true;
+  attachmentError.value = null;
   try {
     const staged = await window.letagentsDesktop.room.pickAttachments(props.roomIdentifier);
     attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+  } catch (error) {
+    attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
   } finally {
     attaching.value = false;
   }
@@ -299,9 +305,17 @@ async function pickAttachments(): Promise<void> {
 async function captureScreenshot(): Promise<void> {
   if (attaching.value || !props.roomIdentifier) return;
   attaching.value = true;
+  attachmentError.value = null;
   try {
-    const staged = await window.letagentsDesktop.room.captureScreenshot(props.roomIdentifier);
+    const roomBridge = window.letagentsDesktop?.room as Partial<typeof window.letagentsDesktop.room> | undefined;
+    if (typeof roomBridge?.captureScreenshot !== "function") {
+      attachmentError.value = "Restart LetAgents Desktop to enable screenshots.";
+      return;
+    }
+    const staged = await roomBridge.captureScreenshot(props.roomIdentifier);
     attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+  } catch (error) {
+    attachmentError.value = error instanceof Error ? error.message : "Screenshot could not be added.";
   } finally {
     attaching.value = false;
   }

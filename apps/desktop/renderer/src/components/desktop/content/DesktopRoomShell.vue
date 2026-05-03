@@ -20,7 +20,7 @@
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
             </svg>
-            Search
+            Find
           </button>
           <button
             class="desktop-room-tool"
@@ -30,9 +30,9 @@
             @click="actionPanelOpen = !actionPanelOpen"
           >
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 8h10M8 3v10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
             </svg>
-            Room
+            Details
           </button>
         </div>
 
@@ -60,50 +60,52 @@
       </div>
     </header>
 
-    <DesktopRoomActionPanel
-      :open="actionPanelOpen"
-      :room="room"
-      :room-url="roomUrl"
-      :copied="roomLinkCopied"
-      :sound-enabled="soundEnabled"
-      :notifications-enabled="notificationsEnabled"
-      :notification-permission="notificationPermission"
-      :rename-busy="renameBusy"
-      :rename-error="renameError"
-      :github-status="githubStatus"
-      :github-loading="githubLoading"
-      :github-busy="githubBusy"
-      :github-error="githubError"
-      @copy-room-link="copyRoomLink"
-      @open-rules="openRules"
-      @toggle-sound="toggleSound"
-      @toggle-notifications="toggleNotifications"
-      @rename-room="renameRoom"
-      @refresh-github="refreshGitHubIntegration"
-      @install-github="installGitHubIntegration"
-      @export-chat="exportChat"
-    />
+    <div v-if="actionPanelOpen || searchOpen" class="desktop-room-control-rail" data-testid="desktop-room-control-rail">
+      <DesktopRoomActionPanel
+        :open="actionPanelOpen"
+        :room="room"
+        :room-url="roomUrl"
+        :copied="roomLinkCopied"
+        :sound-enabled="soundEnabled"
+        :notifications-enabled="notificationsEnabled"
+        :notification-permission="notificationPermission"
+        :rename-busy="renameBusy"
+        :rename-error="renameError"
+        :github-status="githubStatus"
+        :github-loading="githubLoading"
+        :github-busy="githubBusy"
+        :github-error="githubError"
+        @copy-room-link="copyRoomLink"
+        @open-rules="openRules"
+        @toggle-sound="toggleSound"
+        @toggle-notifications="toggleNotifications"
+        @rename-room="renameRoom"
+        @refresh-github="refreshGitHubIntegration"
+        @install-github="installGitHubIntegration"
+        @export-chat="exportChat"
+      />
 
-    <div v-if="searchOpen" class="desktop-room-search-strip" data-testid="desktop-room-search-strip">
-      <label>
-        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-        <input
-          ref="searchInputElement"
-          v-model="searchQuery"
-          type="search"
-          placeholder="Search messages"
-          data-testid="desktop-room-search-input"
-          @keydown.enter.prevent="moveSearch(1)"
-          @keydown.escape.prevent="closeSearch"
-        >
-      </label>
-      <span>{{ searchSummary }}</span>
-      <div>
-        <button type="button" :disabled="!searchResults.length" @click="moveSearch(-1)">Previous</button>
-        <button type="button" :disabled="!searchResults.length" @click="moveSearch(1)">Next</button>
-        <button type="button" @click="closeSearch">Close</button>
+      <div v-if="searchOpen" class="desktop-room-search-strip" data-testid="desktop-room-search-strip">
+        <label>
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+          <input
+            ref="searchInputElement"
+            v-model="searchQuery"
+            type="search"
+            placeholder="Search messages"
+            data-testid="desktop-room-search-input"
+            @keydown.enter.prevent="moveSearch(1)"
+            @keydown.escape.prevent="closeSearch"
+          >
+        </label>
+        <span>{{ searchSummary }}</span>
+        <div>
+          <button type="button" :disabled="!searchResults.length" @click="moveSearch(-1)">Previous</button>
+          <button type="button" :disabled="!searchResults.length" @click="moveSearch(1)">Next</button>
+          <button type="button" @click="closeSearch">Close</button>
+        </div>
       </div>
     </div>
 
@@ -392,7 +394,12 @@ async function renameRoom(displayName: string): Promise<void> {
   renameBusy.value = true;
   renameError.value = null;
   try {
-    const updated = await window.letagentsDesktop.room.rename(props.room.identifier, displayName);
+    const roomBridge = getRoomBridge();
+    if (typeof roomBridge?.rename !== "function") {
+      renameError.value = desktopBridgeUpgradeMessage();
+      return;
+    }
+    const updated = await roomBridge.rename(props.room.identifier, displayName);
     emit("room-renamed", updated);
     emit("refresh-room");
   } catch (error) {
@@ -406,7 +413,13 @@ async function refreshGitHubIntegration(): Promise<void> {
   githubLoading.value = true;
   githubError.value = null;
   try {
-    githubStatus.value = await window.letagentsDesktop.room.getGitHubIntegrationStatus(props.room.identifier);
+    const roomBridge = getRoomBridge();
+    if (typeof roomBridge?.getGitHubIntegrationStatus !== "function") {
+      githubStatus.value = null;
+      githubError.value = desktopBridgeUpgradeMessage();
+      return;
+    }
+    githubStatus.value = await roomBridge.getGitHubIntegrationStatus(props.room.identifier);
   } catch (error) {
     githubStatus.value = null;
     githubError.value = error instanceof Error ? error.message : "GitHub status could not be checked.";
@@ -419,7 +432,12 @@ async function installGitHubIntegration(): Promise<void> {
   githubBusy.value = true;
   githubError.value = null;
   try {
-    const result = await window.letagentsDesktop.room.openGitHubInstall(props.room.identifier);
+    const roomBridge = getRoomBridge();
+    if (typeof roomBridge?.openGitHubInstall !== "function") {
+      githubError.value = desktopBridgeUpgradeMessage();
+      return;
+    }
+    const result = await roomBridge.openGitHubInstall(props.room.identifier);
     if (!result.opened) githubError.value = result.message;
   } catch (error) {
     githubError.value = error instanceof Error ? error.message : "GitHub could not be opened.";
@@ -460,6 +478,14 @@ function exportChat(): void {
   anchor.download = `letagents-${props.room.displayName.replace(/[^a-z0-9-]+/gi, "-").toLowerCase()}-${Date.now()}.txt`;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function getRoomBridge(): Partial<typeof window.letagentsDesktop.room> | undefined {
+  return window.letagentsDesktop?.room as Partial<typeof window.letagentsDesktop.room> | undefined;
+}
+
+function desktopBridgeUpgradeMessage(): string {
+  return "Restart LetAgents Desktop to load the latest room tools.";
 }
 
 function mergeRoomMessages(current: readonly DesktopRoomMessage[], incoming: readonly DesktopRoomMessage[]): DesktopRoomMessage[] {
