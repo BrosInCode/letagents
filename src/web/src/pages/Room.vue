@@ -30,7 +30,6 @@
     <RoomRulesBoard
       v-if="rulesBoardAvailable"
       :open="rulesBoardOpen"
-      :tasks="tasks"
       @close="rulesBoardOpen = false"
     />
 

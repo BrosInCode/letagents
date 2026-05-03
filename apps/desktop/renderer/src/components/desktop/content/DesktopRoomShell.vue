@@ -150,7 +150,6 @@
 
     <DesktopRoomRulesModal
       :open="rulesOpen"
-      :tasks="tasks"
       @close="rulesOpen = false"
     />
   </section>

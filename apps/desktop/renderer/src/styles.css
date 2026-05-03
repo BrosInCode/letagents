@@ -777,44 +777,81 @@ code {
   padding: 10px 16px;
 }
 
-.desktop-room-action-grid {
+.desktop-room-deck {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(310px, 0.92fr) minmax(420px, 1.2fr);
+  gap: 12px;
   max-height: min(38vh, 360px);
   overflow-y: auto;
   padding-right: 2px;
 }
 
-.desktop-room-action-card {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  min-height: 76px;
-  padding: 12px;
+.desktop-room-identity-card,
+.desktop-room-github-pill,
+.desktop-room-command {
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
   background:
-    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.06), transparent 34%),
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.055), transparent 38%),
     rgba(255, 255, 255, 0.025);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
-.desktop-room-action-card-wide {
-  grid-column: span 1;
-  grid-template-columns: minmax(0, 1fr);
+.desktop-room-identity-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 174px;
+  padding: 14px;
+  border-radius: 20px;
 }
 
-.desktop-room-action-card strong,
-.desktop-room-github-line strong {
+.desktop-room-command-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.desktop-room-command {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 78px;
+  padding: 10px;
+  border-radius: 18px;
   color: var(--text);
-  font-size: 0.92rem;
+  text-align: left;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-command:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.15);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.075), transparent 38%),
+    rgba(255, 255, 255, 0.04);
+}
+
+.desktop-room-command span:last-child,
+.desktop-room-github-pill > span:nth-child(2) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-room-command strong,
+.desktop-room-github-pill strong {
+  color: var(--text);
+  font-size: 0.84rem;
   font-weight: 900;
 }
 
-.desktop-room-action-card p,
-.desktop-room-github-line p,
+.desktop-room-command small,
+.desktop-room-github-pill small,
+.desktop-room-action-note,
 .desktop-room-action-error {
   margin: 4px 0 0;
   color: var(--text-secondary);
@@ -826,9 +863,9 @@ code {
   color: #ff8a8a;
 }
 
-.desktop-room-action-card button,
-.desktop-room-share-row button,
-.desktop-room-rename-control button,
+.desktop-room-link-line button,
+.desktop-room-title-control button,
+.desktop-room-github-pill button,
 .desktop-room-search-strip button {
   min-height: 32px;
   padding: 0 12px;
@@ -844,17 +881,17 @@ code {
     transform var(--duration-fast) var(--ease-out);
 }
 
-.desktop-room-action-card button:hover:not(:disabled),
-.desktop-room-share-row button:hover,
-.desktop-room-rename-control button:hover:not(:disabled),
+.desktop-room-link-line button:hover,
+.desktop-room-title-control button:hover:not(:disabled),
+.desktop-room-github-pill button:hover:not(:disabled),
 .desktop-room-search-strip button:hover:not(:disabled) {
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.1);
 }
 
-.desktop-room-action-card button:disabled,
-.desktop-room-rename-control button:disabled,
+.desktop-room-title-control button:disabled,
+.desktop-room-github-pill button:disabled,
 .desktop-room-search-strip button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
@@ -914,15 +951,24 @@ code {
   background: rgba(148, 163, 184, 0.12);
 }
 
-.desktop-room-share-row,
-.desktop-room-rename-control,
-.desktop-room-github-line {
+.desktop-room-link-line,
+.desktop-room-title-control,
+.desktop-room-github-pill {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
-.desktop-room-share-row span {
+.desktop-room-link-line {
+  min-height: 42px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.desktop-room-link-line span {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -932,10 +978,10 @@ code {
   white-space: nowrap;
 }
 
-.desktop-room-rename-control input {
+.desktop-room-title-control input {
   flex: 1;
   min-width: 0;
-  min-height: 38px;
+  min-height: 42px;
   padding: 0 12px;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 999px;
@@ -946,17 +992,16 @@ code {
   font-size: 0.84rem;
 }
 
-.desktop-room-rename-control input:focus {
+.desktop-room-title-control input:focus {
   border-color: rgba(255, 255, 255, 0.22);
 }
 
-.desktop-room-github-line {
+.desktop-room-github-pill {
+  grid-column: span 2;
   min-width: 0;
-}
-
-.desktop-room-github-line div {
-  flex: 1;
-  min-width: 0;
+  min-height: 78px;
+  padding: 10px 12px;
+  border-radius: 18px;
 }
 
 .desktop-room-github-dot {
@@ -976,6 +1021,46 @@ code {
 .desktop-room-github-dot[data-state="loading"] {
   background: #f59e0b;
   box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.11);
+}
+
+@media (max-width: 1180px) {
+  .desktop-room-deck {
+    grid-template-columns: 1fr;
+    max-height: min(48vh, 430px);
+  }
+
+  .desktop-room-command-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 860px) {
+  .desktop-room-command-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .desktop-room-github-pill {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .desktop-room-command-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-room-link-line,
+  .desktop-room-title-control,
+  .desktop-room-github-pill {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .desktop-room-link-line button,
+  .desktop-room-title-control button,
+  .desktop-room-github-pill button {
+    width: 100%;
+  }
 }
 
 .desktop-room-search-strip {
