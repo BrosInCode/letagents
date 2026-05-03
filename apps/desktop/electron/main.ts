@@ -48,6 +48,7 @@ const rendererDistPath = join(desktopRoot, "dist-renderer", "index.html");
 const devServerUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim() || null;
 const apiUrl = process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
 const attachmentProtocolScheme = "letagents-attachment";
+const roomMessageHistoryPageSize = 150;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -1004,7 +1005,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
           ide_label?: string | null;
           actor_label?: string | null;
         } | null;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=24&before=latest`).catch(() => ({ messages: [] })),
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`).catch(() => ({ messages: [] })),
     ]);
 
     const room: DesktopRoomInfo = {
@@ -1504,7 +1505,7 @@ function guessMimeType(fileName: string): string {
 async function getDesktopRoomMessagesBefore(
   roomIdentifier: string,
   beforeMessageId: string,
-  limit = 24
+  limit = roomMessageHistoryPageSize
 ): Promise<DesktopRoomMessagesPage> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedBeforeMessageId = beforeMessageId.trim();
@@ -1598,7 +1599,7 @@ async function pollDesktopRoomMessages(stream: NonNullable<typeof activeRoomStre
         requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
       }
       const response = await fetch(
-        `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=24&timeout=25000&after=${encodeURIComponent(after)}`,
+        `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=${roomMessageHistoryPageSize}&timeout=25000&after=${encodeURIComponent(after)}`,
         { headers: requestHeaders, signal: pollAbortController.signal },
       );
       if (!response.ok) {

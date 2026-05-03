@@ -105,6 +105,7 @@ const olderMessages = ref<DesktopRoomMessage[]>([]);
 const localMessages = ref<DesktopRoomMessage[]>([]);
 const hasOlderMessages = ref(true);
 const loadingOlderMessages = ref(false);
+const messageHistoryPageSize = 150;
 let refreshInterval: number | null = null;
 
 const emit = defineEmits<{
@@ -229,7 +230,7 @@ async function loadOlderMessages(): Promise<void> {
 
   loadingOlderMessages.value = true;
   try {
-    const page = await window.letagentsDesktop.room.getMessagesBefore(props.room.identifier, firstMessageId, 24);
+    const page = await window.letagentsDesktop.room.getMessagesBefore(props.room.identifier, firstMessageId, messageHistoryPageSize);
     olderMessages.value = [...page.messages, ...olderMessages.value];
     hasOlderMessages.value = page.hasOlder;
   } catch {
