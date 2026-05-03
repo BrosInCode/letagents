@@ -20,6 +20,8 @@
             :message="message"
             :thread-count="threadCount(message.id)"
             :latest-thread-message-id="latestThreadMessageId(message.id)"
+            :highlight-query="searchQuery"
+            :search-active="message.id === activeSearchMessageId"
             @reply="startReply"
             @scroll-to-message="scrollToMessage"
             @open-image="openImageViewer"
@@ -109,6 +111,15 @@
             {{ attaching ? "Attaching..." : "Attach" }}
           </button>
           <button
+            class="desktop-composer-attach"
+            type="button"
+            :disabled="sending || !roomIdentifier || attaching"
+            data-testid="desktop-composer-screenshot"
+            @click="captureScreenshot"
+          >
+            Screenshot
+          </button>
+          <button
             class="desktop-composer-send"
             type="submit"
             :disabled="sending || !canSend"
@@ -144,6 +155,8 @@ const props = defineProps<{
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   participants: DesktopParticipantSummary[];
+  searchQuery: string;
+  activeSearchMessageId: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -234,6 +247,15 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => props.activeSearchMessageId,
+  (messageId) => {
+    if (messageId) {
+      void nextTick(() => scrollToMessage(messageId));
+    }
+  },
+);
+
 function submitMessage(): void {
   const text = draft.value.trim();
   if (!text && attachmentDrafts.value.length === 0) return;
@@ -268,6 +290,17 @@ async function pickAttachments(): Promise<void> {
   attaching.value = true;
   try {
     const staged = await window.letagentsDesktop.room.pickAttachments(props.roomIdentifier);
+    attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+  } finally {
+    attaching.value = false;
+  }
+}
+
+async function captureScreenshot(): Promise<void> {
+  if (attaching.value || !props.roomIdentifier) return;
+  attaching.value = true;
+  try {
+    const staged = await window.letagentsDesktop.room.captureScreenshot(props.roomIdentifier);
     attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
   } finally {
     attaching.value = false;

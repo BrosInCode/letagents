@@ -5,6 +5,7 @@
       'is-system-message': isSystem,
       'is-github-message': Boolean(githubEvent),
       'has-reply': Boolean(message.replyTo),
+      'is-search-active': searchActive,
     }"
     :data-owner-kind="ownerKind"
     :data-testid="`room-message-${message.id}`"
@@ -142,6 +143,8 @@ const props = defineProps<{
   message: DesktopRoomMessage;
   threadCount: number;
   latestThreadMessageId: string | null;
+  highlightQuery: string;
+  searchActive: boolean;
 }>();
 
 defineEmits<{
@@ -169,7 +172,7 @@ const replyDisplayName = computed(() =>
 );
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedText = computed(() => renderMessageText(props.message.text || "No message body."));
+const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
 
 function parseSenderIdentity(input: { sender?: string | null }): {
   displayName: string;
@@ -250,8 +253,8 @@ function escapeAttr(value: string): string {
   return escapeHtml(value).replace(/'/g, "&#39;");
 }
 
-function renderMessageText(value: string): string {
-  return escapeHtml(value)
+function renderMessageText(value: string, highlightQuery: string): string {
+  return highlightEscapedText(escapeHtml(value), highlightQuery)
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/(https?:\/\/[^\s<"']+)/g, (_match, url) => {
@@ -260,6 +263,14 @@ function renderMessageText(value: string): string {
     })
     .replace(/(^|[\s(])@([A-Za-z0-9._-]+)/g, '$1<span class="mention-token">@$2</span>')
     .replace(/\n/g, "<br>");
+}
+
+function highlightEscapedText(value: string, query: string): string {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return value;
+  const escapedQuery = escapeHtml(normalizedQuery).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escapedQuery) return value;
+  return value.replace(new RegExp(escapedQuery, "gi"), '<mark class="message-search-hit">$&</mark>');
 }
 
 function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresentation | null {

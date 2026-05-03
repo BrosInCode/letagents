@@ -33,7 +33,7 @@
               Next
             </button>
             <a class="desktop-image-viewer-action" :href="activeImage.href" :download="activeImage.name">Download</a>
-            <a class="desktop-image-viewer-action" :href="activeImage.href" target="_blank" rel="noopener noreferrer">Open original</a>
+            <a class="desktop-image-viewer-action" :href="activeImage.href" target="_blank" rel="noopener noreferrer">Open</a>
             <button class="desktop-image-viewer-action is-primary" type="button" @click="$emit('close')">Close</button>
           </div>
         </header>

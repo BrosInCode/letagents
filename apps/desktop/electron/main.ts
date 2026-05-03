@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,8 @@ import type {
   DesktopAppInfo,
   DiagnosticsSnapshot,
   DesktopFocusRoomInfo,
+  DesktopGitHubIntegrationActionResult,
+  DesktopGitHubIntegrationStatus,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
@@ -147,6 +149,20 @@ type DeviceAuthPollResponse = {
     display_name?: string | null;
     avatar_url?: string | null;
   };
+};
+
+type RoomInfoPayload = {
+  room_id?: string;
+  code?: string;
+  name?: string | null;
+  display_name?: string | null;
+  role?: string;
+  authenticated?: boolean;
+  kind?: "main" | "focus";
+  parent_room_id?: string | null;
+  focus_key?: string | null;
+  source_task_id?: string | null;
+  focus_status?: "active" | "concluded" | null;
 };
 
 class DesktopApiError extends Error {
@@ -864,6 +880,23 @@ function createRoomAccess(input: Partial<DesktopRoomAccess>): DesktopRoomAccess 
   };
 }
 
+function mapDesktopRoomInfoPayload(requestedRoomIdentifier: string, payload: RoomInfoPayload): DesktopRoomInfo {
+  const canonicalIdentifier = payload.room_id || requestedRoomIdentifier;
+  return {
+    identifier: canonicalIdentifier,
+    code: payload.code || "",
+    name: payload.name || canonicalIdentifier,
+    displayName: payload.display_name || payload.name || canonicalIdentifier,
+    role: payload.role || "participant",
+    authenticated: Boolean(payload.authenticated),
+    kind: payload.kind || "main",
+    parentRoomId: payload.parent_room_id || null,
+    focusKey: payload.focus_key || null,
+    sourceTaskId: payload.source_task_id || null,
+    focusStatus: payload.focus_status || null,
+  };
+}
+
 async function parseApiErrorPayload(response: Response): Promise<ApiErrorPayload | null> {
   try {
     const text = await response.text();
@@ -919,19 +952,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
   }
 
   try {
-    const joined = await apiFetch<{
-      room_id?: string;
-      code?: string;
-      name?: string;
-      display_name?: string;
-      role?: string;
-      authenticated?: boolean;
-      kind?: "main" | "focus";
-      parent_room_id?: string | null;
-      focus_key?: string | null;
-      source_task_id?: string | null;
-      focus_status?: "active" | "concluded" | null;
-    }>(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
+    const joined = await apiFetch<RoomInfoPayload>(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
       method: "POST",
     });
 
@@ -1008,19 +1029,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`).catch(() => ({ messages: [] })),
     ]);
 
-    const room: DesktopRoomInfo = {
-      identifier: roomIdentifier,
-      code: joined.code || "",
-      name: joined.name || roomIdentifier,
-      displayName: joined.display_name || joined.name || roomIdentifier,
-      role: joined.role || "participant",
-      authenticated: Boolean(joined.authenticated),
-      kind: joined.kind || "main",
-      parentRoomId: joined.parent_room_id || null,
-      focusKey: joined.focus_key || null,
-      sourceTaskId: joined.source_task_id || null,
-      focusStatus: joined.focus_status || null,
-    };
+    const room = mapDesktopRoomInfoPayload(roomIdentifier, joined);
 
     const focusRooms: DesktopFocusRoomInfo[] = (focusRoomsData.focus_rooms || []).map((focusRoom) => ({
       roomId: focusRoom.room_id,
@@ -1425,57 +1434,90 @@ async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<D
 
   const staged: DesktopStagedAttachment[] = [];
   for (const filePath of result.filePaths) {
-    const fileBuffer = await readFile(filePath);
-    const fileName = basename(filePath);
-    const mimeType = guessMimeType(fileName);
-    const target = await apiFetch<{
-      upload_id?: string;
-      upload_url?: string;
-      url?: string;
-      method?: string;
-      headers?: Record<string, string>;
-      attachment?: { upload_id?: string };
-    }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/attachments/uploads`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        file_name: fileName,
-        mime_type: mimeType,
-        size_bytes: fileBuffer.byteLength,
-      }),
-    });
-
-    const uploadId = target.upload_id || target.attachment?.upload_id;
-    const uploadUrl = target.upload_url || target.url;
-    if (!uploadId || !uploadUrl) {
-      throw new Error(`${fileName} could not be staged.`);
-    }
-
-    const uploadHeaders = new Headers(target.headers || {});
-    if (![...uploadHeaders.keys()].some((key) => key.toLowerCase() === "content-type")) {
-      uploadHeaders.set("Content-Type", mimeType);
-    }
-    const uploadResponse = await fetch(uploadUrl, {
-      method: target.method || "PUT",
-      headers: uploadHeaders,
-      body: fileBuffer,
-    });
-    if (!uploadResponse.ok) {
-      await discardDesktopAttachment(trimmedRoomIdentifier, uploadId).catch(() => undefined);
-      throw new Error(`${fileName} upload failed with HTTP ${uploadResponse.status}.`);
-    }
-
-    staged.push({
-      uploadId,
-      fileName,
-      mimeType,
-      sizeBytes: fileBuffer.byteLength,
-      previewDataUrl: mimeType.startsWith("image/")
-        ? `data:${mimeType};base64,${fileBuffer.toString("base64")}`
-        : null,
-    });
+    staged.push(await stageDesktopAttachmentFile(trimmedRoomIdentifier, filePath));
   }
   return staged;
+}
+
+async function captureAndStageDesktopScreenshot(roomIdentifier: string): Promise<DesktopStagedAttachment[]> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before adding a screenshot.");
+  }
+  if (process.platform !== "darwin") {
+    throw new Error("Screenshot capture is only wired for macOS in this desktop build.");
+  }
+
+  const captureDir = join(tmpdir(), "letagents-desktop-screenshots");
+  await mkdir(captureDir, { recursive: true });
+  const filePath = join(captureDir, `letagents-screenshot-${Date.now()}.png`);
+
+  try {
+    await execFileAsync("screencapture", ["-i", "-t", "png", filePath]);
+    if (!existsSync(filePath)) return [];
+    return [await stageDesktopAttachmentFile(trimmedRoomIdentifier, filePath, "Screenshot.png")];
+  } catch (error) {
+    if (!existsSync(filePath)) return [];
+    throw error;
+  } finally {
+    await rm(filePath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function stageDesktopAttachmentFile(
+  roomIdentifier: string,
+  filePath: string,
+  displayFileName?: string
+): Promise<DesktopStagedAttachment> {
+  const fileBuffer = await readFile(filePath);
+  const fileName = displayFileName || basename(filePath);
+  const mimeType = guessMimeType(fileName);
+  const target = await apiFetch<{
+    upload_id?: string;
+    upload_url?: string;
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    attachment?: { upload_id?: string };
+  }>(`/rooms/${encodeURIComponent(roomIdentifier)}/attachments/uploads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file_name: fileName,
+      mime_type: mimeType,
+      size_bytes: fileBuffer.byteLength,
+    }),
+  });
+
+  const uploadId = target.upload_id || target.attachment?.upload_id;
+  const uploadUrl = target.upload_url || target.url;
+  if (!uploadId || !uploadUrl) {
+    throw new Error(`${fileName} could not be staged.`);
+  }
+
+  const uploadHeaders = new Headers(target.headers || {});
+  if (![...uploadHeaders.keys()].some((key) => key.toLowerCase() === "content-type")) {
+    uploadHeaders.set("Content-Type", mimeType);
+  }
+  const uploadResponse = await fetch(uploadUrl, {
+    method: target.method || "PUT",
+    headers: uploadHeaders,
+    body: fileBuffer,
+  });
+  if (!uploadResponse.ok) {
+    await discardDesktopAttachment(roomIdentifier, uploadId).catch(() => undefined);
+    throw new Error(`${fileName} upload failed with HTTP ${uploadResponse.status}.`);
+  }
+
+  return {
+    uploadId,
+    fileName,
+    mimeType,
+    sizeBytes: fileBuffer.byteLength,
+    previewDataUrl: mimeType.startsWith("image/")
+      ? `data:${mimeType};base64,${fileBuffer.toString("base64")}`
+      : null,
+  };
 }
 
 async function discardDesktopAttachment(roomIdentifier: string, uploadId: string): Promise<void> {
@@ -1781,6 +1823,71 @@ async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
   };
 }
 
+async function renameDesktopRoom(roomIdentifier: string, displayName: string): Promise<DesktopRoomInfo> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedDisplayName = displayName.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before renaming it.");
+  }
+  if (!trimmedDisplayName) {
+    throw new Error("Enter a room name.");
+  }
+
+  const updated = await apiFetch<RoomInfoPayload>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: trimmedDisplayName }),
+  });
+  return mapDesktopRoomInfoPayload(trimmedRoomIdentifier, updated);
+}
+
+async function getDesktopGitHubIntegrationStatus(roomIdentifier: string): Promise<DesktopGitHubIntegrationStatus> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before checking GitHub.");
+  }
+
+  const status = await apiFetch<{
+    room_id?: string;
+    access_room_id?: string | null;
+    configured?: boolean;
+    setup_manifest_available?: boolean;
+    connected?: boolean;
+    install_url_available?: boolean;
+    repository?: { full_name?: string } | null;
+  }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/integrations/github`);
+
+  return {
+    roomId: status.room_id || trimmedRoomIdentifier,
+    accessRoomId: status.access_room_id || null,
+    configured: Boolean(status.configured),
+    setupManifestAvailable: Boolean(status.setup_manifest_available),
+    connected: Boolean(status.connected),
+    installUrlAvailable: Boolean(status.install_url_available),
+    repository: status.repository?.full_name ? { fullName: status.repository.full_name } : null,
+  };
+}
+
+async function openDesktopGitHubInstall(roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before opening GitHub.");
+  }
+
+  const payload = await apiFetch<{ install_url?: string }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/integrations/github/install-url`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+  if (!payload.install_url) {
+    return { opened: false, message: "GitHub did not return an install URL." };
+  }
+  await shell.openExternal(payload.install_url);
+  return { opened: true, message: "GitHub opened in your browser." };
+}
+
 async function startDeviceAuthFlow(roomIdentifier?: string | null): Promise<DesktopAuthStartResult> {
   const trimmedRoomIdentifier = roomIdentifier?.trim() || await resolveRoomIdentifier();
   const path = trimmedRoomIdentifier
@@ -1983,6 +2090,10 @@ ipcMain.handle(
   async (_event, roomIdentifier: string): Promise<DesktopStagedAttachment[]> => pickAndStageDesktopAttachments(roomIdentifier)
 );
 ipcMain.handle(
+  "desktop:room:capture-screenshot",
+  async (_event, roomIdentifier: string): Promise<DesktopStagedAttachment[]> => captureAndStageDesktopScreenshot(roomIdentifier)
+);
+ipcMain.handle(
   "desktop:room:discard-attachment",
   async (_event, roomIdentifier: string, uploadId: string): Promise<void> => discardDesktopAttachment(roomIdentifier, uploadId)
 );
@@ -2005,6 +2116,21 @@ ipcMain.handle(
     attachments?: Array<{ upload_id: string }>
   ): Promise<DesktopSendRoomMessageResult> =>
     sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [])
+);
+ipcMain.handle(
+  "desktop:room:rename",
+  async (_event, roomIdentifier: string, displayName: string): Promise<DesktopRoomInfo> =>
+    renameDesktopRoom(roomIdentifier, displayName)
+);
+ipcMain.handle(
+  "desktop:room:get-github-integration-status",
+  async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationStatus> =>
+    getDesktopGitHubIntegrationStatus(roomIdentifier)
+);
+ipcMain.handle(
+  "desktop:room:open-github-install",
+  async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> =>
+    openDesktopGitHubInstall(roomIdentifier)
 );
 ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
 ipcMain.handle(

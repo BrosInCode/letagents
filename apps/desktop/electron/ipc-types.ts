@@ -230,6 +230,21 @@ export interface DesktopRoomMessage {
   replyTo: DesktopRoomMessageReply | null;
 }
 
+export interface DesktopGitHubIntegrationStatus {
+  roomId: string;
+  accessRoomId: string | null;
+  configured: boolean;
+  setupManifestAvailable: boolean;
+  connected: boolean;
+  installUrlAvailable: boolean;
+  repository: { fullName: string } | null;
+}
+
+export interface DesktopGitHubIntegrationActionResult {
+  opened: boolean;
+  message: string;
+}
+
 export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
   access: DesktopRoomAccess;
@@ -297,6 +312,7 @@ export interface DesktopApi {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
+    captureScreenshot: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     stopStream: (roomIdentifier?: string | null) => Promise<void>;
@@ -307,6 +323,9 @@ export interface DesktopApi {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>
     ) => Promise<DesktopSendRoomMessageResult>;
+    rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
+    getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
+    openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
   };
   auth: {
     getStatus: () => Promise<DesktopAuthStatus>;

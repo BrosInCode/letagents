@@ -100,6 +100,7 @@
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
           @message-sent="handleMessageSent"
+          @room-renamed="handleRoomRenamed"
           @refresh-room="refreshSelectedSnapshot()"
         />
       </template>
@@ -697,6 +698,22 @@ function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
 
 function handleMessageSent(message: DesktopRoomMessage): void {
   appendSelectedMessage(message);
+}
+
+function handleRoomRenamed(room: DesktopRoomInfo): void {
+  if (!selectedSnapshot.value) return;
+  selectedSnapshot.value = {
+    ...selectedSnapshot.value,
+    room,
+    roomIdentifier: room.identifier,
+  };
+  if (rootRoomSnapshot.value && roomSnapshotsMatch(rootRoomSnapshot.value, selectedSnapshot.value)) {
+    rootRoomSnapshot.value = {
+      ...rootRoomSnapshot.value,
+      room,
+      roomIdentifier: room.identifier,
+    };
+  }
 }
 
 async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
