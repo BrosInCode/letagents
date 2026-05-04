@@ -425,7 +425,8 @@ const liveParticipants = computed(() => {
 
   for (const presence of props.presence) {
     if (presence.sessionKind !== "worker") continue;
-    if (hiddenAgentActors.value.has(presence.actorLabel)) continue;
+    if (!presence.sourceFlags.includes("delivery")) continue;
+    if (hiddenAgentActors.value.has(presence.actorLabel) && !isReachablePresence(presence)) continue;
     const participant = participantsByActor.value.get(presence.actorLabel) || null;
     const key = `agent:${presence.agentSessionId || presence.actorLabel}`;
     agents.set(key, buildAgentParticipant(key, presence.actorLabel, participant, presence));
@@ -587,12 +588,16 @@ function buildHumanParticipant(participant: DesktopParticipantSummary): Activity
 }
 
 function resolveActivityState(participant: DesktopParticipantSummary | null, presence: DesktopAgentPresence | null): ActivityState {
-  if (participant?.hiddenAt) return "offline";
-  if (presence?.sessionKind === "worker" && presence.sourceFlags.includes("delivery") && presence.freshness === "active") {
+  if (presence && isReachablePresence(presence)) {
     return presence.status === "idle" ? "away" : "active";
   }
+  if (participant?.hiddenAt) return "offline";
   if (presence?.activityState) return presence.activityState;
   return participant?.activityState || "offline";
+}
+
+function isReachablePresence(presence: DesktopAgentPresence): boolean {
+  return presence.sessionKind === "worker" && presence.sourceFlags.includes("delivery") && presence.freshness === "active";
 }
 
 function workSignalFrom(

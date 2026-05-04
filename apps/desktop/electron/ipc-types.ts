@@ -405,6 +405,16 @@ export type DesktopRoomStreamEvent =
       task: DesktopTaskSummary;
     }
   | {
+      type: "reasoning_update";
+      roomIdentifier: string;
+      session: DesktopReasoningSession;
+    }
+  | {
+      type: "reasoning_remove";
+      roomIdentifier: string;
+      sessionId: string;
+    }
+  | {
       type: "session_disconnect" | "error";
       roomIdentifier: string;
       message: string | null;

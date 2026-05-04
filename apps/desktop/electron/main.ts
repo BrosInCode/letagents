@@ -1208,27 +1208,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
 
     const reasoningSessions: DesktopReasoningSession[] = [
       ...(reasoningData.sessions || reasoningData.reasoning_sessions || []),
-    ].map((session) => ({
-      id: session.id,
-      roomId: session.room_id || null,
-      actorLabel: session.actor_label || null,
-      agentKey: session.agent_key || null,
-      taskId: session.task_id || null,
-      title: session.title || null,
-      status: session.status || null,
-      summary: session.summary || null,
-      latestPayload: session.latest_payload || null,
-      goal: session.goal || null,
-      checking: session.checking || null,
-      hypothesis: session.hypothesis || null,
-      blocker: session.blocker || null,
-      nextAction: session.next_action || null,
-      milestone: session.milestone || null,
-      confidence: session.confidence ?? null,
-      closedAt: session.closed_at || null,
-      createdAt: session.created_at || null,
-      updatedAt: session.updated_at || null,
-    })).sort((left, right) => {
+    ].map(mapDesktopReasoningSessionPayload).sort((left, right) => {
       const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
       const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
       return (Number.isFinite(rightTime) ? rightTime : -1) - (Number.isFinite(leftTime) ? leftTime : -1);
@@ -1832,6 +1812,50 @@ function mapRoomStreamTaskPayload(task: {
   return mapDesktopTaskSummaryPayload({ ...task, id: task.id });
 }
 
+function mapDesktopReasoningSessionPayload(session: {
+  id: string;
+  room_id?: string | null;
+  actor_label?: string | null;
+  agent_key?: string | null;
+  task_id?: string | null;
+  title?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  latest_payload?: DesktopReasoningSession["latestPayload"];
+  goal?: string | null;
+  checking?: string | null;
+  hypothesis?: string | null;
+  blocker?: string | null;
+  next_action?: string | null;
+  milestone?: string | null;
+  confidence?: number | null;
+  closed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}): DesktopReasoningSession {
+  return {
+    id: session.id,
+    roomId: session.room_id || null,
+    actorLabel: session.actor_label || null,
+    agentKey: session.agent_key || null,
+    taskId: session.task_id || null,
+    title: session.title || null,
+    status: session.status || null,
+    summary: session.summary || null,
+    latestPayload: session.latest_payload || null,
+    goal: session.goal || null,
+    checking: session.checking || null,
+    hypothesis: session.hypothesis || null,
+    blocker: session.blocker || null,
+    nextAction: session.next_action || null,
+    milestone: session.milestone || null,
+    confidence: session.confidence ?? null,
+    closedAt: session.closed_at || null,
+    createdAt: session.created_at || null,
+    updatedAt: session.updated_at || null,
+  };
+}
+
 function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: string): void {
   if (!data.trim()) return;
 
@@ -1847,6 +1871,30 @@ function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: 
     const task = mapRoomStreamTaskPayload(payload);
     if (task) {
       emitRoomStreamEvent({ type: "task_update", roomIdentifier: eventRoomIdentifier, task });
+    }
+    return;
+  }
+
+  if (eventName === "reasoning_update") {
+    const session = payload.session;
+    if (session && typeof session === "object" && typeof (session as { id?: unknown }).id === "string") {
+      emitRoomStreamEvent({
+        type: "reasoning_update",
+        roomIdentifier: eventRoomIdentifier,
+        session: mapDesktopReasoningSessionPayload(session as Parameters<typeof mapDesktopReasoningSessionPayload>[0]),
+      });
+    }
+    return;
+  }
+
+  if (eventName === "reasoning_remove") {
+    const sessionId = typeof payload.session_id === "string"
+      ? payload.session_id
+      : typeof payload.id === "string"
+        ? payload.id
+        : null;
+    if (sessionId) {
+      emitRoomStreamEvent({ type: "reasoning_remove", roomIdentifier: eventRoomIdentifier, sessionId });
     }
     return;
   }
