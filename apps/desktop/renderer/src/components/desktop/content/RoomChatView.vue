@@ -1,6 +1,17 @@
 <template>
-  <section class="room-tab-page room-chat-page" data-testid="room-chat-view">
+  <section
+    class="room-tab-page room-chat-page"
+    :data-dragging-attachments="isDraggingAttachment"
+    data-testid="room-chat-view"
+    @dragenter.prevent="handleAttachmentDragEnter"
+    @dragover.prevent="handleAttachmentDragOver"
+    @dragleave.prevent="handleAttachmentDragLeave"
+    @drop.prevent="handleAttachmentDrop"
+  >
     <div class="room-chat-layout">
+      <div v-if="isDraggingAttachment" class="room-attachment-drop-overlay" data-testid="room-attachment-drop-overlay">
+        <span>Drop files to attach</span>
+      </div>
       <div class="room-message-viewport" data-testid="room-chat-viewport">
         <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
           <button
@@ -20,8 +31,11 @@
             :message="message"
             :thread-count="threadCount(message.id)"
             :latest-thread-message-id="latestThreadMessageId(message.id)"
+            :highlight-query="searchQuery"
+            :search-active="message.id === activeSearchMessageId"
             @reply="startReply"
             @scroll-to-message="scrollToMessage"
+            @open-image="openImageViewer"
           />
 
           <article v-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
@@ -42,8 +56,8 @@
 
       <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
         <div class="desktop-composer-identity">
-          <span>Sending from LetAgents Desktop</span>
-          <span class="desktop-composer-shortcut">⌘↵ to send</span>
+          <span>Message the room</span>
+          <span class="desktop-composer-shortcut">Enter to send · ⌘↵ for a new line</span>
         </div>
         <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
           <div>
@@ -53,21 +67,42 @@
           <button type="button" @click="replyTo = null">Cancel</button>
         </div>
         <textarea
+          ref="textareaElement"
           v-model="draft"
           class="desktop-composer-input"
           rows="3"
           placeholder="Write a message..."
-          :disabled="sending || !roomIdentifier"
+          :disabled="!roomIdentifier"
           data-testid="desktop-composer-input"
           @input="syncMentionQuery"
-          @keydown.meta.enter.prevent="submitMessage"
-          @keydown.ctrl.enter.prevent="submitMessage"
           @keydown.down.prevent="moveMentionSelection(1)"
           @keydown.up.prevent="moveMentionSelection(-1)"
           @keydown.enter="handleEnterKey"
           @keydown.escape="mentionOpen = false"
         />
-        <div v-if="attachmentDrafts.length" class="desktop-attachment-drafts" data-testid="desktop-attachment-drafts">
+        <div
+          v-if="attachmentDrafts.length || pendingAttachmentDrafts.length"
+          class="desktop-attachment-drafts"
+          data-testid="desktop-attachment-drafts"
+        >
+          <div
+            v-for="attachment in pendingAttachmentDrafts"
+            :key="attachment.localId"
+            class="desktop-attachment-draft is-pending"
+            data-testid="desktop-attachment-draft-pending"
+          >
+            <span>
+              <img
+                v-if="attachment.previewDataUrl"
+                class="desktop-attachment-preview"
+                :src="attachment.previewDataUrl"
+                alt=""
+              >
+              <span v-else class="desktop-attachment-pending-icon" aria-hidden="true"></span>
+              <strong>{{ attachment.fileName }}</strong>
+              <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }} · Uploading...</small>
+            </span>
+          </div>
           <div
             v-for="attachment in attachmentDrafts"
             :key="attachment.uploadId"
@@ -75,6 +110,7 @@
             data-testid="desktop-attachment-draft"
           >
             <span>
+              <img v-if="attachment.previewDataUrl" class="desktop-attachment-preview" :src="attachment.previewDataUrl" alt="">
               <strong>{{ attachment.fileName }}</strong>
               <small>{{ attachment.mimeType }} · {{ formatBytes(attachment.sizeBytes) }}</small>
             </span>
@@ -96,16 +132,23 @@
           </button>
         </div>
         <div class="desktop-composer-footer">
-          <p v-if="sendError" class="desktop-composer-error" data-testid="desktop-composer-error">{{ sendError }}</p>
+          <p v-if="sendError || attachmentError" class="desktop-composer-error" data-testid="desktop-composer-error">
+            {{ sendError || attachmentError }}
+          </p>
           <p v-else class="desktop-composer-hint">Use @ to bring a person or agent into the thread.</p>
           <button
             class="desktop-composer-attach"
             type="button"
             :disabled="sending || !roomIdentifier || attaching"
+            :title="attaching ? 'Attaching' : 'Attach files'"
+            :aria-label="attaching ? 'Attaching files' : 'Attach files'"
             data-testid="desktop-composer-attach"
             @click="pickAttachments"
           >
-            {{ attaching ? "Attaching..." : "Attach" }}
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
           </button>
           <button
             class="desktop-composer-send"
@@ -117,14 +160,28 @@
           </button>
         </div>
       </form>
+      <DesktopImageViewerModal
+        v-if="activeImageId && roomImages.length"
+        :images="roomImages"
+        :active-image-id="activeImageId"
+        @close="activeImageId = null"
+        @next="shiftImage(1)"
+        @previous="shiftImage(-1)"
+      />
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { DesktopParticipantSummary, DesktopRoomMessage, DesktopStagedAttachment } from "../../../../../electron/ipc-types";
+import type {
+  DesktopDroppedAttachmentContent,
+  DesktopParticipantSummary,
+  DesktopRoomMessage,
+  DesktopStagedAttachment,
+} from "../../../../../electron/ipc-types";
 import DesktopChatMessage from "./DesktopChatMessage.vue";
+import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
 
 const props = defineProps<{
   messages: DesktopRoomMessage[];
@@ -134,6 +191,8 @@ const props = defineProps<{
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   participants: DesktopParticipantSummary[];
+  searchQuery: string;
+  activeSearchMessageId: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -143,15 +202,31 @@ const emit = defineEmits<{
 }>();
 
 const draft = ref("");
+const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const messagesElement = ref<HTMLElement | null>(null);
 const replyTo = ref<DesktopRoomMessage | null>(null);
+const activeImageId = ref<string | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const attachmentDrafts = ref<DesktopStagedAttachment[]>([]);
+const pendingAttachmentDrafts = ref<PendingAttachmentDraft[]>([]);
+const attachmentError = ref<string | null>(null);
 const attaching = ref(false);
+const isDraggingAttachment = ref(false);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 let isScrolledToBottom = true;
+let attachmentDragDepth = 0;
+const maxAttachments = 4;
+const maxAttachmentBytes = 25 * 1024 * 1024;
+
+interface PendingAttachmentDraft {
+  localId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  previewDataUrl: string | null;
+}
 
 const canSend = computed(() => Boolean(props.roomIdentifier && (draft.value.trim() || attachmentDrafts.value.length > 0)));
 const mentionOpen = computed({
@@ -179,6 +254,23 @@ const threadSummaries = computed(() => {
   }
   return summaries;
 });
+const roomImages = computed<DesktopMessageImage[]>(() => {
+  const images: DesktopMessageImage[] = [];
+  for (const message of props.messages) {
+    for (const attachment of message.attachments || []) {
+      if (!isImageAttachment(attachment)) continue;
+      images.push({
+        id: `${message.id}:${attachmentKey(attachment)}`,
+        href: attachmentHref(attachment),
+        name: attachmentName(attachment),
+        meta: attachmentMeta(attachment),
+        sender: displaySender(message.sender),
+        time: formatDateTime(message.timestamp),
+      });
+    }
+  }
+  return images;
+});
 
 watch(
   () => props.messages,
@@ -205,9 +297,18 @@ watch(
   { immediate: true },
 );
 
+watch(
+  () => props.activeSearchMessageId,
+  (messageId) => {
+    if (messageId) {
+      void nextTick(() => scrollToMessage(messageId));
+    }
+  },
+);
+
 function submitMessage(): void {
   const text = draft.value.trim();
-  if ((!text && attachmentDrafts.value.length === 0) || props.sending) return;
+  if (!text && attachmentDrafts.value.length === 0) return;
   emit(
     "send-message",
     text,
@@ -219,13 +320,87 @@ function submitMessage(): void {
   attachmentDrafts.value = [];
 }
 
+function insertNewlineAtCursor(): void {
+  const input = textareaElement.value;
+  if (!input) {
+    draft.value = `${draft.value}\n`;
+    return;
+  }
+  const start = input.selectionStart ?? draft.value.length;
+  const end = input.selectionEnd ?? draft.value.length;
+  draft.value = `${draft.value.slice(0, start)}\n${draft.value.slice(end)}`;
+  void nextTick(() => {
+    input.selectionStart = start + 1;
+    input.selectionEnd = start + 1;
+  });
+}
+
 async function pickAttachments(): Promise<void> {
   if (attaching.value || !props.roomIdentifier) return;
   attaching.value = true;
+  attachmentError.value = null;
   try {
     const staged = await window.letagentsDesktop.room.pickAttachments(props.roomIdentifier);
     attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+  } catch (error) {
+    attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
   } finally {
+    attaching.value = false;
+  }
+}
+
+async function stageDroppedAttachments(files: File[]): Promise<void> {
+  if (attaching.value || files.length === 0) return;
+  if (!props.roomIdentifier) {
+    attachmentError.value = "Choose a room before attaching files.";
+    return;
+  }
+  attachmentError.value = null;
+  const availableSlots = Math.max(0, maxAttachments - attachmentDrafts.value.length - pendingAttachmentDrafts.value.length);
+  if (availableSlots <= 0) {
+    attachmentError.value = `Attach up to ${maxAttachments} files per message.`;
+    return;
+  }
+  const acceptedFiles = files.slice(0, availableSlots);
+  if (files.length > availableSlots) {
+    attachmentError.value = `Attach up to ${maxAttachments} files per message.`;
+  }
+  const validFiles = acceptedFiles.filter((file) => {
+    if (file.size <= maxAttachmentBytes) return true;
+    attachmentError.value = `${file.name || "Attachment"} is larger than ${formatBytes(maxAttachmentBytes)}.`;
+    return false;
+  });
+  if (!validFiles.length) return;
+
+  const pendingDrafts = validFiles.map(toPendingAttachmentDraft);
+  pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
+  attaching.value = true;
+  try {
+    const stageDroppedAttachmentContents = window.letagentsDesktop.room.stageDroppedAttachmentContents;
+    if (!stageDroppedAttachmentContents) {
+      throw new Error("Restart LetAgents Desktop to enable drag and drop attachments.");
+    }
+    const droppedFiles: DesktopDroppedAttachmentContent[] = [];
+    for (const file of validFiles) {
+      droppedFiles.push(await readDroppedAttachmentContent(file));
+    }
+    pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.map((attachment) => {
+      const draftIndex = pendingDrafts.findIndex((draft) => draft.localId === attachment.localId);
+      if (draftIndex < 0) return attachment;
+      const droppedFile = droppedFiles[draftIndex];
+      if (!droppedFile?.contentBase64 || !droppedFile.mimeType.startsWith("image/")) return attachment;
+      return {
+        ...attachment,
+        previewDataUrl: `data:${droppedFile.mimeType};base64,${droppedFile.contentBase64}`,
+      };
+    });
+    const staged = await stageDroppedAttachmentContents(props.roomIdentifier, droppedFiles);
+    attachmentDrafts.value = [...attachmentDrafts.value, ...staged];
+  } catch (error) {
+    attachmentError.value = error instanceof Error ? error.message : "Attachment could not be added.";
+  } finally {
+    const pendingIds = new Set(pendingDrafts.map((attachment) => attachment.localId));
+    pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.filter((attachment) => !pendingIds.has(attachment.localId));
     attaching.value = false;
   }
 }
@@ -235,11 +410,80 @@ async function removeAttachment(uploadId: string): Promise<void> {
   emit("discard-attachment", uploadId);
 }
 
+function handleAttachmentDragEnter(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  attachmentDragDepth += 1;
+  isDraggingAttachment.value = true;
+}
+
+function handleAttachmentDragOver(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = props.roomIdentifier ? "copy" : "none";
+  isDraggingAttachment.value = true;
+}
+
+function handleAttachmentDragLeave(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  attachmentDragDepth = Math.max(0, attachmentDragDepth - 1);
+  if (attachmentDragDepth === 0) {
+    isDraggingAttachment.value = false;
+  }
+}
+
+function handleAttachmentDrop(event: DragEvent): void {
+  if (!hasDraggedFiles(event)) return;
+  attachmentDragDepth = 0;
+  isDraggingAttachment.value = false;
+  const files = Array.from(event.dataTransfer?.files || []);
+  void stageDroppedAttachments(files);
+}
+
+function hasDraggedFiles(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
+function toPendingAttachmentDraft(file: File): PendingAttachmentDraft {
+  return {
+    localId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    fileName: file.name || "attachment",
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    previewDataUrl: null,
+  };
+}
+
+async function readDroppedAttachmentContent(file: File): Promise<DesktopDroppedAttachmentContent> {
+  const dataUrl = await readFileAsDataUrl(file);
+  const [, contentBase64 = ""] = dataUrl.split(",", 2);
+  return {
+    fileName: file.name || "attachment",
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+    contentBase64,
+  };
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result || "")));
+    reader.addEventListener("error", () => reject(reader.error || new Error(`${file.name || "Attachment"} could not be read.`)));
+    reader.readAsDataURL(file);
+  });
+}
+
 function handleEnterKey(event: KeyboardEvent): void {
-  if (!mentionOpen.value) return;
   event.preventDefault();
-  const candidate = mentionCandidates.value[activeMentionIndex.value];
-  if (candidate) insertMention(candidate.displayName);
+  if (mentionOpen.value) {
+    const candidate = mentionCandidates.value[activeMentionIndex.value];
+    if (candidate) insertMention(candidate.displayName);
+    return;
+  }
+  if (event.metaKey || event.ctrlKey || event.shiftKey) {
+    insertNewlineAtCursor();
+    return;
+  }
+  submitMessage();
 }
 
 function scrollToBottom(): void {
@@ -254,6 +498,7 @@ function scrollToBottom(): void {
 
 function startReply(message: DesktopRoomMessage): void {
   replyTo.value = message;
+  void nextTick(() => textareaElement.value?.focus());
 }
 
 function syncMentionQuery(): void {
@@ -308,6 +553,57 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
   return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function attachmentName(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return attachment.fileName || attachment.name || "attachment";
+}
+
+function attachmentMimeType(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return attachment.mimeType || "application/octet-stream";
+}
+
+function attachmentHref(attachment: DesktopRoomMessage["attachments"][number]): string {
+  if (attachment.url) return attachment.url;
+  if (attachment.downloadUrl) return attachment.downloadUrl;
+  if (attachment.dataUrl) return attachment.dataUrl;
+  if (attachment.contentBase64) return `data:${attachmentMimeType(attachment)};base64,${attachment.contentBase64}`;
+  return "#";
+}
+
+function attachmentKey(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return attachment.id || `${attachmentName(attachment)}-${attachment.sizeBytes || 0}-${attachmentMimeType(attachment)}`;
+}
+
+function attachmentMeta(attachment: DesktopRoomMessage["attachments"][number]): string {
+  return [attachmentMimeType(attachment), formatBytes(attachment.sizeBytes || 0)].filter(Boolean).join(" · ");
+}
+
+function isImageAttachment(attachment: DesktopRoomMessage["attachments"][number]): boolean {
+  return attachmentMimeType(attachment).startsWith("image/") && attachmentHref(attachment) !== "#";
+}
+
+function openImageViewer(imageId: string): void {
+  if (!roomImages.value.some((image) => image.id === imageId)) return;
+  activeImageId.value = imageId;
+}
+
+function shiftImage(direction: 1 | -1): void {
+  if (!roomImages.value.length || !activeImageId.value) return;
+  const currentIndex = Math.max(0, roomImages.value.findIndex((image) => image.id === activeImageId.value));
+  const nextIndex = (currentIndex + direction + roomImages.value.length) % roomImages.value.length;
+  activeImageId.value = roomImages.value[nextIndex].id;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function threadCount(messageId: string): number {

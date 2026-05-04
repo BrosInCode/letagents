@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, protocol, safeStorage, shell } from "electron";
 import { execFile } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
@@ -10,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import type {
   DesktopActivityEntry,
+  DesktopAgentPresence,
   DesktopAuthAccount,
   DesktopAuthPollResult,
   DesktopAuthStartResult,
@@ -17,17 +19,21 @@ import type {
   DesktopAppInfo,
   DiagnosticsSnapshot,
   DesktopFocusRoomInfo,
+  DesktopGitHubIntegrationActionResult,
+  DesktopGitHubIntegrationStatus,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
   DesktopPendingDeviceAuth,
+  DesktopReasoningSession,
   DesktopRoomAccess,
   DesktopRoomMessage,
   DesktopRepoRoomSelection,
   DesktopSendRoomMessageResult,
   DesktopParticipantSummary,
+  DesktopDroppedAttachmentContent,
   DesktopRoomInfo,
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
@@ -46,13 +52,29 @@ const workspaceRoot = join(desktopRoot, "..", "..");
 const rendererDistPath = join(desktopRoot, "dist-renderer", "index.html");
 const devServerUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim() || null;
 const apiUrl = process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
+const attachmentProtocolScheme = "letagents-attachment";
+const roomMessageHistoryPageSize = 150;
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: attachmentProtocolScheme,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
+  },
+]);
 
 let mainWindow: BrowserWindow | null = null;
 let activeRoomStream: {
   roomIdentifier: string;
   abortController: AbortController;
   reconnectTimer: NodeJS.Timeout | null;
+  pollAbortController: AbortController | null;
   retryMs: number;
+  lastMessageId: string | null;
   stopped: boolean;
 } | null = null;
 
@@ -130,6 +152,20 @@ type DeviceAuthPollResponse = {
     display_name?: string | null;
     avatar_url?: string | null;
   };
+};
+
+type RoomInfoPayload = {
+  room_id?: string;
+  code?: string;
+  name?: string | null;
+  display_name?: string | null;
+  role?: string;
+  authenticated?: boolean;
+  kind?: "main" | "focus";
+  parent_room_id?: string | null;
+  focus_key?: string | null;
+  source_task_id?: string | null;
+  focus_status?: "active" | "concluded" | null;
 };
 
 class DesktopApiError extends Error {
@@ -847,6 +883,23 @@ function createRoomAccess(input: Partial<DesktopRoomAccess>): DesktopRoomAccess 
   };
 }
 
+function mapDesktopRoomInfoPayload(requestedRoomIdentifier: string, payload: RoomInfoPayload): DesktopRoomInfo {
+  const canonicalIdentifier = payload.room_id || requestedRoomIdentifier;
+  return {
+    identifier: canonicalIdentifier,
+    code: payload.code || "",
+    name: payload.name || canonicalIdentifier,
+    displayName: payload.display_name || payload.name || canonicalIdentifier,
+    role: payload.role || "participant",
+    authenticated: Boolean(payload.authenticated),
+    kind: payload.kind || "main",
+    parentRoomId: payload.parent_room_id || null,
+    focusKey: payload.focus_key || null,
+    sourceTaskId: payload.source_task_id || null,
+    focusStatus: payload.focus_status || null,
+  };
+}
+
 async function parseApiErrorPayload(response: Response): Promise<ApiErrorPayload | null> {
   try {
     const text = await response.text();
@@ -896,29 +949,19 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      presence: [],
+      reasoningSessions: [],
       recentActivity: [],
       messages: [],
     };
   }
 
   try {
-    const joined = await apiFetch<{
-      room_id?: string;
-      code?: string;
-      name?: string;
-      display_name?: string;
-      role?: string;
-      authenticated?: boolean;
-      kind?: "main" | "focus";
-      parent_room_id?: string | null;
-      focus_key?: string | null;
-      source_task_id?: string | null;
-      focus_status?: "active" | "concluded" | null;
-    }>(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
+    const joined = await apiFetch<RoomInfoPayload>(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
       method: "POST",
     });
 
-    const [focusRoomsData, tasksData, participantsData, activityHistoryData, messagesData] = await Promise.all([
+    const [focusRoomsData, tasksData, participantsData, presenceData, reasoningData, activityHistoryData, messagesData] = await Promise.all([
       apiFetch<{ focus_rooms?: Array<{
         room_id: string;
         name: string | null;
@@ -933,7 +976,14 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         title: string;
         status: string;
         assignee: string | null;
+        created_by?: string | null;
         pr_url?: string | null;
+        workflow_refs?: Array<{
+          provider?: string;
+          kind?: string;
+          label?: string;
+          url?: string;
+        }> | null;
         active_leases?: Array<{
           id?: string;
           kind?: string;
@@ -951,20 +1001,101 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         kind: "human" | "agent";
         display_name: string;
         actor_label: string | null;
+        agent_key?: string | null;
+        github_login?: string | null;
+        owner_label?: string | null;
+        ide_label?: string | null;
+        hidden_at?: string | null;
         activity_state: "active" | "away" | "offline" | null;
         last_seen_at: string;
+        last_room_activity_at?: string | null;
+        last_live_heartbeat_at?: string | null;
+        source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
       }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/participants`).catch(() => ({ participants: [] })),
+      apiFetch<{ presence?: Array<{
+        room_id: string;
+        actor_label: string;
+        agent_key: string | null;
+        agent_instance_id: string | null;
+        agent_session_id: string | null;
+        session_kind: "controller" | "worker";
+        runtime: string;
+        display_name: string;
+        owner_label: string | null;
+        ide_label: string | null;
+        status: "idle" | "working" | "reviewing" | "blocked";
+        status_text: string | null;
+        last_heartbeat_at: string;
+        freshness: "active" | "stale";
+        activity_state: "active" | "away" | "offline";
+        source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/presence?limit=100`).catch(() => ({ presence: [] })),
+      apiFetch<{ sessions?: Array<{
+        id: string;
+        room_id?: string | null;
+        actor_label?: string | null;
+        agent_key?: string | null;
+        task_id?: string | null;
+        title?: string | null;
+        status?: string | null;
+        summary?: string | null;
+        latest_payload?: DesktopReasoningSession["latestPayload"];
+        goal?: string | null;
+        checking?: string | null;
+        hypothesis?: string | null;
+        blocker?: string | null;
+        next_action?: string | null;
+        milestone?: string | null;
+        confidence?: number | null;
+        closed_at?: string | null;
+        created_at?: string | null;
+        updated_at?: string | null;
+      }>; reasoning_sessions?: Array<{
+        id: string;
+        room_id?: string | null;
+        actor_label?: string | null;
+        agent_key?: string | null;
+        task_id?: string | null;
+        title?: string | null;
+        status?: string | null;
+        summary?: string | null;
+        latest_payload?: DesktopReasoningSession["latestPayload"];
+        goal?: string | null;
+        checking?: string | null;
+        hypothesis?: string | null;
+        blocker?: string | null;
+        next_action?: string | null;
+        milestone?: string | null;
+        confidence?: number | null;
+        closed_at?: string | null;
+        created_at?: string | null;
+        updated_at?: string | null;
+      }>;
+      }>(`/rooms/${encodeURIComponent(roomIdentifier)}/reasoning-sessions`).catch(() => ({ sessions: [], reasoning_sessions: [] })),
       apiFetch<{ entries?: Array<{
         id: string;
+        room?: {
+          id: string;
+          display_name: string;
+          kind: "main" | "focus";
+          focus_status: "active" | "concluded" | null;
+          source_task_id: string | null;
+        };
         participant: {
           display_name: string;
           kind: "human" | "agent";
+          actor_label?: string | null;
+          owner_label?: string | null;
+          ide_label?: string | null;
           activity_state: "active" | "away" | "offline" | null;
         };
+        first_seen_at?: string | null;
+        last_seen_at?: string | null;
         last_room_activity_at: string;
-        current_tasks: Array<{ id: string; title: string; status: string }>;
-        completed_tasks: Array<{ id: string; title: string; status: string }>;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/activity-history?page_size=5`).catch(() => ({ entries: [] })),
+        current_tasks: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
+        completed_tasks: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
+        created_tasks?: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/activity-history?page_size=20`).catch(() => ({ entries: [] })),
       apiFetch<{ messages?: Array<{
         id: string;
         sender: string;
@@ -988,22 +1119,10 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
           ide_label?: string | null;
           actor_label?: string | null;
         } | null;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=24&before=latest`).catch(() => ({ messages: [] })),
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`).catch(() => ({ messages: [] })),
     ]);
 
-    const room: DesktopRoomInfo = {
-      identifier: roomIdentifier,
-      code: joined.code || "",
-      name: joined.name || roomIdentifier,
-      displayName: joined.display_name || joined.name || roomIdentifier,
-      role: joined.role || "participant",
-      authenticated: Boolean(joined.authenticated),
-      kind: joined.kind || "main",
-      parentRoomId: joined.parent_room_id || null,
-      focusKey: joined.focus_key || null,
-      sourceTaskId: joined.source_task_id || null,
-      focusStatus: joined.focus_status || null,
-    };
+    const room = mapDesktopRoomInfoPayload(roomIdentifier, joined);
 
     const focusRooms: DesktopFocusRoomInfo[] = (focusRoomsData.focus_rooms || []).map((focusRoom) => ({
       roomId: focusRoom.room_id,
@@ -1022,26 +1141,107 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       kind: participant.kind,
       displayName: participant.display_name,
       actorLabel: participant.actor_label || null,
+      agentKey: participant.agent_key || null,
+      githubLogin: participant.github_login || null,
+      ownerLabel: participant.owner_label || null,
+      ideLabel: participant.ide_label || null,
+      hiddenAt: participant.hidden_at || null,
       activityState: participant.activity_state || null,
       lastSeenAt: participant.last_seen_at,
+      lastRoomActivityAt: participant.last_room_activity_at || null,
+      lastLiveHeartbeatAt: participant.last_live_heartbeat_at || null,
+      sourceFlags: participant.source_flags || [],
     }));
+
+    const presence: DesktopAgentPresence[] = (presenceData.presence || []).map((entry) => ({
+      roomId: entry.room_id,
+      actorLabel: entry.actor_label,
+      agentKey: entry.agent_key || null,
+      agentInstanceId: entry.agent_instance_id || null,
+      agentSessionId: entry.agent_session_id || null,
+      sessionKind: entry.session_kind,
+      runtime: entry.runtime,
+      displayName: entry.display_name,
+      ownerLabel: entry.owner_label || null,
+      ideLabel: entry.ide_label || null,
+      status: entry.status,
+      statusText: entry.status_text || null,
+      lastHeartbeatAt: entry.last_heartbeat_at,
+      freshness: entry.freshness,
+      activityState: entry.activity_state,
+      sourceFlags: entry.source_flags || [],
+    }));
+
+    const reasoningSessions: DesktopReasoningSession[] = [
+      ...(reasoningData.sessions || reasoningData.reasoning_sessions || []),
+    ].map((session) => ({
+      id: session.id,
+      roomId: session.room_id || null,
+      actorLabel: session.actor_label || null,
+      agentKey: session.agent_key || null,
+      taskId: session.task_id || null,
+      title: session.title || null,
+      status: session.status || null,
+      summary: session.summary || null,
+      latestPayload: session.latest_payload || null,
+      goal: session.goal || null,
+      checking: session.checking || null,
+      hypothesis: session.hypothesis || null,
+      blocker: session.blocker || null,
+      nextAction: session.next_action || null,
+      milestone: session.milestone || null,
+      confidence: session.confidence ?? null,
+      closedAt: session.closed_at || null,
+      createdAt: session.created_at || null,
+      updatedAt: session.updated_at || null,
+    })).sort((left, right) => {
+      const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
+      const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
+      return (Number.isFinite(rightTime) ? rightTime : -1) - (Number.isFinite(leftTime) ? leftTime : -1);
+    });
+
+    const mapActivityTask = (task: {
+      id: string;
+      title: string;
+      status: string;
+      updated_at?: string | null;
+      workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }>;
+    }) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      updatedAt: task.updated_at || null,
+      workflowRefs: (task.workflow_refs || []).map((ref) => ({
+        provider: ref.provider,
+        kind: ref.kind,
+        label: ref.label,
+        url: ref.url,
+      })),
+    });
 
     const recentActivity: DesktopActivityEntry[] = (activityHistoryData.entries || []).map((entry) => ({
       id: entry.id,
+      room: entry.room
+        ? {
+            id: entry.room.id,
+            displayName: entry.room.display_name,
+            kind: entry.room.kind,
+            focusStatus: entry.room.focus_status,
+            sourceTaskId: entry.room.source_task_id,
+          }
+        : null,
       participantDisplayName: entry.participant.display_name,
       participantKind: entry.participant.kind,
+      participantActorLabel: entry.participant.actor_label || null,
+      participantOwnerLabel: entry.participant.owner_label || null,
+      participantIdeLabel: entry.participant.ide_label || null,
       activityState: entry.participant.activity_state || null,
+      firstSeenAt: entry.first_seen_at || null,
+      lastSeenAt: entry.last_seen_at || null,
       lastRoomActivityAt: entry.last_room_activity_at,
-      currentTasks: (entry.current_tasks || []).map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-      })),
-      completedTasks: (entry.completed_tasks || []).map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-      })),
+      currentTasks: (entry.current_tasks || []).map(mapActivityTask),
+      completedTasks: (entry.completed_tasks || []).map(mapActivityTask),
+      createdTasks: (entry.created_tasks || []).map(mapActivityTask),
     }));
 
     const messages: DesktopRoomMessage[] = [...(messagesData.messages || [])]
@@ -1081,6 +1281,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms,
       tasks,
       participants,
+      presence,
+      reasoningSessions,
       recentActivity,
       messages,
     };
@@ -1112,6 +1314,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         focusRooms: [],
         tasks: [],
         participants: [],
+        presence: [],
+        reasoningSessions: [],
         recentActivity: [],
         messages: [],
       };
@@ -1129,6 +1333,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      presence: [],
+      reasoningSessions: [],
       recentActivity: [],
       messages: [],
     };
@@ -1208,17 +1414,71 @@ function mapRoomMessageAttachmentPayload(attachment: {
   data_url?: string | null;
   content_base64?: string | null;
 }): DesktopRoomMessage["attachments"][number] {
+  const rawUrl = attachment.url || null;
+  const rawDownloadUrl = attachment.download_url || null;
   return {
     id: attachment.id || null,
     name: attachment.name || null,
     fileName: attachment.file_name || attachment.filename || null,
     mimeType: attachment.mime_type || attachment.content_type || null,
     sizeBytes: attachment.size_bytes ?? attachment.byte_size ?? null,
-    url: attachment.url || null,
-    downloadUrl: attachment.download_url || null,
+    url: rawUrl ? proxiedAttachmentUrl(rawUrl) : null,
+    downloadUrl: rawDownloadUrl ? proxiedAttachmentUrl(rawDownloadUrl) : null,
     dataUrl: attachment.data_url || null,
     contentBase64: attachment.content_base64 || null,
   };
+}
+
+function proxiedAttachmentUrl(rawUrl: string): string {
+  if (!shouldProxyAttachmentUrl(rawUrl)) return rawUrl;
+  const encoded = Buffer.from(rawUrl, "utf8").toString("base64url");
+  return `${attachmentProtocolScheme}://download/${encoded}`;
+}
+
+function shouldProxyAttachmentUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("/")) return true;
+  try {
+    const target = new URL(trimmed);
+    return target.origin === new URL(apiUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function resolveAttachmentProxyTarget(rawUrl: string): URL {
+  const apiOrigin = new URL(apiUrl).origin;
+  const target = rawUrl.startsWith("/")
+    ? new URL(rawUrl, apiOrigin)
+    : new URL(rawUrl);
+  if (target.origin !== apiOrigin) {
+    throw new Error("Attachment proxy target is outside LetAgents API.");
+  }
+  return target;
+}
+
+async function handleAttachmentProtocolRequest(request: Request): Promise<Response> {
+  try {
+    const requestUrl = new URL(request.url);
+    const encodedTarget = requestUrl.pathname.replace(/^\/+/, "");
+    if (!encodedTarget) {
+      return new Response("Missing attachment target.", { status: 400 });
+    }
+
+    const rawTarget = Buffer.from(encodedTarget, "base64url").toString("utf8");
+    const target = resolveAttachmentProxyTarget(rawTarget);
+    const storedAuth = await readStoredAuth();
+    const headers = new Headers();
+    if (storedAuth.token) {
+      headers.set("Authorization", `Bearer ${storedAuth.token}`);
+    }
+
+    const response = await fetch(target, { headers });
+    return response;
+  } catch (error) {
+    return new Response(error instanceof Error ? error.message : "Attachment unavailable.", { status: 502 });
+  }
 }
 
 function mapRoomMessageAgentIdentity(identity: {
@@ -1245,7 +1505,14 @@ function mapDesktopTaskSummaryPayload(task: {
   title?: string;
   status?: string;
   assignee?: string | null;
+  created_by?: string | null;
   pr_url?: string | null;
+  workflow_refs?: Array<{
+    provider?: string;
+    kind?: string;
+    label?: string;
+    url?: string;
+  }> | null;
   active_leases?: Array<{
     id?: string;
     kind?: string;
@@ -1264,7 +1531,16 @@ function mapDesktopTaskSummaryPayload(task: {
     title: task.title || task.id,
     status: task.status || "proposed",
     assignee: task.assignee || null,
+    createdBy: task.created_by || null,
     prUrl: task.pr_url || null,
+    workflowRefs: (task.workflow_refs || [])
+      .map((ref) => ({
+        provider: ref.provider || "unknown",
+        kind: ref.kind || "artifact",
+        label: ref.label || ref.url || "Workflow",
+        url: ref.url || "",
+      }))
+      .filter((ref) => Boolean(ref.url)),
     activeLeases: (task.active_leases || []).map((lease) => ({
       id: lease.id || "",
       kind: lease.kind || "work",
@@ -1354,54 +1630,102 @@ async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<D
 
   const staged: DesktopStagedAttachment[] = [];
   for (const filePath of result.filePaths) {
-    const fileBuffer = await readFile(filePath);
-    const fileName = basename(filePath);
-    const mimeType = guessMimeType(fileName);
-    const target = await apiFetch<{
-      upload_id?: string;
-      upload_url?: string;
-      url?: string;
-      method?: string;
-      headers?: Record<string, string>;
-      attachment?: { upload_id?: string };
-    }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/attachments/uploads`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        file_name: fileName,
-        mime_type: mimeType,
-        size_bytes: fileBuffer.byteLength,
-      }),
-    });
-
-    const uploadId = target.upload_id || target.attachment?.upload_id;
-    const uploadUrl = target.upload_url || target.url;
-    if (!uploadId || !uploadUrl) {
-      throw new Error(`${fileName} could not be staged.`);
-    }
-
-    const uploadHeaders = new Headers(target.headers || {});
-    if (![...uploadHeaders.keys()].some((key) => key.toLowerCase() === "content-type")) {
-      uploadHeaders.set("Content-Type", mimeType);
-    }
-    const uploadResponse = await fetch(uploadUrl, {
-      method: target.method || "PUT",
-      headers: uploadHeaders,
-      body: fileBuffer,
-    });
-    if (!uploadResponse.ok) {
-      await discardDesktopAttachment(trimmedRoomIdentifier, uploadId).catch(() => undefined);
-      throw new Error(`${fileName} upload failed with HTTP ${uploadResponse.status}.`);
-    }
-
-    staged.push({
-      uploadId,
-      fileName,
-      mimeType,
-      sizeBytes: fileBuffer.byteLength,
-    });
+    staged.push(await stageDesktopAttachmentFile(trimmedRoomIdentifier, filePath));
   }
   return staged;
+}
+
+async function stageDroppedDesktopAttachmentContents(
+  roomIdentifier: string,
+  files: DesktopDroppedAttachmentContent[]
+): Promise<DesktopStagedAttachment[]> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before attaching files.");
+  }
+
+  const droppedFiles = files
+    .map((file) => ({
+      fileName: file.fileName?.trim() || "attachment",
+      mimeType: file.mimeType?.trim() || guessMimeType(file.fileName || "attachment"),
+      sizeBytes: file.sizeBytes,
+      contentBase64: file.contentBase64,
+    }))
+    .filter((file) => file.contentBase64);
+  if (droppedFiles.length === 0) return [];
+
+  const staged: DesktopStagedAttachment[] = [];
+  for (const file of droppedFiles) {
+    const fileBuffer = Buffer.from(file.contentBase64, "base64");
+    staged.push(await stageDesktopAttachmentBuffer(trimmedRoomIdentifier, fileBuffer, file.fileName, file.mimeType || guessMimeType(file.fileName)));
+  }
+  return staged;
+}
+
+async function stageDesktopAttachmentFile(
+  roomIdentifier: string,
+  filePath: string,
+  displayFileName?: string
+): Promise<DesktopStagedAttachment> {
+  const fileBuffer = await readFile(filePath);
+  const fileName = displayFileName || basename(filePath);
+  const mimeType = guessMimeType(fileName);
+  return stageDesktopAttachmentBuffer(roomIdentifier, fileBuffer, fileName, mimeType);
+}
+
+async function stageDesktopAttachmentBuffer(
+  roomIdentifier: string,
+  fileBuffer: Buffer,
+  fileName: string,
+  mimeType: string
+): Promise<DesktopStagedAttachment> {
+  const target = await apiFetch<{
+    upload_id?: string;
+    upload_url?: string;
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    attachment?: { upload_id?: string };
+  }>(`/rooms/${encodeURIComponent(roomIdentifier)}/attachments/uploads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file_name: fileName,
+      mime_type: mimeType,
+      size_bytes: fileBuffer.byteLength,
+    }),
+  });
+
+  const uploadId = target.upload_id || target.attachment?.upload_id;
+  const uploadUrl = target.upload_url || target.url;
+  if (!uploadId || !uploadUrl) {
+    throw new Error(`${fileName} could not be staged.`);
+  }
+
+  const uploadHeaders = new Headers(target.headers || {});
+  if (![...uploadHeaders.keys()].some((key) => key.toLowerCase() === "content-type")) {
+    uploadHeaders.set("Content-Type", mimeType);
+  }
+  const uploadBody = new Uint8Array(fileBuffer).buffer;
+  const uploadResponse = await fetch(uploadUrl, {
+    method: target.method || "PUT",
+    headers: uploadHeaders,
+    body: uploadBody,
+  });
+  if (!uploadResponse.ok) {
+    await discardDesktopAttachment(roomIdentifier, uploadId).catch(() => undefined);
+    throw new Error(`${fileName} upload failed with HTTP ${uploadResponse.status}.`);
+  }
+
+  return {
+    uploadId,
+    fileName,
+    mimeType,
+    sizeBytes: fileBuffer.byteLength,
+    previewDataUrl: mimeType.startsWith("image/")
+      ? `data:${mimeType};base64,${fileBuffer.toString("base64")}`
+      : null,
+  };
 }
 
 async function discardDesktopAttachment(roomIdentifier: string, uploadId: string): Promise<void> {
@@ -1431,7 +1755,7 @@ function guessMimeType(fileName: string): string {
 async function getDesktopRoomMessagesBefore(
   roomIdentifier: string,
   beforeMessageId: string,
-  limit = 24
+  limit = roomMessageHistoryPageSize
 ): Promise<DesktopRoomMessagesPage> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedBeforeMessageId = beforeMessageId.trim();
@@ -1460,7 +1784,9 @@ function mapRoomStreamTaskPayload(task: {
   title?: string;
   status?: string;
   assignee?: string | null;
+  created_by?: string | null;
   pr_url?: string | null;
+  workflow_refs?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["workflow_refs"];
   active_leases?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["active_leases"];
   updated_at?: string;
   updatedAt?: string;
@@ -1494,11 +1820,67 @@ function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: 
   }
 
   if (eventName === "message") {
+    if (activeRoomStream?.roomIdentifier === roomIdentifier && typeof payload.id === "string") {
+      activeRoomStream.lastMessageId = payload.id;
+    }
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier: eventRoomIdentifier,
       message: mapRoomMessagePayload(payload as Parameters<typeof mapRoomMessagePayload>[0]),
     });
+  }
+}
+
+async function pollDesktopRoomMessages(stream: NonNullable<typeof activeRoomStream>): Promise<void> {
+  while (!stream.stopped) {
+    const after = stream.lastMessageId;
+    if (!after) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      continue;
+    }
+
+    const pollAbortController = new AbortController();
+    stream.pollAbortController = pollAbortController;
+    try {
+      const storedAuth = await readStoredAuth();
+      const requestHeaders = new Headers({
+        Accept: "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      });
+      if (storedAuth.token) {
+        requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
+      }
+      const response = await fetch(
+        `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=${roomMessageHistoryPageSize}&timeout=25000&after=${encodeURIComponent(after)}`,
+        { headers: requestHeaders, signal: pollAbortController.signal },
+      );
+      if (!response.ok) {
+        throw new Error(`Room poll failed with HTTP ${response.status}.`);
+      }
+      const page = await response.json() as { room_id?: string; messages?: Parameters<typeof mapRoomMessagePayload>[0][] };
+      for (const rawMessage of page.messages || []) {
+        if (typeof rawMessage.id === "string") {
+          stream.lastMessageId = rawMessage.id;
+        }
+        emitRoomStreamEvent({
+          type: "message",
+          roomIdentifier: page.room_id || stream.roomIdentifier,
+          message: mapRoomMessagePayload(rawMessage),
+        });
+      }
+    } catch (error) {
+      if (stream.stopped || pollAbortController.signal.aborted) return;
+      emitRoomStreamEvent({
+        type: "error",
+        roomIdentifier: stream.roomIdentifier,
+        message: error instanceof Error ? error.message : "Room polling disconnected.",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    } finally {
+      if (stream.pollAbortController === pollAbortController) {
+        stream.pollAbortController = null;
+      }
+    }
   }
 }
 
@@ -1576,13 +1958,16 @@ async function openDesktopRoomStream(stream: NonNullable<typeof activeRoomStream
   }
 }
 
-async function startDesktopRoomStream(roomIdentifier: string): Promise<void> {
+async function startDesktopRoomStream(roomIdentifier: string, afterMessageId?: string | null): Promise<void> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before opening the live stream.");
   }
 
   if (activeRoomStream?.roomIdentifier === trimmedRoomIdentifier && !activeRoomStream.stopped) {
+    if (afterMessageId) {
+      activeRoomStream.lastMessageId = afterMessageId;
+    }
     return;
   }
 
@@ -1591,10 +1976,13 @@ async function startDesktopRoomStream(roomIdentifier: string): Promise<void> {
     roomIdentifier: trimmedRoomIdentifier,
     abortController: new AbortController(),
     reconnectTimer: null,
+    pollAbortController: null,
     retryMs: 1000,
+    lastMessageId: afterMessageId || null,
     stopped: false,
   };
   void openDesktopRoomStream(activeRoomStream);
+  void pollDesktopRoomMessages(activeRoomStream);
 }
 
 async function stopDesktopRoomStream(roomIdentifier?: string | null): Promise<void> {
@@ -1603,6 +1991,7 @@ async function stopDesktopRoomStream(roomIdentifier?: string | null): Promise<vo
 
   activeRoomStream.stopped = true;
   activeRoomStream.abortController.abort();
+  activeRoomStream.pollAbortController?.abort();
   if (activeRoomStream.reconnectTimer) {
     clearTimeout(activeRoomStream.reconnectTimer);
   }
@@ -1642,6 +2031,71 @@ async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
     error: null,
     warning: resolved.warning,
   };
+}
+
+async function renameDesktopRoom(roomIdentifier: string, displayName: string): Promise<DesktopRoomInfo> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedDisplayName = displayName.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before renaming it.");
+  }
+  if (!trimmedDisplayName) {
+    throw new Error("Enter a room name.");
+  }
+
+  const updated = await apiFetch<RoomInfoPayload>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: trimmedDisplayName }),
+  });
+  return mapDesktopRoomInfoPayload(trimmedRoomIdentifier, updated);
+}
+
+async function getDesktopGitHubIntegrationStatus(roomIdentifier: string): Promise<DesktopGitHubIntegrationStatus> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before checking GitHub.");
+  }
+
+  const status = await apiFetch<{
+    room_id?: string;
+    access_room_id?: string | null;
+    configured?: boolean;
+    setup_manifest_available?: boolean;
+    connected?: boolean;
+    install_url_available?: boolean;
+    repository?: { full_name?: string } | null;
+  }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/integrations/github`);
+
+  return {
+    roomId: status.room_id || trimmedRoomIdentifier,
+    accessRoomId: status.access_room_id || null,
+    configured: Boolean(status.configured),
+    setupManifestAvailable: Boolean(status.setup_manifest_available),
+    connected: Boolean(status.connected),
+    installUrlAvailable: Boolean(status.install_url_available),
+    repository: status.repository?.full_name ? { fullName: status.repository.full_name } : null,
+  };
+}
+
+async function openDesktopGitHubInstall(roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before opening GitHub.");
+  }
+
+  const payload = await apiFetch<{ install_url?: string }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/integrations/github/install-url`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+  if (!payload.install_url) {
+    return { opened: false, message: "GitHub did not return an install URL." };
+  }
+  await shell.openExternal(payload.install_url);
+  return { opened: true, message: "GitHub opened in your browser." };
 }
 
 async function startDeviceAuthFlow(roomIdentifier?: string | null): Promise<DesktopAuthStartResult> {
@@ -1846,12 +2300,21 @@ ipcMain.handle(
   async (_event, roomIdentifier: string): Promise<DesktopStagedAttachment[]> => pickAndStageDesktopAttachments(roomIdentifier)
 );
 ipcMain.handle(
+  "desktop:room:stage-dropped-attachment-contents",
+  async (
+    _event,
+    roomIdentifier: string,
+    files: DesktopDroppedAttachmentContent[]
+  ): Promise<DesktopStagedAttachment[]> => stageDroppedDesktopAttachmentContents(roomIdentifier, files)
+);
+ipcMain.handle(
   "desktop:room:discard-attachment",
   async (_event, roomIdentifier: string, uploadId: string): Promise<void> => discardDesktopAttachment(roomIdentifier, uploadId)
 );
 ipcMain.handle(
   "desktop:room:start-stream",
-  async (_event, roomIdentifier: string): Promise<void> => startDesktopRoomStream(roomIdentifier)
+  async (_event, roomIdentifier: string, afterMessageId?: string | null): Promise<void> =>
+    startDesktopRoomStream(roomIdentifier, afterMessageId)
 );
 ipcMain.handle(
   "desktop:room:stop-stream",
@@ -1867,6 +2330,21 @@ ipcMain.handle(
     attachments?: Array<{ upload_id: string }>
   ): Promise<DesktopSendRoomMessageResult> =>
     sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [])
+);
+ipcMain.handle(
+  "desktop:room:rename",
+  async (_event, roomIdentifier: string, displayName: string): Promise<DesktopRoomInfo> =>
+    renameDesktopRoom(roomIdentifier, displayName)
+);
+ipcMain.handle(
+  "desktop:room:get-github-integration-status",
+  async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationStatus> =>
+    getDesktopGitHubIntegrationStatus(roomIdentifier)
+);
+ipcMain.handle(
+  "desktop:room:open-github-install",
+  async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> =>
+    openDesktopGitHubInstall(roomIdentifier)
 );
 ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
 ipcMain.handle(
@@ -1911,6 +2389,7 @@ ipcMain.handle(
 );
 
 app.whenReady().then(() => {
+  protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
   createWindow();
 
   app.on("activate", () => {

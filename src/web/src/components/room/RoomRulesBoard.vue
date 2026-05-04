@@ -181,6 +181,7 @@ function formatTaskShortId(taskId: string): string {
 function statusLabel(status: string): string {
   return status.replace(/_/g, ' ')
 }
+
 </script>
 
 <style scoped>

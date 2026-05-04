@@ -97,9 +97,13 @@
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
           :participants="selectedSnapshot?.participants || []"
+          :presence="selectedSnapshot?.presence || []"
+          :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
+          :workers="workers"
           @message-sent="handleMessageSent"
+          @room-renamed="handleRoomRenamed"
           @refresh-room="refreshSelectedSnapshot()"
         />
       </template>
@@ -158,7 +162,9 @@ const repoStatus = ref<RepoStatus | null>(null);
 const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
-const selectedRootRoomIdentifier = ref<string | null>(null);
+const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
+const activeEntryStorageKey = "letagents-desktop:active-entry";
+const selectedRootRoomIdentifier = ref<string | null>(readStoredSelectedRootRoomIdentifier());
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
 const authBusy = ref(false);
@@ -172,6 +178,7 @@ const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("mcp");
 let authPollTimer: number | null = null;
 let unsubscribeRoomStream: (() => void) | null = null;
+let activeEntryRestored = false;
 
 const setupEntry: SystemEntry = {
   id: "system:setup",
@@ -264,6 +271,7 @@ const selectedRoomIdentifier = computed(() => {
   if (selectedNeedsAccess.value) return null;
   return selectedRoomInfo.value.identifier || selectedSnapshot.value?.roomIdentifier || null;
 });
+const latestSelectedMessageId = computed(() => selectedSnapshot.value?.messages.at(-1)?.id || null);
 
 const showMcpInstaller = computed(() => {
   if (!mcpInstallState.value) return false;
@@ -337,6 +345,43 @@ const firstRunFeedback = computed(() => {
   return mcpInstallFeedback.value || authFeedback.value || setupLoadError.value;
 });
 
+function readStoredSelectedRootRoomIdentifier(): string | null {
+  try {
+    return window.localStorage.getItem(selectedRootRoomStorageKey)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberSelectedRootRoomIdentifier(roomIdentifier: string | null): void {
+  try {
+    const trimmed = roomIdentifier?.trim();
+    if (trimmed) {
+      window.localStorage.setItem(selectedRootRoomStorageKey, trimmed);
+      return;
+    }
+    window.localStorage.removeItem(selectedRootRoomStorageKey);
+  } catch {
+    // Local persistence should never block the room UI.
+  }
+}
+
+function readStoredActiveEntryId(): string | null {
+  try {
+    return window.localStorage.getItem(activeEntryStorageKey)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberActiveEntryId(entryId: string): void {
+  try {
+    window.localStorage.setItem(activeEntryStorageKey, entryId);
+  } catch {
+    // Local persistence should never block navigation.
+  }
+}
+
 const currentParentRoom = computed<RoomEntry>(() => ({
   id: "room:parent:main",
   type: "room",
@@ -390,6 +435,28 @@ const collapsedSections = ref({
   system: false,
 });
 const collapsedProjects = ref<Record<string, boolean>>({});
+
+function findSidebarEntryById(entryId: string): SidebarEntry | null {
+  if (entryId === pinnedRoom.value.id) return pinnedRoom.value;
+  if (entryId === currentParentRoom.value.id) return currentParentRoom.value;
+
+  for (const group of projectEntries.value) {
+    if (group.parent.id === entryId) return group.parent;
+    const focusRoom = group.focusRooms.find((room) => room.id === entryId);
+    if (focusRoom) return focusRoom;
+  }
+
+  return systemEntries.find((entry) => entry.id === entryId) || null;
+}
+
+function restoreActiveEntryFromStorage(): boolean {
+  const storedEntryId = readStoredActiveEntryId();
+  if (!storedEntryId) return false;
+  const storedEntry = findSidebarEntryById(storedEntryId);
+  if (!storedEntry) return false;
+  activeEntry.value = storedEntry;
+  return true;
+}
 
 function selectNewRoomEntry() {
   activeEntry.value = pinnedRoom.value;
@@ -503,17 +570,20 @@ async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | n
   }
 
   if (activeEntry.value.type !== "room") {
-    selectedSnapshot.value = baseRootSnapshot;
+    selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, baseRootSnapshot);
     return;
   }
 
   const roomIdentifier = resolveSelectedRoomIdentifier(baseRootSnapshot);
   if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
-    selectedSnapshot.value = baseRootSnapshot;
+    selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, baseRootSnapshot);
     return;
   }
 
-  selectedSnapshot.value = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+  selectedSnapshot.value = mergeRoomSnapshotMessages(
+    selectedSnapshot.value,
+    await window.letagentsDesktop.room.getSnapshot(roomIdentifier)
+  );
 }
 
 function selectedSnapshotMatchesRoom(roomIdentifier: string | null): boolean {
@@ -544,12 +614,71 @@ function upsertSelectedTask(task: DesktopTaskSummary): void {
 
 function appendSelectedMessage(message: DesktopRoomMessage): void {
   if (!selectedSnapshot.value) return;
-  const messages = selectedSnapshot.value.messages || [];
-  if (messages.some((existing) => existing.id === message.id)) return;
   selectedSnapshot.value = {
     ...selectedSnapshot.value,
-    messages: [...messages, message],
+    messages: mergeDesktopRoomMessages(selectedSnapshot.value.messages || [], [message]),
   };
+}
+
+function mergeRoomSnapshotMessages(
+  current: DesktopRoomSnapshot | null,
+  incoming: DesktopRoomSnapshot
+): DesktopRoomSnapshot {
+  if (!current || !roomSnapshotsMatch(current, incoming)) return incoming;
+  return {
+    ...incoming,
+    messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
+  };
+}
+
+function roomSnapshotsMatch(left: DesktopRoomSnapshot, right: DesktopRoomSnapshot): boolean {
+  const leftIdentifiers = [
+    left.roomIdentifier,
+    left.room?.identifier,
+    left.room?.name,
+    left.room?.code,
+  ].map(normalizeRoomIdentifier).filter(Boolean);
+  const rightIdentifiers = [
+    right.roomIdentifier,
+    right.room?.identifier,
+    right.room?.name,
+    right.room?.code,
+  ].map(normalizeRoomIdentifier).filter(Boolean);
+  return leftIdentifiers.some((identifier) => rightIdentifiers.includes(identifier));
+}
+
+function mergeDesktopRoomMessages(
+  current: readonly DesktopRoomMessage[],
+  incoming: readonly DesktopRoomMessage[]
+): DesktopRoomMessage[] {
+  const byId = new Map<string, DesktopRoomMessage>();
+  for (const message of current) byId.set(message.id, message);
+  for (const message of incoming) {
+    if (!isPromptOnlyDesktopMessage(message)) {
+      byId.set(message.id, message);
+    }
+  }
+  return [...byId.values()].sort(compareDesktopRoomMessages);
+}
+
+function isPromptOnlyDesktopMessage(message: DesktopRoomMessage): boolean {
+  return message.agentPromptKind === "auto" && !message.text.trim();
+}
+
+function compareDesktopRoomMessages(left: DesktopRoomMessage, right: DesktopRoomMessage): number {
+  const leftNumber = desktopMessageNumber(left.id);
+  const rightNumber = desktopMessageNumber(right.id);
+  if (leftNumber && rightNumber && leftNumber !== rightNumber) return leftNumber - rightNumber;
+  const leftTime = Date.parse(left.timestamp || "");
+  const rightTime = Date.parse(right.timestamp || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  if (leftNumber && !rightNumber) return -1;
+  if (!leftNumber && rightNumber) return 1;
+  return left.id.localeCompare(right.id);
+}
+
+function desktopMessageNumber(messageId: string): number {
+  return Number(/^msg_(\d+)$/.exec(messageId)?.[1] || 0);
 }
 
 function normalizeRoomIdentifier(value: string | null | undefined): string | null {
@@ -572,7 +701,22 @@ function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
 
 function handleMessageSent(message: DesktopRoomMessage): void {
   appendSelectedMessage(message);
-  void refreshSelectedSnapshot();
+}
+
+function handleRoomRenamed(room: DesktopRoomInfo): void {
+  if (!selectedSnapshot.value) return;
+  selectedSnapshot.value = {
+    ...selectedSnapshot.value,
+    room,
+    roomIdentifier: room.identifier,
+  };
+  if (rootRoomSnapshot.value && roomSnapshotsMatch(rootRoomSnapshot.value, selectedSnapshot.value)) {
+    rootRoomSnapshot.value = {
+      ...rootRoomSnapshot.value,
+      room,
+      roomIdentifier: room.identifier,
+    };
+  }
 }
 
 async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
@@ -581,7 +725,8 @@ async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<vo
     await window.letagentsDesktop.room.stopStream();
     return;
   }
-  await window.letagentsDesktop.room.startStream(roomIdentifier);
+  const latestMessageId = selectedSnapshot.value?.messages.at(-1)?.id || null;
+  await window.letagentsDesktop.room.startStream(roomIdentifier, latestMessageId);
 }
 
 async function loadFirstRunRoomContext(): Promise<void> {
@@ -589,13 +734,14 @@ async function loadFirstRunRoomContext(): Promise<void> {
     const [nextAppInfo, nextRepoStatus, nextRootRoomSnapshot] = await Promise.all([
       window.letagentsDesktop.app.getInfo(),
       window.letagentsDesktop.repos.getStatus(),
-      window.letagentsDesktop.room.getSnapshot(),
+      window.letagentsDesktop.room.getSnapshot(selectedRootRoomIdentifier.value),
     ]);
     appInfo.value = nextAppInfo;
     repoStatus.value = nextRepoStatus;
     rootRoomSnapshot.value = nextRootRoomSnapshot;
     selectedSnapshot.value = nextRootRoomSnapshot;
     selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
+    reconcileActiveEntry();
   } catch {
     // First-run should still be usable if room preview is unavailable before auth.
   }
@@ -610,6 +756,11 @@ function resolveSelectedRoomIdentifier(baseRootSnapshot: DesktopRoomSnapshot | n
 }
 
 function reconcileActiveEntry(): void {
+  if (!activeEntryRestored) {
+    activeEntryRestored = true;
+    if (restoreActiveEntryFromStorage()) return;
+  }
+
   if (activeEntry.value.type !== "room") return;
 
   if (activeEntry.value.kind === "focus") {
@@ -772,6 +923,7 @@ async function pickRepoRoom(): Promise<void> {
     rootRoomSnapshot.value = result.snapshot;
     selectedSnapshot.value = result.snapshot;
     selectedRootRoomIdentifier.value = result.snapshot.roomIdentifier;
+    activeEntry.value = currentParentRoom.value;
     const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
     authFeedback.value = result.warning
       ? `${result.warning} Room selected: ${roomLabel}.`
@@ -796,6 +948,7 @@ async function joinRoomCode(roomCode: string): Promise<void> {
     rootRoomSnapshot.value = snapshot;
     selectedSnapshot.value = snapshot;
     selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
+    activeEntry.value = currentParentRoom.value;
     authFeedback.value = snapshot.access.status === "ready"
       ? "Room selected. Open it when you are ready."
       : snapshot.access.message;
@@ -892,6 +1045,7 @@ const repoStatusValue = computed<RepoStatus>(() => repoStatus.value || {
 watch(
   () => activeEntry.value,
   async (nextEntry, previousEntry) => {
+    rememberActiveEntryId(nextEntry.id);
     if (!rootRoomSnapshot.value) return;
     if (nextEntry.id === previousEntry?.id) return;
     await refreshSelectedSnapshot(rootRoomSnapshot.value);
@@ -899,9 +1053,25 @@ watch(
 );
 
 watch(
+  () => selectedRootRoomIdentifier.value,
+  (roomIdentifier) => {
+    rememberSelectedRootRoomIdentifier(roomIdentifier);
+  },
+  { immediate: true }
+);
+
+watch(
   () => selectedRoomIdentifier.value,
   (roomIdentifier) => {
     void syncSelectedRoomStream(roomIdentifier);
+  }
+);
+
+watch(
+  () => latestSelectedMessageId.value,
+  () => {
+    if (!selectedRoomIdentifier.value) return;
+    void syncSelectedRoomStream(selectedRoomIdentifier.value);
   }
 );
 

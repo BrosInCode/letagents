@@ -400,19 +400,21 @@ export function registerRoomMessageRoutes(
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let endDelivery: (() => Promise<void>) | null = null;
-    try {
-      endDelivery = await beginRoomAgentDelivery({
-        req,
-        roomId: project.id,
-        transport: "long_poll",
-        onSessionDisconnected: () => resolveRequest([]),
-      });
-    } catch (error) {
-      if (error instanceof InvalidRoomAgentDeliverySessionError) {
-        res.status(401).json({ error: error.message });
-        return;
+    if (!isDesktopHumanClient(req)) {
+      try {
+        endDelivery = await beginRoomAgentDelivery({
+          req,
+          roomId: project.id,
+          transport: "long_poll",
+          onSessionDisconnected: () => resolveRequest([]),
+        });
+      } catch (error) {
+        if (error instanceof InvalidRoomAgentDeliverySessionError) {
+          res.status(401).json({ error: error.message });
+          return;
+        }
+        throw error;
       }
-      throw error;
     }
     const existing = await getMessagesAfter(projectId, after, {
       limit,

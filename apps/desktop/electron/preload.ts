@@ -8,11 +8,14 @@ const api: DesktopApi = {
   room: {
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
-      ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 24),
+      ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
+    stageDroppedAttachmentContents: (roomIdentifier, files) =>
+      ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
-    startStream: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:start-stream", roomIdentifier),
+    startStream: (roomIdentifier: string, afterMessageId?: string | null) =>
+      ipcRenderer.invoke("desktop:room:start-stream", roomIdentifier, afterMessageId ?? null),
     stopStream: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:stop-stream", roomIdentifier ?? null),
     onStreamEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
@@ -23,6 +26,12 @@ const api: DesktopApi = {
     },
     sendMessage: (roomIdentifier: string, text: string, replyTo?: string | null, attachments?: Array<{ upload_id: string }>) =>
       ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? []),
+    rename: (roomIdentifier: string, displayName: string) =>
+      ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
+    getGitHubIntegrationStatus: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:get-github-integration-status", roomIdentifier),
+    openGitHubInstall: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:open-github-install", roomIdentifier),
   },
   auth: {
     getStatus: () => ipcRenderer.invoke("desktop:auth:get-status"),
