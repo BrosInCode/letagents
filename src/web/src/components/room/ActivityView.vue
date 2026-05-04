@@ -65,6 +65,10 @@
       </p>
     </div>
 
+    <p v-if="activeView === 'live'" class="activity-desktop-note">
+      For more accurate agent activity, run LetAgents Desktop on the Mac hosting your agents. Desktop-aware agents can report richer session liveness in addition to room heartbeats.
+    </p>
+
     <div v-if="activeView === 'history'" class="activity-history-view">
       <div class="activity-history-toolbar">
         <label v-if="historyRoomOptions.length > 1" class="activity-history-filter">
@@ -647,6 +651,31 @@
           class="activity-detail-section"
         >
           <div class="activity-detail-section-header">
+            <h4>Session liveness</h4>
+            <span>{{ selectedParticipant.livenessObservation ? 'Enriched' : 'Basic' }}</span>
+          </div>
+
+          <div v-if="selectedParticipant.livenessObservation" class="activity-liveness-card">
+            <div>
+              <strong>{{ livenessCapabilityLabel(selectedParticipant.livenessObservation.liveness_capability) }}</strong>
+              <span>{{ selectedParticipant.livenessObservation.host_label || selectedParticipant.livenessObservation.host_kind || 'Agent host' }}</span>
+            </div>
+            <p>
+              Last session signal {{ formatLastSeen(selectedParticipant.livenessObservation.last_observed_at) }}.
+              {{ selectedParticipant.livenessObservation.detail || 'Room-scoped agent activity was observed.' }}
+            </p>
+          </div>
+
+          <div v-else class="activity-detail-empty">
+            This agent is reporting standard room presence only. LetAgents Desktop can enrich this with host-level session activity.
+          </div>
+        </section>
+
+        <section
+          v-if="selectedParticipant.kind === 'agent'"
+          class="activity-detail-section"
+        >
+          <div class="activity-detail-section-header">
             <h4>Live reasoning</h4>
             <span>{{ selectedParticipant.activeReasoning.length }}</span>
           </div>
@@ -886,6 +915,7 @@ interface ActivityParticipant {
   hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
   statusText: string | null
+  livenessObservation: RoomAgentPresence['liveness_observation']
   workSignal: ParticipantWorkSignal | null
   lastSeenAt: string | null
   messageCount: number
@@ -910,6 +940,7 @@ interface HistoryParticipant {
   hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
   statusText: string | null
+  livenessObservation: RoomAgentPresence['liveness_observation']
   workSignal: ParticipantWorkSignal | null
   firstSeenAt: string | null
   lastSeenAt: string | null
@@ -1131,6 +1162,14 @@ function buildWorkSignal(input: {
   return null
 }
 
+function livenessCapabilityLabel(value: string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'session_activity') return 'Session activity'
+  if (normalized === 'process_observed') return 'Process observed'
+  if (normalized === 'tool_bridge_only') return 'Tool bridge'
+  return 'Liveness signal'
+}
+
 function buildAgentParticipant(source: AgentReachabilitySource): ActivityParticipant {
   const { actorLabel, key, participant, presence: presenceEntry, activityState } = source
   const messages = actorLabel ? (agentMessagesByActor.value.get(actorLabel) || []) : []
@@ -1164,6 +1203,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     hasCanonicalPresence: false,
     status: null,
     statusText: null,
+    livenessObservation: null,
     workSignal: null,
     lastSeenAt: null,
     messageCount: messages.length,
@@ -1191,6 +1231,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
       hasCanonicalPresence: false,
       status: null,
       statusText: null,
+      livenessObservation: null,
       workSignal: null,
       lastSeenAt: null,
       messageCount: messages.length,
@@ -1231,6 +1272,7 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     ),
     status: presenceEntry?.status || null,
     statusText,
+    livenessObservation: presenceEntry?.liveness_observation ?? null,
     workSignal,
     lastSeenAt: latestTimestamp(
       participant?.last_room_activity_at,
@@ -1279,6 +1321,7 @@ function buildHumanParticipant(participant: RoomParticipant): ActivityParticipan
     hasCanonicalPresence: false,
     status: null,
     statusText: latestMessage ? previewMessage(latestMessage.text) : null,
+    livenessObservation: null,
     workSignal: null,
     lastSeenAt: latestTimestamp(
       participant.last_room_activity_at,
@@ -1465,6 +1508,7 @@ function buildHistoryParticipant(entry: RoomActivityHistoryEntry): HistoryPartic
     hasCanonicalPresence: false,
     status: null,
     statusText: null,
+    livenessObservation: null,
     workSignal: null,
     firstSeenAt: entry.first_seen_at,
     lastSeenAt: entry.last_seen_at,
@@ -2183,7 +2227,8 @@ function formatLastSeen(value: string | null): string {
 
 .activity-task-card,
 .activity-message-card,
-.activity-reasoning-card {
+.activity-reasoning-card,
+.activity-liveness-card {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -2192,6 +2237,31 @@ function formatLastSeen(value: string | null): string {
   border-radius: 8px;
   border: 1px solid var(--activity-border);
   background: var(--activity-surface-soft);
+}
+
+.activity-liveness-card {
+  display: grid;
+  justify-content: stretch;
+  gap: 8px;
+}
+
+.activity-liveness-card > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-liveness-card strong {
+  color: var(--activity-text);
+  font-size: 0.86rem;
+}
+
+.activity-liveness-card span,
+.activity-liveness-card p {
+  margin: 0;
+  color: var(--activity-text-tertiary);
+  font-size: 0.78rem;
 }
 
 .activity-task-copy {
@@ -2339,6 +2409,17 @@ function formatLastSeen(value: string | null): string {
   margin: 0;
   font-size: 0.78rem;
   color: var(--activity-text-secondary);
+}
+
+.activity-desktop-note {
+  margin: calc(var(--space-md, 16px) * -0.35) 0 var(--space-md, 16px);
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--activity-blue) 26%, var(--activity-border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--activity-blue) 9%, var(--activity-surface-soft));
+  color: var(--activity-text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .activity-history-view {

@@ -18,6 +18,7 @@ import {
   message_attachments,
   messages,
   owner_tokens,
+  room_agent_liveness_observations,
   room_agent_delivery_sessions,
   room_agent_sessions,
   room_live_agent_suppressions,
@@ -248,6 +249,31 @@ export interface RoomAgentPresence {
   freshness: AgentPresenceFreshness;
   activity_state: RoomAgentActivityState;
   source_flags: RoomActivitySourceFlag[];
+  liveness_observation: RoomAgentLivenessObservation | null;
+}
+
+export interface RoomAgentRegistrationLiveness {
+  host_id?: string | null;
+  host_kind?: string | null;
+  host_label?: string | null;
+  liveness_capability?: string | null;
+  tool_bridge_id?: string | null;
+}
+
+export interface RoomAgentLivenessObservation {
+  room_id: string;
+  agent_session_id: string;
+  source: string;
+  host_id: string | null;
+  host_kind: string | null;
+  host_label: string | null;
+  liveness_capability: string;
+  tool_bridge_id: string | null;
+  last_observed_at: string;
+  last_tool_call_at: string | null;
+  detail: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface RoomAgentDeliverySession {
@@ -276,6 +302,11 @@ export interface RoomAgentSession {
   room_id: string;
   session_kind: RoomAgentSessionKind;
   runtime: string;
+  host_id: string | null;
+  host_kind: string | null;
+  host_label: string | null;
+  liveness_capability: string | null;
+  tool_bridge_id: string | null;
   actor_label: string;
   agent_key: string;
   agent_instance_id: string | null;
@@ -637,6 +668,22 @@ interface RoomAgentPresenceRow {
   updated_at: string;
 }
 
+interface RoomAgentLivenessObservationRow {
+  room_id: string;
+  agent_session_id: string;
+  source: string;
+  host_id: string | null;
+  host_kind: string | null;
+  host_label: string | null;
+  liveness_capability: string;
+  tool_bridge_id: string | null;
+  last_observed_at: string;
+  last_tool_call_at: string | null;
+  detail: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 interface RoomAgentDeliverySessionRow {
   room_id: string;
   delivery_key: string;
@@ -664,6 +711,11 @@ interface RoomAgentSessionRow {
   token_hash: string;
   session_kind: RoomAgentSessionKind;
   runtime: string;
+  host_id: string | null;
+  host_kind: string | null;
+  host_label: string | null;
+  liveness_capability: string | null;
+  tool_bridge_id: string | null;
   actor_label: string;
   agent_key: string;
   agent_instance_id: string | null;
@@ -1082,6 +1134,27 @@ function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresence {
       status: null,
     }),
     source_flags: buildRoomActivitySourceFlags(["presence"]),
+    liveness_observation: null,
+  };
+}
+
+function toRoomAgentLivenessObservation(
+  row: RoomAgentLivenessObservationRow
+): RoomAgentLivenessObservation {
+  return {
+    room_id: row.room_id,
+    agent_session_id: row.agent_session_id,
+    source: row.source,
+    host_id: row.host_id,
+    host_kind: row.host_kind,
+    host_label: row.host_label,
+    liveness_capability: row.liveness_capability,
+    tool_bridge_id: row.tool_bridge_id,
+    last_observed_at: row.last_observed_at,
+    last_tool_call_at: row.last_tool_call_at,
+    detail: row.detail,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -1114,6 +1187,11 @@ function toRoomAgentSession(row: RoomAgentSessionRow): RoomAgentSession {
     room_id: row.room_id,
     session_kind: row.session_kind,
     runtime: row.runtime,
+    host_id: row.host_id,
+    host_kind: row.host_kind,
+    host_label: row.host_label,
+    liveness_capability: row.liveness_capability,
+    tool_bridge_id: row.tool_bridge_id,
     actor_label: row.actor_label,
     agent_key: row.agent_key,
     agent_instance_id: row.agent_instance_id,
@@ -1153,10 +1231,18 @@ function mergeRoomAgentPresenceRecords(input: {
   roomId: string;
   statusEntries: readonly RoomAgentPresence[];
   deliverySessions: readonly RoomAgentDeliverySession[];
+  livenessObservations?: readonly RoomAgentLivenessObservation[];
   now?: number;
 }): RoomAgentPresence[] {
   const now = input.now ?? Date.now();
   const statusByActor = new Map(input.statusEntries.map((entry) => [entry.actor_label, entry]));
+  const livenessBySession = new Map<string, RoomAgentLivenessObservation>();
+  for (const entry of input.livenessObservations ?? []) {
+    const existing = livenessBySession.get(entry.agent_session_id);
+    if (!existing || Date.parse(entry.last_observed_at) > Date.parse(existing.last_observed_at)) {
+      livenessBySession.set(entry.agent_session_id, entry);
+    }
+  }
   const statusActorsWithDelivery = new Set<string>();
 
   const buildEntry = (
@@ -1168,6 +1254,7 @@ function mergeRoomAgentPresenceRecords(input: {
       ? isRoomAgentDeliverySessionReachable(deliverySession, now)
       : false;
     const status = statusEntry?.status ?? "idle";
+    const agentSessionId = deliverySession?.agent_session_id ?? statusEntry?.agent_session_id ?? null;
     const lastSeenAt = deliverySession
       ? getRoomAgentDeliverySessionLastSeenAt(deliverySession)
       : statusEntry?.last_heartbeat_at ?? new Date(0).toISOString();
@@ -1177,7 +1264,7 @@ function mergeRoomAgentPresenceRecords(input: {
       actor_label: actorLabel,
       agent_key: deliverySession?.agent_key ?? statusEntry?.agent_key ?? null,
       agent_instance_id: deliverySession?.agent_instance_id ?? statusEntry?.agent_instance_id ?? null,
-      agent_session_id: deliverySession?.agent_session_id ?? statusEntry?.agent_session_id ?? null,
+      agent_session_id: agentSessionId,
       session_kind: deliverySession?.session_kind ?? statusEntry?.session_kind ?? "controller",
       runtime: deliverySession?.runtime ?? statusEntry?.runtime ?? "unknown",
       display_name: deliverySession?.display_name ?? statusEntry?.display_name ?? actorLabel,
@@ -1199,6 +1286,7 @@ function mergeRoomAgentPresenceRecords(input: {
         deliverySession ? "delivery" : null,
         statusEntry ? "presence" : null,
       ]),
+      liveness_observation: agentSessionId ? livenessBySession.get(agentSessionId) ?? null : null,
     } satisfies RoomAgentPresence;
   };
 
@@ -1299,15 +1387,24 @@ async function getMergedRoomAgentPresenceRecords(
       asc(room_agent_delivery_sessions.display_name)
     );
 
-  const [statusRows, deliveryRows] = await Promise.all([
+  const livenessQuery = db
+    .select()
+    .from(room_agent_liveness_observations)
+    .where(eq(room_agent_liveness_observations.room_id, roomId))
+    .orderBy(desc(room_agent_liveness_observations.last_observed_at))
+    .limit(Math.max(options?.deliveryLimit ?? options?.statusLimit ?? 50, 200));
+
+  const [statusRows, deliveryRows, livenessRows] = await Promise.all([
     options?.statusLimit ? statusQuery.limit(options.statusLimit) : statusQuery,
     options?.deliveryLimit ? deliveryQuery.limit(options.deliveryLimit) : deliveryQuery,
+    livenessQuery,
   ]);
 
   return mergeRoomAgentPresenceRecords({
     roomId,
     statusEntries: (statusRows as RoomAgentPresenceRow[]).map(toRoomAgentPresence),
     deliverySessions: (deliveryRows as RoomAgentDeliverySessionRow[]).map(toRoomAgentDeliverySession),
+    livenessObservations: (livenessRows as RoomAgentLivenessObservationRow[]).map(toRoomAgentLivenessObservation),
   });
 }
 
@@ -2899,6 +2996,63 @@ export async function upsertRoomAgentPresence(input: {
   return toRoomAgentPresence(presence as RoomAgentPresenceRow);
 }
 
+export async function upsertRoomAgentLivenessObservation(input: {
+  room_id: string;
+  agent_session_id: string;
+  source?: string | null;
+  host_id?: string | null;
+  host_kind?: string | null;
+  host_label?: string | null;
+  liveness_capability?: string | null;
+  tool_bridge_id?: string | null;
+  last_observed_at?: string | null;
+  last_tool_call_at?: string | null;
+  detail?: string | null;
+}): Promise<RoomAgentLivenessObservation> {
+  const now = new Date().toISOString();
+  const lastObservedAt = input.last_observed_at ?? now;
+  const source = input.source?.trim() || "agent_session";
+
+  const [observation] = await db
+    .insert(room_agent_liveness_observations)
+    .values({
+      room_id: input.room_id,
+      agent_session_id: input.agent_session_id,
+      source,
+      host_id: input.host_id ?? null,
+      host_kind: input.host_kind ?? null,
+      host_label: input.host_label ?? null,
+      liveness_capability: input.liveness_capability?.trim() || "session_activity",
+      tool_bridge_id: input.tool_bridge_id ?? null,
+      last_observed_at: lastObservedAt,
+      last_tool_call_at: input.last_tool_call_at ?? lastObservedAt,
+      detail: input.detail ?? null,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [
+        room_agent_liveness_observations.room_id,
+        room_agent_liveness_observations.agent_session_id,
+        room_agent_liveness_observations.source,
+      ],
+      set: {
+        host_id: input.host_id ?? null,
+        host_kind: input.host_kind ?? null,
+        host_label: input.host_label ?? null,
+        liveness_capability: input.liveness_capability?.trim() || "session_activity",
+        tool_bridge_id: input.tool_bridge_id ?? null,
+        last_observed_at: lastObservedAt,
+        last_tool_call_at: input.last_tool_call_at ?? lastObservedAt,
+        detail: input.detail ?? null,
+        updated_at: now,
+      },
+    })
+    .returning();
+
+  return toRoomAgentLivenessObservation(observation as RoomAgentLivenessObservationRow);
+}
+
 function buildRoomAgentDeliveryKey(input: {
   actor_label: string;
   agent_session_id?: string | null;
@@ -3867,6 +4021,7 @@ export async function createRoomAgentSession(input: {
   room_id: string;
   session_kind: RoomAgentSessionKind;
   runtime: string;
+  registration_liveness?: RoomAgentRegistrationLiveness | null;
   actor_label: string;
   agent_key: string;
   agent_instance_id?: string | null;
@@ -3883,6 +4038,11 @@ export async function createRoomAgentSession(input: {
     token_hash: hashToken(sessionToken),
     session_kind: input.session_kind,
     runtime: input.runtime || "unknown",
+    host_id: input.registration_liveness?.host_id ?? null,
+    host_kind: input.registration_liveness?.host_kind ?? null,
+    host_label: input.registration_liveness?.host_label ?? null,
+    liveness_capability: input.registration_liveness?.liveness_capability ?? null,
+    tool_bridge_id: input.registration_liveness?.tool_bridge_id ?? null,
     actor_label: input.actor_label,
     agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id ?? null,

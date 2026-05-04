@@ -142,6 +142,7 @@
         key="activity"
         :recent-activity="recentActivity"
         :participants="participants"
+        :live-cleared-count="participantHiddenCount"
         :presence="presence"
         :reasoning-sessions="reasoningSessions"
         :tasks="tasks"
@@ -192,6 +193,7 @@ const props = defineProps<{
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
+  participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
@@ -239,9 +241,10 @@ const emit = defineEmits<{
 const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null }>>(() => [
   { id: "chat", label: "Chat", count: props.messages.length },
   { id: "board", label: "Board", count: props.tasks.length },
-  { id: "activity", label: "Activity", count: props.participants.length },
+  { id: "activity", label: "Activity", count: visibleParticipantCount.value + props.participantHiddenCount },
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
 ]);
+const visibleParticipantCount = computed(() => props.participants.filter((participant) => !participant.hiddenAt).length);
 const visibleMessages = computed(() => {
   return mergeRoomMessages([...olderMessages.value, ...props.messages], localMessages.value);
 });

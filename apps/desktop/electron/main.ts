@@ -949,6 +949,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      participantHiddenCount: 0,
       presence: [],
       reasoningSessions: [],
       recentActivity: [],
@@ -1011,7 +1012,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         last_room_activity_at?: string | null;
         last_live_heartbeat_at?: string | null;
         source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/participants`).catch(() => ({ participants: [] })),
+      }>; hidden_count?: number }>(`/rooms/${encodeURIComponent(roomIdentifier)}/participants`).catch(() => ({ participants: [], hidden_count: 0 })),
       apiFetch<{ presence?: Array<{
         room_id: string;
         actor_label: string;
@@ -1029,6 +1030,21 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         freshness: "active" | "stale";
         activity_state: "active" | "away" | "offline";
         source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
+        liveness_observation?: {
+          room_id: string;
+          agent_session_id: string;
+          source: string;
+          host_id: string | null;
+          host_kind: string | null;
+          host_label: string | null;
+          liveness_capability: string;
+          tool_bridge_id: string | null;
+          last_observed_at: string;
+          last_tool_call_at: string | null;
+          detail: string | null;
+          created_at: string;
+          updated_at: string;
+        } | null;
       }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/presence?limit=100`).catch(() => ({ presence: [] })),
       apiFetch<{ sessions?: Array<{
         id: string;
@@ -1152,6 +1168,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       lastLiveHeartbeatAt: participant.last_live_heartbeat_at || null,
       sourceFlags: participant.source_flags || [],
     }));
+    const participantHiddenCount = Number(participantsData.hidden_count || 0);
 
     const presence: DesktopAgentPresence[] = (presenceData.presence || []).map((entry) => ({
       roomId: entry.room_id,
@@ -1170,6 +1187,23 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       freshness: entry.freshness,
       activityState: entry.activity_state,
       sourceFlags: entry.source_flags || [],
+      livenessObservation: entry.liveness_observation
+        ? {
+            roomId: entry.liveness_observation.room_id,
+            agentSessionId: entry.liveness_observation.agent_session_id,
+            source: entry.liveness_observation.source,
+            hostId: entry.liveness_observation.host_id,
+            hostKind: entry.liveness_observation.host_kind,
+            hostLabel: entry.liveness_observation.host_label,
+            livenessCapability: entry.liveness_observation.liveness_capability,
+            toolBridgeId: entry.liveness_observation.tool_bridge_id,
+            lastObservedAt: entry.liveness_observation.last_observed_at,
+            lastToolCallAt: entry.liveness_observation.last_tool_call_at,
+            detail: entry.liveness_observation.detail,
+            createdAt: entry.liveness_observation.created_at,
+            updatedAt: entry.liveness_observation.updated_at,
+          }
+        : null,
     }));
 
     const reasoningSessions: DesktopReasoningSession[] = [
@@ -1281,6 +1315,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms,
       tasks,
       participants,
+      participantHiddenCount,
       presence,
       reasoningSessions,
       recentActivity,
@@ -1314,6 +1349,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         focusRooms: [],
         tasks: [],
         participants: [],
+        participantHiddenCount: 0,
         presence: [],
         reasoningSessions: [],
         recentActivity: [],
@@ -1333,6 +1369,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      participantHiddenCount: 0,
       presence: [],
       reasoningSessions: [],
       recentActivity: [],

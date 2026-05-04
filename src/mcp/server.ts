@@ -108,6 +108,34 @@ const roomPresenceByIdentity = new Map<
   { status: AgentPresenceStatus; status_text: string | null }
 >();
 
+function getOrCreateLocalHostId(): string {
+  const state = readLocalState();
+  if (typeof state.local_host_id === "string" && state.local_host_id.trim()) {
+    return state.local_host_id;
+  }
+
+  const hostId = `host_${randomUUID().replace(/-/g, "")}`;
+  updateLocalState((nextState) => {
+    nextState.local_host_id = typeof nextState.local_host_id === "string" && nextState.local_host_id.trim()
+      ? nextState.local_host_id
+      : hostId;
+    return nextState;
+  });
+  return readLocalState().local_host_id || hostId;
+}
+
+function getSessionLivenessRegistration() {
+  const hostId = getOrCreateLocalHostId();
+  const ideLabel = detectAgentIdeLabel();
+  return {
+    host_id: hostId,
+    host_kind: process.platform === "darwin" ? "macos" : process.platform,
+    host_label: null,
+    liveness_capability: "session_activity",
+    tool_bridge_id: `${hostId}:${ideLabel.toLowerCase()}:${AGENT_INSTANCE_UUID}`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Conversation-scoped identity (Option C: per-conversation hints)
 // ---------------------------------------------------------------------------
@@ -1099,6 +1127,7 @@ async function syncRoomPresence(
         ide_label: resolvedIdentity.ide_label,
         status: presence.status,
         status_text: presence.status_text,
+        liveness_observation: getSessionLivenessRegistration(),
         ...agentSessionCredentials(agentSession),
       }),
     });
@@ -1178,6 +1207,11 @@ function toPublicAgentSession(session: StoredAgentSessionState | null): Record<s
     room_id: session.room_id,
     session_kind: session.session_kind,
     runtime: session.runtime,
+    host_id: session.host_id ?? null,
+    host_kind: session.host_kind ?? null,
+    host_label: session.host_label ?? null,
+    liveness_capability: session.liveness_capability ?? null,
+    tool_bridge_id: session.tool_bridge_id ?? null,
     actor_label: session.actor_label,
     agent_key: session.agent_key,
     agent_instance_id: session.agent_instance_id ?? null,
@@ -1830,6 +1864,7 @@ server.tool(
           display_name: display_name?.trim() || identity.display_name,
           session_kind: session_kind ?? "worker",
           runtime: runtime?.trim() || detectAgentIdeLabel().toLowerCase(),
+          registration_liveness: getSessionLivenessRegistration(),
         }),
       }
     );
@@ -1846,6 +1881,11 @@ server.tool(
       room_id: typeof created.room_id === "string" ? created.room_id : targetRoomId,
       session_kind: created.session_kind === "controller" ? "controller" : "worker",
       runtime: typeof created.runtime === "string" ? created.runtime : "unknown",
+      host_id: typeof created.host_id === "string" ? created.host_id : null,
+      host_kind: typeof created.host_kind === "string" ? created.host_kind : null,
+      host_label: typeof created.host_label === "string" ? created.host_label : null,
+      liveness_capability: typeof created.liveness_capability === "string" ? created.liveness_capability : null,
+      tool_bridge_id: typeof created.tool_bridge_id === "string" ? created.tool_bridge_id : null,
       actor_label: typeof created.actor_label === "string" ? created.actor_label : identity.actor_label,
       agent_key: typeof created.agent_key === "string" ? created.agent_key : identity.canonical_key,
       agent_instance_id: typeof created.agent_instance_id === "string" ? created.agent_instance_id : AGENT_INSTANCE_UUID,

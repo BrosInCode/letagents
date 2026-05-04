@@ -97,6 +97,7 @@
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
           :participants="selectedSnapshot?.participants || []"
+          :participant-hidden-count="selectedSnapshot?.participantHiddenCount || 0"
           :presence="selectedSnapshot?.presence || []"
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"

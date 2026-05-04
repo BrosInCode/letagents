@@ -346,6 +346,21 @@ export interface RoomAgentPresence {
   freshness: 'active' | 'stale'
   activity_state: 'active' | 'away' | 'offline'
   source_flags: ReadonlyArray<'delivery' | 'presence' | 'messages' | 'tasks'>
+  liveness_observation: {
+    room_id: string
+    agent_session_id: string
+    source: string
+    host_id: string | null
+    host_kind: string | null
+    host_label: string | null
+    liveness_capability: string
+    tool_bridge_id: string | null
+    last_observed_at: string
+    last_tool_call_at: string | null
+    detail: string | null
+    created_at: string
+    updated_at: string
+  } | null
 }
 
 export interface RoomParticipant {

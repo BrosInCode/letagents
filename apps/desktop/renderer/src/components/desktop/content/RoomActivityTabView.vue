@@ -114,7 +114,41 @@
             </span>
           </button>
 
-          <article v-if="!disconnectedAgents.length" class="desktop-activity-empty">No recently disconnected agents.</article>
+          <article v-if="!disconnectedAgents.length" class="desktop-activity-empty">
+            {{ liveClearedCount > 0 ? "Disconnected agents were cleared from the live roster." : "No recently disconnected agents." }}
+          </article>
+        </section>
+
+        <section class="desktop-activity-group">
+          <header>
+            <div>
+              <h3>Humans seen in room</h3>
+              <p>Human participants currently active in the room.</p>
+            </div>
+            <strong>{{ humans.length }}</strong>
+          </header>
+
+          <button
+            v-for="human in humans"
+            :key="human.key"
+            class="desktop-activity-roster-item"
+            :data-selected="selectedLiveParticipant?.key === human.key"
+            data-state="human"
+            type="button"
+            @click="selectedLiveKey = human.key"
+          >
+            <span class="desktop-activity-avatar" data-state="human">{{ initials(human.label) }}</span>
+            <span>
+              <strong>{{ human.label }}</strong>
+              <small>Human participant</small>
+            </span>
+            <span class="desktop-activity-row-meta">
+              <span class="state-pill" data-state="human">human</span>
+              <small>{{ formatRelative(human.lastSeenAt) }}</small>
+            </span>
+          </button>
+
+          <article v-if="!humans.length" class="desktop-activity-empty">No human room activity has been seen yet.</article>
         </section>
       </div>
 
@@ -156,9 +190,19 @@
 
         <section class="desktop-activity-detail-section">
           <header>
-            <h4>Desktop liveness sources</h4>
-            <span>{{ selectedLiveParticipant.sources.length }}</span>
+            <h4>Session liveness</h4>
+            <span>{{ selectedLiveParticipant.livenessObservation ? "Enriched" : "Basic" }}</span>
           </header>
+          <article v-if="selectedLiveParticipant.livenessObservation" class="desktop-activity-note">
+            <span>{{ livenessCapabilityLabel(selectedLiveParticipant.livenessObservation.livenessCapability) }}</span>
+            <p>
+              {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
+              observed this session {{ formatRelative(selectedLiveParticipant.livenessObservation.lastObservedAt) }}.
+            </p>
+          </article>
+          <p v-else class="desktop-activity-muted">
+            Standard room presence only. LetAgents Desktop can enrich this when the agent host reports session activity.
+          </p>
           <div class="desktop-activity-source-grid">
             <span
               v-for="source in sourceBadges(selectedLiveParticipant)"
@@ -325,6 +369,7 @@ interface ActivityParticipant {
   activityState: ActivityState | null;
   status: DesktopAgentPresence["status"] | null;
   statusText: string | null;
+  livenessObservation: DesktopAgentPresence["livenessObservation"];
   workState: string | null;
   workLabel: string | null;
   lastSeenAt: string | null;
@@ -338,6 +383,7 @@ interface ActivityParticipant {
 const props = defineProps<{
   recentActivity: DesktopActivityEntry[];
   participants: DesktopParticipantSummary[];
+  liveClearedCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
@@ -353,10 +399,14 @@ const openTaskStatuses = new Set(["proposed", "accepted", "assigned", "in_progre
 const completedTaskStatuses = new Set(["merged", "done"]);
 const inactiveReasoningStatuses = new Set(["completed", "done", "dismissed", "closed"]);
 
-const presenceByActor = computed(() => new Map(props.presence.map((entry) => [entry.actorLabel, entry])));
+const hiddenAgentActors = computed(() => new Set(
+  props.participants
+    .filter((participant) => participant.kind === "agent" && participant.hiddenAt && participant.actorLabel)
+    .map((participant) => participant.actorLabel as string)
+));
 const participantsByActor = computed(() => new Map(
   props.participants
-    .filter((participant) => participant.kind === "agent" && participant.actorLabel)
+    .filter((participant) => participant.kind === "agent" && !participant.hiddenAt && participant.actorLabel)
     .map((participant) => [participant.actorLabel as string, participant])
 ));
 
@@ -375,23 +425,16 @@ const liveParticipants = computed(() => {
 
   for (const presence of props.presence) {
     if (presence.sessionKind !== "worker") continue;
+    if (hiddenAgentActors.value.has(presence.actorLabel)) continue;
     const participant = participantsByActor.value.get(presence.actorLabel) || null;
     const key = `agent:${presence.agentSessionId || presence.actorLabel}`;
     agents.set(key, buildAgentParticipant(key, presence.actorLabel, participant, presence));
   }
 
-  for (const participant of props.participants) {
-    if (participant.kind === "agent" && participant.actorLabel && ![...agents.values()].some((agent) => agent.actorLabel === participant.actorLabel)) {
-      const presence = presenceByActor.value.get(participant.actorLabel) || null;
-      const key = `agent:${participant.participantKey}`;
-      agents.set(key, buildAgentParticipant(key, participant.actorLabel, participant, presence));
-    }
-  }
-
   return [
     ...[...agents.values()].sort(compareActivityParticipants),
     ...props.participants
-      .filter((participant) => participant.kind === "human")
+      .filter((participant) => participant.kind === "human" && !participant.hiddenAt)
       .map(buildHumanParticipant)
       .sort(compareActivityParticipants),
   ];
@@ -406,8 +449,8 @@ const disconnectedAgents = computed(() =>
   liveParticipants.value.filter((participant) => participant.kind === "agent" && participant.activityState === "offline")
 );
 const workSignalAgents = computed(() =>
-  liveParticipants.value.filter((participant) =>
-    participant.kind === "agent" && (participant.workState || participant.currentTasks.length || participant.activeReasoning.length)
+  reachableAgents.value.filter((participant) =>
+    participant.workState || participant.currentTasks.length || participant.activeReasoning.length
   )
 );
 const humans = computed(() => liveParticipants.value.filter((participant) => participant.kind === "human"));
@@ -435,8 +478,11 @@ const summaryCards = computed(() => activeView.value === "live"
 const activeReasoningSessions = computed(() =>
   liveParticipants.value.flatMap((participant) => participant.activeReasoning)
 );
+const liveClearedCount = computed(() => props.liveClearedCount || 0);
 const toolbarNote = computed(() => activeView.value === "live"
-  ? "Desktop adds delivery heartbeats, worker reachability, and local app signals on top of room history."
+  ? liveClearedCount.value > 0
+    ? `${liveClearedCount.value} cleared from the live roster.`
+    : "Desktop adds delivery heartbeats, worker reachability, and local app signals on top of room history."
   : "History is the shared web-compatible room record.");
 
 watch(liveParticipants, (next) => {
@@ -488,6 +534,7 @@ function buildAgentParticipant(
     activityState,
     status: presence?.status || null,
     statusText: activityState === "offline" ? null : statusText,
+    livenessObservation: presence?.livenessObservation || null,
     workState: workSignal?.state || null,
     workLabel: workSignal?.label || null,
     lastSeenAt: latestTimestamp(
@@ -506,6 +553,7 @@ function buildAgentParticipant(
     sources: [
       ...(presence?.sourceFlags || []),
       ...(participant?.sourceFlags || []),
+      presence?.livenessObservation ? "session liveness" : null,
       presence?.sourceFlags.includes("delivery") ? "desktop delivery" : null,
       props.workers.some((worker) => worker.roomId && worker.roomId === presence?.roomId) ? "local worker" : null,
     ].filter((source): source is string => Boolean(source)),
@@ -526,6 +574,7 @@ function buildHumanParticipant(participant: DesktopParticipantSummary): Activity
     activityState: participant.activityState,
     status: null,
     statusText: messages.at(-1)?.text || null,
+    livenessObservation: null,
     workState: null,
     workLabel: null,
     lastSeenAt: latestTimestamp(participant.lastRoomActivityAt, participant.lastSeenAt, messages.at(-1)?.timestamp),
@@ -603,10 +652,19 @@ function sourceBadges(participant: ActivityParticipant): Array<{ label: string; 
   return [
     { label: "Delivery", active: sources.has("delivery") || sources.has("desktop delivery") },
     { label: "Presence", active: sources.has("presence") },
+    { label: "Session", active: sources.has("session liveness") },
     { label: "Messages", active: sources.has("messages") },
     { label: "Tasks", active: sources.has("tasks") },
     { label: "Local app", active: sources.has("local worker") },
   ];
+}
+
+function livenessCapabilityLabel(value: string | null | undefined): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "session_activity") return "Session activity";
+  if (normalized === "process_observed") return "Process observed";
+  if (normalized === "tool_bridge_only") return "Tool bridge";
+  return "Liveness signal";
 }
 
 function sortTasks(tasks: DesktopTaskSummary[]): DesktopTaskSummary[] {

@@ -116,6 +116,7 @@ export function buildFallbackPresenceFromMessages(input: {
         freshness: "stale",
         activity_state: "offline" satisfies RoomAgentActivityState,
         source_flags: buildRoomActivitySourceFlags(["messages"]),
+        liveness_observation: null,
       } satisfies RoomAgentPresence;
     })
     .sort(comparePresence);
@@ -152,5 +153,6 @@ export function buildSyntheticPresenceEntry(input: {
     freshness: "stale",
     activity_state: "offline",
     source_flags: buildRoomActivitySourceFlags(["presence"]),
+    liveness_observation: null,
   };
 }
