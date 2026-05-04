@@ -173,7 +173,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type {
   DesktopDroppedAttachmentContent,
   DesktopParticipantSummary,
@@ -193,12 +193,14 @@ const props = defineProps<{
   participants: DesktopParticipantSummary[];
   searchQuery: string;
   activeSearchMessageId: string | null;
+  initialScrollTop?: number | null;
 }>();
 
 const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
   "load-older": [];
   "discard-attachment": [uploadId: string];
+  "scroll-position": [scrollTop: number | null];
 }>();
 
 const draft = ref("");
@@ -216,6 +218,7 @@ const isDraggingAttachment = ref(false);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 let isScrolledToBottom = true;
+let restoredScrollTop: number | null | undefined;
 let attachmentDragDepth = 0;
 const maxAttachments = 4;
 const maxAttachmentBytes = 25 * 1024 * 1024;
@@ -286,11 +289,24 @@ watch(
       messagesElement.value.scrollTop += messagesElement.value.scrollHeight - previousScrollHeight;
       return;
     }
+    if (!oldLastId) {
+      if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
+        if (isScrolledToBottom) {
+          scrollToBottom();
+        }
+      } else {
+        restoreInitialScrollTop();
+      }
+      return;
+    }
+    if (newLastId === oldLastId) {
+      return;
+    }
     if (isScrolledToBottom) {
       scrollToBottom();
       return;
     }
-    if (oldLastId && newLastId && newLastId !== oldLastId) {
+    if (newLastId) {
       unreadCount.value += Math.max(1, newMessages.length - (oldMessages?.length || 0));
     }
   },
@@ -305,6 +321,28 @@ watch(
     }
   },
 );
+
+watch(
+  () => props.roomIdentifier,
+  () => {
+    restoredScrollTop = undefined;
+    unreadCount.value = 0;
+    isScrolledFarUp.value = false;
+    isScrolledToBottom = true;
+    void nextTick(() => {
+      if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
+        scrollToBottom("auto");
+      } else {
+        restoreInitialScrollTop();
+      }
+    });
+  },
+);
+
+onBeforeUnmount(() => {
+  if (!messagesElement.value) return;
+  emit("scroll-position", isScrolledToBottom ? null : messagesElement.value.scrollTop);
+});
 
 function submitMessage(): void {
   const text = draft.value.trim();
@@ -486,11 +524,11 @@ function handleEnterKey(event: KeyboardEvent): void {
   submitMessage();
 }
 
-function scrollToBottom(): void {
+function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   if (!messagesElement.value) return;
   messagesElement.value.scrollTo({
     top: messagesElement.value.scrollHeight,
-    behavior: "smooth",
+    behavior,
   });
   unreadCount.value = 0;
   isScrolledFarUp.value = false;
@@ -519,6 +557,7 @@ function handleScroll(): void {
   const element = messagesElement.value;
   const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
   isScrolledToBottom = distanceToBottom < 80;
+  emit("scroll-position", isScrolledToBottom ? null : element.scrollTop);
   isScrolledFarUp.value = distanceToBottom > 900;
   if (isScrolledToBottom) {
     unreadCount.value = 0;
@@ -526,6 +565,18 @@ function handleScroll(): void {
   if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
     emit("load-older");
   }
+}
+
+function restoreInitialScrollTop(): void {
+  const element = messagesElement.value;
+  const scrollTop = props.initialScrollTop;
+  if (!element || scrollTop === null || scrollTop === undefined || restoredScrollTop === scrollTop) return;
+  restoredScrollTop = scrollTop;
+  element.scrollTo({
+    top: Math.max(0, Math.min(scrollTop, element.scrollHeight)),
+    behavior: "auto",
+  });
+  handleScroll();
 }
 
 function insertMention(displayName: string): void {

@@ -124,9 +124,11 @@
         :participants="participants"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
+        :initial-scroll-top="chatScrollTop"
         @send-message="sendRoomMessage"
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
+        @scroll-position="chatScrollTop = $event"
       />
 
       <RoomBoardView
@@ -222,6 +224,7 @@ const notificationsEnabled = ref(readNotificationsEnabled());
 const liquidGlassEnabled = ref(readLiquidGlassEnabled());
 const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
 const messageHistoryPageSize = 150;
+const chatScrollTop = ref<number | null>(null);
 let refreshInterval: number | null = null;
 let audioContext: AudioContext | null = null;
 let observedLatestMessageId: string | null = null;
@@ -298,6 +301,7 @@ watch(searchResults, (results) => {
 watch(
   () => props.room.identifier,
   () => {
+    chatScrollTop.value = null;
     void refreshGitHubIntegration();
   },
   { immediate: true },
