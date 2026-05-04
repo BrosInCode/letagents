@@ -217,6 +217,8 @@ const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 let isScrolledToBottom = true;
 let attachmentDragDepth = 0;
+const maxAttachments = 4;
+const maxAttachmentBytes = 25 * 1024 * 1024;
 
 interface PendingAttachmentDraft {
   localId: string;
@@ -353,16 +355,35 @@ async function stageDroppedAttachments(files: File[]): Promise<void> {
     attachmentError.value = "Choose a room before attaching files.";
     return;
   }
-  const pendingDrafts = files.map(toPendingAttachmentDraft);
+  attachmentError.value = null;
+  const availableSlots = Math.max(0, maxAttachments - attachmentDrafts.value.length - pendingAttachmentDrafts.value.length);
+  if (availableSlots <= 0) {
+    attachmentError.value = `Attach up to ${maxAttachments} files per message.`;
+    return;
+  }
+  const acceptedFiles = files.slice(0, availableSlots);
+  if (files.length > availableSlots) {
+    attachmentError.value = `Attach up to ${maxAttachments} files per message.`;
+  }
+  const validFiles = acceptedFiles.filter((file) => {
+    if (file.size <= maxAttachmentBytes) return true;
+    attachmentError.value = `${file.name || "Attachment"} is larger than ${formatBytes(maxAttachmentBytes)}.`;
+    return false;
+  });
+  if (!validFiles.length) return;
+
+  const pendingDrafts = validFiles.map(toPendingAttachmentDraft);
   pendingAttachmentDrafts.value = [...pendingAttachmentDrafts.value, ...pendingDrafts];
   attaching.value = true;
-  attachmentError.value = null;
   try {
     const stageDroppedAttachmentContents = window.letagentsDesktop.room.stageDroppedAttachmentContents;
     if (!stageDroppedAttachmentContents) {
       throw new Error("Restart LetAgents Desktop to enable drag and drop attachments.");
     }
-    const droppedFiles = await Promise.all(files.map(readDroppedAttachmentContent));
+    const droppedFiles: DesktopDroppedAttachmentContent[] = [];
+    for (const file of validFiles) {
+      droppedFiles.push(await readDroppedAttachmentContent(file));
+    }
     pendingAttachmentDrafts.value = pendingAttachmentDrafts.value.map((attachment) => {
       const draftIndex = pendingDrafts.findIndex((draft) => draft.localId === attachment.localId);
       if (draftIndex < 0) return attachment;

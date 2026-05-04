@@ -28,7 +28,7 @@
             <section class="rules-section">
               <div class="rules-section-heading">
                 <h3>Required Workflow</h3>
-                <p>Use the room, board, and pull request as the source of truth.</p>
+                <p>Use the board, lease, and PR as the source of truth.</p>
               </div>
               <ol class="rules-list">
                 <li v-for="rule in workflowRules" :key="rule.title">
@@ -40,8 +40,42 @@
 
             <section class="rules-section">
               <div class="rules-section-heading">
+                <h3>Active Task Authority</h3>
+                <p>Current tasks with lease, lock, or review state.</p>
+              </div>
+              <div v-if="authorityRows.length" class="authority-list">
+                <article v-for="row in authorityRows" :key="row.id" class="authority-row">
+                  <div class="authority-main">
+                    <span class="authority-id">{{ row.shortId }}</span>
+                    <strong>{{ row.title }}</strong>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{{ row.status }}</dd>
+                    </div>
+                    <div>
+                      <dt>Lease</dt>
+                      <dd>{{ row.lease }}</dd>
+                    </div>
+                    <div>
+                      <dt>Branch</dt>
+                      <dd>{{ row.branch }}</dd>
+                    </div>
+                    <div>
+                      <dt>PR</dt>
+                      <dd>{{ row.pr }}</dd>
+                    </div>
+                  </dl>
+                </article>
+              </div>
+              <p v-else class="rules-empty">No active task authority is currently exposed on the board.</p>
+            </section>
+
+            <section class="rules-section">
+              <div class="rules-section-heading">
                 <h3>Warning Meanings</h3>
-                <p>Read warnings as routing signals before changing workflow state.</p>
+                <p>Read warnings as routing signals before taking action.</p>
               </div>
               <details v-for="warning in warningRules" :key="warning.title" class="warning-row">
                 <summary>{{ warning.title }}</summary>
@@ -56,8 +90,12 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue'
+import type { RoomTask } from '@/composables/useRoom'
+
+const props = defineProps<{
   open: boolean
+  tasks: ReadonlyArray<RoomTask>
 }>()
 
 defineEmits<{
@@ -70,8 +108,8 @@ const workflowRules = [
     body: 'Start implementation only after the task shows you as assignee.',
   },
   {
-    title: 'Keep ownership visible.',
-    body: 'If someone else takes over, make the handoff explicit before the work continues.',
+    title: 'Use the leased branch.',
+    body: 'Work from the leased branch name or attach the PR through the task workflow.',
   },
   {
     title: 'Open your own PR.',
@@ -90,7 +128,7 @@ const workflowRules = [
 const warningRules = [
   {
     title: 'GitHub event ignored.',
-    body: 'The PR event did not match a clear room workflow, so it cannot move the board automatically.',
+    body: 'The PR event did not match the active task lease, so it cannot move the board automatically.',
   },
   {
     title: 'No checks reported.',
@@ -101,6 +139,48 @@ const warningRules = [
     body: 'Another worktree may own the branch. Verify the PR state on GitHub before treating it as failed.',
   },
 ]
+
+const ACTIVE_STATUSES = new Set(['assigned', 'in_progress', 'blocked', 'in_review', 'merged'])
+
+const authorityRows = computed(() =>
+  props.tasks
+    .filter(task =>
+      ACTIVE_STATUSES.has(task.status) ||
+      Boolean(task.active_leases?.length) ||
+      Boolean(task.active_locks?.length)
+    )
+    .slice(0, 5)
+    .map(task => {
+      const workLease = task.active_leases?.find(lease => lease.kind === 'work')
+      const lease = workLease ?? task.active_leases?.[0] ?? null
+      const workflowRef = task.workflow_refs?.[0]
+      const pr = workflowRef?.url
+        ? workflowRef.label
+        : task.pr_url
+          ? 'PR linked'
+          : 'Not linked'
+
+      return {
+        id: task.id,
+        shortId: formatTaskShortId(task.id),
+        title: task.title,
+        status: statusLabel(task.status),
+        lease: lease ? `${lease.kind} lease` : 'No active lease',
+        branch: lease?.branch_ref || 'No branch',
+        pr,
+      }
+    })
+)
+
+function formatTaskShortId(taskId: string): string {
+  const match = /^task_(\d+)$/i.exec(taskId.trim())
+  if (match) return `T${match[1]}`
+  return taskId.replace(/^task_/i, 'T')
+}
+
+function statusLabel(status: string): string {
+  return status.replace(/_/g, ' ')
+}
 
 </script>
 
@@ -242,7 +322,8 @@ const warningRules = [
   background: var(--bg-card, #131316);
 }
 
-.rules-list strong {
+.rules-list strong,
+.authority-main strong {
   color: var(--text, #fafafa);
   font-size: 0.84rem;
 }
@@ -251,6 +332,66 @@ const warningRules = [
   color: var(--muted, #a1a1aa);
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.authority-list {
+  display: grid;
+  gap: 10px;
+}
+
+.authority-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: var(--bg-card, #131316);
+}
+
+.authority-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.authority-id {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(147, 197, 253, 0.42);
+  background: rgba(147, 197, 253, 0.08);
+  color: #93c5fd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.authority-main strong {
+  overflow-wrap: anywhere;
+}
+
+.authority-row dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.authority-row dt {
+  color: var(--muted, #a1a1aa);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.authority-row dd {
+  margin: 2px 0 0;
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
 }
 
 .warning-row {
@@ -281,6 +422,10 @@ const warningRules = [
   .rules-board-body {
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .authority-row dl {
+    grid-template-columns: 1fr;
   }
 }
 </style>
