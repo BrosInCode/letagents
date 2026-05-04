@@ -204,6 +204,21 @@ export interface DesktopAgentPresence {
   freshness: "active" | "stale";
   activityState: "active" | "away" | "offline";
   sourceFlags: Array<"delivery" | "presence" | "messages" | "tasks">;
+  livenessObservation: {
+    roomId: string;
+    agentSessionId: string;
+    source: string;
+    hostId: string | null;
+    hostKind: string | null;
+    hostLabel: string | null;
+    livenessCapability: string;
+    toolBridgeId: string | null;
+    lastObservedAt: string;
+    lastToolCallAt: string | null;
+    detail: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
 }
 
 export interface DesktopReasoningSnapshot {
@@ -358,6 +373,7 @@ export interface DesktopRoomSnapshot {
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
+  participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
@@ -387,6 +403,16 @@ export type DesktopRoomStreamEvent =
       type: "task_update";
       roomIdentifier: string;
       task: DesktopTaskSummary;
+    }
+  | {
+      type: "reasoning_update";
+      roomIdentifier: string;
+      session: DesktopReasoningSession;
+    }
+  | {
+      type: "reasoning_remove";
+      roomIdentifier: string;
+      sessionId: string;
     }
   | {
       type: "session_disconnect" | "error";

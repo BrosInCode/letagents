@@ -19,7 +19,16 @@
     <div class="room-chat-message-content">
       <div class="room-message-meta">
         <div class="room-message-author-block">
-          <strong>{{ displayName }}</strong>
+          <button
+            v-if="ownerKind === 'agent'"
+            class="room-message-author-button"
+            type="button"
+            :title="`Show ${displayName} activity`"
+            @click="$emit('open-agent', agentModalTarget)"
+          >
+            {{ displayName }}
+          </button>
+          <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
           <span v-if="ideLabel" class="room-message-ide" :data-ide="ideLabel.toLowerCase()">
             {{ ideLabel }}
@@ -180,7 +189,16 @@ defineEmits<{
   reply: [message: DesktopRoomMessage];
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
+  "open-agent": [target: AgentModalTarget];
 }>();
+
+export interface AgentModalTarget {
+  actorLabel: string | null;
+  displayName: string;
+  ownerAttribution: string | null;
+  ideLabel: string | null;
+  sender: string;
+}
 
 const identity = computed(() => parseSenderIdentity(props.message));
 const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
@@ -202,6 +220,13 @@ const replyDisplayName = computed(() =>
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
+const agentModalTarget = computed<AgentModalTarget>(() => ({
+  actorLabel: props.message.actorLabel || props.message.agentIdentity?.actorLabel || props.message.sender,
+  displayName: displayName.value,
+  ownerAttribution: ownerAttribution.value,
+  ideLabel: ideLabel.value,
+  sender: props.message.sender,
+}));
 
 function parseSenderIdentity(input: { sender?: string | null }): {
   displayName: string;

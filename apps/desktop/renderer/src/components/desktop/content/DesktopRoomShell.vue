@@ -122,6 +122,9 @@
         :has-older-messages="hasOlderMessages"
         :loading-older-messages="loadingOlderMessages"
         :participants="participants"
+        :presence="presence"
+        :reasoning-sessions="reasoningSessions"
+        :tasks="tasks"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
         :initial-scroll-top="chatScrollTop"
@@ -142,6 +145,7 @@
         key="activity"
         :recent-activity="recentActivity"
         :participants="participants"
+        :live-cleared-count="participantHiddenCount"
         :presence="presence"
         :reasoning-sessions="reasoningSessions"
         :tasks="tasks"
@@ -165,7 +169,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -192,6 +196,7 @@ const props = defineProps<{
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
+  participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
@@ -225,7 +230,6 @@ const liquidGlassEnabled = ref(readLiquidGlassEnabled());
 const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
 const messageHistoryPageSize = 150;
 const chatScrollTop = ref<number | null>(null);
-let refreshInterval: number | null = null;
 let audioContext: AudioContext | null = null;
 let observedLatestMessageId: string | null = null;
 const ownMessageIds = new Set<string>();
@@ -237,11 +241,12 @@ const emit = defineEmits<{
 }>();
 
 const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null }>>(() => [
-  { id: "chat", label: "Chat", count: props.messages.length },
+  { id: "chat", label: "Chat", count: visibleMessages.value.length },
   { id: "board", label: "Board", count: props.tasks.length },
-  { id: "activity", label: "Activity", count: props.participants.length },
+  { id: "activity", label: "Activity", count: visibleParticipantCount.value + props.participantHiddenCount },
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
 ]);
+const visibleParticipantCount = computed(() => props.participants.filter((participant) => !participant.hiddenAt).length);
 const visibleMessages = computed(() => {
   return mergeRoomMessages([...olderMessages.value, ...props.messages], localMessages.value);
 });
@@ -276,7 +281,7 @@ watch(
 );
 
 watch(
-  () => props.messages.at(-1)?.id || null,
+  () => visibleMessages.value.at(-1)?.id || null,
   (messageId) => {
     if (!messageId) return;
     if (!observedLatestMessageId) {
@@ -285,7 +290,7 @@ watch(
     }
     if (messageId === observedLatestMessageId) return;
     observedLatestMessageId = messageId;
-    const message = props.messages.find((entry) => entry.id === messageId);
+    const message = visibleMessages.value.find((entry) => entry.id === messageId);
     if (!message || ownMessageIds.has(message.id)) return;
     playRoomSound("notification");
     showRoomNotification(message);
@@ -312,59 +317,19 @@ function selectTab(tabId: RoomTabId): void {
   emit("refresh-room");
 }
 
-onMounted(() => {
-  refreshInterval = window.setInterval(() => {
-    emit("refresh-room");
-  }, 10_000);
-});
-
-onUnmounted(() => {
-  if (refreshInterval) {
-    window.clearInterval(refreshInterval);
-    refreshInterval = null;
-  }
-});
-
 async function sendRoomMessage(text: string, replyTo: string | null = null, attachments: Array<{ upload_id: string }> = []): Promise<void> {
   const trimmedText = text.trim();
   if (!trimmedText && attachments.length === 0) return;
 
-  const pendingId = `desktop-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const replyMessage = visibleMessages.value.find((message) => message.id === replyTo) || null;
-  const pendingMessage: DesktopRoomMessage = {
-    id: pendingId,
-    sender: "You",
-    text: trimmedText,
-    attachments: [],
-    agentPromptKind: null,
-    source: "browser",
-    timestamp: new Date().toISOString(),
-    actorLabel: null,
-    agentIdentity: null,
-    replyTo: replyMessage
-      ? {
-          id: replyMessage.id,
-          sender: replyMessage.sender,
-          text: replyMessage.text,
-          source: replyMessage.source,
-          timestamp: replyMessage.timestamp,
-        }
-      : null,
-  };
-  localMessages.value = mergeRoomMessages(localMessages.value, [pendingMessage]);
   sendingMessage.value = true;
   sendError.value = null;
   try {
     const result = await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText, replyTo, attachments);
     ownMessageIds.add(result.message.id);
-    localMessages.value = mergeRoomMessages(
-      localMessages.value.filter((message) => message.id !== pendingId),
-      [result.message]
-    );
+    localMessages.value = mergeRoomMessages(localMessages.value, [result.message]);
     playRoomSound("send");
     emit("message-sent", result.message);
   } catch (error) {
-    localMessages.value = localMessages.value.filter((message) => message.id !== pendingId);
     sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
   } finally {
     sendingMessage.value = false;
@@ -512,9 +477,22 @@ function desktopBridgeUpgradeMessage(): string {
 
 function mergeRoomMessages(current: readonly DesktopRoomMessage[], incoming: readonly DesktopRoomMessage[]): DesktopRoomMessage[] {
   const byId = new Map<string, DesktopRoomMessage>();
-  for (const message of current) byId.set(message.id, message);
-  for (const message of incoming) byId.set(message.id, message);
+  for (const message of current) {
+    if (!isHiddenChatMessage(message)) {
+      byId.set(message.id, message);
+    }
+  }
+  for (const message of incoming) {
+    if (!isHiddenChatMessage(message)) {
+      byId.set(message.id, message);
+    }
+  }
   return [...byId.values()].sort(compareRoomMessages);
+}
+
+function isHiddenChatMessage(message: DesktopRoomMessage): boolean {
+  if (message.agentPromptKind === "auto" && !message.text.trim()) return true;
+  return message.source === "agent" && /^\[status\]\s*/i.test(message.text || "");
 }
 
 function compareRoomMessages(left: DesktopRoomMessage, right: DesktopRoomMessage): number {

@@ -108,6 +108,11 @@ export interface StoredAgentSessionState {
   room_id: string;
   session_kind: "worker" | "controller";
   runtime: string;
+  host_id?: string | null;
+  host_kind?: string | null;
+  host_label?: string | null;
+  liveness_capability?: string | null;
+  tool_bridge_id?: string | null;
   actor_label: string;
   agent_key: string;
   agent_instance_id?: string | null;
@@ -132,6 +137,7 @@ export interface LetagentsLocalState {
   room_sessions?: Record<string, RoomSessionState>;
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, CodexLiveSessionState>;
+  local_host_id?: string;
 }
 
 const DEFAULT_STATE_PATH = join(homedir(), ".letagents", "mcp-state.json");

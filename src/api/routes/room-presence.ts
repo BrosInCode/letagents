@@ -15,6 +15,7 @@ import {
   getTasksForRooms,
   setRoomLiveAgentSuppressed,
   setRoomParticipantsHidden,
+  upsertRoomAgentLivenessObservation,
   upsertRoomAgentPresence,
   type Project,
   type RoomAgentPresence,
@@ -110,6 +111,26 @@ function normalizeActorLabel(value: string | null | undefined): string {
 function normalizeRuntime(value: unknown): string {
   const normalized = String(value ?? "").trim().toLowerCase();
   return normalized || "unknown";
+}
+
+function normalizeOptionalText(value: unknown): string | null {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized || null;
+}
+
+function normalizeRegistrationLiveness(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const input = value as Record<string, unknown>;
+  return {
+    host_id: normalizeOptionalText(input.host_id),
+    host_kind: normalizeOptionalText(input.host_kind),
+    host_label: normalizeOptionalText(input.host_label),
+    liveness_capability: normalizeOptionalText(input.liveness_capability),
+    tool_bridge_id: normalizeOptionalText(input.tool_bridge_id),
+  };
 }
 
 function isActiveWorkerActorLabelConflict(error: unknown): boolean {
@@ -416,6 +437,7 @@ export function registerRoomPresenceRoutes(
       agent_instance_id,
       session_kind,
       runtime,
+      registration_liveness,
     } = req.body as {
       actor_key?: string;
       actor_label?: string;
@@ -424,6 +446,7 @@ export function registerRoomPresenceRoutes(
       agent_instance_id?: string | null;
       session_kind?: string;
       runtime?: string;
+      registration_liveness?: unknown;
     };
 
     const actorKey = typeof actor_key === "string" ? actor_key.trim() : "";
@@ -476,6 +499,7 @@ export function registerRoomPresenceRoutes(
 
       let offset = 0;
       const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
+      const normalizedRegistrationLiveness = normalizeRegistrationLiveness(registration_liveness);
       const maxRegistrationAttempts = 25;
       for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
         let sessionDisplayName = pickSessionDisplayName(offset);
@@ -494,6 +518,7 @@ export function registerRoomPresenceRoutes(
             room_id: project.id,
             session_kind: requestedSessionKind,
             runtime: normalizeRuntime(runtime || resolvedIdeLabel),
+            registration_liveness: normalizedRegistrationLiveness,
             actor_label: actorLabel,
             agent_key: agent.canonical_key,
             agent_instance_id: normalizedAgentInstanceId,
@@ -611,11 +636,12 @@ export function registerRoomPresenceRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const { status, status_text, agent_session_id, agent_session_token } = req.body as {
+    const { status, status_text, agent_session_id, agent_session_token, liveness_observation } = req.body as {
       status?: string;
       status_text?: string | null;
       agent_session_id?: string;
       agent_session_token?: string;
+      liveness_observation?: unknown;
     };
 
     const agentSessionIdentity = await requireWorkerRequestAgentIdentity({
@@ -657,6 +683,25 @@ export function registerRoomPresenceRoutes(
         status: normalizedStatus as AgentPresenceStatus,
         status_text: statusText,
       });
+      const normalizedLiveness = normalizeRegistrationLiveness(liveness_observation);
+      if (normalizedLiveness && agentSessionIdentity.identity.agent_session_id) {
+        try {
+          presence.liveness_observation = await upsertRoomAgentLivenessObservation({
+            room_id: project.id,
+            agent_session_id: agentSessionIdentity.identity.agent_session_id,
+            source: "agent_session",
+            ...normalizedLiveness,
+            last_observed_at: new Date().toISOString(),
+            last_tool_call_at: new Date().toISOString(),
+            detail: statusText,
+          });
+        } catch (error) {
+          console.error(
+            `[presence] failed to persist liveness observation for ${project.id}; continuing with standard presence`,
+            error
+          );
+        }
+      }
       await deps.rememberAgentRoomParticipant({
         projectId: project.id,
         actorLabel: presence.actor_label,

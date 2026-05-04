@@ -97,6 +97,7 @@
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
           :participants="selectedSnapshot?.participants || []"
+          :participant-hidden-count="selectedSnapshot?.participantHiddenCount || 0"
           :presence="selectedSnapshot?.presence || []"
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
@@ -133,6 +134,7 @@ import type {
   DesktopAppInfo,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopReasoningSession,
   DesktopRoomAccess,
   DesktopRoomInfo,
   DesktopRoomMessage,
@@ -178,6 +180,9 @@ const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("mcp");
 let authPollTimer: number | null = null;
 let unsubscribeRoomStream: (() => void) | null = null;
+let liveMetadataRefreshTimer: number | null = null;
+let liveMetadataRefreshInterval: number | null = null;
+let liveMetadataRefreshSequence = 0;
 let activeEntryRestored = false;
 
 const setupEntry: SystemEntry = {
@@ -586,6 +591,27 @@ async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | n
   );
 }
 
+async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
+  const roomIdentifier = selectedRoomIdentifier.value;
+  if (!roomIdentifier) return;
+  const refreshSequence = ++liveMetadataRefreshSequence;
+  const [snapshot, nextWorkers] = await Promise.all([
+    window.letagentsDesktop.room.getSnapshot(roomIdentifier),
+    window.letagentsDesktop.workers.list().catch(() => workers.value),
+  ]);
+  if (
+    refreshSequence !== liveMetadataRefreshSequence
+    || normalizeRoomIdentifier(selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)
+  ) {
+    return;
+  }
+  workers.value = nextWorkers;
+  selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, snapshot);
+  if (rootRoomSnapshot.value && roomSnapshotsMatch(rootRoomSnapshot.value, snapshot)) {
+    rootRoomSnapshot.value = mergeRoomSnapshotMessages(rootRoomSnapshot.value, snapshot);
+  }
+}
+
 function selectedSnapshotMatchesRoom(roomIdentifier: string | null): boolean {
   if (!roomIdentifier || !selectedSnapshot.value) return false;
   const eventRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
@@ -609,6 +635,30 @@ function upsertSelectedTask(task: DesktopTaskSummary): void {
   selectedSnapshot.value = {
     ...selectedSnapshot.value,
     tasks,
+  };
+}
+
+function upsertSelectedReasoningSession(session: DesktopReasoningSession): void {
+  if (!selectedSnapshot.value) return;
+  const existingIndex = selectedSnapshot.value.reasoningSessions.findIndex((existing) => existing.id === session.id);
+  const reasoningSessions = [...selectedSnapshot.value.reasoningSessions];
+  if (existingIndex >= 0) {
+    reasoningSessions.splice(existingIndex, 1, { ...reasoningSessions[existingIndex], ...session });
+  } else {
+    reasoningSessions.unshift(session);
+  }
+  reasoningSessions.sort(compareDesktopReasoningSessions);
+  selectedSnapshot.value = {
+    ...selectedSnapshot.value,
+    reasoningSessions,
+  };
+}
+
+function removeSelectedReasoningSession(sessionId: string): void {
+  if (!selectedSnapshot.value) return;
+  selectedSnapshot.value = {
+    ...selectedSnapshot.value,
+    reasoningSessions: selectedSnapshot.value.reasoningSessions.filter((session) => session.id !== sessionId),
   };
 }
 
@@ -661,6 +711,12 @@ function mergeDesktopRoomMessages(
   return [...byId.values()].sort(compareDesktopRoomMessages);
 }
 
+function compareDesktopReasoningSessions(left: DesktopReasoningSession, right: DesktopReasoningSession): number {
+  const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
+  const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
+  return (Number.isFinite(rightTime) ? rightTime : -1) - (Number.isFinite(leftTime) ? leftTime : -1);
+}
+
 function isPromptOnlyDesktopMessage(message: DesktopRoomMessage): boolean {
   return message.agentPromptKind === "auto" && !message.text.trim();
 }
@@ -689,18 +745,75 @@ function normalizeRoomIdentifier(value: string | null | undefined): string | nul
 function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (!selectedSnapshotMatchesRoom(event.roomIdentifier)) return;
 
+  if (event.type === "open") {
+    scheduleLiveMetadataRefresh(0);
+    return;
+  }
+
   if (event.type === "message") {
     appendSelectedMessage(event.message);
+    if (shouldRefreshMetadataForMessage(event.message)) {
+      scheduleLiveMetadataRefresh();
+    }
     return;
   }
 
   if (event.type === "task_update") {
     upsertSelectedTask(event.task);
+    scheduleLiveMetadataRefresh();
+    return;
   }
+
+  if (event.type === "reasoning_update") {
+    upsertSelectedReasoningSession(event.session);
+    scheduleLiveMetadataRefresh();
+    return;
+  }
+
+  if (event.type === "reasoning_remove") {
+    removeSelectedReasoningSession(event.sessionId);
+    scheduleLiveMetadataRefresh();
+  }
+}
+
+function shouldRefreshMetadataForMessage(message: DesktopRoomMessage): boolean {
+  const source = (message.source || "").toLowerCase();
+  const sender = (message.sender || "").toLowerCase();
+  return source === "agent" || source === "browser" || source === "github" || sender === "letagents" || sender === "github";
+}
+
+function scheduleLiveMetadataRefresh(delayMs = 800): void {
+  if (liveMetadataRefreshTimer) {
+    window.clearTimeout(liveMetadataRefreshTimer);
+  }
+  liveMetadataRefreshTimer = window.setTimeout(() => {
+    liveMetadataRefreshTimer = null;
+    void refreshSelectedRoomSnapshotFromServer().catch(() => undefined);
+  }, delayMs);
+}
+
+function clearLiveMetadataRefreshTimer(): void {
+  if (!liveMetadataRefreshTimer) return;
+  window.clearTimeout(liveMetadataRefreshTimer);
+  liveMetadataRefreshTimer = null;
+}
+
+function startLiveMetadataRefreshInterval(): void {
+  clearLiveMetadataRefreshInterval();
+  liveMetadataRefreshInterval = window.setInterval(() => {
+    void refreshSelectedRoomSnapshotFromServer().catch(() => undefined);
+  }, 5_000);
+}
+
+function clearLiveMetadataRefreshInterval(): void {
+  if (!liveMetadataRefreshInterval) return;
+  window.clearInterval(liveMetadataRefreshInterval);
+  liveMetadataRefreshInterval = null;
 }
 
 function handleMessageSent(message: DesktopRoomMessage): void {
   appendSelectedMessage(message);
+  scheduleLiveMetadataRefresh();
 }
 
 function handleRoomRenamed(room: DesktopRoomInfo): void {
@@ -722,11 +835,13 @@ function handleRoomRenamed(room: DesktopRoomInfo): void {
 async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
   if (!window.letagentsDesktop?.room?.startStream) return;
   if (!roomIdentifier) {
+    clearLiveMetadataRefreshInterval();
     await window.letagentsDesktop.room.stopStream();
     return;
   }
   const latestMessageId = selectedSnapshot.value?.messages.at(-1)?.id || null;
   await window.letagentsDesktop.room.startStream(roomIdentifier, latestMessageId);
+  startLiveMetadataRefreshInterval();
 }
 
 async function loadFirstRunRoomContext(): Promise<void> {
@@ -1093,6 +1208,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   clearAuthPollTimer();
+  clearLiveMetadataRefreshTimer();
+  clearLiveMetadataRefreshInterval();
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
   void window.letagentsDesktop.room.stopStream();

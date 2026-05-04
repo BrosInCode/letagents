@@ -260,6 +260,13 @@
       "when": 1777478400000,
       "tag": "0036_task_lease_agent_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1777885200000,
+      "tag": "0037_agent_liveness_enrichment",
+      "breakpoints": true
     }
   ]
 }

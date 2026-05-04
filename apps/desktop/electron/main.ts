@@ -949,6 +949,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      participantHiddenCount: 0,
       presence: [],
       reasoningSessions: [],
       recentActivity: [],
@@ -1011,7 +1012,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         last_room_activity_at?: string | null;
         last_live_heartbeat_at?: string | null;
         source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/participants`).catch(() => ({ participants: [] })),
+      }>; hidden_count?: number }>(`/rooms/${encodeURIComponent(roomIdentifier)}/participants`).catch(() => ({ participants: [], hidden_count: 0 })),
       apiFetch<{ presence?: Array<{
         room_id: string;
         actor_label: string;
@@ -1029,6 +1030,21 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         freshness: "active" | "stale";
         activity_state: "active" | "away" | "offline";
         source_flags?: Array<"delivery" | "presence" | "messages" | "tasks">;
+        liveness_observation?: {
+          room_id: string;
+          agent_session_id: string;
+          source: string;
+          host_id: string | null;
+          host_kind: string | null;
+          host_label: string | null;
+          liveness_capability: string;
+          tool_bridge_id: string | null;
+          last_observed_at: string;
+          last_tool_call_at: string | null;
+          detail: string | null;
+          created_at: string;
+          updated_at: string;
+        } | null;
       }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/presence?limit=100`).catch(() => ({ presence: [] })),
       apiFetch<{ sessions?: Array<{
         id: string;
@@ -1152,6 +1168,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       lastLiveHeartbeatAt: participant.last_live_heartbeat_at || null,
       sourceFlags: participant.source_flags || [],
     }));
+    const participantHiddenCount = Number(participantsData.hidden_count || 0);
 
     const presence: DesktopAgentPresence[] = (presenceData.presence || []).map((entry) => ({
       roomId: entry.room_id,
@@ -1170,31 +1187,28 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       freshness: entry.freshness,
       activityState: entry.activity_state,
       sourceFlags: entry.source_flags || [],
+      livenessObservation: entry.liveness_observation
+        ? {
+            roomId: entry.liveness_observation.room_id,
+            agentSessionId: entry.liveness_observation.agent_session_id,
+            source: entry.liveness_observation.source,
+            hostId: entry.liveness_observation.host_id,
+            hostKind: entry.liveness_observation.host_kind,
+            hostLabel: entry.liveness_observation.host_label,
+            livenessCapability: entry.liveness_observation.liveness_capability,
+            toolBridgeId: entry.liveness_observation.tool_bridge_id,
+            lastObservedAt: entry.liveness_observation.last_observed_at,
+            lastToolCallAt: entry.liveness_observation.last_tool_call_at,
+            detail: entry.liveness_observation.detail,
+            createdAt: entry.liveness_observation.created_at,
+            updatedAt: entry.liveness_observation.updated_at,
+          }
+        : null,
     }));
 
     const reasoningSessions: DesktopReasoningSession[] = [
       ...(reasoningData.sessions || reasoningData.reasoning_sessions || []),
-    ].map((session) => ({
-      id: session.id,
-      roomId: session.room_id || null,
-      actorLabel: session.actor_label || null,
-      agentKey: session.agent_key || null,
-      taskId: session.task_id || null,
-      title: session.title || null,
-      status: session.status || null,
-      summary: session.summary || null,
-      latestPayload: session.latest_payload || null,
-      goal: session.goal || null,
-      checking: session.checking || null,
-      hypothesis: session.hypothesis || null,
-      blocker: session.blocker || null,
-      nextAction: session.next_action || null,
-      milestone: session.milestone || null,
-      confidence: session.confidence ?? null,
-      closedAt: session.closed_at || null,
-      createdAt: session.created_at || null,
-      updatedAt: session.updated_at || null,
-    })).sort((left, right) => {
+    ].map(mapDesktopReasoningSessionPayload).sort((left, right) => {
       const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
       const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
       return (Number.isFinite(rightTime) ? rightTime : -1) - (Number.isFinite(leftTime) ? leftTime : -1);
@@ -1281,6 +1295,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms,
       tasks,
       participants,
+      participantHiddenCount,
       presence,
       reasoningSessions,
       recentActivity,
@@ -1314,6 +1329,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         focusRooms: [],
         tasks: [],
         participants: [],
+        participantHiddenCount: 0,
         presence: [],
         reasoningSessions: [],
         recentActivity: [],
@@ -1333,6 +1349,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       focusRooms: [],
       tasks: [],
       participants: [],
+      participantHiddenCount: 0,
       presence: [],
       reasoningSessions: [],
       recentActivity: [],
@@ -1795,6 +1812,50 @@ function mapRoomStreamTaskPayload(task: {
   return mapDesktopTaskSummaryPayload({ ...task, id: task.id });
 }
 
+function mapDesktopReasoningSessionPayload(session: {
+  id: string;
+  room_id?: string | null;
+  actor_label?: string | null;
+  agent_key?: string | null;
+  task_id?: string | null;
+  title?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  latest_payload?: DesktopReasoningSession["latestPayload"];
+  goal?: string | null;
+  checking?: string | null;
+  hypothesis?: string | null;
+  blocker?: string | null;
+  next_action?: string | null;
+  milestone?: string | null;
+  confidence?: number | null;
+  closed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}): DesktopReasoningSession {
+  return {
+    id: session.id,
+    roomId: session.room_id || null,
+    actorLabel: session.actor_label || null,
+    agentKey: session.agent_key || null,
+    taskId: session.task_id || null,
+    title: session.title || null,
+    status: session.status || null,
+    summary: session.summary || null,
+    latestPayload: session.latest_payload || null,
+    goal: session.goal || null,
+    checking: session.checking || null,
+    hypothesis: session.hypothesis || null,
+    blocker: session.blocker || null,
+    nextAction: session.next_action || null,
+    milestone: session.milestone || null,
+    confidence: session.confidence ?? null,
+    closedAt: session.closed_at || null,
+    createdAt: session.created_at || null,
+    updatedAt: session.updated_at || null,
+  };
+}
+
 function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: string): void {
   if (!data.trim()) return;
 
@@ -1810,6 +1871,30 @@ function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: 
     const task = mapRoomStreamTaskPayload(payload);
     if (task) {
       emitRoomStreamEvent({ type: "task_update", roomIdentifier: eventRoomIdentifier, task });
+    }
+    return;
+  }
+
+  if (eventName === "reasoning_update") {
+    const session = payload.session;
+    if (session && typeof session === "object" && typeof (session as { id?: unknown }).id === "string") {
+      emitRoomStreamEvent({
+        type: "reasoning_update",
+        roomIdentifier: eventRoomIdentifier,
+        session: mapDesktopReasoningSessionPayload(session as Parameters<typeof mapDesktopReasoningSessionPayload>[0]),
+      });
+    }
+    return;
+  }
+
+  if (eventName === "reasoning_remove") {
+    const sessionId = typeof payload.session_id === "string"
+      ? payload.session_id
+      : typeof payload.id === "string"
+        ? payload.id
+        : null;
+    if (sessionId) {
+      emitRoomStreamEvent({ type: "reasoning_remove", roomIdentifier: eventRoomIdentifier, sessionId });
     }
     return;
   }

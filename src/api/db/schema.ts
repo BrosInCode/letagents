@@ -401,6 +401,11 @@ export const room_agent_sessions = pgTable(
     actor_label: text("actor_label").notNull(),
     agent_key: text("agent_key").notNull(),
     agent_instance_id: text("agent_instance_id"),
+    host_id: text("host_id"),
+    host_kind: text("host_kind"),
+    host_label: text("host_label"),
+    liveness_capability: text("liveness_capability"),
+    tool_bridge_id: text("tool_bridge_id"),
     display_name: text("display_name").notNull(),
     owner_account_id: text("owner_account_id")
       .notNull()
@@ -423,6 +428,44 @@ export const room_agent_sessions = pgTable(
       table.room_id,
       table.agent_key,
       table.ended_at
+    ),
+  })
+);
+
+export const room_agent_liveness_observations = pgTable(
+  "room_agent_liveness_observations",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    agent_session_id: text("agent_session_id")
+      .notNull()
+      .references(() => room_agent_sessions.session_id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    source: text("source").notNull().default("agent_session"),
+    host_id: text("host_id"),
+    host_kind: text("host_kind"),
+    host_label: text("host_label"),
+    liveness_capability: text("liveness_capability").notNull().default("session_activity"),
+    tool_bridge_id: text("tool_bridge_id"),
+    last_observed_at: timestamp("last_observed_at", { mode: "string", withTimezone: true }).notNull(),
+    last_tool_call_at: timestamp("last_tool_call_at", { mode: "string", withTimezone: true }),
+    detail: text("detail"),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "room_agent_liveness_observations_pk",
+      columns: [table.room_id, table.agent_session_id, table.source],
+    }),
+    room_idx: index("room_agent_liveness_observations_room_id_idx").on(table.room_id),
+    session_idx: index("room_agent_liveness_observations_session_idx").on(table.agent_session_id),
+    observed_idx: index("room_agent_liveness_observations_observed_idx").on(
+      table.room_id,
+      table.last_observed_at
     ),
   })
 );

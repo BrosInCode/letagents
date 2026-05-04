@@ -36,6 +36,7 @@
             @reply="startReply"
             @scroll-to-message="scrollToMessage"
             @open-image="openImageViewer"
+            @open-agent="openAgentModal"
           />
 
           <article v-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
@@ -168,19 +169,96 @@
         @next="shiftImage(1)"
         @previous="shiftImage(-1)"
       />
+      <div
+        v-if="activeAgent"
+        class="desktop-agent-modal-backdrop"
+        role="presentation"
+        @click.self="activeAgent = null"
+      >
+        <section
+          class="desktop-agent-modal"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`${activeAgent.displayName} activity`"
+        >
+          <header class="desktop-agent-modal-header">
+            <div>
+              <span>{{ activeAgent.ideLabel || "Agent" }}</span>
+              <h3>{{ activeAgent.displayName }}</h3>
+              <p>{{ activeAgent.ownerAttribution || activeAgentPresence?.ownerLabel || "Room agent" }}</p>
+            </div>
+            <button type="button" aria-label="Close agent activity" @click="activeAgent = null">Close</button>
+          </header>
+
+          <div class="desktop-agent-modal-stats">
+            <article>
+              <strong>{{ activeAgentPresence ? connectionLabel(activeAgentPresence) : "Unknown" }}</strong>
+              <span>Presence</span>
+            </article>
+            <article>
+              <strong>{{ activeAgentTasks.length }}</strong>
+              <span>Open tasks</span>
+            </article>
+            <article>
+              <strong>{{ activeAgentReasoning.length }}</strong>
+              <span>Thinking streams</span>
+            </article>
+            <article>
+              <strong>{{ formatRelative(activeAgentLastSeenAt) }}</strong>
+              <span>Last signal</span>
+            </article>
+          </div>
+
+          <section class="desktop-agent-modal-section">
+            <header>
+              <h4>Activity</h4>
+              <span>{{ activeAgentMessages.length }}</span>
+            </header>
+            <article
+              v-for="message in activeAgentMessages"
+              :key="message.id"
+              class="desktop-agent-modal-card"
+            >
+              <strong>{{ message.text ? messagePreview(message.text) : "Attachment" }}</strong>
+              <span>{{ formatRelative(message.timestamp) }}</span>
+            </article>
+            <p v-if="!activeAgentMessages.length" class="desktop-agent-modal-empty">No recent chat messages from this agent.</p>
+          </section>
+
+          <section class="desktop-agent-modal-section">
+            <header>
+              <h4>Thinking stream</h4>
+              <span>{{ activeAgentReasoning.length }}</span>
+            </header>
+            <article
+              v-for="session in activeAgentReasoning"
+              :key="session.id"
+              class="desktop-agent-modal-card is-reasoning"
+            >
+              <strong>{{ reasoningTitle(session) }}</strong>
+              <p>{{ reasoningSummary(session) }}</p>
+              <span>{{ formatRelative(session.updatedAt || session.createdAt) }}</span>
+            </article>
+            <p v-if="!activeAgentReasoning.length" class="desktop-agent-modal-empty">No visible thinking stream is active for this agent.</p>
+          </section>
+        </section>
+      </div>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from "vue";
 import type {
+  DesktopAgentPresence,
   DesktopDroppedAttachmentContent,
   DesktopParticipantSummary,
+  DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopStagedAttachment,
+  DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
-import DesktopChatMessage from "./DesktopChatMessage.vue";
+import DesktopChatMessage, { type AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
 
 const props = defineProps<{
@@ -191,6 +269,9 @@ const props = defineProps<{
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   participants: DesktopParticipantSummary[];
+  presence: DesktopAgentPresence[];
+  reasoningSessions: DesktopReasoningSession[];
+  tasks: DesktopTaskSummary[];
   searchQuery: string;
   activeSearchMessageId: string | null;
   initialScrollTop?: number | null;
@@ -217,6 +298,7 @@ const attaching = ref(false);
 const isDraggingAttachment = ref(false);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
+const activeAgent = ref<AgentModalTarget | null>(null);
 let isScrolledToBottom = true;
 let restoredScrollTop: number | null | undefined;
 let attachmentDragDepth = 0;
@@ -274,6 +356,44 @@ const roomImages = computed<DesktopMessageImage[]>(() => {
   }
   return images;
 });
+const activeAgentKey = computed(() => normalizeAgentKey(activeAgent.value?.actorLabel || activeAgent.value?.sender || activeAgent.value?.displayName || ""));
+const activeAgentPresence = computed(() =>
+  props.presence.find((presence) =>
+    normalizeAgentKey(presence.actorLabel) === activeAgentKey.value
+    || normalizeAgentKey(presence.displayName) === activeAgentKey.value
+  ) || null
+);
+const activeAgentMessages = computed(() =>
+  props.messages
+    .filter((message) => isMessageFromActiveAgent(message))
+    .filter((message) => !isThinkingUpdateMessage(message))
+    .slice(-6)
+    .reverse()
+);
+const activeAgentReasoning = computed(() =>
+  props.reasoningSessions
+    .filter((session) => {
+      const actor = normalizeAgentKey(session.actorLabel || "");
+      return actor && actor === activeAgentKey.value;
+    })
+    .sort((left, right) => timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt))
+);
+const activeAgentTasks = computed(() =>
+  props.tasks.filter((task) => {
+    const assignee = normalizeAgentKey(task.assignee || "");
+    const agentKey = normalizeAgentKey(activeAgentPresence.value?.agentKey || "");
+    return Boolean(assignee && (assignee === activeAgentKey.value || assignee === agentKey));
+  })
+);
+const activeAgentLastSeenAt = computed(() =>
+  latestTimestamp(
+    activeAgentPresence.value?.lastHeartbeatAt,
+    activeAgentMessages.value[0]?.timestamp,
+    activeAgentReasoning.value[0]?.updatedAt,
+    activeAgentReasoning.value[0]?.createdAt,
+    activeAgentTasks.value[0]?.updatedAt,
+  )
+);
 
 watch(
   () => props.messages,
@@ -292,7 +412,7 @@ watch(
     if (!oldLastId) {
       if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
         if (isScrolledToBottom) {
-          scrollToBottom();
+          scrollToBottom("auto");
         }
       } else {
         restoreInitialScrollTop();
@@ -339,9 +459,19 @@ watch(
   },
 );
 
+onMounted(() => {
+  window.addEventListener("keydown", handleGlobalKeydown);
+  void nextTick(() => restoreInitialScrollTop());
+});
+
 onBeforeUnmount(() => {
-  if (!messagesElement.value) return;
-  emit("scroll-position", isScrolledToBottom ? null : messagesElement.value.scrollTop);
+  if (messagesElement.value) {
+    emit("scroll-position", isScrolledToBottom ? null : messagesElement.value.scrollTop);
+  }
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown);
 });
 
 function submitMessage(): void {
@@ -672,5 +802,76 @@ function scrollToMessage(messageId: string | null): void {
   target.scrollIntoView({ behavior: "smooth", block: "center" });
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
+}
+
+function openAgentModal(target: AgentModalTarget): void {
+  activeAgent.value = target;
+}
+
+function handleGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && activeAgent.value) {
+    activeAgent.value = null;
+  }
+}
+
+function isMessageFromActiveAgent(message: DesktopRoomMessage): boolean {
+  if (!activeAgentKey.value) return false;
+  return [
+    message.actorLabel,
+    message.agentIdentity?.actorLabel,
+    message.agentIdentity?.displayName,
+    message.sender,
+  ].some((value) => normalizeAgentKey(value || "") === activeAgentKey.value);
+}
+
+function isThinkingUpdateMessage(message: DesktopRoomMessage): boolean {
+  return message.source === "agent" && /^\[status\]\s*/i.test(message.text || "");
+}
+
+function normalizeAgentKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function timestampValue(value: string | null | undefined): number {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function latestTimestamp(...values: Array<string | null | undefined>): string | null {
+  return values
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => timestampValue(right) - timestampValue(left))[0] || null;
+}
+
+function formatRelative(value: string | null | undefined): string {
+  const timestamp = timestampValue(value);
+  if (!timestamp) return "unknown";
+  const delta = Date.now() - timestamp;
+  if (delta < 60_000) return "just now";
+  if (delta < 3_600_000) return `${Math.max(1, Math.round(delta / 60_000))}m ago`;
+  if (delta < 86_400_000) return `${Math.max(1, Math.round(delta / 3_600_000))}h ago`;
+  return `${Math.max(1, Math.round(delta / 86_400_000))}d ago`;
+}
+
+function connectionLabel(presence: DesktopAgentPresence): string {
+  if (presence.activityState === "active") return "Connected";
+  if (presence.activityState === "away") return "Away";
+  return "Offline";
+}
+
+function messagePreview(value: string): string {
+  const normalized = value.replace(/^\[status\]\s*/i, "").replace(/\s+/g, " ").trim();
+  return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
+}
+
+function reasoningTitle(session: DesktopReasoningSession): string {
+  return session.title || session.latestPayload?.goal || session.summary || "Thinking";
+}
+
+function reasoningSummary(session: DesktopReasoningSession): string {
+  return session.latestPayload?.summary
+    || session.summary
+    || session.latestPayload?.checking
+    || "No summary exposed yet.";
 }
 </script>
