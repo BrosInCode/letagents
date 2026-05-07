@@ -675,10 +675,25 @@ function mergeRoomSnapshotMessages(
   incoming: DesktopRoomSnapshot
 ): DesktopRoomSnapshot {
   if (!current || !roomSnapshotsMatch(current, incoming)) return incoming;
+  if (shouldPreserveCurrentRoomSnapshot(current, incoming)) {
+    return {
+      ...current,
+      messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
+    };
+  }
   return {
     ...incoming,
     messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
   };
+}
+
+function shouldPreserveCurrentRoomSnapshot(
+  current: DesktopRoomSnapshot,
+  incoming: DesktopRoomSnapshot
+): boolean {
+  if (current.access.status !== "ready" || incoming.access.status !== "unavailable") return false;
+  const transientStatuses = new Set([408, 429, 500, 502, 503, 504]);
+  return incoming.access.httpStatus === null || transientStatuses.has(incoming.access.httpStatus);
 }
 
 function roomSnapshotsMatch(left: DesktopRoomSnapshot, right: DesktopRoomSnapshot): boolean {

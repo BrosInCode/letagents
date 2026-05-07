@@ -168,6 +168,8 @@ type RoomInfoPayload = {
   focus_status?: "active" | "concluded" | null;
 };
 
+const joinedRoomInfoCache = new Map<string, RoomInfoPayload>();
+
 class DesktopApiError extends Error {
   readonly status: number;
   readonly payload: ApiErrorPayload | null;
@@ -883,6 +885,35 @@ function createRoomAccess(input: Partial<DesktopRoomAccess>): DesktopRoomAccess 
   };
 }
 
+function roomInfoCacheKey(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || null;
+}
+
+function rememberJoinedRoomInfo(requestedRoomIdentifier: string, payload: RoomInfoPayload): void {
+  const keys = [
+    requestedRoomIdentifier,
+    payload.room_id,
+    payload.name,
+    payload.code,
+  ].map(roomInfoCacheKey).filter((key): key is string => Boolean(key));
+  for (const key of keys) {
+    joinedRoomInfoCache.set(key, payload);
+  }
+}
+
+async function getJoinedRoomInfo(roomIdentifier: string): Promise<RoomInfoPayload> {
+  const cacheKey = roomInfoCacheKey(roomIdentifier);
+  const cached = cacheKey ? joinedRoomInfoCache.get(cacheKey) : null;
+  if (cached) return cached;
+
+  const joined = await apiFetch<RoomInfoPayload>(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
+    method: "POST",
+  });
+  rememberJoinedRoomInfo(roomIdentifier, joined);
+  return joined;
+}
+
 function mapDesktopRoomInfoPayload(requestedRoomIdentifier: string, payload: RoomInfoPayload): DesktopRoomInfo {
   const canonicalIdentifier = payload.room_id || requestedRoomIdentifier;
   return {
@@ -958,9 +989,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
   }
 
   try {
-    const joined = await apiFetch<RoomInfoPayload>(`/rooms/${encodeURIComponent(roomIdentifier)}/join`, {
-      method: "POST",
-    });
+    const joined = await getJoinedRoomInfo(roomIdentifier);
 
     const [focusRoomsData, tasksData, participantsData, presenceData, reasoningData, activityHistoryData, messagesData] = await Promise.all([
       apiFetch<{ focus_rooms?: Array<{
@@ -2133,6 +2162,7 @@ async function renameDesktopRoom(roomIdentifier: string, displayName: string): P
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ display_name: trimmedDisplayName }),
   });
+  rememberJoinedRoomInfo(trimmedRoomIdentifier, updated);
   return mapDesktopRoomInfoPayload(trimmedRoomIdentifier, updated);
 }
 
@@ -2258,6 +2288,7 @@ async function pollDeviceAuthFlow(requestId?: string | null): Promise<DesktopAut
         account,
         pendingDeviceAuth: null,
       });
+      joinedRoomInfoCache.clear();
       return {
         status: "authorized",
         intervalSeconds: null,
@@ -2444,6 +2475,7 @@ ipcMain.handle("desktop:auth:open-verification", async (_event, url: string): Pr
   await shell.openExternal(url);
 });
 ipcMain.handle("desktop:auth:sign-out", async (): Promise<DesktopAuthStatus> => {
+  joinedRoomInfoCache.clear();
   await clearStoredAuth();
   return getDesktopAuthStatus();
 });

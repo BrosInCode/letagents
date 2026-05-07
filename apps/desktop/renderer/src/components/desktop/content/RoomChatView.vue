@@ -302,6 +302,8 @@ const activeAgent = ref<AgentModalTarget | null>(null);
 let isScrolledToBottom = true;
 let restoredScrollTop: number | null | undefined;
 let attachmentDragDepth = 0;
+let initialScrollSettled = false;
+let pendingInitialScrollFrame: number | null = null;
 const maxAttachments = 4;
 const maxAttachmentBytes = 25 * 1024 * 1024;
 
@@ -412,10 +414,10 @@ watch(
     if (!oldLastId) {
       if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
         if (isScrolledToBottom) {
-          scrollToBottom("auto");
+          scheduleInitialScrollToBottom();
         }
       } else {
-        restoreInitialScrollTop();
+        scheduleInitialScrollRestore();
       }
       return;
     }
@@ -446,14 +448,15 @@ watch(
   () => props.roomIdentifier,
   () => {
     restoredScrollTop = undefined;
+    initialScrollSettled = false;
     unreadCount.value = 0;
     isScrolledFarUp.value = false;
     isScrolledToBottom = true;
     void nextTick(() => {
       if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
-        scrollToBottom("auto");
+        scheduleInitialScrollToBottom();
       } else {
-        restoreInitialScrollTop();
+        scheduleInitialScrollRestore();
       }
     });
   },
@@ -461,10 +464,15 @@ watch(
 
 onMounted(() => {
   window.addEventListener("keydown", handleGlobalKeydown);
-  void nextTick(() => restoreInitialScrollTop());
+  if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
+    scheduleInitialScrollToBottom();
+  } else {
+    scheduleInitialScrollRestore();
+  }
 });
 
 onBeforeUnmount(() => {
+  cancelPendingInitialScroll();
   if (messagesElement.value) {
     emit("scroll-position", isScrolledToBottom ? null : messagesElement.value.scrollTop);
   }
@@ -660,8 +668,10 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
     top: messagesElement.value.scrollHeight,
     behavior,
   });
+  isScrolledToBottom = true;
   unreadCount.value = 0;
   isScrolledFarUp.value = false;
+  emit("scroll-position", null);
 }
 
 function startReply(message: DesktopRoomMessage): void {
@@ -692,7 +702,7 @@ function handleScroll(): void {
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
-  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
+  if (initialScrollSettled && element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
     emit("load-older");
   }
 }
@@ -700,13 +710,44 @@ function handleScroll(): void {
 function restoreInitialScrollTop(): void {
   const element = messagesElement.value;
   const scrollTop = props.initialScrollTop;
-  if (!element || scrollTop === null || scrollTop === undefined || restoredScrollTop === scrollTop) return;
+  if (!element || scrollTop === null || scrollTop === undefined || restoredScrollTop === scrollTop) {
+    initialScrollSettled = true;
+    return;
+  }
   restoredScrollTop = scrollTop;
   element.scrollTo({
     top: Math.max(0, Math.min(scrollTop, element.scrollHeight)),
     behavior: "auto",
   });
+  initialScrollSettled = true;
   handleScroll();
+}
+
+function scheduleInitialScrollToBottom(): void {
+  scheduleInitialScroll(() => {
+    scrollToBottom("auto");
+    initialScrollSettled = true;
+  });
+}
+
+function scheduleInitialScrollRestore(): void {
+  scheduleInitialScroll(() => restoreInitialScrollTop());
+}
+
+function scheduleInitialScroll(callback: () => void): void {
+  cancelPendingInitialScroll();
+  void nextTick(() => {
+    pendingInitialScrollFrame = window.requestAnimationFrame(() => {
+      pendingInitialScrollFrame = null;
+      callback();
+    });
+  });
+}
+
+function cancelPendingInitialScroll(): void {
+  if (pendingInitialScrollFrame === null) return;
+  window.cancelAnimationFrame(pendingInitialScrollFrame);
+  pendingInitialScrollFrame = null;
 }
 
 function insertMention(displayName: string): void {
