@@ -2509,6 +2509,7 @@ code {
 }
 
 .room-message-meta {
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   min-width: 0;
@@ -2610,6 +2611,7 @@ code {
 }
 
 .room-message-meta-tail {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -3312,12 +3314,19 @@ code {
 .desktop-composer-identity {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 10px;
   min-height: 14px;
   color: var(--text-tertiary);
   font-size: 0.64rem;
   font-weight: 700;
+}
+
+.desktop-composer-identity > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-composer-reply {
@@ -3487,6 +3496,8 @@ code {
 }
 
 .desktop-composer-shortcut {
+  flex: 0 1 auto;
+  text-align: right;
   opacity: 0.42;
 }
 
@@ -3504,6 +3515,11 @@ code {
   line-height: 1.28;
 }
 
+.desktop-composer-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .desktop-composer-input::placeholder {
   color: var(--text-tertiary);
 }
@@ -3517,9 +3533,13 @@ code {
 
 .desktop-composer-hint,
 .desktop-composer-error {
+  min-width: 0;
   margin: 0;
   color: var(--text-tertiary);
   font-size: 0.68rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-composer-error {
@@ -6132,6 +6152,49 @@ code {
   .hero-actions,
   .topbar-actions {
     grid-auto-flow: row;
+  }
+
+  .room-message-list {
+    padding: 14px 14px 20px;
+  }
+
+  .room-chat-message {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 10px;
+    padding: 11px 0;
+  }
+
+  .room-message-meta-tail {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .desktop-composer {
+    width: calc(100% - 20px);
+  }
+
+  .desktop-composer-identity,
+  .desktop-composer-footer {
+    align-items: flex-start;
+  }
+
+  .desktop-composer-identity {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .desktop-composer-shortcut {
+    text-align: left;
+  }
+
+  .desktop-composer-footer {
+    flex-wrap: wrap;
+  }
+
+  .desktop-composer-hint,
+  .desktop-composer-error {
+    flex: 1 1 100%;
+    white-space: normal;
   }
 }
 
