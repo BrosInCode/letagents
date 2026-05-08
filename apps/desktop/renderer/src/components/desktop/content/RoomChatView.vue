@@ -204,7 +204,7 @@
               <span>Thinking streams</span>
             </article>
             <article>
-              <strong>{{ formatRelative(activeAgentLastSeenAt) }}</strong>
+              <strong>{{ formatRelativeTime(activeAgentLastSeenAt) }}</strong>
               <span>Last signal</span>
             </article>
           </div>
@@ -220,7 +220,7 @@
               class="desktop-agent-modal-card"
             >
               <strong>{{ message.text ? messagePreview(message.text) : "Attachment" }}</strong>
-              <span>{{ formatRelative(message.timestamp) }}</span>
+              <span>{{ formatRelativeTime(message.timestamp) }}</span>
             </article>
             <p v-if="!activeAgentMessages.length" class="desktop-agent-modal-empty">No recent chat messages from this agent.</p>
           </section>
@@ -237,7 +237,7 @@
             >
               <strong>{{ reasoningTitle(session) }}</strong>
               <p>{{ reasoningSummary(session) }}</p>
-              <span>{{ formatRelative(session.updatedAt || session.createdAt) }}</span>
+              <span>{{ formatRelativeTime(session.updatedAt || session.createdAt) }}</span>
               <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
                 Open reasoning
               </button>
@@ -261,6 +261,9 @@ import type {
   DesktopStagedAttachment,
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
+import { normalizeAgentKey } from "../../../domain/agents";
+import { reasoningSummary, reasoningTitle } from "../../../domain/reasoning";
+import { formatRelativeTime, latestTimestamp, timestampValue } from "../../../domain/time";
 import DesktopChatMessage, { type AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
 
@@ -925,31 +928,6 @@ function isThinkingUpdateMessage(message: DesktopRoomMessage): boolean {
   return message.source === "agent" && /^\[status\]\s*/i.test(message.text || "");
 }
 
-function normalizeAgentKey(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function timestampValue(value: string | null | undefined): number {
-  const parsed = Date.parse(String(value || ""));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function latestTimestamp(...values: Array<string | null | undefined>): string | null {
-  return values
-    .filter((value): value is string => Boolean(value))
-    .sort((left, right) => timestampValue(right) - timestampValue(left))[0] || null;
-}
-
-function formatRelative(value: string | null | undefined): string {
-  const timestamp = timestampValue(value);
-  if (!timestamp) return "unknown";
-  const delta = Date.now() - timestamp;
-  if (delta < 60_000) return "just now";
-  if (delta < 3_600_000) return `${Math.max(1, Math.round(delta / 60_000))}m ago`;
-  if (delta < 86_400_000) return `${Math.max(1, Math.round(delta / 3_600_000))}h ago`;
-  return `${Math.max(1, Math.round(delta / 86_400_000))}d ago`;
-}
-
 function connectionLabel(presence: DesktopAgentPresence): string {
   if (presence.activityState === "active") return "Connected";
   if (presence.activityState === "away") return "Away";
@@ -961,14 +939,4 @@ function messagePreview(value: string): string {
   return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
 }
 
-function reasoningTitle(session: DesktopReasoningSession): string {
-  return session.title || session.latestPayload?.goal || session.summary || "Thinking";
-}
-
-function reasoningSummary(session: DesktopReasoningSession): string {
-  return session.latestPayload?.summary
-    || session.summary
-    || session.latestPayload?.checking
-    || "No summary exposed yet.";
-}
 </script>

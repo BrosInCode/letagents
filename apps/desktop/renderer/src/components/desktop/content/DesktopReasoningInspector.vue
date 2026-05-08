@@ -80,6 +80,8 @@ import type {
   DesktopReasoningSnapshot,
   DesktopReasoningUpdate,
 } from "../../../../../electron/ipc-types";
+import { displayNameFromActor } from "../../../domain/agents";
+import { timestampValue } from "../../../domain/time";
 
 interface ReasoningField {
   label: string;
@@ -288,12 +290,6 @@ function sortTimeline(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry
   );
 }
 
-function displayNameFromActor(actorLabel: string): string {
-  const normalized = actorLabel.trim();
-  if (!normalized) return "Agent";
-  return normalized.split("|")[0]?.trim() || normalized;
-}
-
 function sanitizeId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "stream";
 }
@@ -302,11 +298,6 @@ function labelFromStatus(value: string | null): string {
   const normalized = String(value || "").trim();
   if (!normalized) return "Update";
   return normalized.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function timestampValue(value: string | null | undefined): number {
-  const parsed = Date.parse(String(value || ""));
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function formatTimestamp(value: string | null | undefined): string {

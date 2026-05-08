@@ -54,7 +54,7 @@
             </span>
             <span class="desktop-activity-row-meta">
               <span class="state-pill" :data-state="agent.activityState || 'offline'">{{ connectionLabel(agent) }}</span>
-              <small>{{ formatRelative(agent.lastSeenAt) }}</small>
+              <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
             </span>
           </button>
 
@@ -96,7 +96,7 @@
             <span class="desktop-activity-row-meta">
               <span v-if="!isReachableParticipant(agent)" class="desktop-activity-mini-pill">signal only</span>
               <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} reasoning</span>
-              <small>{{ formatRelative(agent.lastSeenAt) }}</small>
+              <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
             </span>
           </button>
 
@@ -133,7 +133,7 @@
             </span>
             <span class="desktop-activity-row-meta">
               <span class="state-pill" data-state="offline">offline</span>
-              <small>{{ formatRelative(agent.lastSeenAt) }}</small>
+              <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
             </span>
           </button>
 
@@ -172,7 +172,7 @@
             </span>
             <span class="desktop-activity-row-meta">
               <span class="state-pill" data-state="human">human</span>
-              <small>{{ formatRelative(human.lastSeenAt) }}</small>
+              <small>{{ formatRelativeTime(human.lastSeenAt) }}</small>
             </span>
           </button>
 
@@ -206,7 +206,7 @@
             <span>Reasoning</span>
           </article>
           <article>
-            <strong>{{ formatRelative(selectedLiveParticipant.lastSeenAt) }}</strong>
+            <strong>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</strong>
             <span>Last signal</span>
           </article>
         </div>
@@ -225,7 +225,7 @@
             <span>{{ livenessCapabilityLabel(selectedLiveParticipant.livenessObservation.livenessCapability) }}</span>
             <p>
               {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
-              observed this session {{ formatRelative(selectedLiveParticipant.livenessObservation.lastObservedAt) }}.
+              observed this session {{ formatRelativeTime(selectedLiveParticipant.livenessObservation.lastObservedAt) }}.
             </p>
           </article>
           <p v-else class="desktop-activity-muted">
@@ -262,7 +262,7 @@
           <article v-for="session in selectedLiveParticipant.activeReasoning" :key="session.id" class="desktop-activity-reasoning">
             <strong>{{ reasoningTitle(session) }}</strong>
             <p>{{ reasoningSummary(session) }}</p>
-            <span>{{ reasoningStatus(session) }} · {{ formatRelative(session.updatedAt || session.createdAt) }}</span>
+            <span>{{ reasoningStatus(session) }} · {{ formatRelativeTime(session.updatedAt || session.createdAt) }}</span>
             <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
               Open reasoning
             </button>
@@ -306,7 +306,7 @@
             </span>
             <span class="desktop-activity-row-meta">
               <span class="desktop-activity-mini-pill">{{ entry.currentTasks.length }} open</span>
-              <small>{{ formatRelative(entry.lastRoomActivityAt) }}</small>
+              <small>{{ formatRelativeTime(entry.lastRoomActivityAt) }}</small>
             </span>
           </button>
 
@@ -321,7 +321,7 @@
             <h3>{{ selectedHistoryEntry.participantDisplayName }}</h3>
             <p>
               {{ selectedHistoryEntry.room?.displayName || "This room" }}
-              · last active {{ formatRelative(selectedHistoryEntry.lastRoomActivityAt) }}
+              · last active {{ formatRelativeTime(selectedHistoryEntry.lastRoomActivityAt) }}
             </p>
           </div>
           <span class="state-pill" :data-state="selectedHistoryEntry.activityState || 'offline'">
@@ -343,7 +343,7 @@
             <span>Created</span>
           </article>
           <article>
-            <strong>{{ formatRelative(selectedHistoryEntry.firstSeenAt) }}</strong>
+            <strong>{{ formatRelativeTime(selectedHistoryEntry.firstSeenAt) }}</strong>
             <span>First seen</span>
           </article>
         </div>
@@ -390,6 +390,10 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
+import { displayNameFromActor, ideFromActor, normalizeAgentKey, ownerFromActor } from "../../../domain/agents";
+import { reasoningSummary, reasoningTitle } from "../../../domain/reasoning";
+import { sortTasksByUpdated } from "../../../domain/tasks";
+import { formatRelativeTime, latestTimestamp, timestampValue } from "../../../domain/time";
 
 type ActivityState = "active" | "away" | "offline";
 type ParticipantKind = "agent" | "human";
@@ -605,11 +609,11 @@ function buildAgentParticipant(
   const activityEntry = activityEntryForAgent(actorLabel, participant?.displayName || presence?.displayName || null);
   const currentTasks = mergeTasks(
     activityTasksToDesktopTasks(activityEntry?.currentTasks || []),
-    sortTasks(assignedTasks.filter((task) => openTaskStatuses.has(task.status)))
+    sortTasksByUpdated(assignedTasks.filter((task) => openTaskStatuses.has(task.status)))
   );
   const completedTasks = mergeTasks(
     activityTasksToDesktopTasks(activityEntry?.completedTasks || []),
-    sortTasks(assignedTasks.filter((task) => completedTaskStatuses.has(task.status)))
+    sortTasksByUpdated(assignedTasks.filter((task) => completedTaskStatuses.has(task.status)))
   ).slice(0, 6);
   const statusText = presence?.statusText || latestStatusMessage(messages) || null;
   const activityState = resolveActivityState(participant, presence);
@@ -678,8 +682,8 @@ function buildHumanParticipant(participant: DesktopParticipantSummary): Activity
     lastSeenAt: latestTimestamp(participant.lastRoomActivityAt, participant.lastSeenAt, messages.at(-1)?.timestamp),
     messageCount: messages.length,
     reasoningCount: 0,
-    currentTasks: sortTasks(assignedTasks.filter((task) => openTaskStatuses.has(task.status))),
-    completedTasks: sortTasks(assignedTasks.filter((task) => completedTaskStatuses.has(task.status))).slice(0, 6),
+    currentTasks: sortTasksByUpdated(assignedTasks.filter((task) => openTaskStatuses.has(task.status))),
+    completedTasks: sortTasksByUpdated(assignedTasks.filter((task) => completedTaskStatuses.has(task.status))).slice(0, 6),
     activeReasoning: [],
     sources: participant.sourceFlags,
   };
@@ -836,16 +840,12 @@ function livenessCapabilityLabel(value: string | null | undefined): string {
   return "Liveness signal";
 }
 
-function sortTasks(tasks: DesktopTaskSummary[]): DesktopTaskSummary[] {
-  return [...tasks].sort((left, right) => timestampValue(right.updatedAt) - timestampValue(left.updatedAt));
-}
-
 function mergeTasks(...taskLists: DesktopTaskSummary[][]): DesktopTaskSummary[] {
   const merged = new Map<string, DesktopTaskSummary>();
   for (const task of taskLists.flat()) {
     merged.set(task.id, task);
   }
-  return sortTasks([...merged.values()]);
+  return sortTasksByUpdated([...merged.values()]);
 }
 
 function activityTasksToDesktopTasks(tasks: DesktopActivityEntry["currentTasks"]): DesktopTaskSummary[] {
@@ -863,30 +863,6 @@ function activityTasksToDesktopTasks(tasks: DesktopActivityEntry["currentTasks"]
     createdAt: null,
     updatedAt: task.updatedAt || "",
   }));
-}
-
-function normalizeAgentKey(value: string | null | undefined): string {
-  return String(value || "").trim().toLowerCase();
-}
-
-function latestTimestamp(...values: Array<string | null | undefined>): string | null {
-  return values.reduce<string | null>((best, value) => timestampValue(value) > timestampValue(best) ? value || null : best, null);
-}
-
-function timestampValue(value: string | null | undefined): number {
-  const parsed = Date.parse(String(value || ""));
-  return Number.isFinite(parsed) ? parsed : -1;
-}
-
-function formatRelative(value: string | null | undefined): string {
-  const time = timestampValue(value);
-  if (time < 0) return "unknown";
-  const diffMinutes = Math.max(0, Math.round((Date.now() - time) / 60_000));
-  if (diffMinutes < 1) return "just now";
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  const diffHours = Math.round(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return `${Math.round(diffHours / 24)}d ago`;
 }
 
 function connectionLabel(participant: ActivityParticipant): string {
@@ -909,21 +885,6 @@ function taskStatusLabel(status: string): string {
   return status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function reasoningTitle(session: DesktopReasoningSession): string {
-  return session.title || session.summary || session.goal || "Reasoning stream";
-}
-
-function reasoningSummary(session: DesktopReasoningSession): string {
-  return session.latestPayload?.checking
-    || session.latestPayload?.next_action
-    || session.latestPayload?.hypothesis
-    || session.checking
-    || session.nextAction
-    || session.hypothesis
-    || session.summary
-    || "No summary published yet.";
-}
-
 function reasoningStatus(session: DesktopReasoningSession): string {
   return session.closedAt ? "Closed" : taskStatusLabel(session.status || "active");
 }
@@ -932,18 +893,4 @@ function initials(value: string): string {
   return value.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "A";
 }
 
-function displayNameFromActor(actorLabel: string): string {
-  const parts = String(actorLabel || "").split("|").map((part) => part.trim()).filter(Boolean);
-  return parts[0] || actorLabel || "Agent";
-}
-
-function ownerFromActor(actorLabel: string): string | null {
-  const parts = String(actorLabel || "").split("|").map((part) => part.trim()).filter(Boolean);
-  return parts[1]?.replace(/'s agent$/i, "") || null;
-}
-
-function ideFromActor(actorLabel: string): string | null {
-  const parts = String(actorLabel || "").split("|").map((part) => part.trim()).filter(Boolean);
-  return parts[2] || null;
-}
 </script>
