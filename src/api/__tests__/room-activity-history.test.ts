@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildRoomActivityHistoryEntries,
+  decorateRoomActivityHistoryEntriesWithCounts,
   filterRoomActivityHistoryEntries,
   paginateRoomActivityHistoryEntries,
   sortRoomActivityHistoryEntries,
@@ -177,6 +178,27 @@ test("filterRoomActivityHistoryEntries searches tasks beyond the displayed top f
   assert.equal(filterRoomActivityHistoryEntries(entries, { query: "legacy archive migration" }).length, 1);
 });
 
+test("decorateRoomActivityHistoryEntriesWithCounts attaches message and reasoning totals", () => {
+  const entries = decorateRoomActivityHistoryEntriesWithCounts({
+    entries: buildRoomActivityHistoryEntries({ rooms, participants, tasks }),
+    messageCounts: [
+      { actor_label: "Thicket | EmmyMay's agent | Codex", count: 3 },
+      { actor_label: "Thicket", count: 2 },
+      { actor_label: "Maple | EmmyMay's agent | Codex", count: 1 },
+    ],
+    reasoningSessionCounts: [
+      { actor_label: "Thicket | EmmyMay's agent | Codex", count: 4 },
+    ],
+  });
+  const thicketEntry = entries.find((entry) => entry.participant.display_name === "Thicket");
+  const mapleEntry = entries.find((entry) => entry.participant.display_name === "Maple");
+
+  assert.equal(thicketEntry?.message_count, 5);
+  assert.equal(thicketEntry?.reasoning_session_count, 4);
+  assert.equal(mapleEntry?.message_count, 1);
+  assert.equal(mapleEntry?.reasoning_session_count, 0);
+});
+
 test("buildRoomActivityHistoryEntries sorts by canonical last-seen time, not task churn", () => {
   const entries = buildRoomActivityHistoryEntries({
     rooms,
@@ -267,6 +289,8 @@ test("sortRoomActivityHistoryEntries reorders decorated entries by last_seen_at"
       first_seen_at: "2026-04-21T10:20:00.000Z",
       last_seen_at: "2026-04-21T11:40:00.000Z",
       last_room_activity_at: "2026-04-21T12:10:00.000Z",
+      message_count: 0,
+      reasoning_session_count: 0,
       current_tasks: [],
       completed_tasks: [],
       created_tasks: [],
@@ -298,6 +322,8 @@ test("sortRoomActivityHistoryEntries reorders decorated entries by last_seen_at"
       first_seen_at: "2026-04-21T10:10:00.000Z",
       last_seen_at: "2026-04-21T12:00:00.000Z",
       last_room_activity_at: "2026-04-21T12:00:00.000Z",
+      message_count: 0,
+      reasoning_session_count: 0,
       current_tasks: [],
       completed_tasks: [],
       created_tasks: [],

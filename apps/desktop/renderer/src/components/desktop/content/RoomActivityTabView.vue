@@ -52,18 +52,18 @@
         <section class="desktop-activity-group">
           <header>
             <div>
-              <h3>Work signals</h3>
-              <p>Status, leases, and reasoning streams exposed by active agents.</p>
+              <h3>Agent signals</h3>
+              <p>Status, leases, reasoning, and host liveness from worker sessions.</p>
             </div>
-            <strong>{{ workSignalAgents.length }}</strong>
+            <strong>{{ agentSignalAgents.length }}</strong>
           </header>
 
           <button
-            v-for="agent in workSignalAgents"
+            v-for="agent in agentSignalAgents"
             :key="agent.key"
             class="desktop-activity-roster-item"
             :data-selected="selectedLiveParticipant?.key === agent.key"
-            :data-state="agent.workState || agent.activityState || 'offline'"
+            :data-state="agent.workState || (hasRecentLivenessObservation(agent) ? 'active' : agent.activityState || 'offline')"
             type="button"
             @click="selectedLiveKey = agent.key"
           >
@@ -74,15 +74,16 @@
             </span>
             <span>
               <strong>{{ agent.label }}</strong>
-              <small>{{ agent.workLabel || "Working" }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
+              <small>{{ signalLabel(agent) }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
             </span>
             <span class="desktop-activity-row-meta">
+              <span v-if="!isReachableParticipant(agent)" class="desktop-activity-mini-pill">signal only</span>
               <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} reasoning</span>
               <small>{{ formatRelative(agent.lastSeenAt) }}</small>
             </span>
           </button>
 
-          <article v-if="!workSignalAgents.length" class="desktop-activity-empty">No active work signals are exposed yet.</article>
+          <article v-if="!agentSignalAgents.length" class="desktop-activity-empty">No active agent signals are exposed yet.</article>
         </section>
 
         <section class="desktop-activity-group">
@@ -155,7 +156,7 @@
       <aside v-if="selectedLiveParticipant" class="desktop-activity-detail" :data-kind="selectedLiveParticipant.kind">
         <div class="desktop-activity-detail-header">
           <div>
-            <span>{{ selectedLiveParticipant.kind === "agent" ? "Agent liveness" : "Human activity" }}</span>
+            <span>{{ selectedLiveParticipant.kind === "agent" ? "Agent status" : "Human activity" }}</span>
             <h3>{{ selectedLiveParticipant.label }}</h3>
             <p>{{ participantSubtitle(selectedLiveParticipant) }}</p>
           </div>
@@ -174,7 +175,7 @@
             <span>Open tasks</span>
           </article>
           <article>
-            <strong>{{ selectedLiveParticipant.activeReasoning.length }}</strong>
+            <strong>{{ selectedLiveParticipant.reasoningCount }}</strong>
             <span>Reasoning</span>
           </article>
           <article>
@@ -374,6 +375,7 @@ interface ActivityParticipant {
   workLabel: string | null;
   lastSeenAt: string | null;
   messageCount: number;
+  reasoningCount: number;
   currentTasks: DesktopTaskSummary[];
   completedTasks: DesktopTaskSummary[];
   activeReasoning: DesktopReasoningSession[];
@@ -398,6 +400,7 @@ const selectedHistoryKey = ref<string | null>(null);
 const openTaskStatuses = new Set(["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review"]);
 const completedTaskStatuses = new Set(["merged", "done"]);
 const inactiveReasoningStatuses = new Set(["completed", "done", "dismissed", "closed"]);
+const recentSignalWindowMs = 15 * 60 * 1000;
 
 const hiddenAgentActors = computed(() => new Set(
   props.participants
@@ -420,12 +423,28 @@ const agentMessagesByActor = computed(() => {
   return grouped;
 });
 
+const activityEntriesByActor = computed(() => {
+  const grouped = new Map<string, DesktopActivityEntry>();
+  for (const entry of props.recentActivity) {
+    if (entry.participantKind !== "agent") continue;
+    for (const key of [
+      entry.participantActorLabel,
+      entry.participantDisplayName,
+    ].map(normalizeAgentKey).filter(Boolean)) {
+      const existing = grouped.get(key);
+      if (!existing || timestampValue(entry.lastRoomActivityAt) > timestampValue(existing.lastRoomActivityAt)) {
+        grouped.set(key, entry);
+      }
+    }
+  }
+  return grouped;
+});
+
 const liveParticipants = computed(() => {
   const agents = new Map<string, ActivityParticipant>();
 
   for (const presence of props.presence) {
     if (presence.sessionKind !== "worker") continue;
-    if (!presence.sourceFlags.includes("delivery")) continue;
     if (hiddenAgentActors.value.has(presence.actorLabel) && !isReachablePresence(presence)) continue;
     const participant = participantsByActor.value.get(presence.actorLabel) || null;
     const key = `agent:${presence.agentSessionId || presence.actorLabel}`;
@@ -447,16 +466,33 @@ const reachableAgents = computed(() =>
   )
 );
 const disconnectedAgents = computed(() =>
-  liveParticipants.value.filter((participant) => participant.kind === "agent" && participant.activityState === "offline")
-);
-const workSignalAgents = computed(() =>
-  reachableAgents.value.filter((participant) =>
-    participant.workState || participant.currentTasks.length || participant.activeReasoning.length
+  liveParticipants.value.filter((participant) =>
+    participant.kind === "agent"
+    && participant.activityState === "offline"
+    && hasDeliverySignal(participant)
+    && !hasAgentSignal(participant)
   )
 );
+const agentSignalAgents = computed(() =>
+  liveParticipants.value
+    .filter((participant) => participant.kind === "agent" && hasAgentSignal(participant))
+    .sort(compareSignalParticipants)
+);
 const humans = computed(() => liveParticipants.value.filter((participant) => participant.kind === "human"));
+const visibleLiveParticipants = computed(() => {
+  const participants = new Map<string, ActivityParticipant>();
+  for (const participant of [
+    ...reachableAgents.value,
+    ...agentSignalAgents.value,
+    ...disconnectedAgents.value,
+    ...humans.value,
+  ]) {
+    participants.set(participant.key, participant);
+  }
+  return [...participants.values()];
+});
 const selectedLiveParticipant = computed(() =>
-  liveParticipants.value.find((participant) => participant.key === selectedLiveKey.value) || liveParticipants.value[0] || null
+  visibleLiveParticipants.value.find((participant) => participant.key === selectedLiveKey.value) || visibleLiveParticipants.value[0] || null
 );
 const selectedHistoryEntry = computed(() =>
   props.recentActivity.find((entry) => entry.id === selectedHistoryKey.value) || props.recentActivity[0] || null
@@ -465,7 +501,7 @@ const selectedHistoryEntry = computed(() =>
 const summaryCards = computed(() => activeView.value === "live"
   ? [
       { value: reachableAgents.value.length, label: "Reachable agents" },
-      { value: workSignalAgents.value.length, label: "Work signals" },
+      { value: agentSignalAgents.value.length, label: "Agent signals" },
       { value: disconnectedAgents.value.length, label: "Disconnected" },
       { value: humans.value.length, label: "Humans seen" },
       { value: activeReasoningSessions.value.length, label: "Reasoning streams" },
@@ -483,10 +519,10 @@ const liveClearedCount = computed(() => props.liveClearedCount || 0);
 const toolbarNote = computed(() => activeView.value === "live"
   ? liveClearedCount.value > 0
     ? `${liveClearedCount.value} cleared from the live roster.`
-    : "Desktop adds delivery heartbeats, worker reachability, and local app signals on top of room history."
+    : "Desktop separates message reachability from worker status, tasks, reasoning, and session liveness."
   : "History is the shared web-compatible room record.");
 
-watch(liveParticipants, (next) => {
+watch(visibleLiveParticipants, (next) => {
   if (!next.length) {
     selectedLiveKey.value = null;
     return;
@@ -518,11 +554,20 @@ function buildAgentParticipant(
     .filter(isActiveReasoningSession)
     .sort((left, right) => timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt));
   const assignedTasks = props.tasks.filter((task) => participantMatchesActor(actorLabel, participant?.displayName, task.assignee));
-  const currentTasks = sortTasks(assignedTasks.filter((task) => openTaskStatuses.has(task.status)));
-  const completedTasks = sortTasks(assignedTasks.filter((task) => completedTaskStatuses.has(task.status))).slice(0, 6);
+  const activityEntry = activityEntryForAgent(actorLabel, participant?.displayName || presence?.displayName || null);
+  const currentTasks = mergeTasks(
+    activityTasksToDesktopTasks(activityEntry?.currentTasks || []),
+    sortTasks(assignedTasks.filter((task) => openTaskStatuses.has(task.status)))
+  );
+  const completedTasks = mergeTasks(
+    activityTasksToDesktopTasks(activityEntry?.completedTasks || []),
+    sortTasks(assignedTasks.filter((task) => completedTaskStatuses.has(task.status)))
+  ).slice(0, 6);
   const statusText = presence?.statusText || latestStatusMessage(messages) || null;
   const activityState = resolveActivityState(participant, presence);
   const workSignal = workSignalFrom(presence, statusText, currentTasks.length, activeReasoning.length);
+  const messageCount = Math.max(messages.length, activityEntry?.messageCount || 0);
+  const reasoningCount = Math.max(activeReasoning.length, activityEntry?.reasoningSessionCount || 0);
 
   return {
     key,
@@ -534,26 +579,30 @@ function buildAgentParticipant(
     runtime: presence?.runtime || null,
     activityState,
     status: presence?.status || null,
-    statusText: activityState === "offline" ? null : statusText,
+    statusText,
     livenessObservation: presence?.livenessObservation || null,
     workState: workSignal?.state || null,
     workLabel: workSignal?.label || null,
     lastSeenAt: latestTimestamp(
       participant?.lastLiveHeartbeatAt,
       presence?.lastHeartbeatAt,
+      presence?.livenessObservation?.lastObservedAt,
       participant?.lastRoomActivityAt,
       participant?.lastSeenAt,
       messages.at(-1)?.timestamp,
       activeReasoning[0]?.updatedAt,
       currentTasks[0]?.updatedAt
     ),
-    messageCount: messages.length,
+    messageCount,
+    reasoningCount,
     currentTasks,
     completedTasks,
     activeReasoning,
     sources: [
       ...(presence?.sourceFlags || []),
       ...(participant?.sourceFlags || []),
+      messageCount > 0 ? "messages" : null,
+      currentTasks.length || completedTasks.length ? "tasks" : null,
       presence?.livenessObservation ? "session liveness" : null,
       presence?.sourceFlags.includes("delivery") ? "desktop delivery" : null,
       props.workers.some((worker) => worker.roomId && worker.roomId === presence?.roomId) ? "local worker" : null,
@@ -580,6 +629,7 @@ function buildHumanParticipant(participant: DesktopParticipantSummary): Activity
     workLabel: null,
     lastSeenAt: latestTimestamp(participant.lastRoomActivityAt, participant.lastSeenAt, messages.at(-1)?.timestamp),
     messageCount: messages.length,
+    reasoningCount: 0,
     currentTasks: sortTasks(assignedTasks.filter((task) => openTaskStatuses.has(task.status))),
     completedTasks: sortTasks(assignedTasks.filter((task) => completedTaskStatuses.has(task.status))).slice(0, 6),
     activeReasoning: [],
@@ -596,8 +646,55 @@ function resolveActivityState(participant: DesktopParticipantSummary | null, pre
   return participant?.activityState || "offline";
 }
 
+function activityEntryForAgent(actorLabel: string, displayName: string | null): DesktopActivityEntry | null {
+  return [
+    actorLabel,
+    displayName,
+  ].map(normalizeAgentKey)
+    .filter(Boolean)
+    .map((key) => activityEntriesByActor.value.get(key) || null)
+    .find((entry): entry is DesktopActivityEntry => Boolean(entry)) || null;
+}
+
 function isReachablePresence(presence: DesktopAgentPresence): boolean {
   return presence.sessionKind === "worker" && presence.sourceFlags.includes("delivery") && presence.freshness === "active";
+}
+
+function isReachableParticipant(participant: ActivityParticipant): boolean {
+  return participant.kind === "agent" && (participant.activityState === "active" || participant.activityState === "away");
+}
+
+function hasDeliverySignal(participant: ActivityParticipant): boolean {
+  return participant.sources.includes("delivery") || participant.sources.includes("desktop delivery");
+}
+
+function hasRecentParticipantSignal(participant: ActivityParticipant): boolean {
+  return isRecentTimestamp(participant.lastSeenAt);
+}
+
+function hasRecentLivenessObservation(participant: ActivityParticipant): boolean {
+  return isRecentTimestamp(participant.livenessObservation?.lastObservedAt);
+}
+
+function isRecentTimestamp(value: string | null | undefined): boolean {
+  const signalTime = timestampValue(value);
+  return signalTime >= 0 && Date.now() - signalTime <= recentSignalWindowMs;
+}
+
+function hasAgentSignal(participant: ActivityParticipant): boolean {
+  if (participant.kind !== "agent") return false;
+  if (participant.currentTasks.length || participant.activeReasoning.length) return true;
+  if (participant.livenessObservation && hasRecentLivenessObservation(participant)) return true;
+  return Boolean((participant.workState || participant.statusText) && hasRecentParticipantSignal(participant));
+}
+
+function signalLabel(participant: ActivityParticipant): string {
+  if (participant.workLabel) return participant.workLabel;
+  if (participant.livenessObservation && hasRecentLivenessObservation(participant)) {
+    return livenessCapabilityLabel(participant.livenessObservation.livenessCapability);
+  }
+  if (participant.statusText) return "Status";
+  return "Signal";
 }
 
 function workSignalFrom(
@@ -630,6 +727,12 @@ function compareActivityParticipants(left: ActivityParticipant, right: ActivityP
   const byState = stateRank(left) - stateRank(right);
   if (byState) return byState;
   return timestampValue(right.lastSeenAt) - timestampValue(left.lastSeenAt) || left.label.localeCompare(right.label);
+}
+
+function compareSignalParticipants(left: ActivityParticipant, right: ActivityParticipant): number {
+  const leftReachable = isReachableParticipant(left) ? 0 : 1;
+  const rightReachable = isReachableParticipant(right) ? 0 : 1;
+  return leftReachable - rightReachable || compareActivityParticipants(left, right);
 }
 
 function participantMatchesActor(actorLabel: string, displayName: string | null | undefined, value: string | null): boolean {
@@ -676,6 +779,29 @@ function sortTasks(tasks: DesktopTaskSummary[]): DesktopTaskSummary[] {
   return [...tasks].sort((left, right) => timestampValue(right.updatedAt) - timestampValue(left.updatedAt));
 }
 
+function mergeTasks(...taskLists: DesktopTaskSummary[][]): DesktopTaskSummary[] {
+  const merged = new Map<string, DesktopTaskSummary>();
+  for (const task of taskLists.flat()) {
+    merged.set(task.id, task);
+  }
+  return sortTasks([...merged.values()]);
+}
+
+function activityTasksToDesktopTasks(tasks: DesktopActivityEntry["currentTasks"]): DesktopTaskSummary[] {
+  return tasks.map((task) => ({
+    ...task,
+    assignee: null,
+    createdBy: null,
+    prUrl: null,
+    activeLeases: [],
+    updatedAt: task.updatedAt || "",
+  }));
+}
+
+function normalizeAgentKey(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
 function latestTimestamp(...values: Array<string | null | undefined>): string | null {
   return values.reduce<string | null>((best, value) => timestampValue(value) > timestampValue(best) ? value || null : best, null);
 }
@@ -700,13 +826,16 @@ function connectionLabel(participant: ActivityParticipant): string {
   if (participant.kind === "human") return "human";
   if (participant.activityState === "active") return "connected";
   if (participant.activityState === "away") return "idle";
+  if (hasAgentSignal(participant)) return "signal only";
   return "offline";
 }
 
 function participantSubtitle(participant: ActivityParticipant): string {
   if (participant.kind === "human") return "Seen through room messages and tasks.";
+  if (participant.activityState === "active" || participant.activityState === "away") return "Can receive room messages now.";
+  if (hasAgentSignal(participant)) return "Session or work signals are updating, but message delivery is not reachable.";
   if (participant.activityState === "offline") return "Delivery session is no longer reachable.";
-  return "Can receive room messages now.";
+  return "No current delivery or session signal.";
 }
 
 function taskStatusLabel(status: string): string {
