@@ -4137,10 +4137,28 @@ code {
 
 .desktop-activity-stat {
   display: grid;
-  gap: 4px;
+  align-content: space-between;
+  gap: 10px;
   min-height: 82px;
   padding: 15px;
   border-radius: 18px;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.desktop-activity-stat:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(22, 22, 24, 0.82);
+}
+
+.desktop-activity-stat-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .desktop-activity-stat strong {
@@ -4159,6 +4177,71 @@ code {
 .desktop-activity-task a,
 .desktop-activity-reasoning span {
   color: var(--text-tertiary);
+}
+
+.desktop-activity-icon,
+.desktop-activity-header-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.desktop-activity-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 13px;
+}
+
+.desktop-activity-header-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 14px;
+}
+
+.desktop-activity-icon svg,
+.desktop-activity-header-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.desktop-activity-stat[data-tone="reachable"] .desktop-activity-icon,
+.desktop-activity-header-icon[data-tone="reachable"] {
+  background: rgba(34, 197, 94, 0.13);
+  color: #86efac;
+}
+
+.desktop-activity-stat[data-tone="signal"] .desktop-activity-icon,
+.desktop-activity-header-icon[data-tone="signal"],
+.desktop-activity-stat[data-tone="reasoning"] .desktop-activity-icon {
+  background: rgba(139, 124, 246, 0.14);
+  color: #c4b5fd;
+}
+
+.desktop-activity-stat[data-tone="offline"] .desktop-activity-icon,
+.desktop-activity-header-icon[data-tone="offline"] {
+  background: rgba(248, 113, 113, 0.13);
+  color: #fca5a5;
+}
+
+.desktop-activity-stat[data-tone="human"] .desktop-activity-icon,
+.desktop-activity-header-icon[data-tone="human"] {
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+}
+
+.desktop-activity-stat[data-tone="history"] .desktop-activity-icon,
+.desktop-activity-header-icon[data-tone="history"] {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+}
+
+.desktop-activity-stat[data-tone="task"] .desktop-activity-icon {
+  background: rgba(251, 191, 36, 0.13);
+  color: #fde68a;
 }
 
 .desktop-activity-toolbar,
@@ -4194,6 +4277,15 @@ code {
   color: var(--text-secondary);
   font-weight: 800;
   cursor: pointer;
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.desktop-activity-switcher button:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .desktop-activity-switcher button[data-active="true"] {
@@ -4248,6 +4340,11 @@ code {
   justify-content: space-between;
 }
 
+.desktop-activity-group header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .desktop-activity-group h3,
 .desktop-activity-detail h3,
 .desktop-activity-detail-section h4 {
@@ -4275,18 +4372,35 @@ code {
 .desktop-activity-roster-item {
   width: 100%;
   min-height: 76px;
-  padding: 11px;
-  border: 0;
+  padding: 12px;
+  border: 1px solid transparent;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.035);
   color: inherit;
   text-align: left;
   cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
 }
 
 .desktop-activity-roster-item:hover,
 .desktop-activity-roster-item[data-selected="true"] {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.desktop-activity-roster-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+.desktop-activity-roster-item[data-selected="true"] {
+  border-color: rgba(196, 181, 253, 0.28);
+  box-shadow:
+    inset 3px 0 0 rgba(196, 181, 253, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .desktop-activity-avatar {
@@ -4343,6 +4457,7 @@ code {
   justify-items: end;
   gap: 6px;
   margin-left: auto;
+  max-width: 42%;
 }
 
 .desktop-activity-mini-pill {
@@ -4355,6 +4470,7 @@ code {
   color: #c4b5fd;
   font-size: 0.76rem;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .desktop-activity-empty {
@@ -4402,7 +4518,7 @@ code {
   color: var(--text-tertiary);
   font-size: 0.72rem;
   font-weight: 900;
-  letter-spacing: 0.14em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -4417,6 +4533,7 @@ code {
 .desktop-activity-task,
 .desktop-activity-reasoning,
 .desktop-activity-source-grid span {
+  border: 1px solid rgba(255, 255, 255, 0.045);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.04);
 }
@@ -4476,6 +4593,15 @@ code {
   align-items: flex-start;
   justify-content: space-between;
   padding: 11px;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.desktop-activity-task:hover,
+.desktop-activity-reasoning:hover {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .desktop-activity-task strong,
