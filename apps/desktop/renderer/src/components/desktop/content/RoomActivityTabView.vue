@@ -1,8 +1,15 @@
 <template>
   <section class="room-tab-page room-activity-page" data-testid="room-activity-tab-view">
     <div class="desktop-activity-summary">
-      <article v-for="card in summaryCards" :key="card.label" class="desktop-activity-stat">
-        <strong>{{ card.value }}</strong>
+      <article v-for="card in summaryCards" :key="card.label" class="desktop-activity-stat" :data-tone="card.tone">
+        <span class="desktop-activity-stat-top">
+          <span class="desktop-activity-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path :d="activityIconPath(card.icon)" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <strong>{{ card.value }}</strong>
+        </span>
         <span>{{ card.label }}</span>
       </article>
     </div>
@@ -19,6 +26,11 @@
       <div class="desktop-activity-groups">
         <section class="desktop-activity-group">
           <header>
+            <span class="desktop-activity-header-icon" data-tone="reachable" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path :d="activityIconPath('radio')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
             <div>
               <h3>Reachable agents</h3>
               <p>Delivery-backed worker sessions that can receive room messages now.</p>
@@ -51,6 +63,11 @@
 
         <section class="desktop-activity-group">
           <header>
+            <span class="desktop-activity-header-icon" data-tone="signal" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path :d="activityIconPath('pulse')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
             <div>
               <h3>Agent signals</h3>
               <p>Status, leases, reasoning, and host liveness from worker sessions.</p>
@@ -88,6 +105,11 @@
 
         <section class="desktop-activity-group">
           <header>
+            <span class="desktop-activity-header-icon" data-tone="offline" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path :d="activityIconPath('power')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
             <div>
               <h3>Recently disconnected</h3>
               <p>Worker sessions that were recently known but are no longer reachable.</p>
@@ -122,6 +144,11 @@
 
         <section class="desktop-activity-group">
           <header>
+            <span class="desktop-activity-header-icon" data-tone="human" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path :d="activityIconPath('user')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
             <div>
               <h3>Humans seen in room</h3>
               <p>Human participants currently active in the room.</p>
@@ -246,6 +273,11 @@
       <div class="desktop-activity-groups">
         <section class="desktop-activity-group">
           <header>
+            <span class="desktop-activity-header-icon" data-tone="history" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path :d="activityIconPath('clock')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
             <div>
               <h3>Room history</h3>
               <p>Participants ordered by their latest room-family activity.</p>
@@ -358,6 +390,15 @@ import type {
 
 type ActivityState = "active" | "away" | "offline";
 type ParticipantKind = "agent" | "human";
+type ActivityIcon = "radio" | "pulse" | "power" | "user" | "brain" | "clock" | "task";
+type ActivityTone = "reachable" | "signal" | "offline" | "human" | "reasoning" | "history" | "task";
+
+interface ActivitySummaryCard {
+  value: number;
+  label: string;
+  icon: ActivityIcon;
+  tone: ActivityTone;
+}
 
 interface ActivityParticipant {
   key: string;
@@ -498,19 +539,19 @@ const selectedHistoryEntry = computed(() =>
   props.recentActivity.find((entry) => entry.id === selectedHistoryKey.value) || props.recentActivity[0] || null
 );
 
-const summaryCards = computed(() => activeView.value === "live"
+const summaryCards = computed<ActivitySummaryCard[]>(() => activeView.value === "live"
   ? [
-      { value: reachableAgents.value.length, label: "Reachable agents" },
-      { value: agentSignalAgents.value.length, label: "Agent signals" },
-      { value: disconnectedAgents.value.length, label: "Disconnected" },
-      { value: humans.value.length, label: "Humans seen" },
-      { value: activeReasoningSessions.value.length, label: "Reasoning streams" },
+      { value: reachableAgents.value.length, label: "Reachable agents", icon: "radio", tone: "reachable" },
+      { value: agentSignalAgents.value.length, label: "Agent signals", icon: "pulse", tone: "signal" },
+      { value: disconnectedAgents.value.length, label: "Disconnected", icon: "power", tone: "offline" },
+      { value: humans.value.length, label: "Humans seen", icon: "user", tone: "human" },
+      { value: activeReasoningSessions.value.length, label: "Reasoning streams", icon: "brain", tone: "reasoning" },
     ]
   : [
-      { value: props.recentActivity.filter((entry) => entry.participantKind === "agent").length, label: "Agents in history" },
-      { value: props.recentActivity.filter((entry) => entry.participantKind === "human").length, label: "Humans in history" },
-      { value: props.recentActivity.reduce((total, entry) => total + entry.currentTasks.length, 0), label: "Open tasks linked" },
-      { value: props.recentActivity.reduce((total, entry) => total + entry.completedTasks.length, 0), label: "Completed tasks" },
+      { value: props.recentActivity.filter((entry) => entry.participantKind === "agent").length, label: "Agents in history", icon: "clock", tone: "history" },
+      { value: props.recentActivity.filter((entry) => entry.participantKind === "human").length, label: "Humans in history", icon: "user", tone: "human" },
+      { value: props.recentActivity.reduce((total, entry) => total + entry.currentTasks.length, 0), label: "Open tasks linked", icon: "task", tone: "task" },
+      { value: props.recentActivity.reduce((total, entry) => total + entry.completedTasks.length, 0), label: "Completed tasks", icon: "task", tone: "reachable" },
     ]);
 const activeReasoningSessions = computed(() =>
   liveParticipants.value.flatMap((participant) => participant.activeReasoning)
@@ -765,6 +806,19 @@ function sourceBadges(participant: ActivityParticipant): Array<{ label: string; 
     { label: "Tasks", active: sources.has("tasks") },
     { label: "Local app", active: sources.has("local worker") },
   ];
+}
+
+function activityIconPath(icon: ActivityIcon): string {
+  const paths: Record<ActivityIcon, string> = {
+    radio: "M4.93 19.07a10 10 0 0 1 0-14.14M8.46 15.54a5 5 0 0 1 0-7.08M12 12h.01M15.54 8.46a5 5 0 0 1 0 7.08M19.07 4.93a10 10 0 0 1 0 14.14",
+    pulse: "M3 12h4l2-7 4 14 2-7h6",
+    power: "M12 2v10M18.36 5.64a9 9 0 1 1-12.72 0",
+    user: "M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8",
+    brain: "M9.5 3a3 3 0 0 0-3 3v.5A3.5 3.5 0 0 0 3 10v1a3 3 0 0 0 3 3h.5V9M14.5 3a3 3 0 0 1 3 3v.5A3.5 3.5 0 0 1 21 10v1a3 3 0 0 1-3 3h-.5V9M8 17a4 4 0 0 0 8 0",
+    clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 7v5l3 2",
+    task: "M9 11l2 2 4-4M4 5h16M4 19h16M4 12h2M18 12h2",
+  };
+  return paths[icon];
 }
 
 function livenessCapabilityLabel(value: string | null | undefined): string {
