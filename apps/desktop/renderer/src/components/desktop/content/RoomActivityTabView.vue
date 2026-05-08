@@ -216,6 +216,30 @@
           <p>{{ selectedLiveParticipant.statusText }}</p>
         </section>
 
+        <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
+          <header>
+            <h4>Reasoning snapshot</h4>
+            <span>{{ reasoningStatus(selectedLiveParticipant.latestReasoning) }}</span>
+          </header>
+          <article class="desktop-activity-reasoning">
+            <strong>{{ reasoningTitle(selectedLiveParticipant.latestReasoning) }}</strong>
+            <p>{{ reasoningSummary(selectedLiveParticipant.latestReasoning) }}</p>
+            <div v-if="selectedLiveParticipant.latestReasoningFields.length" class="desktop-agent-modal-fields">
+              <span v-for="field in selectedLiveParticipant.latestReasoningFields" :key="field.label">
+                <small>{{ field.label }}</small>
+                <strong>{{ field.value }}</strong>
+              </span>
+            </div>
+            <button
+              type="button"
+              class="desktop-reasoning-open-button"
+              @click="emit('open-reasoning', selectedLiveParticipant.latestReasoning.id)"
+            >
+              Open reasoning
+            </button>
+          </article>
+        </section>
+
         <section class="desktop-activity-detail-section">
           <header>
             <h4>Session liveness</h4>
@@ -391,7 +415,7 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import { displayNameFromActor, ideFromActor, normalizeAgentKey, ownerFromActor } from "../../../domain/agents";
-import { reasoningSummary, reasoningTitle } from "../../../domain/reasoning";
+import { reasoningFieldRows, reasoningStatus, reasoningSummary, reasoningTitle } from "../../../domain/reasoning";
 import { sortTasksByUpdated } from "../../../domain/tasks";
 import { formatRelativeTime, latestTimestamp, timestampValue } from "../../../domain/time";
 
@@ -427,6 +451,8 @@ interface ActivityParticipant {
   currentTasks: DesktopTaskSummary[];
   completedTasks: DesktopTaskSummary[];
   activeReasoning: DesktopReasoningSession[];
+  latestReasoning: DesktopReasoningSession | null;
+  latestReasoningFields: Array<{ label: string; value: string }>;
   sources: string[];
 }
 
@@ -650,6 +676,8 @@ function buildAgentParticipant(
     currentTasks,
     completedTasks,
     activeReasoning,
+    latestReasoning: activeReasoning[0] || null,
+    latestReasoningFields: activeReasoning[0] ? reasoningFieldRows(activeReasoning[0]) : [],
     sources: [
       ...(presence?.sourceFlags || []),
       ...(participant?.sourceFlags || []),
@@ -685,6 +713,8 @@ function buildHumanParticipant(participant: DesktopParticipantSummary): Activity
     currentTasks: sortTasksByUpdated(assignedTasks.filter((task) => openTaskStatuses.has(task.status))),
     completedTasks: sortTasksByUpdated(assignedTasks.filter((task) => completedTaskStatuses.has(task.status))).slice(0, 6),
     activeReasoning: [],
+    latestReasoning: null,
+    latestReasoningFields: [],
     sources: participant.sourceFlags,
   };
 }
@@ -834,6 +864,7 @@ function activityIconPath(icon: ActivityIcon): string {
 
 function livenessCapabilityLabel(value: string | null | undefined): string {
   const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "codex_app_server_runtime_stream") return "Codex app-server stream";
   if (normalized === "session_activity") return "Session activity";
   if (normalized === "process_observed") return "Process observed";
   if (normalized === "tool_bridge_only") return "Tool bridge";
@@ -883,10 +914,6 @@ function participantSubtitle(participant: ActivityParticipant): string {
 
 function taskStatusLabel(status: string): string {
   return status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function reasoningStatus(session: DesktopReasoningSession): string {
-  return session.closedAt ? "Closed" : taskStatusLabel(session.status || "active");
 }
 
 function initials(value: string): string {
