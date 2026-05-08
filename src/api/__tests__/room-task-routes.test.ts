@@ -4,6 +4,7 @@ import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const {
+  isDesktopHumanTaskWriteForTest,
   isCurrentStalePromptAction,
   registerRoomTaskRoutes,
 } = await import("../routes/room-tasks.js");
@@ -213,6 +214,45 @@ test("owner-token task creation requires a registered worker session", async () 
     error: "Registered worker session is required for agent write actions.",
   });
   assert.equal(admissionCalled, false);
+});
+
+test("desktop human task writes are identified by header or body marker without worker credentials", () => {
+  assert.equal(
+    isDesktopHumanTaskWriteForTest(
+      {
+        authKind: "owner_token",
+        headers: { "x-letagents-desktop-client": "1" },
+      } as never,
+      { status: "accepted" }
+    ),
+    true
+  );
+
+  assert.equal(
+    isDesktopHumanTaskWriteForTest(
+      {
+        authKind: "owner_token",
+        headers: {},
+      } as never,
+      { status: "accepted", desktop_human_client: true }
+    ),
+    true
+  );
+
+  assert.equal(
+    isDesktopHumanTaskWriteForTest(
+      {
+        authKind: "owner_token",
+        headers: { "x-letagents-desktop-client": "1" },
+      } as never,
+      {
+        status: "accepted",
+        desktop_human_client: true,
+        agent_session_id: "agent_session_1",
+      }
+    ),
+    false
+  );
 });
 
 test("room task updates deny parent board writes from hard-isolated Focus Rooms before task lookup", async () => {

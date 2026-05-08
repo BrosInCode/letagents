@@ -1564,6 +1564,13 @@ function mapDesktopTaskMutationResult(data: { task?: unknown; id?: unknown }): D
   };
 }
 
+function withDesktopHumanTaskBody<T extends object>(body: T): T & { desktop_human_client: true } {
+  return {
+    ...body,
+    desktop_human_client: true,
+  };
+}
+
 async function addDesktopRoomTask(roomIdentifier: string, title: string): Promise<DesktopTaskMutationResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedTitle = title.trim();
@@ -1577,7 +1584,7 @@ async function addDesktopRoomTask(roomIdentifier: string, title: string): Promis
         "Content-Type": "application/json",
         "X-LetAgents-Desktop-Client": "1",
       },
-      body: JSON.stringify({ title: trimmedTitle, created_by: "human" }),
+      body: JSON.stringify(withDesktopHumanTaskBody({ title: trimmedTitle, created_by: "human" })),
     }
   );
   return mapDesktopTaskMutationResult(data);
@@ -1599,7 +1606,7 @@ async function updateDesktopRoomTask(
         "Content-Type": "application/json",
         "X-LetAgents-Desktop-Client": "1",
       },
-      body: JSON.stringify(updates),
+      body: JSON.stringify(withDesktopHumanTaskBody(updates)),
     }
   );
   return mapDesktopTaskMutationResult(data);
@@ -1621,7 +1628,7 @@ async function updateDesktopRoomTaskLease(
         "Content-Type": "application/json",
         "X-LetAgents-Desktop-Client": "1",
       },
-      body: JSON.stringify(input),
+      body: JSON.stringify(withDesktopHumanTaskBody(input)),
     }
   );
   return mapDesktopTaskMutationResult(data);
@@ -1643,7 +1650,7 @@ async function updateDesktopRoomTaskReviewLease(
         "Content-Type": "application/json",
         "X-LetAgents-Desktop-Client": "1",
       },
-      body: JSON.stringify(input),
+      body: JSON.stringify(withDesktopHumanTaskBody(input)),
     }
   );
   return mapDesktopTaskMutationResult(data);

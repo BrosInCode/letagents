@@ -102,8 +102,8 @@ type ReviewLeaseActionRequestBody = {
 };
 
 function hasAgentSessionCredentials(input: Record<string, unknown>): boolean {
-  return typeof input.agent_session_id === "string" && input.agent_session_id.trim().length > 0
-    && typeof input.agent_session_token === "string" && input.agent_session_token.trim().length > 0;
+  return (typeof input.agent_session_id === "string" && input.agent_session_id.trim().length > 0)
+    || (typeof input.agent_session_token === "string" && input.agent_session_token.trim().length > 0);
 }
 
 function isDesktopHumanClient(req: AuthenticatedRequest): boolean {
@@ -111,8 +111,18 @@ function isDesktopHumanClient(req: AuthenticatedRequest): boolean {
     && req.headers?.["x-letagents-desktop-client"] === "1";
 }
 
+function hasDesktopHumanBodyMarker(body: Record<string, unknown>): boolean {
+  return body.desktop_human_client === true || body.desktop_human_client === "true";
+}
+
+export function isDesktopHumanTaskWriteForTest(req: AuthenticatedRequest, body: Record<string, unknown>): boolean {
+  return req.authKind === "owner_token"
+    && (isDesktopHumanClient(req) || hasDesktopHumanBodyMarker(body))
+    && !hasAgentSessionCredentials(body);
+}
+
 function isDesktopHumanWrite(req: AuthenticatedRequest, body: Record<string, unknown>): boolean {
-  return isDesktopHumanClient(req) && !hasAgentSessionCredentials(body);
+  return isDesktopHumanTaskWriteForTest(req, body);
 }
 
 const LEASE_RECOVERY_ACTIVE_STATUSES = new Set<TaskStatus>([
