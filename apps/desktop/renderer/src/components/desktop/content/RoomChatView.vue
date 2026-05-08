@@ -722,10 +722,12 @@ function restoreInitialScrollTop(): void {
     return;
   }
   restoredScrollTop = scrollTop;
-  element.scrollTo({
-    top: Math.max(0, Math.min(scrollTop, element.scrollHeight)),
-    behavior: "auto",
-  });
+  // Override CSS `scroll-behavior: smooth` to prevent animated scrolling.
+  // Chromium/Electron honours the CSS property even when JS says "auto".
+  const prev = element.style.scrollBehavior;
+  element.style.scrollBehavior = "auto";
+  element.scrollTop = Math.max(0, Math.min(scrollTop, element.scrollHeight));
+  element.style.scrollBehavior = prev;
   initialScrollSettled = true;
   handleScroll();
 }
