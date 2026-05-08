@@ -125,7 +125,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { DesktopTaskSummary } from "../../../../../electron/ipc-types";
+import type { DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
 import RoomBoardSummary from "./RoomBoardSummary.vue";
 
 type TaskAction = {
@@ -138,6 +138,7 @@ type TaskAction = {
 const props = defineProps<{
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
+  workers: WorkerSnapshot[];
 }>();
 
 const emit = defineEmits<{
@@ -148,6 +149,14 @@ const emit = defineEmits<{
 const newTaskTitle = ref("");
 const busyAction = ref<string | null>(null);
 const errorMessage = ref<string | null>(null);
+
+const localWorker = computed(() =>
+  props.workers.find((worker) =>
+    worker.agentSessionId
+    && normalizeRoom(worker.roomId) === normalizeRoom(props.roomIdentifier)
+    && ["connected", "away"].includes(worker.state)
+  ) || null
+);
 
 const statusRanks: Record<string, number> = {
   proposed: 10,
@@ -202,13 +211,33 @@ function actionsFor(task: DesktopTaskSummary): TaskAction[] {
   const actions: TaskAction[] = [];
   const work = workLease(task);
   const review = reviewLeases(task)[0] || null;
+  const worker = localWorker.value;
+  const workerOwnsTask = Boolean(worker && work && (
+    work.agentSessionId === worker.agentSessionId
+    || (!!work.agentKey && work.agentKey === worker.agentKey)
+  ));
 
   if (task.status === "proposed") {
     actions.push(statusAction("accept", "Accept", "primary", "accepted"));
     actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
   }
   if (task.status === "accepted") {
+    if (worker && !work) {
+      actions.push(workerAction("claim", "Claim", "primary"));
+    }
     actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
+  }
+  if (task.status === "assigned" && workerOwnsTask) {
+    actions.push(workerAction("start", "Start", "primary"));
+    actions.push(workerAction("block", "Block", "neutral"));
+  }
+  if (task.status === "in_progress" && workerOwnsTask) {
+    actions.push(workerAction("submit_review", "Submit review", "primary"));
+    actions.push(workerAction("block", "Block", "neutral"));
+  }
+  if (task.status === "blocked" && workerOwnsTask) {
+    actions.push(workerAction("resume", "Resume", "primary"));
+    actions.push(workerAction("submit_review", "Submit review", "neutral"));
   }
   if (task.status === "in_review") {
     actions.push(statusAction("merged", "Mark merged", "primary", "merged"));
@@ -251,6 +280,19 @@ function statusAction(id: string, label: string, tone: TaskAction["tone"], statu
     label,
     tone,
     run: async (task) => (await window.letagentsDesktop.room.updateTask(props.roomIdentifier, task.id, { status })).task,
+  };
+}
+
+function workerAction(
+  action: "claim" | "start" | "block" | "resume" | "submit_review",
+  label: string,
+  tone: TaskAction["tone"]
+): TaskAction {
+  return {
+    id: action,
+    label,
+    tone,
+    run: async (task) => (await window.letagentsDesktop.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
   };
 }
 
@@ -303,6 +345,10 @@ function workLease(task: DesktopTaskSummary) {
 
 function reviewLeases(task: DesktopTaskSummary) {
   return task.activeLeases.filter((lease) => lease.kind === "review");
+}
+
+function normalizeRoom(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
 }
 
 function relativeTime(value: string): string {

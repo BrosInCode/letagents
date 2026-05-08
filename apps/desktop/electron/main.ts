@@ -44,6 +44,7 @@ import type {
   DesktopTaskLeaseActionInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
+  DesktopTaskWorkerActionInput,
   DesktopTaskSummary,
   RepoStatus,
   RepoWorktreeEntry,
@@ -59,6 +60,7 @@ const devServerUrl = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim() || nul
 const apiUrl = process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
 const attachmentProtocolScheme = "letagents-attachment";
 const roomMessageHistoryPageSize = 150;
+const letagentsLocalStatePath = process.env.LETAGENTS_STATE_PATH?.trim() || join(homedir(), ".letagents", "mcp-state.json");
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -113,6 +115,29 @@ type StoredMcpInstallSetup = {
   completedAt: string | null;
   selectedTargetId: DesktopMcpInstallTargetId | null;
   installs: Partial<Record<DesktopMcpInstallTargetId, { lastInstalledAt: string }>>;
+};
+
+type StoredLocalAgentSession = {
+  session_id?: string;
+  session_token?: string;
+  room_id?: string;
+  session_kind?: "worker" | "controller" | string;
+  runtime?: string;
+  actor_label?: string;
+  agent_key?: string;
+  agent_instance_id?: string | null;
+  display_name?: string;
+  owner_label?: string;
+  ide_label?: string;
+  created_at?: string;
+  updated_at?: string;
+  last_seen_at?: string;
+  ended_at?: string | null;
+};
+
+type StoredLetAgentsLocalState = {
+  agent_sessions?: Record<string, StoredLocalAgentSession>;
+  current_agent_session_ids?: Record<string, string>;
 };
 
 const mcpInstallTargetIds: DesktopMcpInstallTargetId[] = ["claude-code", "antigravity", "cursor", "codex"];
@@ -1778,6 +1803,127 @@ async function updateDesktopRoomTaskReviewLease(
   return mapDesktopTaskMutationResult(data);
 }
 
+function normalizeRoomIdentifierKey(value: string | null | undefined): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function readLetAgentsLocalState(): StoredLetAgentsLocalState {
+  try {
+    if (!existsSync(letagentsLocalStatePath)) return {};
+    const parsed = JSON.parse(readFileSync(letagentsLocalStatePath, "utf8")) as StoredLetAgentsLocalState;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function localWorkerState(session: StoredLocalAgentSession): WorkerSnapshot["state"] {
+  if (session.ended_at) return "offline";
+  const lastSeen = Date.parse(session.last_seen_at || session.updated_at || "");
+  if (!Number.isFinite(lastSeen)) return "away";
+  const ageMs = Date.now() - lastSeen;
+  if (ageMs < 2 * 60 * 1000) return "connected";
+  if (ageMs < 15 * 60 * 1000) return "away";
+  return "offline";
+}
+
+function localSessionTimestamp(session: StoredLocalAgentSession): number {
+  const timestamp = Date.parse(session.updated_at || session.last_seen_at || "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function getLocalWorkerSessions(roomIdentifier?: string | null): StoredLocalAgentSession[] {
+  const state = readLetAgentsLocalState();
+  const targetRoom = normalizeRoomIdentifierKey(roomIdentifier);
+  return Object.values(state.agent_sessions || {})
+    .filter((session) =>
+      session.session_kind === "worker"
+      && session.session_id
+      && session.session_token
+      && session.actor_label
+      && session.agent_key
+      && !session.ended_at
+      && localWorkerState(session) !== "offline"
+      && (!targetRoom || normalizeRoomIdentifierKey(session.room_id) === targetRoom)
+    )
+    .sort((left, right) => localSessionTimestamp(right) - localSessionTimestamp(left));
+}
+
+function getCurrentLocalWorkerSession(roomIdentifier: string): StoredLocalAgentSession | null {
+  const state = readLetAgentsLocalState();
+  const targetRoom = normalizeRoomIdentifierKey(roomIdentifier);
+  const currentSessionId = Object.entries(state.current_agent_session_ids || {})
+    .find(([roomId]) => normalizeRoomIdentifierKey(roomId) === targetRoom)?.[1] ?? null;
+  const current = currentSessionId ? state.agent_sessions?.[currentSessionId] ?? null : null;
+  if (
+    current?.session_kind === "worker"
+    && current.session_id
+    && current.session_token
+    && current.actor_label
+    && current.agent_key
+    && !current.ended_at
+    && localWorkerState(current) !== "offline"
+    && normalizeRoomIdentifierKey(current.room_id) === targetRoom
+  ) {
+    return current;
+  }
+  return getLocalWorkerSessions(roomIdentifier)[0] || null;
+}
+
+function buildWorkerActionPatch(
+  taskId: string,
+  session: StoredLocalAgentSession,
+  input: DesktopTaskWorkerActionInput
+): Record<string, unknown> {
+  const base = {
+    agent_session_id: session.session_id,
+    agent_session_token: session.session_token,
+  };
+  switch (input.action) {
+    case "claim":
+      return {
+        ...base,
+        status: "assigned",
+        assignee: session.actor_label,
+        assignee_agent_key: session.agent_key,
+      };
+    case "start":
+    case "resume":
+      return { ...base, status: "in_progress" };
+    case "block":
+      return { ...base, status: "blocked" };
+    case "submit_review":
+      return { ...base, status: "in_review" };
+    default:
+      throw new Error(`Unsupported worker action for ${taskId}.`);
+  }
+}
+
+async function runDesktopRoomTaskWorkerAction(
+  roomIdentifier: string,
+  taskId: string,
+  input: DesktopTaskWorkerActionInput
+): Promise<DesktopTaskMutationResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) throw new Error("Choose a room before updating a task.");
+  if (!taskId.trim()) throw new Error("Task id is required.");
+
+  const session = getCurrentLocalWorkerSession(trimmedRoomIdentifier);
+  if (!session?.session_id || !session.session_token) {
+    throw new Error("No registered local worker session is available for this room.");
+  }
+
+  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildWorkerActionPatch(taskId, session, input)),
+    }
+  );
+  return mapDesktopTaskMutationResult(data);
+}
+
 async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<DesktopStagedAttachment[]> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
@@ -2529,7 +2675,23 @@ async function pollDeviceAuthFlow(requestId?: string | null): Promise<DesktopAut
 }
 
 function buildWorkerSnapshots(): WorkerSnapshot[] {
-  return [];
+  const state = readLetAgentsLocalState();
+  return Object.values(state.agent_sessions || {})
+    .filter((session) => session.session_kind === "worker" && session.session_id)
+    .sort((left, right) => localSessionTimestamp(right) - localSessionTimestamp(left))
+    .map((session) => ({
+      id: session.session_id || `${session.agent_key || "worker"}:${session.room_id || "room"}`,
+      runtime: session.runtime || "worker",
+      state: localWorkerState(session),
+      roomId: session.room_id || null,
+      actorLabel: session.actor_label || null,
+      agentKey: session.agent_key || null,
+      agentSessionId: session.session_id || null,
+      detail: [
+        session.actor_label || session.display_name || "Local worker",
+        session.room_id ? `in ${session.room_id}` : null,
+      ].filter(Boolean).join(" "),
+    }));
 }
 
 function buildDiagnosticsSnapshot(): DiagnosticsSnapshot {
@@ -2669,6 +2831,16 @@ ipcMain.handle(
     input: DesktopTaskReviewLeaseActionInput
   ): Promise<DesktopTaskMutationResult> =>
     updateDesktopRoomTaskReviewLease(roomIdentifier, taskId, input)
+);
+ipcMain.handle(
+  "desktop:room:run-task-worker-action",
+  async (
+    _event,
+    roomIdentifier: string,
+    taskId: string,
+    input: DesktopTaskWorkerActionInput
+  ): Promise<DesktopTaskMutationResult> =>
+    runDesktopRoomTaskWorkerAction(roomIdentifier, taskId, input)
 );
 ipcMain.handle(
   "desktop:room:rename",
