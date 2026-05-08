@@ -273,6 +273,8 @@ export interface DesktopActivityEntry {
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   lastRoomActivityAt: string;
+  messageCount: number;
+  reasoningSessionCount: number;
   currentTasks: Array<{
     id: string;
     title: string;

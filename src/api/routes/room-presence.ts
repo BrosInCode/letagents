@@ -7,8 +7,10 @@ import {
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getMessages,
+  getRoomMessageCountsBySender,
   getRoomAgentPresence,
   getRoomAgentPresenceSnapshot,
+  getRoomReasoningSessionCountsByActor,
   getRoomParticipants,
   getRoomParticipantsForRooms,
   getProjectById,
@@ -29,6 +31,7 @@ import {
 import { buildSyntheticPresenceEntry } from "../presence-fallback.js";
 import {
   buildRoomActivityHistoryEntries,
+  decorateRoomActivityHistoryEntriesWithCounts,
   filterRoomActivityHistoryEntries,
   paginateRoomActivityHistoryEntries,
   sortRoomActivityHistoryEntries,
@@ -196,8 +199,13 @@ export function registerRoomPresenceRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined) ?? 50;
+    const scope = typeof req.query.scope === "string" ? req.query.scope.trim().toLowerCase() : "live";
     try {
-      const presence = await getRoomAgentPresence(project.id, { limit });
+      const presence = scope === "snapshot"
+        ? (await getRoomAgentPresenceSnapshot(project.id))
+            .filter((entry) => entry.session_kind === "worker")
+            .slice(0, limit)
+        : await getRoomAgentPresence(project.id, { limit });
 
       res.json({
         room_id: project.id,
@@ -299,10 +307,18 @@ export function registerRoomPresenceRoutes(
       const selectedRoomId = normalizeHistoryRoomId(req.query.room_id) ?? project.id;
       const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? project;
       const scopedRooms = rooms.filter((room) => room.id === selectedRoom.id);
-      const [selectedRoomParticipants, roomTasks, selectedRoomPresence] = await Promise.all([
+      const [
+        selectedRoomParticipants,
+        roomTasks,
+        selectedRoomPresence,
+        messageCounts,
+        reasoningSessionCounts,
+      ] = await Promise.all([
         getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
         getTasksForRooms([selectedRoom.id]),
         getRoomAgentPresenceSnapshot(selectedRoom.id).catch(() => []),
+        getRoomMessageCountsBySender(selectedRoom.id).catch(() => []),
+        getRoomReasoningSessionCountsByActor(selectedRoom.id).catch(() => []),
       ]);
       const fallbackMessages = selectedRoomParticipants.length > 0
         ? []
@@ -313,13 +329,17 @@ export function registerRoomPresenceRoutes(
         presence: selectedRoomPresence,
         fallbackMessages,
       });
-      const entries = decorateRoomActivityHistoryEntriesWithPresence({
-        entries: buildRoomActivityHistoryEntries({
-          rooms: scopedRooms,
-          participants: historyParticipants,
-          tasks: roomTasks,
+      const entries = decorateRoomActivityHistoryEntriesWithCounts({
+        entries: decorateRoomActivityHistoryEntriesWithPresence({
+          entries: buildRoomActivityHistoryEntries({
+            rooms: scopedRooms,
+            participants: historyParticipants,
+            tasks: roomTasks,
+          }),
+          presence: selectedRoomPresence,
         }),
-        presence: selectedRoomPresence,
+        messageCounts,
+        reasoningSessionCounts,
       });
       const filtered = filterRoomActivityHistoryEntries(entries, {
         roomId: selectedRoom.id,

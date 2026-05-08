@@ -1074,7 +1074,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
           created_at: string;
           updated_at: string;
         } | null;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/presence?limit=100`).catch(() => ({ presence: [] })),
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/presence?limit=100&scope=snapshot`).catch(() => ({ presence: [] })),
       apiFetch<{ sessions?: Array<{
         id: string;
         room_id?: string | null;
@@ -1137,10 +1137,12 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
         first_seen_at?: string | null;
         last_seen_at?: string | null;
         last_room_activity_at: string;
+        message_count?: number | null;
+        reasoning_session_count?: number | null;
         current_tasks: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
         completed_tasks: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
         created_tasks?: Array<{ id: string; title: string; status: string; updated_at?: string | null; workflow_refs?: Array<{ provider: string; kind: string; label: string; url: string }> }>;
-      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/activity-history?page_size=20`).catch(() => ({ entries: [] })),
+      }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/activity-history?page_size=50`).catch(() => ({ entries: [] })),
       apiFetch<{ messages?: Array<{
         id: string;
         sender: string;
@@ -1282,6 +1284,8 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       firstSeenAt: entry.first_seen_at || null,
       lastSeenAt: entry.last_seen_at || null,
       lastRoomActivityAt: entry.last_room_activity_at,
+      messageCount: Number(entry.message_count || 0),
+      reasoningSessionCount: Number(entry.reasoning_session_count || 0),
       currentTasks: (entry.current_tasks || []).map(mapActivityTask),
       completedTasks: (entry.completed_tasks || []).map(mapActivityTask),
       createdTasks: (entry.created_tasks || []).map(mapActivityTask),

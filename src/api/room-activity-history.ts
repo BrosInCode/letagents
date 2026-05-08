@@ -42,9 +42,16 @@ export interface RoomActivityHistoryEntry {
   first_seen_at: string;
   last_seen_at: string;
   last_room_activity_at: string;
+  message_count: number;
+  reasoning_session_count: number;
   current_tasks: RoomActivityHistoryTaskSummary[];
   completed_tasks: RoomActivityHistoryTaskSummary[];
   created_tasks: RoomActivityHistoryTaskSummary[];
+}
+
+export interface RoomActivityHistoryActorCount {
+  actor_label: string;
+  count: number;
 }
 
 const SEARCH_TEXT = Symbol("roomActivityHistorySearchText");
@@ -205,6 +212,32 @@ function buildEntrySearchText(entry: RoomActivityHistoryEntry): string {
   });
 }
 
+function buildCountMap(counts: readonly RoomActivityHistoryActorCount[]): Map<string, number> {
+  const grouped = new Map<string, number>();
+  for (const entry of counts) {
+    const key = normalize(entry.actor_label);
+    if (!key) continue;
+    grouped.set(key, (grouped.get(key) ?? 0) + Math.max(0, Number(entry.count) || 0));
+  }
+  return grouped;
+}
+
+function countForParticipant(
+  counts: ReadonlyMap<string, number>,
+  participant: RoomActivityHistoryEntry["participant"]
+): number {
+  const keys = new Set([
+    normalize(participant.actor_label),
+    normalize(participant.display_name),
+    normalize(participant.github_login),
+  ].filter(Boolean));
+  let total = 0;
+  for (const key of keys) {
+    total += counts.get(key) ?? 0;
+  }
+  return total;
+}
+
 export function buildRoomActivityHistoryEntries(input: {
   rooms: readonly Project[];
   participants: readonly RoomParticipant[];
@@ -275,6 +308,8 @@ export function buildRoomActivityHistoryEntries(input: {
           completedTasks[0]?.updated_at,
           createdTasks[0]?.updated_at
         ),
+        message_count: 0,
+        reasoning_session_count: 0,
         current_tasks: currentTasks.slice(0, 5).map(toTaskSummary),
         completed_tasks: completedTasks.slice(0, 5).map(toTaskSummary),
         created_tasks: createdTasks.slice(0, 5).map(toTaskSummary),
@@ -299,6 +334,20 @@ export function buildRoomActivityHistoryEntries(input: {
     })
     .filter((entry): entry is RoomActivityHistoryEntry => entry !== null)
     .sort(compareRoomActivityHistoryEntries);
+}
+
+export function decorateRoomActivityHistoryEntriesWithCounts(input: {
+  entries: readonly RoomActivityHistoryEntry[];
+  messageCounts: readonly RoomActivityHistoryActorCount[];
+  reasoningSessionCounts: readonly RoomActivityHistoryActorCount[];
+}): RoomActivityHistoryEntry[] {
+  const messageCounts = buildCountMap(input.messageCounts);
+  const reasoningSessionCounts = buildCountMap(input.reasoningSessionCounts);
+  return input.entries.map((entry) => ({
+    ...entry,
+    message_count: countForParticipant(messageCounts, entry.participant),
+    reasoning_session_count: countForParticipant(reasoningSessionCounts, entry.participant),
+  }));
 }
 
 export function filterRoomActivityHistoryEntries(

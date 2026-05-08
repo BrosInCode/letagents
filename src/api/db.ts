@@ -345,6 +345,11 @@ export interface RoomParticipant {
   updated_at: string;
 }
 
+export interface RoomActivityActorCount {
+  actor_label: string;
+  count: number;
+}
+
 export interface ReasoningSession {
   id: string;
   room_id: string;
@@ -2809,6 +2814,25 @@ export async function getMessagesAfter(
   return getMessages(roomId, { ...options, after: afterMessageId });
 }
 
+export async function getRoomMessageCountsBySender(roomId: string): Promise<RoomActivityActorCount[]> {
+  const rows = await db
+    .select({
+      actor_label: messages.sender,
+      count: sql<number>`COUNT(*)::int`,
+    })
+    .from(messages)
+    .where(and(
+      eq(messages.room_id, roomId),
+      sql`NOT (${messages.agent_prompt_kind} = 'auto' AND BTRIM(${messages.text}) = '')`
+    ))
+    .groupBy(messages.sender);
+
+  return rows.map((row) => ({
+    actor_label: row.actor_label,
+    count: Number(row.count) || 0,
+  }));
+}
+
 export async function getMessageAttachment(
   roomId: string,
   messageId: string,
@@ -3144,7 +3168,7 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
 }): Promise<void> {
   const now = new Date().toISOString();
   const deliveryKey = buildRoomAgentDeliveryKey(input);
-  await db
+  const [session] = await db
     .update(room_agent_delivery_sessions)
     .set({
       updated_at: now,
@@ -3155,7 +3179,12 @@ export async function markRoomAgentDeliveryHeartbeat(input: {
         eq(room_agent_delivery_sessions.delivery_key, deliveryKey),
         sql`${room_agent_delivery_sessions.active_connection_count} > 0`
       )
-    );
+    )
+    .returning({ delivery_key: room_agent_delivery_sessions.delivery_key });
+
+  if (session && input.agent_session_id) {
+    await touchRoomAgentSession(input.agent_session_id);
+  }
 }
 
 export async function markRoomAgentDeliveryDisconnected(input: {
@@ -3185,6 +3214,10 @@ export async function markRoomAgentDeliveryDisconnected(input: {
       )
     )
     .returning();
+
+  if (session && input.agent_session_id) {
+    await touchRoomAgentSession(input.agent_session_id);
+  }
 
   return session ? toRoomAgentDeliverySession(session as RoomAgentDeliverySessionRow) : null;
 }
@@ -3559,6 +3592,22 @@ export async function getReasoningSessions(
     .limit(limit);
 
   return (rows as ReasoningSessionRow[]).map(toReasoningSession);
+}
+
+export async function getRoomReasoningSessionCountsByActor(roomId: string): Promise<RoomActivityActorCount[]> {
+  const rows = await db
+    .select({
+      actor_label: reasoning_sessions.actor_label,
+      count: sql<number>`COUNT(*)::int`,
+    })
+    .from(reasoning_sessions)
+    .where(eq(reasoning_sessions.room_id, roomId))
+    .groupBy(reasoning_sessions.actor_label);
+
+  return rows.map((row) => ({
+    actor_label: row.actor_label,
+    count: Number(row.count) || 0,
+  }));
 }
 
 export async function getReasoningSessionById(

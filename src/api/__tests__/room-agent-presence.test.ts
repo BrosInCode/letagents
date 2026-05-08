@@ -19,12 +19,15 @@ const roomAgentActivityModule = await import("../../shared/room-agent-activity.j
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
+const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createProjectWithName = dbModule?.createProjectWithName;
 const getRoomAgentPresence = dbModule?.getRoomAgentPresence;
 const getRoomAgentPresenceSnapshot = dbModule?.getRoomAgentPresenceSnapshot;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
 const setRoomLiveAgentSuppressed = dbModule?.setRoomLiveAgentSuppressed;
+const upsertAccount = dbModule?.upsertAccount;
+const upsertRoomAgentLivenessObservation = dbModule?.upsertRoomAgentLivenessObservation;
 const upsertRoomAgentPresence = dbModule?.upsertRoomAgentPresence;
 const room_agent_delivery_sessions = schemaModule?.room_agent_delivery_sessions;
 const { ACTIVE_AGENT_DELIVERY_WINDOW_MS } = agentPresenceModule;
@@ -156,6 +159,83 @@ test(
     assert.equal(snapshot[0]?.status, "reviewing");
     assert.equal(snapshot[0]?.status_text, "reviewing PR #146");
     assert.equal(snapshot[0]?.activity_state, "offline");
+  }
+);
+
+test(
+  "presence snapshots attach session liveness to status-only worker sessions",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName ||
+      !createRoomAgentSession ||
+      !getRoomAgentPresence ||
+      !getRoomAgentPresenceSnapshot ||
+      !upsertAccount ||
+      !upsertRoomAgentLivenessObservation ||
+      !upsertRoomAgentPresence
+    ) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const actorLabel = "MapleRidge | EmmyMay's agent | Codex";
+    const owner = await upsertAccount({
+      provider: "github",
+      provider_user_id: "31524469",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+    const agentSession = await createRoomAgentSession({
+      room_id: room.id,
+      session_kind: "worker",
+      runtime: "codex",
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/mapleridge",
+      agent_instance_id: "instance-status-only-worker",
+      display_name: "MapleRidge",
+      owner_account_id: owner.id,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+    });
+
+    await upsertRoomAgentPresence({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "EmmyMay/mapleridge",
+      agent_session_id: agentSession.session_id,
+      session_kind: "worker",
+      runtime: "codex",
+      display_name: "MapleRidge",
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+      status: "working",
+      status_text: "working without a delivery stream",
+    });
+    await upsertRoomAgentLivenessObservation({
+      room_id: room.id,
+      agent_session_id: agentSession.session_id,
+      source: "agent_session",
+      host_kind: "macos",
+      liveness_capability: "session_activity",
+      last_observed_at: "2026-05-08T12:00:00.000Z",
+    });
+
+    assert.deepEqual(await getRoomAgentPresence(room.id), []);
+
+    const snapshot = await getRoomAgentPresenceSnapshot(room.id);
+    assert.equal(snapshot.length, 1);
+    assert.equal(snapshot[0]?.actor_label, actorLabel);
+    assert.equal(snapshot[0]?.session_kind, "worker");
+    assert.equal(snapshot[0]?.activity_state, "offline");
+    assert.deepEqual(snapshot[0]?.source_flags, ["presence"]);
+    assert.equal(snapshot[0]?.liveness_observation?.agent_session_id, agentSession.session_id);
+    const lastObservedAt = snapshot[0]?.liveness_observation?.last_observed_at;
+    assert.ok(lastObservedAt);
+    assert.equal(new Date(lastObservedAt).toISOString(), "2026-05-08T12:00:00.000Z");
   }
 );
 
