@@ -1837,6 +1837,505 @@ code {
   transform: translateY(-1px);
 }
 
+.desktop-board-panel {
+  height: 100%;
+  overflow-y: auto;
+  padding: 18px 20px;
+}
+
+.desktop-board-add-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.desktop-board-add-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 9px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  transition: border-color 150ms var(--ease-out);
+}
+
+.desktop-board-add-input:focus {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.desktop-board-add-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.desktop-board-add-button {
+  min-height: 40px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.desktop-board-add-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.desktop-board-add-button:disabled,
+.desktop-board-add-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.desktop-board-group {
+  margin-bottom: 16px;
+}
+
+.desktop-board-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  transition: color 150ms var(--ease-out);
+}
+
+.desktop-board-group-title:hover {
+  color: var(--text);
+}
+
+.desktop-board-group-chevron {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  transition: transform 180ms var(--ease-out);
+}
+
+.desktop-board-group-chevron[data-collapsed="true"] {
+  transform: rotate(-90deg);
+}
+
+.desktop-board-group-chevron svg {
+  width: 12px;
+  height: 12px;
+}
+
+.desktop-board-group-count {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  font-size: 0.66rem;
+}
+
+.desktop-board-group-list {
+  display: grid;
+  gap: 6px;
+}
+
+.desktop-board-task-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  margin-bottom: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: rgba(19, 19, 22, 0.78);
+  transition: border-color 150ms var(--ease-out), background 150ms var(--ease-out);
+}
+
+.desktop-board-task-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(24, 24, 28, 0.84);
+}
+
+.desktop-board-task-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.desktop-board-task-heading {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.desktop-board-task-id {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid rgba(147, 197, 253, 0.42);
+  border-radius: 4px;
+  background: rgba(147, 197, 253, 0.08);
+  color: #93c5fd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.desktop-board-task-heading h4 {
+  flex: 1;
+  min-width: min(100%, 12rem);
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.desktop-board-status-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 0.6rem;
+  font-weight: 800;
+  line-height: 1.55;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.desktop-board-status-badge[data-status="proposed"] { color: #a1a1aa; border-color: rgba(161, 161, 170, 0.38); }
+.desktop-board-status-badge[data-status="accepted"] { color: #60a5fa; border-color: rgba(96, 165, 250, 0.38); }
+.desktop-board-status-badge[data-status="assigned"] { color: #c084fc; border-color: rgba(192, 132, 252, 0.38); }
+.desktop-board-status-badge[data-status="in_progress"] { color: #fbbf24; border-color: rgba(251, 191, 36, 0.38); }
+.desktop-board-status-badge[data-status="blocked"] { color: #f87171; border-color: rgba(248, 113, 113, 0.38); }
+.desktop-board-status-badge[data-status="in_review"] { color: #38bdf8; border-color: rgba(56, 189, 248, 0.38); }
+.desktop-board-status-badge[data-status="merged"] { color: #34d399; border-color: rgba(52, 211, 153, 0.38); }
+.desktop-board-status-badge[data-status="done"] { color: #22c55e; border-color: rgba(34, 197, 94, 0.38); }
+.desktop-board-status-badge[data-status="cancelled"] { color: #64748b; border-color: rgba(100, 116, 139, 0.38); }
+
+.desktop-board-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+}
+
+.desktop-board-person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.desktop-board-person-chip small {
+  color: var(--text-tertiary);
+  font-size: 0.58rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.desktop-board-person-chip strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-board-task-description {
+  margin: 0 0 2px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.desktop-board-authority,
+.desktop-board-review-authority {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.desktop-board-authority[data-state="held"],
+.desktop-board-review-authority[data-state="assigned"] {
+  border-color: rgba(52, 211, 153, 0.18);
+  background: rgba(52, 211, 153, 0.045);
+}
+
+.desktop-board-authority[data-state="mismatch"],
+.desktop-board-review-authority[data-state="missing"],
+.desktop-board-review-authority[data-state="conflict"] {
+  border-color: rgba(251, 191, 36, 0.2);
+  background: rgba(251, 191, 36, 0.052);
+}
+
+.desktop-board-authority header,
+.desktop-board-review-authority header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.desktop-board-authority header div,
+.desktop-board-review-authority header div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-board-authority header span,
+.desktop-board-review-authority header span {
+  color: var(--text-tertiary);
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.desktop-board-authority h5,
+.desktop-board-review-authority h5 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.desktop-board-authority header > strong,
+.desktop-board-review-authority header > strong {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+
+.desktop-board-authority-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.desktop-board-authority-grid span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-board-authority-grid small {
+  color: var(--text-tertiary);
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.desktop-board-authority-grid strong {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-board-authority p,
+.desktop-board-review-authority p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.desktop-board-coordination {
+  display: grid;
+  gap: 4px;
+}
+
+.desktop-board-coordination-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.095);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.desktop-board-coordination-badge[data-kind="lease"] {
+  border-color: rgba(168, 85, 247, 0.2);
+  background: rgba(168, 85, 247, 0.08);
+  color: #c084fc;
+}
+
+.desktop-board-coordination-badge[data-kind="lock"] {
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.08);
+  color: #f87171;
+}
+
+.desktop-board-coordination-badge[data-kind="stale"] {
+  border-color: rgba(251, 191, 36, 0.2);
+  background: rgba(251, 191, 36, 0.08);
+  color: #fde68a;
+}
+
+.desktop-board-coordination-badge[data-kind="muted"] {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+}
+
+.desktop-board-workflow-links,
+.desktop-board-task-actions,
+.desktop-board-review-assign {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.desktop-board-workflow-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.desktop-board-workflow-links a:hover {
+  color: var(--text);
+}
+
+.desktop-board-workflow-links svg {
+  width: 12px;
+  height: 12px;
+}
+
+.desktop-board-review-assign select {
+  min-width: min(100%, 190px);
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: rgba(10, 10, 10, 0.54);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.74rem;
+}
+
+.desktop-board-action-button {
+  min-height: 29px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.desktop-board-action-button:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+}
+
+.desktop-board-action-button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.desktop-board-action-button[data-tone="primary"] {
+  border-color: rgba(96, 165, 250, 0.3);
+  color: #93c5fd;
+}
+
+.desktop-board-action-button[data-tone="danger"] {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: #f87171;
+}
+
+.desktop-board-empty {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.desktop-board-empty h3 {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.desktop-board-empty p {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.desktop-board-empty code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.78rem;
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-board-add-form,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-board-task-card,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-board-authority,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-board-review-authority {
+  border-color: rgba(255, 255, 255, 0.115);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.026) 54%, rgba(255, 255, 255, 0.012)),
+    rgba(13, 13, 13, 0.58);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(16px) saturate(1.12);
+}
+
 .desktop-task-board {
   display: grid;
   grid-template-columns: repeat(4, minmax(220px, 1fr));
@@ -6195,6 +6694,38 @@ code {
   .desktop-composer-error {
     flex: 1 1 100%;
     white-space: normal;
+  }
+
+  .desktop-board-panel {
+    padding: 12px;
+  }
+
+  .desktop-board-add-form,
+  .desktop-board-task-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .desktop-board-add-button {
+    width: 100%;
+  }
+
+  .desktop-board-task-card {
+    padding: 10px;
+  }
+
+  .desktop-board-authority-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-board-task-actions,
+  .desktop-board-review-assign {
+    align-items: stretch;
+  }
+
+  .desktop-board-action-button,
+  .desktop-board-review-assign select {
+    flex: 1 1 100%;
   }
 }
 
