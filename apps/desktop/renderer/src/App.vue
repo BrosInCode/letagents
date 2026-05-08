@@ -105,6 +105,7 @@
           :workers="workers"
           @message-sent="handleMessageSent"
           @room-renamed="handleRoomRenamed"
+          @task-updated="upsertSelectedTask"
           @refresh-room="handleRefreshRoom"
         />
       </template>

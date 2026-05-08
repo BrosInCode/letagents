@@ -41,6 +41,9 @@ import type {
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
   DesktopStagedAttachment,
+  DesktopTaskLeaseActionInput,
+  DesktopTaskMutationResult,
+  DesktopTaskReviewLeaseActionInput,
   DesktopTaskSummary,
   RepoStatus,
   RepoWorktreeEntry,
@@ -1006,6 +1009,7 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
       apiFetch<{ tasks?: Array<{
         id: string;
         title: string;
+        description?: string | null;
         status: string;
         assignee: string | null;
         created_by?: string | null;
@@ -1026,6 +1030,14 @@ async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promi
           status?: string;
           updated_at?: string | null;
         }>;
+        active_locks?: Array<{
+          id?: string;
+          scope?: string;
+          reason?: string | null;
+          message?: string | null;
+          created_by?: string | null;
+        }>;
+        created_at?: string | null;
         updated_at: string;
       }> }>(`/rooms/${encodeURIComponent(roomIdentifier)}/tasks`).catch(() => ({ tasks: [] })),
       apiFetch<{ participants?: Array<{
@@ -1555,6 +1567,7 @@ function mapRoomMessageAgentIdentity(identity: {
 function mapDesktopTaskSummaryPayload(task: {
   id: string;
   title?: string;
+  description?: string | null;
   status?: string;
   assignee?: string | null;
   created_by?: string | null;
@@ -1575,12 +1588,21 @@ function mapDesktopTaskSummaryPayload(task: {
     status?: string;
     updated_at?: string | null;
   }> | null;
+  active_locks?: Array<{
+    id?: string;
+    scope?: string;
+    reason?: string | null;
+    message?: string | null;
+    created_by?: string | null;
+  }> | null;
+  created_at?: string | null;
   updated_at?: string;
   updatedAt?: string;
 }): DesktopTaskSummary {
   return {
     id: task.id,
     title: task.title || task.id,
+    description: task.description || null,
     status: task.status || "proposed",
     assignee: task.assignee || null,
     createdBy: task.created_by || null,
@@ -1602,6 +1624,14 @@ function mapDesktopTaskSummaryPayload(task: {
       status: lease.status || "active",
       updatedAt: lease.updated_at || null,
     })).filter((lease) => Boolean(lease.id)),
+    activeLocks: (task.active_locks || []).map((lock) => ({
+      id: lock.id || "",
+      scope: lock.scope || "task",
+      reason: lock.reason || null,
+      message: lock.message || null,
+      createdBy: lock.created_by || null,
+    })).filter((lock) => Boolean(lock.id)),
+    createdAt: task.created_at || null,
     updatedAt: task.updated_at || task.updatedAt || new Date().toISOString(),
   };
 }
@@ -1663,6 +1693,89 @@ async function sendDesktopRoomMessage(
   return {
     message: mapRoomMessagePayload(message),
   };
+}
+
+function mapDesktopTaskMutationResult(data: { task?: unknown; id?: unknown }): DesktopTaskMutationResult {
+  const rawTask = data.task && typeof data.task === "object" ? data.task : data.id ? data : null;
+  if (!rawTask || typeof rawTask !== "object" || typeof (rawTask as { id?: unknown }).id !== "string") {
+    throw new Error("Task response was incomplete.");
+  }
+  return {
+    task: mapDesktopTaskSummaryPayload(rawTask as Parameters<typeof mapDesktopTaskSummaryPayload>[0]),
+  };
+}
+
+async function addDesktopRoomTask(roomIdentifier: string, title: string): Promise<DesktopTaskMutationResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedTitle = title.trim();
+  if (!trimmedRoomIdentifier) throw new Error("Choose a room before adding a task.");
+  if (!trimmedTitle) throw new Error("Task title is required.");
+  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: trimmedTitle, created_by: "human" }),
+    }
+  );
+  return mapDesktopTaskMutationResult(data);
+}
+
+async function updateDesktopRoomTask(
+  roomIdentifier: string,
+  taskId: string,
+  updates: { status?: string; assignee?: string | null; pr_url?: string | null }
+): Promise<DesktopTaskMutationResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) throw new Error("Choose a room before updating a task.");
+  if (!taskId.trim()) throw new Error("Task id is required.");
+  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    }
+  );
+  return mapDesktopTaskMutationResult(data);
+}
+
+async function updateDesktopRoomTaskLease(
+  roomIdentifier: string,
+  taskId: string,
+  input: DesktopTaskLeaseActionInput
+): Promise<DesktopTaskMutationResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) throw new Error("Choose a room before updating a task lease.");
+  if (!taskId.trim()) throw new Error("Task id is required.");
+  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }
+  );
+  return mapDesktopTaskMutationResult(data);
+}
+
+async function updateDesktopRoomTaskReviewLease(
+  roomIdentifier: string,
+  taskId: string,
+  input: DesktopTaskReviewLeaseActionInput
+): Promise<DesktopTaskMutationResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) throw new Error("Choose a room before updating review authority.");
+  if (!taskId.trim()) throw new Error("Task id is required.");
+  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }
+  );
+  return mapDesktopTaskMutationResult(data);
 }
 
 async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<DesktopStagedAttachment[]> {
@@ -1878,6 +1991,8 @@ function mapRoomStreamTaskPayload(task: {
   pr_url?: string | null;
   workflow_refs?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["workflow_refs"];
   active_leases?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["active_leases"];
+  active_locks?: Parameters<typeof mapDesktopTaskSummaryPayload>[0]["active_locks"];
+  created_at?: string | null;
   updated_at?: string;
   updatedAt?: string;
 }): DesktopTaskSummary | null {
@@ -2519,6 +2634,41 @@ ipcMain.handle(
     attachments?: Array<{ upload_id: string }>
   ): Promise<DesktopSendRoomMessageResult> =>
     sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [])
+);
+ipcMain.handle(
+  "desktop:room:add-task",
+  async (_event, roomIdentifier: string, title: string): Promise<DesktopTaskMutationResult> =>
+    addDesktopRoomTask(roomIdentifier, title)
+);
+ipcMain.handle(
+  "desktop:room:update-task",
+  async (
+    _event,
+    roomIdentifier: string,
+    taskId: string,
+    updates: { status?: string; assignee?: string | null; pr_url?: string | null }
+  ): Promise<DesktopTaskMutationResult> =>
+    updateDesktopRoomTask(roomIdentifier, taskId, updates)
+);
+ipcMain.handle(
+  "desktop:room:update-task-lease",
+  async (
+    _event,
+    roomIdentifier: string,
+    taskId: string,
+    input: DesktopTaskLeaseActionInput
+  ): Promise<DesktopTaskMutationResult> =>
+    updateDesktopRoomTaskLease(roomIdentifier, taskId, input)
+);
+ipcMain.handle(
+  "desktop:room:update-task-review-lease",
+  async (
+    _event,
+    roomIdentifier: string,
+    taskId: string,
+    input: DesktopTaskReviewLeaseActionInput
+  ): Promise<DesktopTaskMutationResult> =>
+    updateDesktopRoomTaskReviewLease(roomIdentifier, taskId, input)
 );
 ipcMain.handle(
   "desktop:room:rename",
