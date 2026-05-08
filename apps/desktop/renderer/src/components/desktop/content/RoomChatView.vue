@@ -304,6 +304,8 @@ let restoredScrollTop: number | null | undefined;
 let attachmentDragDepth = 0;
 let initialScrollSettled = false;
 let pendingInitialScrollFrame: number | null = null;
+let pendingInitialScrollToken = 0;
+let componentUnmounted = false;
 const maxAttachments = 4;
 const maxAttachmentBytes = 25 * 1024 * 1024;
 
@@ -424,7 +426,7 @@ watch(
     if (newLastId === oldLastId) {
       return;
     }
-    if (isScrolledToBottom) {
+    if (initialScrollSettled && isScrolledToBottom) {
       scrollToBottom();
       return;
     }
@@ -463,6 +465,7 @@ watch(
 );
 
 onMounted(() => {
+  componentUnmounted = false;
   window.addEventListener("keydown", handleGlobalKeydown);
   if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
     scheduleInitialScrollToBottom();
@@ -472,9 +475,10 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  componentUnmounted = true;
   cancelPendingInitialScroll();
   if (messagesElement.value) {
-    emit("scroll-position", isScrolledToBottom ? null : messagesElement.value.scrollTop);
+    emit("scroll-position", messagesElement.value.scrollTop);
   }
 });
 
@@ -736,15 +740,19 @@ function scheduleInitialScrollRestore(): void {
 
 function scheduleInitialScroll(callback: () => void): void {
   cancelPendingInitialScroll();
+  const token = ++pendingInitialScrollToken;
   void nextTick(() => {
+    if (componentUnmounted || token !== pendingInitialScrollToken) return;
     pendingInitialScrollFrame = window.requestAnimationFrame(() => {
       pendingInitialScrollFrame = null;
+      if (componentUnmounted || token !== pendingInitialScrollToken) return;
       callback();
     });
   });
 }
 
 function cancelPendingInitialScroll(): void {
+  pendingInitialScrollToken += 1;
   if (pendingInitialScrollFrame === null) return;
   window.cancelAnimationFrame(pendingInitialScrollFrame);
   pendingInitialScrollFrame = null;
