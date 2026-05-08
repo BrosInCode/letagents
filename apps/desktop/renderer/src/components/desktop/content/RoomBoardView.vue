@@ -354,6 +354,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
+import { sortTasks } from "../../../domain/tasks";
 import RoomBoardSummary from "./RoomBoardSummary.vue";
 
 type TaskAction = {
@@ -412,18 +413,6 @@ const localWorker = computed(() =>
     && ["connected", "away"].includes(worker.state)
   ) || null
 );
-
-const statusRanks: Record<string, number> = {
-  proposed: 10,
-  accepted: 20,
-  assigned: 30,
-  in_progress: 40,
-  blocked: 50,
-  in_review: 60,
-  merged: 70,
-  done: 80,
-  cancelled: 90,
-};
 
 const laneStatusMap: Record<Exclude<TaskLaneFilterId, "all">, string[]> = {
   open: ["proposed", "accepted", "assigned"],
@@ -688,14 +677,6 @@ function quickFilterCount(filterId: TaskQuickFilterId): number {
   return props.tasks.filter((task) => matchesQuickFilter(task, filterId)).length;
 }
 
-function sortTasks(tasks: DesktopTaskSummary[]): DesktopTaskSummary[] {
-  return [...tasks].sort((left, right) => {
-    const statusDelta = (statusRanks[left.status] || 999) - (statusRanks[right.status] || 999);
-    if (statusDelta !== 0) return statusDelta;
-    return timestampValue(right.updatedAt) - timestampValue(left.updatedAt);
-  });
-}
-
 function workflowRefs(task: DesktopTaskSummary): DesktopTaskSummary["workflowRefs"] {
   return task.workflowRefs.length
     ? task.workflowRefs
@@ -957,8 +938,4 @@ function absoluteTime(value: string | null | undefined): string {
   });
 }
 
-function timestampValue(value: string | null | undefined): number {
-  const timestamp = Date.parse(value || "");
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
 </script>

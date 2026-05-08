@@ -1,12 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, safeStorage, shell } from "electron";
-import { execFile } from "node:child_process";
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
-import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type {
@@ -49,7 +46,6 @@ import type {
   DesktopTaskWorkerActionInput,
   DesktopTaskSummary,
   RepoStatus,
-  RepoWorktreeEntry,
   WorkerSnapshot,
 } from "./ipc-types.js";
 import {
@@ -59,8 +55,12 @@ import {
   getCurrentLocalWorkerSession,
   readLetAgentsLocalState,
 } from "./board-task-actions.js";
+import {
+  buildRepoStatus,
+  resolveRoomIdentifier,
+  resolveRoomIdentifierFromPath,
+} from "./repo-status.js";
 
-const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(__dirname, "..");
 const workspaceRoot = join(desktopRoot, "..", "..");
@@ -196,198 +196,6 @@ class DesktopApiError extends Error {
     this.status = status;
     this.payload = payload;
   }
-}
-
-async function runGit(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd: workspaceRoot,
-  });
-  return stdout;
-}
-
-async function runGitInPath(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd });
-  return stdout;
-}
-
-async function getCurrentBranch(): Promise<string | null> {
-  try {
-    const stdout = await runGit(["branch", "--show-current"]);
-    const branch = stdout.trim();
-    return branch || null;
-  } catch {
-    return null;
-  }
-}
-
-async function getWorktrees(): Promise<RepoWorktreeEntry[]> {
-  try {
-    const stdout = await runGit(["worktree", "list", "--porcelain"]);
-    const lines = stdout.split(/\r?\n/);
-    const entries: RepoWorktreeEntry[] = [];
-    let current: Partial<RepoWorktreeEntry> | null = null;
-
-    for (const line of lines) {
-      if (!line.trim()) {
-        if (current?.path && current.head) {
-          entries.push({
-            path: current.path,
-            branch: current.branch ?? null,
-            head: current.head,
-            isCurrent: current.path === workspaceRoot,
-          });
-        }
-        current = null;
-        continue;
-      }
-
-      const [key, ...rest] = line.split(" ");
-      const value = rest.join(" ").trim();
-      if (key === "worktree") {
-        current = { path: value };
-      } else if (current && key === "HEAD") {
-        current.head = value;
-      } else if (current && key === "branch") {
-        current.branch = value.replace(/^refs\/heads\//, "");
-      }
-    }
-
-    if (current?.path && current.head) {
-      entries.push({
-        path: current.path,
-        branch: current.branch ?? null,
-        head: current.head,
-        isCurrent: current.path === workspaceRoot,
-      });
-    }
-
-    return entries;
-  } catch {
-    return [];
-  }
-}
-
-async function buildRepoStatus(): Promise<RepoStatus> {
-  return {
-    rootPath: workspaceRoot,
-    branch: await getCurrentBranch(),
-    worktrees: await getWorktrees(),
-  };
-}
-
-function normalizeGitRemoteToRoomIdentifier(remote: string): string | null {
-  const value = remote.trim();
-  if (!value) return null;
-
-  const sshMatch = /^git@([^:]+):(.+?)(?:\.git)?$/.exec(value);
-  if (sshMatch) {
-    return `${sshMatch[1]}/${sshMatch[2]}`.replace(/\.git$/, "");
-  }
-
-  try {
-    const url = new URL(value);
-    if (!url.hostname) return null;
-    return `${url.hostname}${url.pathname}`.replace(/\.git$/, "").replace(/\/+$/, "");
-  } catch {
-    return null;
-  }
-}
-
-function readConfiguredRoomIdentifier(): string | null {
-  try {
-    const configPath = join(workspaceRoot, ".letagents.json");
-    if (!existsSync(configPath)) return null;
-    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as { room?: string };
-    return parsed.room?.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-function readConfiguredRoomIdentifierAt(repoRoot: string): string | null {
-  try {
-    const configPath = join(repoRoot, ".letagents.json");
-    if (!existsSync(configPath)) return null;
-    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as { room?: string };
-    return parsed.room?.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveRoomIdentifier(): Promise<string | null> {
-  const configured = readConfiguredRoomIdentifier();
-  if (configured) return configured;
-
-  try {
-    const stdout = await runGit(["remote", "get-url", "origin"]);
-    return normalizeGitRemoteToRoomIdentifier(stdout);
-  } catch {
-    return null;
-  }
-}
-
-function slugifyLocalProjectName(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    || "project";
-}
-
-function createLocalRoomIdentifier(projectPath: string): string {
-  const normalizedPath = resolve(projectPath);
-  const folderName = slugifyLocalProjectName(basename(normalizedPath));
-  const pathHash = createHash("sha256").update(normalizedPath).digest("hex").slice(0, 10);
-  return `local-${folderName}-${pathHash}`;
-}
-
-async function resolveRoomIdentifierFromPath(folderPath: string): Promise<{
-  repoRoot: string | null;
-  roomIdentifier: string;
-  source: DesktopRepoRoomSelection["source"];
-  warning: string | null;
-}> {
-  let repoRoot: string | null = null;
-  try {
-    const stdout = await runGitInPath(folderPath, ["rev-parse", "--show-toplevel"]);
-    repoRoot = stdout.trim() || null;
-  } catch {
-    return {
-      repoRoot: null,
-      roomIdentifier: createLocalRoomIdentifier(folderPath),
-      source: "local_fallback",
-      warning: "This folder is not a Git repository yet. LetAgents opened a local room that you can attach to GitHub later.",
-    };
-  }
-
-  if (!repoRoot) {
-    return {
-      repoRoot: null,
-      roomIdentifier: createLocalRoomIdentifier(folderPath),
-      source: "local_fallback",
-      warning: "This folder is not a Git repository yet. LetAgents opened a local room that you can attach to GitHub later.",
-    };
-  }
-
-  const configured = readConfiguredRoomIdentifierAt(repoRoot);
-  if (configured) return { repoRoot, roomIdentifier: configured, source: "configured", warning: null };
-
-  try {
-    const stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"]);
-    const roomIdentifier = normalizeGitRemoteToRoomIdentifier(stdout);
-    if (roomIdentifier) return { repoRoot, roomIdentifier, source: "git_remote", warning: null };
-  } catch {
-    // Fall through to the local room fallback below.
-  }
-
-  return {
-    repoRoot,
-    roomIdentifier: createLocalRoomIdentifier(repoRoot),
-    source: "local_fallback",
-    warning: "This repo is only on your Mac. LetAgents opened a local room; attach it to GitHub after you add a remote.",
-  };
 }
 
 function getSetupStorePath(): string {
@@ -983,7 +791,7 @@ function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
 }
 
 async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promise<DesktopRoomSnapshot> {
-  const roomIdentifier = requestedRoomIdentifier?.trim() || await resolveRoomIdentifier();
+  const roomIdentifier = requestedRoomIdentifier?.trim() || await resolveRoomIdentifier(workspaceRoot);
   if (!roomIdentifier) {
     return {
       roomIdentifier: null,
@@ -2516,7 +2324,7 @@ async function openDesktopGitHubInstall(roomIdentifier: string): Promise<Desktop
 }
 
 async function startDeviceAuthFlow(roomIdentifier?: string | null): Promise<DesktopAuthStartResult> {
-  const trimmedRoomIdentifier = roomIdentifier?.trim() || await resolveRoomIdentifier();
+  const trimmedRoomIdentifier = roomIdentifier?.trim() || await resolveRoomIdentifier(workspaceRoot);
   const path = trimmedRoomIdentifier
     ? `/auth/device/start?room_id=${encodeURIComponent(trimmedRoomIdentifier)}`
     : "/auth/device/start";
@@ -2863,7 +2671,7 @@ ipcMain.handle(
 ipcMain.handle("desktop:setup:complete-mcp-onboarding", async (): Promise<DesktopMcpInstallState> => {
   return completeMcpOnboarding();
 });
-ipcMain.handle("desktop:repos:get-status", async (): Promise<RepoStatus> => buildRepoStatus());
+ipcMain.handle("desktop:repos:get-status", async (): Promise<RepoStatus> => buildRepoStatus(workspaceRoot));
 ipcMain.handle("desktop:repos:pick-room", async (): Promise<DesktopRepoRoomSelection> => pickRepoRoom());
 ipcMain.handle("desktop:workers:list", async (): Promise<WorkerSnapshot[]> => buildWorkerSnapshots());
 ipcMain.handle(
