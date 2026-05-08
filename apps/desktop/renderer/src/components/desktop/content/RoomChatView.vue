@@ -419,7 +419,8 @@ watch(
           scheduleInitialScrollToBottom();
         }
       } else {
-        scheduleInitialScrollRestore();
+        // Scroll restore is handled synchronously in onMounted; no need to
+        // schedule here (messagesElement is not yet available before mount).
       }
       return;
     }
@@ -458,7 +459,7 @@ watch(
       if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
         scheduleInitialScrollToBottom();
       } else {
-        scheduleInitialScrollRestore();
+        restoreInitialScrollTop();
       }
     });
   },
@@ -467,10 +468,12 @@ watch(
 onMounted(() => {
   componentUnmounted = false;
   window.addEventListener("keydown", handleGlobalKeydown);
-  if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
-    scheduleInitialScrollToBottom();
+  if (props.initialScrollTop !== null && props.initialScrollTop !== undefined) {
+    // Restore saved scroll position synchronously before the first paint to
+    // avoid a visible flash where the view briefly appears at scrollTop 0.
+    restoreInitialScrollTop();
   } else {
-    scheduleInitialScrollRestore();
+    scheduleInitialScrollToBottom();
   }
 });
 
