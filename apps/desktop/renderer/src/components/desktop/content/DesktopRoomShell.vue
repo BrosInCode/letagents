@@ -128,11 +128,13 @@
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
         :initial-scroll-top="chatScrollTop"
+        :initial-draft="chatDraftText"
         @send-message="sendRoomMessage"
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
         @open-reasoning="openReasoningInspector"
         @scroll-position="chatScrollTop = $event"
+        @draft-change="chatDraftText = $event"
       />
 
       <RoomBoardView
@@ -240,6 +242,7 @@ const liquidGlassEnabled = ref(readLiquidGlassEnabled());
 const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
 const messageHistoryPageSize = 150;
 const chatScrollTop = ref<number | null>(null);
+const chatDraftText = ref("");
 const selectedReasoningSessionId = ref<string | null>(null);
 let audioContext: AudioContext | null = null;
 let observedLatestMessageId: string | null = null;
@@ -321,6 +324,7 @@ watch(
   () => props.room.identifier,
   () => {
     chatScrollTop.value = null;
+    chatDraftText.value = "";
     selectedReasoningSessionId.value = null;
     void refreshGitHubIntegration();
   },

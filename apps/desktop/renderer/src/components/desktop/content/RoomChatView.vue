@@ -57,8 +57,8 @@
 
       <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
         <div class="desktop-composer-identity">
-          <span>Message the room</span>
-          <span class="desktop-composer-shortcut">Enter to send · ⌘↵ for a new line</span>
+          <span>{{ composerTargetLabel }}</span>
+          <span class="desktop-composer-shortcut">{{ composerPresenceLabel }}</span>
         </div>
         <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
           <div>
@@ -72,10 +72,10 @@
           v-model="draft"
           class="desktop-composer-input"
           rows="3"
-          placeholder="Write a message..."
+          :placeholder="roomIdentifier ? 'Write a message...' : 'Choose a room to start writing'"
           :disabled="!roomIdentifier"
           data-testid="desktop-composer-input"
-          @input="syncMentionQuery"
+          @input="handleDraftInput"
           @keydown.down.prevent="moveMentionSelection(1)"
           @keydown.up.prevent="moveMentionSelection(-1)"
           @keydown.enter="handleEnterKey"
@@ -136,7 +136,7 @@
           <p v-if="sendError || attachmentError" class="desktop-composer-error" data-testid="desktop-composer-error">
             {{ sendError || attachmentError }}
           </p>
-          <p v-else class="desktop-composer-hint">Use @ to bring a person or agent into the thread.</p>
+          <p v-else class="desktop-composer-hint">{{ composerHint }}</p>
           <button
             class="desktop-composer-attach"
             type="button"
@@ -278,6 +278,7 @@ const props = defineProps<{
   searchQuery: string;
   activeSearchMessageId: string | null;
   initialScrollTop?: number | null;
+  initialDraft?: string;
 }>();
 
 const emit = defineEmits<{
@@ -286,9 +287,10 @@ const emit = defineEmits<{
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
   "scroll-position": [scrollTop: number | null];
+  "draft-change": [text: string];
 }>();
 
-const draft = ref("");
+const draft = ref(props.initialDraft || "");
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const messagesElement = ref<HTMLElement | null>(null);
 const replyTo = ref<DesktopRoomMessage | null>(null);
@@ -322,6 +324,21 @@ interface PendingAttachmentDraft {
 }
 
 const canSend = computed(() => Boolean(props.roomIdentifier && (draft.value.trim() || attachmentDrafts.value.length > 0)));
+const reachableParticipantCount = computed(() =>
+  props.participants.filter((participant) => participant.activityState !== "offline").length
+);
+const composerTargetLabel = computed(() => props.roomIdentifier ? "Message the room" : "No room selected");
+const composerPresenceLabel = computed(() => {
+  if (!props.roomIdentifier) return "Open a room before sending";
+  if (reachableParticipantCount.value === 0) return "No reachable participants";
+  if (reachableParticipantCount.value === 1) return "1 reachable participant";
+  return `${reachableParticipantCount.value} reachable participants`;
+});
+const composerHint = computed(() =>
+  props.roomIdentifier
+    ? "Use @ to bring a person or agent into the thread."
+    : "Select a room from the sidebar to enable chat."
+);
 const mentionOpen = computed({
   get: () => mentionQuery.value !== null && mentionCandidates.value.length > 0,
   set: (value: boolean) => {
@@ -459,6 +476,13 @@ watch(
     unreadCount.value = 0;
     isScrolledFarUp.value = false;
     isScrolledToBottom = true;
+    draft.value = props.initialDraft || "";
+    emit("draft-change", draft.value);
+    mentionQuery.value = null;
+    replyTo.value = null;
+    attachmentError.value = null;
+    attachmentDrafts.value = [];
+    pendingAttachmentDrafts.value = [];
     void nextTick(() => {
       if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
         scheduleInitialScrollToBottom();
@@ -484,6 +508,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   componentUnmounted = true;
   cancelPendingInitialScroll();
+  emit("draft-change", draft.value);
   if (messagesElement.value) {
     emit("scroll-position", messagesElement.value.scrollTop);
   }
@@ -503,6 +528,7 @@ function submitMessage(): void {
     attachmentDrafts.value.map((attachment) => ({ upload_id: attachment.uploadId })),
   );
   draft.value = "";
+  syncDraftToShell();
   replyTo.value = null;
   attachmentDrafts.value = [];
 }
@@ -511,11 +537,13 @@ function insertNewlineAtCursor(): void {
   const input = textareaElement.value;
   if (!input) {
     draft.value = `${draft.value}\n`;
+    syncDraftToShell();
     return;
   }
   const start = input.selectionStart ?? draft.value.length;
   const end = input.selectionEnd ?? draft.value.length;
   draft.value = `${draft.value.slice(0, start)}\n${draft.value.slice(end)}`;
+  syncDraftToShell();
   void nextTick(() => {
     input.selectionStart = start + 1;
     input.selectionEnd = start + 1;
@@ -696,6 +724,11 @@ function syncMentionQuery(): void {
   activeMentionIndex.value = 0;
 }
 
+function handleDraftInput(): void {
+  syncDraftToShell();
+  syncMentionQuery();
+}
+
 function moveMentionSelection(delta: number): void {
   if (!mentionOpen.value) return;
   const count = mentionCandidates.value.length;
@@ -770,6 +803,12 @@ function cancelPendingInitialScroll(): void {
 function insertMention(displayName: string): void {
   draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._-]*)$/, `$1@${displayName} `);
   mentionQuery.value = null;
+  syncDraftToShell();
+  void nextTick(() => textareaElement.value?.focus());
+}
+
+function syncDraftToShell(): void {
+  emit("draft-change", draft.value);
 }
 
 function displaySender(sender: string): string {
