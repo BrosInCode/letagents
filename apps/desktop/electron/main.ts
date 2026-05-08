@@ -1573,7 +1573,10 @@ async function addDesktopRoomTask(roomIdentifier: string, title: string): Promis
     `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
       body: JSON.stringify({ title: trimmedTitle, created_by: "human" }),
     }
   );
@@ -1592,7 +1595,10 @@ async function updateDesktopRoomTask(
     `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
     {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
       body: JSON.stringify(updates),
     }
   );
@@ -1611,7 +1617,10 @@ async function updateDesktopRoomTaskLease(
     `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
       body: JSON.stringify(input),
     }
   );
@@ -1630,7 +1639,10 @@ async function updateDesktopRoomTaskReviewLease(
     `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
       body: JSON.stringify(input),
     }
   );

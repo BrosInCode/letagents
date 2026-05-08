@@ -101,6 +101,20 @@ type ReviewLeaseActionRequestBody = {
   target_agent_session_id?: string;
 };
 
+function hasAgentSessionCredentials(input: Record<string, unknown>): boolean {
+  return typeof input.agent_session_id === "string" && input.agent_session_id.trim().length > 0
+    && typeof input.agent_session_token === "string" && input.agent_session_token.trim().length > 0;
+}
+
+function isDesktopHumanClient(req: AuthenticatedRequest): boolean {
+  return req.authKind === "owner_token"
+    && req.headers?.["x-letagents-desktop-client"] === "1";
+}
+
+function isDesktopHumanWrite(req: AuthenticatedRequest, body: Record<string, unknown>): boolean {
+  return isDesktopHumanClient(req) && !hasAgentSessionCredentials(body);
+}
+
 const LEASE_RECOVERY_ACTIVE_STATUSES = new Set<TaskStatus>([
   "assigned",
   "in_progress",
@@ -287,6 +301,9 @@ async function resolveOwnerTokenWorkerWriteIdentity(input: {
   if (input.req.authKind !== "owner_token") {
     return { kind: "not_owner_token" };
   }
+  if (isDesktopHumanWrite(input.req, input.body)) {
+    return { kind: "not_owner_token" };
+  }
 
   const result = await requireWorkerRequestAgentIdentity({
     req: input.req,
@@ -391,7 +408,7 @@ export function registerRoomTaskRoutes(
 
     const task = await createTask(project.id, title, createdBy, description, source_message_id);
 
-    if (req.authKind === "owner_token") {
+    if (req.authKind === "owner_token" && !isDesktopHumanWrite(req, requestBody)) {
       await createCoordinationEvent({
         room_id: project.id,
         task_id: task.id,
@@ -716,6 +733,7 @@ export function registerRoomTaskRoutes(
     }
 
     const requestBody = (req.body ?? {}) as LeaseActionRequestBody;
+    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody as Record<string, unknown>);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -743,7 +761,7 @@ export function registerRoomTaskRoutes(
     const actorInstanceId = workerIdentity?.agent_instance_id ?? normalizeTaskActorInstanceId(requestBody.actor_instance_id);
     const actorSessionId = workerIdentity?.agent_session_id ?? null;
     let actorKey: string | null = workerIdentity?.agent_key ?? null;
-    if (req.authKind === "owner_token" && !workerIdentity) {
+    if (req.authKind === "owner_token" && !workerIdentity && !desktopHumanWrite) {
       const actorValidation = await deps.validateOwnerTokenTaskActorKey({
         req,
         actorKey: normalizeTaskActorKey(requestBody.actor_key),
@@ -797,7 +815,7 @@ export function registerRoomTaskRoutes(
         return;
       }
 
-      if (req.authKind === "owner_token") {
+      if (req.authKind === "owner_token" && !desktopHumanWrite) {
         const targetValidation = await deps.validateOwnerTokenTaskActorKey({
           req,
           actorKey: targetActorKeyRaw,
