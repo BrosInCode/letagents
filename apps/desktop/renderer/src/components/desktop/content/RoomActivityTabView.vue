@@ -790,10 +790,13 @@ function mergeTasks(...taskLists: DesktopTaskSummary[][]): DesktopTaskSummary[] 
 function activityTasksToDesktopTasks(tasks: DesktopActivityEntry["currentTasks"]): DesktopTaskSummary[] {
   return tasks.map((task) => ({
     ...task,
+    description: null,
     assignee: null,
     createdBy: null,
     prUrl: null,
     activeLeases: [],
+    activeLocks: [],
+    createdAt: null,
     updatedAt: task.updatedAt || "",
   }));
 }

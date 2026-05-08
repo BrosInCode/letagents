@@ -137,7 +137,10 @@
       <RoomBoardView
         v-else-if="activeTab === 'board'"
         key="board"
+        :room-identifier="room.identifier"
         :tasks="tasks"
+        @task-updated="emit('task-updated', $event)"
+        @refresh-room="emit('refresh-room')"
       />
 
       <RoomActivityTabView
@@ -237,6 +240,7 @@ const ownMessageIds = new Set<string>();
 const emit = defineEmits<{
   "message-sent": [message: DesktopRoomMessage];
   "room-renamed": [room: DesktopRoomInfo];
+  "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
 }>();
 

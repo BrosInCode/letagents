@@ -148,6 +148,7 @@ export interface DesktopFocusRoomInfo {
 export interface DesktopTaskSummary {
   id: string;
   title: string;
+  description: string | null;
   status: string;
   assignee: string | null;
   createdBy: string | null;
@@ -167,7 +168,37 @@ export interface DesktopTaskSummary {
     status: string;
     updatedAt: string | null;
   }>;
+  activeLocks: Array<{
+    id: string;
+    scope: "room" | "task" | string;
+    reason: string | null;
+    message: string | null;
+    createdBy: string | null;
+  }>;
+  createdAt: string | null;
   updatedAt: string;
+}
+
+export interface DesktopTaskMutationResult {
+  task: DesktopTaskSummary;
+}
+
+export interface DesktopTaskLeaseActionInput {
+  action: "release" | "handoff";
+  lease_id?: string | null;
+  target_actor_key?: string | null;
+  target_actor_instance_id?: string | null;
+  target_agent_session_id?: string | null;
+  reason?: string | null;
+}
+
+export interface DesktopTaskReviewLeaseActionInput {
+  action: "assign" | "claim" | "release";
+  lease_id?: string | null;
+  target_actor_key?: string | null;
+  target_actor_instance_id?: string | null;
+  target_agent_session_id?: string | null;
+  reason?: string | null;
 }
 
 export interface DesktopParticipantSummary {
@@ -469,6 +500,22 @@ export interface DesktopApi {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>
     ) => Promise<DesktopSendRoomMessageResult>;
+    addTask: (roomIdentifier: string, title: string) => Promise<DesktopTaskMutationResult>;
+    updateTask: (
+      roomIdentifier: string,
+      taskId: string,
+      updates: { status?: string; assignee?: string | null; pr_url?: string | null }
+    ) => Promise<DesktopTaskMutationResult>;
+    updateTaskLease: (
+      roomIdentifier: string,
+      taskId: string,
+      input: DesktopTaskLeaseActionInput
+    ) => Promise<DesktopTaskMutationResult>;
+    updateTaskReviewLease: (
+      roomIdentifier: string,
+      taskId: string,
+      input: DesktopTaskReviewLeaseActionInput
+    ) => Promise<DesktopTaskMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
     openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
