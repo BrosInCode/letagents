@@ -140,6 +140,7 @@
         key="board"
         :room-identifier="room.identifier"
         :tasks="tasks"
+        :presence="presence"
         :workers="workers"
         @task-updated="emit('task-updated', $event)"
         @refresh-room="emit('refresh-room')"

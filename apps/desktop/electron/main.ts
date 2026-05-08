@@ -44,6 +44,7 @@ import type {
   DesktopTaskLeaseActionInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
+  DesktopTaskReviewWorkerActionInput,
   DesktopTaskWorkerActionInput,
   DesktopTaskSummary,
   RepoStatus,
@@ -1924,6 +1925,37 @@ async function runDesktopRoomTaskWorkerAction(
   return mapDesktopTaskMutationResult(data);
 }
 
+async function runDesktopRoomTaskReviewWorkerAction(
+  roomIdentifier: string,
+  taskId: string,
+  input: DesktopTaskReviewWorkerActionInput
+): Promise<DesktopTaskMutationResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) throw new Error("Choose a room before updating review authority.");
+  if (!taskId.trim()) throw new Error("Task id is required.");
+
+  const session = getCurrentLocalWorkerSession(trimmedRoomIdentifier);
+  if (!session?.session_id || !session.session_token) {
+    throw new Error("No registered local worker session is available for this room.");
+  }
+
+  const data = await apiFetch<{ task?: unknown; id?: unknown }>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: input.action,
+        lease_id: input.lease_id ?? null,
+        reason: input.reason ?? null,
+        agent_session_id: session.session_id,
+        agent_session_token: session.session_token,
+      }),
+    }
+  );
+  return mapDesktopTaskMutationResult(data);
+}
+
 async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<DesktopStagedAttachment[]> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
@@ -2841,6 +2873,16 @@ ipcMain.handle(
     input: DesktopTaskWorkerActionInput
   ): Promise<DesktopTaskMutationResult> =>
     runDesktopRoomTaskWorkerAction(roomIdentifier, taskId, input)
+);
+ipcMain.handle(
+  "desktop:room:run-task-review-worker-action",
+  async (
+    _event,
+    roomIdentifier: string,
+    taskId: string,
+    input: DesktopTaskReviewWorkerActionInput
+  ): Promise<DesktopTaskMutationResult> =>
+    runDesktopRoomTaskReviewWorkerAction(roomIdentifier, taskId, input)
 );
 ipcMain.handle(
   "desktop:room:rename",

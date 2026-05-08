@@ -38,6 +38,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:update-task-review-lease", roomIdentifier, taskId, input),
     runTaskWorkerAction: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:run-task-worker-action", roomIdentifier, taskId, input),
+    runTaskReviewWorkerAction: (roomIdentifier: string, taskId: string, input) =>
+      ipcRenderer.invoke("desktop:room:run-task-review-worker-action", roomIdentifier, taskId, input),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     getGitHubIntegrationStatus: (roomIdentifier: string) =>

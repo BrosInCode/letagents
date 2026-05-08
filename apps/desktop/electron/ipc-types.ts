@@ -209,6 +209,12 @@ export interface DesktopTaskWorkerActionInput {
   reason?: string | null;
 }
 
+export interface DesktopTaskReviewWorkerActionInput {
+  action: "claim" | "release";
+  lease_id?: string | null;
+  reason?: string | null;
+}
+
 export interface DesktopParticipantSummary {
   participantKey: string;
   kind: "human" | "agent";
@@ -546,6 +552,11 @@ export interface DesktopApi {
       roomIdentifier: string,
       taskId: string,
       input: DesktopTaskWorkerActionInput
+    ) => Promise<DesktopTaskMutationResult>;
+    runTaskReviewWorkerAction: (
+      roomIdentifier: string,
+      taskId: string,
+      input: DesktopTaskReviewWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
