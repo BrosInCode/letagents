@@ -9,6 +9,8 @@ const api: DesktopApi = {
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
+    getReasoningSession: (roomIdentifier: string, sessionId: string) =>
+      ipcRenderer.invoke("desktop:room:get-reasoning-session", roomIdentifier, sessionId),
     pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
     stageDroppedAttachmentContents: (roomIdentifier, files) =>
       ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
