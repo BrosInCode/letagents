@@ -28,6 +28,9 @@ export interface WorkerSnapshot {
   runtime: string;
   state: "not_started" | "starting" | "connected" | "away" | "offline" | "failed";
   roomId: string | null;
+  actorLabel: string | null;
+  agentKey: string | null;
+  agentSessionId: string | null;
   detail: string;
 }
 
@@ -198,6 +201,11 @@ export interface DesktopTaskReviewLeaseActionInput {
   target_actor_key?: string | null;
   target_actor_instance_id?: string | null;
   target_agent_session_id?: string | null;
+  reason?: string | null;
+}
+
+export interface DesktopTaskWorkerActionInput {
+  action: "claim" | "start" | "block" | "resume" | "submit_review";
   reason?: string | null;
 }
 
@@ -533,6 +541,11 @@ export interface DesktopApi {
       roomIdentifier: string,
       taskId: string,
       input: DesktopTaskReviewLeaseActionInput
+    ) => Promise<DesktopTaskMutationResult>;
+    runTaskWorkerAction: (
+      roomIdentifier: string,
+      taskId: string,
+      input: DesktopTaskWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
