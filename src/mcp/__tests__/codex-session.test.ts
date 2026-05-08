@@ -11,6 +11,7 @@ import {
   inspectLocalCodexSession,
   isCodexAgentSessionMarker,
   summarizeCodexRuntimeNotificationForTest,
+  summarizeCodexRuntimeSnapshotForTest,
 } from "../codex-session.js";
 import { saveCodexLiveSession, type CodexLiveSessionState } from "../local-state.js";
 
@@ -67,6 +68,22 @@ test("summarizeCodexRuntimeNotificationForTest maps runtime notifications to vis
   assert.equal(summary.status, "working");
   assert.match(summary.summary, /Codex turn started/);
   assert.match(summary.checking, /codex_app_server: turn\/started/);
+});
+
+test("summarizeCodexRuntimeSnapshotForTest maps app-server snapshots to visible reasoning", () => {
+  const summary = summarizeCodexRuntimeSnapshotForTest({
+    threadStatus: "active",
+    turnStatus: "inProgress",
+    recentItems: [
+      { type: "userMessage", text: "Review PR #350." },
+      { type: "agentMessage", phase: "commentary", text: "I am checking the desktop reasoning UI." },
+    ],
+  });
+
+  assert.ok(summary);
+  assert.equal(summary.status, "working");
+  assert.equal(summary.summary, "I am checking the desktop reasoning UI.");
+  assert.match(summary.checking, /Latest Codex worker message/);
 });
 
 test("inspectLocalCodexSession marks ready servers with failed websocket handshakes unknown", async () => {
