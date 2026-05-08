@@ -853,10 +853,13 @@ function activityTasksToDesktopTasks(tasks: DesktopActivityEntry["currentTasks"]
     ...task,
     description: null,
     assignee: null,
+    assigneeAgentKey: null,
     createdBy: null,
     prUrl: null,
+    workflowArtifacts: [],
     activeLeases: [],
     activeLocks: [],
+    stalePromptState: null,
     createdAt: null,
     updatedAt: task.updatedAt || "",
   }));

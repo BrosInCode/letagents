@@ -154,8 +154,19 @@ export interface DesktopTaskSummary {
   description: string | null;
   status: string;
   assignee: string | null;
+  assigneeAgentKey: string | null;
   createdBy: string | null;
   prUrl: string | null;
+  workflowArtifacts: Array<{
+    provider: string;
+    kind: string;
+    id: string | null;
+    number: number | null;
+    title: string | null;
+    url: string | null;
+    ref: string | null;
+    state: string | null;
+  }>;
   workflowRefs: Array<{
     provider: string;
     kind: string;
@@ -178,6 +189,14 @@ export interface DesktopTaskSummary {
     message: string | null;
     createdBy: string | null;
   }>;
+  stalePromptState: {
+    isStale: boolean;
+    reason: string | null;
+    staleForMs: number | null;
+    muted: boolean;
+    mutedBy: string | null;
+    mutedAt: string | null;
+  } | null;
   createdAt: string | null;
   updatedAt: string;
 }
