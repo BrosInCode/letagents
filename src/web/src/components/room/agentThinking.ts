@@ -1,4 +1,4 @@
-import type { RoomAgentPresence, RoomMessage } from '@/composables/useRoom'
+import type { RoomAgentPresence, RoomMessage, RoomReasoningSession } from '@/composables/useRoom'
 
 export type AgentThinkingPhase = RoomAgentPresence['status'] | 'note'
 
@@ -249,6 +249,67 @@ export function buildAgentThinkingSnapshot(input: {
       allowPlainAgentNotes: true,
     }
   )
+}
+
+export function buildAgentThinkingFromReasoningSession(
+  session: RoomReasoningSession | null | undefined
+): AgentThinkingTimelineEntry | null {
+  if (!session) return null
+  const payload = session.latest_payload
+  const summary = cleanThoughtLine(
+    payload?.summary
+    || session.summary
+    || payload?.checking
+    || payload?.next_action
+    || session.checking
+    || session.next_action
+    || ''
+  )
+  if (!summary) return null
+
+  const fields: AgentThinkingField[] = []
+  const pushField = (key: AgentThinkingField['key'], value: string | null | undefined) => {
+    const normalized = cleanThoughtLine(value || '')
+    if (normalized) fields.push({ key, label: FIELD_LABELS[key], value: normalized })
+  }
+
+  pushField('goal', payload?.goal || session.goal)
+  pushField('hypothesis', payload?.hypothesis || session.hypothesis)
+  pushField('evidence', payload?.checking || session.checking)
+  pushField('next', payload?.next_action || session.next_action)
+  pushField('blocker', payload?.blocker || session.blocker)
+  if (typeof payload?.confidence === 'number') {
+    pushField('confidence', `${Math.round(payload.confidence * 100)}%`)
+  } else if (typeof session.confidence === 'number') {
+    pushField('confidence', `${Math.round(session.confidence * 100)}%`)
+  }
+
+  const phase = classifyThinkingPhase({
+    status: payload?.status as RoomAgentPresence['status'] | null | undefined,
+    text: [
+      summary,
+      payload?.checking || session.checking || '',
+      payload?.blocker || session.blocker || '',
+    ].join(' '),
+    hasBlockerField: fields.some((field) => field.key === 'blocker'),
+    isStatus: false,
+    isPlainNote: false,
+  })
+
+  return {
+    id: session.id,
+    timestamp: session.updated_at || session.created_at || '',
+    phase,
+    phaseLabel: getPhaseLabel(phase),
+    summary,
+    details: dedupeStrings([
+      payload?.milestone || session.milestone || '',
+      payload?.checking || session.checking || '',
+      payload?.next_action || session.next_action || '',
+    ].filter((entry) => entry && entry !== summary)).slice(0, 3),
+    fields: sortFields(fields).slice(0, 4),
+    isStatus: false,
+  }
 }
 
 export function buildAgentThinkingTimeline(

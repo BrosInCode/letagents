@@ -571,6 +571,34 @@
     rgba(255, 255, 255, 0.035);
 }
 
+.desktop-agent-modal-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.desktop-agent-modal-fields span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.desktop-agent-modal-fields small {
+  color: var(--text-tertiary);
+  font-size: 0.66rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.desktop-agent-modal-fields strong {
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
 .desktop-reasoning-open-button {
   justify-self: flex-start;
   min-height: 30px;

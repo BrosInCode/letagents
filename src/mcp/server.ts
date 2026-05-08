@@ -124,15 +124,18 @@ function getOrCreateLocalHostId(): string {
   return readLocalState().local_host_id || hostId;
 }
 
-function getSessionLivenessRegistration() {
+function getSessionLivenessRegistration(runtime = detectAgentRuntimeLabel()) {
   const hostId = getOrCreateLocalHostId();
   const ideLabel = detectAgentIdeLabel();
+  const normalizedRuntime = runtime.trim().toLowerCase() || ideLabel.toLowerCase();
   return {
     host_id: hostId,
     host_kind: process.platform === "darwin" ? "macos" : process.platform,
     host_label: null,
-    liveness_capability: "session_activity",
-    tool_bridge_id: `${hostId}:${ideLabel.toLowerCase()}:${AGENT_INSTANCE_UUID}`,
+    liveness_capability: normalizedRuntime === "codex"
+      ? "codex_app_server_runtime_stream"
+      : "session_activity",
+    tool_bridge_id: `${hostId}:${normalizedRuntime}:${AGENT_INSTANCE_UUID}`,
   };
 }
 
@@ -266,6 +269,14 @@ function detectAgentIdeLabel(): string {
   const explicitName = normalizeAgentBaseName(AGENT_NAME || AGENT_DISPLAY_NAME);
   const inferred = inferAgentIdeLabel(explicitName);
   return inferred || "Agent";
+}
+
+function detectAgentRuntimeLabel(): string {
+  if (isCodexRuntime()) {
+    return "codex";
+  }
+
+  return detectAgentIdeLabel().trim().toLowerCase() || "unknown";
 }
 
 function getFallbackSlotPrefix(namespaceKey: string): string {
@@ -1852,6 +1863,7 @@ server.tool(
       };
     }
 
+    const requestedRuntime = runtime?.trim() || detectAgentRuntimeLabel();
     const created = await apiCall<Record<string, unknown>>(
       `/rooms/${encodeRoomIdPath(targetRoomId)}/agent-sessions`,
       {
@@ -1863,8 +1875,8 @@ server.tool(
           agent_instance_id: AGENT_INSTANCE_UUID,
           display_name: display_name?.trim() || identity.display_name,
           session_kind: session_kind ?? "worker",
-          runtime: runtime?.trim() || detectAgentIdeLabel().toLowerCase(),
-          registration_liveness: getSessionLivenessRegistration(),
+          runtime: requestedRuntime,
+          registration_liveness: getSessionLivenessRegistration(requestedRuntime),
         }),
       }
     );

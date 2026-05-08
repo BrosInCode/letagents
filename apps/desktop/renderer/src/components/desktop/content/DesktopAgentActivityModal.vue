@@ -40,6 +40,27 @@
 
       <section class="desktop-agent-modal-section">
         <header>
+          <h4>Latest reasoning</h4>
+          <span>{{ latestReasoning ? reasoningStatus(latestReasoning) : "None" }}</span>
+        </header>
+        <article v-if="latestReasoning" class="desktop-agent-modal-card is-reasoning">
+          <strong>{{ reasoningTitle(latestReasoning) }}</strong>
+          <p>{{ reasoningSummary(latestReasoning) }}</p>
+          <div v-if="latestReasoningFields.length" class="desktop-agent-modal-fields">
+            <span v-for="field in latestReasoningFields" :key="field.label">
+              <small>{{ field.label }}</small>
+              <strong>{{ field.value }}</strong>
+            </span>
+          </div>
+          <button type="button" class="desktop-reasoning-open-button" @click="$emit('open-reasoning', latestReasoning.id)">
+            Open reasoning
+          </button>
+        </article>
+        <p v-else class="desktop-agent-modal-empty">No visible thinking stream is active for this agent.</p>
+      </section>
+
+      <section class="desktop-agent-modal-section">
+        <header>
           <h4>Activity</h4>
           <span>{{ activeAgentMessages.length }}</span>
         </header>
@@ -86,7 +107,7 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import { normalizeAgentKey } from "../../../domain/agents";
-import { reasoningSummary, reasoningTitle } from "../../../domain/reasoning";
+import { reasoningFieldRows, reasoningStatus, reasoningSummary, reasoningTitle } from "../../../domain/reasoning";
 import { formatRelativeTime, latestTimestamp, timestampValue } from "../../../domain/time";
 import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 
@@ -131,6 +152,10 @@ const activeAgentTasks = computed(() =>
     const agentKey = normalizeAgentKey(activeAgentPresence.value?.agentKey || "");
     return Boolean(assignee && (assignee === activeAgentKey.value || assignee === agentKey));
   })
+);
+const latestReasoning = computed(() => activeAgentReasoning.value[0] || null);
+const latestReasoningFields = computed(() =>
+  latestReasoning.value ? reasoningFieldRows(latestReasoning.value) : []
 );
 const activeAgentLastSeenAt = computed(() =>
   latestTimestamp(

@@ -76,6 +76,7 @@ export interface CodexLiveSessionState {
   server_pid?: number | null;
   launched_server: boolean;
   codex_bin: string;
+  reasoning_session_id?: string | null;
   status: CodexLiveSessionStatus;
   last_error?: string | null;
   started_at: string;

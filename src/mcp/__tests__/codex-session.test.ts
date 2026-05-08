@@ -6,7 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import type { AddressInfo } from "node:net";
 
-import { deriveCodexLiveSessionStatus, inspectLocalCodexSession } from "../codex-session.js";
+import {
+  deriveCodexLiveSessionStatus,
+  inspectLocalCodexSession,
+  isCodexAgentSessionMarker,
+  summarizeCodexRuntimeNotificationForTest,
+} from "../codex-session.js";
 import { saveCodexLiveSession, type CodexLiveSessionState } from "../local-state.js";
 
 const baseSession: CodexLiveSessionState = {
@@ -43,6 +48,25 @@ test("deriveCodexLiveSessionStatus preserves normal completed turns", () => {
     deriveCodexLiveSessionStatus(baseSession, true, "active", "completed"),
     "completed"
   );
+});
+
+test("isCodexAgentSessionMarker identifies Codex sessions by runtime and bridge markers", () => {
+  assert.equal(isCodexAgentSessionMarker({ runtime: "codex" }), true);
+  assert.equal(isCodexAgentSessionMarker({ ide_label: "Codex" }), true);
+  assert.equal(isCodexAgentSessionMarker({ liveness_capability: "codex_app_server_runtime_stream" }), true);
+  assert.equal(isCodexAgentSessionMarker({ tool_bridge_id: "host_1:codex:agent_1" }), true);
+  assert.equal(isCodexAgentSessionMarker({ runtime: "antigravity", ide_label: "Agent" }), false);
+});
+
+test("summarizeCodexRuntimeNotificationForTest maps runtime notifications to visible reasoning", () => {
+  const summary = summarizeCodexRuntimeNotificationForTest({
+    method: "turn/started",
+    params: { item: { type: "tool_call", name: "shell" } },
+  });
+
+  assert.equal(summary.status, "working");
+  assert.match(summary.summary, /Codex turn started/);
+  assert.match(summary.checking, /codex_app_server: turn\/started/);
 });
 
 test("inspectLocalCodexSession marks ready servers with failed websocket handshakes unknown", async () => {

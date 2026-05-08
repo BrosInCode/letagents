@@ -887,6 +887,7 @@ import {
   type AgentReachabilitySource,
 } from './reachability'
 import {
+  buildAgentThinkingFromReasoningSession,
   buildAgentThinkingSnapshot,
   buildAgentThinkingTimeline,
   extractStatusText,
@@ -1164,6 +1165,7 @@ function buildWorkSignal(input: {
 
 function livenessCapabilityLabel(value: string | null | undefined): string {
   const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'codex_app_server_runtime_stream') return 'Codex app-server stream'
   if (normalized === 'session_activity') return 'Session activity'
   if (normalized === 'process_observed') return 'Process observed'
   if (normalized === 'tool_bridge_only') return 'Tool bridge'
@@ -1252,12 +1254,18 @@ function buildAgentParticipant(source: AgentReachabilitySource): ActivityPartici
     currentTasks,
     activeReasoning,
   })
-  const thinkingSnapshot = buildAgentThinkingSnapshot({
+  const activeReasoningThinking = activeReasoning
+    .map((session) => buildAgentThinkingFromReasoningSession(session))
+    .filter((entry): entry is AgentThinkingTimelineEntry => Boolean(entry))
+  const thinkingSnapshot = activeReasoningThinking[0] || buildAgentThinkingSnapshot({
     messages,
     status: presenceEntry?.status || null,
     statusText,
   })
-  const thinkingTimeline = buildAgentThinkingTimeline(messages)
+  const thinkingTimeline = [
+    ...activeReasoningThinking,
+    ...buildAgentThinkingTimeline(messages),
+  ].slice(0, 5)
 
   return {
     key,
