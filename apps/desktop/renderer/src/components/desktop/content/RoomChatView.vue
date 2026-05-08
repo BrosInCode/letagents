@@ -12,48 +12,20 @@
       <div v-if="isDraggingAttachment" class="room-attachment-drop-overlay" data-testid="room-attachment-drop-overlay">
         <span>Drop files to attach</span>
       </div>
-      <div class="room-message-viewport" data-testid="room-chat-viewport">
-        <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
-          <button
-            v-if="messages.length && hasOlderMessages"
-            class="room-load-older"
-            type="button"
-            :disabled="loadingOlderMessages"
-            data-testid="desktop-load-older-messages"
-            @click="$emit('load-older')"
-          >
-            {{ loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages" }}
-          </button>
-
-          <DesktopChatMessage
-            v-for="message in messages"
-            :key="message.id"
-            :message="message"
-            :thread-count="threadCount(message.id)"
-            :latest-thread-message-id="latestThreadMessageId(message.id)"
-            :highlight-query="searchQuery"
-            :search-active="message.id === activeSearchMessageId"
-            @reply="startReply"
-            @scroll-to-message="scrollToMessage"
-            @open-image="openImageViewer"
-            @open-agent="openAgentModal"
-          />
-
-          <article v-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
-            <h3>Open a room to begin</h3>
-            <p>Messages from humans, agents, and GitHub will appear here as the room comes alive.</p>
-          </article>
-        </div>
-        <button
-          v-if="unreadCount > 0 || isScrolledFarUp"
-          class="room-new-messages-pill"
-          type="button"
-          data-testid="desktop-new-messages-pill"
-          @click="scrollToBottom()"
-        >
-          {{ unreadCount > 0 ? `↓ ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : "↓ Scroll to latest" }}
-        </button>
-      </div>
+      <DesktopMessageViewport
+        :messages="messages"
+        :room-key="roomIdentifier"
+        :has-older-messages="hasOlderMessages"
+        :loading-older-messages="loadingOlderMessages"
+        :search-query="searchQuery"
+        :active-search-message-id="activeSearchMessageId"
+        :initial-scroll-top="initialScrollTop"
+        @load-older="emit('load-older')"
+        @reply="startReply"
+        @open-image="openImageViewer"
+        @open-agent="openAgentModal"
+        @scroll-position="emit('scroll-position', $event)"
+      />
 
       <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
         <div class="desktop-composer-identity">
@@ -164,8 +136,9 @@ import type {
 } from "../../../../../electron/ipc-types";
 import DesktopAgentActivityModal from "./DesktopAgentActivityModal.vue";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "./DesktopAttachmentDrafts.vue";
-import DesktopChatMessage, { type AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
+import DesktopMessageViewport from "./DesktopMessageViewport.vue";
+import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 
 const props = defineProps<{
   messages: DesktopRoomMessage[];
@@ -195,7 +168,6 @@ const emit = defineEmits<{
 
 const draft = ref(props.initialDraft || "");
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
-const messagesElement = ref<HTMLElement | null>(null);
 const replyTo = ref<DesktopRoomMessage | null>(null);
 const activeImageId = ref<string | null>(null);
 const mentionQuery = ref<string | null>(null);
@@ -205,16 +177,8 @@ const pendingAttachmentDrafts = ref<PendingAttachmentDraft[]>([]);
 const attachmentError = ref<string | null>(null);
 const attaching = ref(false);
 const isDraggingAttachment = ref(false);
-const unreadCount = ref(0);
-const isScrolledFarUp = ref(false);
 const activeAgent = ref<AgentModalTarget | null>(null);
-let isScrolledToBottom = true;
-let restoredScrollTop: number | null | undefined;
 let attachmentDragDepth = 0;
-let initialScrollSettled = false;
-let pendingInitialScrollFrame: number | null = null;
-let pendingInitialScrollToken = 0;
-let componentUnmounted = false;
 const maxAttachments = 4;
 const maxAttachmentBytes = 25 * 1024 * 1024;
 
@@ -247,18 +211,6 @@ const mentionCandidates = computed(() => {
     .filter((participant) => participant.displayName.toLowerCase().includes(query))
     .slice(0, 6);
 });
-const threadSummaries = computed(() => {
-  const summaries = new Map<string, { count: number; latest: DesktopRoomMessage | null }>();
-  for (const message of props.messages) {
-    const parentId = message.replyTo?.id;
-    if (!parentId) continue;
-    const summary = summaries.get(parentId) || { count: 0, latest: null };
-    summary.count += 1;
-    summary.latest = message;
-    summaries.set(parentId, summary);
-  }
-  return summaries;
-});
 const roomImages = computed<DesktopMessageImage[]>(() => {
   const images: DesktopMessageImage[] = [];
   for (const message of props.messages) {
@@ -277,61 +229,8 @@ const roomImages = computed<DesktopMessageImage[]>(() => {
   return images;
 });
 watch(
-  () => props.messages,
-  async (newMessages, oldMessages) => {
-    const previousScrollHeight = messagesElement.value?.scrollHeight || 0;
-    const oldLastId = oldMessages?.[oldMessages.length - 1]?.id;
-    const newLastId = newMessages[newMessages.length - 1]?.id;
-    const isPrepend = Boolean(oldLastId && newLastId === oldLastId && newMessages[0]?.id !== oldMessages?.[0]?.id);
-
-    await nextTick();
-
-    if (isPrepend && messagesElement.value) {
-      messagesElement.value.scrollTop += messagesElement.value.scrollHeight - previousScrollHeight;
-      return;
-    }
-    if (!oldLastId) {
-      if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
-        if (isScrolledToBottom) {
-          scheduleInitialScrollToBottom();
-        }
-      } else {
-        // Scroll restore is handled synchronously in onMounted; no need to
-        // schedule here (messagesElement is not yet available before mount).
-      }
-      return;
-    }
-    if (newLastId === oldLastId) {
-      return;
-    }
-    if (initialScrollSettled && isScrolledToBottom) {
-      scrollToBottom();
-      return;
-    }
-    if (newLastId) {
-      unreadCount.value += Math.max(1, newMessages.length - (oldMessages?.length || 0));
-    }
-  },
-  { immediate: true },
-);
-
-watch(
-  () => props.activeSearchMessageId,
-  (messageId) => {
-    if (messageId) {
-      void nextTick(() => scrollToMessage(messageId));
-    }
-  },
-);
-
-watch(
   () => props.roomIdentifier,
   () => {
-    restoredScrollTop = undefined;
-    initialScrollSettled = false;
-    unreadCount.value = 0;
-    isScrolledFarUp.value = false;
-    isScrolledToBottom = true;
     draft.value = props.initialDraft || "";
     emit("draft-change", draft.value);
     mentionQuery.value = null;
@@ -339,35 +238,15 @@ watch(
     attachmentError.value = null;
     attachmentDrafts.value = [];
     pendingAttachmentDrafts.value = [];
-    void nextTick(() => {
-      if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
-        scheduleInitialScrollToBottom();
-      } else {
-        restoreInitialScrollTop();
-      }
-    });
   },
 );
 
 onMounted(() => {
-  componentUnmounted = false;
   window.addEventListener("keydown", handleGlobalKeydown);
-  if (props.initialScrollTop !== null && props.initialScrollTop !== undefined) {
-    // Restore saved scroll position synchronously before the first paint to
-    // avoid a visible flash where the view briefly appears at scrollTop 0.
-    restoreInitialScrollTop();
-  } else {
-    scheduleInitialScrollToBottom();
-  }
 });
 
 onBeforeUnmount(() => {
-  componentUnmounted = true;
-  cancelPendingInitialScroll();
   emit("draft-change", draft.value);
-  if (messagesElement.value) {
-    emit("scroll-position", messagesElement.value.scrollTop);
-  }
 });
 
 onUnmounted(() => {
@@ -557,18 +436,6 @@ function handleEnterKey(event: KeyboardEvent): void {
   submitMessage();
 }
 
-function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
-  if (!messagesElement.value) return;
-  messagesElement.value.scrollTo({
-    top: messagesElement.value.scrollHeight,
-    behavior,
-  });
-  isScrolledToBottom = true;
-  unreadCount.value = 0;
-  isScrolledFarUp.value = false;
-  emit("scroll-position", null);
-}
-
 function startReply(message: DesktopRoomMessage): void {
   replyTo.value = message;
   void nextTick(() => textareaElement.value?.focus());
@@ -590,70 +457,6 @@ function moveMentionSelection(delta: number): void {
   const count = mentionCandidates.value.length;
   if (!count) return;
   activeMentionIndex.value = (activeMentionIndex.value + delta + count) % count;
-}
-
-function handleScroll(): void {
-  if (!messagesElement.value) return;
-  const element = messagesElement.value;
-  const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-  isScrolledToBottom = distanceToBottom < 80;
-  emit("scroll-position", isScrolledToBottom ? null : element.scrollTop);
-  isScrolledFarUp.value = distanceToBottom > 900;
-  if (isScrolledToBottom) {
-    unreadCount.value = 0;
-  }
-  if (initialScrollSettled && element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
-    emit("load-older");
-  }
-}
-
-function restoreInitialScrollTop(): void {
-  const element = messagesElement.value;
-  const scrollTop = props.initialScrollTop;
-  if (!element || scrollTop === null || scrollTop === undefined || restoredScrollTop === scrollTop) {
-    initialScrollSettled = true;
-    return;
-  }
-  restoredScrollTop = scrollTop;
-  // Override CSS `scroll-behavior: smooth` to prevent animated scrolling.
-  // Chromium/Electron honours the CSS property even when JS says "auto".
-  const prev = element.style.scrollBehavior;
-  element.style.scrollBehavior = "auto";
-  element.scrollTop = Math.max(0, Math.min(scrollTop, element.scrollHeight));
-  element.style.scrollBehavior = prev;
-  initialScrollSettled = true;
-  handleScroll();
-}
-
-function scheduleInitialScrollToBottom(): void {
-  scheduleInitialScroll(() => {
-    scrollToBottom("auto");
-    initialScrollSettled = true;
-  });
-}
-
-function scheduleInitialScrollRestore(): void {
-  scheduleInitialScroll(() => restoreInitialScrollTop());
-}
-
-function scheduleInitialScroll(callback: () => void): void {
-  cancelPendingInitialScroll();
-  const token = ++pendingInitialScrollToken;
-  void nextTick(() => {
-    if (componentUnmounted || token !== pendingInitialScrollToken) return;
-    pendingInitialScrollFrame = window.requestAnimationFrame(() => {
-      pendingInitialScrollFrame = null;
-      if (componentUnmounted || token !== pendingInitialScrollToken) return;
-      callback();
-    });
-  });
-}
-
-function cancelPendingInitialScroll(): void {
-  pendingInitialScrollToken += 1;
-  if (pendingInitialScrollFrame === null) return;
-  window.cancelAnimationFrame(pendingInitialScrollFrame);
-  pendingInitialScrollFrame = null;
 }
 
 function insertMention(displayName: string): void {
@@ -738,23 +541,6 @@ function formatDateTime(value: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-function threadCount(messageId: string): number {
-  return threadSummaries.value.get(messageId)?.count || 0;
-}
-
-function latestThreadMessageId(messageId: string): string | null {
-  return threadSummaries.value.get(messageId)?.latest?.id || null;
-}
-
-function scrollToMessage(messageId: string | null): void {
-  if (!messageId || !messagesElement.value) return;
-  const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
-  if (!target) return;
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
-  target.classList.add("jump-target");
-  window.setTimeout(() => target.classList.remove("jump-target"), 1500);
 }
 
 function openAgentModal(target: AgentModalTarget): void {
