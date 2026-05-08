@@ -21,6 +21,7 @@ import type {
   DesktopFocusRoomInfo,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
+  DesktopInviteRoomCreation,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
@@ -1878,6 +1879,20 @@ async function runDesktopRoomTaskReviewWorkerAction(
   return mapDesktopTaskMutationResult(data);
 }
 
+async function createDesktopInviteRoom(): Promise<DesktopInviteRoomCreation> {
+  const room = await apiFetch<{ id: string; code?: string | null }>("/projects", {
+    method: "POST",
+  });
+  const roomIdentifier = room.id;
+  const code = room.code || room.id;
+  const snapshot = await fetchRoomSnapshot(code);
+  return {
+    roomIdentifier,
+    code,
+    snapshot,
+  };
+}
+
 async function pickAndStageDesktopAttachments(roomIdentifier: string): Promise<DesktopStagedAttachment[]> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
@@ -2798,6 +2813,10 @@ ipcMain.handle(
   "desktop:room:rename",
   async (_event, roomIdentifier: string, displayName: string): Promise<DesktopRoomInfo> =>
     renameDesktopRoom(roomIdentifier, displayName)
+);
+ipcMain.handle(
+  "desktop:room:create-invite-room",
+  async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom()
 );
 ipcMain.handle(
   "desktop:room:get-github-integration-status",

@@ -528,6 +528,12 @@ export interface DesktopRepoRoomSelection {
   warning: string | null;
 }
 
+export interface DesktopInviteRoomCreation {
+  roomIdentifier: string;
+  code: string;
+  snapshot: DesktopRoomSnapshot;
+}
+
 export interface DesktopApi {
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
@@ -578,6 +584,7 @@ export interface DesktopApi {
       input: DesktopTaskReviewWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
+    createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
     openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
   };

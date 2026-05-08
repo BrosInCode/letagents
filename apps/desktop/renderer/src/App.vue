@@ -125,6 +125,68 @@
         :notes="diagnostics?.notes || []"
       />
     </section>
+
+    <div
+      v-if="newRoomModalOpen"
+      class="desktop-modal-backdrop"
+      data-testid="new-room-modal"
+      @click.self="closeNewRoomModal"
+    >
+      <section class="desktop-new-room-modal" role="dialog" aria-modal="true" aria-labelledby="new-room-title">
+        <header class="desktop-new-room-header">
+          <div>
+            <p class="sidebar-label">New room</p>
+            <h2 id="new-room-title">Choose how to open a room</h2>
+          </div>
+          <button class="desktop-modal-close" type="button" aria-label="Close new room dialog" @click="closeNewRoomModal">
+            ×
+          </button>
+        </header>
+
+        <div class="desktop-new-room-grid">
+          <button
+            class="desktop-new-room-option"
+            type="button"
+            :disabled="newRoomBusy"
+            data-testid="new-room-create-invite"
+            @click="createInviteRoom"
+          >
+            <span class="desktop-new-room-icon">#</span>
+            <strong>Invite room</strong>
+            <small>Create a room with a random join code for ad-hoc collaboration.</small>
+          </button>
+
+          <button
+            class="desktop-new-room-option"
+            type="button"
+            :disabled="newRoomBusy"
+            data-testid="new-room-open-project"
+            @click="openProjectRoomFromModal"
+          >
+            <span class="desktop-new-room-icon">⌂</span>
+            <strong>Project folder</strong>
+            <small>Open a folder and use its .letagents.json, git remote, or local room fallback.</small>
+          </button>
+        </div>
+
+        <form class="desktop-new-room-join" @submit.prevent="joinRoomCodeFromModal">
+          <label>
+            <span>Join with code</span>
+            <input
+              v-model="newRoomJoinCode"
+              type="text"
+              placeholder="ABCD-1234"
+              :disabled="newRoomBusy"
+            />
+          </label>
+          <button type="submit" :disabled="newRoomBusy || !newRoomJoinCode.trim()">Join</button>
+        </form>
+
+        <p v-if="newRoomFeedback" class="desktop-new-room-feedback" :data-state="newRoomFeedbackState">
+          {{ newRoomFeedback }}
+        </p>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -176,6 +238,11 @@ const mcpInstallState = ref<DesktopMcpInstallState | null>(null);
 const selectedMcpTargetIds = ref<DesktopMcpInstallTargetId[]>([]);
 const mcpInstallBusy = ref(false);
 const mcpInstallFeedback = ref<string | null>(null);
+const newRoomModalOpen = ref(false);
+const newRoomBusy = ref(false);
+const newRoomFeedback = ref<string | null>(null);
+const newRoomFeedbackState = ref<"info" | "error" | "success">("info");
+const newRoomJoinCode = ref("");
 const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("mcp");
@@ -465,7 +532,16 @@ function restoreActiveEntryFromStorage(): boolean {
 }
 
 function selectNewRoomEntry() {
-  activeEntry.value = pinnedRoom.value;
+  newRoomModalOpen.value = true;
+  newRoomFeedback.value = null;
+  newRoomFeedbackState.value = "info";
+}
+
+function closeNewRoomModal(): void {
+  if (newRoomBusy.value) return;
+  newRoomModalOpen.value = false;
+  newRoomFeedback.value = null;
+  newRoomJoinCode.value = "";
 }
 
 function cycleSidebar() {
@@ -1041,6 +1117,86 @@ function goBackMcpOnboarding(): void {
   mcpWizardStep.value = mcpWizardStep.value === "done" ? "install" : "choose";
 }
 
+function openRoomSnapshot(snapshot: DesktopRoomSnapshot): void {
+  rootRoomSnapshot.value = snapshot;
+  selectedSnapshot.value = snapshot;
+  selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
+  activeEntry.value = currentParentRoom.value;
+}
+
+async function createInviteRoom(): Promise<void> {
+  newRoomBusy.value = true;
+  newRoomFeedback.value = "Creating invite room...";
+  newRoomFeedbackState.value = "info";
+  try {
+    const result = await window.letagentsDesktop.room.createInviteRoom();
+    openRoomSnapshot(result.snapshot);
+    newRoomFeedback.value = `Invite room created. Join code: ${result.code}.`;
+    newRoomFeedbackState.value = "success";
+    newRoomJoinCode.value = "";
+  } catch (error) {
+    newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not create an invite room.";
+    newRoomFeedbackState.value = "error";
+  } finally {
+    newRoomBusy.value = false;
+  }
+}
+
+async function openProjectRoomFromModal(): Promise<void> {
+  newRoomBusy.value = true;
+  newRoomFeedback.value = "Opening the project picker...";
+  newRoomFeedbackState.value = "info";
+  try {
+    const result = await window.letagentsDesktop.repos.pickRoom();
+    if (result.canceled) {
+      newRoomFeedback.value = null;
+      return;
+    }
+    if (result.error || !result.snapshot) {
+      newRoomFeedback.value = result.error || "LetAgents could not open a room from that folder.";
+      newRoomFeedbackState.value = "error";
+      return;
+    }
+    openRoomSnapshot(result.snapshot);
+    newRoomFeedback.value = result.warning
+      ? `${result.warning} Room selected.`
+      : "Project room selected.";
+    newRoomFeedbackState.value = "success";
+    newRoomModalOpen.value = false;
+    newRoomJoinCode.value = "";
+  } catch (error) {
+    newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the project picker.";
+    newRoomFeedbackState.value = "error";
+  } finally {
+    newRoomBusy.value = false;
+  }
+}
+
+async function joinRoomCodeFromModal(): Promise<void> {
+  const roomCode = newRoomJoinCode.value.trim();
+  if (!roomCode) return;
+  newRoomBusy.value = true;
+  newRoomFeedback.value = "Joining room...";
+  newRoomFeedbackState.value = "info";
+  try {
+    const snapshot = await window.letagentsDesktop.room.getSnapshot(roomCode);
+    openRoomSnapshot(snapshot);
+    newRoomFeedback.value = snapshot.access.status === "ready"
+      ? "Room selected."
+      : snapshot.access.message;
+    newRoomFeedbackState.value = snapshot.access.status === "ready" ? "success" : "error";
+    if (snapshot.access.status === "ready") {
+      newRoomModalOpen.value = false;
+      newRoomJoinCode.value = "";
+    }
+  } catch (error) {
+    newRoomFeedback.value = error instanceof Error ? error.message : "LetAgents could not join that room.";
+    newRoomFeedbackState.value = "error";
+  } finally {
+    newRoomBusy.value = false;
+  }
+}
+
 async function pickRepoRoom(): Promise<void> {
   loading.value = true;
   mcpInstallFeedback.value = null;
@@ -1056,10 +1212,7 @@ async function pickRepoRoom(): Promise<void> {
       authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
       return;
     }
-    rootRoomSnapshot.value = result.snapshot;
-    selectedSnapshot.value = result.snapshot;
-    selectedRootRoomIdentifier.value = result.snapshot.roomIdentifier;
-    activeEntry.value = currentParentRoom.value;
+    openRoomSnapshot(result.snapshot);
     const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
     authFeedback.value = result.warning
       ? `${result.warning} Room selected: ${roomLabel}.`
@@ -1081,10 +1234,7 @@ async function joinRoomCode(roomCode: string): Promise<void> {
   setupLoadError.value = null;
   try {
     const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
-    rootRoomSnapshot.value = snapshot;
-    selectedSnapshot.value = snapshot;
-    selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
-    activeEntry.value = currentParentRoom.value;
+    openRoomSnapshot(snapshot);
     authFeedback.value = snapshot.access.status === "ready"
       ? "Room selected. Open it when you are ready."
       : snapshot.access.message;
