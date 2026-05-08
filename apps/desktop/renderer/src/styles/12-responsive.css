@@ -1,0 +1,330 @@
+
+@media (max-width: 1240px) {
+  .room-activity-grid,
+  .desktop-board-content,
+  .desktop-board-filters,
+  .desktop-task-board,
+  .stats-grid,
+  .action-grid,
+  .auth-panel,
+  .auth-steps,
+  .first-run-github-step,
+  .first-run-room-step,
+  .mcp-selected-app,
+  .mcp-onboarding .mcp-choice-card,
+  .first-run-github-step,
+  .first-run-room-step {
+    grid-template-columns: 1fr;
+  }
+
+  .first-run-card .mcp-choice-step {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mcp-target-status,
+  .mcp-choice-check {
+    justify-self: start;
+  }
+
+  .mcp-wizard-actions {
+    justify-content: flex-start;
+  }
+
+  .desktop-task-detail-panel {
+    position: static;
+  }
+}
+
+@media (max-width: 1060px) {
+  .desktop-onboarding-shell .first-run-wizard {
+    width: min(100%, calc(100vw - 32px));
+  }
+
+  .first-run-card .mcp-choice-step {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 980px) {
+  .desktop-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-shell[data-sidebar-mode="rail"],
+  .desktop-shell[data-sidebar-mode="hidden"] {
+    grid-template-columns: 1fr;
+  }
+
+  .app-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .app-main {
+    padding: 22px 18px 24px;
+  }
+}
+
+@media (max-width: 720px) {
+  .desktop-room-header,
+  .app-topbar,
+  .surface-row {
+    flex-direction: column;
+  }
+
+  .hero-panel h3,
+  .surface-intro h3 {
+    font-size: 1.5rem;
+  }
+
+  .hero-actions,
+  .topbar-actions {
+    grid-auto-flow: row;
+  }
+
+  .room-message-list {
+    padding: 14px 14px 20px;
+  }
+
+  .room-chat-message {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 10px;
+    padding: 11px 0;
+  }
+
+  .room-message-meta-tail {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .desktop-composer {
+    width: calc(100% - 20px);
+  }
+
+  .desktop-composer-identity,
+  .desktop-composer-footer {
+    align-items: flex-start;
+  }
+
+  .desktop-composer-identity {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .desktop-composer-shortcut {
+    text-align: left;
+  }
+
+  .desktop-composer-footer {
+    flex-wrap: wrap;
+  }
+
+  .desktop-composer-hint,
+  .desktop-composer-error {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+
+  .desktop-board-panel {
+    padding: 12px;
+  }
+
+  .desktop-board-add-form,
+  .desktop-board-task-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .desktop-board-add-button {
+    width: 100%;
+  }
+
+  .desktop-board-task-card {
+    padding: 10px;
+  }
+
+  .desktop-board-authority-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-board-task-actions,
+  .desktop-board-review-assign {
+    align-items: stretch;
+  }
+
+  .desktop-board-action-button,
+  .desktop-board-review-assign select {
+    flex: 1 1 100%;
+  }
+}
+
+.desktop-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 12, 20, 0.68);
+  backdrop-filter: blur(12px);
+}
+
+.desktop-new-room-modal {
+  width: min(680px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+.desktop-new-room-header,
+.desktop-new-room-join {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.desktop-new-room-header h2 {
+  margin: 4px 0 0;
+  font-size: 1.2rem;
+  letter-spacing: 0;
+}
+
+.desktop-modal-close {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.desktop-new-room-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.desktop-new-room-option {
+  min-height: 150px;
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.desktop-new-room-option:hover:not(:disabled),
+.desktop-modal-close:hover:not(:disabled),
+.desktop-new-room-join button:hover:not(:disabled) {
+  border-color: var(--border-accent);
+}
+
+.desktop-new-room-option:disabled,
+.desktop-new-room-join input:disabled,
+.desktop-new-room-join button:disabled,
+.desktop-modal-close:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.desktop-new-room-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--green-dim);
+  color: var(--green);
+  font-weight: 800;
+}
+
+.desktop-new-room-option strong {
+  font-size: 1rem;
+}
+
+.desktop-new-room-option small,
+.desktop-new-room-join span,
+.desktop-new-room-feedback {
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.desktop-new-room-join {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+}
+
+.desktop-new-room-join label {
+  flex: 1;
+  display: grid;
+  gap: 6px;
+}
+
+.desktop-new-room-join input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.desktop-new-room-join button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  background: var(--green);
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.desktop-new-room-feedback {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.desktop-new-room-feedback[data-state="error"] {
+  color: var(--red);
+}
+
+.desktop-new-room-feedback[data-state="success"] {
+  color: var(--green);
+}
+
+@media (max-width: 720px) {
+  .desktop-new-room-grid,
+  .desktop-new-room-join {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}
