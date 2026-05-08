@@ -93,6 +93,46 @@
             </span>
           </div>
 
+          <section
+            v-if="shouldShowReviewPanel(task)"
+            class="desktop-task-review-panel"
+            :data-state="reviewPanelState(task).state"
+          >
+            <header>
+              <div>
+                <small>Review authority</small>
+                <strong>{{ reviewPanelState(task).label }}</strong>
+              </div>
+              <span>{{ reviewPanelState(task).badge }}</span>
+            </header>
+            <p>{{ reviewPanelState(task).detail }}</p>
+            <div v-if="reviewAssignmentCandidates(task).length" class="desktop-task-review-assign">
+              <select
+                :value="selectedReviewerByTask[task.id] || ''"
+                :disabled="busyAction !== null"
+                @change="selectedReviewerByTask[task.id] = ($event.target as HTMLSelectElement).value"
+              >
+                <option value="">Assign reviewer...</option>
+                <option
+                  v-for="candidate in reviewAssignmentCandidates(task)"
+                  :key="reviewCandidateKey(candidate)"
+                  :value="reviewCandidateValue(candidate)"
+                >
+                  {{ reviewCandidateLabel(candidate) }}
+                </option>
+              </select>
+              <button
+                type="button"
+                class="desktop-task-action"
+                data-tone="neutral"
+                :disabled="busyAction !== null || !selectedReviewerByTask[task.id]"
+                @click="assignReview(task)"
+              >
+                {{ busyAction === `${task.id}:assign-review` ? "Assigning..." : "Assign" }}
+              </button>
+            </div>
+          </section>
+
           <div v-if="actionsFor(task).length" class="desktop-task-actions">
             <button
               v-for="action in actionsFor(task)"
@@ -125,7 +165,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { DesktopTaskSummary } from "../../../../../electron/ipc-types";
+import type { DesktopAgentPresence, DesktopTaskSummary } from "../../../../../electron/ipc-types";
 import RoomBoardSummary from "./RoomBoardSummary.vue";
 
 type TaskAction = {
@@ -138,6 +178,7 @@ type TaskAction = {
 const props = defineProps<{
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
+  presence: DesktopAgentPresence[];
 }>();
 
 const emit = defineEmits<{
@@ -148,6 +189,7 @@ const emit = defineEmits<{
 const newTaskTitle = ref("");
 const busyAction = ref<string | null>(null);
 const errorMessage = ref<string | null>(null);
+const selectedReviewerByTask = ref<Record<string, string>>({});
 
 const statusRanks: Record<string, number> = {
   proposed: 10,
@@ -211,6 +253,7 @@ function actionsFor(task: DesktopTaskSummary): TaskAction[] {
     actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
   }
   if (task.status === "in_review") {
+    actions.push(statusAction("changes", "Request changes", "danger", "blocked"));
     actions.push(statusAction("merged", "Mark merged", "primary", "merged"));
   }
   if (task.status === "merged") {
@@ -238,6 +281,17 @@ function actionsFor(task: DesktopTaskSummary): TaskAction[] {
         action: "release",
         lease_id: review.id,
         reason: `Released board review authority for ${nextTask.id} from desktop board.`,
+      })).task,
+    });
+  }
+  if (canClaimReview(task)) {
+    actions.push({
+      id: "claim-review",
+      label: "Claim review",
+      tone: "primary",
+      run: async (nextTask) => (await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, nextTask.id, {
+        action: "claim",
+        reason: `Claimed board review authority for ${nextTask.id} from desktop board.`,
       })).task,
     });
   }
@@ -272,6 +326,25 @@ async function runBoardMutation(id: string, mutation: () => Promise<DesktopTaskS
   }
 }
 
+async function assignReview(task: DesktopTaskSummary): Promise<void> {
+  const selected = parseReviewCandidateValue(selectedReviewerByTask.value[task.id] || "");
+  if (!selected) return;
+  await runBoardMutation(`${task.id}:assign-review`, async () => {
+    const result = await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, task.id, {
+      action: "assign",
+      target_actor_key: selected.agentKey,
+      target_actor_instance_id: selected.agentInstanceId,
+      target_agent_session_id: selected.agentSessionId,
+      reason: `Assigned board review authority for ${task.id} from desktop board.`,
+    });
+    selectedReviewerByTask.value = {
+      ...selectedReviewerByTask.value,
+      [task.id]: "",
+    };
+    return result.task;
+  });
+}
+
 function sortTasks(tasks: DesktopTaskSummary[]): DesktopTaskSummary[] {
   return [...tasks].sort((left, right) => {
     const statusDelta = (statusRanks[left.status] || 999) - (statusRanks[right.status] || 999);
@@ -303,6 +376,122 @@ function workLease(task: DesktopTaskSummary) {
 
 function reviewLeases(task: DesktopTaskSummary) {
   return task.activeLeases.filter((lease) => lease.kind === "review");
+}
+
+function shouldShowReviewPanel(task: DesktopTaskSummary): boolean {
+  return ["in_review", "blocked"].includes(task.status) || reviewLeases(task).length > 0;
+}
+
+function canClaimReview(task: DesktopTaskSummary): boolean {
+  return shouldShowReviewPanel(task) && reviewLeases(task).length === 0;
+}
+
+function reviewPanelState(task: DesktopTaskSummary): {
+  state: "assigned" | "missing" | "conflict" | "idle";
+  label: string;
+  badge: string;
+  detail: string;
+} {
+  const work = workLease(task);
+  const reviews = reviewLeases(task);
+  const conflicts = reviews.filter((review) => review.agentKey && review.agentKey === work?.agentKey);
+  if (!shouldShowReviewPanel(task)) {
+    return {
+      state: "idle",
+      label: "Review not active",
+      badge: "Idle",
+      detail: "Move the task to review before assigning board review authority.",
+    };
+  }
+  if (conflicts.length) {
+    return {
+      state: "conflict",
+      label: "Reviewer conflicts with worker",
+      badge: "Conflict",
+      detail: "The active worker also holds review authority. Assign a different reachable worker before merge handoff.",
+    };
+  }
+  if (reviews.length) {
+    return {
+      state: "assigned",
+      label: reviews.map((lease) => lease.holderLabel || lease.agentKey || "Reviewer").join(", "),
+      badge: "Assigned",
+      detail: "A separate review lane is recorded for this task. Release it here if the assignment is stale or incorrect.",
+    };
+  }
+  return {
+    state: "missing",
+    label: "No reviewer assigned",
+    badge: "Needed",
+    detail: "Assign a reachable worker session for board review, or try claiming review authority from a registered desktop worker context.",
+  };
+}
+
+function reviewAssignmentCandidates(task: DesktopTaskSummary): DesktopAgentPresence[] {
+  const work = workLease(task);
+  const reviews = reviewLeases(task);
+  const seen = new Set<string>();
+  return props.presence
+    .filter((entry) => {
+      if (entry.sessionKind !== "worker") return false;
+      if (!entry.agentKey || !entry.agentSessionId) return false;
+      if (entry.freshness !== "active" || entry.activityState === "offline") return false;
+      if (work?.agentKey && entry.agentKey === work.agentKey) return false;
+      if (reviews.some((lease) => lease.agentKey && lease.agentKey === entry.agentKey)) return false;
+      const key = reviewCandidateKey(entry);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+function reviewCandidateKey(candidate: DesktopAgentPresence): string {
+  return [
+    candidate.agentKey || "agent",
+    candidate.agentInstanceId || "instance",
+    candidate.agentSessionId || candidate.actorLabel,
+  ].join(":");
+}
+
+function reviewCandidateValue(candidate: DesktopAgentPresence): string {
+  return JSON.stringify({
+    agentKey: candidate.agentKey,
+    agentInstanceId: candidate.agentInstanceId,
+    agentSessionId: candidate.agentSessionId,
+  });
+}
+
+function parseReviewCandidateValue(value: string): {
+  agentKey: string;
+  agentInstanceId: string | null;
+  agentSessionId: string;
+} | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as {
+      agentKey?: unknown;
+      agentInstanceId?: unknown;
+      agentSessionId?: unknown;
+    };
+    const agentKey = typeof parsed.agentKey === "string" ? parsed.agentKey.trim() : "";
+    const agentSessionId = typeof parsed.agentSessionId === "string" ? parsed.agentSessionId.trim() : "";
+    if (!agentKey || !agentSessionId) return null;
+    return {
+      agentKey,
+      agentInstanceId: typeof parsed.agentInstanceId === "string" && parsed.agentInstanceId.trim()
+        ? parsed.agentInstanceId.trim()
+        : null,
+      agentSessionId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function reviewCandidateLabel(candidate: DesktopAgentPresence): string {
+  const sessionSuffix = candidate.agentSessionId ? candidate.agentSessionId.slice(-6) : "session";
+  return `${candidate.displayName} (${sessionSuffix})`;
 }
 
 function relativeTime(value: string): string {
