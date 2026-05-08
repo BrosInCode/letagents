@@ -236,6 +236,9 @@
             <strong>{{ reasoningTitle(session) }}</strong>
             <p>{{ reasoningSummary(session) }}</p>
             <span>{{ reasoningStatus(session) }} · {{ formatRelative(session.updatedAt || session.createdAt) }}</span>
+            <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
+              Open reasoning
+            </button>
           </article>
           <p v-if="!selectedLiveParticipant.activeReasoning.length" class="desktop-activity-muted">No active reasoning stream exposed right now.</p>
         </section>
@@ -391,6 +394,10 @@ const props = defineProps<{
   tasks: DesktopTaskSummary[];
   messages: DesktopRoomMessage[];
   workers: WorkerSnapshot[];
+}>();
+
+const emit = defineEmits<{
+  "open-reasoning": [sessionId: string];
 }>();
 
 const activeView = ref<"live" | "history">("live");

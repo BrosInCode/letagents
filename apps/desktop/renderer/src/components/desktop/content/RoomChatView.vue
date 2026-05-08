@@ -238,6 +238,9 @@
               <strong>{{ reasoningTitle(session) }}</strong>
               <p>{{ reasoningSummary(session) }}</p>
               <span>{{ formatRelative(session.updatedAt || session.createdAt) }}</span>
+              <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
+                Open reasoning
+              </button>
             </article>
             <p v-if="!activeAgentReasoning.length" class="desktop-agent-modal-empty">No visible thinking stream is active for this agent.</p>
           </section>
@@ -281,6 +284,7 @@ const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
   "load-older": [];
   "discard-attachment": [uploadId: string];
+  "open-reasoning": [sessionId: string];
   "scroll-position": [scrollTop: number | null];
 }>();
 

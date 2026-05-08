@@ -255,6 +255,23 @@ export interface DesktopReasoningSession {
   updatedAt: string | null;
 }
 
+export interface DesktopReasoningUpdate {
+  id: string;
+  roomId: string | null;
+  sessionId: string | null;
+  actorLabel: string | null;
+  status: string | null;
+  summary: string | null;
+  milestone: string | null;
+  payload: DesktopReasoningSnapshot | null;
+  createdAt: string | null;
+}
+
+export interface DesktopReasoningSessionDetail {
+  session: DesktopReasoningSession;
+  updates: DesktopReasoningUpdate[];
+}
+
 export interface DesktopActivityEntry {
   id: string;
   room: {
@@ -454,6 +471,7 @@ export interface DesktopApi {
   room: {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
+    getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
     pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
     stageDroppedAttachmentContents?: (
       roomIdentifier: string,

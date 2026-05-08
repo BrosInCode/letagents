@@ -131,6 +131,7 @@
         @send-message="sendRoomMessage"
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
+        @open-reasoning="openReasoningInspector"
         @scroll-position="chatScrollTop = $event"
       />
 
@@ -151,6 +152,7 @@
         :tasks="tasks"
         :messages="visibleMessages"
         :workers="workers"
+        @open-reasoning="openReasoningInspector"
       />
 
       <RoomDetailsView
@@ -164,6 +166,13 @@
     <DesktopRoomRulesModal
       :open="rulesOpen"
       @close="rulesOpen = false"
+    />
+
+    <DesktopReasoningInspector
+      :open="Boolean(selectedReasoningSession)"
+      :room-identifier="room.identifier"
+      :session="selectedReasoningSession"
+      @close="selectedReasoningSessionId = null"
     />
   </section>
 </template>
@@ -183,6 +192,7 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
+import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
@@ -230,6 +240,7 @@ const liquidGlassEnabled = ref(readLiquidGlassEnabled());
 const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
 const messageHistoryPageSize = 150;
 const chatScrollTop = ref<number | null>(null);
+const selectedReasoningSessionId = ref<string | null>(null);
 let audioContext: AudioContext | null = null;
 let observedLatestMessageId: string | null = null;
 const ownMessageIds = new Set<string>();
@@ -266,6 +277,9 @@ const searchResults = computed(() => {
   });
 });
 const activeSearchMessageId = computed(() => searchResults.value[activeSearchIndex.value]?.id || null);
+const selectedReasoningSession = computed(() =>
+  props.reasoningSessions.find((session) => session.id === selectedReasoningSessionId.value) || null
+);
 const searchSummary = computed(() => {
   if (!normalizedSearchQuery.value) return "Type to search this room.";
   if (!searchResults.value.length) return "No messages found.";
@@ -307,6 +321,7 @@ watch(
   () => props.room.identifier,
   () => {
     chatScrollTop.value = null;
+    selectedReasoningSessionId.value = null;
     void refreshGitHubIntegration();
   },
   { immediate: true },
@@ -315,6 +330,10 @@ watch(
 function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
   emit("refresh-room");
+}
+
+function openReasoningInspector(sessionId: string): void {
+  selectedReasoningSessionId.value = sessionId;
 }
 
 async function sendRoomMessage(text: string, replyTo: string | null = null, attachments: Array<{ upload_id: string }> = []): Promise<void> {
