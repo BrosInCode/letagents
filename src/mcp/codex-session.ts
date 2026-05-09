@@ -23,6 +23,8 @@ const STARTUP_POLL_INTERVAL_MS = 500;
 const SESSION_MONITOR_INTERVAL_MS = 30_000;
 const CODEX_RUNTIME_STREAM_SOURCE = "codex_app_server";
 const CODEX_RUNTIME_STREAM_THROTTLE_MS = 750;
+const CODEX_RUNTIME_STREAM_REPEAT_MS = 30_000;
+const CODEX_RUNTIME_STREAM_SNAPSHOT_INTERVAL_MS = 2_000;
 
 function getWebSocketCtor(): typeof WebSocket {
   const ctor = globalThis.WebSocket;
@@ -104,7 +106,15 @@ export interface StartLocalCodexSessionResult {
 const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeBridgeClients = new Map<string, RpcClient>();
+const codexRuntimeBridgeSnapshotTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeBridgeLastPost = new Map<string, { signature: string; postedAt: number }>();
+
+type CodexRuntimeReasoningSummary = {
+  summary: string;
+  status: AgentPresenceStatus;
+  checking: string;
+  next_action: string;
+};
 
 function terminateSpawnedProcess(pid: number): void {
   try {
@@ -637,22 +647,66 @@ export function summarizeCodexRuntimeNotificationForTest(notification: RpcNotifi
   };
 }
 
-async function postCodexRuntimeReasoningUpdate(
+export function summarizeCodexRuntimeSnapshotForTest(input: {
+  turnStatus?: unknown;
+  threadStatus?: unknown;
+  recentItems?: Array<Record<string, unknown>>;
+}): CodexRuntimeReasoningSummary | null {
+  const recentItems = input.recentItems ?? [];
+  const latestItem = [...recentItems].reverse().find((item) => {
+    const type = String(item.type ?? "");
+    return type === "agentMessage" || type === "userMessage";
+  });
+  const latestText = typeof latestItem?.text === "string" ? latestItem.text.trim() : "";
+  const latestType = String(latestItem?.type ?? "");
+  const turnStatus = typeof input.turnStatus === "string" ? input.turnStatus : "";
+  const threadStatus = typeof input.threadStatus === "string" ? input.threadStatus : "";
+  const status = statusForCodexRuntimeMethod(`${threadStatus} ${turnStatus} ${latestType}`);
+
+  if (latestText) {
+    return {
+      summary: latestType === "agentMessage" ? latestText : "Codex worker received room input.",
+      status,
+      checking: latestType === "agentMessage"
+        ? "Latest Codex worker message from app-server snapshot."
+        : latestText,
+      next_action: status === "idle" ? "Waiting for the next room event." : "Continuing the Codex worker turn.",
+    };
+  }
+
+  if (turnStatus || threadStatus) {
+    const statusText = [threadStatus && `thread ${threadStatus}`, turnStatus && `turn ${turnStatus}`]
+      .filter(Boolean)
+      .join(", ");
+    return {
+      summary: `Codex worker ${statusText}.`,
+      status,
+      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: snapshot`,
+      next_action: status === "idle" ? "Waiting for the next room event." : "Monitoring Codex worker progress.",
+    };
+  }
+
+  return null;
+}
+
+async function postCodexRuntimeReasoningSummary(
   session: CodexLiveSessionState,
-  notification: RpcNotification
+  summary: CodexRuntimeReasoningSummary
 ): Promise<void> {
   const workerSession = codexWorkerSessionForLiveSession(session);
   if (!workerSession) {
     return;
   }
 
-  const summary = summarizeCodexRuntimeNotificationForTest(notification);
   const signature = `${session.session_id}:${summary.summary}:${summary.status}`;
   const lastPost = codexRuntimeBridgeLastPost.get(session.session_id);
   if (
     lastPost?.signature === signature &&
-    Date.now() - lastPost.postedAt < CODEX_RUNTIME_STREAM_THROTTLE_MS
+    Date.now() - lastPost.postedAt < CODEX_RUNTIME_STREAM_REPEAT_MS
   ) {
+    return;
+  }
+  if (lastPost && Date.now() - lastPost.postedAt < CODEX_RUNTIME_STREAM_THROTTLE_MS) {
     return;
   }
   codexRuntimeBridgeLastPost.set(session.session_id, { signature, postedAt: Date.now() });
@@ -705,9 +759,37 @@ async function postCodexRuntimeReasoningUpdate(
   }
 }
 
+async function postCodexRuntimeReasoningUpdate(
+  session: CodexLiveSessionState,
+  notification: RpcNotification
+): Promise<void> {
+  await postCodexRuntimeReasoningSummary(
+    session,
+    summarizeCodexRuntimeNotificationForTest(notification)
+  );
+}
+
 function startCodexRuntimeStreamBridge(session: CodexLiveSessionState, client: RpcClient): void {
   stopCodexRuntimeStreamBridge(session.session_id);
   codexRuntimeBridgeClients.set(session.session_id, client);
+  void inspectLocalCodexSession(session.session_id).catch(() => {
+    // The periodic snapshot bridge will retry while the session remains reachable.
+  });
+  const snapshotTimer = setInterval(() => {
+    void inspectLocalCodexSession(session.session_id).then((status) => {
+      if (
+        !status ||
+        !status.server_reachable ||
+        isTerminalCodexSessionStatus(status.session.status)
+      ) {
+        stopCodexRuntimeStreamBridge(session.session_id);
+      }
+    }).catch(() => {
+      stopCodexRuntimeStreamBridge(session.session_id);
+    });
+  }, CODEX_RUNTIME_STREAM_SNAPSHOT_INTERVAL_MS);
+  snapshotTimer.unref?.();
+  codexRuntimeBridgeSnapshotTimers.set(session.session_id, snapshotTimer);
 }
 
 async function maybeStartCodexRuntimeStreamBridge(session: CodexLiveSessionState): Promise<void> {
@@ -734,6 +816,11 @@ function stopCodexRuntimeStreamBridge(sessionId: string): void {
   if (client) {
     client.close();
     codexRuntimeBridgeClients.delete(sessionId);
+  }
+  const snapshotTimer = codexRuntimeBridgeSnapshotTimers.get(sessionId);
+  if (snapshotTimer) {
+    clearInterval(snapshotTimer);
+    codexRuntimeBridgeSnapshotTimers.delete(sessionId);
   }
   codexRuntimeBridgeLastPost.delete(sessionId);
 }
@@ -964,6 +1051,7 @@ export async function inspectLocalCodexSession(
     const turn = turns.find((candidate) => candidate.id === session.turn_id) ?? turns[turns.length - 1];
     const threadStatus = extractThreadStatus(read?.thread);
     const turnStatus = extractTurnStatus(turn);
+    const recentItems = summarizeItems(turn?.items ?? turn?.output);
     const updated =
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
@@ -976,12 +1064,23 @@ export async function inspectLocalCodexSession(
       clearSessionMonitor(updated.session_id);
     }
 
+    const snapshotSummary = summarizeCodexRuntimeSnapshotForTest({
+      threadStatus,
+      turnStatus,
+      recentItems,
+    });
+    if (snapshotSummary) {
+      void postCodexRuntimeReasoningSummary(updated, snapshotSummary).catch(() => {
+        // Snapshot-derived reasoning should never break session inspection.
+      });
+    }
+
     return {
       session: updated,
       server_reachable: true,
       thread_status: read?.thread?.status ?? null,
       turn_status: turn?.status ?? null,
-      recent_items: summarizeItems(turn?.items ?? turn?.output),
+      recent_items: recentItems,
     };
   } catch (error) {
     const updated =
