@@ -469,6 +469,13 @@
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.48);
 }
 
+.desktop-reasoning-inspector[data-live="true"] {
+  border-color: rgba(56, 189, 248, 0.28);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.48),
+    0 0 0 1px rgba(56, 189, 248, 0.08);
+}
+
 .desktop-reasoning-inspector:focus {
   outline: none;
 }
@@ -547,6 +554,8 @@
 .desktop-reasoning-freshness[data-state="live"] {
   background: rgba(34, 197, 94, 0.14);
   color: #86efac;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.25);
+  animation: desktop-reasoning-live-pulse 1.8s ease-in-out infinite;
 }
 
 .desktop-reasoning-freshness[data-state="recent"] {
@@ -583,6 +592,13 @@
   display: grid;
   gap: 7px;
   padding: 14px;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.desktop-reasoning-summary[data-updating="true"] {
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(14, 165, 233, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.08);
 }
 
 .desktop-reasoning-summary span,
@@ -592,6 +608,18 @@
   font-size: 0.72rem;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.desktop-reasoning-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 8px;
+  border-radius: 999px;
+  background: #86efac;
+  box-shadow: 0 0 0 0 rgba(134, 239, 172, 0.34);
+  animation: desktop-reasoning-dot-pulse 1.4s ease-in-out infinite;
+  vertical-align: 1px;
 }
 
 .desktop-reasoning-summary p,
@@ -670,6 +698,19 @@
   border-left: 2px solid rgba(125, 211, 252, 0.4);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.desktop-reasoning-timeline-entry[data-current="true"] {
+  border-left-color: rgba(134, 239, 172, 0.66);
+  background: rgba(34, 197, 94, 0.055);
+}
+
+.desktop-reasoning-timeline-entry[data-updating="true"] {
+  transform: translateY(-1px);
+  border-color: rgba(125, 211, 252, 0.18);
+  border-left-color: rgba(125, 211, 252, 0.82);
+  background: rgba(14, 165, 233, 0.09);
 }
 
 .desktop-reasoning-timeline-entry div {
@@ -693,4 +734,26 @@
 
 .desktop-reasoning-empty {
   margin: 0;
+}
+
+@keyframes desktop-reasoning-live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);
+  }
+}
+
+@keyframes desktop-reasoning-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: scale(0.86);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
 }

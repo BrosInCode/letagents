@@ -8,6 +8,8 @@
       <section
         ref="dialogElement"
         class="desktop-reasoning-inspector"
+        :data-live="streamState === 'live'"
+        :data-updating="recentlyUpdated"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -29,8 +31,11 @@
         </header>
 
         <div class="desktop-reasoning-inspector-body">
-          <section class="desktop-reasoning-summary">
-            <span>Current summary</span>
+          <section class="desktop-reasoning-summary" :data-updating="recentlyUpdated">
+            <span>
+              Current summary
+              <small v-if="streamState === 'live'" class="desktop-reasoning-live-dot" aria-label="Streaming" />
+            </span>
             <p>{{ currentSummary }}</p>
           </section>
 
@@ -57,7 +62,13 @@
             </header>
 
             <ol v-if="timelineEntries.length" class="desktop-reasoning-timeline">
-              <li v-for="entry in timelineEntries" :key="entry.id" class="desktop-reasoning-timeline-entry">
+              <li
+                v-for="entry in timelineEntries"
+                :key="entry.id"
+                class="desktop-reasoning-timeline-entry"
+                :data-current="entry.current"
+                :data-updating="entry.current && recentlyUpdated"
+              >
                 <div>
                   <strong>{{ entry.label }}</strong>
                   <time>{{ formatTimestamp(entry.timestamp) }}</time>
@@ -96,6 +107,7 @@ interface ReasoningTimelineEntry {
   label: string;
   text: string;
   timestamp: string | null;
+  current?: boolean;
 }
 
 const props = defineProps<{
@@ -113,7 +125,9 @@ const detailSession = ref<DesktopReasoningSession | null>(null);
 const detailUpdates = ref<DesktopReasoningUpdate[]>([]);
 const isLoadingDetail = ref(false);
 const detailError = ref<string | null>(null);
+const recentlyUpdated = ref(false);
 let fetchSerial = 0;
+let livePulseTimer: ReturnType<typeof setTimeout> | null = null;
 
 const activeSession = computed(() => detailSession.value || props.session);
 const titleId = computed(() => `desktop-reasoning-${sanitizeId(activeSession.value?.id || "stream")}`);
@@ -193,7 +207,9 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
       timestamp: update.createdAt,
     }))
     .filter((entry) => entry.text.trim());
-  if (updateEntries.length) return compactTimelineEntries(sortTimeline(updateEntries));
+  if (updateEntries.length) {
+    return compactTimelineEntries(sortTimeline([...updateEntries, ...currentLiveTimelineEntry.value]));
+  }
 
   const session = activeSession.value;
   const snapshot = currentSnapshot.value;
@@ -208,6 +224,20 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
     { id: `${session.id}-next`, label: "Next action", text: snapshot.next_action || "", timestamp },
     { id: `${session.id}-milestone`, label: "Milestone", text: snapshot.milestone || "", timestamp },
   ].filter((entry) => entry.text.trim())));
+});
+
+const currentLiveTimelineEntry = computed<ReasoningTimelineEntry[]>(() => {
+  const session = activeSession.value;
+  const snapshot = currentSnapshot.value;
+  const text = String(snapshot?.summary || session?.summary || "").trim();
+  if (!session || !text) return [];
+  return [{
+    id: `${session.id}-current-live`,
+    label: labelFromStatus(snapshot?.status || session.status || "working"),
+    text,
+    timestamp: session.updatedAt || session.createdAt,
+    current: true,
+  }];
 });
 
 const streamState = computed(() => {
@@ -257,6 +287,11 @@ watch(() => props.open, (next) => {
     detailUpdates.value = [];
     detailError.value = null;
     isLoadingDetail.value = false;
+    recentlyUpdated.value = false;
+    if (livePulseTimer) {
+      clearTimeout(livePulseTimer);
+      livePulseTimer = null;
+    }
     return;
   }
   void nextTick(() => dialogElement.value?.focus());
@@ -269,6 +304,26 @@ watch(
     if (detailSession.value?.id === nextSession.id) {
       detailSession.value = { ...detailSession.value, ...nextSession };
     }
+  }
+);
+
+watch(
+  () => [
+    props.session?.id,
+    props.session?.updatedAt,
+    props.session?.summary,
+    props.session?.latestPayload?.summary,
+    props.session?.latestPayload?.checking,
+    props.session?.latestPayload?.next_action,
+  ].join("|"),
+  () => {
+    if (!props.open || !props.session) return;
+    recentlyUpdated.value = true;
+    if (livePulseTimer) clearTimeout(livePulseTimer);
+    livePulseTimer = setTimeout(() => {
+      recentlyUpdated.value = false;
+      livePulseTimer = null;
+    }, 1000);
   }
 );
 
