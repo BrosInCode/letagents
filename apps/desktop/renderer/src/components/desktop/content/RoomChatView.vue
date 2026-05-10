@@ -752,7 +752,9 @@ function openAgentModal(target: AgentModalTarget): void {
     emit("open-reasoning", session.id);
     return;
   }
-  emit("open-agent-reasoning-fallback", target);
+  if (hasReasoningStreamSurface(target)) {
+    emit("open-agent-reasoning-fallback", target);
+  }
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {
@@ -786,6 +788,35 @@ function reasoningSessionKeys(session: DesktopReasoningSession): string[] {
     displayNameFromActorLabel(session.actorLabel),
     session.agentKey,
   ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function hasReasoningStreamSurface(target: AgentModalTarget): boolean {
+  const keys = agentIdentityKeys(target);
+  const markerText = [
+    target.ideLabel,
+    target.sender,
+    target.actorLabel,
+  ].join(" ").toLowerCase();
+  if (markerText.includes("codex")) return true;
+
+  return props.presence.some((presence) => {
+    const presenceKeys = [
+      presence.actorLabel,
+      presence.displayName,
+      presence.agentKey,
+    ].map(normalizeAgentIdentity).filter(Boolean);
+    if (!presenceKeys.some((key) => keys.includes(key))) return false;
+
+    const capability = String(presence.livenessObservation?.livenessCapability || "").toLowerCase();
+    const bridgeId = String(presence.livenessObservation?.toolBridgeId || "").toLowerCase();
+    const runtime = String(presence.runtime || "").toLowerCase();
+    const ideLabel = String(presence.ideLabel || "").toLowerCase();
+    return capability.includes("stream") ||
+      capability.includes("codex") ||
+      bridgeId.includes(":codex:") ||
+      runtime === "codex" ||
+      ideLabel === "codex";
+  });
 }
 
 function normalizeAgentIdentity(value: string | null | undefined): string {
