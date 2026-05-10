@@ -25,6 +25,8 @@ const CODEX_RUNTIME_STREAM_SOURCE = "codex_app_server";
 const CODEX_RUNTIME_STREAM_THROTTLE_MS = 750;
 const CODEX_RUNTIME_STREAM_REPEAT_MS = 30_000;
 const CODEX_RUNTIME_STREAM_SNAPSHOT_INTERVAL_MS = 2_000;
+const CODEX_RUNTIME_STREAM_BIND_RETRY_MS = 1_000;
+const CODEX_RUNTIME_STREAM_BIND_RETRY_ATTEMPTS = 30;
 
 function getWebSocketCtor(): typeof WebSocket {
   const ctor = globalThis.WebSocket;
@@ -107,6 +109,7 @@ const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeBridgeClients = new Map<string, RpcClient>();
 const codexRuntimeBridgeSnapshotTimers = new Map<string, ReturnType<typeof setInterval>>();
+const codexRuntimeBridgeBindTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const codexRuntimeBridgeLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexReasoningStreams = new Map<string, Map<number, string>>();
 
@@ -154,6 +157,11 @@ function registerProcessCleanup(): void {
       terminateSpawnedProcess(pid);
     }
     spawnedServerPids.clear();
+
+    for (const timer of codexRuntimeBridgeBindTimers.values()) {
+      clearTimeout(timer);
+    }
+    codexRuntimeBridgeBindTimers.clear();
   };
 
   process.on("exit", cleanup);
@@ -542,6 +550,17 @@ function codexWorkerSessionsForRoom(roomId: string): StoredAgentSessionState[] {
 function codexWorkerSessionForLiveSession(session: CodexLiveSessionState): StoredAgentSessionState | null {
   const state = readLocalState();
   const candidates = codexWorkerSessionsForRoom(session.room_id);
+
+  if (session.agent_session_id) {
+    const bound = state.agent_sessions?.[session.agent_session_id] ?? null;
+    if (
+      bound &&
+      candidates.some((candidate) => candidate.session_id === bound.session_id)
+    ) {
+      return bound;
+    }
+  }
+
   const startedAt = Date.parse(session.started_at);
   const afterLiveSessionStart = candidates
     .filter((candidate) => {
@@ -938,6 +957,75 @@ async function maybeStartCodexRuntimeStreamBridge(session: CodexLiveSessionState
   startCodexRuntimeStreamBridge(session, client);
 }
 
+export async function bindCodexRuntimeStreamBridgeForAgentSession(
+  workerSession: StoredAgentSessionState
+): Promise<boolean> {
+  if (!isCodexAgentSessionMarker(workerSession) || workerSession.session_kind !== "worker") {
+    return false;
+  }
+
+  const liveSession = getCurrentCodexLiveSession(workerSession.room_id);
+  if (!liveSession || isTerminalCodexSessionStatus(liveSession.status)) {
+    return false;
+  }
+
+  const boundSession =
+    updateCodexLiveSession(liveSession.session_id, (current) => ({
+      ...current,
+      agent_session_id: workerSession.session_id,
+      updated_at: new Date().toISOString(),
+    })) ?? liveSession;
+
+  await maybeStartCodexRuntimeStreamBridge(boundSession);
+  return true;
+}
+
+export function scheduleCodexRuntimeStreamBridgeBind(
+  workerSession: StoredAgentSessionState,
+  attempts = CODEX_RUNTIME_STREAM_BIND_RETRY_ATTEMPTS
+): void {
+  if (!isCodexAgentSessionMarker(workerSession) || workerSession.session_kind !== "worker") {
+    return;
+  }
+
+  const existing = codexRuntimeBridgeBindTimers.get(workerSession.session_id);
+  if (existing) {
+    clearTimeout(existing);
+  }
+
+  const attemptBind = (remainingAttempts: number) => {
+    void bindCodexRuntimeStreamBridgeForAgentSession(workerSession)
+      .then((bound) => {
+        if (bound || remainingAttempts <= 1) {
+          codexRuntimeBridgeBindTimers.delete(workerSession.session_id);
+          return;
+        }
+
+        const timer = setTimeout(
+          () => attemptBind(remainingAttempts - 1),
+          CODEX_RUNTIME_STREAM_BIND_RETRY_MS
+        );
+        timer.unref?.();
+        codexRuntimeBridgeBindTimers.set(workerSession.session_id, timer);
+      })
+      .catch(() => {
+        if (remainingAttempts <= 1) {
+          codexRuntimeBridgeBindTimers.delete(workerSession.session_id);
+          return;
+        }
+
+        const timer = setTimeout(
+          () => attemptBind(remainingAttempts - 1),
+          CODEX_RUNTIME_STREAM_BIND_RETRY_MS
+        );
+        timer.unref?.();
+        codexRuntimeBridgeBindTimers.set(workerSession.session_id, timer);
+      });
+  };
+
+  attemptBind(attempts);
+}
+
 function stopCodexRuntimeStreamBridge(sessionId: string): void {
   const client = codexRuntimeBridgeClients.get(sessionId);
   if (client) {
@@ -1118,6 +1206,7 @@ export function toPublicCodexLiveSession(
     server_url: session.server_url,
     server_pid: session.server_pid ?? null,
     launched_server: session.launched_server,
+    agent_session_id: session.agent_session_id ?? null,
     status: session.status,
     last_error: session.last_error ?? null,
     started_at: session.started_at,
