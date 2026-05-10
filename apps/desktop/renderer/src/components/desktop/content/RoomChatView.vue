@@ -752,9 +752,7 @@ function openAgentModal(target: AgentModalTarget): void {
     emit("open-reasoning", session.id);
     return;
   }
-  if (hasReasoningStreamSurface(target)) {
-    emit("open-agent-reasoning-fallback", target);
-  }
+  emit("open-agent-reasoning-fallback", target);
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {
@@ -766,33 +764,11 @@ function latestReasoningForAgent(target: AgentModalTarget): DesktopReasoningSess
   if (!keys.length) return null;
 
   return props.reasoningSessions
-    .filter((session) => keys.includes(normalizeAgentIdentity(session.actorLabel || "")))
+    .filter((session) => reasoningSessionKeys(session).some((key) => keys.includes(key)))
     .sort((left, right) =>
       reasoningTime(right) - reasoningTime(left)
       || String(right.id).localeCompare(String(left.id))
     )[0] || null;
-}
-
-function hasReasoningStreamSurface(target: AgentModalTarget): boolean {
-  const keys = agentIdentityKeys(target);
-  const markerText = [
-    target.ideLabel,
-    target.sender,
-    target.actorLabel,
-  ].join(" ").toLowerCase();
-  if (markerText.includes("codex")) return true;
-
-  return props.presence.some((presence) => {
-    const presenceKeys = [
-      presence.actorLabel,
-      presence.displayName,
-      presence.agentKey,
-    ].map(normalizeAgentIdentity).filter(Boolean);
-    const capability = String(presence.livenessObservation?.livenessCapability || "").toLowerCase();
-    const bridgeId = String(presence.livenessObservation?.toolBridgeId || "").toLowerCase();
-    return presenceKeys.some((key) => keys.includes(key)) &&
-      (capability.includes("stream") || capability.includes("codex") || bridgeId.includes(":codex:"));
-  });
 }
 
 function agentIdentityKeys(target: AgentModalTarget): string[] {
@@ -800,11 +776,24 @@ function agentIdentityKeys(target: AgentModalTarget): string[] {
     target.actorLabel,
     target.sender,
     target.displayName,
+    displayNameFromActorLabel(target.actorLabel),
+  ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function reasoningSessionKeys(session: DesktopReasoningSession): string[] {
+  return [
+    session.actorLabel,
+    displayNameFromActorLabel(session.actorLabel),
+    session.agentKey,
   ].map(normalizeAgentIdentity).filter(Boolean);
 }
 
 function normalizeAgentIdentity(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
+}
+
+function displayNameFromActorLabel(value: string | null | undefined): string {
+  return String(value || "").split("|")[0]?.trim() || "";
 }
 
 function reasoningTime(session: DesktopReasoningSession): number {
