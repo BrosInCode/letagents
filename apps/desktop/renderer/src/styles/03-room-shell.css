@@ -755,9 +755,6 @@
 .desktop-room-shell[data-liquid-glass="true"] .room-new-messages-pill,
 .desktop-room-shell[data-liquid-glass="true"] .room-thread-marker,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-mention-panel,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-agent-modal,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-agent-modal-card,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-agent-modal-stats article,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-mention-option[data-active="true"],
 .desktop-room-shell[data-liquid-glass="true"] .desktop-mention-option:hover {
   border-color: rgba(255, 255, 255, 0.14);

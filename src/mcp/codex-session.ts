@@ -108,6 +108,7 @@ const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeBridgeClients = new Map<string, RpcClient>();
 const codexRuntimeBridgeSnapshotTimers = new Map<string, ReturnType<typeof setInterval>>();
 const codexRuntimeBridgeLastPost = new Map<string, { signature: string; postedAt: number }>();
+const codexReasoningStreams = new Map<string, Map<number, string>>();
 
 type CodexRuntimeReasoningSummary = {
   summary: string;
@@ -600,12 +601,138 @@ function compactRuntimeParam(value: unknown): string | null {
   return type || name;
 }
 
+function notificationRecord(notification: RpcNotification): Record<string, unknown> {
+  return notification.params && typeof notification.params === "object"
+    ? notification.params as Record<string, unknown>
+    : {};
+}
+
+function reasoningStreamKey(record: Record<string, unknown>): string | null {
+  const threadId = typeof record.threadId === "string" ? record.threadId : "";
+  const turnId = typeof record.turnId === "string" ? record.turnId : "";
+  const itemId = typeof record.itemId === "string"
+    ? record.itemId
+    : typeof (record.item as Record<string, unknown> | undefined)?.id === "string"
+      ? String((record.item as Record<string, unknown>).id)
+      : "";
+  return threadId && turnId && itemId ? `${threadId}:${turnId}:${itemId}` : null;
+}
+
+function ensureReasoningStream(key: string): Map<number, string> {
+  const existing = codexReasoningStreams.get(key);
+  if (existing) return existing;
+  const next = new Map<number, string>();
+  codexReasoningStreams.set(key, next);
+  return next;
+}
+
+function coerceReasoningSummaryParts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((part) => {
+    if (typeof part === "string") return part;
+    if (part && typeof part === "object" && "text" in part) {
+      return String((part as { text?: unknown }).text ?? "");
+    }
+    return "";
+  }).map((part) => part.trim()).filter(Boolean);
+}
+
+function reasoningSummaryFromStream(stream: Map<number, string>): string {
+  return [...stream.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, value]) => value.trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+export function summarizeCodexReasoningNotificationForTest(
+  notification: RpcNotification
+): CodexRuntimeReasoningSummary | null {
+  const method = notification.method.trim();
+  if (!method.startsWith("item/reasoning/") && method !== "item/started" && method !== "item/completed") {
+    return null;
+  }
+
+  const record = notificationRecord(notification);
+  const item = record.item && typeof record.item === "object"
+    ? record.item as Record<string, unknown>
+    : null;
+  const itemType = typeof item?.type === "string" ? item.type : "";
+  if ((method === "item/started" || method === "item/completed") && itemType !== "reasoning") {
+    return null;
+  }
+
+  const key = reasoningStreamKey(record);
+  if (!key) {
+    return null;
+  }
+
+  if (method === "item/reasoning/summaryTextDelta") {
+    const summaryIndex = typeof record.summaryIndex === "number" ? record.summaryIndex : 0;
+    const delta = typeof record.delta === "string" ? record.delta : "";
+    const stream = ensureReasoningStream(key);
+    stream.set(summaryIndex, `${stream.get(summaryIndex) ?? ""}${delta}`);
+    const summary = reasoningSummaryFromStream(stream);
+    return {
+      summary: summary || "Codex reasoning summary is streaming.",
+      status: "working",
+      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: readable reasoning summary`,
+      next_action: "Continue streaming the Codex reasoning summary.",
+    };
+  }
+
+  if (method === "item/reasoning/summaryPartAdded") {
+    const summaryIndex = typeof record.summaryIndex === "number" ? record.summaryIndex : 0;
+    const stream = ensureReasoningStream(key);
+    stream.set(summaryIndex, stream.get(summaryIndex) ?? "");
+    return {
+      summary: reasoningSummaryFromStream(stream) || "Codex started a new reasoning summary section.",
+      status: "working",
+      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: reasoning summary section ${summaryIndex + 1}`,
+      next_action: "Continue streaming the Codex reasoning summary.",
+    };
+  }
+
+  if (method === "item/reasoning/textDelta") {
+    return {
+      summary: "Codex raw reasoning text is streaming.",
+      status: "working",
+      checking: "Raw reasoning text is available from Codex app-server but hidden by LetAgents by default.",
+      next_action: "Wait for readable reasoning summary deltas or other runtime progress.",
+    };
+  }
+
+  const stream = ensureReasoningStream(key);
+  const summaryParts = coerceReasoningSummaryParts(item?.summary);
+  if (summaryParts.length) {
+    summaryParts.forEach((part, index) => stream.set(index, part));
+  }
+  const summary = reasoningSummaryFromStream(stream);
+  const completed = method === "item/completed";
+  if (completed) {
+    codexReasoningStreams.delete(key);
+  }
+
+  return {
+    summary: summary || (completed ? "Codex reasoning summary completed." : "Codex reasoning summary started."),
+    status: completed ? "idle" : "working",
+    checking: `${CODEX_RUNTIME_STREAM_SOURCE}: readable reasoning item`,
+    next_action: completed ? "Waiting for the next Codex runtime event." : "Streaming readable Codex reasoning.",
+  };
+}
+
 export function summarizeCodexRuntimeNotificationForTest(notification: RpcNotification): {
   summary: string;
   status: AgentPresenceStatus;
   checking: string;
   next_action: string;
 } {
+  const reasoningSummary = summarizeCodexReasoningNotificationForTest(notification);
+  if (reasoningSummary) {
+    return reasoningSummary;
+  }
+
   const method = notification.method.trim();
   const detail = compactRuntimeParam(notification.params);
   const readableMethod = method.replaceAll("/", " ");

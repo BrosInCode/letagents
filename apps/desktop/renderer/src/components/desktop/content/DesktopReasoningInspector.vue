@@ -21,7 +21,9 @@
             <p>{{ subtitle }}</p>
           </div>
           <div class="desktop-reasoning-inspector-actions">
-            <span class="desktop-reasoning-freshness" :data-state="freshnessState">{{ freshnessLabel }}</span>
+            <span class="desktop-reasoning-freshness" :data-state="streamState" :title="streamDescription">
+              {{ streamLabel }}
+            </span>
             <button type="button" @click="emit('close')">Close</button>
           </div>
         </header>
@@ -208,20 +210,46 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
   ].filter((entry) => entry.text.trim()));
 });
 
-const freshnessState = computed(() => {
-  const updatedAt = timestampValue(activeSession.value?.updatedAt || activeSession.value?.createdAt || null);
-  if (!updatedAt) return "unknown";
-  const age = Date.now() - updatedAt;
-  if (age <= 120_000) return "live";
-  if (age <= 600_000) return "recent";
-  return "stale";
+const streamState = computed(() => {
+  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").toLowerCase();
+  if (isCodexReasoningSummary.value) return "live";
+  if (isCodexSnapshot.value) return "snapshot";
+  if (status === "working" || status === "reviewing") return "live";
+  if (status === "blocked") return "blocked";
+  return "recent";
 });
-const freshnessLabel = computed(() => {
-  if (freshnessState.value === "live") return "Live";
-  if (freshnessState.value === "recent") return "Recent";
-  if (freshnessState.value === "stale") return "Stale";
-  return "Unknown";
+const isCodexReasoningSummary = computed(() => {
+  const snapshot = currentSnapshot.value;
+  const text = [
+    snapshot?.summary,
+    snapshot?.checking,
+    snapshot?.next_action,
+  ].join(" ").toLowerCase();
+  return text.includes("readable reasoning") || text.includes("reasoning summary");
 });
+const isCodexSnapshot = computed(() => {
+  if (isCodexReasoningSummary.value) return false;
+  const snapshot = currentSnapshot.value;
+  const text = [
+    snapshot?.summary,
+    snapshot?.checking,
+    snapshot?.next_action,
+  ].join(" ").toLowerCase();
+  return text.includes("codex_app_server") || text.includes("app-server snapshot") || text.includes("snapshot-derived");
+});
+const streamLabel = computed(() => {
+  if (isCodexReasoningSummary.value) return "Live thinking";
+  if (isCodexSnapshot.value) return "Snapshot";
+  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").trim();
+  return status ? labelFromStatus(status) : "Reasoning";
+});
+const streamDescription = computed(() =>
+  isCodexReasoningSummary.value
+    ? "Readable Codex reasoning summary stream"
+    : isCodexSnapshot.value
+      ? "Codex app-server snapshot"
+      : streamLabel.value
+);
 
 watch(() => props.open, (next) => {
   if (!next) {
@@ -251,8 +279,17 @@ watch(
     const serial = ++fetchSerial;
     isLoadingDetail.value = true;
     detailError.value = null;
-    detailSession.value = null;
-    detailUpdates.value = [];
+    const previousSessionId = detailSession.value?.id || props.session?.id || null;
+    if (!detailSession.value) {
+      detailSession.value = props.session;
+    }
+    if (previousSessionId !== sessionId) {
+      detailUpdates.value = [];
+    }
+    if (sessionId.startsWith("pending-agent-reasoning:")) {
+      isLoadingDetail.value = false;
+      return;
+    }
     try {
       const result = await window.letagentsDesktop.room.getReasoningSession(roomIdentifier, sessionId);
       if (serial !== fetchSerial) return;

@@ -133,6 +133,7 @@
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
         @open-reasoning="openReasoningInspector"
+        @open-agent-reasoning-fallback="openAgentReasoningFallback"
         @scroll-position="chatScrollTop = $event"
         @draft-change="chatDraftText = $event"
       />
@@ -176,10 +177,10 @@
     />
 
     <DesktopReasoningInspector
-      :open="Boolean(selectedReasoningSession)"
+      :open="Boolean(selectedReasoningSessionId && selectedReasoningSessionForInspector)"
       :room-identifier="room.identifier"
-      :session="selectedReasoningSession"
-      @close="selectedReasoningSessionId = null"
+      :session="selectedReasoningSessionForInspector"
+      @close="closeReasoningInspector"
     />
   </section>
 </template>
@@ -200,6 +201,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
+import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
@@ -249,6 +251,7 @@ const messageHistoryPageSize = 150;
 const chatScrollTop = ref<number | null>(null);
 const chatDraftText = ref("");
 const selectedReasoningSessionId = ref<string | null>(null);
+const selectedReasoningSessionCache = ref<DesktopReasoningSession | null>(null);
 let audioContext: AudioContext | null = null;
 let observedLatestMessageId: string | null = null;
 const ownMessageIds = new Set<string>();
@@ -288,6 +291,9 @@ const searchResults = computed(() => {
 const activeSearchMessageId = computed(() => searchResults.value[activeSearchIndex.value]?.id || null);
 const selectedReasoningSession = computed(() =>
   props.reasoningSessions.find((session) => session.id === selectedReasoningSessionId.value) || null
+);
+const selectedReasoningSessionForInspector = computed(() =>
+  selectedReasoningSession.value || selectedReasoningSessionCache.value
 );
 const searchSummary = computed(() => {
   if (!normalizedSearchQuery.value) return "Type to search this room.";
@@ -332,10 +338,17 @@ watch(
     chatScrollTop.value = null;
     chatDraftText.value = "";
     selectedReasoningSessionId.value = null;
+    selectedReasoningSessionCache.value = null;
     void refreshGitHubIntegration();
   },
   { immediate: true },
 );
+
+watch(selectedReasoningSession, (session) => {
+  if (session) {
+    selectedReasoningSessionCache.value = session;
+  }
+});
 
 function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
@@ -344,6 +357,50 @@ function selectTab(tabId: RoomTabId): void {
 
 function openReasoningInspector(sessionId: string): void {
   selectedReasoningSessionId.value = sessionId;
+  selectedReasoningSessionCache.value = props.reasoningSessions.find((session) => session.id === sessionId) || null;
+}
+
+function openAgentReasoningFallback(target: AgentModalTarget): void {
+  const actorLabel = target.actorLabel || target.sender || target.displayName;
+  const now = new Date().toISOString();
+  const session: DesktopReasoningSession = {
+    id: `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`,
+    roomId: props.room.identifier,
+    actorLabel,
+    agentKey: null,
+    taskId: null,
+    title: "Waiting for live reasoning",
+    status: "idle",
+    summary: "No live reasoning stream yet.",
+    latestPayload: {
+      summary: "No live reasoning stream yet.",
+      goal: `${target.displayName} reasoning`,
+      checking: "Waiting for Codex runtime events or reasoning updates.",
+      next_action: "This view will update when the agent publishes its first reasoning update.",
+      status: "idle",
+    },
+    goal: `${target.displayName} reasoning`,
+    checking: "Waiting for Codex runtime events or reasoning updates.",
+    hypothesis: null,
+    blocker: null,
+    nextAction: "This view will update when the agent publishes its first reasoning update.",
+    milestone: null,
+    confidence: null,
+    closedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  selectedReasoningSessionId.value = session.id;
+  selectedReasoningSessionCache.value = session;
+}
+
+function closeReasoningInspector(): void {
+  selectedReasoningSessionId.value = null;
+  selectedReasoningSessionCache.value = null;
+}
+
+function sanitizeFallbackId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "agent";
 }
 
 async function sendRoomMessage(text: string, replyTo: string | null = null, attachments: Array<{ upload_id: string }> = []): Promise<void> {
