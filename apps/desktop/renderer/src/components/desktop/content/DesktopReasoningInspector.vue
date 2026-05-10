@@ -8,6 +8,8 @@
       <section
         ref="dialogElement"
         class="desktop-reasoning-inspector"
+        :data-live="streamState === 'live'"
+        :data-updating="recentlyUpdated"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -21,14 +23,19 @@
             <p>{{ subtitle }}</p>
           </div>
           <div class="desktop-reasoning-inspector-actions">
-            <span class="desktop-reasoning-freshness" :data-state="freshnessState">{{ freshnessLabel }}</span>
+            <span class="desktop-reasoning-freshness" :data-state="streamState" :title="streamDescription">
+              {{ streamLabel }}
+            </span>
             <button type="button" @click="emit('close')">Close</button>
           </div>
         </header>
 
         <div class="desktop-reasoning-inspector-body">
-          <section class="desktop-reasoning-summary">
-            <span>Current summary</span>
+          <section class="desktop-reasoning-summary" :data-updating="recentlyUpdated">
+            <span>
+              Current summary
+              <small v-if="streamState === 'live'" class="desktop-reasoning-live-dot" aria-label="Streaming" />
+            </span>
             <p>{{ currentSummary }}</p>
           </section>
 
@@ -55,7 +62,13 @@
             </header>
 
             <ol v-if="timelineEntries.length" class="desktop-reasoning-timeline">
-              <li v-for="entry in timelineEntries" :key="entry.id" class="desktop-reasoning-timeline-entry">
+              <li
+                v-for="entry in timelineEntries"
+                :key="entry.id"
+                class="desktop-reasoning-timeline-entry"
+                :data-current="entry.current"
+                :data-updating="entry.current && recentlyUpdated"
+              >
                 <div>
                   <strong>{{ entry.label }}</strong>
                   <time>{{ formatTimestamp(entry.timestamp) }}</time>
@@ -94,6 +107,7 @@ interface ReasoningTimelineEntry {
   label: string;
   text: string;
   timestamp: string | null;
+  current?: boolean;
 }
 
 const props = defineProps<{
@@ -111,7 +125,9 @@ const detailSession = ref<DesktopReasoningSession | null>(null);
 const detailUpdates = ref<DesktopReasoningUpdate[]>([]);
 const isLoadingDetail = ref(false);
 const detailError = ref<string | null>(null);
+const recentlyUpdated = ref(false);
 let fetchSerial = 0;
+let livePulseTimer: ReturnType<typeof setTimeout> | null = null;
 
 const activeSession = computed(() => detailSession.value || props.session);
 const titleId = computed(() => `desktop-reasoning-${sanitizeId(activeSession.value?.id || "stream")}`);
@@ -191,13 +207,15 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
       timestamp: update.createdAt,
     }))
     .filter((entry) => entry.text.trim());
-  if (updateEntries.length) return sortTimeline(updateEntries);
+  if (updateEntries.length) {
+    return compactTimelineEntries(sortTimeline([...updateEntries, ...currentLiveTimelineEntry.value]));
+  }
 
   const session = activeSession.value;
   const snapshot = currentSnapshot.value;
   if (!session || !snapshot) return [];
   const timestamp = session.updatedAt || session.createdAt;
-  return sortTimeline([
+  return compactTimelineEntries(sortTimeline([
     { id: `${session.id}-summary`, label: "Summary", text: snapshot.summary || session.summary || "", timestamp },
     { id: `${session.id}-goal`, label: "Goal", text: snapshot.goal || "", timestamp },
     { id: `${session.id}-checking`, label: "Checking", text: snapshot.checking || "", timestamp },
@@ -205,23 +223,63 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
     { id: `${session.id}-blocker`, label: "Blocker", text: snapshot.blocker || "", timestamp },
     { id: `${session.id}-next`, label: "Next action", text: snapshot.next_action || "", timestamp },
     { id: `${session.id}-milestone`, label: "Milestone", text: snapshot.milestone || "", timestamp },
-  ].filter((entry) => entry.text.trim()));
+  ].filter((entry) => entry.text.trim())));
 });
 
-const freshnessState = computed(() => {
-  const updatedAt = timestampValue(activeSession.value?.updatedAt || activeSession.value?.createdAt || null);
-  if (!updatedAt) return "unknown";
-  const age = Date.now() - updatedAt;
-  if (age <= 120_000) return "live";
-  if (age <= 600_000) return "recent";
-  return "stale";
+const currentLiveTimelineEntry = computed<ReasoningTimelineEntry[]>(() => {
+  const session = activeSession.value;
+  const snapshot = currentSnapshot.value;
+  const text = String(snapshot?.summary || session?.summary || "").trim();
+  if (!session || !text) return [];
+  return [{
+    id: `${session.id}-current-live`,
+    label: labelFromStatus(snapshot?.status || session.status || "working"),
+    text,
+    timestamp: session.updatedAt || session.createdAt,
+    current: true,
+  }];
 });
-const freshnessLabel = computed(() => {
-  if (freshnessState.value === "live") return "Live";
-  if (freshnessState.value === "recent") return "Recent";
-  if (freshnessState.value === "stale") return "Stale";
-  return "Unknown";
+
+const streamState = computed(() => {
+  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").toLowerCase();
+  if (isCodexReasoningSummary.value) return "live";
+  if (isCodexSnapshot.value) return "snapshot";
+  if (status === "working" || status === "reviewing") return "live";
+  if (status === "blocked") return "blocked";
+  return "recent";
 });
+const isCodexReasoningSummary = computed(() => {
+  const snapshot = currentSnapshot.value;
+  const text = [
+    snapshot?.summary,
+    snapshot?.checking,
+    snapshot?.next_action,
+  ].join(" ").toLowerCase();
+  return text.includes("readable reasoning") || text.includes("reasoning summary");
+});
+const isCodexSnapshot = computed(() => {
+  if (isCodexReasoningSummary.value) return false;
+  const snapshot = currentSnapshot.value;
+  const text = [
+    snapshot?.summary,
+    snapshot?.checking,
+    snapshot?.next_action,
+  ].join(" ").toLowerCase();
+  return text.includes("codex_app_server") || text.includes("app-server snapshot") || text.includes("snapshot-derived");
+});
+const streamLabel = computed(() => {
+  if (isCodexReasoningSummary.value) return "Live thinking";
+  if (isCodexSnapshot.value) return "Snapshot";
+  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").trim();
+  return status ? labelFromStatus(status) : "Reasoning";
+});
+const streamDescription = computed(() =>
+  isCodexReasoningSummary.value
+    ? "Readable Codex reasoning summary stream"
+    : isCodexSnapshot.value
+      ? "Codex app-server snapshot"
+      : streamLabel.value
+);
 
 watch(() => props.open, (next) => {
   if (!next) {
@@ -229,6 +287,11 @@ watch(() => props.open, (next) => {
     detailUpdates.value = [];
     detailError.value = null;
     isLoadingDetail.value = false;
+    recentlyUpdated.value = false;
+    if (livePulseTimer) {
+      clearTimeout(livePulseTimer);
+      livePulseTimer = null;
+    }
     return;
   }
   void nextTick(() => dialogElement.value?.focus());
@@ -245,14 +308,43 @@ watch(
 );
 
 watch(
+  () => [
+    props.session?.id,
+    props.session?.updatedAt,
+    props.session?.summary,
+    props.session?.latestPayload?.summary,
+    props.session?.latestPayload?.checking,
+    props.session?.latestPayload?.next_action,
+  ].join("|"),
+  () => {
+    if (!props.open || !props.session) return;
+    recentlyUpdated.value = true;
+    if (livePulseTimer) clearTimeout(livePulseTimer);
+    livePulseTimer = setTimeout(() => {
+      recentlyUpdated.value = false;
+      livePulseTimer = null;
+    }, 1000);
+  }
+);
+
+watch(
   () => [props.open, props.roomIdentifier, props.session?.id] as const,
   async ([isOpen, roomIdentifier, sessionId]) => {
     if (!isOpen || !roomIdentifier || !sessionId) return;
     const serial = ++fetchSerial;
     isLoadingDetail.value = true;
     detailError.value = null;
-    detailSession.value = null;
-    detailUpdates.value = [];
+    const previousSessionId = detailSession.value?.id || props.session?.id || null;
+    if (!detailSession.value) {
+      detailSession.value = props.session;
+    }
+    if (previousSessionId !== sessionId) {
+      detailUpdates.value = [];
+    }
+    if (sessionId.startsWith("pending-agent-reasoning:")) {
+      isLoadingDetail.value = false;
+      return;
+    }
     try {
       const result = await window.letagentsDesktop.room.getReasoningSession(roomIdentifier, sessionId);
       if (serial !== fetchSerial) return;
@@ -288,6 +380,31 @@ function sortTimeline(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry
     timestampValue(left.timestamp) - timestampValue(right.timestamp)
     || left.id.localeCompare(right.id)
   );
+}
+
+function compactTimelineEntries(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry[] {
+  const compacted: ReasoningTimelineEntry[] = [];
+  for (const entry of entries) {
+    const previous = compacted[compacted.length - 1];
+    if (
+      previous &&
+      previous.label === entry.label &&
+      normalizeTimelineText(previous.text) === normalizeTimelineText(entry.text)
+    ) {
+      compacted[compacted.length - 1] = {
+        ...previous,
+        id: entry.id,
+        timestamp: entry.timestamp || previous.timestamp,
+      };
+      continue;
+    }
+    compacted.push(entry);
+  }
+  return compacted;
+}
+
+function normalizeTimelineText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function sanitizeId(value: string): string {

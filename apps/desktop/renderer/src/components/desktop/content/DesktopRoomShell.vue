@@ -133,6 +133,7 @@
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
         @open-reasoning="openReasoningInspector"
+        @open-agent-reasoning-fallback="openAgentReasoningFallback"
         @scroll-position="chatScrollTop = $event"
         @draft-change="chatDraftText = $event"
       />
@@ -176,10 +177,10 @@
     />
 
     <DesktopReasoningInspector
-      :open="Boolean(selectedReasoningSession)"
+      :open="Boolean(selectedReasoningSessionId && selectedReasoningSessionForInspector)"
       :room-identifier="room.identifier"
-      :session="selectedReasoningSession"
-      @close="selectedReasoningSessionId = null"
+      :session="selectedReasoningSessionForInspector"
+      @close="closeReasoningInspector"
     />
   </section>
 </template>
@@ -200,11 +201,14 @@ import type {
 } from "../../../../../electron/ipc-types";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
+import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
+import { displayNameFromActor } from "../../../domain/agents";
+import { timestampValue } from "../../../domain/time";
 
 type RoomTabId = "chat" | "board" | "activity" | "rooms";
 
@@ -249,6 +253,8 @@ const messageHistoryPageSize = 150;
 const chatScrollTop = ref<number | null>(null);
 const chatDraftText = ref("");
 const selectedReasoningSessionId = ref<string | null>(null);
+const selectedReasoningSessionCache = ref<DesktopReasoningSession | null>(null);
+const selectedReasoningFallbackTarget = ref<AgentModalTarget | null>(null);
 let audioContext: AudioContext | null = null;
 let observedLatestMessageId: string | null = null;
 const ownMessageIds = new Set<string>();
@@ -270,6 +276,9 @@ const visibleParticipantCount = computed(() => props.participants.filter((partic
 const visibleMessages = computed(() => {
   return mergeRoomMessages([...olderMessages.value, ...props.messages], localMessages.value);
 });
+const roomMessagesForAgentInsight = computed(() =>
+  [...olderMessages.value, ...props.messages, ...localMessages.value].sort(compareRoomMessages)
+);
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
 const normalizedSearchQuery = computed(() => searchQuery.value.trim().toLowerCase());
 const searchResults = computed(() => {
@@ -286,8 +295,16 @@ const searchResults = computed(() => {
   });
 });
 const activeSearchMessageId = computed(() => searchResults.value[activeSearchIndex.value]?.id || null);
-const selectedReasoningSession = computed(() =>
-  props.reasoningSessions.find((session) => session.id === selectedReasoningSessionId.value) || null
+const selectedReasoningSession = computed(() => {
+  const directSession = props.reasoningSessions.find((session) => session.id === selectedReasoningSessionId.value);
+  if (directSession) return directSession;
+  const target = selectedReasoningFallbackTarget.value;
+  return target ? latestReasoningSessionForTarget(target) : null;
+});
+const selectedReasoningSessionForInspector = computed(() =>
+  selectedReasoningSession.value
+  || (selectedReasoningFallbackTarget.value ? buildAgentFallbackReasoningSession(selectedReasoningFallbackTarget.value) : null)
+  || selectedReasoningSessionCache.value
 );
 const searchSummary = computed(() => {
   if (!normalizedSearchQuery.value) return "Type to search this room.";
@@ -332,10 +349,18 @@ watch(
     chatScrollTop.value = null;
     chatDraftText.value = "";
     selectedReasoningSessionId.value = null;
+    selectedReasoningSessionCache.value = null;
+    selectedReasoningFallbackTarget.value = null;
     void refreshGitHubIntegration();
   },
   { immediate: true },
 );
+
+watch(selectedReasoningSession, (session) => {
+  if (session) {
+    selectedReasoningSessionCache.value = session;
+  }
+});
 
 function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
@@ -344,6 +369,129 @@ function selectTab(tabId: RoomTabId): void {
 
 function openReasoningInspector(sessionId: string): void {
   selectedReasoningSessionId.value = sessionId;
+  selectedReasoningSessionCache.value = props.reasoningSessions.find((session) => session.id === sessionId) || null;
+  selectedReasoningFallbackTarget.value = null;
+}
+
+function openAgentReasoningFallback(target: AgentModalTarget): void {
+  const actorLabel = target.actorLabel || target.sender || target.displayName;
+  selectedReasoningSessionId.value = `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`;
+  selectedReasoningFallbackTarget.value = target;
+  selectedReasoningSessionCache.value = buildAgentFallbackReasoningSession(target);
+}
+
+function closeReasoningInspector(): void {
+  selectedReasoningSessionId.value = null;
+  selectedReasoningSessionCache.value = null;
+  selectedReasoningFallbackTarget.value = null;
+}
+
+function latestReasoningSessionForTarget(target: AgentModalTarget): DesktopReasoningSession | null {
+  const keys = agentTargetKeys(target);
+  if (!keys.length) return null;
+  return props.reasoningSessions
+    .filter((session) => reasoningSessionKeys(session).some((key) => keys.includes(key)))
+    .sort((left, right) => timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt))[0] || null;
+}
+
+function buildAgentFallbackReasoningSession(target: AgentModalTarget): DesktopReasoningSession {
+  const actorLabel = target.actorLabel || target.sender || target.displayName;
+  const latestMessage = latestMessageForAgent(target);
+  const latestText = latestMessage ? stripStatusPrefix(latestMessage.text) : "";
+  const timestamp = latestMessage?.timestamp || new Date().toISOString();
+  const status = inferAgentFallbackStatus(latestText);
+  const summary = latestText
+    ? `No live reasoning stream yet. Latest room activity: ${latestText}`
+    : "No live reasoning stream yet.";
+  const checking = latestText
+    ? "No reasoning stream has been published yet; showing the agent's latest room activity while waiting for Codex runtime events."
+    : "Waiting for Codex runtime events or reasoning updates.";
+  const nextAction = latestText
+    ? "This view will switch to live reasoning when the agent publishes a stream event or reasoning update."
+    : "This view will update when the agent publishes its first reasoning update.";
+
+  return {
+    id: `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`,
+    roomId: props.room.identifier,
+    actorLabel,
+    agentKey: null,
+    taskId: null,
+    title: "Waiting for live reasoning",
+    status,
+    summary,
+    latestPayload: {
+      summary,
+      goal: `${target.displayName} reasoning`,
+      checking,
+      next_action: nextAction,
+      status,
+    },
+    goal: `${target.displayName} reasoning`,
+    checking,
+    hypothesis: null,
+    blocker: null,
+    nextAction,
+    milestone: null,
+    confidence: null,
+    closedAt: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function latestMessageForAgent(target: AgentModalTarget): DesktopRoomMessage | null {
+  const keys = agentTargetKeys(target);
+  if (!keys.length) return null;
+  return [...roomMessagesForAgentInsight.value]
+    .reverse()
+    .find((message) => message.source === "agent" && messageKeys(message).some((key) => keys.includes(key))) || null;
+}
+
+function agentTargetKeys(target: AgentModalTarget): string[] {
+  return [
+    target.actorLabel,
+    target.sender,
+    target.displayName,
+    displayNameFromActor(target.actorLabel),
+  ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function reasoningSessionKeys(session: DesktopReasoningSession): string[] {
+  return [
+    session.actorLabel,
+    displayNameFromActor(session.actorLabel),
+    session.agentKey,
+  ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function messageKeys(message: DesktopRoomMessage): string[] {
+  return [
+    message.sender,
+    message.actorLabel,
+    message.agentIdentity?.actorLabel,
+    message.agentIdentity?.displayName,
+    displayNameFromActor(message.sender),
+  ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function normalizeAgentIdentity(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function stripStatusPrefix(value: string): string {
+  return value.replace(/^\[status\]\s*/i, "").trim();
+}
+
+function inferAgentFallbackStatus(value: string): "idle" | "working" | "reviewing" | "blocked" {
+  const text = value.toLowerCase();
+  if (text.includes("blocked")) return "blocked";
+  if (text.includes("review")) return "reviewing";
+  if (/(working|debugging|checking|inspecting|running|testing|building|implementing)/i.test(text)) return "working";
+  return "idle";
+}
+
+function sanitizeFallbackId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "agent";
 }
 
 async function sendRoomMessage(text: string, replyTo: string | null = null, attachments: Array<{ upload_id: string }> = []): Promise<void> {

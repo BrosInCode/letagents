@@ -137,16 +137,6 @@
         @next="shiftImage(1)"
         @previous="shiftImage(-1)"
       />
-      <DesktopAgentActivityModal
-        v-if="activeAgent"
-        :agent="activeAgent"
-        :messages="messages"
-        :presence="presence"
-        :reasoning-sessions="reasoningSessions"
-        :tasks="tasks"
-        @close="activeAgent = null"
-        @open-reasoning="emit('open-reasoning', $event)"
-      />
     </div>
   </section>
 </template>
@@ -162,7 +152,6 @@ import type {
   DesktopStagedAttachment,
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
-import DesktopAgentActivityModal from "./DesktopAgentActivityModal.vue";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "./DesktopAttachmentDrafts.vue";
 import DesktopChatMessage, { type AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopImageViewerModal, { type DesktopMessageImage } from "./DesktopImageViewerModal.vue";
@@ -189,6 +178,7 @@ const emit = defineEmits<{
   "load-older": [];
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
+  "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "scroll-position": [scrollTop: number | null];
   "draft-change": [text: string];
 }>();
@@ -207,7 +197,6 @@ const attaching = ref(false);
 const isDraggingAttachment = ref(false);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
-const activeAgent = ref<AgentModalTarget | null>(null);
 let isScrolledToBottom = true;
 let restoredScrollTop: number | null | undefined;
 let attachmentDragDepth = 0;
@@ -758,13 +747,89 @@ function scrollToMessage(messageId: string | null): void {
 }
 
 function openAgentModal(target: AgentModalTarget): void {
-  activeAgent.value = target;
+  const session = latestReasoningForAgent(target);
+  if (session) {
+    emit("open-reasoning", session.id);
+    return;
+  }
+  if (hasReasoningStreamSurface(target)) {
+    emit("open-agent-reasoning-fallback", target);
+  }
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape" && activeAgent.value) {
-    activeAgent.value = null;
-  }
+  if (event.key === "Escape") return;
+}
+
+function latestReasoningForAgent(target: AgentModalTarget): DesktopReasoningSession | null {
+  const keys = agentIdentityKeys(target);
+  if (!keys.length) return null;
+
+  return props.reasoningSessions
+    .filter((session) => reasoningSessionKeys(session).some((key) => keys.includes(key)))
+    .sort((left, right) =>
+      reasoningTime(right) - reasoningTime(left)
+      || String(right.id).localeCompare(String(left.id))
+    )[0] || null;
+}
+
+function agentIdentityKeys(target: AgentModalTarget): string[] {
+  return [
+    target.actorLabel,
+    target.sender,
+    target.displayName,
+    displayNameFromActorLabel(target.actorLabel),
+  ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function reasoningSessionKeys(session: DesktopReasoningSession): string[] {
+  return [
+    session.actorLabel,
+    displayNameFromActorLabel(session.actorLabel),
+    session.agentKey,
+  ].map(normalizeAgentIdentity).filter(Boolean);
+}
+
+function hasReasoningStreamSurface(target: AgentModalTarget): boolean {
+  const keys = agentIdentityKeys(target);
+  const markerText = [
+    target.ideLabel,
+    target.sender,
+    target.actorLabel,
+  ].join(" ").toLowerCase();
+  if (markerText.includes("codex")) return true;
+
+  return props.presence.some((presence) => {
+    const presenceKeys = [
+      presence.actorLabel,
+      presence.displayName,
+      presence.agentKey,
+    ].map(normalizeAgentIdentity).filter(Boolean);
+    if (!presenceKeys.some((key) => keys.includes(key))) return false;
+
+    const capability = String(presence.livenessObservation?.livenessCapability || "").toLowerCase();
+    const bridgeId = String(presence.livenessObservation?.toolBridgeId || "").toLowerCase();
+    const runtime = String(presence.runtime || "").toLowerCase();
+    const ideLabel = String(presence.ideLabel || "").toLowerCase();
+    return capability.includes("stream") ||
+      capability.includes("codex") ||
+      bridgeId.includes(":codex:") ||
+      runtime === "codex" ||
+      ideLabel === "codex";
+  });
+}
+
+function normalizeAgentIdentity(value: string | null | undefined): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function displayNameFromActorLabel(value: string | null | undefined): string {
+  return String(value || "").split("|")[0]?.trim() || "";
+}
+
+function reasoningTime(session: DesktopReasoningSession): number {
+  const parsed = Date.parse(String(session.updatedAt || session.createdAt || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 </script>

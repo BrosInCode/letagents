@@ -230,13 +230,6 @@
                 <strong>{{ field.value }}</strong>
               </span>
             </div>
-            <button
-              type="button"
-              class="desktop-reasoning-open-button"
-              @click="emit('open-reasoning', selectedLiveParticipant.latestReasoning.id)"
-            >
-              Open reasoning
-            </button>
           </article>
         </section>
 

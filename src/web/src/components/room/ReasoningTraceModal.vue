@@ -8,6 +8,8 @@
       <section
         ref="dialogRef"
         class="reasoning-dialog"
+        :data-live="streamState === 'live'"
+        :data-updating="recentlyUpdated"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -20,15 +22,21 @@
             <h2 :id="titleId">{{ heading }}</h2>
             <p class="reasoning-subtitle">{{ subtitle }}</p>
           </div>
+          <span class="reasoning-live-badge" :data-state="streamState">
+            {{ streamLabel }}
+          </span>
           <button class="reasoning-close" type="button" @click="$emit('close')">
             Close
           </button>
         </header>
 
         <div class="reasoning-body">
-          <section v-if="activeSession.summary" class="reasoning-summary">
-            <h3>Current summary</h3>
-            <p>{{ activeSession.summary }}</p>
+          <section v-if="currentSummary" class="reasoning-summary" :data-updating="recentlyUpdated">
+            <h3>
+              Current summary
+              <small v-if="streamState === 'live'" class="reasoning-live-dot" aria-label="Streaming" />
+            </h3>
+            <p>{{ currentSummary }}</p>
           </section>
 
           <dl v-if="highlights.length > 0" class="reasoning-highlights">
@@ -57,6 +65,8 @@
                 v-for="entry in timelineEntries"
                 :key="entry.id"
                 class="reasoning-entry"
+                :data-current="entry.current"
+                :data-updating="entry.current && recentlyUpdated"
               >
                 <div class="reasoning-entry-meta">
                   <span>{{ entryLabel(entry) }}</span>
@@ -101,6 +111,12 @@ defineEmits<{
 const dialogRef = ref<HTMLElement | null>(null)
 const sessionDetail = ref<RoomReasoningSession | null>(null)
 const isLoadingDetail = ref(false)
+const recentlyUpdated = ref(false)
+let livePulseTimer: ReturnType<typeof setTimeout> | null = null
+
+interface ReasoningTimelineEntry extends RoomReasoningEntry {
+  current?: boolean
+}
 
 function sortReasoningUpdates(updates: readonly RoomReasoningUpdate[]): RoomReasoningUpdate[] {
   return [...updates].sort((left, right) => {
@@ -214,6 +230,12 @@ const currentSnapshot = computed<RoomReasoningSnapshot | null>(() => {
   return session.summary ? { summary: session.summary } : null
 })
 
+const currentSummary = computed(() =>
+  currentSnapshot.value?.summary
+  || activeSession.value?.summary
+  || ''
+)
+
 const highlights = computed(() => {
   const session = activeSession.value
   const snapshot = currentSnapshot.value
@@ -238,7 +260,7 @@ const highlights = computed(() => {
     .map(([label, value]) => ({ label, value: String(value) }))
 })
 
-const timelineEntries = computed<RoomReasoningEntry[]>(() => {
+const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
   const session = activeSession.value
   if (!session) return []
 
@@ -254,7 +276,7 @@ const timelineEntries = computed<RoomReasoningEntry[]>(() => {
       : []
 
   if (detailEntries.length > 0) {
-    return [...detailEntries]
+    return compactTimelineEntries([...detailEntries, ...currentLiveTimelineEntry.value])
       .filter((entry) => Boolean(entry?.id && entry?.text))
       .sort((left, right) => {
         const leftTime = Date.parse(left.timestamp || '')
@@ -288,10 +310,65 @@ const timelineEntries = computed<RoomReasoningEntry[]>(() => {
     }))
 })
 
+const currentLiveTimelineEntry = computed<ReasoningTimelineEntry[]>(() => {
+  const session = activeSession.value
+  const text = currentSummary.value.trim()
+  if (!session || !text) return []
+  return [{
+    id: `${session.id}-current-live`,
+    label: session.status || currentSnapshot.value?.status || 'working',
+    text,
+    timestamp: session.updated_at || session.created_at || new Date().toISOString(),
+    current: true,
+  }]
+})
+
+const streamState = computed(() => {
+  const status = String(currentSnapshot.value?.status || activeSession.value?.status || '').toLowerCase()
+  if (isCodexReasoningSummary.value) return 'live'
+  if (isCodexSnapshot.value) return 'snapshot'
+  if (status === 'working' || status === 'reviewing') return 'live'
+  if (status === 'blocked') return 'blocked'
+  return 'recent'
+})
+
+const isCodexReasoningSummary = computed(() => {
+  const snapshot = currentSnapshot.value
+  const text = [
+    snapshot?.summary,
+    snapshot?.checking,
+    snapshot?.next_action,
+  ].join(' ').toLowerCase()
+  return text.includes('readable reasoning') || text.includes('reasoning summary')
+})
+
+const isCodexSnapshot = computed(() => {
+  if (isCodexReasoningSummary.value) return false
+  const snapshot = currentSnapshot.value
+  const text = [
+    snapshot?.summary,
+    snapshot?.checking,
+    snapshot?.next_action,
+  ].join(' ').toLowerCase()
+  return text.includes('codex_app_server') || text.includes('app-server snapshot') || text.includes('snapshot-derived')
+})
+
+const streamLabel = computed(() => {
+  if (isCodexReasoningSummary.value) return 'Live thinking'
+  if (isCodexSnapshot.value) return 'Snapshot'
+  const status = String(currentSnapshot.value?.status || activeSession.value?.status || '').trim()
+  return status ? entryLabel({ id: 'status', text: status, timestamp: '', label: status }) : 'Reasoning'
+})
+
 watch(() => props.open, (next) => {
   if (!next) {
     sessionDetail.value = null
     isLoadingDetail.value = false
+    recentlyUpdated.value = false
+    if (livePulseTimer) {
+      clearTimeout(livePulseTimer)
+      livePulseTimer = null
+    }
     return
   }
   nextTick(() => dialogRef.value?.focus())
@@ -304,6 +381,26 @@ watch(
     if (sessionDetail.value?.id === nextSession.id) {
       sessionDetail.value = mergeReasoningSessionDetail(sessionDetail.value, nextSession)
     }
+  }
+)
+
+watch(
+  () => [
+    props.session?.id,
+    props.session?.updated_at,
+    props.session?.summary,
+    props.session?.latest_payload?.summary,
+    props.session?.latest_payload?.checking,
+    props.session?.latest_payload?.next_action,
+  ].join('|'),
+  () => {
+    if (!props.open || !props.session) return
+    recentlyUpdated.value = true
+    if (livePulseTimer) clearTimeout(livePulseTimer)
+    livePulseTimer = setTimeout(() => {
+      recentlyUpdated.value = false
+      livePulseTimer = null
+    }, 1000)
   }
 )
 
@@ -358,6 +455,32 @@ function entryLabel(entry: RoomReasoningEntry): string {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
+function compactTimelineEntries(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry[] {
+  const compacted: ReasoningTimelineEntry[] = []
+  for (const entry of entries) {
+    const previous = compacted[compacted.length - 1]
+    if (
+      previous
+      && previous.label === entry.label
+      && normalizeTimelineText(previous.text) === normalizeTimelineText(entry.text)
+    ) {
+      compacted[compacted.length - 1] = {
+        ...previous,
+        id: entry.id,
+        timestamp: entry.timestamp || previous.timestamp,
+        current: Boolean(previous.current || entry.current),
+      }
+      continue
+    }
+    compacted.push(entry)
+  }
+  return compacted
+}
+
+function normalizeTimelineText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
 function formatTimestamp(value: string | null | undefined): string {
   const timestamp = String(value || '').trim()
   if (!timestamp) return 'unknown'
@@ -397,6 +520,13 @@ function formatTimestamp(value: string | null | undefined): string {
   box-shadow: 0 26px 70px rgba(0, 0, 0, 0.45);
 }
 
+.reasoning-dialog[data-live='true'] {
+  border-color: rgba(56, 189, 248, 0.3);
+  box-shadow:
+    0 26px 70px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(56, 189, 248, 0.08);
+}
+
 .reasoning-dialog:focus {
   outline: none;
 }
@@ -416,6 +546,42 @@ function formatTimestamp(value: string | null | undefined): string {
   justify-content: flex-end;
   border-top: 1px solid rgba(148, 163, 184, 0.14);
   border-bottom: none;
+}
+
+.reasoning-live-badge {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.74rem;
+  font-weight: 800;
+  justify-content: center;
+  line-height: 1;
+  min-height: 30px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.reasoning-live-badge[data-state='live'] {
+  animation: reasoning-live-pulse 1.8s ease-in-out infinite;
+  background: rgba(34, 197, 94, 0.14);
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.25);
+  color: #86efac;
+}
+
+.reasoning-live-badge[data-state='snapshot'] {
+  background: rgba(125, 211, 252, 0.14);
+  color: #bae6fd;
+}
+
+.reasoning-live-badge[data-state='blocked'] {
+  background: rgba(251, 113, 133, 0.14);
+  color: #fecdd3;
+}
+
+.reasoning-live-badge[data-state='recent'] {
+  background: rgba(14, 165, 233, 0.14);
+  color: #7dd3fc;
 }
 
 .reasoning-eyebrow {
@@ -457,11 +623,33 @@ function formatTimestamp(value: string | null | undefined): string {
   padding: 16px;
 }
 
+.reasoning-summary {
+  transition: background 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.reasoning-summary[data-updating='true'] {
+  background: rgba(14, 165, 233, 0.08);
+  border-color: rgba(56, 189, 248, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.08);
+}
+
 .reasoning-summary h3,
 .reasoning-section-header h3 {
   margin: 0;
   color: var(--text, #fafafa);
   font-size: 0.92rem;
+}
+
+.reasoning-live-dot {
+  animation: reasoning-dot-pulse 1.4s ease-in-out infinite;
+  background: #86efac;
+  border-radius: 999px;
+  box-shadow: 0 0 0 0 rgba(134, 239, 172, 0.34);
+  display: inline-block;
+  height: 7px;
+  margin-left: 8px;
+  vertical-align: 1px;
+  width: 7px;
 }
 
 .reasoning-summary p {
@@ -537,6 +725,18 @@ function formatTimestamp(value: string | null | undefined): string {
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 14px;
   background: rgba(2, 6, 23, 0.44);
+  transition: background 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+
+.reasoning-entry[data-current='true'] {
+  background: rgba(34, 197, 94, 0.055);
+  border-color: rgba(134, 239, 172, 0.22);
+}
+
+.reasoning-entry[data-updating='true'] {
+  background: rgba(14, 165, 233, 0.09);
+  border-color: rgba(125, 211, 252, 0.24);
+  transform: translateY(-1px);
 }
 
 .reasoning-entry-meta {
@@ -580,6 +780,28 @@ function formatTimestamp(value: string | null | undefined): string {
   background: rgba(30, 41, 59, 0.96);
   border-color: rgba(191, 219, 254, 0.32);
   outline: none;
+}
+
+@keyframes reasoning-live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);
+  }
+}
+
+@keyframes reasoning-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: scale(0.86);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
 }
 
 @media (max-width: 720px) {

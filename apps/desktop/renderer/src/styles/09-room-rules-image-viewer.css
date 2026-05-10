@@ -1,13 +1,5 @@
 
 @media (max-width: 760px) {
-  .desktop-agent-modal-backdrop {
-    padding: 14px;
-  }
-
-  .desktop-agent-modal-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .desktop-reasoning-inspector-backdrop {
     padding: 14px;
   }
@@ -24,11 +16,6 @@
 }
 
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .desktop-agent-modal {
-    background: rgba(18, 18, 18, 0.96);
-    backdrop-filter: none;
-  }
-
   .desktop-reasoning-inspector-backdrop {
     backdrop-filter: none;
   }

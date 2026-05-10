@@ -10,6 +10,7 @@ import {
   deriveCodexLiveSessionStatus,
   inspectLocalCodexSession,
   isCodexAgentSessionMarker,
+  summarizeCodexReasoningNotificationForTest,
   summarizeCodexRuntimeNotificationForTest,
   summarizeCodexRuntimeSnapshotForTest,
 } from "../codex-session.js";
@@ -84,6 +85,49 @@ test("summarizeCodexRuntimeSnapshotForTest maps app-server snapshots to visible 
   assert.equal(summary.status, "working");
   assert.equal(summary.summary, "I am checking the desktop reasoning UI.");
   assert.match(summary.checking, /Latest Codex worker message/);
+});
+
+test("summarizeCodexReasoningNotificationForTest accumulates readable reasoning summary deltas", () => {
+  const params = { threadId: "thread_reasoning", turnId: "turn_reasoning", itemId: "item_reasoning" };
+  assert.deepEqual(
+    summarizeCodexReasoningNotificationForTest({
+      method: "item/reasoning/summaryPartAdded",
+      params: { ...params, summaryIndex: 0 },
+    })?.summary,
+    "Codex started a new reasoning summary section."
+  );
+
+  const first = summarizeCodexReasoningNotificationForTest({
+    method: "item/reasoning/summaryTextDelta",
+    params: { ...params, summaryIndex: 0, delta: "Reading the " },
+  });
+  const second = summarizeCodexReasoningNotificationForTest({
+    method: "item/reasoning/summaryTextDelta",
+    params: { ...params, summaryIndex: 0, delta: "desktop UI." },
+  });
+
+  assert.ok(first);
+  assert.ok(second);
+  assert.equal(first.status, "working");
+  assert.equal(second.summary, "Reading the desktop UI.");
+  assert.match(second.checking, /readable reasoning summary/);
+});
+
+test("summarizeCodexReasoningNotificationForTest hides raw reasoning text deltas", () => {
+  const summary = summarizeCodexReasoningNotificationForTest({
+    method: "item/reasoning/textDelta",
+    params: {
+      threadId: "thread_raw_reasoning",
+      turnId: "turn_raw_reasoning",
+      itemId: "item_raw_reasoning",
+      contentIndex: 0,
+      delta: "raw private reasoning",
+    },
+  });
+
+  assert.ok(summary);
+  assert.equal(summary.summary, "Codex raw reasoning text is streaming.");
+  assert.doesNotMatch(summary.checking, /raw private reasoning/);
 });
 
 test("inspectLocalCodexSession marks ready servers with failed websocket handshakes unknown", async () => {

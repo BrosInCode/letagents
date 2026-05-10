@@ -70,6 +70,7 @@ import {
 } from "../shared/request-headers.js";
 import {
   inspectLocalCodexSession,
+  scheduleCodexRuntimeStreamBridgeBind,
   startLocalCodexSession,
   stopLocalCodexSession,
   toPublicCodexLiveSession,
@@ -1909,6 +1910,8 @@ server.tool(
       last_seen_at: typeof created.last_seen_at === "string" ? created.last_seen_at : new Date().toISOString(),
       ended_at: typeof created.ended_at === "string" ? created.ended_at : null,
     });
+
+    scheduleCodexRuntimeStreamBridgeBind(session);
 
     return {
       content: [
