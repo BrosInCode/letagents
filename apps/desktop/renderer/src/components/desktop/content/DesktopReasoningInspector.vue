@@ -193,13 +193,13 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
       timestamp: update.createdAt,
     }))
     .filter((entry) => entry.text.trim());
-  if (updateEntries.length) return sortTimeline(updateEntries);
+  if (updateEntries.length) return compactTimelineEntries(sortTimeline(updateEntries));
 
   const session = activeSession.value;
   const snapshot = currentSnapshot.value;
   if (!session || !snapshot) return [];
   const timestamp = session.updatedAt || session.createdAt;
-  return sortTimeline([
+  return compactTimelineEntries(sortTimeline([
     { id: `${session.id}-summary`, label: "Summary", text: snapshot.summary || session.summary || "", timestamp },
     { id: `${session.id}-goal`, label: "Goal", text: snapshot.goal || "", timestamp },
     { id: `${session.id}-checking`, label: "Checking", text: snapshot.checking || "", timestamp },
@@ -207,7 +207,7 @@ const timelineEntries = computed<ReasoningTimelineEntry[]>(() => {
     { id: `${session.id}-blocker`, label: "Blocker", text: snapshot.blocker || "", timestamp },
     { id: `${session.id}-next`, label: "Next action", text: snapshot.next_action || "", timestamp },
     { id: `${session.id}-milestone`, label: "Milestone", text: snapshot.milestone || "", timestamp },
-  ].filter((entry) => entry.text.trim()));
+  ].filter((entry) => entry.text.trim())));
 });
 
 const streamState = computed(() => {
@@ -325,6 +325,31 @@ function sortTimeline(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry
     timestampValue(left.timestamp) - timestampValue(right.timestamp)
     || left.id.localeCompare(right.id)
   );
+}
+
+function compactTimelineEntries(entries: ReasoningTimelineEntry[]): ReasoningTimelineEntry[] {
+  const compacted: ReasoningTimelineEntry[] = [];
+  for (const entry of entries) {
+    const previous = compacted[compacted.length - 1];
+    if (
+      previous &&
+      previous.label === entry.label &&
+      normalizeTimelineText(previous.text) === normalizeTimelineText(entry.text)
+    ) {
+      compacted[compacted.length - 1] = {
+        ...previous,
+        id: entry.id,
+        timestamp: entry.timestamp || previous.timestamp,
+      };
+      continue;
+    }
+    compacted.push(entry);
+  }
+  return compacted;
+}
+
+function normalizeTimelineText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function sanitizeId(value: string): string {

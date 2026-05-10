@@ -1354,6 +1354,7 @@ export async function startLocalCodexSession(
   const launchedServer = !(await isServerReady(serverUrl));
   let serverPid: number | null = null;
   let client: RpcClient | null = null;
+  let notificationSession: CodexLiveSessionState | null = null;
   let startupSucceeded = false;
 
   try {
@@ -1369,7 +1370,15 @@ export async function startLocalCodexSession(
       }
     }
 
-    client = new RpcClient(serverUrl);
+    client = new RpcClient(serverUrl, (notification) => {
+      const session = notificationSession
+        ? getStoredCodexLiveSession(notificationSession.session_id) ?? notificationSession
+        : null;
+      if (!session) return;
+      void postCodexRuntimeReasoningUpdate(session, notification).catch(() => {
+        // Runtime notifications should never break the worker turn.
+      });
+    });
     await client.connect();
 
     const threadStart = await client.request<ThreadStartResult>("thread/start", {});
@@ -1422,11 +1431,13 @@ export async function startLocalCodexSession(
         codex_bin: codexBin,
       })
     );
+    notificationSession = session;
 
     try {
       const verifiedSession = await waitForWorkerStartup(session);
       scheduleOwnedSessionMonitor(verifiedSession);
-      await maybeStartCodexRuntimeStreamBridge(verifiedSession);
+      startCodexRuntimeStreamBridge(verifiedSession, client);
+      client = null;
       startupSucceeded = true;
       return { session: verifiedSession, reused: false };
     } catch (error) {
