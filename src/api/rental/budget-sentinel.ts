@@ -215,8 +215,14 @@ export function isMeterStale(
 }
 
 /**
- * How long the meter has been stale, in ms. Returns `null` if not
- * stale (fresh snapshot inside the window).
+ * How long the meter has been stale, in ms. Returns:
+ *   • `null`  when the snapshot is fresh (inside the window)
+ *   • a finite ms count when we have a parseable lastMeterAt
+ *   • `-1`    when we have no parseable lastMeterAt at all
+ *     (never-seen-a-snapshot path). `-1` is a finite sentinel
+ *     instead of `Infinity` so the value survives JSON
+ *     serialization through the future API routes without
+ *     becoming `null` and conflating with the "fresh" case.
  */
 export function staleAgeMs(
   state: BudgetSentinelState,
@@ -225,10 +231,10 @@ export function staleAgeMs(
 ): number | null {
   if (!isMeterStale(state, nowMs, options)) return null;
   if (typeof state.lastMeterAt !== "string" || !state.lastMeterAt) {
-    return Number.POSITIVE_INFINITY;
+    return -1;
   }
   const lastMs = Date.parse(state.lastMeterAt);
-  if (!Number.isFinite(lastMs)) return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(lastMs)) return -1;
   return Math.max(0, nowMs - lastMs);
 }
 
@@ -387,10 +393,19 @@ export function applyReconciliation(
 
   let nextStatus = state.status;
   const ceiling = effectiveLrtCeiling(state);
+  // Exhaustion check includes still-outstanding reservations: a
+  // session is "exhausted" once committed-used + in-flight
+  // reservations cross the effective ceiling, not only when
+  // `lrtUsed` alone crosses it. Otherwise multi-step reservations
+  // that overrun their actuals can leave the session reading
+  // active with `used + reserved > ceiling`, which then collides
+  // with the next authorize() call and skips the
+  // budget.exhausted activity event entirely.
+  const totalCommitted = newUsed + newReserved;
   const becameExhausted =
     ceiling > 0
     && state.status !== "budget_exhausted"
-    && newUsed >= ceiling;
+    && totalCommitted >= ceiling;
   if (becameExhausted) {
     nextStatus = "budget_exhausted";
   }

@@ -211,6 +211,28 @@ describe("meter staleness", () => {
     );
   });
 
+  it("staleAgeMs returns -1 (finite sentinel) when lastMeterAt is missing/invalid", () => {
+    // Important: must be finite so the value survives JSON
+    // serialization through API routes without becoming `null`
+    // (which is reserved for the "fresh meter" case).
+    assert.equal(
+      staleAgeMs(makeState({ lastMeterAt: null }), REFERENCE_NOW),
+      -1,
+    );
+    assert.equal(
+      staleAgeMs(makeState({ lastMeterAt: "not-a-date" }), REFERENCE_NOW),
+      -1,
+    );
+    // null = fresh, -1 = unknown, finite = age. Distinguishable.
+    const fresh = staleAgeMs(
+      makeState({
+        lastMeterAt: new Date(REFERENCE_NOW - 1_000).toISOString(),
+      }),
+      REFERENCE_NOW,
+    );
+    assert.equal(fresh, null);
+  });
+
   it("returns false within the default 30s window", () => {
     const lastMeterAt = new Date(REFERENCE_NOW - 10_000).toISOString();
     assert.equal(
@@ -392,6 +414,38 @@ describe("applyReconciliation", () => {
     assert.equal(result.state.lrtUsed, 87_500);
     assert.equal(result.state.status, "budget_exhausted");
     assert.equal(result.becameExhausted, true);
+  });
+
+  it("transitions status → budget_exhausted when used + still-reserved crosses the ceiling", () => {
+    // LivelyPeak's #379 finding: a multi-step reservation that
+    // overruns its actuals leaves `used + reserved > ceiling` even
+    // though `used` alone is still under. We must transition on
+    // total committed, not just on used.
+    //
+    // Ceiling = 87_000.
+    // Pre-state: used=50_000, reserved=40_000 (total 90_000 already
+    // over ceiling — but the previous step was authorize'd before
+    // a different reservation expanded the total). We reconcile a
+    // small actual that releases only some of the placeholder.
+    const state = makeState({
+      lrtUsed: 50_000,
+      lrtReserved: 40_000,
+    });
+    const result = applyReconciliation(/* actual */ 1_000, /* releasing */ 500, state);
+    assert.equal(result.state.lrtUsed, 51_000);
+    assert.equal(result.state.lrtReserved, 39_500);
+    // used alone (51_000) is still under the 87_000 ceiling, but
+    // used + reserved = 90_500 ≥ 87_000 — we MUST transition.
+    assert.equal(result.state.status, "budget_exhausted");
+    assert.equal(result.becameExhausted, true);
+  });
+
+  it("does NOT transition when used + reserved stays under the ceiling", () => {
+    const state = makeState({ lrtUsed: 10_000, lrtReserved: 5_000 });
+    const result = applyReconciliation(2_000, 1_500, state);
+    // total = 12_000 + 3_500 = 15_500 ≪ 87_000.
+    assert.equal(result.state.status, "active");
+    assert.equal(result.becameExhausted, false);
   });
 
   it("does NOT re-flag becameExhausted when status is already exhausted", () => {
