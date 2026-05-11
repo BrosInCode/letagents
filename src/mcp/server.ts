@@ -4543,38 +4543,23 @@ server.tool(
     };
   }
 );
-
-server.tool(
-  "rental_refresh_quota",
-  "Trigger an on-demand quota refresh for a rental session. Calls the desktop-side adapter bridge to poll the provider's native quota API and returns the latest snapshot. Use this when the agent suspects the cached quota snapshot is stale — e.g. after a budget extension was granted or after a long idle period. The server routes the request to the adapter that owns the session's provider lane.",
-  {
-    session_id: z.string().describe("Rental session id to refresh quota for."),
-    provider: z
-      .string()
-      .optional()
-      .describe(
-        "Optional provider hint — e.g. 'antigravity', 'codex'. The server infers the provider from the session if omitted.",
-      ),
-  },
-  async ({ session_id, provider }) => {
-    const result = await rentalRefreshQuota(rentalToolDeps, {
-      session_id,
-      provider,
-    });
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(result, null, 2),
-        },
-      ],
-    };
-  }
-);
+// ---------------------------------------------------------------------------
+// rental_refresh_quota — DEFERRED until POST /refresh-quota route lands (p2.8b)
+// ---------------------------------------------------------------------------
+// The handler (rentalRefreshQuota) and tests exist in rental-tools.ts /
+// rental-heartbeat.test.ts. Uncomment and register once the server-side
+// route is wired in p2.8b.
+//
+// server.tool(
+//   "rental_refresh_quota",
+//   "Trigger an on-demand quota refresh for a rental session...",
+//   { session_id: z.string(), provider: z.string().optional() },
+//   async ({ session_id, provider }) => { ... }
+// );
 
 server.tool(
   "rental_report_usage",
-  "Forward an already-built IngestUsageReport to the rental usage ingest endpoint (POST /api/rental/sessions/:id/usage). The desktop meter adapter is the canonical source of these reports, so MCP-side use should be limited to tool-mediated steps the desktop adapter pipeline does not observe. See spec §17.7 / §19.6 for the report shape; the server validates and rejects malformed input.",
+  "Forward an already-built IngestUsageReport to the rental usage ingest endpoint (POST /api/rental/sessions/:id/usage). The desktop meter adapter is the canonical source of these reports, so MCP-side use should be limited to tool-mediated steps the desktop adapter pipeline does not observe. See spec §17.7 / §19.6 for the report shape; the server validates and rejects malformed input. Note: Budget Sentinel reconciliation (applyReconciliation) is handled server-side by the ingest route, not by this MCP tool.",
   {
     session_id: z.string().describe("Rental session id to report against."),
     report: z
