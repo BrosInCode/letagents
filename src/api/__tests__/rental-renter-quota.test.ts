@@ -364,6 +364,33 @@ describe("POST /api/rental/renter/declare-quota-exhausted", () => {
     );
   });
 
+  it("rejects non-quota_exhausted startTrigger with 400 (semantic match)", async () => {
+    // LivelyPeak's PR #384 catch: the endpoint stores an
+    // `inExhaustedState: true` mirror, so only the quota_exhausted
+    // start_trigger is semantically valid. Other valid enum values
+    // (user_initiated / scheduled / task_handoff) describe other
+    // intents and shouldn't land here.
+    for (const trigger of ["user_initiated", "scheduled", "task_handoff"] as const) {
+      const res = await reqJson(
+        server!.port,
+        "POST",
+        "/api/rental/renter/declare-quota-exhausted",
+        {
+          startTrigger: trigger,
+          triggerConfidence: "manual",
+          renterLaneProvider: "antigravity",
+          renterLaneExhaustedAt: "2026-05-11T09:55:00.000Z",
+        },
+      );
+      assert.equal(res.status, 400);
+      assert.match(
+        ((res.body as { error?: string })?.error ?? "") as string,
+        /quota_exhausted/,
+      );
+    }
+    assert.equal(store.size(), 0, "rejected declarations are not stored");
+  });
+
   it("rejects bad enum value (startTrigger) with 400", async () => {
     const res = await reqJson(
       server!.port,

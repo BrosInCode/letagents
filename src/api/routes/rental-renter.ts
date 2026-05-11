@@ -547,11 +547,22 @@ export function registerRentalRenterRoutes(
 
       const ctx = triggerContext.value;
       // Manual-declare semantics: the renter is asserting their own
-      // lane is exhausted. Require the same fields a quota_exhausted
-      // session-create would require so the GET /quota-status payload
-      // can populate everything the next session-create needs.
+      // lane is exhausted. The endpoint is /declare-quota-exhausted,
+      // so only the `quota_exhausted` start_trigger value is
+      // semantically valid here — other triggers (user_initiated /
+      // scheduled / task_handoff) describe different intents and
+      // shouldn't be stored as a quota-exhausted state mirror.
+      // Require the same fields a quota_exhausted session-create
+      // would require so the GET /quota-status payload can populate
+      // everything the next session-create needs.
       if (!ctx.startTrigger) {
         return res.status(400).json({ error: "startTrigger is required" });
+      }
+      if (ctx.startTrigger !== "quota_exhausted") {
+        return res.status(400).json({
+          error:
+            "startTrigger must be 'quota_exhausted' on the declare-quota-exhausted endpoint",
+        });
       }
       if (!ctx.triggerConfidence) {
         return res.status(400).json({ error: "triggerConfidence is required" });
