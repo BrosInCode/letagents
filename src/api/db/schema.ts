@@ -223,6 +223,9 @@ export const rental_sessions = pgTable(
     renter_lane_recovered_at: timestamp("renter_lane_recovered_at", {
       withTimezone: true,
     }),
+    // Heartbeat / liveness (§18.3)
+    heartbeat_count: integer("heartbeat_count").notNull().default(0),
+    last_heartbeat_at: timestamp("last_heartbeat_at", { withTimezone: true }),
     // Timestamps
     started_at: timestamp("started_at", { withTimezone: true }),
     ended_at: timestamp("ended_at", { withTimezone: true }),
