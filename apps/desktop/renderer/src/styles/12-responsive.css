@@ -8,6 +8,7 @@
   .action-grid,
   .auth-panel,
   .auth-steps,
+  .settings-grid,
   .first-run-github-step,
   .first-run-room-step,
   .mcp-selected-app,
@@ -155,6 +156,21 @@
   .desktop-board-action-button,
   .desktop-board-review-assign select {
     flex: 1 1 100%;
+  }
+
+  .settings-section-header,
+  .settings-room-row {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-section-actions,
+  .settings-room-actions {
+    grid-auto-flow: row;
+    justify-content: stretch;
+  }
+
+  .settings-room-actions .ghost-button {
+    width: 100%;
   }
 }
 

@@ -38,6 +38,7 @@
       :project-entries="projectEntries"
       :system-entries="systemEntries"
       :workers-entry="workersEntry"
+      :settings-entry="settingsEntry"
       :diagnostics-entry="diagnosticsEntry"
       :collapsed-sections="collapsedSections"
       :collapsed-projects="collapsedProjects"
@@ -55,7 +56,7 @@
         :sidebar-mode="sidebarMode"
         :loading="loading"
         @cycle-sidebar="cycleSidebar"
-        @show-system="activeEntry = diagnosticsEntry"
+        @show-system="activeEntry = settingsEntry"
         @refresh="refresh"
       />
 
@@ -118,6 +119,24 @@
       <WorkerStatusView
         v-else-if="activeEntry.id === 'system:workers'"
         :workers="workers"
+      />
+
+      <SettingsView
+        v-else-if="activeEntry.id === 'system:settings'"
+        :account-rooms="accountRooms"
+        :app-info="appInfo"
+        :auth-status="authStatus"
+        :busy="loading || authBusy"
+        :feedback="settingsFeedback"
+        :mcp-install-state="mcpInstallState"
+        :room-action-busy-key="settingsRoomActionBusyKey"
+        @delete-room="deleteAccountRoom"
+        @leave-room="leaveAccountRoom"
+        @open-room="openAccountRoomFromSettings"
+        @open-setup="activeEntry = setupEntry"
+        @refresh="refreshSettings"
+        @sign-out="signOut"
+        @start-auth="startAuthFlow"
       />
 
       <DiagnosticsView
@@ -216,6 +235,7 @@ import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.
 import McpInstallOnboardingView from "./components/desktop/content/McpInstallOnboardingView.vue";
 import DiagnosticsView from "./components/desktop/content/DiagnosticsView.vue";
 import RepoStatusView from "./components/desktop/content/RepoStatusView.vue";
+import SettingsView from "./components/desktop/content/SettingsView.vue";
 import WorkerStatusView from "./components/desktop/content/WorkerStatusView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
@@ -257,6 +277,8 @@ const newRoomBusy = ref(false);
 const newRoomFeedback = ref<string | null>(null);
 const newRoomFeedbackState = ref<"info" | "error" | "success">("info");
 const newRoomJoinCode = ref("");
+const settingsFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
+const settingsRoomActionBusyKey = ref<string | null>(null);
 const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
 const firstRunStage = ref<FirstRunWizardStage>("mcp");
@@ -291,6 +313,14 @@ const workersEntry: SystemEntry = {
   sectionLabel: "System",
 };
 
+const settingsEntry: SystemEntry = {
+  id: "system:settings",
+  type: "system",
+  title: "Settings",
+  description: "Account and rooms",
+  sectionLabel: "System",
+};
+
 const diagnosticsEntry: SystemEntry = {
   id: "system:diagnostics",
   type: "system",
@@ -299,7 +329,7 @@ const diagnosticsEntry: SystemEntry = {
   sectionLabel: "System",
 };
 
-const systemEntries: SystemEntry[] = [setupEntry, repositoryEntry, workersEntry, diagnosticsEntry];
+const systemEntries: SystemEntry[] = [setupEntry, repositoryEntry, workersEntry, settingsEntry, diagnosticsEntry];
 
 const repoName = computed(() => {
   return rootRoomSnapshot.value?.room?.displayName
@@ -629,6 +659,23 @@ async function refresh(): Promise<void> {
     await refreshSelectedSnapshot(nextRootRoomSnapshot);
   } finally {
     loading.value = false;
+  }
+}
+
+async function refreshAccountRooms(): Promise<void> {
+  accountRooms.value = await window.letagentsDesktop.room.listAccountRooms?.().catch(() => []) || [];
+}
+
+async function refreshSettings(): Promise<void> {
+  settingsFeedback.value = { message: "Refreshing account rooms...", state: "info" };
+  try {
+    await refresh();
+    settingsFeedback.value = { message: "Settings refreshed.", state: "success" };
+  } catch (error) {
+    settingsFeedback.value = {
+      message: error instanceof Error ? error.message : "Settings could not refresh.",
+      state: "error",
+    };
   }
 }
 
@@ -1162,6 +1209,92 @@ function openRoomSnapshot(
   selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
   rememberRootRoomSnapshot(snapshot, options);
   activeEntry.value = currentParentRoom.value;
+}
+
+function settingsRoomActionKey(action: "delete" | "leave", room: DesktopAccountRoomEntry): string {
+  return `${action}:${room.roomIdentifier}`;
+}
+
+function forgetRecentRootRoom(roomIdentifier: string): void {
+  const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!normalizedRoomIdentifier) return;
+  const nextRecentRooms = recentRootRooms.value.filter(
+    (room) => normalizeRoomIdentifier(room.identifier) !== normalizedRoomIdentifier
+  );
+  recentRootRooms.value = nextRecentRooms;
+  rememberRecentRootRooms(recentRootRoomsStorageKey, nextRecentRooms);
+}
+
+async function openAccountRoomFromSettings(room: DesktopAccountRoomEntry): Promise<void> {
+  settingsFeedback.value = { message: `Opening ${room.displayName}...`, state: "info" };
+  loading.value = true;
+  try {
+    const snapshot = await window.letagentsDesktop.room.getSnapshot(room.roomIdentifier);
+    openRoomSnapshot(snapshot, { meta: room.role === "admin" ? "Admin" : "Account room" });
+    settingsFeedback.value = null;
+  } catch (error) {
+    settingsFeedback.value = {
+      message: error instanceof Error ? error.message : `Could not open ${room.displayName}.`,
+      state: "error",
+    };
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function leaveAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
+  if (!window.confirm(`Leave ${room.displayName}? It will be removed from your account room list.`)) {
+    return;
+  }
+
+  settingsRoomActionBusyKey.value = settingsRoomActionKey("leave", room);
+  settingsFeedback.value = { message: `Leaving ${room.displayName}...`, state: "info" };
+  try {
+    await window.letagentsDesktop.room.leaveAccountRoom(room.roomIdentifier);
+    forgetRecentRootRoom(room.roomIdentifier);
+    await refreshAccountRooms();
+    settingsFeedback.value = { message: `Left ${room.displayName}.`, state: "success" };
+  } catch (error) {
+    settingsFeedback.value = {
+      message: error instanceof Error ? error.message : `Could not leave ${room.displayName}.`,
+      state: "error",
+    };
+  } finally {
+    settingsRoomActionBusyKey.value = null;
+  }
+}
+
+async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
+  if (!window.confirm(`Delete ${room.displayName}? This removes the room and its focus rooms for everyone.`)) {
+    return;
+  }
+
+  settingsRoomActionBusyKey.value = settingsRoomActionKey("delete", room);
+  settingsFeedback.value = { message: `Deleting ${room.displayName}...`, state: "info" };
+  try {
+    await window.letagentsDesktop.room.deleteAccountRoom(room.roomIdentifier);
+    forgetRecentRootRoom(room.roomIdentifier);
+    accountRooms.value = accountRooms.value.filter(
+      (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
+    );
+
+    if (normalizeRoomIdentifier(selectedRootRoomIdentifier.value) === normalizeRoomIdentifier(room.roomIdentifier)) {
+      selectedRootRoomIdentifier.value = null;
+      rootRoomSnapshot.value = null;
+      selectedSnapshot.value = null;
+      activeEntry.value = settingsEntry;
+    }
+
+    await refreshAccountRooms();
+    settingsFeedback.value = { message: `Deleted ${room.displayName}.`, state: "success" };
+  } catch (error) {
+    settingsFeedback.value = {
+      message: error instanceof Error ? error.message : `Could not delete ${room.displayName}.`,
+      state: "error",
+    };
+  } finally {
+    settingsRoomActionBusyKey.value = null;
+  }
 }
 
 async function createInviteRoom(): Promise<void> {

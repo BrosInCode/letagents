@@ -192,15 +192,15 @@
       </button>
       <button
         class="sidebar-icon-button"
-        :data-active="activeEntry.id === diagnosticsEntry.id"
+        :data-active="activeEntry.id === settingsEntry.id"
         type="button"
-        data-testid="rail-system"
-        aria-label="System"
-        title="System"
-        @click="$emit('select-entry', diagnosticsEntry)"
+        data-testid="rail-settings"
+        aria-label="Settings"
+        title="Settings"
+        @click="$emit('select-entry', settingsEntry)"
       >
         <svg viewBox="0 0 20 20" aria-hidden="true">
-          <path :d="sidebarIconPath('system')" />
+          <path :d="sidebarIconPath('settings')" />
         </svg>
       </button>
     </div>
@@ -218,6 +218,7 @@ const props = defineProps<{
   projectEntries: ProjectGroup[];
   systemEntries: SystemEntry[];
   workersEntry: SystemEntry;
+  settingsEntry: SystemEntry;
   diagnosticsEntry: SystemEntry;
   collapsedSections: {
     pinned: boolean;
@@ -245,13 +246,14 @@ const sidebarSummary = computed(() => {
   return `${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}`;
 });
 
-function sidebarIconPath(icon: "agents" | "chevron" | "pin" | "plus" | "room" | "system"): string {
+function sidebarIconPath(icon: "agents" | "chevron" | "pin" | "plus" | "room" | "settings" | "system"): string {
   const paths = {
     agents: "M6.75 8.25a2.25 2.25 0 1 0 0-4.5 2.25 2.25 0 0 0 0 4.5Zm6.5 0a2.25 2.25 0 1 0 0-4.5 2.25 2.25 0 0 0 0 4.5ZM3.25 15.5c.45-2.28 1.82-3.42 4.1-3.42s3.65 1.14 4.1 3.42m-1.2-3.42c.55-.58 1.35-.87 2.4-.87 2.03 0 3.27 1.06 3.72 3.18",
     chevron: "M7.5 4.75 12.75 10 7.5 15.25",
     pin: "M10.75 2.75 15 7l-2.2 2.2.35 4.15-1.3 1.3-3.15-3.15-3.95 3.95-.2-.2 3.95-3.95-3.15-3.15 1.3-1.3 4.15.35 1.95-2.45Z",
     plus: "M10 4.5v11M4.5 10h11",
     room: "M3.5 9.25 10 4l6.5 5.25M5.25 8.75v6.75h9.5V8.75",
+    settings: "M5 6.25h10M8 6.25a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm7 7.5H5m10 0a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0Z",
     system: "M10 3.5v2m0 9v2m6.5-6.5h-2m-9 0h-2m11.1-4.6-1.42 1.42M6.82 13.18 5.4 14.6m9.2 0-1.42-1.42M6.82 6.82 5.4 5.4M7.25 10a2.75 2.75 0 1 0 5.5 0 2.75 2.75 0 0 0-5.5 0Z",
   };
   return paths[icon];
@@ -261,6 +263,7 @@ function systemIconPath(item: SystemEntry): string {
   if (item.id === "system:workers") return sidebarIconPath("agents");
   if (item.id === "system:repos") return "M4 5.25h12v9.5H4zM6.5 7.75h7M6.5 10h5M6.5 12.25h3.5";
   if (item.id === "system:setup") return "M4.5 10.25 8 13.75 15.5 5.75";
+  if (item.id === "system:settings") return sidebarIconPath("settings");
   return sidebarIconPath("system");
 }
 </script>

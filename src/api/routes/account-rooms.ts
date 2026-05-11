@@ -1,6 +1,8 @@
 import type { Express } from "express";
 
 import {
+  archiveAccountRoomForAccount,
+  deleteAccountRoomForAccount,
   getAccountRoomsForAccount,
   type AccountRoomListEntry,
   type AccountRoomListFocusRoom,
@@ -16,9 +18,25 @@ export interface AccountRoomRouteDeps {
       includeArchived?: boolean;
     }
   ): Promise<AccountRoomListEntry[]>;
+  archiveAccountRoomForAccount(input: {
+    accountId: string;
+    roomId: string;
+    login?: string | null;
+  }): Promise<{ room_id: string; archived: true } | null>;
+  deleteAccountRoomForAccount(input: {
+    accountId: string;
+    roomId: string;
+  }): Promise<{
+    room_id: string;
+    deleted: boolean;
+    error?: "not_found" | "forbidden";
+    reason?: string;
+  }>;
 }
 
 const defaultDeps: AccountRoomRouteDeps = {
+  archiveAccountRoomForAccount,
+  deleteAccountRoomForAccount,
   getAccountRoomsForAccount,
 };
 
@@ -55,10 +73,17 @@ function toAccountRoomResponse(room: AccountRoomListEntry): Record<string, unkno
     source: room.source,
     pinned: room.pinned,
     archived: room.archived,
+    can_leave: room.can_leave,
+    can_delete: room.can_delete,
+    delete_reason: room.delete_reason,
     first_opened_at: room.first_opened_at,
     last_opened_at: room.last_opened_at,
     focus_rooms: room.focus_rooms.map(toAccountFocusRoomResponse),
   };
+}
+
+function accountRoomIdParam(req: AuthenticatedRequest): string {
+  return decodeURIComponent((req.params as Record<string, string>)[0] || "").trim();
 }
 
 export function registerAccountRoomRoutes(
@@ -79,5 +104,61 @@ export function registerAccountRoomRoutes(
     });
 
     res.json({ rooms: rooms.map(toAccountRoomResponse) });
+  });
+
+  app.post(/^\/account\/rooms\/(.+)\/leave$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const roomId = accountRoomIdParam(req);
+    if (!roomId) {
+      res.status(400).json({ error: "Room identifier is required" });
+      return;
+    }
+
+    const result = await deps.archiveAccountRoomForAccount({
+      accountId: req.sessionAccount.account_id,
+      roomId,
+      login: req.sessionAccount.login,
+    });
+
+    if (!result) {
+      res.status(404).json({ error: "Room not found" });
+      return;
+    }
+
+    res.json(result);
+  });
+
+  app.delete(/^\/account\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const roomId = accountRoomIdParam(req);
+    if (!roomId) {
+      res.status(400).json({ error: "Room identifier is required" });
+      return;
+    }
+
+    const result = await deps.deleteAccountRoomForAccount({
+      accountId: req.sessionAccount.account_id,
+      roomId,
+    });
+
+    if (result.error === "not_found") {
+      res.status(404).json({ error: result.reason || "Room not found" });
+      return;
+    }
+
+    if (result.error === "forbidden") {
+      res.status(403).json({ error: result.reason || "Room cannot be deleted" });
+      return;
+    }
+
+    res.json(result);
   });
 }
