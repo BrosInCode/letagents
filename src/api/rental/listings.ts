@@ -8,7 +8,7 @@
  */
 
 import crypto from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { rental_listings } from "../db/schema.js";
 
@@ -245,6 +245,17 @@ export async function publicListings(
   if (filters.modelLabel) {
     conditions.push(eq(rental_listings.model_label, filters.modelLabel));
   }
+  if (filters.mode) {
+    // Postgres JSONB containment: supported_modes is a jsonb array of
+    // strings such as ["scoped", "trusted_open"]. Push the filter into
+    // SQL so it composes with pagination correctly — applying the
+    // filter after limit/offset (the previous in-memory approach) would
+    // return empty/underfilled pages when matches exist further down.
+    // Matches the existing `@>` jsonb pattern in src/api/db.ts.
+    conditions.push(
+      sql`${rental_listings.supported_modes} @> ${JSON.stringify([filters.mode])}::jsonb`,
+    );
+  }
 
   const rows = await db
     .select()
@@ -254,14 +265,7 @@ export async function publicListings(
     .limit(limit)
     .offset(offset);
 
-  // Filter `mode` in memory because supported_modes is a jsonb string[]
-  // and varies in shape across drizzle dialects. Cheap: at most `limit`
-  // rows are returned from SQL.
-  const modeFiltered = filters.mode
-    ? rows.filter((row) => Array.isArray(row.supported_modes) && (row.supported_modes as string[]).includes(filters.mode!))
-    : rows;
-
-  return modeFiltered.map(redactPublicListing);
+  return rows.map(redactPublicListing);
 }
 
 /**

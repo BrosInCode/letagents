@@ -28,6 +28,17 @@ const { buildInMemoryListingsRateLimiter, registerRentalRenterRoutes } = await i
   "../routes/rental-renter.js"
 );
 
+// Lazy-imported pieces used to introspect the generated SQL without
+// touching a real database. drizzle's `.toSQL()` returns the prepared
+// statement + params for any query built from its query builder, so we
+// can verify that the `mode` filter is part of the WHERE clause (i.e.
+// applied before pagination) and not a post-hoc array filter.
+const { sql: drizzleSql, and: drizzleAnd, eq: drizzleEq, desc: drizzleDesc } = await import(
+  "drizzle-orm"
+);
+const { rental_listings: rentalListingsTable } = await import("../db/schema.js");
+const { db: drizzleDb } = await import("../db/client.js");
+
 // ===== Pure unit tests =====
 
 describe("clampPageLimit", () => {
@@ -141,6 +152,62 @@ describe("redactPublicListing", () => {
     assert.equal(redacted.modelLabel, null);
     assert.equal(redacted.quotaLaneLabel, null);
     assert.equal(redacted.lrtEstimate, null);
+  });
+});
+
+describe("publicListings SQL composition", () => {
+  // These tests rebuild the WHERE clause the way publicListings does
+  // and verify the generated SQL via drizzle's .toSQL() introspection.
+  // No database is touched. The point is to lock in the contract that
+  // the `mode` filter is part of the WHERE clause (pre-pagination), not
+  // applied after `limit/offset` — which would yield empty/underfilled
+  // pages when matches exist further down.
+
+  function buildPublicListingsQuery(mode?: "scoped" | "trusted_open") {
+    const conditions = [
+      drizzleEq(rentalListingsTable.verification_status, "verified"),
+      drizzleEq(rentalListingsTable.status, "active"),
+    ];
+    if (mode) {
+      conditions.push(
+        drizzleSql`${rentalListingsTable.supported_modes} @> ${JSON.stringify([mode])}::jsonb`,
+      );
+    }
+    return drizzleDb
+      .select()
+      .from(rentalListingsTable)
+      .where(drizzleAnd(...conditions))
+      .orderBy(drizzleDesc(rentalListingsTable.updated_at))
+      .limit(25)
+      .offset(0);
+  }
+
+  it("includes the @> jsonb containment fragment when mode is passed", () => {
+    const compiled = buildPublicListingsQuery("trusted_open").toSQL();
+    assert.match(compiled.sql, /@>/, "mode filter should be present in the WHERE clause SQL");
+    assert.match(compiled.sql, /::jsonb/, "the JSON literal should be cast to jsonb");
+    // The mode value should be a parameter, not interpolated literally.
+    assert.ok(
+      compiled.params.includes('["trusted_open"]'),
+      "expected the JSON array parameter to be sent",
+    );
+  });
+
+  it("omits the @> fragment when mode is not passed", () => {
+    const compiled = buildPublicListingsQuery(undefined).toSQL();
+    assert.equal(compiled.sql.includes("@>"), false, "no jsonb containment when mode is omitted");
+  });
+
+  it("places mode condition before LIMIT (so pagination respects the filter)", () => {
+    const compiled = buildPublicListingsQuery("scoped").toSQL();
+    const indexOfContainment = compiled.sql.indexOf("@>");
+    const indexOfLimit = compiled.sql.toLowerCase().indexOf("limit ");
+    assert.ok(indexOfContainment >= 0, "expected @> in the generated SQL");
+    assert.ok(indexOfLimit >= 0, "expected LIMIT in the generated SQL");
+    assert.ok(
+      indexOfContainment < indexOfLimit,
+      `mode filter must appear before LIMIT (got @> at ${indexOfContainment}, LIMIT at ${indexOfLimit})`,
+    );
   });
 });
 
