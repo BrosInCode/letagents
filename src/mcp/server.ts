@@ -87,6 +87,11 @@ import {
   type RoomAgentSessionKind,
 } from "../shared/agent-presence.js";
 import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
+import {
+  rentalAccept,
+  rentalDecline,
+  rentalListRequests,
+} from "./rental-tools.js";
 
 // ---------------------------------------------------------------------------
 // Room State
@@ -4402,6 +4407,106 @@ server.tool(
     }
   }
 );
+
+// ===========================================================================
+// ===== RENTAL TOOLS (p3.1) =================================================
+// ===========================================================================
+//
+// MCP tools that let an agent acting as a Rent an Agent provider poll for
+// incoming session requests and accept/decline them. All three wrap
+// /api/rental/provider/* and are gated server-side by LETAGENTS_RENT_ENABLED.
+//
+// Handler logic lives in `./rental-tools.ts` so it can be unit-tested without
+// booting an MCP transport. The registrations here are thin wrappers that
+// inject the live `apiCall` and shape the response into the MCP content
+// envelope.
+//
+// Spec refs: §6 (provider listing flow), §18.2 (accept/decline state
+// transitions). Plan: docs/RENT_AN_AGENT_TASK_BREAKDOWN.md PR p3.1.
+
+const rentalToolDeps = { apiCall };
+
+server.tool(
+  "rental_list_requests",
+  "List incoming Rent an Agent session requests for the authenticated provider. Returns an array of session objects in the 'requested' state. Use this to poll while you are available to host renters.",
+  {},
+  async () => {
+    const result = await rentalListRequests(rentalToolDeps);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "rental_accept",
+  "Accept a pending Rent an Agent session request. Idempotent: pass a stable idempotency_key so repeated calls with the same key for the same session_id are safe to retry. Transitions the session from 'requested' to 'accepted' per spec §18.2.",
+  {
+    session_id: z
+      .string()
+      .describe("Rental session id (e.g. 'rsess_*'). Get this from rental_list_requests."),
+    idempotency_key: z
+      .string()
+      .describe(
+        "Caller-chosen idempotency key. Repeating the same key for the same session is safe."
+      ),
+  },
+  async ({ session_id, idempotency_key }) => {
+    const result = await rentalAccept(rentalToolDeps, {
+      session_id,
+      idempotency_key,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "rental_decline",
+  "Decline a pending Rent an Agent session request. Idempotent via idempotency_key. Transitions the session from 'requested' to 'cancelled' per spec §18.2. An optional reason is forwarded to the renter for context.",
+  {
+    session_id: z
+      .string()
+      .describe("Rental session id to decline."),
+    idempotency_key: z
+      .string()
+      .describe("Caller-chosen idempotency key. Repeating the same key is safe."),
+    reason: z
+      .string()
+      .optional()
+      .describe("Optional short reason shown to the renter (e.g. 'busy', 'out of quota')."),
+  },
+  async ({ session_id, idempotency_key, reason }) => {
+    const result = await rentalDecline(rentalToolDeps, {
+      session_id,
+      idempotency_key,
+      reason,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// ===========================================================================
+// ===== END RENTAL TOOLS ===================================================
+// ===========================================================================
 
 // -- check_repo_visibility --------------------------------------------------
 
