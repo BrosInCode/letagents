@@ -56,6 +56,51 @@ test("parseSessionFile produces exactly the 4 assistant turns from the fixture",
   assert.equal(turns[2]?.reasoningTokens, 150);
 });
 
+test("parser reads model from top-level OR nested message.model (real Claude Code JSONL)", async () => {
+  // Real Claude Code JSONL puts model on `message.model`. Our older
+  // fixture had it top-level. The parser accepts either form,
+  // preferring top-level when both are present.
+  //
+  // Fixture turns:
+  //   turn[0] — top-level model only
+  //   turn[1] — message.model only
+  //   turn[2] — message.model only (with reasoning_tokens)
+  //   turn[3] — message.model only
+  const adapter = new ClaudeCodeAdapter();
+  const turns = await adapter.parseSessionFile(FIXTURE_PATH);
+  for (const turn of turns) {
+    assert.equal(
+      turn.model,
+      "claude-3.7-sonnet",
+      "every assistant turn should resolve to the same model regardless of placement",
+    );
+  }
+});
+
+test("parser writes a synthetic conflicting-model file and prefers top-level", async () => {
+  // When both top-level `turn.model` and nested `turn.message.model` are
+  // present, the parser should prefer the top-level value. This is the
+  // documented precedence in the ClaudeCodeAssistantTurn JSDoc.
+  const { writeFile, mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const tmpDir = await mkdtemp(join(tmpdir(), "letagents-rent-test-"));
+  const tmpPath = join(tmpDir, "conflict.jsonl");
+  const conflictLine = JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-05-11T10:00:00.000Z",
+    model: "top-level-wins",
+    message: {
+      model: "nested-loses",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  });
+  await writeFile(tmpPath, conflictLine + "\n", "utf8");
+  const adapter = new ClaudeCodeAdapter();
+  const turns = await adapter.parseSessionFile(tmpPath);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.model, "top-level-wins");
+});
+
 test("sumTurns matches expected totals across the fixture", async () => {
   const adapter = new ClaudeCodeAdapter();
   const turns = await adapter.parseSessionFile(FIXTURE_PATH);

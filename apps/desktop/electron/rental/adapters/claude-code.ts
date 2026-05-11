@@ -60,12 +60,18 @@ export const CLAUDE_CODE_CAPABILITIES: AdapterCapabilities = Object.freeze({
 /**
  * Shape of one assistant turn we care about. Many other fields exist
  * on the line; we only require these.
+ *
+ * Note: real Claude Code JSONL entries put the model identifier on
+ * `message.model`, not on the top-level entry. Some local tooling and
+ * earlier formats expose it at `turn.model`. We accept either,
+ * preferring the top-level value when both are present.
  */
 interface ClaudeCodeAssistantTurn {
   type: "assistant";
   timestamp?: string;
   model?: string;
   message?: {
+    model?: string;
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
@@ -309,9 +315,14 @@ function parseAssistantTurn(entry: unknown): ParsedTurn | null {
   const turn = entry as unknown as ClaudeCodeAssistantTurn;
   const usage = turn.message?.usage;
   if (!usage) return null;
+  // Prefer top-level `turn.model` (legacy / our test fixture) but fall
+  // back to `turn.message.model` which is where real Claude Code JSONL
+  // entries put it. Either way, end up with `string | null`.
+  const topLevelModel = typeof turn.model === "string" ? turn.model : null;
+  const messageModel = typeof turn.message?.model === "string" ? turn.message.model : null;
   return {
     timestamp: typeof turn.timestamp === "string" ? turn.timestamp : null,
-    model: typeof turn.model === "string" ? turn.model : null,
+    model: topLevelModel ?? messageModel,
     inputTokens: numberOr(usage.input_tokens, 0),
     outputTokens: numberOr(usage.output_tokens, 0),
     cacheCreationTokens: numberOr(usage.cache_creation_input_tokens, 0),
