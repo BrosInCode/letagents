@@ -4559,7 +4559,7 @@ server.tool(
 
 server.tool(
   "rental_report_usage",
-  "Forward an already-built IngestUsageReport to the rental usage ingest endpoint (POST /api/rental/sessions/:id/usage). The desktop meter adapter is the canonical source of these reports, so MCP-side use should be limited to tool-mediated steps the desktop adapter pipeline does not observe. See spec §17.7 / §19.6 for the report shape; the server validates and rejects malformed input. Note: Budget Sentinel reconciliation (applyReconciliation) is handled server-side by the ingest route, not by this MCP tool.",
+  "Forward an already-built IngestUsageReport to the rental usage ingest endpoint (POST /api/rental/sessions/:id/usage). The desktop meter adapter is the canonical source of these reports, so MCP-side use should be limited to tool-mediated steps the desktop adapter pipeline does not observe. See spec §17.7 / §19.6 for the report shape; the server validates and rejects malformed input. SCOPE: this tool ONLY persists to rental_usage_meters; it does NOT advance Budget Sentinel state. Callers that need budget gates to update (e.g. trigger budget.reconciled / budget.exhausted events) must separately invoke the Budget Sentinel reconcile endpoint (POST /api/rental/sessions/:id/budget/reconcile — p2.8b) or a future rental_reconcile_budget MCP tool.",
   {
     session_id: z.string().describe("Rental session id to report against."),
     report: z
