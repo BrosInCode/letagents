@@ -1347,6 +1347,9 @@ registerRentalProviderRoutes(app, {
   declineSession,
   listProviderRequests,
 });
+// Register internal routes before renter routes so the shared terminal
+// cancel endpoint supports either renter or provider callers.
+registerRentalInternalRoutes(app);
 registerRentalRenterRoutes(app, {
   publicListings,
   shouldAllowListingsQuery: buildInMemoryListingsRateLimiter(),
@@ -1355,7 +1358,6 @@ registerRentalRenterRoutes(app, {
   getSessionById,
   cancelSession,
 });
-registerRentalInternalRoutes(app);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST;
