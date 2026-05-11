@@ -234,6 +234,431 @@ export interface DesktopTaskReviewWorkerActionInput {
   reason?: string | null;
 }
 
+export type DesktopRentalMode = "scoped" | "trusted_open";
+export type DesktopRentalContinuityMode = "smart_handoff" | "full_transcript";
+export type DesktopRentalContinuityIngestDepth = "tier_1" | "tier_2";
+/** Launch IDEs plus future adapter keys once a provider proves quota reporting. */
+export type DesktopRentalIdeKind = "claude_code" | "codex" | "antigravity" | "cursor" | (string & {});
+export type DesktopRentalListingStatus = "active" | "paused" | "disabled" | "setup_required";
+export type DesktopRentalVerificationStatus = "verified" | "partially_verified" | "experimental" | "unreachable";
+export type DesktopRentalMeterConfidence =
+  | "official_exact"
+  | "local_exact"
+  | "derived"
+  | "calibrated"
+  | "estimated"
+  | "weak_estimate"
+  | "unknown";
+export type DesktopRentalNativeQuotaUnit =
+  | "tokens"
+  | "credits"
+  | "usd"
+  | "requests"
+  | "percent_window"
+  | "time"
+  | "unknown";
+export type DesktopRentalReadinessStatus = "ready" | "degraded" | "blocked" | "unknown";
+export type DesktopRentalSessionStatus =
+  | "requested"
+  | "accepted"
+  | "provisioning"
+  | "active"
+  | "blocked"
+  | "patch_review"
+  | "pr_opened"
+  | "budget_exhausted"
+  | "stale"
+  | "completed"
+  | "cancelled"
+  | "expired"
+  | "failed";
+export type DesktopRentalStartTrigger = "quota_exhausted" | "user_initiated" | "scheduled" | "task_handoff";
+export type DesktopRentalTriggerConfidence = "exact" | "inferred" | "manual";
+export type DesktopRentalActivitySource = "agent" | "tool" | "patch_gate" | "system" | "renter" | "provider";
+export type DesktopRentalActivityVisibility = "renter" | "provider" | "both" | "internal" | "rental_visible";
+export type DesktopRentalExposureType = "file" | "search_result" | "directory_listing" | "command_output";
+export type DesktopRentalSecretScanStatus = "passed" | "redacted" | "blocked";
+export type DesktopRentalPatchSource = "signed_change_journal" | "explicit_patch" | "raw_diff";
+export type DesktopRentalPatchGateStatus =
+  | "pending"
+  | "passed"
+  | "passed_with_warnings"
+  | "needs_renter_approval"
+  | "rejected"
+  | "needs_revision"
+  | "timed_out";
+export type DesktopRentalContextApprovalStatus = "pending" | "approved" | "denied" | "expired";
+
+export interface DesktopRentalQuotaSnapshot {
+  id: string | null;
+  provider: DesktopRentalIdeKind;
+  modelLabel: string | null;
+  quotaLaneId: string | null;
+  quotaLaneLabel: string | null;
+  nativeUnit: DesktopRentalNativeQuotaUnit;
+  nativeUsed: number | null;
+  nativeRemaining: number | null;
+  nativeLimit: number | null;
+  nativeResetAt: string | null;
+  nativeExpiresAt: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheCreationTokens: number | null;
+  cacheReadTokens: number | null;
+  reasoningTokens: number | null;
+  lrtEstimate: number | null;
+  lrtRemaining: number | null;
+  confidence: DesktopRentalMeterConfidence;
+  source: string | null;
+  observedAt: string | null;
+  stale: boolean;
+  raw: Record<string, unknown> | null;
+}
+
+export interface DesktopRentalUsageSnapshot {
+  sessionId: string;
+  lrtLimit: number | null;
+  lrtReserved: number;
+  lrtUsed: number;
+  lrtRemaining: number | null;
+  budgetStopThreshold: number | null;
+  timeLimitMinutes: number | null;
+  startedAt: string | null;
+  endsAt: string | null;
+  quotaSnapshot: DesktopRentalQuotaSnapshot | null;
+  updatedAt: string | null;
+}
+
+export interface DesktopRentalProviderReadinessCheck {
+  id: string;
+  label: string;
+  status: "passed" | "warning" | "failed" | "unknown";
+  detail: string | null;
+}
+
+export interface DesktopRentalProviderReadiness {
+  status: DesktopRentalReadinessStatus;
+  summary: string | null;
+  blockers: string[];
+  warnings: string[];
+  badges: string[];
+  checks: DesktopRentalProviderReadinessCheck[];
+  lastCheckedAt: string | null;
+}
+
+export interface DesktopRentalPreflightResult {
+  listingId: string | null;
+  provider: DesktopRentalIdeKind;
+  readiness: DesktopRentalProviderReadiness;
+  quotaSnapshot: DesktopRentalQuotaSnapshot | null;
+  canPublish: boolean;
+  ranAt: string;
+}
+
+export interface DesktopRentalListing {
+  id: string;
+  providerAccountId: string | null;
+  providerDisplayName: string | null;
+  displayName: string;
+  status: DesktopRentalListingStatus;
+  verificationStatus: DesktopRentalVerificationStatus;
+  readinessBadges: string[];
+  readiness: DesktopRentalProviderReadiness | null;
+  ideKind: DesktopRentalIdeKind;
+  modelLabel: string | null;
+  quotaLaneId: string | null;
+  quotaLaneLabel: string | null;
+  meterConfidence: DesktopRentalMeterConfidence;
+  nativeQuotaUnit: DesktopRentalNativeQuotaUnit;
+  lastNativeQuotaSnapshot: DesktopRentalQuotaSnapshot | null;
+  lastLrtEstimate: number | null;
+  lastQuotaResetAt: string | null;
+  verifiedAgentFingerprintId: string | null;
+  supportedModes: DesktopRentalMode[];
+  maxConcurrentSessions: number;
+  activeSessionCount: number;
+  defaultLrtLimit: number | null;
+  defaultTimeLimitMinutes: number | null;
+  manualAcceptRequired: boolean;
+  createdAt: string | null;
+  updatedAt: string;
+}
+
+export interface DesktopRentalListingQuery {
+  roomIdentifier?: string | null;
+  ideKind?: DesktopRentalIdeKind | null;
+  mode?: DesktopRentalMode | null;
+  includeUnavailable?: boolean;
+}
+
+export interface DesktopRentalListingInput {
+  displayName: string;
+  ideKind: DesktopRentalIdeKind;
+  modelLabel?: string | null;
+  quotaLaneId?: string | null;
+  quotaLaneLabel?: string | null;
+  supportedModes?: DesktopRentalMode[];
+  defaultLrtLimit?: number | null;
+  defaultTimeLimitMinutes?: number | null;
+  manualAcceptRequired?: boolean;
+}
+
+export interface DesktopRentalListingPatch {
+  displayName?: string;
+  status?: DesktopRentalListingStatus;
+  modelLabel?: string | null;
+  quotaLaneId?: string | null;
+  quotaLaneLabel?: string | null;
+  supportedModes?: DesktopRentalMode[];
+  defaultLrtLimit?: number | null;
+  defaultTimeLimitMinutes?: number | null;
+  manualAcceptRequired?: boolean;
+}
+
+export interface DesktopRentalAgentAvailability {
+  actorLabel: string | null;
+  agentKey: string | null;
+  agentSessionId: string | null;
+  displayName: string;
+  listingId: string | null;
+  listingStatus: DesktopRentalListingStatus | null;
+  availability: "available" | "rented" | "offline" | "setup_required" | "not_listed";
+  ideKind: DesktopRentalIdeKind | null;
+  modelLabel: string | null;
+  activeSessionId: string | null;
+  lrtRemaining: number | null;
+  quotaResetAt: string | null;
+  meterConfidence: DesktopRentalMeterConfidence | null;
+  badges: string[];
+}
+
+export interface DesktopRentalScope {
+  includePaths: string[];
+  excludePaths: string[];
+  protectedPaths: string[];
+  notes: string | null;
+}
+
+export interface DesktopRentalPolicy {
+  maxLrt: number | null;
+  maxDurationMinutes: number | null;
+  maxPatchBytes: number | null;
+  allowCommands: boolean;
+  allowNetwork: boolean;
+  requirePatchGate: boolean;
+}
+
+export interface DesktopRentalQuotaLease {
+  id: string;
+  laneId: string | null;
+  lrtLimit: number | null;
+  lrtReserved: number;
+  lrtUsed: number;
+  expiresAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface DesktopRentalStartInput {
+  listingId: string;
+  roomIdentifier: string;
+  taskTitle: string;
+  taskPrompt: string;
+  repoProvider?: string | null;
+  repoOwner?: string | null;
+  repoName?: string | null;
+  baseBranch?: string | null;
+  mode: DesktopRentalMode;
+  continuityMode: DesktopRentalContinuityMode;
+  continuityIngestDepth?: DesktopRentalContinuityIngestDepth;
+  approvedScope: DesktopRentalScope;
+  policy: DesktopRentalPolicy;
+  startTrigger?: DesktopRentalStartTrigger;
+  triggerConfidence?: DesktopRentalTriggerConfidence;
+  renterQuotaSignal?: Record<string, unknown> | null;
+}
+
+export interface DesktopRentalSession {
+  id: string;
+  listingId: string;
+  renterAccountId: string | null;
+  providerAccountId: string | null;
+  roomIdentifier: string | null;
+  repoProvider: string | null;
+  repoOwner: string | null;
+  repoName: string | null;
+  baseBranch: string | null;
+  workBranch: string | null;
+  taskTitle: string;
+  taskPrompt: string;
+  mode: DesktopRentalMode;
+  continuityMode: DesktopRentalContinuityMode;
+  continuityIngestDepth: DesktopRentalContinuityIngestDepth;
+  continuityPackId: string | null;
+  status: DesktopRentalSessionStatus;
+  approvedScope: DesktopRentalScope;
+  policy: DesktopRentalPolicy;
+  quotaLease: DesktopRentalQuotaLease | null;
+  nativeQuotaUnit: DesktopRentalNativeQuotaUnit | null;
+  nativeQuotaStartSnapshot: DesktopRentalQuotaSnapshot | null;
+  nativeQuotaLatestSnapshot: DesktopRentalQuotaSnapshot | null;
+  meterConfidence: DesktopRentalMeterConfidence | null;
+  lrtLimit: number | null;
+  lrtReserved: number;
+  lrtUsed: number;
+  lrtRemaining: number | null;
+  budgetStopThreshold: number | null;
+  timeLimitMinutes: number | null;
+  startTrigger: DesktopRentalStartTrigger | null;
+  triggerConfidence: DesktopRentalTriggerConfidence | null;
+  renterLaneExhaustedAt: string | null;
+  renterLaneProvider: string | null;
+  renterLaneModel: string | null;
+  renterLaneRefreshEta: string | null;
+  renterQuotaSignal: Record<string, unknown> | null;
+  renterLaneRecoveredAt: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string;
+}
+
+export interface DesktopRentalRequest {
+  id: string;
+  sessionId: string;
+  listingId: string;
+  status: "pending" | "accepted" | "declined" | "cancelled" | "expired";
+  renterDisplayName: string | null;
+  providerDisplayName: string | null;
+  taskTitle: string;
+  taskPrompt: string;
+  mode: DesktopRentalMode;
+  continuityMode: DesktopRentalContinuityMode;
+  requestedLrtLimit: number | null;
+  requestedTimeLimitMinutes: number | null;
+  createdAt: string | null;
+  expiresAt: string | null;
+  updatedAt: string;
+}
+
+export interface DesktopRentalProviderDashboard {
+  listings: DesktopRentalListing[];
+  activeSessions: DesktopRentalSession[];
+  pendingRequests: DesktopRentalRequest[];
+  readiness: DesktopRentalProviderReadiness;
+  quotaSnapshots: DesktopRentalQuotaSnapshot[];
+  updatedAt: string | null;
+}
+
+export interface DesktopRentalActivityEvent {
+  id: string;
+  sessionId: string;
+  roomIdentifier: string | null;
+  eventType: string;
+  source: DesktopRentalActivitySource;
+  verified: boolean;
+  visibility: DesktopRentalActivityVisibility;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface DesktopRentalExposure {
+  id: string;
+  sessionId: string;
+  path: string;
+  exposureType: DesktopRentalExposureType;
+  reason: string | null;
+  redactionCount: number;
+  secretScanStatus: DesktopRentalSecretScanStatus;
+  requestedBy: string | null;
+  approvedBy: string | null;
+  scopeId: string | null;
+  createdAt: string;
+}
+
+export interface DesktopRentalPatchCheckResult {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "passed" | "warning" | "failed" | "skipped";
+  detail: string | null;
+  completedAt: string | null;
+}
+
+export interface DesktopRentalPatch {
+  id: string;
+  sessionId: string;
+  source: DesktopRentalPatchSource;
+  summary: string | null;
+  diffRef: string | null;
+  diffPreview: string | null;
+  gateStatus: DesktopRentalPatchGateStatus;
+  riskScore: number | null;
+  warnings: string[];
+  checkResults: DesktopRentalPatchCheckResult[];
+  prUrl: string | null;
+  createdAt: string | null;
+  updatedAt: string;
+}
+
+export interface DesktopRentalContextApproval {
+  id: string;
+  sessionId: string;
+  requestType: "read_file" | "search" | "directory_listing" | "command_output" | (string & {});
+  status: DesktopRentalContextApprovalStatus;
+  path: string | null;
+  reason: string | null;
+  redactionCount: number;
+  requestedBy: string | null;
+  decidedBy: string | null;
+  createdAt: string | null;
+  decidedAt: string | null;
+}
+
+export interface DesktopRentalContinuityReceiptSource {
+  kind: "room_state" | "worktree" | "adapter_log" | "tool_hook" | "rate_limit_sidecar" | (string & {});
+  label: string;
+  itemCount: number;
+  redactionCount: number;
+  cap: number | null;
+  preview: string | null;
+}
+
+export interface DesktopRentalContinuityReceipt {
+  id: string;
+  sessionId: string;
+  mode: DesktopRentalContinuityMode;
+  ingestDepth: DesktopRentalContinuityIngestDepth;
+  approved: boolean;
+  sources: DesktopRentalContinuityReceiptSource[];
+  createdAt: string | null;
+  approvedAt: string | null;
+  approvedBy: string | null;
+}
+
+export interface DesktopRentalApi {
+  listListings: (input?: DesktopRentalListingQuery) => Promise<DesktopRentalListing[]>;
+  getProviderDashboard: () => Promise<DesktopRentalProviderDashboard>;
+  createListing: (input: DesktopRentalListingInput) => Promise<DesktopRentalListing>;
+  updateListing: (id: string, input: DesktopRentalListingPatch) => Promise<DesktopRentalListing>;
+  pauseListing: (id: string) => Promise<DesktopRentalListing>;
+  resumeListing: (id: string) => Promise<DesktopRentalListing>;
+  refreshQuota: (id: string) => Promise<DesktopRentalQuotaSnapshot>;
+  runPreflight: (id?: string) => Promise<DesktopRentalPreflightResult>;
+  createSession: (input: DesktopRentalStartInput) => Promise<DesktopRentalSession>;
+  getSession: (id: string) => Promise<DesktopRentalSession>;
+  cancelSession: (id: string) => Promise<DesktopRentalSession>;
+  listProviderRequests: () => Promise<DesktopRentalRequest[]>;
+  acceptRequest: (id: string) => Promise<DesktopRentalSession>;
+  declineRequest: (id: string, reason?: string) => Promise<DesktopRentalRequest>;
+  getActivity: (sessionId: string) => Promise<DesktopRentalActivityEvent[]>;
+  getExposures: (sessionId: string) => Promise<DesktopRentalExposure[]>;
+  getPatches: (sessionId: string) => Promise<DesktopRentalPatch[]>;
+  getUsage: (sessionId: string) => Promise<DesktopRentalUsageSnapshot>;
+  approvePatch: (sessionId: string, patchId: string) => Promise<DesktopRentalPatch>;
+  requestPatchChanges: (sessionId: string, patchId: string, note: string) => Promise<DesktopRentalPatch>;
+  approveContextRequest: (sessionId: string, approvalId: string) => Promise<DesktopRentalContextApproval>;
+  denyContextRequest: (sessionId: string, approvalId: string) => Promise<DesktopRentalContextApproval>;
+}
+
 export interface DesktopParticipantSummary {
   participantKey: string;
   kind: "human" | "agent";
@@ -643,6 +1068,7 @@ export interface DesktopApi {
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
     openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
   };
+  rental?: DesktopRentalApi;
   auth: {
     getStatus: () => Promise<DesktopAuthStatus>;
     startDeviceFlow: (roomIdentifier?: string | null) => Promise<DesktopAuthStartResult>;
