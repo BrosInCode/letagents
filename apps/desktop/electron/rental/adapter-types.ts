@@ -70,6 +70,8 @@ export interface AdapterUsageDelta {
   usd: number;
   toolCalls: number;
   commandRuns: number;
+  filesExposed: number;
+  heartbeats: number;
 }
 
 /** Mirror of `LrtEstimate`. */

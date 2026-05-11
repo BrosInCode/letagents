@@ -53,6 +53,8 @@ export interface SnapshotReportBody {
     usd: number | null;
     toolCalls: number;
     commandRuns: number;
+    filesExposed: number;
+    heartbeats: number;
   };
   lrt: {
     lrtUsed: number;
@@ -122,6 +124,10 @@ export function computeIdempotencyKey(
   h.update(String(delta.toolCalls));
   h.update(":");
   h.update(String(delta.commandRuns));
+  h.update(":");
+  h.update(String(delta.filesExposed));
+  h.update(":");
+  h.update(String(delta.heartbeats));
   h.update("|");
   h.update(String(Math.round(lrt.lrtUsed)));
   return `desktop_${h.digest("hex").slice(0, 32)}`;
@@ -157,6 +163,8 @@ export function buildUsageReport(inputs: ReportSnapshotInputs): SnapshotReportBo
       usd: inputs.delta.usd ?? null,
       toolCalls: inputs.delta.toolCalls,
       commandRuns: inputs.delta.commandRuns,
+      filesExposed: inputs.delta.filesExposed,
+      heartbeats: inputs.delta.heartbeats,
     },
     lrt: {
       lrtUsed: inputs.lrt.lrtUsed,

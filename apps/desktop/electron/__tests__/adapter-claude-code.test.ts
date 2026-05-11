@@ -139,6 +139,8 @@ test("readUsageDeltaFromTurns aggregates turns into an AdapterUsageDelta with ze
   assert.equal(delta.usd, 0);
   assert.equal(delta.toolCalls, 0);
   assert.equal(delta.commandRuns, 0);
+  assert.equal(delta.filesExposed, 0);
+  assert.equal(delta.heartbeats, 0);
 });
 
 test("estimateAvailableLrt computes LRT used via the §17.3 formula and remaining vs calibration", async () => {
@@ -159,6 +161,8 @@ test("estimateAvailableLrt computes LRT used via the §17.3 formula and remainin
     usd: 0,
     toolCalls: 0,
     commandRuns: 0,
+    filesExposed: 0,
+    heartbeats: 0,
   });
 
   const estimate = adapter.estimateAvailableLrt(snapshot, {

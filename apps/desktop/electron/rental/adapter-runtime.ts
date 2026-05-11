@@ -5,7 +5,7 @@
  *
  *   1. Holds a registry of adapter instances by provider key.
  *   2. While `LETAGENTS_RENT_ENABLED` and there's an active rental
- *      session, periodically polls each adapter for a fresh
+ *      session, periodically polls the active adapter source for a fresh
  *      NativeQuotaSnapshot + UsageDelta and ships the result to the
  *      server via the snapshot-reporter from p2.3b.
  *   3. Stops gracefully when the active session ends or the feature
@@ -114,6 +114,8 @@ export interface AdapterSchedulerOptions {
   clearTimer?: (handle: unknown) => void;
   /** Override snapshot-reporter for unit tests. */
   reportSnapshotFn?: typeof reportSnapshot;
+  /** Injectable clock for tests. */
+  now?: () => Date;
 }
 
 export interface AdapterTickResult {
@@ -131,7 +133,7 @@ const DEFAULT_INTERVAL_MS = 30_000;
  * Tick body for one adapter:
  *
  *   1. discoverSources()
- *   2. for each source: readNativeQuota → readUsageDelta(scope)
+ *   2. pick the active source, then readNativeQuota → readUsageDelta(scope)
  *      → estimateAvailableLrt → reportSnapshot
  *   3. record results, invoke onTick(...)
  *
@@ -206,39 +208,43 @@ export class AdapterScheduler {
       return results;
     }
     const report = this.opts.reportSnapshotFn ?? reportSnapshot;
-    for (const source of sources) {
-      try {
-        const snapshot = await adapter.readNativeQuota(source);
-        if (!snapshot) {
-          results.push({ source, snapshot: null, reported: null, error: null });
-          continue;
-        }
-        const delta = await adapter.readUsageDelta(context.scope);
-        const lrt = adapter.estimateAvailableLrt(snapshot, {
-          lrtPerFullWindow: null,
-          sampleCount: 0,
-        });
-        const reported = await report(
-          {
-            sessionId: context.sessionId,
-            snapshot,
-            delta,
-            lrt,
-          },
-          context.reporterConfig,
-        );
-        if (!reported.ok) {
-          this.opts.onError?.(
-            new Error(`reportSnapshot failed: ${reported.status} ${reported.error ?? "unknown"}`),
-            { phase: "reportSnapshot" },
-          );
-        }
-        results.push({ source, snapshot, reported, error: null });
-      } catch (err) {
-        const e = asError(err);
-        this.opts.onError?.(e, { phase: "runAdapterPass" });
-        results.push({ source, snapshot: null, reported: null, error: e });
+    const source = sources[0];
+    if (!source) return results;
+
+    try {
+      const snapshot = await adapter.readNativeQuota(source);
+      if (!snapshot) {
+        results.push({ source, snapshot: null, reported: null, error: null });
+        return results;
       }
+      const rawDelta = await adapter.readUsageDelta(context.scope);
+      const delta = { ...rawDelta, heartbeats: 1 };
+      const lrt = adapter.estimateAvailableLrt(snapshot, {
+        lrtPerFullWindow: null,
+        sampleCount: 0,
+      });
+      const lastHeartbeatAt = (this.opts.now ?? (() => new Date()))().toISOString();
+      const reported = await report(
+        {
+          sessionId: context.sessionId,
+          snapshot,
+          delta,
+          lrt,
+          lastHeartbeatAt,
+        },
+        context.reporterConfig,
+      );
+      if (!reported.ok) {
+        this.opts.onError?.(
+          new Error(`reportSnapshot failed: ${reported.status} ${reported.error ?? "unknown"}`),
+          { phase: "reportSnapshot" },
+        );
+      }
+      results.push({ source, snapshot, reported, error: null });
+    } catch (err) {
+      const e = asError(err);
+      this.opts.onError?.(e, { phase: "runAdapterPass" });
+      results.push({ source, snapshot: null, reported: null, error: e });
     }
     return results;
   }

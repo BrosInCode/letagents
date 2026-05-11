@@ -57,6 +57,8 @@ class StubAdapter implements DesktopMeterAdapter {
     usd: 0,
     toolCalls: 0,
     commandRuns: 0,
+    filesExposed: 0,
+    heartbeats: 0,
   };
   lrt: AdapterLrtEstimate = { lrtUsed: 100, lrtRemaining: null, confidence: "local_exact" };
   discoverCalls = 0;
@@ -99,6 +101,7 @@ function buildScheduler(over: {
   reporter?: (inputs: ReportSnapshotInputs) => Promise<ReportSnapshotResult>;
   onError?: (err: Error, context: { phase: string }) => void;
   intervalMs?: number;
+  now?: () => Date;
 } = {}) {
   const registry = new AdapterRegistry();
   const adapter = new StubAdapter();
@@ -135,6 +138,7 @@ function buildScheduler(over: {
           reporterCalls.push(inputs);
           return { ok: true, status: 201, idempotencyKey: "test-key", body: null, error: null };
         }),
+    now: over.now,
   });
   return {
     scheduler,
@@ -175,7 +179,7 @@ test("tickOnce skips work when no adapter is registered for the context's provid
   assert.equal(reporterCalls.length, 0);
 });
 
-test("tickOnce runs discover → readNativeQuota → readUsageDelta → reportSnapshot for every source", async () => {
+test("tickOnce runs discover → readNativeQuota → readUsageDelta → reportSnapshot for the active source", async () => {
   const { scheduler, adapter, reporterCalls } = buildScheduler();
   const out = await scheduler.tickOnce();
   assert.equal(adapter.discoverCalls, 1);
@@ -186,6 +190,39 @@ test("tickOnce runs discover → readNativeQuota → readUsageDelta → reportSn
   assert.equal(out.length, 1);
   assert.ok(out[0]!.reported?.ok);
   assert.equal(out[0]!.error, null);
+});
+
+test("tickOnce reports only the first discovered source", async () => {
+  const { scheduler, adapter, reporterCalls } = buildScheduler();
+  adapter.sources = [
+    { id: "s1", label: "S1", kind: "jsonl", pathHint: "/tmp/a.jsonl", lastSeenAt: null },
+    { id: "s2", label: "S2", kind: "jsonl", pathHint: "/tmp/b.jsonl", lastSeenAt: null },
+  ];
+  const out = await scheduler.tickOnce();
+  assert.equal(adapter.readQuotaCalls, 1);
+  assert.equal(adapter.readDeltaCalls, 1);
+  assert.equal(reporterCalls.length, 1);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.source.id, "s1");
+});
+
+test("tickOnce returns empty when no sources are discovered", async () => {
+  const { scheduler, adapter, reporterCalls } = buildScheduler();
+  adapter.sources = [];
+  const out = await scheduler.tickOnce();
+  assert.deepEqual(out, []);
+  assert.equal(adapter.readQuotaCalls, 0);
+  assert.equal(adapter.readDeltaCalls, 0);
+  assert.equal(reporterCalls.length, 0);
+});
+
+test("tickOnce reports heartbeat count and timestamp for a successful tick", async () => {
+  const now = new Date("2026-05-11T10:01:00.000Z");
+  const { scheduler, reporterCalls } = buildScheduler({ now: () => now });
+  await scheduler.tickOnce();
+  assert.equal(reporterCalls.length, 1);
+  assert.equal(reporterCalls[0]!.delta.heartbeats, 1);
+  assert.equal(reporterCalls[0]!.lastHeartbeatAt, now.toISOString());
 });
 
 test("tickOnce records null snapshot results without invoking the reporter", async () => {

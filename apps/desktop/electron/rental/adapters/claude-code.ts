@@ -206,6 +206,8 @@ export class ClaudeCodeAdapter implements DesktopMeterAdapter {
       usd: 0,
       toolCalls: 0,
       commandRuns: 0,
+      filesExposed: 0,
+      heartbeats: 0,
     });
     const remaining = history.lrtPerFullWindow !== null
       ? Math.max(0, history.lrtPerFullWindow - lrtUsed)
@@ -272,6 +274,8 @@ export function readUsageDeltaFromTurns(turns: ParsedTurn[]): AdapterUsageDelta 
     usd: 0,
     toolCalls: 0,
     commandRuns: 0,
+    filesExposed: 0,
+    heartbeats: 0,
   };
 }
 
@@ -287,6 +291,8 @@ function emptyDelta(): AdapterUsageDelta {
     usd: 0,
     toolCalls: 0,
     commandRuns: 0,
+    filesExposed: 0,
+    heartbeats: 0,
   };
 }
 

@@ -25,6 +25,8 @@ function emptyDelta(): UsageDelta {
     usd: 0,
     toolCalls: 0,
     commandRuns: 0,
+    filesExposed: 0,
+    heartbeats: 0,
   };
 }
 
