@@ -562,9 +562,18 @@ export interface DesktopAccountRoomEntry {
   source: string | null;
   pinned: boolean;
   archived: boolean;
+  canLeave: boolean;
+  canDelete: boolean;
+  deleteReason: string | null;
   firstOpenedAt: string | null;
   lastOpenedAt: string | null;
   focusRooms: DesktopAccountFocusRoomEntry[];
+}
+
+export interface DesktopAccountRoomActionResult {
+  roomIdentifier: string;
+  archived?: boolean;
+  deleted?: boolean;
 }
 
 export interface DesktopApi {
@@ -573,6 +582,8 @@ export interface DesktopApi {
   };
   room: {
     listAccountRooms: () => Promise<DesktopAccountRoomEntry[]>;
+    leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
+    deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;

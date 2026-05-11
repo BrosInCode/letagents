@@ -23,11 +23,15 @@ const pool = dbClientModule?.pool;
 const accountRoomRecents = schemaModule?.account_room_recents;
 const assignProjectAdmin = dbModule?.assignProjectAdmin;
 const createFocusRoomForTask = dbModule?.createFocusRoomForTask;
+const createProject = dbModule?.createProject;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createTask = dbModule?.createTask;
+const getProjectById = dbModule?.getProjectById;
 const upsertAccount = dbModule?.upsertAccount;
 const upsertRoomParticipant = dbModule?.upsertRoomParticipant;
+const archiveAccountRoomForAccount = accountRoomModule?.archiveAccountRoomForAccount;
+const deleteAccountRoomForAccount = accountRoomModule?.deleteAccountRoomForAccount;
 const getAccountRoomsForAccount = accountRoomModule?.getAccountRoomsForAccount;
 const upsertAccountRoomRecent = accountRoomModule?.upsertAccountRoomRecent;
 
@@ -39,11 +43,15 @@ function requireTestDeps(): asserts db is NonNullable<typeof db> {
   assert.ok(accountRoomRecents);
   assert.ok(assignProjectAdmin);
   assert.ok(createFocusRoomForTask);
+  assert.ok(createProject);
   assert.ok(createProjectWithName);
   assert.ok(createRoomAgentSession);
   assert.ok(createTask);
+  assert.ok(getProjectById);
   assert.ok(upsertAccount);
   assert.ok(upsertRoomParticipant);
+  assert.ok(archiveAccountRoomForAccount);
+  assert.ok(deleteAccountRoomForAccount);
   assert.ok(getAccountRoomsForAccount);
   assert.ok(upsertAccountRoomRecent);
 }
@@ -152,6 +160,21 @@ test(
       source: "open_room",
     });
 
+    const ownedInviteRoom = await createProject();
+    await assignProjectAdmin(ownedInviteRoom.id, account.id);
+    await upsertAccountRoomRecent({
+      accountId: account.id,
+      roomId: ownedInviteRoom.id,
+      displayName: ownedInviteRoom.display_name,
+      source: "create_invite",
+    });
+    await upsertAccountRoomRecent({
+      accountId: account.id,
+      roomId: ownedInviteRoom.id,
+      displayName: ownedInviteRoom.display_name,
+      source: "join",
+    });
+
     const archivedRoom = await createProjectWithName("github.com/acct/archived-room");
     await upsertAccountRoomRecent({
       accountId: account.id,
@@ -185,6 +208,8 @@ test(
       [focusOnlyRoom.room.id]
     );
     assert.equal(roomsById.get(recentRoom.id)?.display_name, "Recent Room");
+    assert.equal(roomsById.get(ownedInviteRoom.id)?.source, "create_invite");
+    assert.equal(roomsById.get(ownedInviteRoom.id)?.can_delete, true);
     assert.equal(roomsById.has(archivedRoom.id), false);
 
     const includingArchived = await getAccountRoomsForAccount(account.id, {
@@ -193,5 +218,149 @@ test(
       limit: 20,
     });
     assert.equal(includingArchived.some((room) => room.room_id === archivedRoom.id), true);
+  }
+);
+
+test(
+  "archiveAccountRoomForAccount only archives associated rooms",
+  { skip: requiresDatabase },
+  async () => {
+    requireTestDeps();
+
+    const account = await upsertAccount({
+      provider: "github",
+      provider_user_id: "acct-archive-test",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+
+    const unrelatedRoom = await createProjectWithName("github.com/acct/unrelated-room");
+    const rejected = await archiveAccountRoomForAccount({
+      accountId: account.id,
+      roomId: unrelatedRoom.id,
+      login: "EmmyMay",
+    });
+    assert.equal(rejected, null);
+
+    const afterRejected = await getAccountRoomsForAccount(account.id, {
+      login: "EmmyMay",
+      includeArchived: true,
+      limit: 20,
+    });
+    assert.equal(afterRejected.some((room) => room.room_id === unrelatedRoom.id), false);
+
+    const participantRoom = await createProjectWithName("github.com/acct/archive-room");
+    await upsertRoomParticipant({
+      room_id: participantRoom.id,
+      participant_key: "human:login:emmymay",
+      kind: "human",
+      github_login: null,
+      display_name: "EmmyMay",
+      last_seen_at: "2026-05-10T10:00:00.000Z",
+    });
+
+    const archived = await archiveAccountRoomForAccount({
+      accountId: account.id,
+      roomId: participantRoom.id,
+      login: "EmmyMay",
+    });
+    assert.deepEqual(archived, { room_id: participantRoom.id, archived: true });
+
+    const visibleRooms = await getAccountRoomsForAccount(account.id, {
+      login: "EmmyMay",
+      limit: 20,
+    });
+    assert.equal(visibleRooms.some((room) => room.room_id === participantRoom.id), false);
+
+    const archivedRooms = await getAccountRoomsForAccount(account.id, {
+      login: "EmmyMay",
+      includeArchived: true,
+      limit: 20,
+    });
+    assert.equal(archivedRooms.some((room) => room.room_id === participantRoom.id), true);
+
+    const focusOnlyParent = await createProjectWithName("github.com/acct/archive-focus-parent");
+    const focusOnlyTask = await createTask(focusOnlyParent.id, "Focused archive", "EmmyMay");
+    const focusOnlyRoom = await createFocusRoomForTask(focusOnlyParent.id, focusOnlyTask.id);
+    assert.ok(focusOnlyRoom);
+    await createRoomAgentSession({
+      room_id: focusOnlyRoom.room.id,
+      session_kind: "worker",
+      runtime: "codex",
+      actor_label: "FocusOnly | EmmyMay's agent | Codex",
+      agent_key: "EmmyMay/focusonly",
+      display_name: "FocusOnly",
+      owner_account_id: account.id,
+      owner_label: "EmmyMay",
+      ide_label: "Codex",
+    });
+
+    const focusVisibleBeforeArchive = await getAccountRoomsForAccount(account.id, {
+      login: "EmmyMay",
+      limit: 20,
+    });
+    assert.equal(focusVisibleBeforeArchive.some((room) => room.room_id === focusOnlyParent.id), true);
+
+    const archivedFocusParent = await archiveAccountRoomForAccount({
+      accountId: account.id,
+      roomId: focusOnlyParent.id,
+      login: "EmmyMay",
+    });
+    assert.deepEqual(archivedFocusParent, { room_id: focusOnlyParent.id, archived: true });
+
+    const focusVisibleAfterArchive = await getAccountRoomsForAccount(account.id, {
+      login: "EmmyMay",
+      limit: 20,
+    });
+    assert.equal(focusVisibleAfterArchive.some((room) => room.room_id === focusOnlyParent.id), false);
+  }
+);
+
+test(
+  "deleteAccountRoomForAccount only deletes account-created invite rooms",
+  { skip: requiresDatabase },
+  async () => {
+    requireTestDeps();
+
+    const account = await upsertAccount({
+      provider: "github",
+      provider_user_id: "acct-delete-test",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+
+    const adminOnlyInvite = await createProject();
+    await assignProjectAdmin(adminOnlyInvite.id, account.id);
+    const blocked = await deleteAccountRoomForAccount({
+      accountId: account.id,
+      roomId: adminOnlyInvite.id,
+    });
+    assert.equal(blocked.deleted, false);
+    assert.equal(blocked.error, "forbidden");
+
+    const createdInvite = await createProject();
+    await assignProjectAdmin(createdInvite.id, account.id);
+    await upsertAccountRoomRecent({
+      accountId: account.id,
+      roomId: createdInvite.id,
+      displayName: createdInvite.display_name,
+      source: "create_invite",
+    });
+    await upsertAccountRoomRecent({
+      accountId: account.id,
+      roomId: createdInvite.id,
+      displayName: createdInvite.display_name,
+      source: "join",
+    });
+
+    const deleted = await deleteAccountRoomForAccount({
+      accountId: account.id,
+      roomId: createdInvite.id,
+    });
+    assert.deepEqual(deleted, {
+      room_id: createdInvite.id,
+      deleted: true,
+    });
+    assert.equal(await getProjectById(createdInvite.id), undefined);
   }
 );

@@ -7,6 +7,10 @@ const api: DesktopApi = {
   },
   room: {
     listAccountRooms: () => ipcRenderer.invoke("desktop:room:list-account-rooms"),
+    leaveAccountRoom: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:leave-account-room", roomIdentifier),
+    deleteAccountRoom: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier),
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),

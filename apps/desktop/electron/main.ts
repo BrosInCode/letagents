@@ -10,6 +10,7 @@ import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
   DesktopAccountFocusRoomEntry,
+  DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
   DesktopAuthAccount,
   DesktopAuthPollResult,
@@ -808,9 +809,25 @@ function mapDesktopAccountRoomEntry(payload: Record<string, unknown>): DesktopAc
     source: typeof payload.source === "string" ? payload.source : null,
     pinned: payload.pinned === true,
     archived: payload.archived === true,
+    canLeave: payload.can_leave !== false,
+    canDelete: payload.can_delete === true,
+    deleteReason: typeof payload.delete_reason === "string" ? payload.delete_reason : null,
     firstOpenedAt: typeof payload.first_opened_at === "string" ? payload.first_opened_at : null,
     lastOpenedAt: typeof payload.last_opened_at === "string" ? payload.last_opened_at : null,
     focusRooms,
+  };
+}
+
+function mapDesktopAccountRoomActionResult(payload: Record<string, unknown>): DesktopAccountRoomActionResult {
+  const roomIdentifier = typeof payload.room_id === "string"
+    ? payload.room_id
+    : typeof payload.id === "string"
+      ? payload.id
+      : "";
+  return {
+    roomIdentifier,
+    archived: payload.archived === true ? true : undefined,
+    deleted: payload.deleted === true ? true : undefined,
   };
 }
 
@@ -823,6 +840,22 @@ async function listDesktopAccountRooms(): Promise<DesktopAccountRoomEntry[]> {
     .filter((room): room is Record<string, unknown> => Boolean(room) && typeof room === "object")
     .map(mapDesktopAccountRoomEntry)
     .filter((room) => Boolean(room.roomIdentifier));
+}
+
+async function leaveDesktopAccountRoom(roomIdentifier: string): Promise<DesktopAccountRoomActionResult> {
+  const response = await apiFetch<Record<string, unknown>>(
+    `/account/rooms/${encodeURIComponent(roomIdentifier)}/leave`,
+    { method: "POST" }
+  );
+  return mapDesktopAccountRoomActionResult(response);
+}
+
+async function deleteDesktopAccountRoom(roomIdentifier: string): Promise<DesktopAccountRoomActionResult> {
+  const response = await apiFetch<Record<string, unknown>>(
+    `/account/rooms/${encodeURIComponent(roomIdentifier)}`,
+    { method: "DELETE" }
+  );
+  return mapDesktopAccountRoomActionResult(response);
 }
 
 async function parseApiErrorPayload(response: Response): Promise<ApiErrorPayload | null> {
@@ -2604,6 +2637,16 @@ ipcMain.handle("desktop:app:get-info", async (): Promise<DesktopAppInfo> => ({
 ipcMain.handle(
   "desktop:room:list-account-rooms",
   async (): Promise<DesktopAccountRoomEntry[]> => listDesktopAccountRooms()
+);
+ipcMain.handle(
+  "desktop:room:leave-account-room",
+  async (_event, roomIdentifier: string): Promise<DesktopAccountRoomActionResult> =>
+    leaveDesktopAccountRoom(roomIdentifier)
+);
+ipcMain.handle(
+  "desktop:room:delete-account-room",
+  async (_event, roomIdentifier: string): Promise<DesktopAccountRoomActionResult> =>
+    deleteDesktopAccountRoom(roomIdentifier)
 );
 ipcMain.handle(
   "desktop:room:get-snapshot",

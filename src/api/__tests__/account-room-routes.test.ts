@@ -6,16 +6,38 @@ const { registerAccountRoomRoutes } = await import("../routes/account-rooms.js")
 
 type Handler = (req: Record<string, any>, res: Record<string, any>) => Promise<void>;
 
-function captureGetHandler(): { handler: () => Handler } & Record<string, unknown> {
-  let routeHandler: Handler | undefined;
+function captureAccountRoomHandlers(): {
+  deleteHandler: () => Handler;
+  getHandler: () => Handler;
+  postHandler: () => Handler;
+} & Record<string, unknown> {
+  let getRouteHandler: Handler | undefined;
+  let postRouteHandler: Handler | undefined;
+  let deleteRouteHandler: Handler | undefined;
   return {
     get(path: string, handler: Handler) {
       assert.equal(path, "/account/rooms");
-      routeHandler = handler;
+      getRouteHandler = handler;
     },
-    handler() {
-      assert.ok(routeHandler);
-      return routeHandler;
+    post(path: RegExp, handler: Handler) {
+      assert.equal(path.source, "^\\/account\\/rooms\\/(.+)\\/leave$");
+      postRouteHandler = handler;
+    },
+    delete(path: RegExp, handler: Handler) {
+      assert.equal(path.source, "^\\/account\\/rooms\\/(.+)$");
+      deleteRouteHandler = handler;
+    },
+    deleteHandler() {
+      assert.ok(deleteRouteHandler);
+      return deleteRouteHandler;
+    },
+    getHandler() {
+      assert.ok(getRouteHandler);
+      return getRouteHandler;
+    },
+    postHandler() {
+      assert.ok(postRouteHandler);
+      return postRouteHandler;
     },
   };
 }
@@ -36,24 +58,36 @@ function responseStub() {
 }
 
 test("account room route requires authentication", async () => {
-  const app = captureGetHandler();
+  const app = captureAccountRoomHandlers();
   registerAccountRoomRoutes(app as never, {
+    archiveAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    deleteAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
     getAccountRoomsForAccount: async () => {
       throw new Error("not invoked");
     },
   });
 
   const res = responseStub();
-  await app.handler()({ query: {}, sessionAccount: null }, res);
+  await app.getHandler()({ query: {}, sessionAccount: null }, res);
 
   assert.equal(res.statusCode, 401);
   assert.deepEqual(res.body, { error: "Authentication required" });
 });
 
 test("account room route returns parent rooms with nested focus rooms", async () => {
-  const app = captureGetHandler();
+  const app = captureAccountRoomHandlers();
   const calls: unknown[] = [];
   registerAccountRoomRoutes(app as never, {
+    archiveAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    deleteAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
     async getAccountRoomsForAccount(accountId, options) {
       calls.push({ accountId, options });
       return [
@@ -65,6 +99,9 @@ test("account room route returns parent rooms with nested focus rooms", async ()
           source: "admin",
           pinned: false,
           archived: false,
+          can_leave: true,
+          can_delete: true,
+          delete_reason: null,
           first_opened_at: "2026-05-01T10:00:00.000Z",
           last_opened_at: "2026-05-02T10:00:00.000Z",
           focus_rooms: [
@@ -88,7 +125,7 @@ test("account room route returns parent rooms with nested focus rooms", async ()
   });
 
   const res = responseStub();
-  await app.handler()(
+  await app.getHandler()(
     {
       query: { limit: "25", include_archived: "true" },
       sessionAccount: {
@@ -126,6 +163,9 @@ test("account room route returns parent rooms with nested focus rooms", async ()
         source: "admin",
         pinned: false,
         archived: false,
+        can_leave: true,
+        can_delete: true,
+        delete_reason: null,
         first_opened_at: "2026-05-01T10:00:00.000Z",
         last_opened_at: "2026-05-02T10:00:00.000Z",
         focus_rooms: [
@@ -147,5 +187,112 @@ test("account room route returns parent rooms with nested focus rooms", async ()
         ],
       },
     ],
+  });
+});
+
+test("leave route archives the account room", async () => {
+  const app = captureAccountRoomHandlers();
+  const calls: unknown[] = [];
+  registerAccountRoomRoutes(app as never, {
+    async archiveAccountRoomForAccount(input) {
+      calls.push(input);
+      return { room_id: input.roomId, archived: true };
+    },
+    deleteAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    getAccountRoomsForAccount: async () => {
+      throw new Error("not invoked");
+    },
+  });
+
+  const res = responseStub();
+  await app.postHandler()(
+    {
+      params: { 0: encodeURIComponent("github.com/owner/repo") },
+      sessionAccount: { account_id: "acct_1", login: "EmmyMay" },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls, [
+    { accountId: "acct_1", roomId: "github.com/owner/repo", login: "EmmyMay" },
+  ]);
+  assert.deepEqual(res.body, {
+    room_id: "github.com/owner/repo",
+    archived: true,
+  });
+});
+
+test("delete route blocks rooms the account cannot delete", async () => {
+  const app = captureAccountRoomHandlers();
+  registerAccountRoomRoutes(app as never, {
+    archiveAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    async deleteAccountRoomForAccount(input) {
+      return {
+        room_id: input.roomId,
+        deleted: false,
+        error: "forbidden",
+        reason: "LetAgents can only delete invite rooms this account created.",
+      };
+    },
+    getAccountRoomsForAccount: async () => {
+      throw new Error("not invoked");
+    },
+  });
+
+  const res = responseStub();
+  await app.deleteHandler()(
+    {
+      params: { 0: encodeURIComponent("github.com/owner/repo") },
+      sessionAccount: { account_id: "acct_1", login: "EmmyMay" },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "LetAgents can only delete invite rooms this account created.",
+  });
+});
+
+test("delete route deletes account-owned invite rooms", async () => {
+  const app = captureAccountRoomHandlers();
+  const calls: unknown[] = [];
+  registerAccountRoomRoutes(app as never, {
+    archiveAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    async deleteAccountRoomForAccount(input) {
+      calls.push(input);
+      return {
+        room_id: input.roomId,
+        deleted: true,
+      };
+    },
+    getAccountRoomsForAccount: async () => {
+      throw new Error("not invoked");
+    },
+  });
+
+  const res = responseStub();
+  await app.deleteHandler()(
+    {
+      params: { 0: "ABCD-1234" },
+      sessionAccount: { account_id: "acct_1" },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls, [
+    { accountId: "acct_1", roomId: "ABCD-1234" },
+  ]);
+  assert.deepEqual(res.body, {
+    room_id: "ABCD-1234",
+    deleted: true,
   });
 });

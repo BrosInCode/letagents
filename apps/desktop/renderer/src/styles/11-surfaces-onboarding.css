@@ -149,6 +149,135 @@ code {
   font-size: 0.78rem;
 }
 
+.settings-page {
+  max-width: 1180px;
+}
+
+.settings-grid,
+.settings-section,
+.settings-section-header,
+.settings-account-summary,
+.settings-room-copy,
+.settings-room-actions,
+.settings-section-actions,
+.settings-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-card {
+  min-height: 150px;
+}
+
+.settings-account-summary {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.settings-section {
+  margin-top: 4px;
+}
+
+.settings-section-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.settings-section-header h4 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.settings-section-actions {
+  grid-auto-flow: column;
+  align-items: center;
+  justify-content: end;
+}
+
+.settings-feedback {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.settings-feedback[data-state="success"] {
+  border-color: rgba(34, 197, 94, 0.2);
+  color: var(--green);
+  background: var(--green-dim);
+}
+
+.settings-feedback[data-state="error"] {
+  border-color: rgba(239, 68, 68, 0.2);
+  color: var(--red);
+  background: var(--red-dim);
+}
+
+.settings-room-row {
+  align-items: center;
+}
+
+.settings-room-copy {
+  min-width: 0;
+}
+
+.settings-room-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.settings-room-meta span {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.settings-room-actions {
+  grid-auto-flow: column;
+  align-items: center;
+  justify-content: end;
+}
+
+.settings-icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  min-width: 42px;
+  padding: 0;
+}
+
+.settings-icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.settings-danger-button {
+  border-color: rgba(248, 113, 113, 0.25);
+  background: rgba(248, 113, 113, 0.1);
+  color: #fecaca;
+}
+
+.settings-muted-note {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .auth-onboarding {
   max-width: 1180px;
 }

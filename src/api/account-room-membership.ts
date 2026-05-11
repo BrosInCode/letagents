@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { db } from "./db/client.js";
 import {
@@ -8,6 +8,7 @@ import {
   room_participants,
   rooms,
 } from "./db/schema.js";
+import { isInviteCode } from "./room-routing.js";
 
 type RoomKind = "main" | "focus";
 type FocusRoomStatus = "active" | "concluded";
@@ -36,6 +37,9 @@ export interface AccountRoomListEntry {
   source: string | null;
   pinned: boolean;
   archived: boolean;
+  can_leave: boolean;
+  can_delete: boolean;
+  delete_reason: string | null;
   first_opened_at: string | null;
   last_opened_at: string | null;
   focus_rooms: AccountRoomListFocusRoom[];
@@ -63,6 +67,7 @@ type AccountRoomCandidate = {
   source: string | null;
   pinned: boolean;
   archived: boolean;
+  canDelete: boolean;
   first_opened_at: string | null;
   last_opened_at: string | null;
 };
@@ -103,6 +108,13 @@ function laterTimestamp(current: string | null, next: string | null): string | n
   return next > current ? next : current;
 }
 
+function mergeAccountRoomSource(current: string | null, next: string | null): string | null {
+  if (current === "create_invite" || next === "create_invite") {
+    return "create_invite";
+  }
+  return current || next;
+}
+
 function mergeAccountRoomCandidate(
   existing: AccountRoomCandidate,
   next: AccountRoomCandidate
@@ -110,9 +122,10 @@ function mergeAccountRoomCandidate(
   return {
     project: existing.project,
     role: existing.role === "admin" || next.role === "admin" ? "admin" : "participant",
-    source: existing.source || next.source,
+    source: mergeAccountRoomSource(existing.source, next.source),
     pinned: existing.pinned || next.pinned,
     archived: existing.archived || next.archived,
+    canDelete: existing.canDelete || next.canDelete,
     first_opened_at: earlierTimestamp(existing.first_opened_at, next.first_opened_at),
     last_opened_at: laterTimestamp(existing.last_opened_at, next.last_opened_at),
   };
@@ -125,6 +138,7 @@ function normalizeAccountRoomCandidate(
     source?: string | null;
     pinned?: boolean;
     archived?: boolean;
+    canDelete?: boolean;
     firstOpenedAt?: string | null;
     lastOpenedAt?: string | null;
   }
@@ -137,9 +151,88 @@ function normalizeAccountRoomCandidate(
     source: options.source ?? null,
     pinned: Boolean(options.pinned),
     archived: Boolean(options.archived),
+    canDelete: Boolean(options.canDelete),
     first_opened_at: firstOpenedAt,
     last_opened_at: lastOpenedAt,
   };
+}
+
+function accountRoomDeleteReason(candidate: AccountRoomCandidate): string | null {
+  if (candidate.role !== "admin") {
+    return "Only room admins can delete this room.";
+  }
+  if (!candidate.canDelete || !isInviteCode(candidate.project.id)) {
+    return "Deletion is available only for invite rooms this account created in LetAgents.";
+  }
+  return null;
+}
+
+async function accountHasRoomAssociation(input: {
+  accountId: string;
+  roomId: string;
+  login?: string | null;
+}): Promise<boolean> {
+  const focusRoomRows = await db
+    .select({ id: rooms.id })
+    .from(rooms)
+    .where(and(eq(rooms.kind, "focus"), eq(rooms.parent_room_id, input.roomId)));
+  const associatedRoomIds = [input.roomId, ...focusRoomRows.map((row) => row.id)];
+
+  const [adminRow] = await db
+    .select({ account_id: project_admins.account_id })
+    .from(project_admins)
+    .where(
+      and(
+        inArray(project_admins.project_id, associatedRoomIds),
+        eq(project_admins.account_id, input.accountId)
+      )
+    )
+    .limit(1);
+  if (adminRow) return true;
+
+  const [agentSessionRow] = await db
+    .select({ room_id: room_agent_sessions.room_id })
+    .from(room_agent_sessions)
+    .where(
+      and(
+        inArray(room_agent_sessions.room_id, associatedRoomIds),
+        eq(room_agent_sessions.owner_account_id, input.accountId)
+      )
+    )
+    .limit(1);
+  if (agentSessionRow) return true;
+
+  const [recentRow] = await db
+    .select({ room_id: account_room_recents.room_id })
+    .from(account_room_recents)
+    .where(
+      and(
+        eq(account_room_recents.account_id, input.accountId),
+        inArray(account_room_recents.room_id, associatedRoomIds)
+      )
+    )
+    .limit(1);
+  if (recentRow) return true;
+
+  const normalizedLogin = input.login?.trim().toLowerCase() || null;
+  if (!normalizedLogin) return false;
+  const loginValue = input.login?.trim() || normalizedLogin;
+  const [participantRow] = await db
+    .select({ room_id: room_participants.room_id })
+    .from(room_participants)
+    .where(
+      and(
+        inArray(room_participants.room_id, associatedRoomIds),
+        eq(room_participants.kind, "human"),
+        or(
+          eq(room_participants.github_login, loginValue),
+          eq(room_participants.participant_key, `human:login:${normalizedLogin}`)
+        )
+      )
+    )
+    .limit(1);
+
+  return Boolean(participantRow);
 }
 
 function toAccountRoomListFocusRoom(
@@ -186,12 +279,142 @@ export async function upsertAccountRoomRecent(input: {
       target: [account_room_recents.account_id, account_room_recents.room_id],
       set: {
         display_name: input.displayName ?? null,
-        source: input.source ?? null,
+        source: sql`CASE WHEN ${account_room_recents.source} = 'create_invite' THEN ${account_room_recents.source} ELSE ${input.source ?? null} END`,
         archived: false,
         last_opened_at: now,
         updated_at: now,
       },
     });
+}
+
+export async function archiveAccountRoomForAccount(input: {
+  accountId: string;
+  roomId: string;
+  login?: string | null;
+}): Promise<{ room_id: string; archived: true } | null> {
+  const [room] = await db
+    .select({ id: rooms.id, display_name: rooms.display_name, created_at: rooms.created_at })
+    .from(rooms)
+    .where(eq(rooms.id, input.roomId))
+    .limit(1);
+
+  if (!room) {
+    return null;
+  }
+
+  const hasAssociation = await accountHasRoomAssociation({
+    accountId: input.accountId,
+    roomId: room.id,
+    login: input.login,
+  });
+  if (!hasAssociation) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  await db
+    .insert(account_room_recents)
+    .values({
+      account_id: input.accountId,
+      room_id: room.id,
+      display_name: room.display_name,
+      source: "left_room",
+      pinned: false,
+      archived: true,
+      first_opened_at: now,
+      last_opened_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [account_room_recents.account_id, account_room_recents.room_id],
+      set: {
+        archived: true,
+        updated_at: now,
+      },
+    });
+
+  return { room_id: room.id, archived: true };
+}
+
+export async function deleteAccountRoomForAccount(input: {
+  accountId: string;
+  roomId: string;
+}): Promise<{
+  room_id: string;
+  deleted: boolean;
+  error?: "not_found" | "forbidden";
+  reason?: string;
+}> {
+  const [room] = await db
+    .select({ id: rooms.id, kind: rooms.kind })
+    .from(rooms)
+    .where(eq(rooms.id, input.roomId))
+    .limit(1);
+
+  if (!room) {
+    return {
+      room_id: input.roomId,
+      deleted: false,
+      error: "not_found",
+      reason: "Room not found.",
+    };
+  }
+
+  if (room.kind !== "main" || !isInviteCode(room.id)) {
+    return {
+      room_id: room.id,
+      deleted: false,
+      error: "forbidden",
+      reason: "Only invite rooms can be deleted from account settings.",
+    };
+  }
+
+  const [adminRow] = await db
+    .select({ account_id: project_admins.account_id })
+    .from(project_admins)
+    .where(
+      and(
+        eq(project_admins.project_id, room.id),
+        eq(project_admins.account_id, input.accountId)
+      )
+    )
+    .limit(1);
+
+  if (!adminRow) {
+    return {
+      room_id: room.id,
+      deleted: false,
+      error: "forbidden",
+      reason: "Only room admins can delete this room.",
+    };
+  }
+
+  const [recentRow] = await db
+    .select({ source: account_room_recents.source })
+    .from(account_room_recents)
+    .where(
+      and(
+        eq(account_room_recents.account_id, input.accountId),
+        eq(account_room_recents.room_id, room.id)
+      )
+    )
+    .limit(1);
+
+  if (recentRow?.source !== "create_invite") {
+    return {
+      room_id: room.id,
+      deleted: false,
+      error: "forbidden",
+      reason: "LetAgents can only delete invite rooms this account created.",
+    };
+  }
+
+  await db.delete(rooms).where(eq(rooms.id, room.id));
+
+  return {
+    room_id: room.id,
+    deleted: true,
+  };
 }
 
 export async function getAccountRoomsForAccount(
@@ -308,6 +531,7 @@ export async function getAccountRoomsForAccount(
       source: row.source || "recent",
       pinned: row.pinned,
       archived: row.archived,
+      canDelete: row.source === "create_invite",
       firstOpenedAt: row.first_opened_at,
       lastOpenedAt: row.last_opened_at,
     }));
@@ -317,9 +541,26 @@ export async function getAccountRoomsForAccount(
   const directParentRoomIds = new Set<string>();
   const directFocusRoomIds = new Set<string>();
   const parentCandidates = new Map<string, AccountRoomCandidate>();
+  const hiddenParentRoomIds = new Set<string>();
+
+  if (!options.includeArchived) {
+    for (const candidate of candidatesByRoomId.values()) {
+      if (candidate.archived && candidate.project.kind === "main") {
+        hiddenParentRoomIds.add(candidate.project.id);
+      }
+    }
+  }
 
   for (const candidate of candidatesByRoomId.values()) {
     if (candidate.archived && !options.includeArchived) {
+      continue;
+    }
+
+    if (
+      candidate.project.kind === "focus"
+      && candidate.project.parent_room_id
+      && hiddenParentRoomIds.has(candidate.project.parent_room_id)
+    ) {
       continue;
     }
 
@@ -402,16 +643,22 @@ export async function getAccountRoomsForAccount(
       return a.project.display_name.localeCompare(b.project.display_name);
     })
     .slice(0, limit)
-    .map((candidate) => ({
-      room_id: candidate.project.id,
-      display_name: candidate.project.display_name,
-      kind: "main",
-      role: candidate.role,
-      source: candidate.source,
-      pinned: candidate.pinned,
-      archived: candidate.archived,
-      first_opened_at: candidate.first_opened_at,
-      last_opened_at: candidate.last_opened_at,
-      focus_rooms: focusRoomsByParentId.get(candidate.project.id) ?? [],
-    }));
+    .map((candidate) => {
+      const deleteReason = accountRoomDeleteReason(candidate);
+      return {
+        room_id: candidate.project.id,
+        display_name: candidate.project.display_name,
+        kind: "main",
+        role: candidate.role,
+        source: candidate.source,
+        pinned: candidate.pinned,
+        archived: candidate.archived,
+        can_leave: true,
+        can_delete: !deleteReason,
+        delete_reason: deleteReason,
+        first_opened_at: candidate.first_opened_at,
+        last_opened_at: candidate.last_opened_at,
+        focus_rooms: focusRoomsByParentId.get(candidate.project.id) ?? [],
+      };
+    });
 }
