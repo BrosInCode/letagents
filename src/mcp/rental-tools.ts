@@ -335,3 +335,160 @@ export async function rentalDecline(
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// rental_emit_activity (p3.3 — wraps POST /api/rental/sessions/:id/activity)
+// ---------------------------------------------------------------------------
+
+export interface RentalEmitActivityInput {
+  session_id: string;
+  event_type: string;
+  source?: string;
+  payload?: Record<string, unknown>;
+  verified?: boolean;
+}
+
+export interface RentalEmitActivityResult {
+  success: boolean;
+  event?: unknown;
+  error?: string;
+}
+
+export async function rentalEmitActivity(
+  deps: RentalToolDeps,
+  input: RentalEmitActivityInput,
+): Promise<RentalEmitActivityResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  if (typeof input.event_type !== "string" || !input.event_type.trim()) {
+    return { success: false, error: "event_type is required" };
+  }
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/activity`;
+
+  const body: Record<string, unknown> = {
+    event_type: input.event_type.trim(),
+  };
+  if (typeof input.source === "string" && input.source.trim()) {
+    body.source = input.source.trim();
+  } else {
+    body.source = "agent";
+  }
+  if (typeof input.payload === "object" && input.payload !== null && !Array.isArray(input.payload)) {
+    body.payload = input.payload;
+  } else {
+    body.payload = {};
+  }
+  if (typeof input.verified === "boolean") {
+    body.verified = input.verified;
+  }
+  // verified=false by default per spec — server resolves from event-type set
+
+  try {
+    const event = await deps.apiCall<unknown>(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { success: true, event };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// rental_complete (p3.3 — wraps POST /api/rental/sessions/:id/complete)
+// ---------------------------------------------------------------------------
+
+export interface RentalCompleteInput {
+  session_id: string;
+  summary?: string;
+}
+
+export interface RentalCompleteResult {
+  success: boolean;
+  session?: unknown;
+  error?: string;
+}
+
+export async function rentalComplete(
+  deps: RentalToolDeps,
+  input: RentalCompleteInput,
+): Promise<RentalCompleteResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/complete`;
+
+  const body: Record<string, unknown> = {};
+  if (typeof input.summary === "string" && input.summary.trim()) {
+    body.summary = input.summary.trim();
+  }
+
+  try {
+    const session = await deps.apiCall<unknown>(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { success: true, session };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// rental_cancel (p3.3 — wraps POST /api/rental/sessions/:id/cancel)
+// ---------------------------------------------------------------------------
+
+export interface RentalCancelInput {
+  session_id: string;
+  reason?: string;
+}
+
+export interface RentalCancelResult {
+  success: boolean;
+  session?: unknown;
+  error?: string;
+}
+
+export async function rentalCancel(
+  deps: RentalToolDeps,
+  input: RentalCancelInput,
+): Promise<RentalCancelResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/cancel`;
+
+  const body: Record<string, unknown> = {};
+  if (typeof input.reason === "string" && input.reason.trim()) {
+    body.reason = input.reason.trim();
+  }
+
+  try {
+    const session = await deps.apiCall<unknown>(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { success: true, session };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
