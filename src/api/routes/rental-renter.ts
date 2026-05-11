@@ -2,15 +2,18 @@
  * Renter-facing rental routes.
  *
  * Routes:
- *   GET    /api/rental/listings   — public marketplace discovery (paginated)
+ *   GET    /api/rental/listings              — public marketplace discovery (paginated)
+ *   POST   /api/rental/sessions              — create session (p1.3)
+ *   GET    /api/rental/sessions/:id          — get session (p1.3)
+ *   POST   /api/rental/sessions/:id/cancel   — cancel session (p1.3)
  *
  * Gated by `LETAGENTS_RENT_ENABLED` like the provider routes.
  * Rate-limited per renter session to prevent enumeration of the
  * full provider fleet.
  *
  * Spec §20 (API surface), §1.5 (readiness-gated marketplace),
- * §22.2 (Available to rent UX). Part of PR p1.1b (Phase 1 follow-up
- * to listings CRUD).
+ * §22.2 (Available to rent UX), §7 (renter session flow),
+ * §18.2 (session state machine).
  */
 
 import type { Express, Response } from "express";
@@ -20,6 +23,9 @@ import type {
   PublicListingsQuery,
   PublicRentalListing,
 } from "../rental/listings.js";
+import type { rental_sessions } from "../db/schema.js";
+
+type Session = typeof rental_sessions.$inferSelect;
 
 // ===== Public deps =====
 
@@ -31,6 +37,33 @@ export interface RentalRenterRouteDeps {
    * {@link buildInMemoryListingsRateLimiter}.
    */
   shouldAllowListingsQuery: ListingsRateLimiter;
+  // Session management (p1.3)
+  createSession(input: {
+    listingId: string;
+    renterAccountId: string;
+    repoOwner: string;
+    repoName: string;
+    baseBranch: string;
+    taskTitle: string;
+    taskPrompt: string;
+    mode?: "scoped" | "trusted_open";
+    continuityMode?: "smart_handoff" | "full_transcript";
+    startTrigger?: "quota_exhausted" | "user_initiated" | "scheduled" | "task_handoff";
+    triggerConfidence?: "exact" | "inferred" | "manual";
+    renterLaneProvider?: string;
+    renterLaneModel?: string;
+    renterLaneExhaustedAt?: Date;
+    renterLaneRefreshEta?: Date;
+    renterQuotaSignal?: Record<string, unknown>;
+    lrtLimit?: number;
+    timeLimitMinutes?: number;
+  }): Promise<Session>;
+  getSessionById(sessionId: string, accountId: string): Promise<Session | null>;
+  cancelSession(
+    sessionId: string,
+    accountId: string,
+    role: "renter" | "provider"
+  ): Promise<Session | null>;
 }
 
 export type ListingsRateLimiter = (renterKey: string) => boolean;
@@ -144,6 +177,7 @@ export function registerRentalRenterRoutes(
   app: Express,
   deps: RentalRenterRouteDeps
 ): void {
+  // ===== p1.1b: public marketplace discovery =====
   app.get("/api/rental/listings", async (req: AuthenticatedRequest, res) => {
     if (!requireRentEnabled(res)) return;
 
@@ -161,4 +195,151 @@ export function registerRentalRenterRoutes(
       res.status(500).json({ error: "Failed to list public listings" });
     }
   });
+
+  // ===== p1.3: session management =====
+
+  function requireAuth(
+    req: AuthenticatedRequest,
+    res: Response
+  ): string | null {
+    const sa = req.sessionAccount;
+    if (!sa) {
+      res.status(401).json({ error: "unauthenticated" });
+      return null;
+    }
+    return sa.account_id;
+  }
+
+  // POST /api/rental/sessions — renter creates a session
+  app.post(
+    "/api/rental/sessions",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const {
+        listingId,
+        repoOwner,
+        repoName,
+        baseBranch,
+        taskTitle,
+        taskPrompt,
+        mode,
+        continuityMode,
+        startTrigger,
+        triggerConfidence,
+        renterLaneProvider,
+        renterLaneModel,
+        renterLaneExhaustedAt,
+        renterLaneRefreshEta,
+        renterQuotaSignal,
+        lrtLimit,
+        timeLimitMinutes,
+      } = req.body;
+
+      if (!listingId?.trim()) {
+        return res.status(400).json({ error: "listingId is required" });
+      }
+      if (!repoOwner?.trim()) {
+        return res.status(400).json({ error: "repoOwner is required" });
+      }
+      if (!repoName?.trim()) {
+        return res.status(400).json({ error: "repoName is required" });
+      }
+      if (!baseBranch?.trim()) {
+        return res.status(400).json({ error: "baseBranch is required" });
+      }
+      if (!taskTitle?.trim()) {
+        return res.status(400).json({ error: "taskTitle is required" });
+      }
+      if (!taskPrompt?.trim()) {
+        return res.status(400).json({ error: "taskPrompt is required" });
+      }
+
+      try {
+        const session = await deps.createSession({
+          listingId: listingId.trim(),
+          renterAccountId: accountId,
+          repoOwner: repoOwner.trim(),
+          repoName: repoName.trim(),
+          baseBranch: baseBranch.trim(),
+          taskTitle: taskTitle.trim(),
+          taskPrompt: taskPrompt.trim(),
+          mode,
+          continuityMode,
+          startTrigger,
+          triggerConfidence,
+          renterLaneProvider,
+          renterLaneModel,
+          renterLaneExhaustedAt: renterLaneExhaustedAt
+            ? new Date(renterLaneExhaustedAt)
+            : undefined,
+          renterLaneRefreshEta: renterLaneRefreshEta
+            ? new Date(renterLaneRefreshEta)
+            : undefined,
+          renterQuotaSignal,
+          lrtLimit,
+          timeLimitMinutes,
+        });
+        return res.status(201).json(session);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "unknown_error";
+        if (
+          message === "listing_not_found" ||
+          message === "listing_not_active"
+        ) {
+          return res.status(404).json({ error: message });
+        }
+        if (message === "mode_not_supported") {
+          return res.status(400).json({ error: message });
+        }
+        return res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  // GET /api/rental/sessions/:id
+  app.get(
+    "/api/rental/sessions/:id",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const session = await deps.getSessionById(req.params.id as string, accountId);
+      if (!session) {
+        return res.status(404).json({ error: "session_not_found" });
+      }
+      return res.json(session);
+    }
+  );
+
+  // POST /api/rental/sessions/:id/cancel
+  app.post(
+    "/api/rental/sessions/:id/cancel",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      try {
+        const session = await deps.cancelSession(
+          req.params.id as string,
+          accountId,
+          "renter"
+        );
+        if (!session) {
+          return res.status(404).json({ error: "session_not_found" });
+        }
+        return res.json(session);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "unknown_error";
+        if (message.startsWith("invalid_transition")) {
+          return res.status(409).json({ error: message });
+        }
+        return res.status(500).json({ error: message });
+      }
+    }
+  );
 }

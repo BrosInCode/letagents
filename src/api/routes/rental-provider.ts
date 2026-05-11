@@ -11,7 +11,7 @@
  * All routes gated by LETAGENTS_RENT_ENABLED env flag.
  * Part of PR p1.1 (Phase 1: Session Lifecycle & Listings).
  *
- * Spec §6 (provider listing flow).
+ * Spec §6 (provider listing flow), §18.2 (session accept/decline).
  */
 
 import type { Express, Response } from "express";
@@ -38,6 +38,16 @@ export interface RentalProviderRouteDeps {
     providerAccountId: string
   ): Promise<RentalListing | null>;
   listMyListings(providerAccountId: string): Promise<RentalListing[]>;
+  // Session management (p1.3)
+  acceptSession(
+    sessionId: string,
+    providerAccountId: string
+  ): Promise<unknown | null>;
+  declineSession(
+    sessionId: string,
+    providerAccountId: string
+  ): Promise<unknown | null>;
+  listProviderRequests(providerAccountId: string): Promise<unknown[]>;
 }
 
 export function isRentEnabled(): boolean {
@@ -204,4 +214,83 @@ export function registerRentalProviderRoutes(
       res.status(500).json({ error: "Failed to resume listing" });
     }
   });
+
+  // ===== Session management routes (p1.3) =====
+
+  // GET /api/rental/provider/requests — list incoming session requests
+  app.get(
+    "/api/rental/provider/requests",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireProviderAccountId(req, res);
+      if (!accountId) return;
+
+      try {
+        const requests = await deps.listProviderRequests(accountId);
+        res.json(requests);
+      } catch (error) {
+        res.status(500).json({ error: "Failed to list requests" });
+      }
+    }
+  );
+
+  // POST /api/rental/provider/sessions/:id/accept — accept a session request
+  app.post(
+    "/api/rental/provider/sessions/:id/accept",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireProviderAccountId(req, res);
+      if (!accountId) return;
+
+      try {
+        const session = await deps.acceptSession(
+          req.params.id as string,
+          accountId
+        );
+        if (!session) {
+          res.status(404).json({ error: "session_not_found" });
+          return;
+        }
+        res.json(session);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "unknown_error";
+        if (message.startsWith("invalid_transition")) {
+          res.status(409).json({ error: message });
+          return;
+        }
+        res.status(500).json({ error: "Failed to accept session" });
+      }
+    }
+  );
+
+  // POST /api/rental/provider/sessions/:id/decline — decline a session request
+  app.post(
+    "/api/rental/provider/sessions/:id/decline",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireProviderAccountId(req, res);
+      if (!accountId) return;
+
+      try {
+        const session = await deps.declineSession(
+          req.params.id as string,
+          accountId
+        );
+        if (!session) {
+          res.status(404).json({ error: "session_not_found" });
+          return;
+        }
+        res.json(session);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "unknown_error";
+        if (message.startsWith("invalid_transition")) {
+          res.status(409).json({ error: message });
+          return;
+        }
+        res.status(500).json({ error: "Failed to decline session" });
+      }
+    }
+  );
 }
