@@ -120,6 +120,8 @@ export interface UsageDelta {
   usd: number;
   toolCalls: number;
   commandRuns: number;
+  filesExposed: number;
+  heartbeats: number;
 }
 
 /**

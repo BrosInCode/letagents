@@ -42,6 +42,8 @@ function fixtureDelta(over: Partial<AdapterUsageDelta> = {}): AdapterUsageDelta 
     usd: 0,
     toolCalls: 0,
     commandRuns: 0,
+    filesExposed: 0,
+    heartbeats: 0,
     ...over,
   };
 }
@@ -118,6 +120,8 @@ test("computeIdempotencyKey changes when any persisted delta axis changes", () =
     { field: "usd", bump: 0.01 },
     { field: "toolCalls", bump: 1 },
     { field: "commandRuns", bump: 1 },
+    { field: "filesExposed", bump: 1 },
+    { field: "heartbeats", bump: 1 },
   ];
   for (const { field, bump } of perturbations) {
     const perturbed: AdapterUsageDelta = {
@@ -167,6 +171,16 @@ test("buildUsageReport forwards non-zero credits/usd as numbers", () => {
   }));
   assert.equal(body.delta.credits, 12.5);
   assert.equal(body.delta.usd, 0.04);
+});
+
+test("buildUsageReport forwards files and heartbeat counters", () => {
+  const body = buildUsageReport(fixtureInputs({
+    delta: fixtureDelta({ filesExposed: 2, heartbeats: 1 }),
+    lastHeartbeatAt: "2026-05-11T10:01:00.000Z",
+  }));
+  assert.equal(body.delta.filesExposed, 2);
+  assert.equal(body.delta.heartbeats, 1);
+  assert.equal(body.lastHeartbeatAt, "2026-05-11T10:01:00.000Z");
 });
 
 test("buildUsageReport accepts an explicit idempotencyKey override", () => {
