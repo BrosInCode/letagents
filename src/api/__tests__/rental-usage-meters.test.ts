@@ -480,6 +480,8 @@ describe("POST /api/rental/sessions/:id/usage", () => {
 
     registerRentalInternalRoutes(app, {
       ingestUsage: (sessionId, report) => ingestImpl(sessionId, report),
+      reserveBudget: async () => { throw new Error("reserveBudget not used"); },
+      reconcileBudget: async () => { throw new Error("reconcileBudget not used"); },
       resolveSessionAccess: async (sessionId, accountId) => {
         resolveAccessCalls.push({ sessionId, accountId });
         return accessReturn;
@@ -521,6 +523,8 @@ describe("POST /api/rental/sessions/:id/usage", () => {
     noAuth.use(express.json());
     registerRentalInternalRoutes(noAuth, {
       ingestUsage: ingestImpl,
+      reserveBudget: async () => { throw new Error("reserveBudget not used"); },
+      reconcileBudget: async () => { throw new Error("reconcileBudget not used"); },
       resolveSessionAccess: async () => "renter",
     });
     const srv = await new Promise<http.Server>((resolve) => {
