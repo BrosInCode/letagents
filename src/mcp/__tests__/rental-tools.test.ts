@@ -19,6 +19,8 @@ import {
   rentalListRequests,
   rentalAccept,
   rentalDecline,
+  rentalHeartbeat,
+  rentalReportUsage,
   type RentalToolDeps,
 } from "../rental-tools.js";
 
@@ -285,5 +287,182 @@ describe("rentalDecline", () => {
     assert.equal(res.success, false);
     assert.match(res.error ?? "", /session_not_found/);
     assert.equal(res.idempotency_key, "k");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rental_heartbeat (p3.2)
+// ---------------------------------------------------------------------------
+
+describe("rentalHeartbeat", () => {
+  it("rejects empty session_id without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalHeartbeat(deps, { session_id: "" });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /session_id/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /heartbeat and unwraps recordHeartbeat result", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps(
+      {
+        ok: true,
+        status: "active",
+        heartbeatCount: 5,
+        transitioned: false,
+      },
+      captured,
+    );
+    const res = await rentalHeartbeat(deps, { session_id: "rsess_1" });
+    assert.equal(captured.length, 1);
+    assert.equal(
+      captured[0].path,
+      "/api/rental/sessions/rsess_1/heartbeat",
+    );
+    assert.equal(captured[0].options?.method, "POST");
+    assert.equal(res.success, true);
+    assert.equal(res.ok, true);
+    assert.equal(res.status, "active");
+    assert.equal(res.heartbeat_count, 5);
+    assert.equal(res.transitioned, false);
+  });
+
+  it("URL-encodes the session_id path segment", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({ ok: true }, captured);
+    await rentalHeartbeat(deps, { session_id: "rsess/with space" });
+    assert.equal(
+      captured[0].path,
+      "/api/rental/sessions/rsess%2Fwith%20space/heartbeat",
+    );
+  });
+
+  it("trims whitespace from session_id", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({ ok: true }, captured);
+    await rentalHeartbeat(deps, { session_id: "  rsess_1  " });
+    assert.equal(captured[0].path, "/api/rental/sessions/rsess_1/heartbeat");
+  });
+
+  it("propagates transitioned: true when first heartbeat lands", async () => {
+    const deps = makeDeps({
+      ok: true,
+      status: "active",
+      heartbeatCount: 1,
+      transitioned: true,
+    });
+    const res = await rentalHeartbeat(deps, { session_id: "rsess_1" });
+    assert.equal(res.transitioned, true);
+    assert.equal(res.status, "active");
+  });
+
+  it("surfaces apiCall errors (not_provider 403, session_not_found 404, etc.)", async () => {
+    const deps = makeFailingDeps(new Error("not_provider"));
+    const res = await rentalHeartbeat(deps, { session_id: "rsess_1" });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /not_provider/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rental_report_usage (p3.2)
+// ---------------------------------------------------------------------------
+
+describe("rentalReportUsage", () => {
+  const sampleReport = {
+    source: "tool",
+    snapshot: {
+      provider: "claude_code",
+      model: "claude-3.7-sonnet",
+      nativeUnit: "tokens",
+      nativeUsed: null,
+      nativeRemaining: null,
+      nativeResetAt: null,
+    },
+    delta: {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      reasoningTokens: 0,
+      requests: 1,
+      credits: 0,
+      usd: 0,
+      toolCalls: 0,
+      commandRuns: 0,
+      filesExposed: 0,
+      heartbeats: 0,
+    },
+    lrt: { lrtUsed: 300, confidence: "local_exact" },
+    adapterPayload: null,
+    idempotencyKey: "mcp-report-abc",
+    lastHeartbeatAt: null,
+  };
+
+  it("rejects empty session_id without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalReportUsage(deps, {
+      session_id: "",
+      report: sampleReport,
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /session_id/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("rejects non-object report (array / string / null)", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    for (const bad of [[1, 2, 3], "string", null] as unknown[]) {
+      const res = await rentalReportUsage(deps, {
+        session_id: "rsess_1",
+        report: bad as Record<string, unknown>,
+      });
+      assert.equal(res.success, false);
+      assert.match(res.error ?? "", /JSON object/);
+    }
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /usage with the report body verbatim", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({ id: "meter_row_1" }, captured);
+    const res = await rentalReportUsage(deps, {
+      session_id: "rsess_1",
+      report: sampleReport,
+    });
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].path, "/api/rental/sessions/rsess_1/usage");
+    assert.equal(captured[0].options?.method, "POST");
+    const body = JSON.parse(String(captured[0].options?.body ?? "null"));
+    assert.deepEqual(body, sampleReport);
+    assert.equal(res.success, true);
+    assert.deepEqual(res.meter, { id: "meter_row_1" });
+  });
+
+  it("URL-encodes the session_id path segment", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    await rentalReportUsage(deps, {
+      session_id: "rsess/special?id",
+      report: sampleReport,
+    });
+    assert.equal(
+      captured[0].path,
+      "/api/rental/sessions/rsess%2Fspecial%3Fid/usage",
+    );
+  });
+
+  it("surfaces apiCall errors (e.g. 400 invalid_delta) as success: false", async () => {
+    const deps = makeFailingDeps(new Error("invalid_delta"));
+    const res = await rentalReportUsage(deps, {
+      session_id: "rsess_1",
+      report: sampleReport,
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /invalid_delta/);
   });
 });
