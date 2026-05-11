@@ -116,6 +116,56 @@ function laneKey(provider: string, model: string | null): string {
   return `${provider}::${model ?? ""}`;
 }
 
+/**
+ * Threshold above which a `percent_window` reading counts as a
+ * lane having affirmatively recovered. A value of 0.1 means
+ * "≥10% remaining". Tuned to avoid both false positives (a tiny
+ * sliver of remaining quota that's about to run out anyway clears
+ * the buffer) and false negatives (a fully restored lane has to
+ * read > some headroom before we trust it).
+ */
+export const PERCENT_WINDOW_HEALTHY_THRESHOLD = 0.1;
+
+/**
+ * Whether a snapshot represents an affirmative "lane has remaining
+ * capacity" signal, as opposed to an inconclusive reading.
+ *
+ * Affirmative:
+ *   • `percent_window` with `nativeRemaining > PERCENT_WINDOW_HEALTHY_THRESHOLD`
+ *
+ * Inconclusive (does NOT clear the failure buffer):
+ *   • tokens / credits / usd / requests / unknown units — the
+ *     adapter does not surface a remaining count we can trust
+ *   • `percent_window` with `nativeRemaining ≤ THRESHOLD`
+ *   • any snapshot that ALSO carries a structured exhaustion
+ *     flag (those should have already been promoted to exact by
+ *     classifySnapshot, but defensively we never clear when the
+ *     IDE itself says exhausted)
+ *
+ * Exported for the renter-trigger.ts runtime (next slice) and for
+ * tests.
+ */
+export function isAffirmativelyHealthy(
+  snapshot: AdapterNativeQuotaSnapshot,
+): boolean {
+  const raw = (snapshot.raw ?? {}) as Record<string, unknown>;
+  if (
+    raw.exhausted === true
+    || raw.exhausted_event === true
+    || raw.quota_event === "exhausted"
+  ) {
+    return false;
+  }
+  if (
+    snapshot.nativeUnit === "percent_window"
+    && typeof snapshot.nativeRemaining === "number"
+    && snapshot.nativeRemaining > PERCENT_WINDOW_HEALTHY_THRESHOLD
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export class RenterTriggerClassifier {
   private readonly options: Required<RenterTriggerClassifierOptions>;
   /**
@@ -146,10 +196,15 @@ export class RenterTriggerClassifier {
    * Feed one observation. Returns the current trigger signal,
    * computed against the cumulative per-lane state.
    *
-   * Healthy snapshots (i.e. `classifySnapshot` returns no trigger
-   * for a real provider/model) clear that lane's failure buffer
-   * so a one-off transient burst followed by a healthy reading
-   * does not later trigger an "inferred" rescue.
+   * Failure buffers are only cleared by an *affirmatively healthy*
+   * snapshot (see {@link isAffirmativelyHealthy}). Unknown / null
+   * readings (e.g. a token-adapter snapshot that does not expose
+   * remaining quota, or a `percent_window=0` reading without a
+   * `reset_at`) do NOT clear the buffer — those are inconclusive
+   * states, not signals that the lane has recovered. If they did
+   * clear, scheduler snapshots between quota-failure pulses would
+   * keep wiping the buffer and the inferred threshold could never
+   * be reached for an actually-failing lane.
    */
   observe(
     observation: RenterQuotaObservation,
@@ -160,6 +215,7 @@ export class RenterTriggerClassifier {
       if (
         !signal.triggered
         && observation.snapshot.provider
+        && isAffirmativelyHealthy(observation.snapshot)
       ) {
         const key = laneKey(
           observation.snapshot.provider,

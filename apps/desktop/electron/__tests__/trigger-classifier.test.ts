@@ -17,8 +17,10 @@ import test, { describe, it } from "node:test";
 
 import type { AdapterNativeQuotaSnapshot } from "../rental/adapter-types.js";
 import {
+  PERCENT_WINDOW_HEALTHY_THRESHOLD,
   RENTER_TRIGGER_REASONS,
   RenterTriggerClassifier,
+  isAffirmativelyHealthy,
 } from "../rental/trigger-classifier.js";
 
 // ---------------------------------------------------------------------------
@@ -301,7 +303,7 @@ describe("RenterTriggerClassifier — consecutive failures (per-lane)", () => {
     assert.equal(c.failureCount(nowMs + 10_000, "antigravity", "gemini-2.5-flash"), 1);
   });
 
-  it("clears the lane's failure buffer when a healthy snapshot arrives", () => {
+  it("clears the lane's failure buffer when an affirmatively-healthy snapshot arrives", () => {
     // A burst of failures followed by a healthy reading should NOT
     // be classified as inferred — the lane has recovered, so the
     // accumulated failures are stale signal.
@@ -320,7 +322,7 @@ describe("RenterTriggerClassifier — consecutive failures (per-lane)", () => {
     }
     assert.equal(c.failureCount(nowMs + 2000, "antigravity", "gemini-2.5-pro"), 2);
 
-    // Healthy snapshot for the same lane.
+    // Affirmatively healthy snapshot for the same lane.
     c.observe(
       {
         kind: "snapshot",
@@ -346,6 +348,112 @@ describe("RenterTriggerClassifier — consecutive failures (per-lane)", () => {
       nowMs + 4000,
     );
     assert.equal(after.triggered, false);
+  });
+
+  it("does NOT clear the lane buffer on inconclusive snapshots (token-adapter, percent_window=0 without reset_at)", () => {
+    // The bug LivelyPeak caught in round 2: a token-based snapshot
+    // (nativeRemaining=null because the local log doesn't expose
+    // remaining) is *inconclusive*, not healthy. Same for
+    // percent_window=0 without a reset_at. Clearing the buffer on
+    // those would mean scheduler snapshots between failure pulses
+    // keep wiping the buffer and the inferred threshold could
+    // never be reached for an actually-failing lane.
+    const c = new RenterTriggerClassifier({ inferredFailureCount: 3 });
+    const nowMs = Date.parse("2026-05-11T10:00:00.000Z");
+
+    // Two failures for the antigravity lane.
+    for (let i = 0; i < 2; i++) {
+      c.observe(
+        {
+          kind: "quota_failure",
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          occurredAt: new Date(nowMs + i * 1000).toISOString(),
+        },
+        nowMs + i * 1000,
+      );
+    }
+
+    // A token-based (Claude Code-like) snapshot for the SAME lane.
+    // nativeRemaining=null, no structured exhaustion flag → no_trigger,
+    // but the buffer must NOT clear.
+    c.observe(
+      {
+        kind: "snapshot",
+        snapshot: makeSnapshot({
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          nativeUnit: "tokens",
+          nativeRemaining: null,
+          nativeTotal: null,
+          nativeResetAt: null,
+          raw: { turnCount: 4 },
+        }),
+      },
+      nowMs + 2500,
+    );
+    assert.equal(c.failureCount(nowMs + 2500, "antigravity", "gemini-2.5-pro"), 2);
+
+    // A percent_window=0 snapshot WITHOUT reset_at also inconclusive.
+    c.observe(
+      {
+        kind: "snapshot",
+        snapshot: makeSnapshot({
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          nativeUnit: "percent_window",
+          nativeRemaining: 0,
+          nativeResetAt: null,
+        }),
+      },
+      nowMs + 2750,
+    );
+    assert.equal(c.failureCount(nowMs + 2750, "antigravity", "gemini-2.5-pro"), 2);
+
+    // Third real failure now escalates — the inconclusive snapshots
+    // did not wipe the buffer.
+    const escalated = c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: new Date(nowMs + 3000).toISOString(),
+      },
+      nowMs + 3000,
+    );
+    assert.equal(escalated.triggered, true);
+    assert.equal(escalated.confidence, "inferred");
+  });
+
+  it("does not clear the buffer on a snapshot with percent_remaining at exactly the healthy threshold", () => {
+    // Boundary: PERCENT_WINDOW_HEALTHY_THRESHOLD is a strict >.
+    // A snapshot reading exactly at the threshold is borderline,
+    // not affirmatively healthy.
+    const c = new RenterTriggerClassifier({ inferredFailureCount: 3 });
+    const nowMs = Date.parse("2026-05-11T10:00:00.000Z");
+    for (let i = 0; i < 2; i++) {
+      c.observe(
+        {
+          kind: "quota_failure",
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          occurredAt: new Date(nowMs + i * 1000).toISOString(),
+        },
+        nowMs + i * 1000,
+      );
+    }
+    c.observe(
+      {
+        kind: "snapshot",
+        snapshot: makeSnapshot({
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          nativeRemaining: PERCENT_WINDOW_HEALTHY_THRESHOLD,
+        }),
+      },
+      nowMs + 2000,
+    );
+    assert.equal(c.failureCount(nowMs + 2000, "antigravity", "gemini-2.5-pro"), 2);
   });
 
   it("evicts failures older than the rolling window", () => {
@@ -424,6 +532,66 @@ describe("RenterTriggerClassifier — manual declare", () => {
 // ---------------------------------------------------------------------------
 // reset() clears buffer
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// isAffirmativelyHealthy direct unit tests
+// ---------------------------------------------------------------------------
+
+describe("isAffirmativelyHealthy", () => {
+  it("returns true only for percent_window with remaining > threshold", () => {
+    assert.equal(
+      isAffirmativelyHealthy(
+        makeSnapshot({ nativeUnit: "percent_window", nativeRemaining: 0.5 }),
+      ),
+      true,
+    );
+    assert.equal(
+      isAffirmativelyHealthy(
+        makeSnapshot({
+          nativeUnit: "percent_window",
+          nativeRemaining: PERCENT_WINDOW_HEALTHY_THRESHOLD,
+        }),
+      ),
+      false,
+      "exactly at threshold is borderline, not affirmative",
+    );
+    assert.equal(
+      isAffirmativelyHealthy(
+        makeSnapshot({ nativeUnit: "percent_window", nativeRemaining: 0 }),
+      ),
+      false,
+    );
+  });
+
+  it("returns false for token / credit / unknown snapshots regardless of remaining", () => {
+    for (const unit of ["tokens", "credits", "usd", "requests", "unknown"] as const) {
+      assert.equal(
+        isAffirmativelyHealthy(
+          makeSnapshot({
+            nativeUnit: unit,
+            nativeRemaining: 999_999,
+            nativeTotal: null,
+          }),
+        ),
+        false,
+        `${unit} unit should not be treated as affirmatively healthy`,
+      );
+    }
+  });
+
+  it("returns false when raw flags structured exhaustion (defensive)", () => {
+    assert.equal(
+      isAffirmativelyHealthy(
+        makeSnapshot({
+          nativeUnit: "percent_window",
+          nativeRemaining: 0.9,
+          raw: { exhausted: true },
+        }),
+      ),
+      false,
+    );
+  });
+});
 
 test("reset() clears all lane failure buffers", () => {
   const c = new RenterTriggerClassifier({ inferredFailureCount: 2 });
