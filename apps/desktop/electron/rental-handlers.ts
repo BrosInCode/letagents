@@ -20,6 +20,14 @@ import type {
   DesktopRentalUsageSnapshot,
 } from "./ipc-types.js";
 import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
+import type { RentalApiClient } from "./rental/api-client.js";
+import {
+  mapApiListingArray,
+  mapApiRequest,
+  mapApiRequestArray,
+  mapApiSession,
+  toApiCreateSessionBody,
+} from "./rental/api-mapper.js";
 
 export type DisabledRentalResult = {
   enabled: false;
@@ -31,6 +39,17 @@ type RentalIpcHandler = (_event: unknown, ...args: unknown[]) => unknown;
 export interface DesktopRentalHandlerOptions {
   enabled?: boolean;
   renterTriggerRuntime?: RenterTriggerRuntime;
+  /**
+   * Optional live API client. When provided, the IPC channels for
+   * listings discovery, provider requests, and session lifecycle
+   * call the server and surface the mapped DesktopRental* shape.
+   * When omitted (e.g. offline desktop, missing auth) the channels
+   * fall back to the stub responses so the UI stays renderable.
+   *
+   * Wiring lands here in p1.8c on top of the p1.8a client (#392)
+   * and p1.8b mapper (#393).
+   */
+  apiClient?: RentalApiClient | null;
 }
 
 const disabledRentalResult: DisabledRentalResult = Object.freeze({ enabled: false });
@@ -45,6 +64,7 @@ export function registerDesktopRentalIpcHandlers(
 ): void {
   const enabled = options.enabled ?? isRentEnabled();
   const renterTriggerRuntime = options.renterTriggerRuntime ?? new RenterTriggerRuntime();
+  const apiClient = options.apiClient ?? null;
   const register = (channel: string, handler: RentalIpcHandler) => {
     ipcMain.handle(channel, async (event, ...args) => {
       if (!enabled) return disabledRentalResult;
@@ -52,7 +72,13 @@ export function registerDesktopRentalIpcHandlers(
     });
   };
 
-  register("desktop:rental:list-listings", () => []);
+  register("desktop:rental:list-listings", async () => {
+    if (apiClient) {
+      const result = await apiClient.publicListings();
+      if (result.ok) return mapApiListingArray(result.body);
+    }
+    return [];
+  });
   register("desktop:rental:get-provider-dashboard", () => buildEmptyProviderDashboard());
   register("desktop:rental:create-listing", (_event, input) =>
     buildStubListing("listing_stub", normalizeListingInput(input))
@@ -68,12 +94,68 @@ export function registerDesktopRentalIpcHandlers(
   );
   register("desktop:rental:refresh-quota", (_event, id) => buildEmptyQuotaSnapshot(String(id)));
   register("desktop:rental:run-preflight", (_event, id) => buildPreflightResult(typeof id === "string" ? id : null));
-  register("desktop:rental:create-session", (_event, input) => buildStubSession("session_stub", normalizeStartInput(input)));
-  register("desktop:rental:get-session", (_event, id) => buildStubSession(String(id)));
-  register("desktop:rental:cancel-session", (_event, id) => buildStubSession(String(id), undefined, "cancelled"));
-  register("desktop:rental:list-provider-requests", () => []);
-  register("desktop:rental:accept-request", (_event, id) => buildStubSession(String(id), undefined, "accepted"));
-  register("desktop:rental:decline-request", (_event, id) => buildStubRequest(String(id), "declined"));
+  register("desktop:rental:create-session", async (_event, input) => {
+    const normalized = normalizeStartInput(input);
+    if (apiClient) {
+      const result = await apiClient.createSession(toApiCreateSessionBody(normalized));
+      if (result.ok) {
+        const mapped = mapApiSession(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubSession("session_stub", normalized);
+  });
+  register("desktop:rental:get-session", async (_event, id) => {
+    const sessionId = String(id);
+    if (apiClient) {
+      const result = await apiClient.getSession(sessionId);
+      if (result.ok) {
+        const mapped = mapApiSession(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubSession(sessionId);
+  });
+  register("desktop:rental:cancel-session", async (_event, id) => {
+    const sessionId = String(id);
+    if (apiClient) {
+      const result = await apiClient.cancelSession(sessionId);
+      if (result.ok) {
+        const mapped = mapApiSession(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubSession(sessionId, undefined, "cancelled");
+  });
+  register("desktop:rental:list-provider-requests", async () => {
+    if (apiClient) {
+      const result = await apiClient.listProviderRequests();
+      if (result.ok) return mapApiRequestArray(result.body);
+    }
+    return [];
+  });
+  register("desktop:rental:accept-request", async (_event, id) => {
+    const sessionId = String(id);
+    if (apiClient) {
+      const result = await apiClient.acceptRequest(sessionId);
+      if (result.ok) {
+        const mapped = mapApiSession(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubSession(sessionId, undefined, "accepted");
+  });
+  register("desktop:rental:decline-request", async (_event, id) => {
+    const sessionId = String(id);
+    if (apiClient) {
+      const result = await apiClient.declineRequest(sessionId);
+      if (result.ok) {
+        const mapped = mapApiRequest(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubRequest(sessionId, "declined");
+  });
   register("desktop:rental:get-activity", () => [] satisfies DesktopRentalActivityEvent[]);
   register("desktop:rental:get-exposures", () => [] satisfies DesktopRentalExposure[]);
   register("desktop:rental:get-patches", () => [] satisfies DesktopRentalPatch[]);
