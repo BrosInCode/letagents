@@ -2,10 +2,11 @@
  * Internal rental routes — called by adapters / MCP tools, not browsers.
  *
  * Routes (mounted under /api/rental):
- *   POST /api/rental/sessions/:id/usage      — adapter snapshot ingest (p2.2)
- *   POST /api/rental/sessions/:id/heartbeat  — provider liveness beat (p1.5
- *                                              service + p3.2 route wiring)
- *   GET  /api/rental/sessions/:id/liveness   — read current liveness state
+ *   POST /api/rental/sessions/:id/usage             — adapter snapshot ingest (p2.2)
+ *   POST /api/rental/sessions/:id/budget/reserve    — pre-step reserve (p2.8b)
+ *   POST /api/rental/sessions/:id/budget/reconcile  — actual usage reconciliation (p2.8b)
+ *   POST /api/rental/sessions/:id/heartbeat         — provider liveness beat
+ *   GET  /api/rental/sessions/:id/liveness          — read current liveness state
  *
  * Auth: an authenticated session must belong to the rental session as
  *       either the renter or the provider. Anonymous calls are 401.
@@ -35,6 +36,15 @@ import {
   type RentalUsageIngestDeps,
 } from "../rental/usage-ingest.js";
 import {
+  BudgetOrchestratorError,
+  reconcileBudget,
+  reserveBudget,
+  type BudgetReconcileInput,
+  type BudgetReconcileResult,
+  type BudgetReserveInput,
+  type BudgetReserveResult,
+} from "../rental/budget-orchestrator.js";
+import {
   createDefaultDeps as createDefaultHeartbeatDeps,
   getLivenessStatus,
   recordHeartbeat,
@@ -52,6 +62,14 @@ export interface RentalInternalRouteDeps {
     report: IngestUsageReport,
     deps?: RentalUsageIngestDeps,
   ) => Promise<RentalUsageMeterRow>;
+  reserveBudget: (
+    sessionId: string,
+    input: BudgetReserveInput,
+  ) => Promise<BudgetReserveResult>;
+  reconcileBudget: (
+    sessionId: string,
+    input: BudgetReconcileInput,
+  ) => Promise<BudgetReconcileResult>;
   /**
    * Resolve which roles (renter, provider) a session-bound account
    * has for the rental. Returns null when no such session.
@@ -86,6 +104,8 @@ async function defaultHeartbeatDeps(): Promise<HeartbeatDeps> {
 
 export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
   ingestUsage,
+  reserveBudget,
+  reconcileBudget,
   async resolveSessionAccess(sessionId, accountId) {
     const [row] = await db
       .select({
@@ -241,6 +261,51 @@ function parseReport(body: unknown): IngestUsageReport | { error: string } {
   return b as unknown as IngestUsageReport;
 }
 
+function finiteNonNegativeField(
+  body: Record<string, unknown>,
+  field: string,
+): number | { error: string } {
+  const value = body[field];
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return { error: `${field} must be a finite non-negative number` };
+  }
+  return value;
+}
+
+function parseReserve(body: unknown): BudgetReserveInput | { error: string } {
+  if (!isPlainObject(body)) return { error: "body must be an object" };
+  const stepCostLrt = finiteNonNegativeField(body, "stepCostLrt");
+  if (typeof stepCostLrt !== "number") return stepCostLrt;
+  return { stepCostLrt };
+}
+
+function parseReconcile(body: unknown): BudgetReconcileInput | { error: string } {
+  if (!isPlainObject(body)) return { error: "body must be an object" };
+  const actualCostLrt = finiteNonNegativeField(body, "actualCostLrt");
+  if (typeof actualCostLrt !== "number") return actualCostLrt;
+  const reservedCostLrt = finiteNonNegativeField(body, "reservedCostLrt");
+  if (typeof reservedCostLrt !== "number") return reservedCostLrt;
+  return { actualCostLrt, reservedCostLrt };
+}
+
+async function requireSessionAccess(
+  req: AuthenticatedRequest,
+  res: Response,
+  deps: RentalInternalRouteDeps,
+): Promise<string | null> {
+  if (!requireRentEnabled(res)) return null;
+  const accountId = requireAccountId(req, res);
+  if (!accountId) return null;
+
+  const sessionId = req.params.id as string;
+  const access = await deps.resolveSessionAccess(sessionId, accountId);
+  if (!access) {
+    res.status(404).json({ error: "session not found" });
+    return null;
+  }
+  return sessionId;
+}
+
 // ===== Route registration =====
 
 export function registerRentalInternalRoutes(
@@ -248,16 +313,8 @@ export function registerRentalInternalRoutes(
   deps: RentalInternalRouteDeps = defaultRentalInternalDeps,
 ): void {
   app.post("/api/rental/sessions/:id/usage", async (req: AuthenticatedRequest, res) => {
-    if (!requireRentEnabled(res)) return;
-    const accountId = requireAccountId(req, res);
-    if (!accountId) return;
-
-    const sessionId = req.params.id as string;
-    const access = await deps.resolveSessionAccess(sessionId, accountId);
-    if (!access) {
-      res.status(404).json({ error: "session not found" });
-      return;
-    }
+    const sessionId = await requireSessionAccess(req, res, deps);
+    if (!sessionId) return;
 
     const parsed = parseReport(req.body);
     if ("error" in parsed) {
@@ -274,6 +331,50 @@ export function registerRentalInternalRoutes(
         return;
       }
       res.status(500).json({ error: "Failed to ingest usage" });
+    }
+  });
+
+  app.post("/api/rental/sessions/:id/budget/reserve", async (req: AuthenticatedRequest, res) => {
+    const sessionId = await requireSessionAccess(req, res, deps);
+    if (!sessionId) return;
+
+    const parsed = parseReserve(req.body);
+    if ("error" in parsed) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    try {
+      const result = await deps.reserveBudget(sessionId, parsed);
+      res.status(result.decision.allowed ? 201 : 409).json(result);
+    } catch (err) {
+      if (err instanceof BudgetOrchestratorError) {
+        res.status(err.status).json({ error: err.message, code: err.code });
+        return;
+      }
+      res.status(500).json({ error: "Failed to reserve budget" });
+    }
+  });
+
+  app.post("/api/rental/sessions/:id/budget/reconcile", async (req: AuthenticatedRequest, res) => {
+    const sessionId = await requireSessionAccess(req, res, deps);
+    if (!sessionId) return;
+
+    const parsed = parseReconcile(req.body);
+    if ("error" in parsed) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    try {
+      const result = await deps.reconcileBudget(sessionId, parsed);
+      res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof BudgetOrchestratorError) {
+        res.status(err.status).json({ error: err.message, code: err.code });
+        return;
+      }
+      res.status(500).json({ error: "Failed to reconcile budget" });
     }
   });
 
