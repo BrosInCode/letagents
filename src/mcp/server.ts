@@ -4445,7 +4445,7 @@ server.tool(
 
 server.tool(
   "rental_accept",
-  "Accept a pending Rent an Agent session request. Transitions the session from 'requested' to 'accepted' per spec §18.2. Optionally pass an idempotency_key for safe retries (forwarded when the server supports it).",
+  "Accept a pending Rent an Agent session request. Transitions the session from 'requested' to 'accepted' per spec §18.2. An optional idempotency_key is forwarded to the server for future idempotency support.",
   {
     session_id: z
       .string()
