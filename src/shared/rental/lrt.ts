@@ -60,11 +60,20 @@ export const DEFAULT_LRT_WEIGHTS: LrtWeights = Object.freeze({
 }) as LrtWeights;
 
 /**
- * Per-provider overrides applied on top of {@link DEFAULT_LRT_WEIGHTS}.
+ * Per-provider weight overrides applied on top of {@link DEFAULT_LRT_WEIGHTS}.
  *
- * Add an entry here when a specific provider needs different weights
- * (e.g. Cursor charges per request; Antigravity bills monthly credits).
- * Any field omitted falls back to the default.
+ * V1 intentionally ships **no** baked-in non-zero overrides. Hard-coded
+ * placeholder weights (e.g. an arbitrary LRT-per-request for Cursor)
+ * would cause Budget Sentinel to systematically over- or under-count
+ * before any real calibration history exists. Instead, request-based
+ * and credit-based providers calibrate at the **session/adapter level**
+ * via the `calibratedWeights` argument to {@link computeLrt}, which the
+ * meter adapter populates from observed LRT-per-{request,credit,USD}
+ * once {@link CalibrationHistory} has enough samples.
+ *
+ * Future per-provider defaults can be added here once calibrated values
+ * are well-known across the fleet (e.g. \"LRT per Cursor premium request\"
+ * has converged after N sessions).
  */
 export const PROVIDER_LRT_WEIGHTS: Readonly<Record<string, Partial<LrtWeights>>> =
   Object.freeze({
@@ -80,18 +89,28 @@ export const PROVIDER_LRT_WEIGHTS: Readonly<Record<string, Partial<LrtWeights>>>
       // does the heavy lifting (see estimateLrtFromPercentWindow below).
     },
     cursor: {
-      // Cursor's "included usage" surface is request-based for many plans.
-      // Set a non-zero per-request weight so request-only deltas count.
-      request: 50,
+      // Request weight intentionally left at the 0 default — adapters
+      // supply a calibrated per-request weight via `computeLrt`'s
+      // `calibratedWeights` argument once history is available.
     },
   });
 
 /**
- * Resolve the effective weight table for one provider.
+ * Resolve the effective weight table for one provider, optionally
+ * applying a session-level calibrated override on top.
+ *
+ * Lookup order, highest precedence first:
+ *
+ *   1. `calibratedWeights` argument          (per-session adapter override)
+ *   2. PROVIDER_LRT_WEIGHTS[provider]        (well-known per-provider override)
+ *   3. DEFAULT_LRT_WEIGHTS                   (§17.3 starting weights)
  */
-export function resolveWeights(provider: string): LrtWeights {
-  const override = PROVIDER_LRT_WEIGHTS[provider] ?? {};
-  return { ...DEFAULT_LRT_WEIGHTS, ...override };
+export function resolveWeights(
+  provider: string,
+  calibratedWeights?: Partial<LrtWeights>,
+): LrtWeights {
+  const providerOverride = PROVIDER_LRT_WEIGHTS[provider] ?? {};
+  return { ...DEFAULT_LRT_WEIGHTS, ...providerOverride, ...(calibratedWeights ?? {}) };
 }
 
 /**
@@ -111,11 +130,21 @@ export function resolveWeights(provider: string): LrtWeights {
  *   + credits               × credits_to_lrt
  *   + usd                   × usd_to_lrt
  *
+ * `calibratedWeights` lets the meter adapter pass a per-session
+ * calibrated override (e.g. an observed LRT-per-request for Cursor
+ * derived from {@link CalibrationHistory}). Without it, only the
+ * default + provider weights apply, which means request/credit/USD
+ * components contribute 0 LRT until an adapter calibrates them.
+ *
  * Negative deltas are clamped to zero — a meter that goes "backwards"
  * is treated as a reset event, not a refund.
  */
-export function computeLrt(delta: UsageDelta, provider: string): number {
-  const w = resolveWeights(provider);
+export function computeLrt(
+  delta: UsageDelta,
+  provider: string,
+  calibratedWeights?: Partial<LrtWeights>,
+): number {
+  const w = resolveWeights(provider, calibratedWeights);
   const tokens =
     Math.max(0, delta.inputTokens) * w.input
     + Math.max(0, delta.outputTokens) * w.output

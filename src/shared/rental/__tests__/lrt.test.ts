@@ -55,16 +55,42 @@ test("computeLrt clamps negative components to zero (meter reset is not a refund
   assert.equal(computeLrt(delta, "claude_code"), 500 * DEFAULT_LRT_WEIGHTS.output);
 });
 
-test("PROVIDER_LRT_WEIGHTS overrides apply for Cursor request-based plans", () => {
+test("PROVIDER_LRT_WEIGHTS leaves request weight at default for Cursor (no placeholder)", () => {
+  // V1 ships no baked-in non-zero request weight for Cursor — adapters
+  // calibrate via the per-session override (see next test). This guards
+  // against accidentally re-introducing a hard-coded placeholder.
   const w = resolveWeights("cursor");
-  assert.equal(w.request, 50, "Cursor request weight should be the override");
+  assert.equal(w.request, DEFAULT_LRT_WEIGHTS.request, "no baked-in Cursor request weight");
   assert.equal(w.input, DEFAULT_LRT_WEIGHTS.input, "non-overridden weights fall back to defaults");
 
   const delta: UsageDelta = {
     ...emptyDelta(),
     requests: 3,
   };
-  assert.equal(computeLrt(delta, "cursor"), 3 * 50);
+  // Without a calibrated override, request-based deltas contribute 0 LRT.
+  assert.equal(computeLrt(delta, "cursor"), 0);
+});
+
+test("computeLrt applies calibratedWeights override at session/adapter level", () => {
+  // The meter adapter discovers, via CalibrationHistory, that this Cursor
+  // lane averages ~37 LRT per request. It passes that override to
+  // computeLrt for this session only — no global hard-coding.
+  const delta: UsageDelta = {
+    ...emptyDelta(),
+    requests: 3,
+  };
+  assert.equal(computeLrt(delta, "cursor", { request: 37 }), 3 * 37);
+});
+
+test("calibratedWeights precedence — session override beats provider default", () => {
+  // Even if we add a provider override later, the per-session calibration
+  // wins. This is the contract Budget Sentinel relies on.
+  const delta: UsageDelta = { ...emptyDelta(), outputTokens: 100 };
+  assert.equal(
+    computeLrt(delta, "claude_code", { output: 8 }),
+    100 * 8,
+    "calibrated override replaces provider/default output weight",
+  );
 });
 
 test("computeLrt falls back to default weights for unknown providers", () => {
