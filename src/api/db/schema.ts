@@ -278,6 +278,20 @@ export const rentalActivitySourceEnum = pgEnum("rental_activity_source", [
   "provider",
 ]);
 
+/**
+ * Source of a `rental_usage_meters` row per spec §19.6:
+ *   adapter      — desktop-side meter adapter snapshot
+ *   tool         — MCP `rental_report_usage` call
+ *   self_reported — rented agent's own usage claim (lower trust)
+ *   system       — server-side bookkeeping (Budget Sentinel, reconciler)
+ */
+export const rentalUsageMeterSourceEnum = pgEnum("rental_usage_meter_source", [
+  "adapter",
+  "tool",
+  "self_reported",
+  "system",
+]);
+
 export const rental_activity_events = pgTable(
   "rental_activity_events",
   {
@@ -312,6 +326,84 @@ export const rental_activity_events = pgTable(
     index("rental_activity_events_room_id_idx").on(table.room_id),
     index("rental_activity_events_event_type_idx").on(table.event_type),
   ]
+);
+
+/**
+ * Per-session meter snapshots reported by desktop adapters / MCP tools.
+ *
+ * Spec §19.6. Each row is one observation: a NativeQuotaSnapshot from
+ * a p2.3 adapter combined with the UsageDelta since the prior row, the
+ * resulting LRT delta + running total, and the confidence the adapter
+ * had in the reading. Idempotent on (session_id, idempotency_key) so
+ * retried writes from a flaky desktop process don't double-count.
+ *
+ * Numeric fields default to 0 so a "no movement" reading still rolls up
+ * cleanly; native_* fields are nullable because not every IDE exposes
+ * every native unit.
+ */
+export const rental_usage_meters = pgTable(
+  "rental_usage_meters",
+  {
+    id: text("id").primaryKey(),
+    session_id: text("session_id").notNull(),
+    source: rentalUsageMeterSourceEnum("source").notNull(),
+    // Native quota fields — nullable; populated only when the adapter
+    // reports them. native_unit is text not enum because some adapters
+    // expose multiple unit signals in one snapshot.
+    native_unit: text("native_unit"),
+    native_used: numeric("native_used"),
+    native_remaining: numeric("native_remaining"),
+    native_reset_at: timestamp("native_reset_at", { withTimezone: true }),
+    // Token deltas — default 0 so summing is safe even when a unit is absent.
+    input_tokens: integer("input_tokens").notNull().default(0),
+    output_tokens: integer("output_tokens").notNull().default(0),
+    cache_creation_tokens: integer("cache_creation_tokens").notNull().default(0),
+    cache_read_tokens: integer("cache_read_tokens").notNull().default(0),
+    reasoning_tokens: integer("reasoning_tokens").notNull().default(0),
+    requests_used: integer("requests_used").notNull().default(0),
+    credits_used: numeric("credits_used"),
+    usd_used: numeric("usd_used"),
+    // LRT bookkeeping — Budget Sentinel reads `lrt_total` to gate work.
+    lrt_delta: integer("lrt_delta").notNull().default(0),
+    lrt_total: integer("lrt_total").notNull().default(0),
+    confidence: rentalMeterConfidenceEnum("confidence").notNull(),
+    adapter_payload: jsonb("adapter_payload"),
+    // Activity counters mirrored onto the meter for cheap reads.
+    tool_call_count: integer("tool_call_count").notNull().default(0),
+    command_run_count: integer("command_run_count").notNull().default(0),
+    files_exposed_count: integer("files_exposed_count").notNull().default(0),
+    heartbeat_count: integer("heartbeat_count").notNull().default(0),
+    last_heartbeat_at: timestamp("last_heartbeat_at", { withTimezone: true }),
+    // Idempotency: a duplicate report with the same key is a no-op.
+    // Unique per (session_id, idempotency_key) — see uniqueIndex below.
+    idempotency_key: text("idempotency_key").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: "rental_usage_meters_session_fk",
+      columns: [table.session_id],
+      foreignColumns: [rental_sessions.id],
+    }),
+    // Cheap session-scoped lookups for Budget Sentinel.
+    index("rental_usage_meters_session_id_idx").on(table.session_id),
+    // Idempotency guard — duplicate reports from a flaky desktop process
+    // hit this and the route returns the existing row.
+    uniqueIndex("rental_usage_meters_session_idempotency_uq").on(
+      table.session_id,
+      table.idempotency_key,
+    ),
+    // Last-snapshot-per-session reads (Budget Sentinel pre-step + UI).
+    index("rental_usage_meters_session_created_idx").on(
+      table.session_id,
+      table.created_at,
+    ),
+  ],
 );
 
 export const id_sequences = pgTable("id_sequences", {
