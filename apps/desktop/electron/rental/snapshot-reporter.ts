@@ -89,6 +89,9 @@ export function computeIdempotencyKey(
   delta: AdapterUsageDelta,
   lrt: AdapterLrtEstimate,
 ): string {
+  // Hash every axis the server persists. Missing any one of them would
+  // make two semantically different reports collide on the same key
+  // (the server would short-circuit and the new delta would be lost).
   const h = createHash("sha256");
   h.update(sessionId);
   h.update("|");
@@ -98,6 +101,7 @@ export function computeIdempotencyKey(
   h.update("|");
   h.update(snapshot.model ?? "");
   h.update("|");
+  // Token axes.
   h.update(String(delta.inputTokens));
   h.update(":");
   h.update(String(delta.outputTokens));
@@ -107,6 +111,17 @@ export function computeIdempotencyKey(
   h.update(String(delta.cacheReadTokens));
   h.update(":");
   h.update(String(delta.reasoningTokens));
+  h.update("|");
+  // Non-token axes also persisted by the server.
+  h.update(String(delta.requests));
+  h.update(":");
+  h.update(String(delta.credits));
+  h.update(":");
+  h.update(String(delta.usd));
+  h.update(":");
+  h.update(String(delta.toolCalls));
+  h.update(":");
+  h.update(String(delta.commandRuns));
   h.update("|");
   h.update(String(Math.round(lrt.lrtUsed)));
   return `desktop_${h.digest("hex").slice(0, 32)}`;
@@ -133,8 +148,13 @@ export function buildUsageReport(inputs: ReportSnapshotInputs): SnapshotReportBo
       cacheReadTokens: inputs.delta.cacheReadTokens,
       reasoningTokens: inputs.delta.reasoningTokens,
       requests: inputs.delta.requests,
-      credits: inputs.delta.credits || null,
-      usd: inputs.delta.usd || null,
+      // Preserve the zero-vs-unknown distinction: forward the number
+      // as-is when the adapter reported one (including 0), only null
+      // when the adapter omitted the field entirely (undefined). The
+      // AdapterUsageDelta contract already uses `number | undefined`
+      // here, so null only appears when explicitly set by the adapter.
+      credits: inputs.delta.credits ?? null,
+      usd: inputs.delta.usd ?? null,
       toolCalls: inputs.delta.toolCalls,
       commandRuns: inputs.delta.commandRuns,
     },

@@ -99,6 +99,40 @@ test("computeIdempotencyKey changes when the LRT delta changes", () => {
   );
 });
 
+test("computeIdempotencyKey changes when any persisted delta axis changes", () => {
+  // Every axis the server persists must affect the key, otherwise a
+  // changed-usage report could collide with a stale key and the server
+  // would short-circuit the new delta out of existence.
+  const baseline = fixtureInputs();
+  const base = computeIdempotencyKey(baseline.sessionId, baseline.snapshot, baseline.delta, baseline.lrt);
+
+  type DeltaField = keyof AdapterUsageDelta;
+  const perturbations: { field: DeltaField; bump: number }[] = [
+    { field: "inputTokens", bump: 1 },
+    { field: "outputTokens", bump: 1 },
+    { field: "cacheCreationTokens", bump: 1 },
+    { field: "cacheReadTokens", bump: 1 },
+    { field: "reasoningTokens", bump: 1 },
+    { field: "requests", bump: 1 },
+    { field: "credits", bump: 0.01 },
+    { field: "usd", bump: 0.01 },
+    { field: "toolCalls", bump: 1 },
+    { field: "commandRuns", bump: 1 },
+  ];
+  for (const { field, bump } of perturbations) {
+    const perturbed: AdapterUsageDelta = {
+      ...baseline.delta,
+      [field]: (baseline.delta[field] as number) + bump,
+    };
+    const k = computeIdempotencyKey(baseline.sessionId, baseline.snapshot, perturbed, baseline.lrt);
+    assert.notEqual(
+      k,
+      base,
+      `idempotency key must change when delta.${field} changes — otherwise a different usage report can collide with a stale key`,
+    );
+  }
+});
+
 test("buildUsageReport carries snapshot + delta + lrt into the wire shape", () => {
   const body = buildUsageReport(fixtureInputs());
   assert.equal(body.source, "adapter");
@@ -113,6 +147,26 @@ test("buildUsageReport carries snapshot + delta + lrt into the wire shape", () =
   assert.equal(body.lrt.confidence, "local_exact");
   assert.ok(body.idempotencyKey.startsWith("desktop_"));
   assert.ok(body.adapterPayload && (body.adapterPayload as { turnCount?: number }).turnCount === 4);
+});
+
+test("buildUsageReport preserves credits/usd = 0 (zero is not unknown)", () => {
+  // Regression: prior code coerced zero to null with `|| null`, losing
+  // the zero-vs-unknown distinction. The adapter contract says credits
+  // and usd are always present numbers; only null is "unknown".
+  const body = buildUsageReport(fixtureInputs({
+    delta: fixtureDelta({ credits: 0, usd: 0, requests: 5 }),
+  }));
+  assert.equal(body.delta.credits, 0, "0 credits is a real observation, not null");
+  assert.equal(body.delta.usd, 0, "0 usd is a real observation, not null");
+  assert.equal(body.delta.requests, 5);
+});
+
+test("buildUsageReport forwards non-zero credits/usd as numbers", () => {
+  const body = buildUsageReport(fixtureInputs({
+    delta: fixtureDelta({ credits: 12.5, usd: 0.04 }),
+  }));
+  assert.equal(body.delta.credits, 12.5);
+  assert.equal(body.delta.usd, 0.04);
 });
 
 test("buildUsageReport accepts an explicit idempotencyKey override", () => {
