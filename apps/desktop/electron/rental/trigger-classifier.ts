@@ -111,14 +111,28 @@ export interface RenterTriggerClassifierOptions {
 const DEFAULT_INFERRED_FAILURE_COUNT = 3;
 const DEFAULT_INFERRED_WINDOW_MS = 5 * 60 * 1000;
 
+/** Internal key used to group failures by lane. */
+function laneKey(provider: string, model: string | null): string {
+  return `${provider}::${model ?? ""}`;
+}
+
 export class RenterTriggerClassifier {
   private readonly options: Required<RenterTriggerClassifierOptions>;
-  private readonly recentFailures: Array<{
-    provider: string;
-    model: string | null;
-    occurredAt: string;
-    detail?: Record<string, unknown>;
-  }> = [];
+  /**
+   * Failures grouped by (provider, model). Inferred classification
+   * is per-lane so mixed transient failures across different
+   * providers cannot accumulate to trigger a rescue for whichever
+   * lane happens to have the most recent failure.
+   */
+  private readonly failuresByLane: Map<
+    string,
+    Array<{
+      provider: string;
+      model: string | null;
+      occurredAt: string;
+      detail?: Record<string, unknown>;
+    }>
+  > = new Map();
 
   constructor(options: RenterTriggerClassifierOptions = {}) {
     this.options = {
@@ -130,18 +144,33 @@ export class RenterTriggerClassifier {
 
   /**
    * Feed one observation. Returns the current trigger signal,
-   * computed against the cumulative state (the classifier is
-   * stateful only over `recentFailures`).
+   * computed against the cumulative per-lane state.
+   *
+   * Healthy snapshots (i.e. `classifySnapshot` returns no trigger
+   * for a real provider/model) clear that lane's failure buffer
+   * so a one-off transient burst followed by a healthy reading
+   * does not later trigger an "inferred" rescue.
    */
   observe(
     observation: RenterQuotaObservation,
     nowMs: number = Date.now(),
   ): RenterTriggerSignal {
     if (observation.kind === "snapshot") {
-      return this.classifySnapshot(observation.snapshot);
+      const signal = this.classifySnapshot(observation.snapshot);
+      if (
+        !signal.triggered
+        && observation.snapshot.provider
+      ) {
+        const key = laneKey(
+          observation.snapshot.provider,
+          observation.snapshot.model ?? null,
+        );
+        this.failuresByLane.delete(key);
+      }
+      return signal;
     }
     this.recordFailure(observation, nowMs);
-    return this.classifyFailures(nowMs);
+    return this.classifyFailures(observation.provider, observation.model, nowMs);
   }
 
   /**
@@ -181,10 +210,18 @@ export class RenterTriggerClassifier {
     // dead even though the snapshot is "estimated" confidence in
     // the LRT sense. The trigger is about the user's IDE state,
     // not the LRT projection.
+    //
+    // Requiring `nativeResetAt` is intentional: without a reset
+    // timestamp we cannot distinguish a transient zero (e.g. the
+    // adapter raced the IDE writing the file) from a real lane
+    // exhaustion, and the renter has no actionable ETA. Drop those
+    // to the failure-burst path (inferred) where they belong.
     if (
       snapshot.nativeUnit === "percent_window"
       && typeof snapshot.nativeRemaining === "number"
       && snapshot.nativeRemaining <= 0
+      && typeof snapshot.nativeResetAt === "string"
+      && snapshot.nativeResetAt.length > 0
     ) {
       return {
         triggered: true,
@@ -240,50 +277,73 @@ export class RenterTriggerClassifier {
   }
 
   /**
-   * Clear the rolling failure buffer. Called once a rescue session
-   * is opened so the next series of failures starts fresh.
+   * Clear all lane failure buffers. Called once a rescue session is
+   * opened so the next series of failures starts fresh.
    */
   reset(): void {
-    this.recentFailures.length = 0;
+    this.failuresByLane.clear();
   }
 
   /**
    * For tests + telemetry: how many quota failures are currently
-   * inside the rolling window.
+   * inside the rolling window for a specific lane. When provider /
+   * model are omitted, returns the total across all lanes.
    */
-  failureCount(nowMs: number = Date.now()): number {
-    this.evictExpired(nowMs);
-    return this.recentFailures.length;
+  failureCount(
+    nowMs: number = Date.now(),
+    provider?: string,
+    model?: string | null,
+  ): number {
+    if (typeof provider === "string") {
+      const key = laneKey(provider, model ?? null);
+      this.evictExpired(key, nowMs);
+      return this.failuresByLane.get(key)?.length ?? 0;
+    }
+    let total = 0;
+    for (const key of [...this.failuresByLane.keys()]) {
+      this.evictExpired(key, nowMs);
+      total += this.failuresByLane.get(key)?.length ?? 0;
+    }
+    return total;
   }
 
   private recordFailure(
     observation: Extract<RenterQuotaObservation, { kind: "quota_failure" }>,
     nowMs: number,
   ): void {
-    this.recentFailures.push({
+    const key = laneKey(observation.provider, observation.model);
+    const bucket = this.failuresByLane.get(key) ?? [];
+    bucket.push({
       provider: observation.provider,
       model: observation.model,
       occurredAt: observation.occurredAt,
       detail: observation.detail,
     });
-    this.evictExpired(nowMs);
+    this.failuresByLane.set(key, bucket);
+    this.evictExpired(key, nowMs);
   }
 
-  private classifyFailures(nowMs: number): RenterTriggerSignal {
-    this.evictExpired(nowMs);
-    if (this.recentFailures.length < this.options.inferredFailureCount) {
+  private classifyFailures(
+    provider: string,
+    model: string | null,
+    nowMs: number,
+  ): RenterTriggerSignal {
+    const key = laneKey(provider, model);
+    this.evictExpired(key, nowMs);
+    const bucket = this.failuresByLane.get(key) ?? [];
+    if (bucket.length < this.options.inferredFailureCount) {
       return {
         triggered: false,
         confidence: null,
         reason: RENTER_TRIGGER_REASONS.NO_TRIGGER,
-        provider: null,
-        model: null,
+        provider,
+        model,
         observedAt: null,
         laneResetAt: null,
         rawSignal: null,
       };
     }
-    const latest = this.recentFailures[this.recentFailures.length - 1]!;
+    const latest = bucket[bucket.length - 1]!;
     return {
       triggered: true,
       confidence: "inferred",
@@ -294,9 +354,11 @@ export class RenterTriggerClassifier {
       laneResetAt: null,
       rawSignal: {
         source: "consecutive_failures",
-        count: this.recentFailures.length,
+        provider,
+        model,
+        count: bucket.length,
         window_ms: this.options.inferredWindowMs,
-        recent: this.recentFailures.map((f) => ({
+        recent: bucket.map((f) => ({
           provider: f.provider,
           model: f.model,
           occurred_at: f.occurredAt,
@@ -306,12 +368,17 @@ export class RenterTriggerClassifier {
     };
   }
 
-  private evictExpired(nowMs: number): void {
+  private evictExpired(key: string, nowMs: number): void {
+    const bucket = this.failuresByLane.get(key);
+    if (!bucket) return;
     const cutoff = nowMs - this.options.inferredWindowMs;
-    while (this.recentFailures.length > 0) {
-      const head = this.recentFailures[0]!;
+    while (bucket.length > 0) {
+      const head = bucket[0]!;
       if (Date.parse(head.occurredAt) >= cutoff) break;
-      this.recentFailures.shift();
+      bucket.shift();
+    }
+    if (bucket.length === 0) {
+      this.failuresByLane.delete(key);
     }
   }
 }

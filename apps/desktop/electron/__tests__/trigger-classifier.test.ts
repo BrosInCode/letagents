@@ -103,6 +103,24 @@ describe("RenterTriggerClassifier — percent_window exhausted", () => {
     assert.equal(result.laneResetAt, "2026-05-11T20:30:00.000Z");
   });
 
+  it("does NOT promote percent_remaining=0 to exact when reset_at is null", () => {
+    // Without a reset timestamp we cannot tell a transient race
+    // condition from real lane exhaustion. The renter also has no
+    // actionable ETA. These belong on the failure-burst path
+    // (inferred) instead — the classifier returns no_trigger here
+    // and a downstream observer can downgrade to a failure pulse.
+    const c = new RenterTriggerClassifier();
+    const result = c.classifySnapshot(
+      makeSnapshot({
+        nativeUnit: "percent_window",
+        nativeRemaining: 0,
+        nativeResetAt: null,
+      }),
+    );
+    assert.equal(result.triggered, false);
+    assert.equal(result.reason, RENTER_TRIGGER_REASONS.NO_TRIGGER);
+  });
+
   it("does not fire for a healthy percent_remaining=0.42 lane", () => {
     const c = new RenterTriggerClassifier();
     const result = c.classifySnapshot(makeSnapshot({ nativeRemaining: 0.42 }));
@@ -156,7 +174,7 @@ describe("RenterTriggerClassifier — token-based snapshot", () => {
 // Consecutive failures → inferred
 // ---------------------------------------------------------------------------
 
-describe("RenterTriggerClassifier — consecutive failures", () => {
+describe("RenterTriggerClassifier — consecutive failures (per-lane)", () => {
   it("requires N failures inside the rolling window to escalate to inferred", () => {
     const c = new RenterTriggerClassifier({
       inferredFailureCount: 3,
@@ -201,9 +219,133 @@ describe("RenterTriggerClassifier — consecutive failures", () => {
     assert.equal(s.triggered, true);
     assert.equal(s.confidence, "inferred");
     assert.equal(s.reason, RENTER_TRIGGER_REASONS.CONSECUTIVE_FAILURES);
-    const raw = s.rawSignal as { count: number; recent: unknown[] };
+    const raw = s.rawSignal as { count: number; recent: unknown[]; provider: string; model: string };
     assert.equal(raw.count, 3);
     assert.equal(raw.recent.length, 3);
+    assert.equal(raw.provider, "antigravity");
+    assert.equal(raw.model, "gemini-2.5-pro");
+  });
+
+  it("does NOT escalate when failures are spread across different providers", () => {
+    // The bug LivelyPeak caught: a global counter would have
+    // promoted 3 mixed failures to inferred for the latest lane.
+    // Per-lane counting prevents that.
+    const c = new RenterTriggerClassifier({ inferredFailureCount: 3 });
+    const nowMs = Date.parse("2026-05-11T10:00:00.000Z");
+    c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: "2026-05-11T10:00:00.000Z",
+      },
+      nowMs,
+    );
+    c.observe(
+      {
+        kind: "quota_failure",
+        provider: "claude_code",
+        model: "claude-3.7-sonnet",
+        occurredAt: "2026-05-11T10:00:05.000Z",
+      },
+      nowMs + 5_000,
+    );
+    const final = c.observe(
+      {
+        kind: "quota_failure",
+        provider: "cursor",
+        model: null,
+        occurredAt: "2026-05-11T10:00:10.000Z",
+      },
+      nowMs + 10_000,
+    );
+    assert.equal(final.triggered, false);
+    // The cursor lane only has 1 failure; classification returns
+    // no_trigger but still reports the lane it tried to classify.
+    assert.equal(final.provider, "cursor");
+  });
+
+  it("does NOT escalate when failures are on the same provider but different models", () => {
+    const c = new RenterTriggerClassifier({ inferredFailureCount: 3 });
+    const nowMs = Date.parse("2026-05-11T10:00:00.000Z");
+    c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: "2026-05-11T10:00:00.000Z",
+      },
+      nowMs,
+    );
+    c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-flash",
+        occurredAt: "2026-05-11T10:00:05.000Z",
+      },
+      nowMs + 5_000,
+    );
+    const third = c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: "2026-05-11T10:00:10.000Z",
+      },
+      nowMs + 10_000,
+    );
+    // gemini-2.5-pro lane only has 2 failures, threshold is 3.
+    assert.equal(third.triggered, false);
+    assert.equal(c.failureCount(nowMs + 10_000, "antigravity", "gemini-2.5-pro"), 2);
+    assert.equal(c.failureCount(nowMs + 10_000, "antigravity", "gemini-2.5-flash"), 1);
+  });
+
+  it("clears the lane's failure buffer when a healthy snapshot arrives", () => {
+    // A burst of failures followed by a healthy reading should NOT
+    // be classified as inferred — the lane has recovered, so the
+    // accumulated failures are stale signal.
+    const c = new RenterTriggerClassifier({ inferredFailureCount: 3 });
+    const nowMs = Date.parse("2026-05-11T10:00:00.000Z");
+    for (let i = 0; i < 2; i++) {
+      c.observe(
+        {
+          kind: "quota_failure",
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          occurredAt: new Date(nowMs + i * 1000).toISOString(),
+        },
+        nowMs + i * 1000,
+      );
+    }
+    assert.equal(c.failureCount(nowMs + 2000, "antigravity", "gemini-2.5-pro"), 2);
+
+    // Healthy snapshot for the same lane.
+    c.observe(
+      {
+        kind: "snapshot",
+        snapshot: makeSnapshot({
+          provider: "antigravity",
+          model: "gemini-2.5-pro",
+          nativeRemaining: 0.8,
+        }),
+      },
+      nowMs + 3000,
+    );
+    assert.equal(c.failureCount(nowMs + 3000, "antigravity", "gemini-2.5-pro"), 0);
+
+    // A third failure now should NOT trigger inferred — the lane's
+    // buffer was reset by the healthy snapshot, so we're back to 1.
+    const after = c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: new Date(nowMs + 4000).toISOString(),
+      },
+      nowMs + 4000,
+    );
+    assert.equal(after.triggered, false);
   });
 
   it("evicts failures older than the rolling window", () => {
@@ -236,7 +378,7 @@ describe("RenterTriggerClassifier — consecutive failures", () => {
     // Advance time well past the window — old failures get evicted
     // before classification. New failures only.
     const future = Date.parse("2026-05-11T10:30:00.000Z");
-    let s = c.observe(
+    const s = c.observe(
       {
         kind: "quota_failure",
         provider: "antigravity",
@@ -246,7 +388,7 @@ describe("RenterTriggerClassifier — consecutive failures", () => {
       future,
     );
     assert.equal(s.triggered, false);
-    assert.equal(c.failureCount(future), 1);
+    assert.equal(c.failureCount(future, "antigravity", null), 1);
   });
 });
 
@@ -283,7 +425,7 @@ describe("RenterTriggerClassifier — manual declare", () => {
 // reset() clears buffer
 // ---------------------------------------------------------------------------
 
-test("reset() clears the rolling failure buffer", () => {
+test("reset() clears all lane failure buffers", () => {
   const c = new RenterTriggerClassifier({ inferredFailureCount: 2 });
   const now = Date.parse("2026-05-11T10:00:00.000Z");
   c.observe(
@@ -295,7 +437,18 @@ test("reset() clears the rolling failure buffer", () => {
     },
     now,
   );
-  assert.equal(c.failureCount(now), 1);
+  c.observe(
+    {
+      kind: "quota_failure",
+      provider: "cursor",
+      model: null,
+      occurredAt: "2026-05-11T10:00:00.000Z",
+    },
+    now,
+  );
+  assert.equal(c.failureCount(now), 2);
   c.reset();
   assert.equal(c.failureCount(now), 0);
+  assert.equal(c.failureCount(now, "antigravity", null), 0);
+  assert.equal(c.failureCount(now, "cursor", null), 0);
 });
