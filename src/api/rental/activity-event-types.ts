@@ -66,6 +66,10 @@ export const EDIT_PROPOSED = "edit.proposed" as const;
 // ===== Patch events =====
 export const PATCH_PROPOSED = "patch.proposed" as const;
 
+// ===== Lane events (D4 amendment — renter quota lane lifecycle) =====
+export const LANE_EXHAUSTED = "lane.exhausted" as const;
+export const LANE_RECOVERED = "lane.recovered" as const;
+
 // ===== Patch Gate events =====
 export const PATCH_GATE_STARTED = "patch_gate.started" as const;
 export const PATCH_GATE_SCOPE_PASSED = "patch_gate.scope_passed" as const;
@@ -115,6 +119,8 @@ export type RentalActivityEventType =
   | typeof COMMAND_TIMED_OUT
   | typeof EDIT_PROPOSED
   | typeof PATCH_PROPOSED
+  | typeof LANE_EXHAUSTED
+  | typeof LANE_RECOVERED
   | typeof PATCH_GATE_STARTED
   | typeof PATCH_GATE_SCOPE_PASSED
   | typeof PATCH_GATE_SECRET_PASSED
@@ -163,6 +169,8 @@ export const ALL_ACTIVITY_EVENT_TYPES: readonly RentalActivityEventType[] = [
   COMMAND_TIMED_OUT,
   EDIT_PROPOSED,
   PATCH_PROPOSED,
+  LANE_EXHAUSTED,
+  LANE_RECOVERED,
   PATCH_GATE_STARTED,
   PATCH_GATE_SCOPE_PASSED,
   PATCH_GATE_SECRET_PASSED,
@@ -234,6 +242,8 @@ export const AUTO_VERIFIED_EVENT_TYPES: ReadonlySet<RentalActivityEventType> =
     COMMAND_TIMED_OUT,
     EDIT_PROPOSED,
     PATCH_PROPOSED,
+    LANE_EXHAUSTED,
+    LANE_RECOVERED,
     PATCH_GATE_STARTED,
     PATCH_GATE_SCOPE_PASSED,
     PATCH_GATE_SECRET_PASSED,
