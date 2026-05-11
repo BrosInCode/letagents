@@ -56,6 +56,7 @@ import {
   type LivenessInfo,
   type SessionRecord,
 } from "../rental/heartbeat.js";
+import { isValidTransition } from "../rental/session-state-machine.js";
 
 // ===== Deps =====
 
@@ -526,6 +527,22 @@ export function registerRentalInternalRoutes(
       const summary = typeof body.summary === "string" ? body.summary.trim() : undefined;
 
       try {
+        // Read current status for transition validation
+        const [current] = await db
+          .select({ status: rental_sessions.status })
+          .from(rental_sessions)
+          .where(eq(rental_sessions.id, sessionId));
+        if (!current) {
+          res.status(404).json({ error: "session not found" });
+          return;
+        }
+        if (!isValidTransition(current.status, "completed")) {
+          res.status(409).json({
+            error: `invalid_transition: cannot move from ${current.status} to completed`,
+          });
+          return;
+        }
+
         const [updated] = await db
           .update(rental_sessions)
           .set({
@@ -588,6 +605,22 @@ export function registerRentalInternalRoutes(
       const reason = typeof body.reason === "string" ? body.reason.trim() : undefined;
 
       try {
+        // Read current status for transition validation
+        const [current] = await db
+          .select({ status: rental_sessions.status })
+          .from(rental_sessions)
+          .where(eq(rental_sessions.id, sessionId));
+        if (!current) {
+          res.status(404).json({ error: "session not found" });
+          return;
+        }
+        if (!isValidTransition(current.status, "cancelled")) {
+          res.status(409).json({
+            error: `invalid_transition: cannot move from ${current.status} to cancelled`,
+          });
+          return;
+        }
+
         const [updated] = await db
           .update(rental_sessions)
           .set({

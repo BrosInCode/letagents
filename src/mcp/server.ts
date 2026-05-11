@@ -4639,7 +4639,7 @@ server.tool(
 
 server.tool(
   "rental_complete",
-  "Mark a rental session as completed. Transitions the session to terminal state 'completed', records ended_at, and triggers §18.4 teardown (activity event emission, resource cleanup). Only the provider agent should call this when work is finished.",
+  "Mark a rental session as completed. Transitions the session to terminal state 'completed', records ended_at, and triggers §18.4 teardown (activity event emission, resource cleanup). Either the renter or the provider can mark completion; the caller's role is recorded in the activity event.",
   {
     session_id: z.string().describe("Rental session id to complete."),
     summary: z
