@@ -274,6 +274,12 @@ export type DesktopRentalSessionStatus =
   | "failed";
 export type DesktopRentalStartTrigger = "quota_exhausted" | "user_initiated" | "scheduled" | "task_handoff";
 export type DesktopRentalTriggerConfidence = "exact" | "inferred" | "manual";
+export type DesktopRentalTriggerReason =
+  | "structured_event"
+  | "percent_window_exhausted"
+  | "consecutive_failures"
+  | "user_declared"
+  | "no_trigger";
 export type DesktopRentalActivitySource = "agent" | "tool" | "patch_gate" | "system" | "renter" | "provider";
 export type DesktopRentalActivityVisibility = "renter" | "provider" | "both" | "internal" | "rental_visible";
 export type DesktopRentalExposureType = "file" | "search_result" | "directory_listing" | "command_output";
@@ -326,6 +332,41 @@ export interface DesktopRentalUsageSnapshot {
   startedAt: string | null;
   endsAt: string | null;
   quotaSnapshot: DesktopRentalQuotaSnapshot | null;
+  updatedAt: string | null;
+}
+
+export interface DesktopRentalRenterTriggerSignal {
+  triggered: boolean;
+  confidence: DesktopRentalTriggerConfidence | null;
+  reason: DesktopRentalTriggerReason;
+  provider: string | null;
+  model: string | null;
+  observedAt: string | null;
+  laneResetAt: string | null;
+  rawSignal: Record<string, unknown> | null;
+}
+
+export interface DesktopRentalQuotaFailureInput {
+  provider: string;
+  model?: string | null;
+  occurredAt?: string | null;
+  detail?: Record<string, unknown>;
+}
+
+export interface DesktopRentalManualDeclareInput {
+  provider?: string | null;
+  model?: string | null;
+  note?: string | null;
+  occurredAt?: string | null;
+}
+
+export interface DesktopRentalOwnQuotaStatus {
+  triggered: boolean;
+  lastSignal: DesktopRentalRenterTriggerSignal | null;
+  lastSnapshot: DesktopRentalQuotaSnapshot | null;
+  provider: string | null;
+  model: string | null;
+  failureCount: number;
   updatedAt: string | null;
 }
 
@@ -474,6 +515,10 @@ export interface DesktopRentalStartInput {
   policy: DesktopRentalPolicy;
   startTrigger?: DesktopRentalStartTrigger;
   triggerConfidence?: DesktopRentalTriggerConfidence;
+  renterLaneProvider?: string | null;
+  renterLaneModel?: string | null;
+  renterLaneExhaustedAt?: string | null;
+  renterLaneRefreshEta?: string | null;
   renterQuotaSignal?: Record<string, unknown> | null;
 }
 
@@ -653,6 +698,8 @@ export interface DesktopRentalApi {
   getExposures: (sessionId: string) => Promise<DesktopRentalExposure[]>;
   getPatches: (sessionId: string) => Promise<DesktopRentalPatch[]>;
   getUsage: (sessionId: string) => Promise<DesktopRentalUsageSnapshot>;
+  getOwnQuotaStatus: () => Promise<DesktopRentalOwnQuotaStatus>;
+  declareQuotaExhausted: (input?: DesktopRentalManualDeclareInput) => Promise<DesktopRentalRenterTriggerSignal>;
   approvePatch: (sessionId: string, patchId: string) => Promise<DesktopRentalPatch>;
   requestPatchChanges: (sessionId: string, patchId: string, note: string) => Promise<DesktopRentalPatch>;
   approveContextRequest: (sessionId: string, approvalId: string) => Promise<DesktopRentalContextApproval>;
@@ -921,6 +968,12 @@ export type DesktopRoomStreamEvent =
       type: "reasoning_remove";
       roomIdentifier: string;
       sessionId: string;
+    }
+  | {
+      type: "rental_quota_exhausted";
+      roomIdentifier: string;
+      signal: DesktopRentalRenterTriggerSignal;
+      status: DesktopRentalOwnQuotaStatus;
     }
   | {
       type: "session_disconnect" | "error";
