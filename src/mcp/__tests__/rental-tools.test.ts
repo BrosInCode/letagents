@@ -123,13 +123,16 @@ describe("rentalAccept", () => {
     assert.equal(captured.length, 0);
   });
 
-  it("rejects missing idempotency_key without calling apiCall", async () => {
+  it("calls accept without idempotency_key when omitted", async () => {
     const captured: CapturedCall[] = [];
-    const deps = makeDeps({}, captured);
-    const res = await rentalAccept(deps, { session_id: "rsess_1", idempotency_key: "" });
-    assert.equal(res.success, false);
-    assert.match(res.error ?? "", /idempotency_key/);
-    assert.equal(captured.length, 0);
+    const deps = makeDeps({ id: "rsess_1", status: "accepted" }, captured);
+    const res = await rentalAccept(deps, { session_id: "rsess_1" });
+    assert.equal(res.success, true);
+    assert.equal(captured.length, 1);
+    const body = JSON.parse(String(captured[0].options?.body ?? "null"));
+    assert.equal(body.idempotency_key, undefined);
+    assert.equal(headerValue(captured[0].options, "Idempotency-Key"), undefined);
+    assert.equal(res.idempotency_key, undefined);
   });
 
   it("calls POST accept with idempotency-key header + body", async () => {
@@ -215,16 +218,16 @@ describe("rentalDecline", () => {
     assert.equal(captured.length, 0);
   });
 
-  it("rejects missing idempotency_key", async () => {
+  it("calls decline without idempotency_key when omitted", async () => {
     const captured: CapturedCall[] = [];
-    const deps = makeDeps({}, captured);
-    const res = await rentalDecline(deps, {
-      session_id: "rsess_1",
-      idempotency_key: "",
-    });
-    assert.equal(res.success, false);
-    assert.match(res.error ?? "", /idempotency_key/);
-    assert.equal(captured.length, 0);
+    const deps = makeDeps({ id: "rsess_1", status: "cancelled" }, captured);
+    const res = await rentalDecline(deps, { session_id: "rsess_1" });
+    assert.equal(res.success, true);
+    assert.equal(captured.length, 1);
+    const body = JSON.parse(String(captured[0].options?.body ?? "null"));
+    assert.equal(body.idempotency_key, undefined);
+    assert.equal(headerValue(captured[0].options, "Idempotency-Key"), undefined);
+    assert.equal(res.idempotency_key, undefined);
   });
 
   it("calls POST decline with idempotency-key header + body", async () => {

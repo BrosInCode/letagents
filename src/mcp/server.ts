@@ -4445,15 +4445,16 @@ server.tool(
 
 server.tool(
   "rental_accept",
-  "Accept a pending Rent an Agent session request. Idempotent: pass a stable idempotency_key so repeated calls with the same key for the same session_id are safe to retry. Transitions the session from 'requested' to 'accepted' per spec §18.2.",
+  "Accept a pending Rent an Agent session request. Transitions the session from 'requested' to 'accepted' per spec §18.2. Optionally pass an idempotency_key for safe retries (forwarded when the server supports it).",
   {
     session_id: z
       .string()
       .describe("Rental session id (e.g. 'rsess_*'). Get this from rental_list_requests."),
     idempotency_key: z
       .string()
+      .optional()
       .describe(
-        "Caller-chosen idempotency key. Repeating the same key for the same session is safe."
+        "Optional caller-chosen idempotency key. Forwarded to the server when provided."
       ),
   },
   async ({ session_id, idempotency_key }) => {
@@ -4474,18 +4475,19 @@ server.tool(
 
 server.tool(
   "rental_decline",
-  "Decline a pending Rent an Agent session request. Idempotent via idempotency_key. Transitions the session from 'requested' to 'cancelled' per spec §18.2. An optional reason is forwarded to the renter for context.",
+  "Decline a pending Rent an Agent session request. Transitions the session from 'requested' to 'cancelled' per spec §18.2. An optional reason is forwarded in the request body.",
   {
     session_id: z
       .string()
       .describe("Rental session id to decline."),
     idempotency_key: z
       .string()
-      .describe("Caller-chosen idempotency key. Repeating the same key is safe."),
+      .optional()
+      .describe("Optional caller-chosen idempotency key. Forwarded to the server when provided."),
     reason: z
       .string()
       .optional()
-      .describe("Optional short reason shown to the renter (e.g. 'busy', 'out of quota')."),
+      .describe("Optional short reason forwarded in the decline body (e.g. 'busy', 'out of quota')."),
   },
   async ({ session_id, idempotency_key, reason }) => {
     const result = await rentalDecline(rentalToolDeps, {

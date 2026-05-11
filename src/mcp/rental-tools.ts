@@ -13,6 +13,13 @@
  *
  * Spec refs: §6 (provider flow), §18.2 (accept/decline transitions).
  * Plan: docs/RENT_AN_AGENT_TASK_BREAKDOWN.md PR p3.1.
+ *
+ * Note: idempotency_key is accepted and forwarded but the server-side
+ * accept/decline routes do not yet honour it (repeat calls 409). The
+ * key is optional so callers don't break when the backend adds support.
+ *
+ * Note: reason is forwarded to the decline endpoint body. Whether the
+ * server persists it depends on the current route implementation.
  */
 
 export interface RentalToolDeps {
@@ -52,12 +59,12 @@ export async function rentalListRequests(
 
 export interface RentalAcceptInput {
   session_id: string;
-  idempotency_key: string;
+  idempotency_key?: string;
 }
 
 export interface RentalDeclineInput {
   session_id: string;
-  idempotency_key: string;
+  idempotency_key?: string;
   reason?: string;
 }
 
@@ -74,11 +81,6 @@ function validateSessionId(input: { session_id?: string }): string | null {
   return null;
 }
 
-function validateIdempotencyKey(input: { idempotency_key?: string }): string | null {
-  const v = input.idempotency_key;
-  if (typeof v !== "string" || !v.trim()) return "idempotency_key is required";
-  return null;
-}
 
 export async function rentalAccept(
   deps: RentalToolDeps,
@@ -86,29 +88,35 @@ export async function rentalAccept(
 ): Promise<RentalAcceptResult> {
   const sessionIdError = validateSessionId(input);
   if (sessionIdError) return { success: false, error: sessionIdError };
-  const idemError = validateIdempotencyKey(input);
-  if (idemError) return { success: false, error: idemError };
 
   const path = `/api/rental/provider/sessions/${encodeURIComponent(
     input.session_id.trim()
   )}/accept`;
 
+  const idemKey = input.idempotency_key?.trim() || undefined;
+  const headers: Record<string, string> = {};
+  const bodyPayload: Record<string, unknown> = {};
+  if (idemKey) {
+    headers["Idempotency-Key"] = idemKey;
+    bodyPayload.idempotency_key = idemKey;
+  }
+
   try {
     const session = await deps.apiCall<unknown>(path, {
       method: "POST",
-      headers: { "Idempotency-Key": input.idempotency_key.trim() },
-      body: JSON.stringify({ idempotency_key: input.idempotency_key.trim() }),
+      headers,
+      body: JSON.stringify(bodyPayload),
     });
     return {
       success: true,
       session,
-      idempotency_key: input.idempotency_key.trim(),
+      ...(idemKey ? { idempotency_key: idemKey } : {}),
     };
   } catch (err) {
     return {
       success: false,
       error: err instanceof Error ? err.message : String(err),
-      idempotency_key: input.idempotency_key.trim(),
+      ...(idemKey ? { idempotency_key: idemKey } : {}),
     };
   }
 }
@@ -119,16 +127,18 @@ export async function rentalDecline(
 ): Promise<RentalAcceptResult> {
   const sessionIdError = validateSessionId(input);
   if (sessionIdError) return { success: false, error: sessionIdError };
-  const idemError = validateIdempotencyKey(input);
-  if (idemError) return { success: false, error: idemError };
 
   const path = `/api/rental/provider/sessions/${encodeURIComponent(
     input.session_id.trim()
   )}/decline`;
 
-  const payload: Record<string, unknown> = {
-    idempotency_key: input.idempotency_key.trim(),
-  };
+  const idemKey = input.idempotency_key?.trim() || undefined;
+  const headers: Record<string, string> = {};
+  const payload: Record<string, unknown> = {};
+  if (idemKey) {
+    headers["Idempotency-Key"] = idemKey;
+    payload.idempotency_key = idemKey;
+  }
   if (typeof input.reason === "string" && input.reason.trim()) {
     payload.reason = input.reason.trim();
   }
@@ -136,19 +146,19 @@ export async function rentalDecline(
   try {
     const session = await deps.apiCall<unknown>(path, {
       method: "POST",
-      headers: { "Idempotency-Key": input.idempotency_key.trim() },
+      headers,
       body: JSON.stringify(payload),
     });
     return {
       success: true,
       session,
-      idempotency_key: input.idempotency_key.trim(),
+      ...(idemKey ? { idempotency_key: idemKey } : {}),
     };
   } catch (err) {
     return {
       success: false,
       error: err instanceof Error ? err.message : String(err),
-      idempotency_key: input.idempotency_key.trim(),
+      ...(idemKey ? { idempotency_key: idemKey } : {}),
     };
   }
 }
