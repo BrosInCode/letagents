@@ -89,10 +89,24 @@ export interface LaneRecoveryDeps {
    */
   loadPriorSnapshot(sessionId: string): Promise<RenterLaneSnapshotRecord | null>;
   /**
-   * Mark `renter_lane_recovered_at` on the session row. Implementations
-   * should be idempotent (e.g. only update when the column is NULL).
+   * Atomically mark `renter_lane_recovered_at` on the session row.
+   * MUST return whether the row was actually changed by this call so
+   * the service can emit `lane.recovered` exactly once even under
+   * concurrent callers.
+   *
+   * The canonical implementation is:
+   *
+   *   UPDATE rental_sessions
+   *      SET renter_lane_recovered_at = $1
+   *    WHERE id = $2
+   *      AND renter_lane_recovered_at IS NULL
+   *
+   * with `updated > 0` returned. Two racing callers will both
+   * `loadSession()` with `renter_lane_recovered_at = null`, both pass
+   * the delta gate, but only one UPDATE will affect a row — the loser
+   * gets `updated = false` and the service skips the event emission.
    */
-  markRecovered(sessionId: string, recoveredAt: Date): Promise<void>;
+  markRecovered(sessionId: string, recoveredAt: Date): Promise<boolean>;
   /** Append the `lane.recovered` activity event. */
   emitLaneRecoveredEvent(input: {
     sessionId: string;
@@ -116,6 +130,8 @@ export const LANE_RECOVERY_REASONS = Object.freeze({
   NO_PRIOR_SNAPSHOT: "no_prior_snapshot",
   DELTA_BELOW_THRESHOLD: "delta_below_threshold",
   INVALID_SIGNAL: "invalid_signal",
+  STALE_SIGNAL: "stale_signal",
+  RACE_LOST: "race_lost",
 } as const);
 
 export type LaneRecoveryReason =
@@ -192,6 +208,25 @@ export async function applyRenterLaneSignal(
     return fail(LANE_RECOVERY_REASONS.NO_PRIOR_SNAPSHOT);
   }
 
+  // Reject stale or out-of-order signals. Without this, a late-arriving
+  // pre-exhaustion snapshot (or a replay attack) that happens to read
+  // high `percent_remaining` could "recover" a lane that's still dead.
+  // Two ordering invariants:
+  //   1. signal.observedAt must be strictly after prior.observedAt
+  //      (we already have the prior; only newer readings can possibly
+  //      represent a refresh).
+  //   2. signal.observedAt must be strictly after
+  //      session.renter_lane_exhausted_at (a snapshot taken before the
+  //      lane was even marked exhausted cannot be the recovery signal).
+  if (signal.observedAt.getTime() <= prior.observedAt.getTime()) {
+    return fail(LANE_RECOVERY_REASONS.STALE_SIGNAL, prior.percentRemaining, null);
+  }
+  if (
+    signal.observedAt.getTime() <= session.renter_lane_exhausted_at.getTime()
+  ) {
+    return fail(LANE_RECOVERY_REASONS.STALE_SIGNAL, prior.percentRemaining, null);
+  }
+
   const delta = signal.percentRemaining - prior.percentRemaining;
   if (delta < LANE_RECOVERY_THRESHOLD) {
     return fail(
@@ -201,7 +236,18 @@ export async function applyRenterLaneSignal(
     );
   }
 
-  await deps.markRecovered(signal.sessionId, signal.observedAt);
+  // Atomically claim the recovery — only the racing caller whose UPDATE
+  // actually changed the row gets to emit the event. Losers see
+  // `markRecovered → false` and return without emitting, preserving
+  // the "exactly once" `lane.recovered` invariant per session.
+  const updated = await deps.markRecovered(signal.sessionId, signal.observedAt);
+  if (!updated) {
+    return fail(
+      LANE_RECOVERY_REASONS.RACE_LOST,
+      prior.percentRemaining,
+      delta,
+    );
+  }
 
   if (session.room_id) {
     await deps.emitLaneRecoveredEvent({

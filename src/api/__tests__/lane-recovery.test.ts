@@ -47,12 +47,19 @@ interface EmitCall {
 function makeDeps(input: {
   session?: RentalSessionLaneView | null;
   prior?: RenterLaneSnapshotRecord | null;
+  /**
+   * Lets a test simulate the lose-the-race case where the atomic
+   * UPDATE found that another caller already set the column. Defaults
+   * to `true` (winning race).
+   */
+  markUpdated?: boolean;
 }): LaneRecoveryDeps & {
   marked: MarkRecoveredCall[];
   emitted: EmitCall[];
 } {
   const marked: MarkRecoveredCall[] = [];
   const emitted: EmitCall[] = [];
+  const updates = input.markUpdated ?? true;
   return {
     marked,
     emitted,
@@ -64,6 +71,7 @@ function makeDeps(input: {
     },
     async markRecovered(sessionId, recoveredAt) {
       marked.push({ sessionId, recoveredAt });
+      return updates;
     },
     async emitLaneRecoveredEvent(call) {
       emitted.push(call);
@@ -137,7 +145,10 @@ describe("applyRenterLaneSignal — happy path", () => {
   it("accepts null renter_lane_provider as a wildcard match", async () => {
     const deps = makeDeps({
       session: makeSession({ renter_lane_provider: null }),
-      prior: { percentRemaining: 0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(makeSignal(), deps);
     assert.equal(decision.recovered, true);
@@ -147,7 +158,10 @@ describe("applyRenterLaneSignal — happy path", () => {
   it("accepts null incoming model as a wildcard against any recorded model", async () => {
     const deps = makeDeps({
       session: makeSession({ renter_lane_model: "gemini-2.5-flash" }),
-      prior: { percentRemaining: 0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(
       makeSignal({ model: null }),
@@ -185,7 +199,10 @@ describe("applyRenterLaneSignal — threshold gating", () => {
   it("rejects a negative delta (lane continuing to drain)", async () => {
     const deps = makeDeps({
       session: makeSession(),
-      prior: { percentRemaining: 0.8, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0.8,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(
       makeSignal({ percentRemaining: 0.2 }),
@@ -199,7 +216,10 @@ describe("applyRenterLaneSignal — threshold gating", () => {
   it("accepts a delta exactly at LANE_RECOVERY_THRESHOLD", async () => {
     const deps = makeDeps({
       session: makeSession(),
-      prior: { percentRemaining: 0.0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0.0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(
       makeSignal({ percentRemaining: LANE_RECOVERY_THRESHOLD }),
@@ -226,7 +246,10 @@ describe("applyRenterLaneSignal — required state", () => {
   it("requires renter_lane_exhausted_at to be set", async () => {
     const deps = makeDeps({
       session: makeSession({ renter_lane_exhausted_at: null }),
-      prior: { percentRemaining: 0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(makeSignal(), deps);
     assert.equal(decision.reason, LANE_RECOVERY_REASONS.LANE_NOT_EXHAUSTED);
@@ -254,7 +277,10 @@ describe("applyRenterLaneSignal — idempotency", () => {
     const alreadyRecoveredAt = new Date("2026-05-11T17:00:00.000Z");
     const deps = makeDeps({
       session: makeSession({ renter_lane_recovered_at: alreadyRecoveredAt }),
-      prior: { percentRemaining: 0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(makeSignal(), deps);
     assert.equal(decision.recovered, false);
@@ -272,7 +298,10 @@ describe("applyRenterLaneSignal — provider / model match", () => {
   it("rejects mismatched provider", async () => {
     const deps = makeDeps({
       session: makeSession({ renter_lane_provider: "antigravity" }),
-      prior: { percentRemaining: 0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(
       makeSignal({ provider: "claude_code" }),
@@ -285,7 +314,10 @@ describe("applyRenterLaneSignal — provider / model match", () => {
   it("rejects mismatched model when both sides are set", async () => {
     const deps = makeDeps({
       session: makeSession({ renter_lane_model: "gemini-2.5-pro" }),
-      prior: { percentRemaining: 0, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(
       makeSignal({ model: "gemini-2.5-flash" }),
@@ -346,11 +378,115 @@ describe("applyRenterLaneSignal — no room_id", () => {
   it("still marks recovered but skips event emission when room_id is null", async () => {
     const deps = makeDeps({
       session: makeSession({ room_id: null }),
-      prior: { percentRemaining: 0.02, observedAt: new Date() },
+      prior: {
+        percentRemaining: 0.02,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
     });
     const decision = await applyRenterLaneSignal(makeSignal(), deps);
     assert.equal(decision.recovered, true);
     assert.equal(deps.marked.length, 1);
     assert.equal(deps.emitted.length, 0);
+  });
+});
+
+// ===========================================================================
+// Stale / out-of-order signals (review feedback fix)
+// ===========================================================================
+
+describe("applyRenterLaneSignal — stale signal guards", () => {
+  it("rejects a signal observed before the prior snapshot", async () => {
+    const deps = makeDeps({
+      session: makeSession(),
+      prior: {
+        percentRemaining: 0.02,
+        observedAt: new Date("2026-05-11T18:30:00.000Z"),
+      },
+    });
+    const decision = await applyRenterLaneSignal(
+      makeSignal({ observedAt: new Date("2026-05-11T18:00:00.000Z") }),
+      deps,
+    );
+    assert.equal(decision.recovered, false);
+    assert.equal(decision.reason, LANE_RECOVERY_REASONS.STALE_SIGNAL);
+    assert.equal(deps.marked.length, 0);
+    assert.equal(deps.emitted.length, 0);
+  });
+
+  it("rejects a signal observed at exactly the prior timestamp (non-strict ordering)", async () => {
+    const ts = new Date("2026-05-11T18:00:00.000Z");
+    const deps = makeDeps({
+      session: makeSession(),
+      prior: { percentRemaining: 0.02, observedAt: ts },
+    });
+    const decision = await applyRenterLaneSignal(
+      makeSignal({ observedAt: ts }),
+      deps,
+    );
+    assert.equal(decision.reason, LANE_RECOVERY_REASONS.STALE_SIGNAL);
+    assert.equal(deps.marked.length, 0);
+  });
+
+  it("rejects a signal observed before the lane was marked exhausted", async () => {
+    // Prior snapshot is fine, but the new "recovery" signal was
+    // observed before the exhaustion timestamp — it cannot be the
+    // refresh event for an exhaustion that hasn't happened yet.
+    const deps = makeDeps({
+      session: makeSession({
+        renter_lane_exhausted_at: new Date("2026-05-11T19:00:00.000Z"),
+      }),
+      prior: {
+        percentRemaining: 0.02,
+        observedAt: new Date("2026-05-11T08:30:00.000Z"),
+      },
+    });
+    const decision = await applyRenterLaneSignal(
+      makeSignal({ observedAt: new Date("2026-05-11T18:00:00.000Z") }),
+      deps,
+    );
+    assert.equal(decision.reason, LANE_RECOVERY_REASONS.STALE_SIGNAL);
+    assert.equal(deps.marked.length, 0);
+  });
+});
+
+// ===========================================================================
+// Atomicity / race-loss (review feedback fix)
+// ===========================================================================
+
+describe("applyRenterLaneSignal — atomic markRecovered", () => {
+  it("does not emit lane.recovered when the atomic UPDATE found no row", async () => {
+    // Simulates the concurrent caller path: both callers loaded a
+    // session with renter_lane_recovered_at = null and passed the
+    // delta gate, but only one UPDATE actually changed a row.
+    const deps = makeDeps({
+      session: makeSession(),
+      prior: {
+        percentRemaining: 0.02,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
+      markUpdated: false,
+    });
+    const decision = await applyRenterLaneSignal(makeSignal(), deps);
+    assert.equal(decision.recovered, false);
+    assert.equal(decision.reason, LANE_RECOVERY_REASONS.RACE_LOST);
+    // Even the loser still calls markRecovered once (the atomic
+    // UPDATE attempt is the race), but no event is emitted.
+    assert.equal(deps.marked.length, 1);
+    assert.equal(deps.emitted.length, 0);
+  });
+
+  it("emits exactly one lane.recovered when the atomic UPDATE wins", async () => {
+    const deps = makeDeps({
+      session: makeSession(),
+      prior: {
+        percentRemaining: 0.02,
+        observedAt: new Date("2026-05-11T09:30:00.000Z"),
+      },
+      markUpdated: true,
+    });
+    const decision = await applyRenterLaneSignal(makeSignal(), deps);
+    assert.equal(decision.recovered, true);
+    assert.equal(deps.marked.length, 1);
+    assert.equal(deps.emitted.length, 1);
   });
 });
