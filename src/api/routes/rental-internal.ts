@@ -19,6 +19,7 @@ import type { AuthenticatedRequest } from "../http-helpers.js";
 import { db } from "../db/client.js";
 import { rental_sessions } from "../db/schema.js";
 import {
+  INGEST_CONFIDENCE_VALUES,
   UsageIngestError,
   defaultUsageIngestDeps,
   ingestUsage,
@@ -86,18 +87,83 @@ function requireAccountId(req: AuthenticatedRequest, res: Response): string | nu
   return sa.account_id;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOptionalFiniteNumber(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function parseReport(body: unknown): IngestUsageReport | { error: string } {
-  if (!body || typeof body !== "object") return { error: "body must be an object" };
-  const b = body as Record<string, unknown>;
-  if (!b.source || typeof b.source !== "string") return { error: "source is required" };
-  if (!["adapter", "tool", "self_reported", "system"].includes(b.source as string)) {
+  if (!isPlainObject(body)) return { error: "body must be an object" };
+  const b = body;
+
+  // source enum
+  if (typeof b.source !== "string"
+      || !["adapter", "tool", "self_reported", "system"].includes(b.source)) {
     return { error: "source must be one of adapter|tool|self_reported|system" };
   }
-  if (!b.snapshot || typeof b.snapshot !== "object") return { error: "snapshot is required" };
-  if (!b.lrt || typeof b.lrt !== "object") return { error: "lrt is required" };
+
+  // snapshot — nested shape must be valid before reaching the service.
+  if (!isPlainObject(b.snapshot)) return { error: "snapshot is required" };
+  const snap = b.snapshot;
+  if (typeof snap.provider !== "string" || !snap.provider.trim()) {
+    return { error: "snapshot.provider must be a non-empty string" };
+  }
+  if (snap.model !== undefined && snap.model !== null && typeof snap.model !== "string") {
+    return { error: "snapshot.model must be string|null|undefined" };
+  }
+  if (snap.nativeUnit !== undefined && snap.nativeUnit !== null && typeof snap.nativeUnit !== "string") {
+    return { error: "snapshot.nativeUnit must be string|null|undefined" };
+  }
+  if (!isOptionalFiniteNumber(snap.nativeUsed)
+      || !isOptionalFiniteNumber(snap.nativeRemaining)) {
+    return { error: "snapshot.nativeUsed / nativeRemaining must be finite numbers or null" };
+  }
+  if (snap.nativeResetAt !== undefined && snap.nativeResetAt !== null
+      && (typeof snap.nativeResetAt !== "string" || Number.isNaN(Date.parse(snap.nativeResetAt)))) {
+    return { error: "snapshot.nativeResetAt must be an ISO timestamp or null" };
+  }
+
+  // lrt — nested shape must be valid.
+  if (!isPlainObject(b.lrt)) return { error: "lrt is required" };
+  const lrt = b.lrt;
+  if (typeof lrt.lrtUsed !== "number" || !Number.isFinite(lrt.lrtUsed)) {
+    return { error: "lrt.lrtUsed must be a finite number" };
+  }
+  if (typeof lrt.confidence !== "string"
+      || !(INGEST_CONFIDENCE_VALUES as readonly string[]).includes(lrt.confidence)) {
+    return {
+      error: `lrt.confidence must be one of ${INGEST_CONFIDENCE_VALUES.join("|")}`,
+    };
+  }
+
+  // delta — optional but must be an object when present, numeric fields finite.
+  if (b.delta !== undefined && !isPlainObject(b.delta)) {
+    return { error: "delta must be an object when provided" };
+  }
+
+  // idempotencyKey
   if (typeof b.idempotencyKey !== "string" || !b.idempotencyKey.trim()) {
     return { error: "idempotencyKey is required" };
   }
+
+  // adapterPayload optional
+  if (b.adapterPayload !== undefined
+      && b.adapterPayload !== null
+      && !isPlainObject(b.adapterPayload)) {
+    return { error: "adapterPayload must be an object or null" };
+  }
+
+  // lastHeartbeatAt optional
+  if (b.lastHeartbeatAt !== undefined
+      && b.lastHeartbeatAt !== null
+      && (typeof b.lastHeartbeatAt !== "string" || Number.isNaN(Date.parse(b.lastHeartbeatAt)))) {
+    return { error: "lastHeartbeatAt must be an ISO timestamp or null" };
+  }
+
   return b as unknown as IngestUsageReport;
 }
 

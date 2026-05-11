@@ -22,6 +22,21 @@ import {
   rental_usage_meters,
 } from "../db/schema.js";
 
+/**
+ * Set of confidence values the route layer accepts before reaching the
+ * service. Exported so the route can validate without re-importing the
+ * drizzle enum.
+ */
+export const INGEST_CONFIDENCE_VALUES = [
+  "official_exact",
+  "local_exact",
+  "derived",
+  "calibrated",
+  "estimated",
+  "weak_estimate",
+  "unknown",
+] as const;
+
 // ===== Wire shape =====
 
 /**
@@ -204,6 +219,21 @@ function numericString(value: number | null | undefined): string | null {
  *   • Counters carry forward from the previous row, plus the deltas
  *     reported in `report.delta`.
  */
+/**
+ * Predicate for the Postgres unique-violation error code (`23505`).
+ * Drizzle/pg surfaces this either via `err.code` or via the message
+ * mentioning the constraint name, depending on the path.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; message?: unknown };
+  if (e.code === "23505") return true;
+  if (typeof e.message === "string" && e.message.includes("rental_usage_meters_session_idempotency_uq")) {
+    return true;
+  }
+  return false;
+}
+
 export async function ingestUsage(
   sessionId: string,
   report: IngestUsageReport,
@@ -215,8 +245,16 @@ export async function ingestUsage(
   if (!report.snapshot || typeof report.snapshot.provider !== "string") {
     throw new UsageIngestError("snapshot.provider is required", "invalid_input", 400);
   }
+  if (!report.lrt || typeof report.lrt.lrtUsed !== "number" || !Number.isFinite(report.lrt.lrtUsed)) {
+    throw new UsageIngestError("lrt.lrtUsed must be a finite number", "invalid_input", 400);
+  }
+  if (typeof report.lrt.confidence !== "string"
+      || !(INGEST_CONFIDENCE_VALUES as readonly string[]).includes(report.lrt.confidence)) {
+    throw new UsageIngestError("lrt.confidence must be a valid confidence value", "invalid_input", 400);
+  }
 
-  // Idempotency short-circuit.
+  // Idempotency short-circuit (best-effort — the unique index below is
+  // the actual guarantee under concurrent retries).
   const existing = await deps.loadByIdempotency(sessionId, report.idempotencyKey);
   if (existing) return existing;
 
@@ -249,7 +287,11 @@ export async function ingestUsage(
   }
 
   const previous = await deps.loadLatestMeter(sessionId);
-  const lrtDelta = numberOr(report.lrt?.lrtUsed, 0);
+  // LRT columns are `integer` in pg; the shared weights produce
+  // fractional values (e.g. cache_creation * 1.25). Round at the DB
+  // boundary so totals stay representable; document the rounding so
+  // Budget Sentinel knows what to expect.
+  const lrtDelta = Math.max(0, Math.round(numberOr(report.lrt?.lrtUsed, 0)));
   const lrtTotal = (previous?.lrt_total ?? 0) + lrtDelta;
 
   const delta = report.delta ?? {};
@@ -262,26 +304,43 @@ export async function ingestUsage(
     native_remaining: numericString(report.snapshot.nativeRemaining),
     native_reset_at:
       report.snapshot.nativeResetAt ? new Date(report.snapshot.nativeResetAt) : null,
-    input_tokens: numberOr(delta.inputTokens, 0),
-    output_tokens: numberOr(delta.outputTokens, 0),
-    cache_creation_tokens: numberOr(delta.cacheCreationTokens, 0),
-    cache_read_tokens: numberOr(delta.cacheReadTokens, 0),
-    reasoning_tokens: numberOr(delta.reasoningTokens, 0),
-    requests_used: numberOr(delta.requests, 0),
+    input_tokens: Math.round(numberOr(delta.inputTokens, 0)),
+    output_tokens: Math.round(numberOr(delta.outputTokens, 0)),
+    cache_creation_tokens: Math.round(numberOr(delta.cacheCreationTokens, 0)),
+    cache_read_tokens: Math.round(numberOr(delta.cacheReadTokens, 0)),
+    reasoning_tokens: Math.round(numberOr(delta.reasoningTokens, 0)),
+    requests_used: Math.round(numberOr(delta.requests, 0)),
     credits_used: numericString(delta.credits ?? null),
     usd_used: numericString(delta.usd ?? null),
     lrt_delta: lrtDelta,
     lrt_total: lrtTotal,
     confidence: report.lrt.confidence,
     adapter_payload: report.adapterPayload ?? null,
-    tool_call_count: (previous?.tool_call_count ?? 0) + numberOr(delta.toolCalls, 0),
-    command_run_count: (previous?.command_run_count ?? 0) + numberOr(delta.commandRuns, 0),
+    tool_call_count: (previous?.tool_call_count ?? 0) + Math.round(numberOr(delta.toolCalls, 0)),
+    command_run_count: (previous?.command_run_count ?? 0) + Math.round(numberOr(delta.commandRuns, 0)),
     files_exposed_count:
-      (previous?.files_exposed_count ?? 0) + numberOr(delta.filesExposed, 0),
-    heartbeat_count: (previous?.heartbeat_count ?? 0) + numberOr(delta.heartbeats, 0),
+      (previous?.files_exposed_count ?? 0) + Math.round(numberOr(delta.filesExposed, 0)),
+    heartbeat_count: (previous?.heartbeat_count ?? 0) + Math.round(numberOr(delta.heartbeats, 0)),
     last_heartbeat_at: report.lastHeartbeatAt ? new Date(report.lastHeartbeatAt) : null,
     idempotency_key: report.idempotencyKey,
   };
 
-  return deps.insertMeter(insertRow);
+  // Race-safe insert. If two concurrent requests with the same
+  // (session_id, idempotency_key) both pass the loadByIdempotency
+  // check above, the unique index `rental_usage_meters_session_idempotency_uq`
+  // makes exactly one win. The loser re-reads and returns the winner's row.
+  //
+  // Note (V1 trade-off): under high concurrency for *different*
+  // idempotency keys on the same session, two reports can race past
+  // loadLatestMeter() and both compute the same lrt_total, missing
+  // one delta. Budget Sentinel reconciles on the next snapshot.
+  // A SELECT FOR UPDATE / advisory-lock guarantee is tracked for v2.
+  try {
+    return await deps.insertMeter(insertRow);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const winner = await deps.loadByIdempotency(sessionId, report.idempotencyKey);
+    if (winner) return winner;
+    throw err;
+  }
 }

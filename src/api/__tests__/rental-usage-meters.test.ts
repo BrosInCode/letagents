@@ -304,6 +304,84 @@ describe("ingestUsage", () => {
     assert.equal(inserted[0]!.input_tokens, 0);
     assert.equal(inserted[0]!.output_tokens, 100);
   });
+
+  it("rounds fractional LRT to an integer at the DB boundary", async () => {
+    const { deps, inserted } = buildDeps();
+    const report = makeReport({
+      lrt: { lrtUsed: 1234.7, confidence: "local_exact" },
+    });
+    await ingestUsage("sess_1", report, deps);
+    assert.equal(inserted[0]!.lrt_delta, 1235, "Math.round(1234.7) = 1235");
+    assert.equal(inserted[0]!.lrt_total, 1235);
+  });
+
+  it("rounds fractional integer-column deltas (cache_creation etc.)", async () => {
+    const { deps, inserted } = buildDeps();
+    const report = makeReport({
+      delta: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationTokens: 12.4,
+        cacheReadTokens: 12.6,
+        reasoningTokens: 0,
+        toolCalls: 1.5,
+      },
+    });
+    await ingestUsage("sess_1", report, deps);
+    assert.equal(inserted[0]!.cache_creation_tokens, 12);
+    assert.equal(inserted[0]!.cache_read_tokens, 13);
+    assert.equal(inserted[0]!.tool_call_count, 2);
+  });
+
+  it("rejects when lrt.lrtUsed is not a finite number", async () => {
+    const { deps } = buildDeps();
+    await assert.rejects(
+      ingestUsage("sess_1", makeReport({ lrt: { lrtUsed: Number.NaN, confidence: "local_exact" } }), deps),
+      (err) => err instanceof UsageIngestError && err.code === "invalid_input",
+    );
+  });
+
+  it("rejects unknown lrt.confidence value", async () => {
+    const { deps } = buildDeps();
+    await assert.rejects(
+      ingestUsage(
+        "sess_1",
+        makeReport({ lrt: { lrtUsed: 100, confidence: "ultra_exact" as IngestUsageReport["lrt"]["confidence"] } }),
+        deps,
+      ),
+      (err) => err instanceof UsageIngestError && err.code === "invalid_input",
+    );
+  });
+
+  it("on unique-violation insert, re-loads idempotency winner and returns it", async () => {
+    // Simulate the race: loadByIdempotency returns null on the first
+    // call (no row yet), insert throws 23505, then the second
+    // loadByIdempotency returns the winner row.
+    const winner = makeMeterRow({ id: "rusg_winner", idempotency_key: "ikey-race" });
+    let idempotencyLookups = 0;
+    let insertAttempts = 0;
+    const deps = {
+      loadSession: async () => ({ id: "sess_1", renter_lane_provider: null, renter_lane_model: null }),
+      loadLatestMeter: async () => null,
+      loadByIdempotency: async () => {
+        idempotencyLookups += 1;
+        return idempotencyLookups === 1 ? null : winner;
+      },
+      insertMeter: async () => {
+        insertAttempts += 1;
+        // Emulate Postgres 23505 unique_violation.
+        const err = new Error(
+          'duplicate key value violates unique constraint "rental_usage_meters_session_idempotency_uq"',
+        ) as Error & { code?: string };
+        err.code = "23505";
+        throw err;
+      },
+    };
+    const out = await ingestUsage("sess_1", makeReport({ idempotencyKey: "ikey-race" }), deps);
+    assert.equal(out.id, "rusg_winner", "should re-read and return the race winner");
+    assert.equal(insertAttempts, 1);
+    assert.equal(idempotencyLookups, 2);
+  });
 });
 
 // ===== Route tests =====
@@ -415,6 +493,38 @@ describe("POST /api/rental/sessions/:id/usage", () => {
     const res = await post("/api/rental/sessions/sess_1/usage", {
       ...makeReport(),
       source: "garbage",
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("returns 400 when snapshot.provider is missing or empty", async () => {
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      snapshot: { provider: "" },
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("returns 400 when lrt.lrtUsed is not a finite number", async () => {
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      lrt: { lrtUsed: "not-a-number" as unknown as number, confidence: "local_exact" },
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("returns 400 when lrt.confidence is not a valid value", async () => {
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      lrt: { lrtUsed: 100, confidence: "ultra_exact" as unknown as IngestUsageReport["lrt"]["confidence"] },
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("returns 400 when snapshot.nativeResetAt is not parseable", async () => {
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      snapshot: { ...makeReport().snapshot, nativeResetAt: "not-a-date" },
     });
     assert.equal(res.status, 400);
   });
