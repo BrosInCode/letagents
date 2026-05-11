@@ -26,6 +26,7 @@ import {
   AntigravityAdapter,
   computePercentWindowDelta,
   defaultAntigravityQuotaPaths,
+  estimateLrtRemainingForWindow,
   parseQuotaDocument,
   pickPrimaryLane,
   type AntigravityLane,
@@ -310,7 +311,14 @@ test("estimateAvailableLrt returns null lrtRemaining without calibration", () =>
   assert.equal(result.confidence, "estimated");
 });
 
-test("estimateAvailableLrt multiplies percent_remaining × lrtPerFullWindow", () => {
+test("estimateAvailableLrt projects lrtRemaining but holds lrtUsed at 0 until the server reconciler lands", () => {
+  // For a percent_window meter, `lrt.lrtUsed` reported every tick
+  // would be summed into `lrt_total` server-side and over-charge the
+  // session. The successive-snapshot reconciler (which converts
+  // pairs of snapshots into a real delta) is a separate slice;
+  // until then this adapter must report `lrtUsed = 0` even when
+  // calibration is available. `lrtRemaining` is informational and
+  // safe to project.
   const adapter = new AntigravityAdapter();
   const result = adapter.estimateAvailableLrt(
     {
@@ -327,9 +335,36 @@ test("estimateAvailableLrt multiplies percent_remaining × lrtPerFullWindow", ()
     },
     { lrtPerFullWindow: 100_000, sampleCount: 3 },
   );
-  assert.equal(result.lrtUsed, 75_000);
+  assert.equal(result.lrtUsed, 0);
   assert.equal(result.lrtRemaining, 25_000);
   assert.equal(result.confidence, "estimated");
+});
+
+test("estimateAvailableLrt is safe across repeated heartbeats (no LRT overcharge)", () => {
+  // Spot-check guard against the LivelyPeak overcharge finding:
+  // ten consecutive snapshots at the same percent_remaining must
+  // each report lrtUsed=0 so the server's lrt_total += lrt.lrtUsed
+  // accumulator never grows on a stable lane.
+  const adapter = new AntigravityAdapter();
+  const baseSnapshot = {
+    provider: "antigravity",
+    model: "gemini-2.5-pro",
+    sourceId: "x",
+    nativeUnit: "percent_window" as const,
+    nativeRemaining: 0.3,
+    nativeTotal: 1,
+    nativeResetAt: null,
+    confidence: "estimated" as const,
+    observedAt: "2026-05-11T10:00:00.000Z",
+    raw: {},
+  };
+  for (let i = 0; i < 10; i++) {
+    const result = adapter.estimateAvailableLrt(baseSnapshot, {
+      lrtPerFullWindow: 100_000,
+      sampleCount: 12,
+    });
+    assert.equal(result.lrtUsed, 0, `tick ${i} reported non-zero lrtUsed`);
+  }
 });
 
 test("estimateAvailableLrt upgrades confidence to calibrated after ≥10 samples", () => {
@@ -351,10 +386,10 @@ test("estimateAvailableLrt upgrades confidence to calibrated after ≥10 samples
   );
   assert.equal(result.confidence, "calibrated");
   assert.equal(result.lrtRemaining, 40_000);
-  assert.equal(result.lrtUsed, 40_000);
+  assert.equal(result.lrtUsed, 0);
 });
 
-test("estimateAvailableLrt clamps out-of-range percent_remaining", () => {
+test("estimateAvailableLrt clamps out-of-range percent_remaining for lrtRemaining", () => {
   const adapter = new AntigravityAdapter();
   const overshoot = adapter.estimateAvailableLrt(
     {
@@ -390,7 +425,21 @@ test("estimateAvailableLrt clamps out-of-range percent_remaining", () => {
     { lrtPerFullWindow: 100, sampleCount: 1 },
   );
   assert.equal(undershoot.lrtRemaining, 0);
-  assert.equal(undershoot.lrtUsed, 100);
+  assert.equal(undershoot.lrtUsed, 0);
+});
+
+test("estimateLrtRemainingForWindow is a pure helper for the reconciler / UI", () => {
+  // Available LRT projection should be a standalone helper too, so
+  // the future server-side reconciler and any UI consumer share one
+  // formula. Test the boundary cases directly.
+  assert.equal(estimateLrtRemainingForWindow(0.5, 100_000), 50_000);
+  assert.equal(estimateLrtRemainingForWindow(0, 100_000), 0);
+  assert.equal(estimateLrtRemainingForWindow(1, 100_000), 100_000);
+  assert.equal(estimateLrtRemainingForWindow(1.5, 100_000), 100_000);
+  assert.equal(estimateLrtRemainingForWindow(-0.1, 100_000), 0);
+  assert.equal(estimateLrtRemainingForWindow(0.5, null), null);
+  assert.equal(estimateLrtRemainingForWindow(0.5, 0), null);
+  assert.equal(estimateLrtRemainingForWindow(NaN, 100_000), null);
 });
 
 // ---------------------------------------------------------------------------

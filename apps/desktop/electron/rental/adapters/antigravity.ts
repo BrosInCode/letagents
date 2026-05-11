@@ -223,10 +223,24 @@ export class AntigravityAdapter implements DesktopMeterAdapter {
     const percentRemaining = snapshot.nativeRemaining;
     const lrtPerFullWindow = history.lrtPerFullWindow;
 
-    // Without calibration, we cannot project LRT remaining. The server
-    // will fall back to its own confidence-bucket stop threshold and
-    // refuse to admit the listing into the marketplace until a few
-    // sessions calibrate the value.
+    // IMPORTANT: `lrtUsed` is reported on every snapshot and the server
+    // rolls it into `lrt_total` as `previous + report.lrt.lrtUsed`
+    // (see `src/api/rental/usage-ingest.ts`). For a percent_window
+    // signal the *cumulative* used quota inside the lane is
+    //
+    //   used_in_window = lrtPerFullWindow × (1 − percent_remaining)
+    //
+    // but that value is NOT a delta — emitting it every heartbeat
+    // would re-charge the same already-consumed window usage on every
+    // tick. The proper reconciliation is "subtract last reported
+    // snapshot from current" and that lives server-side in the
+    // successive-snapshot reconciler (not in this slice).
+    //
+    // Until that reconciler lands we therefore hold `lrtUsed = 0` for
+    // percent_window snapshots. `lrtRemaining` is safe to expose
+    // because it is informational, not cumulative. The full LRT math
+    // is preserved in `estimateLrtRemainingForWindow` so the future
+    // reconciler / UI can call it directly without re-deriving.
     if (lrtPerFullWindow === null || lrtPerFullWindow <= 0) {
       return {
         lrtUsed: 0,
@@ -246,9 +260,10 @@ export class AntigravityAdapter implements DesktopMeterAdapter {
       };
     }
 
-    const clamped = Math.min(1, Math.max(0, percentRemaining));
-    const lrtRemaining = lrtPerFullWindow * clamped;
-    const lrtUsed = lrtPerFullWindow * (1 - clamped);
+    const lrtRemaining = estimateLrtRemainingForWindow(
+      percentRemaining,
+      lrtPerFullWindow,
+    );
 
     // Once we have enough calibration samples, we can upgrade the
     // confidence label from "estimated" to "calibrated" per §17.13.
@@ -259,7 +274,7 @@ export class AntigravityAdapter implements DesktopMeterAdapter {
       history.sampleCount >= 10 ? "calibrated" : snapshot.confidence;
 
     return {
-      lrtUsed,
+      lrtUsed: 0,
       lrtRemaining,
       confidence: upgraded,
     };
@@ -427,6 +442,29 @@ function parseIsoMillis(value: string | null): number {
   if (!value) return 0;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : 0;
+}
+
+/**
+ * Convert a `percent_remaining` reading into an LRT-remaining
+ * projection using a calibrated `lrtPerFullWindow`.
+ *
+ * Exported so the successive-snapshot reconciler that lands
+ * server-side later (not in this slice) and any UI display that
+ * wants to render "≈ X LRT left" can share one canonical formula.
+ *
+ * Returns null when calibration is not yet available.
+ */
+export function estimateLrtRemainingForWindow(
+  percentRemaining: number,
+  lrtPerFullWindow: number | null,
+): number | null {
+  if (lrtPerFullWindow === null || lrtPerFullWindow <= 0) return null;
+  if (
+    typeof percentRemaining !== "number"
+    || !Number.isFinite(percentRemaining)
+  ) return null;
+  const clamped = Math.min(1, Math.max(0, percentRemaining));
+  return lrtPerFullWindow * clamped;
 }
 
 /**
