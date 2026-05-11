@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "schema": "cursor.usage.v1",
+  "observed_at": "2026-05-11T10:00:00.000Z",
+  "billing_cycle": {
+    "started_at": "2026-05-01T00:00:00.000Z",
+    "resets_at": "2026-06-01T00:00:00.000Z"
+  },
+  "premium": {
+    "requests_used": 320,
+    "requests_total": 500,
+    "model": "claude-3.7-sonnet"
+  },
+  "spend": {
+    "cents_used": 412,
+    "cents_limit": 2000
+  },
+  "by_model": [
+    { "model": "claude-3.7-sonnet", "requests_used": 240, "cents_used": 240 },
+    { "model": "gpt-4o", "requests_used": 60, "cents_used": 120 },
+    { "model": "claude-3-haiku", "requests_used": 20, "cents_used": 52 }
+  ]
+}
