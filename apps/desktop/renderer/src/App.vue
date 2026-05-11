@@ -955,6 +955,11 @@ function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (event.type === "reasoning_remove") {
     removeSelectedReasoningSession(event.sessionId);
     scheduleLiveMetadataRefresh();
+    return;
+  }
+
+  if (event.type === "rental_quota_exhausted") {
+    scheduleLiveMetadataRefresh(0);
   }
 }
 

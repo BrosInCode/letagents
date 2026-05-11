@@ -65,6 +65,7 @@ import {
   resolveRoomIdentifierFromPath,
 } from "./repo-status.js";
 import { registerDesktopRentalIpcHandlers } from "./rental-handlers.js";
+import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(__dirname, "..");
@@ -98,6 +99,10 @@ let activeRoomStream: {
   lastMessageId: string | null;
   stopped: boolean;
 } | null = null;
+const renterTriggerRuntime = new RenterTriggerRuntime({
+  getRoomIdentifier: () => activeRoomStream?.roomIdentifier ?? null,
+  emitRoomStreamEvent,
+});
 
 type ApiErrorPayload = {
   error?: string;
@@ -2806,7 +2811,7 @@ ipcMain.handle(
   async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> =>
     openDesktopGitHubInstall(roomIdentifier)
 );
-registerDesktopRentalIpcHandlers(ipcMain);
+registerDesktopRentalIpcHandlers(ipcMain, { renterTriggerRuntime });
 ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
 ipcMain.handle(
   "desktop:auth:start-device-flow",

@@ -74,6 +74,8 @@ const api: DesktopApi = {
     getExposures: (sessionId) => ipcRenderer.invoke("desktop:rental:get-exposures", sessionId),
     getPatches: (sessionId) => ipcRenderer.invoke("desktop:rental:get-patches", sessionId),
     getUsage: (sessionId) => ipcRenderer.invoke("desktop:rental:get-usage", sessionId),
+    getOwnQuotaStatus: () => ipcRenderer.invoke("desktop:rental:get-own-quota-status"),
+    declareQuotaExhausted: (input) => ipcRenderer.invoke("desktop:rental:declare-quota-exhausted", input ?? {}),
     approvePatch: (sessionId, patchId) => ipcRenderer.invoke("desktop:rental:approve-patch", sessionId, patchId),
     requestPatchChanges: (sessionId, patchId, note) =>
       ipcRenderer.invoke("desktop:rental:request-patch-changes", sessionId, patchId, note),

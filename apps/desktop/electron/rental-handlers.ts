@@ -8,6 +8,7 @@ import type {
   DesktopRentalListing,
   DesktopRentalListingInput,
   DesktopRentalListingPatch,
+  DesktopRentalManualDeclareInput,
   DesktopRentalPatch,
   DesktopRentalPreflightResult,
   DesktopRentalProviderDashboard,
@@ -18,6 +19,7 @@ import type {
   DesktopRentalStartInput,
   DesktopRentalUsageSnapshot,
 } from "./ipc-types.js";
+import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
 
 export type DisabledRentalResult = {
   enabled: false;
@@ -28,6 +30,7 @@ type RentalIpcHandler = (_event: unknown, ...args: unknown[]) => unknown;
 
 export interface DesktopRentalHandlerOptions {
   enabled?: boolean;
+  renterTriggerRuntime?: RenterTriggerRuntime;
 }
 
 const disabledRentalResult: DisabledRentalResult = Object.freeze({ enabled: false });
@@ -41,6 +44,7 @@ export function registerDesktopRentalIpcHandlers(
   options: DesktopRentalHandlerOptions = {}
 ): void {
   const enabled = options.enabled ?? isRentEnabled();
+  const renterTriggerRuntime = options.renterTriggerRuntime ?? new RenterTriggerRuntime();
   const register = (channel: string, handler: RentalIpcHandler) => {
     ipcMain.handle(channel, async (event, ...args) => {
       if (!enabled) return disabledRentalResult;
@@ -74,6 +78,10 @@ export function registerDesktopRentalIpcHandlers(
   register("desktop:rental:get-exposures", () => [] satisfies DesktopRentalExposure[]);
   register("desktop:rental:get-patches", () => [] satisfies DesktopRentalPatch[]);
   register("desktop:rental:get-usage", (_event, sessionId) => buildEmptyUsageSnapshot(String(sessionId)));
+  register("desktop:rental:get-own-quota-status", () => renterTriggerRuntime.getOwnQuotaStatus());
+  register("desktop:rental:declare-quota-exhausted", (_event, input) =>
+    renterTriggerRuntime.declareManual(normalizeManualDeclareInput(input))
+  );
   register("desktop:rental:approve-patch", (_event, sessionId, patchId) =>
     buildStubPatch(String(sessionId), String(patchId), "passed")
   );
@@ -98,6 +106,10 @@ function normalizeListingPatch(input: unknown): Partial<DesktopRentalListingPatc
 
 function normalizeStartInput(input: unknown): Partial<DesktopRentalStartInput> {
   return input && typeof input === "object" ? input as Partial<DesktopRentalStartInput> : {};
+}
+
+function normalizeManualDeclareInput(input: unknown): DesktopRentalManualDeclareInput {
+  return input && typeof input === "object" ? input as DesktopRentalManualDeclareInput : {};
 }
 
 function now(): string {
@@ -243,10 +255,10 @@ function buildStubSession(
     timeLimitMinutes: input.policy?.maxDurationMinutes ?? null,
     startTrigger: input.startTrigger ?? null,
     triggerConfidence: input.triggerConfidence ?? null,
-    renterLaneExhaustedAt: null,
-    renterLaneProvider: null,
-    renterLaneModel: null,
-    renterLaneRefreshEta: null,
+    renterLaneExhaustedAt: input.renterLaneExhaustedAt ?? null,
+    renterLaneProvider: input.renterLaneProvider ?? null,
+    renterLaneModel: input.renterLaneModel ?? null,
+    renterLaneRefreshEta: input.renterLaneRefreshEta ?? null,
     renterQuotaSignal: input.renterQuotaSignal ?? null,
     renterLaneRecoveredAt: null,
     startedAt: null,

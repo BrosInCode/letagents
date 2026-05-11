@@ -51,6 +51,8 @@ test("rental IPC registers the preload channel surface", () => {
     "desktop:rental:get-exposures",
     "desktop:rental:get-patches",
     "desktop:rental:get-usage",
+    "desktop:rental:get-own-quota-status",
+    "desktop:rental:declare-quota-exhausted",
     "desktop:rental:approve-patch",
     "desktop:rental:request-patch-changes",
     "desktop:rental:approve-context-request",
@@ -87,4 +89,24 @@ test("enabled rental IPC creates typed session and patch stubs", async () => {
   const patch = await invoke(handlers, "desktop:rental:approve-patch", "session_1", "patch_1");
   assert.equal((patch as { sessionId: string }).sessionId, "session_1");
   assert.equal((patch as { gateStatus: string }).gateStatus, "passed");
+});
+
+test("enabled rental IPC exposes renter-side quota trigger status and manual declaration", async () => {
+  const handlers = captureHandlers(true);
+  const initial = await invoke(handlers, "desktop:rental:get-own-quota-status");
+  assert.equal((initial as { triggered: boolean }).triggered, false);
+
+  const signal = await invoke(handlers, "desktop:rental:declare-quota-exhausted", {
+    provider: "codex",
+    model: "gpt-5.2",
+    note: "quota modal",
+    occurredAt: "2026-05-11T10:00:00.000Z",
+  });
+  assert.equal((signal as { triggered: boolean }).triggered, true);
+  assert.equal((signal as { confidence: string }).confidence, "manual");
+  assert.equal((signal as { provider: string }).provider, "codex");
+
+  const after = await invoke(handlers, "desktop:rental:get-own-quota-status");
+  assert.equal((after as { triggered: boolean }).triggered, true);
+  assert.equal((after as { provider: string }).provider, "codex");
 });
