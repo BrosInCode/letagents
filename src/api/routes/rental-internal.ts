@@ -2,16 +2,22 @@
  * Internal rental routes — called by adapters / MCP tools, not browsers.
  *
  * Routes (mounted under /api/rental):
- *   POST /api/rental/sessions/:id/usage  — adapter snapshot ingest (p2.2)
+ *   POST /api/rental/sessions/:id/usage             — adapter snapshot ingest (p2.2)
  *   POST /api/rental/sessions/:id/budget/reserve    — pre-step reserve (p2.8b)
- *   POST /api/rental/sessions/:id/budget/reconcile — actual usage reconciliation (p2.8b)
+ *   POST /api/rental/sessions/:id/budget/reconcile  — actual usage reconciliation (p2.8b)
+ *   POST /api/rental/sessions/:id/heartbeat         — provider liveness beat
+ *   GET  /api/rental/sessions/:id/liveness          — read current liveness state
  *
  * Auth: an authenticated session must belong to the rental session as
  *       either the renter or the provider. Anonymous calls are 401.
+ *       Heartbeats are provider-only — `recordHeartbeat` returns
+ *       `not_provider` (403) when the caller doesn't own the lane.
  * Feature gate: `LETAGENTS_RENT_ENABLED` (404 `rent_disabled` when off).
  *
- * Spec §17.7 (MeterAdapter contract) + §19.6 (rental_usage_meters).
- * Part of PR p2.2 (Phase 2 server-side foundation).
+ * Spec §17.7 (MeterAdapter contract) + §18.3 (heartbeats / liveness) +
+ * §19.6 (rental_usage_meters).
+ *
+ * Lands in PR p2.2 (usage) + p3.2 (heartbeat route + MCP tool wrapper).
  */
 
 import type { Express, Response } from "express";
@@ -38,6 +44,15 @@ import {
   type BudgetReserveInput,
   type BudgetReserveResult,
 } from "../rental/budget-orchestrator.js";
+import {
+  createDefaultDeps as createDefaultHeartbeatDeps,
+  getLivenessStatus,
+  recordHeartbeat,
+  type HeartbeatDeps,
+  type HeartbeatResult,
+  type LivenessInfo,
+  type SessionRecord,
+} from "../rental/heartbeat.js";
 
 // ===== Deps =====
 
@@ -63,6 +78,28 @@ export interface RentalInternalRouteDeps {
     sessionId: string,
     accountId: string,
   ) => Promise<"renter" | "provider" | null>;
+  /**
+   * Resolve heartbeat-backing dependencies. Lazily called per-process
+   * (the underlying `createDefaultDeps()` opens DB clients on import,
+   * so we defer until route hit to keep test isolation).
+   */
+  heartbeatDeps: () => Promise<HeartbeatDeps>;
+  /**
+   * Read a session by id for liveness reporting. Mirrors the
+   * `getSession` shape from heartbeat.ts so tests can inject one
+   * implementation for both routes.
+   */
+  getSessionForLiveness: (
+    sessionId: string,
+  ) => Promise<SessionRecord | null>;
+}
+
+let cachedHeartbeatDeps: HeartbeatDeps | null = null;
+
+async function defaultHeartbeatDeps(): Promise<HeartbeatDeps> {
+  if (cachedHeartbeatDeps) return cachedHeartbeatDeps;
+  cachedHeartbeatDeps = await createDefaultHeartbeatDeps();
+  return cachedHeartbeatDeps;
 }
 
 export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
@@ -81,6 +118,11 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
     if (row.renter === accountId) return "renter";
     if (row.provider === accountId) return "provider";
     return null;
+  },
+  heartbeatDeps: defaultHeartbeatDeps,
+  async getSessionForLiveness(sessionId) {
+    const deps = await defaultHeartbeatDeps();
+    return deps.getSession(sessionId);
   },
 };
 
@@ -335,4 +377,80 @@ export function registerRentalInternalRoutes(
       res.status(500).json({ error: "Failed to reconcile budget" });
     }
   });
+
+  // ===== Heartbeat (§18.3) =====
+  //
+  // The recordHeartbeat service from rental/heartbeat.ts lifts straight
+  // into a route here: provider-only auth, transitions provisioning →
+  // active on first beat, recovers stale → active. The route maps
+  // recordHeartbeat's error string into HTTP status codes the same way
+  // the p1.5 test stub did, so MCP / desktop clients see a stable
+  // contract.
+  app.post(
+    "/api/rental/sessions/:id/heartbeat",
+    async (req: AuthenticatedRequest, res) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAccountId(req, res);
+      if (!accountId) return;
+
+      const sessionId = req.params.id as string;
+      let heartbeatDeps: HeartbeatDeps;
+      try {
+        heartbeatDeps = await deps.heartbeatDeps();
+      } catch {
+        res.status(500).json({ error: "heartbeat_deps_unavailable" });
+        return;
+      }
+
+      let result: HeartbeatResult;
+      try {
+        result = await recordHeartbeat(sessionId, accountId, heartbeatDeps);
+      } catch {
+        res.status(500).json({ error: "Failed to record heartbeat" });
+        return;
+      }
+
+      if (!result.ok) {
+        const status = result.error === "session_not_found"
+          ? 404
+          : result.error === "not_provider"
+            ? 403
+            : 409;
+        res.status(status).json({ error: result.error ?? "heartbeat_failed" });
+        return;
+      }
+      res.json(result);
+    },
+  );
+
+  app.get(
+    "/api/rental/sessions/:id/liveness",
+    async (req: AuthenticatedRequest, res) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAccountId(req, res);
+      if (!accountId) return;
+
+      const sessionId = req.params.id as string;
+      const access = await deps.resolveSessionAccess(sessionId, accountId);
+      if (!access) {
+        res.status(404).json({ error: "session_not_found" });
+        return;
+      }
+
+      let session: SessionRecord | null;
+      try {
+        session = await deps.getSessionForLiveness(sessionId);
+      } catch {
+        res.status(500).json({ error: "liveness_deps_unavailable" });
+        return;
+      }
+      if (!session) {
+        res.status(404).json({ error: "session_not_found" });
+        return;
+      }
+
+      const info: LivenessInfo = getLivenessStatus(session);
+      res.json(info);
+    },
+  );
 }

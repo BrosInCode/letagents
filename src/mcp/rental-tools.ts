@@ -121,6 +121,179 @@ export async function rentalAccept(
   }
 }
 
+// ---------------------------------------------------------------------------
+// rental_heartbeat (p3.2 — wraps POST /api/rental/sessions/:id/heartbeat)
+// ---------------------------------------------------------------------------
+
+export interface RentalHeartbeatInput {
+  session_id: string;
+}
+
+export interface RentalHeartbeatResult {
+  success: boolean;
+  /** Whether the server accepted the heartbeat (provider match, valid state). */
+  ok?: boolean;
+  /** New session status (may have transitioned provisioning → active). */
+  status?: string;
+  /** Rolling heartbeat count on the session. */
+  heartbeat_count?: number;
+  /** True if this heartbeat caused a status transition. */
+  transitioned?: boolean;
+  error?: string;
+}
+
+export async function rentalHeartbeat(
+  deps: RentalToolDeps,
+  input: RentalHeartbeatInput,
+): Promise<RentalHeartbeatResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/heartbeat`;
+
+  try {
+    const body = await deps.apiCall<{
+      ok?: boolean;
+      status?: string;
+      heartbeatCount?: number;
+      transitioned?: boolean;
+    }>(path, { method: "POST" });
+
+    return {
+      success: true,
+      ok: body?.ok ?? true,
+      status: typeof body?.status === "string" ? body.status : undefined,
+      heartbeat_count:
+        typeof body?.heartbeatCount === "number" ? body.heartbeatCount : undefined,
+      transitioned: body?.transitioned ?? false,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// rental_report_usage (p3.2 — wraps POST /api/rental/sessions/:id/usage)
+// ---------------------------------------------------------------------------
+
+export interface RentalReportUsageInput {
+  session_id: string;
+  /**
+   * Pre-built IngestUsageReport object the caller has already
+   * normalized. The MCP layer does NOT mint a snapshot for the
+   * agent — the desktop meter adapter pipeline is the only
+   * authoritative source for that shape. This tool exists so an
+   * agent can FORWARD an already-built report from a tool-mediated
+   * step (e.g. self-reported usage when no native meter is
+   * available). The server validates the report shape on receive;
+   * we pass it through unchanged.
+   */
+  report: Record<string, unknown>;
+}
+
+export interface RentalReportUsageResult {
+  success: boolean;
+  /** Returned meter row when the report was accepted. */
+  meter?: unknown;
+  error?: string;
+}
+
+export async function rentalReportUsage(
+  deps: RentalToolDeps,
+  input: RentalReportUsageInput,
+): Promise<RentalReportUsageResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  if (
+    typeof input.report !== "object"
+    || input.report === null
+    || Array.isArray(input.report)
+  ) {
+    return { success: false, error: "report must be a JSON object" };
+  }
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/usage`;
+
+  try {
+    const meter = await deps.apiCall<unknown>(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input.report),
+    });
+    return { success: true, meter };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// rental_refresh_quota (p3.2 — wraps POST /api/rental/sessions/:id/refresh-quota)
+// ---------------------------------------------------------------------------
+
+export interface RentalRefreshQuotaInput {
+  session_id: string;
+  /** Optional provider hint — e.g. "antigravity", "codex". */
+  provider?: string;
+}
+
+export interface RentalRefreshQuotaResult {
+  success: boolean;
+  /** Refreshed snapshot returned by the adapter bridge. */
+  snapshot?: unknown;
+  /** Whether the adapter actually ran a new poll (vs. returned a cached snapshot). */
+  refreshed?: boolean;
+  error?: string;
+}
+
+export async function rentalRefreshQuota(
+  deps: RentalToolDeps,
+  input: RentalRefreshQuotaInput,
+): Promise<RentalRefreshQuotaResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/refresh-quota`;
+
+  const bodyPayload: Record<string, unknown> = {};
+  if (typeof input.provider === "string" && input.provider.trim()) {
+    bodyPayload.provider = input.provider.trim();
+  }
+
+  try {
+    const body = await deps.apiCall<{
+      snapshot?: unknown;
+      refreshed?: boolean;
+    }>(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(bodyPayload),
+    });
+
+    return {
+      success: true,
+      snapshot: body?.snapshot ?? null,
+      refreshed: body?.refreshed ?? true,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export async function rentalDecline(
   deps: RentalToolDeps,
   input: RentalDeclineInput

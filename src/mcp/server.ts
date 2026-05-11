@@ -90,7 +90,10 @@ import { getPollTimeoutCapMs } from "../shared/poll-timeout-cap.js";
 import {
   rentalAccept,
   rentalDecline,
+  rentalHeartbeat,
   rentalListRequests,
+  rentalRefreshQuota,
+  rentalReportUsage,
 } from "./rental-tools.js";
 
 // ---------------------------------------------------------------------------
@@ -4494,6 +4497,81 @@ server.tool(
       session_id,
       idempotency_key,
       reason,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Heartbeat / usage tools (p3.2)
+// ---------------------------------------------------------------------------
+//
+// rental_heartbeat keeps a provider session marked "active" — the
+// server expires sessions that go silent past §18.3's 15-minute
+// window. Agents acting as providers should call this on a 30s
+// cadence per spec.
+//
+// rental_report_usage forwards an already-built IngestUsageReport
+// (the shape persisted to rental_usage_meters in p2.2). Use it
+// when the MCP-side agent has a tool-mediated usage step that the
+// desktop meter adapter pipeline cannot observe — most commonly:
+// the agent ran a step in a worker that lives outside the
+// desktop adapter scope.
+
+server.tool(
+  "rental_heartbeat",
+  "Beat the heart of an active Rent an Agent provider session. Records last_heartbeat_at and transitions provisioning → active on the first beat. Provider-only; the server returns not_provider when the caller does not own the lane. Call on a 30s cadence per spec §18.3.",
+  {
+    session_id: z.string().describe("Rental session id to heartbeat."),
+  },
+  async ({ session_id }) => {
+    const result = await rentalHeartbeat(rentalToolDeps, { session_id });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+// ---------------------------------------------------------------------------
+// rental_refresh_quota — DEFERRED until POST /refresh-quota route lands (p2.8b)
+// ---------------------------------------------------------------------------
+// The handler (rentalRefreshQuota) and tests exist in rental-tools.ts /
+// rental-heartbeat.test.ts. Uncomment and register once the server-side
+// route is wired in p2.8b.
+//
+// server.tool(
+//   "rental_refresh_quota",
+//   "Trigger an on-demand quota refresh for a rental session...",
+//   { session_id: z.string(), provider: z.string().optional() },
+//   async ({ session_id, provider }) => { ... }
+// );
+
+server.tool(
+  "rental_report_usage",
+  "Forward an already-built IngestUsageReport to the rental usage ingest endpoint (POST /api/rental/sessions/:id/usage). The desktop meter adapter is the canonical source of these reports, so MCP-side use should be limited to tool-mediated steps the desktop adapter pipeline does not observe. See spec §17.7 / §19.6 for the report shape; the server validates and rejects malformed input. SCOPE: this tool ONLY persists to rental_usage_meters; it does NOT advance Budget Sentinel state. Callers that need budget gates to update (e.g. trigger budget.reconciled / budget.exhausted events) must separately invoke the Budget Sentinel reconcile endpoint (POST /api/rental/sessions/:id/budget/reconcile — p2.8b) or a future rental_reconcile_budget MCP tool.",
+  {
+    session_id: z.string().describe("Rental session id to report against."),
+    report: z
+      .record(z.string(), z.unknown())
+      .describe(
+        "Pre-built IngestUsageReport object (source, snapshot, delta, lrt, idempotencyKey, etc.). Forwarded verbatim.",
+      ),
+  },
+  async ({ session_id, report }) => {
+    const result = await rentalReportUsage(rentalToolDeps, {
+      session_id,
+      report,
     });
     return {
       content: [
