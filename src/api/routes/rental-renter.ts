@@ -6,6 +6,11 @@
  *   POST   /api/rental/sessions              — create session (p1.3)
  *   GET    /api/rental/sessions/:id          — get session (p1.3)
  *   POST   /api/rental/sessions/:id/cancel   — cancel session (p1.3)
+ *   GET    /api/rental/renter/quota-status
+ *   POST   /api/rental/renter/declare-quota-exhausted
+ *   POST   /api/rental/sessions/:id/budget-extension-requests
+ *   POST   /api/rental/sessions/:id/budget-extension-requests/:requestId/approve
+ *   POST   /api/rental/sessions/:id/budget-extension-requests/:requestId/deny
  *
  * Gated by `LETAGENTS_RENT_ENABLED` like the provider routes.
  * Rate-limited per renter session to prevent enumeration of the
@@ -13,7 +18,7 @@
  *
  * Spec §20 (API surface), §1.5 (readiness-gated marketplace),
  * §22.2 (Available to rent UX), §7 (renter session flow),
- * §18.2 (session state machine).
+ * §17.15 (budget extension), §18.2 (session state machine).
  */
 
 import type { Express, Response } from "express";
@@ -24,6 +29,17 @@ import type {
   PublicRentalListing,
 } from "../rental/listings.js";
 import type { rental_sessions } from "../db/schema.js";
+import {
+  approveBudgetExtension,
+  BudgetExtensionError,
+  denyBudgetExtension,
+  requestBudgetExtension,
+  type BudgetExtensionApprovalInput,
+  type BudgetExtensionDenialInput,
+  type BudgetExtensionRequestInput,
+  type BudgetExtensionDecisionResult,
+  type BudgetExtensionRequestResult,
+} from "../rental/budget-extension.js";
 import {
   defaultRenterQuotaStateStore,
   type RenterQuotaStateStore,
@@ -69,6 +85,23 @@ export interface RentalRenterRouteDeps {
     accountId: string,
     role: "renter" | "provider"
   ): Promise<Session | null>;
+  requestBudgetExtension?: (
+    sessionId: string,
+    requesterAccountId: string,
+    input: BudgetExtensionRequestInput,
+  ) => Promise<BudgetExtensionRequestResult>;
+  approveBudgetExtension?: (
+    sessionId: string,
+    approverAccountId: string,
+    requestId: string,
+    input?: BudgetExtensionApprovalInput,
+  ) => Promise<BudgetExtensionDecisionResult>;
+  denyBudgetExtension?: (
+    sessionId: string,
+    approverAccountId: string,
+    requestId: string,
+    input?: BudgetExtensionDenialInput,
+  ) => Promise<BudgetExtensionDecisionResult>;
   // p2.6c renter-trigger state mirror
   renterQuotaState?: RenterQuotaStateStore;
 }
@@ -205,6 +238,73 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parsePositiveLrt(
+  body: Record<string, unknown>,
+  field: string,
+): number | { error: string } {
+  const value = body[field];
+  if (
+    typeof value !== "number"
+    || !Number.isFinite(value)
+    || !Number.isInteger(value)
+    || value <= 0
+  ) {
+    return { error: `${field} must be a finite positive integer` };
+  }
+  return value;
+}
+
+function parseOptionalText(
+  body: Record<string, unknown>,
+  field: string,
+): string | undefined | { error: string } {
+  const value = body[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    return { error: `${field} must be a string` };
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function parseBudgetExtensionRequest(
+  body: unknown,
+): BudgetExtensionRequestInput | { error: string } {
+  if (!isPlainObject(body)) return { error: "body must be an object" };
+  const requestedAdditionalLrt = parsePositiveLrt(body, "requestedAdditionalLrt");
+  if (typeof requestedAdditionalLrt !== "number") return requestedAdditionalLrt;
+  const reason = parseOptionalText(body, "reason");
+  if (typeof reason === "object") return reason;
+  return { requestedAdditionalLrt, reason };
+}
+
+function parseBudgetExtensionApproval(
+  body: unknown,
+): BudgetExtensionApprovalInput | { error: string } {
+  if (body === undefined || body === null) return {};
+  if (!isPlainObject(body)) return { error: "body must be an object" };
+
+  let approvedAdditionalLrt: number | undefined;
+  if (body.approvedAdditionalLrt !== undefined && body.approvedAdditionalLrt !== null) {
+    const parsed = parsePositiveLrt(body, "approvedAdditionalLrt");
+    if (typeof parsed !== "number") return parsed;
+    approvedAdditionalLrt = parsed;
+  }
+  const note = parseOptionalText(body, "note");
+  if (typeof note === "object") return note;
+  return { approvedAdditionalLrt, note };
+}
+
+function parseBudgetExtensionDenial(
+  body: unknown,
+): BudgetExtensionDenialInput | { error: string } {
+  if (body === undefined || body === null) return {};
+  if (!isPlainObject(body)) return { error: "body must be an object" };
+  const reason = parseOptionalText(body, "reason");
+  if (typeof reason === "object") return reason;
+  return { reason };
+}
+
 /**
  * Parse + validate the D3 trigger-context fields from a session-create
  * request body. Returns a structured success or a 400-quality error.
@@ -337,6 +437,13 @@ export function registerRentalRenterRoutes(
   app: Express,
   deps: RentalRenterRouteDeps
 ): void {
+  const requestBudgetExtensionImpl =
+    deps.requestBudgetExtension ?? requestBudgetExtension;
+  const approveBudgetExtensionImpl =
+    deps.approveBudgetExtension ?? approveBudgetExtension;
+  const denyBudgetExtensionImpl =
+    deps.denyBudgetExtension ?? denyBudgetExtension;
+
   // ===== p1.1b: public marketplace discovery =====
   app.get("/api/rental/listings", async (req: AuthenticatedRequest, res) => {
     if (!requireRentEnabled(res)) return;
@@ -588,6 +695,95 @@ export function registerRentalRenterRoutes(
 
       const stored = renterQuotaState.get(accountId);
       return res.json(renterQuotaState.serialize(stored));
+    },
+  );
+
+  app.post(
+    "/api/rental/sessions/:id/budget-extension-requests",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const parsed = parseBudgetExtensionRequest(req.body);
+      if ("error" in parsed) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      try {
+        const result = await requestBudgetExtensionImpl(
+          req.params.id as string,
+          accountId,
+          parsed,
+        );
+        return res.status(201).json(result);
+      } catch (err: unknown) {
+        if (err instanceof BudgetExtensionError) {
+          return res.status(err.status).json({ error: err.message, code: err.code });
+        }
+        const message = err instanceof Error ? err.message : "unknown_error";
+        return res.status(500).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/rental/sessions/:id/budget-extension-requests/:requestId/approve",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const parsed = parseBudgetExtensionApproval(req.body);
+      if ("error" in parsed) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      try {
+        const result = await approveBudgetExtensionImpl(
+          req.params.id as string,
+          accountId,
+          req.params.requestId as string,
+          parsed,
+        );
+        return res.json(result);
+      } catch (err: unknown) {
+        if (err instanceof BudgetExtensionError) {
+          return res.status(err.status).json({ error: err.message, code: err.code });
+        }
+        const message = err instanceof Error ? err.message : "unknown_error";
+        return res.status(500).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    "/api/rental/sessions/:id/budget-extension-requests/:requestId/deny",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const parsed = parseBudgetExtensionDenial(req.body);
+      if ("error" in parsed) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      try {
+        const result = await denyBudgetExtensionImpl(
+          req.params.id as string,
+          accountId,
+          req.params.requestId as string,
+          parsed,
+        );
+        return res.json(result);
+      } catch (err: unknown) {
+        if (err instanceof BudgetExtensionError) {
+          return res.status(err.status).json({ error: err.message, code: err.code });
+        }
+        const message = err instanceof Error ? err.message : "unknown_error";
+        return res.status(500).json({ error: message });
+      }
     },
   );
 }

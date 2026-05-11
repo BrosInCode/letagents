@@ -24,17 +24,18 @@ import {
   BUDGET_METER_STALE,
   BUDGET_METER_RECOVERED,
   BUDGET_EXTERNAL_USAGE_SUSPECTED,
+  BUDGET_EXTENSION_REQUESTED,
   COMMAND_RUN,
   PATCH_GATE_TIMED_OUT,
   type RentalActivityEventType,
 } from "../rental/activity-event-types.js";
 
 describe("§9.4 event taxonomy completeness", () => {
-  it("has exactly 45 event types (43 from spec §9.4 + 2 D4 lane events)", () => {
+  it("has exactly 48 event types (43 from spec §9.4 + 2 D4 lane events + 3 budget extension events)", () => {
     // D4 amendment (renter quota lane lifecycle) added:
     //   lane.exhausted  — detected when the renter's IDE quota dies
     //   lane.recovered  — detected when the renter's lane refreshes
-    assert.strictEqual(ALL_ACTIVITY_EVENT_TYPES.length, 45);
+    assert.strictEqual(ALL_ACTIVITY_EVENT_TYPES.length, 48);
   });
 
   it("all event types are unique", () => {
@@ -64,6 +65,8 @@ describe("§9.4 event taxonomy completeness", () => {
       "session.teardown_completed",
       "budget.meter_stale", "budget.meter_recovered",
       "budget.external_usage_suspected",
+      "budget.extension_requested", "budget.extension_approved",
+      "budget.extension_denied",
       "context.scope_denied", "context.base_branch_changed",
       "patch_gate.apply_failed",
       // D4 amendment — renter quota lane lifecycle
@@ -81,7 +84,7 @@ describe("§9.4 event taxonomy completeness", () => {
     // ensures each element is a valid union member.
     // At runtime, we verify the count matches.
     const _typeCheck: readonly RentalActivityEventType[] = ALL_ACTIVITY_EVENT_TYPES;
-    assert.ok(_typeCheck.length === 45);
+    assert.ok(_typeCheck.length === 48);
   });
 });
 
@@ -145,6 +148,10 @@ describe("default visibility per event type", () => {
 
   it("session.started defaults to rental_visible", () => {
     assert.strictEqual(getDefaultVisibility(SESSION_STARTED), "rental_visible");
+  });
+
+  it("budget.extension_requested defaults to rental_visible", () => {
+    assert.strictEqual(getDefaultVisibility(BUDGET_EXTENSION_REQUESTED), "rental_visible");
   });
 
   it("command.run defaults to rental_visible", () => {
