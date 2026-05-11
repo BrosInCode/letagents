@@ -212,6 +212,7 @@ import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
 } from "./routes/rental-renter.js";
+import { registerRentalInternalRoutes } from "./routes/rental-internal.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -1354,6 +1355,7 @@ registerRentalRenterRoutes(app, {
   getSessionById,
   cancelSession,
 });
+registerRentalInternalRoutes(app);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST;
