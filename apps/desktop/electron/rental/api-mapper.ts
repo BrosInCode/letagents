@@ -49,6 +49,7 @@ import type {
   DesktopRentalScope,
   DesktopRentalSession,
   DesktopRentalSessionStatus,
+  DesktopRentalStartInput,
   DesktopRentalStartTrigger,
   DesktopRentalTriggerConfidence,
   DesktopRentalVerificationStatus,
@@ -667,4 +668,66 @@ function unwrapArray(raw: unknown, ...keys: string[]): unknown[] {
     }
   }
   return [];
+}
+
+// ---------------------------------------------------------------------------
+// Outbound: Desktop input → API body
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a `DesktopRentalStartInput` (renderer-side payload for
+ * `desktop:rental:create-session`) into the body shape the server's
+ * `POST /api/rental/sessions` expects.
+ *
+ * Only forwards fields that are actually set. Lets the route
+ * apply its own defaults (mode → "scoped", continuityMode →
+ * "smart_handoff") rather than echoing partial inputs.
+ *
+ * `lrtLimit` and `timeLimitMinutes` are lifted out of the
+ * renderer's `policy` envelope because the API surfaces them at
+ * the top level.
+ *
+ * Spec ref: §6.2 renter session-create flow + §19.2 rental_sessions
+ * D3 columns.
+ */
+export function toApiCreateSessionBody(
+  input: Partial<DesktopRentalStartInput>,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  const passThrough: Array<keyof DesktopRentalStartInput> = [
+    "listingId",
+    "repoOwner",
+    "repoName",
+    "baseBranch",
+    "taskTitle",
+    "taskPrompt",
+    "mode",
+    "continuityMode",
+    "startTrigger",
+    "triggerConfidence",
+    "renterLaneProvider",
+    "renterLaneModel",
+    "renterLaneExhaustedAt",
+    "renterLaneRefreshEta",
+    "renterQuotaSignal",
+  ];
+  for (const key of passThrough) {
+    const value = input[key];
+    if (value !== undefined && value !== null) {
+      body[key as string] = value;
+    }
+  }
+  const policy = input.policy;
+  if (policy) {
+    if (typeof policy.maxLrt === "number" && Number.isFinite(policy.maxLrt)) {
+      body.lrtLimit = policy.maxLrt;
+    }
+    if (
+      typeof policy.maxDurationMinutes === "number"
+      && Number.isFinite(policy.maxDurationMinutes)
+    ) {
+      body.timeLimitMinutes = policy.maxDurationMinutes;
+    }
+  }
+  return body;
 }
