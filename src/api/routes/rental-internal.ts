@@ -7,6 +7,9 @@
  *   POST /api/rental/sessions/:id/budget/reconcile  — actual usage reconciliation (p2.8b)
  *   POST /api/rental/sessions/:id/heartbeat         — provider liveness beat
  *   GET  /api/rental/sessions/:id/liveness          — read current liveness state
+ *   POST /api/rental/sessions/:id/activity          — emit activity event (p3.3)
+ *   POST /api/rental/sessions/:id/complete          — complete session (p3.3)
+ *   POST /api/rental/sessions/:id/cancel            — cancel session (p3.3)
  *
  * Auth: an authenticated session must belong to the rental session as
  *       either the renter or the provider. Anonymous calls are 401.
@@ -451,6 +454,177 @@ export function registerRentalInternalRoutes(
 
       const info: LivenessInfo = getLivenessStatus(session);
       res.json(info);
+    },
+  );
+
+  // ===== Activity emission (p3.3 §9.4) =====
+  app.post(
+    "/api/rental/sessions/:id/activity",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+
+      const body = req.body;
+      if (!isPlainObject(body)) {
+        res.status(400).json({ error: "body must be an object" });
+        return;
+      }
+      if (typeof body.event_type !== "string" || !body.event_type) {
+        res.status(400).json({ error: "event_type is required" });
+        return;
+      }
+
+      const accountId = (req as AuthenticatedRequest).sessionAccount!.account_id;
+      const role = await deps.resolveSessionAccess(sessionId, accountId);
+      const source = (typeof body.source === "string" && body.source.trim())
+        ? body.source.trim()
+        : (role === "provider" ? "agent" : role ?? "agent");
+
+      try {
+        const { emitActivityEvent } = await import("../rental/activity-emitter.js");
+        // Look up room_id for the session
+        const [sess] = await db
+          .select({ room_id: rental_sessions.room_id })
+          .from(rental_sessions)
+          .where(eq(rental_sessions.id, sessionId));
+        if (!sess?.room_id) {
+          res.status(409).json({ error: "session has no room_id" });
+          return;
+        }
+        const event = await emitActivityEvent({
+          sessionId,
+          roomId: sess.room_id,
+          eventType: body.event_type as any,
+          source: source as any,
+          payload: isPlainObject(body.payload) ? body.payload : {},
+          verified: typeof body.verified === "boolean" ? body.verified : undefined,
+        });
+        res.status(201).json(event);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to emit activity";
+        res.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // ===== Complete session (p3.3 §18.4) =====
+  app.post(
+    "/api/rental/sessions/:id/complete",
+    async (req: AuthenticatedRequest, res) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAccountId(req, res);
+      if (!accountId) return;
+
+      const sessionId = req.params.id as string;
+      const role = await deps.resolveSessionAccess(sessionId, accountId);
+      if (!role) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+
+      const body = req.body ?? {};
+      const summary = typeof body.summary === "string" ? body.summary.trim() : undefined;
+
+      try {
+        const [updated] = await db
+          .update(rental_sessions)
+          .set({
+            status: "completed",
+            ended_at: new Date(),
+            updated_at: new Date(),
+          })
+          .where(eq(rental_sessions.id, sessionId))
+          .returning();
+
+        if (!updated) {
+          res.status(404).json({ error: "session not found" });
+          return;
+        }
+
+        // Emit session.completed event
+        if (updated.room_id) {
+          const { emitActivityEvent } = await import("../rental/activity-emitter.js");
+          const { SESSION_COMPLETED } = await import("../rental/activity-event-types.js");
+          await emitActivityEvent({
+            sessionId,
+            roomId: updated.room_id,
+            eventType: SESSION_COMPLETED,
+            source: role,
+            payload: { summary: summary ?? null },
+          });
+        }
+
+        res.json(updated);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to complete session";
+        if (message.includes("invalid_transition")) {
+          res.status(409).json({ error: message });
+          return;
+        }
+        res.status(500).json({ error: message });
+      }
+    },
+  );
+
+  // ===== Cancel session (p3.3 §18.4) =====
+  //
+  // Both renter and provider can cancel — resolveSessionAccess returns
+  // the caller's role, which is recorded in the cancellation event.
+  app.post(
+    "/api/rental/sessions/:id/cancel",
+    async (req: AuthenticatedRequest, res) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAccountId(req, res);
+      if (!accountId) return;
+
+      const sessionId = req.params.id as string;
+      const role = await deps.resolveSessionAccess(sessionId, accountId);
+      if (!role) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+
+      const body = req.body ?? {};
+      const reason = typeof body.reason === "string" ? body.reason.trim() : undefined;
+
+      try {
+        const [updated] = await db
+          .update(rental_sessions)
+          .set({
+            status: "cancelled",
+            ended_at: new Date(),
+            updated_at: new Date(),
+          })
+          .where(eq(rental_sessions.id, sessionId))
+          .returning();
+
+        if (!updated) {
+          res.status(404).json({ error: "session not found" });
+          return;
+        }
+
+        // Emit session.cancelled event
+        if (updated.room_id) {
+          const { emitActivityEvent } = await import("../rental/activity-emitter.js");
+          const { SESSION_CANCELLED } = await import("../rental/activity-event-types.js");
+          await emitActivityEvent({
+            sessionId,
+            roomId: updated.room_id,
+            eventType: SESSION_CANCELLED,
+            source: role,
+            payload: { reason: reason ?? null, cancelled_by: role },
+          });
+        }
+
+        res.json(updated);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to cancel session";
+        if (message.includes("invalid_transition")) {
+          res.status(409).json({ error: message });
+          return;
+        }
+        res.status(500).json({ error: message });
+      }
     },
   );
 }
