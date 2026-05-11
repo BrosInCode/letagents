@@ -456,6 +456,63 @@ describe("RenterTriggerClassifier — consecutive failures (per-lane)", () => {
     assert.equal(c.failureCount(nowMs + 2000, "antigravity", "gemini-2.5-pro"), 2);
   });
 
+  it("evicts out-of-order stale failures from anywhere in the bucket", () => {
+    // Repro for LivelyPeak's round-3 finding: a late tool-hook
+    // callback can record a failure whose occurredAt is older
+    // than what's already in the bucket. A shift-from-head
+    // eviction would leave it wedged behind fresher entries and
+    // over-count toward the inferred threshold.
+    const c = new RenterTriggerClassifier({
+      inferredFailureCount: 3,
+      inferredWindowMs: 60_000,
+    });
+    const nowMs = Date.parse("2026-05-11T10:00:00.000Z");
+
+    // Fresh failure — in-window.
+    const first = c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: "2026-05-11T10:00:00.000Z",
+      },
+      nowMs,
+    );
+    assert.equal(first.triggered, false);
+
+    // Late stale failure — older than the cutoff (60s window),
+    // appended after a fresher one. A shift-from-head eviction
+    // would NOT remove this because the head is fresh.
+    c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: "2026-05-11T09:58:30.000Z",
+      },
+      nowMs + 30_000,
+    );
+
+    // Another fresh failure — in-window.
+    const third = c.observe(
+      {
+        kind: "quota_failure",
+        provider: "antigravity",
+        model: "gemini-2.5-pro",
+        occurredAt: "2026-05-11T10:00:30.000Z",
+      },
+      nowMs + 30_000,
+    );
+
+    // Threshold is 3; only two in-window failures exist. The stale
+    // middle entry must be evicted so inferred does NOT fire.
+    assert.equal(third.triggered, false);
+    assert.equal(
+      c.failureCount(nowMs + 30_000, "antigravity", "gemini-2.5-pro"),
+      2,
+    );
+  });
+
   it("evicts failures older than the rolling window", () => {
     const c = new RenterTriggerClassifier({
       inferredFailureCount: 3,

@@ -428,13 +428,19 @@ export class RenterTriggerClassifier {
     const bucket = this.failuresByLane.get(key);
     if (!bucket) return;
     const cutoff = nowMs - this.options.inferredWindowMs;
-    while (bucket.length > 0) {
-      const head = bucket[0]!;
-      if (Date.parse(head.occurredAt) >= cutoff) break;
-      bucket.shift();
-    }
-    if (bucket.length === 0) {
+    // Filter — not shift — because callers may append failures
+    // out-of-order (a late tool-hook callback can record an
+    // occurredAt that's older than the bucket head). A
+    // shift-from-head approach would leave the stale entry
+    // wedged behind a fresher one and over-count inferred. Build
+    // a fresh array of only in-window entries instead.
+    const fresh = bucket.filter((f) => Date.parse(f.occurredAt) >= cutoff);
+    if (fresh.length === 0) {
       this.failuresByLane.delete(key);
+      return;
+    }
+    if (fresh.length !== bucket.length) {
+      this.failuresByLane.set(key, fresh);
     }
   }
 }
