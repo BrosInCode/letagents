@@ -64,6 +64,7 @@ import {
   resolveRoomIdentifier,
   resolveRoomIdentifierFromPath,
 } from "./repo-status.js";
+import { registerDesktopRentalIpcHandlers } from "./rental-handlers.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(__dirname, "..");
@@ -2805,6 +2806,7 @@ ipcMain.handle(
   async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> =>
     openDesktopGitHubInstall(roomIdentifier)
 );
+registerDesktopRentalIpcHandlers(ipcMain);
 ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
 ipcMain.handle(
   "desktop:auth:start-device-flow",
