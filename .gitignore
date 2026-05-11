@@ -10,6 +10,8 @@ data/
 .env
 .review-worktrees/
 mitm_capture.jsonl
+.agents/workflows/deploy.local.md
+.agents/workflows/*.local.md
 
 # Headless Antigravity debug/test scripts (local development only)
 antigravity_ls_sniffer.mjs
