@@ -198,7 +198,12 @@ import {
   pauseListing,
   resumeListing,
   listMyListings,
+  publicListings,
 } from "./rental/listings.js";
+import {
+  buildInMemoryListingsRateLimiter,
+  registerRentalRenterRoutes,
+} from "./routes/rental-renter.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -1328,6 +1333,10 @@ registerRentalProviderRoutes(app, {
   pauseListing,
   resumeListing,
   listMyListings,
+});
+registerRentalRenterRoutes(app, {
+  publicListings,
+  shouldAllowListingsQuery: buildInMemoryListingsRateLimiter(),
 });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
