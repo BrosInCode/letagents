@@ -188,6 +188,17 @@ import {
   type GitHubWebhookRouteDeps,
 } from "./routes/github-webhooks.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import {
+  registerRentalProviderRoutes,
+  type RentalProviderRouteDeps,
+} from "./routes/rental-provider.js";
+import {
+  createListing,
+  updateListing,
+  pauseListing,
+  resumeListing,
+  listMyListings,
+} from "./rental/listings.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -1311,6 +1322,13 @@ registerRoomFocusRoutes(app, roomFocusRouteDeps);
 registerRoomTaskRoutes(app, roomTaskRouteDeps);
 registerRoomEventRoutes(app, roomEventRouteDeps);
 registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
+registerRentalProviderRoutes(app, {
+  createListing,
+  updateListing,
+  pauseListing,
+  resumeListing,
+  listMyListings,
+});
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST;
