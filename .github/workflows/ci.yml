@@ -191,15 +191,15 @@ jobs:
       - name: Deploy to production
         uses: appleboy/ssh-action@v1
         with:
-          host: 134.209.165.143
-          username: emmy
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
 
             IMAGE_TAG="${{ needs.docker.outputs.image_tag }}"
 
-            cd ~/letagents
+            cd "${{ secrets.DEPLOY_PATH }}"
 
             # Fetch and checkout the exact commit that triggered this deploy
             git fetch origin staging

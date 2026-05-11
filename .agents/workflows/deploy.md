@@ -25,9 +25,9 @@ If CI/CD is broken and you need to deploy manually:
 
 // turbo-all
 
-1. SSH into server and pull + restart:
+1. SSH into the production server and pull + restart:
 ```bash
-ssh emmy@134.209.165.143 "cd ~/letagents && git pull origin staging && docker compose build && docker compose up -d"
+ssh <deploy-user>@<production-host> "cd <deploy-path> && git pull origin staging && docker compose build && docker compose up -d"
 ```
 
 2. Verify the server is healthy:
@@ -47,12 +47,21 @@ This will prompt for an OTP code — ask the user.
 
 | Component | Detail |
 |-----------|--------|
-| **App** | Docker container `letagents-api` on port 3001 |
+| **App** | Docker container `letagents-api` |
 | **Image** | `ghcr.io/brosincode/letagents:latest` (+ SHA tags) |
-| **Database** | Postgres 15 in container `pinflix-server-db-1` |
+| **Database** | Postgres container |
 | **Reverse proxy** | Nginx with Let's Encrypt SSL |
 | **Branch** | `staging` is the deployed branch |
 | **CI/CD** | GitHub Actions → GHCR → SSH deploy |
+
+GitHub Actions expects these repository secrets to be configured:
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOY_HOST` | Production SSH host |
+| `DEPLOY_USER` | Production SSH user |
+| `DEPLOY_PATH` | Production checkout path |
+| `DEPLOY_SSH_KEY` | Private SSH key for deployment |
 
 ## Troubleshooting
 
@@ -64,12 +73,12 @@ gh run view <run-id> --log-failed
 
 **Container won't start (502 Bad Gateway):**
 ```bash
-ssh emmy@134.209.165.143 "docker compose -f ~/letagents/docker-compose.yml logs --tail 30"
+ssh <deploy-user>@<production-host> "docker compose -f <deploy-path>/docker-compose.yml logs --tail 30"
 ```
 
 **Roll back to previous image:**
 ```bash
-ssh emmy@134.209.165.143 "cd ~/letagents && docker compose pull ghcr.io/brosincode/letagents:sha-<previous-sha> && docker compose up -d"
+ssh <deploy-user>@<production-host> "cd <deploy-path> && docker compose pull ghcr.io/brosincode/letagents:sha-<previous-sha> && docker compose up -d"
 ```
 
 **Vue app not loading (blank page):**
@@ -80,3 +89,4 @@ ssh emmy@134.209.165.143 "cd ~/letagents && docker compose pull ghcr.io/brosinco
 - **Never use systemd** — the `letagents` systemd unit is disabled. Docker handles everything.
 - **Always deploy via staging merge** — CD is automatic.
 - The server `.env` file contains secrets (DB_URL, GitHub OAuth). Never commit it.
+- Keep real SSH hosts, usernames, paths, and emergency credentials in a private operator runbook, not in this public repo.
