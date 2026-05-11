@@ -201,6 +201,14 @@ import {
   publicListings,
 } from "./rental/listings.js";
 import {
+  createSession,
+  acceptSession,
+  declineSession,
+  cancelSession,
+  getSessionById,
+  listProviderRequests,
+} from "./rental/sessions.js";
+import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
 } from "./routes/rental-renter.js";
@@ -1333,10 +1341,18 @@ registerRentalProviderRoutes(app, {
   pauseListing,
   resumeListing,
   listMyListings,
+  // p1.3 session deps
+  acceptSession,
+  declineSession,
+  listProviderRequests,
 });
 registerRentalRenterRoutes(app, {
   publicListings,
   shouldAllowListingsQuery: buildInMemoryListingsRateLimiter(),
+  // p1.3 session deps
+  createSession,
+  getSessionById,
+  cancelSession,
 });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
