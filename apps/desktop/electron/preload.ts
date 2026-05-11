@@ -55,6 +55,33 @@ const api: DesktopApi = {
     openGitHubInstall: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:open-github-install", roomIdentifier),
   },
+  rental: {
+    listListings: (input) => ipcRenderer.invoke("desktop:rental:list-listings", input ?? {}),
+    getProviderDashboard: () => ipcRenderer.invoke("desktop:rental:get-provider-dashboard"),
+    createListing: (input) => ipcRenderer.invoke("desktop:rental:create-listing", input),
+    updateListing: (id, input) => ipcRenderer.invoke("desktop:rental:update-listing", id, input),
+    pauseListing: (id) => ipcRenderer.invoke("desktop:rental:pause-listing", id),
+    resumeListing: (id) => ipcRenderer.invoke("desktop:rental:resume-listing", id),
+    refreshQuota: (id) => ipcRenderer.invoke("desktop:rental:refresh-quota", id),
+    runPreflight: (id?: string) => ipcRenderer.invoke("desktop:rental:run-preflight", id ?? null),
+    createSession: (input) => ipcRenderer.invoke("desktop:rental:create-session", input),
+    getSession: (id) => ipcRenderer.invoke("desktop:rental:get-session", id),
+    cancelSession: (id) => ipcRenderer.invoke("desktop:rental:cancel-session", id),
+    listProviderRequests: () => ipcRenderer.invoke("desktop:rental:list-provider-requests"),
+    acceptRequest: (id) => ipcRenderer.invoke("desktop:rental:accept-request", id),
+    declineRequest: (id, reason?: string) => ipcRenderer.invoke("desktop:rental:decline-request", id, reason ?? null),
+    getActivity: (sessionId) => ipcRenderer.invoke("desktop:rental:get-activity", sessionId),
+    getExposures: (sessionId) => ipcRenderer.invoke("desktop:rental:get-exposures", sessionId),
+    getPatches: (sessionId) => ipcRenderer.invoke("desktop:rental:get-patches", sessionId),
+    getUsage: (sessionId) => ipcRenderer.invoke("desktop:rental:get-usage", sessionId),
+    approvePatch: (sessionId, patchId) => ipcRenderer.invoke("desktop:rental:approve-patch", sessionId, patchId),
+    requestPatchChanges: (sessionId, patchId, note) =>
+      ipcRenderer.invoke("desktop:rental:request-patch-changes", sessionId, patchId, note),
+    approveContextRequest: (sessionId, approvalId) =>
+      ipcRenderer.invoke("desktop:rental:approve-context-request", sessionId, approvalId),
+    denyContextRequest: (sessionId, approvalId) =>
+      ipcRenderer.invoke("desktop:rental:deny-context-request", sessionId, approvalId),
+  },
   auth: {
     getStatus: () => ipcRenderer.invoke("desktop:auth:get-status"),
     startDeviceFlow: (roomIdentifier?: string | null) =>
