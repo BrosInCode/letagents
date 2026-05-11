@@ -39,6 +39,7 @@ import {
   type Task,
   type TaskStatus,
 } from "./db.js";
+import { upsertAccountRoomRecent } from "./account-room-membership.js";
 import { getGitHubAppConfig, hasGitHubAppConfig } from "./github-config.js";
 import {
   buildGitHubLeaseEnforcementPlan,
@@ -124,6 +125,7 @@ import {
   type HttpMiddlewareDeps,
 } from "./http-middleware.js";
 import { resolveRequestAuth } from "./request-auth.js";
+import { registerAccountRoomRoutes } from "./routes/account-rooms.js";
 import { registerWebRoutes } from "./routes/web.js";
 import {
   registerAuthRoutes,
@@ -1130,6 +1132,7 @@ const legacyProjectRouteDeps = {
   resolveProjectRole,
   requireAdmin,
   rememberHumanRoomParticipant,
+  rememberAccountRoom: upsertAccountRoomRecent,
 } satisfies LegacyProjectRouteDeps;
 
 const legacyProjectMessageRouteDeps = {
@@ -1254,6 +1257,7 @@ const roomJoinRouteDeps = {
   isRepoBackedProject,
   resolveProjectRole,
   rememberHumanRoomParticipant,
+  rememberAccountRoom: upsertAccountRoomRecent,
   toRoomResponse,
 } satisfies RoomJoinRouteDeps;
 
@@ -1271,6 +1275,7 @@ registerGitHubAppCallbackRoute(app);
 registerGitHubWebhookRoutes(app, githubWebhookRouteDeps);
 
 registerAuthRoutes(app);
+registerAccountRoomRoutes(app);
 
 registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
 

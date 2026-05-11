@@ -43,6 +43,12 @@ export interface RoomJoinRouteDeps {
     projectId: string;
     sessionAccount: AuthenticatedRequest["sessionAccount"];
   }): Promise<void>;
+  rememberAccountRoom(input: {
+    accountId: string;
+    roomId: string;
+    displayName?: string | null;
+    source?: string | null;
+  }): Promise<void>;
   toRoomResponse(
     project: Project,
     options?: {
@@ -134,6 +140,12 @@ export function registerRoomJoinRoutes(
       await deps.rememberHumanRoomParticipant({
         projectId: project.id,
         sessionAccount: req.sessionAccount,
+      });
+      await deps.rememberAccountRoom({
+        accountId: req.sessionAccount.account_id,
+        roomId: project.id,
+        displayName: project.display_name,
+        source: "join",
       });
     }
 

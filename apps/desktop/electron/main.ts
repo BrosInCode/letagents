@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopAccountFocusRoomEntry,
+  DesktopAccountRoomEntry,
   DesktopAuthAccount,
   DesktopAuthPollResult,
   DesktopAuthStartResult,
@@ -753,6 +755,74 @@ function mapDesktopRoomInfoPayload(requestedRoomIdentifier: string, payload: Roo
     sourceTaskId: payload.source_task_id || null,
     focusStatus: payload.focus_status || null,
   };
+}
+
+function mapDesktopAccountFocusRoomEntry(payload: Record<string, unknown>): DesktopAccountFocusRoomEntry {
+  const roomIdentifier = typeof payload.room_id === "string"
+    ? payload.room_id
+    : typeof payload.id === "string"
+      ? payload.id
+      : "";
+  return {
+    roomIdentifier,
+    displayName: typeof payload.display_name === "string" && payload.display_name.trim()
+      ? payload.display_name
+      : roomIdentifier,
+    name: typeof payload.name === "string" && payload.name.trim() ? payload.name : roomIdentifier,
+    kind: "focus",
+    parentRoomId: typeof payload.parent_room_id === "string" ? payload.parent_room_id : null,
+    focusKey: typeof payload.focus_key === "string" ? payload.focus_key : null,
+    sourceTaskId: typeof payload.source_task_id === "string" ? payload.source_task_id : null,
+    focusStatus: payload.focus_status === "active" || payload.focus_status === "concluded" ? payload.focus_status : null,
+    role: payload.role === "admin" ? "admin" : "participant",
+    source: typeof payload.source === "string" ? payload.source : null,
+    firstOpenedAt: typeof payload.first_opened_at === "string" ? payload.first_opened_at : null,
+    lastOpenedAt: typeof payload.last_opened_at === "string" ? payload.last_opened_at : null,
+  };
+}
+
+function mapDesktopAccountRoomEntry(payload: Record<string, unknown>): DesktopAccountRoomEntry {
+  const roomIdentifier = typeof payload.room_id === "string"
+    ? payload.room_id
+    : typeof payload.id === "string"
+      ? payload.id
+      : "";
+  const focusRooms = Array.isArray(payload.focus_rooms)
+    ? payload.focus_rooms
+      .filter((room): room is Record<string, unknown> => Boolean(room) && typeof room === "object")
+      .map(mapDesktopAccountFocusRoomEntry)
+      .filter((room) => Boolean(room.roomIdentifier))
+    : [];
+  return {
+    roomIdentifier,
+    displayName: typeof payload.display_name === "string" && payload.display_name.trim()
+      ? payload.display_name
+      : roomIdentifier,
+    name: typeof payload.name === "string" && payload.name.trim() ? payload.name : roomIdentifier,
+    kind: "main",
+    parentRoomId: typeof payload.parent_room_id === "string" ? payload.parent_room_id : null,
+    focusKey: typeof payload.focus_key === "string" ? payload.focus_key : null,
+    sourceTaskId: typeof payload.source_task_id === "string" ? payload.source_task_id : null,
+    focusStatus: payload.focus_status === "active" || payload.focus_status === "concluded" ? payload.focus_status : null,
+    role: payload.role === "admin" ? "admin" : "participant",
+    source: typeof payload.source === "string" ? payload.source : null,
+    pinned: payload.pinned === true,
+    archived: payload.archived === true,
+    firstOpenedAt: typeof payload.first_opened_at === "string" ? payload.first_opened_at : null,
+    lastOpenedAt: typeof payload.last_opened_at === "string" ? payload.last_opened_at : null,
+    focusRooms,
+  };
+}
+
+async function listDesktopAccountRooms(): Promise<DesktopAccountRoomEntry[]> {
+  const response = await apiFetch<{ rooms?: unknown[] }>("/account/rooms?limit=50").catch((error) => {
+    if (error instanceof DesktopApiError && error.status === 401) return { rooms: [] };
+    throw error;
+  });
+  return (response.rooms || [])
+    .filter((room): room is Record<string, unknown> => Boolean(room) && typeof room === "object")
+    .map(mapDesktopAccountRoomEntry)
+    .filter((room) => Boolean(room.roomIdentifier));
 }
 
 async function parseApiErrorPayload(response: Response): Promise<ApiErrorPayload | null> {
@@ -2531,6 +2601,10 @@ ipcMain.handle("desktop:app:get-info", async (): Promise<DesktopAppInfo> => ({
   apiUrl,
 }));
 
+ipcMain.handle(
+  "desktop:room:list-account-rooms",
+  async (): Promise<DesktopAccountRoomEntry[]> => listDesktopAccountRooms()
+);
 ipcMain.handle(
   "desktop:room:get-snapshot",
   async (_event, roomIdentifier?: string | null): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier)

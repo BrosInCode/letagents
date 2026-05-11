@@ -45,6 +45,12 @@ export interface LegacyProjectRouteDeps {
     projectId: string;
     sessionAccount: NonNullable<AuthenticatedRequest["sessionAccount"]>;
   }): Promise<void>;
+  rememberAccountRoom(input: {
+    accountId: string;
+    roomId: string;
+    displayName?: string | null;
+    source?: string | null;
+  }): Promise<void>;
 }
 
 export function registerLegacyProjectRoutes(
@@ -69,6 +75,12 @@ export function registerLegacyProjectRoutes(
     const project = await createProject();
     if (req.sessionAccount) {
       await assignProjectAdmin(project.id, req.sessionAccount.account_id);
+      await deps.rememberAccountRoom({
+        accountId: req.sessionAccount.account_id,
+        roomId: project.id,
+        displayName: project.display_name,
+        source: "create_invite",
+      });
     }
     res.status(201).json(project);
   });
@@ -120,6 +132,12 @@ export function registerLegacyProjectRoutes(
       await deps.rememberHumanRoomParticipant({
         projectId: project.id,
         sessionAccount: req.sessionAccount,
+      });
+      await deps.rememberAccountRoom({
+        accountId: req.sessionAccount.account_id,
+        roomId: project.id,
+        displayName: project.display_name,
+        source: "open_room",
       });
     }
 

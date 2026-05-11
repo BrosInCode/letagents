@@ -2,6 +2,7 @@ export type RoomEntry = {
   id: string;
   type: "room";
   kind: "parent" | "focus";
+  roomIdentifier: string | null;
   title: string;
   meta: string;
   sectionLabel: string;
