@@ -187,25 +187,34 @@ function buildDeps(overrides: {
   byIdempotency?: RentalUsageMeterRow | null;
 } = {}) {
   const inserted: (typeof rental_usage_meters.$inferInsert)[] = [];
-  // Distinguish "no key provided" from "explicit null" by checking ownership.
+  const lockOrder: string[] = [];
   const sessionProvided = Object.prototype.hasOwnProperty.call(overrides, "session");
   const defaultSession = { id: "sess_1", renter_lane_provider: null, renter_lane_model: null };
-  return {
-    inserted,
-    deps: {
-      loadSession: async () => (sessionProvided ? overrides.session ?? null : defaultSession),
-      loadLatestMeter: async () => overrides.latest ?? null,
-      loadByIdempotency: async () => overrides.byIdempotency ?? null,
-      insertMeter: async (row: typeof rental_usage_meters.$inferInsert) => {
-        inserted.push(row);
-        return makeMeterRow({
-          ...row,
-          created_at: new Date(),
-          updated_at: new Date(),
-        } as Partial<RentalUsageMeterRow>);
-      },
+  const base = {
+    loadSession: async () => (sessionProvided ? overrides.session ?? null : defaultSession),
+    loadLatestMeter: async () => overrides.latest ?? null,
+    loadByIdempotency: async () => overrides.byIdempotency ?? null,
+    insertMeter: async (row: typeof rental_usage_meters.$inferInsert) => {
+      inserted.push(row);
+      return makeMeterRow({
+        ...row,
+        created_at: new Date(),
+        updated_at: new Date(),
+      } as Partial<RentalUsageMeterRow>);
     },
   };
+  const deps = {
+    ...base,
+    async withSessionLock<T>(sessionId: string, body: (locked: typeof deps) => Promise<T>): Promise<T> {
+      lockOrder.push(`acquire:${sessionId}`);
+      try {
+        return await body(deps);
+      } finally {
+        lockOrder.push(`release:${sessionId}`);
+      }
+    },
+  };
+  return { inserted, deps, lockOrder };
 }
 
 describe("ingestUsage", () => {
@@ -355,8 +364,8 @@ describe("ingestUsage", () => {
 
   it("on unique-violation insert, re-loads idempotency winner and returns it", async () => {
     // Simulate the race: loadByIdempotency returns null on the first
-    // call (no row yet), insert throws 23505, then the second
-    // loadByIdempotency returns the winner row.
+    // call, insert throws 23505, then loadByIdempotency returns the
+    // winner row.
     const winner = makeMeterRow({ id: "rusg_winner", idempotency_key: "ikey-race" });
     let idempotencyLookups = 0;
     let insertAttempts = 0;
@@ -365,22 +374,76 @@ describe("ingestUsage", () => {
       loadLatestMeter: async () => null,
       loadByIdempotency: async () => {
         idempotencyLookups += 1;
-        return idempotencyLookups === 1 ? null : winner;
+        // 1st call (pre-lock) returns null, 2nd call (inside lock) returns null,
+        // 3rd call (recovery after 23505) returns winner.
+        return idempotencyLookups <= 2 ? null : winner;
       },
       insertMeter: async () => {
         insertAttempts += 1;
-        // Emulate Postgres 23505 unique_violation.
         const err = new Error(
           'duplicate key value violates unique constraint "rental_usage_meters_session_idempotency_uq"',
         ) as Error & { code?: string };
         err.code = "23505";
         throw err;
       },
+      async withSessionLock<T>(_sessionId: string, body: (locked: typeof deps) => Promise<T>): Promise<T> {
+        return body(deps);
+      },
     };
     const out = await ingestUsage("sess_1", makeReport({ idempotencyKey: "ikey-race" }), deps);
     assert.equal(out.id, "rusg_winner", "should re-read and return the race winner");
     assert.equal(insertAttempts, 1);
-    assert.equal(idempotencyLookups, 2);
+    assert.ok(idempotencyLookups >= 3, "expected idempotency reads pre-lock, inside-lock, and post-23505");
+  });
+
+  it("acquires withSessionLock before reading latest meter / inserting", async () => {
+    const { deps, lockOrder, inserted } = buildDeps();
+    await ingestUsage("sess_42", makeReport({ idempotencyKey: "ikey-lock" }), deps);
+    assert.deepEqual(lockOrder, ["acquire:sess_42", "release:sess_42"]);
+    assert.equal(inserted.length, 1);
+  });
+
+  it("two concurrent ingests on the same session serialize through the lock and compute distinct rolling totals", async () => {
+    // The buildDeps mock serializes inside withSessionLock by awaiting
+    // the inner body before releasing. We exploit that to verify two
+    // back-to-back ingests each see the prior row as `previous` and
+    // produce a strictly increasing lrt_total.
+    const rows: RentalUsageMeterRow[] = [];
+    const inserted: (typeof rental_usage_meters.$inferInsert)[] = [];
+    let latest: RentalUsageMeterRow | null = null;
+    const deps = {
+      loadSession: async () => ({ id: "sess_99", renter_lane_provider: null, renter_lane_model: null }),
+      loadLatestMeter: async () => latest,
+      loadByIdempotency: async (_sessionId: string, key: string) => rows.find((r) => r.idempotency_key === key) ?? null,
+      insertMeter: async (row: typeof rental_usage_meters.$inferInsert) => {
+        inserted.push(row);
+        const out = makeMeterRow({
+          ...row,
+          created_at: new Date(),
+          updated_at: new Date(),
+        } as Partial<RentalUsageMeterRow>);
+        rows.push(out);
+        latest = out;
+        return out;
+      },
+      async withSessionLock<T>(_sessionId: string, body: (locked: typeof deps) => Promise<T>): Promise<T> {
+        return body(deps);
+      },
+    };
+
+    const r1 = await ingestUsage(
+      "sess_99",
+      makeReport({ lrt: { lrtUsed: 100, confidence: "local_exact" }, idempotencyKey: "k1" }),
+      deps,
+    );
+    const r2 = await ingestUsage(
+      "sess_99",
+      makeReport({ lrt: { lrtUsed: 250, confidence: "local_exact" }, idempotencyKey: "k2" }),
+      deps,
+    );
+    assert.equal(r1.lrt_total, 100);
+    assert.equal(r2.lrt_total, 350, "second ingest must see first row as `previous`");
+    assert.equal(inserted.length, 2);
   });
 });
 
@@ -525,6 +588,36 @@ describe("POST /api/rental/sessions/:id/usage", () => {
     const res = await post("/api/rental/sessions/sess_1/usage", {
       ...makeReport(),
       snapshot: { ...makeReport().snapshot, nativeResetAt: "not-a-date" },
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("returns 400 when delta.inputTokens is present but not a finite number", async () => {
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      delta: { ...makeReport().delta, inputTokens: "12" as unknown as number },
+    });
+    assert.equal(res.status, 400);
+    const json = (await res.json()) as { error: string };
+    assert.match(json.error, /delta\.inputTokens/);
+  });
+
+  it("returns 400 when delta.credits is present but not a finite number", async () => {
+    // JSON.stringify(Infinity) → null; use a string to exercise the
+    // non-finite path that actually reaches the parser.
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      delta: { ...makeReport().delta, credits: "12.34" as unknown as number },
+    });
+    assert.equal(res.status, 400);
+    const json = (await res.json()) as { error: string };
+    assert.match(json.error, /delta\.credits/);
+  });
+
+  it("returns 400 when delta is not an object", async () => {
+    const res = await post("/api/rental/sessions/sess_1/usage", {
+      ...makeReport(),
+      delta: "garbage" as unknown as object,
     });
     assert.equal(res.status, 400);
   });

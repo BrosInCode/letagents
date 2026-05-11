@@ -15,7 +15,7 @@
  */
 
 import crypto from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import {
   rental_sessions,
@@ -125,6 +125,14 @@ export class UsageIngestError extends Error {
  * Lookup shape used by `ingestUsage`. The default implementation reads
  * `rental_sessions` + the latest `rental_usage_meters` row through
  * `db`. Tests inject mocks via {@link RentalUsageIngestDeps}.
+ *
+ * `withSessionLock` serializes ingest writes for a single session by
+ * holding a Postgres transaction-scoped advisory lock keyed on the
+ * session id. Concurrent requests for the same session queue on the
+ * lock; concurrent requests for different sessions don't block each
+ * other. This is the authoritative guarantee that `lrt_total` reflects
+ * every committed delta — no read-then-write race even for distinct
+ * idempotency keys.
  */
 export interface RentalUsageIngestDeps {
   loadSession(sessionId: string): Promise<{
@@ -143,48 +151,91 @@ export interface RentalUsageIngestDeps {
   insertMeter(
     row: typeof rental_usage_meters.$inferInsert,
   ): Promise<RentalUsageMeterRow>;
+
+  /**
+   * Run `body` inside a transaction that holds an advisory lock keyed
+   * on this session id. The lock is auto-released when the transaction
+   * commits or rolls back.
+   */
+  withSessionLock<T>(
+    sessionId: string,
+    body: (locked: RentalUsageIngestDeps) => Promise<T>,
+  ): Promise<T>;
+}
+
+/**
+ * Build an ingest deps implementation against any drizzle-compatible
+ * executor — either the top-level `db` (used outside the lock for
+ * pre-validation reads) or a transaction handle `tx` (used inside the
+ * lock so all reads and the insert see a consistent serialized view).
+ */
+type IngestExecutor = typeof db;
+
+function buildIngestDeps(executor: IngestExecutor): Omit<RentalUsageIngestDeps, "withSessionLock"> {
+  return {
+    async loadSession(sessionId) {
+      const [row] = await executor
+        .select({
+          id: rental_sessions.id,
+          renter_lane_provider: rental_sessions.renter_lane_provider,
+          renter_lane_model: rental_sessions.renter_lane_model,
+        })
+        .from(rental_sessions)
+        .where(eq(rental_sessions.id, sessionId));
+      return row ?? null;
+    },
+    async loadLatestMeter(sessionId) {
+      const [row] = await executor
+        .select()
+        .from(rental_usage_meters)
+        .where(eq(rental_usage_meters.session_id, sessionId))
+        .orderBy(desc(rental_usage_meters.created_at))
+        .limit(1);
+      return row ?? null;
+    },
+    async loadByIdempotency(sessionId, idempotencyKey) {
+      const [row] = await executor
+        .select()
+        .from(rental_usage_meters)
+        .where(
+          and(
+            eq(rental_usage_meters.session_id, sessionId),
+            eq(rental_usage_meters.idempotency_key, idempotencyKey),
+          ),
+        );
+      return row ?? null;
+    },
+    async insertMeter(row) {
+      const [inserted] = await executor.insert(rental_usage_meters).values(row).returning();
+      return inserted;
+    },
+  };
 }
 
 /**
  * Default deps wired to the live db. The route module uses this; tests
  * inject their own.
+ *
+ * `withSessionLock` opens a drizzle transaction and acquires a
+ * transaction-scoped advisory lock keyed on the session id via
+ * `pg_advisory_xact_lock(hashtextextended(...))`. The lock is
+ * automatically released on commit/rollback.
  */
 export const defaultUsageIngestDeps: RentalUsageIngestDeps = {
-  async loadSession(sessionId) {
-    const [row] = await db
-      .select({
-        id: rental_sessions.id,
-        renter_lane_provider: rental_sessions.renter_lane_provider,
-        renter_lane_model: rental_sessions.renter_lane_model,
-      })
-      .from(rental_sessions)
-      .where(eq(rental_sessions.id, sessionId));
-    return row ?? null;
-  },
-  async loadLatestMeter(sessionId) {
-    const [row] = await db
-      .select()
-      .from(rental_usage_meters)
-      .where(eq(rental_usage_meters.session_id, sessionId))
-      .orderBy(desc(rental_usage_meters.created_at))
-      .limit(1);
-    return row ?? null;
-  },
-  async loadByIdempotency(sessionId, idempotencyKey) {
-    const [row] = await db
-      .select()
-      .from(rental_usage_meters)
-      .where(
-        and(
-          eq(rental_usage_meters.session_id, sessionId),
-          eq(rental_usage_meters.idempotency_key, idempotencyKey),
-        ),
-      );
-    return row ?? null;
-  },
-  async insertMeter(row) {
-    const [inserted] = await db.insert(rental_usage_meters).values(row).returning();
-    return inserted;
+  ...buildIngestDeps(db),
+  async withSessionLock(sessionId, body) {
+    return db.transaction(async (tx) => {
+      // 64-bit advisory lock keyed by a stable hash of the session id.
+      // Using `hashtextextended` (8-byte) keeps the lock-id space large
+      // enough to avoid collisions in practice; collision worst case is
+      // unrelated sessions block briefly, which is still correct.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${sessionId}, 0))`);
+      const txDeps: RentalUsageIngestDeps = {
+        ...buildIngestDeps(tx as unknown as IngestExecutor),
+        withSessionLock: defaultUsageIngestDeps.withSessionLock,
+      };
+      return body(txDeps);
+    });
   },
 };
 
@@ -253,17 +304,16 @@ export async function ingestUsage(
     throw new UsageIngestError("lrt.confidence must be a valid confidence value", "invalid_input", 400);
   }
 
-  // Idempotency short-circuit (best-effort — the unique index below is
-  // the actual guarantee under concurrent retries).
-  const existing = await deps.loadByIdempotency(sessionId, report.idempotencyKey);
-  if (existing) return existing;
+  // Cheap pre-checks outside the lock — they don't depend on rolling
+  // state and can short-circuit duplicate/mismatched reports without
+  // queueing on the session lock.
+  const earlyExisting = await deps.loadByIdempotency(sessionId, report.idempotencyKey);
+  if (earlyExisting) return earlyExisting;
 
-  // Session must exist; FK alone is fine but we want a clean 404 vs 23503.
   const session = await deps.loadSession(sessionId);
   if (!session) {
     throw new UsageIngestError("session not found", "session_not_found", 404);
   }
-
   if (
     session.renter_lane_provider
     && session.renter_lane_provider !== report.snapshot.provider
@@ -286,7 +336,32 @@ export async function ingestUsage(
     );
   }
 
-  const previous = await deps.loadLatestMeter(sessionId);
+  // Authoritative path: serialize all writes for this session so the
+  // rolling lrt_total / counter carry-forward is correct for both same-key
+  // retries and distinct-key concurrent reports. The advisory lock is
+  // released when the transaction commits/rolls back.
+  return deps.withSessionLock(sessionId, async (locked) => {
+    // Re-check idempotency inside the lock — a concurrent winner may
+    // have committed since the pre-check above.
+    const lockedExisting = await locked.loadByIdempotency(sessionId, report.idempotencyKey);
+    if (lockedExisting) return lockedExisting;
+
+    const previous = await locked.loadLatestMeter(sessionId);
+    return performInsert(locked, sessionId, report, previous);
+  });
+}
+
+/**
+ * Inner insert — operates inside the per-session lock. Splits out the
+ * row construction + unique-violation recovery so the lock body stays
+ * readable.
+ */
+async function performInsert(
+  locked: RentalUsageIngestDeps,
+  sessionId: string,
+  report: IngestUsageReport,
+  previous: RentalUsageMeterRow | null,
+): Promise<RentalUsageMeterRow> {
   // LRT columns are `integer` in pg; the shared weights produce
   // fractional values (e.g. cache_creation * 1.25). Round at the DB
   // boundary so totals stay representable; document the rounding so
@@ -325,21 +400,16 @@ export async function ingestUsage(
     idempotency_key: report.idempotencyKey,
   };
 
-  // Race-safe insert. If two concurrent requests with the same
-  // (session_id, idempotency_key) both pass the loadByIdempotency
-  // check above, the unique index `rental_usage_meters_session_idempotency_uq`
-  // makes exactly one win. The loser re-reads and returns the winner's row.
-  //
-  // Note (V1 trade-off): under high concurrency for *different*
-  // idempotency keys on the same session, two reports can race past
-  // loadLatestMeter() and both compute the same lrt_total, missing
-  // one delta. Budget Sentinel reconciles on the next snapshot.
-  // A SELECT FOR UPDATE / advisory-lock guarantee is tracked for v2.
+  // Belt-and-braces: even though the surrounding advisory lock
+  // serializes writes for this session, retain the unique-violation
+  // recovery path so that any future call site that bypasses
+  // `withSessionLock` (e.g. test stubs) still behaves correctly when
+  // two requests race on the same (session_id, idempotency_key).
   try {
-    return await deps.insertMeter(insertRow);
+    return await locked.insertMeter(insertRow);
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
-    const winner = await deps.loadByIdempotency(sessionId, report.idempotencyKey);
+    const winner = await locked.loadByIdempotency(sessionId, report.idempotencyKey);
     if (winner) return winner;
     throw err;
   }

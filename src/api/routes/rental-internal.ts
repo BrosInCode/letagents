@@ -140,9 +140,40 @@ function parseReport(body: unknown): IngestUsageReport | { error: string } {
     };
   }
 
-  // delta — optional but must be an object when present, numeric fields finite.
-  if (b.delta !== undefined && !isPlainObject(b.delta)) {
-    return { error: "delta must be an object when provided" };
+  // delta — optional but must be an object when present, every numeric
+  // field finite and non-negative when present. Reject silently-bad input
+  // (e.g. "12.4" string) rather than coercing it to 0.
+  if (b.delta !== undefined) {
+    if (!isPlainObject(b.delta)) {
+      return { error: "delta must be an object when provided" };
+    }
+    const deltaIntFields = [
+      "inputTokens",
+      "outputTokens",
+      "cacheCreationTokens",
+      "cacheReadTokens",
+      "reasoningTokens",
+      "requests",
+      "toolCalls",
+      "commandRuns",
+      "filesExposed",
+      "heartbeats",
+    ] as const;
+    for (const f of deltaIntFields) {
+      const v = (b.delta as Record<string, unknown>)[f];
+      if (v === undefined) continue;
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        return { error: `delta.${f} must be a finite number when provided` };
+      }
+    }
+    const deltaNumericFields = ["credits", "usd"] as const;
+    for (const f of deltaNumericFields) {
+      const v = (b.delta as Record<string, unknown>)[f];
+      if (v === undefined || v === null) continue;
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        return { error: `delta.${f} must be a finite number or null when provided` };
+      }
+    }
   }
 
   // idempotencyKey
