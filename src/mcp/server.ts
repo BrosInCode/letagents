@@ -93,6 +93,7 @@ import {
   rentalHeartbeat,
   rentalListRequests,
   rentalRefreshQuota,
+  rentalRequestBudgetExtension,
   rentalReportUsage,
 } from "./rental-tools.js";
 
@@ -4572,6 +4573,38 @@ server.tool(
     const result = await rentalReportUsage(rentalToolDeps, {
       session_id,
       report,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "rental_request_budget_extension",
+  "Request additional LRT for a Rent an Agent session. This creates a pending budget.extension_requested activity event only; it does not grant budget and cannot approve itself. A renter must approve the request through the renter-side budget-extension approval route before the session lrt_limit changes.",
+  {
+    session_id: z.string().describe("Rental session id that needs more LRT."),
+    requested_additional_lrt: z
+      .number()
+      .int()
+      .positive()
+      .describe("Positive amount of additional LRT requested."),
+    reason: z
+      .string()
+      .optional()
+      .describe("Optional short reason shown to the renter."),
+  },
+  async ({ session_id, requested_additional_lrt, reason }) => {
+    const result = await rentalRequestBudgetExtension(rentalToolDeps, {
+      session_id,
+      requested_additional_lrt,
+      reason,
     });
     return {
       content: [

@@ -1,7 +1,7 @@
 /**
  * Rental Activity Event Types — §9.4 Taxonomy
  *
- * All 44 event types from the V1 spec, organized by category.
+ * V1 rental activity event types, organized by category.
  * Each event type is a string constant for use in the activity-emitter.
  *
  * Categories:
@@ -40,6 +40,9 @@ export const BUDGET_EXHAUSTED = "budget.exhausted" as const;
 export const BUDGET_METER_STALE = "budget.meter_stale" as const;
 export const BUDGET_METER_RECOVERED = "budget.meter_recovered" as const;
 export const BUDGET_EXTERNAL_USAGE_SUSPECTED = "budget.external_usage_suspected" as const;
+export const BUDGET_EXTENSION_REQUESTED = "budget.extension_requested" as const;
+export const BUDGET_EXTENSION_APPROVED = "budget.extension_approved" as const;
+export const BUDGET_EXTENSION_DENIED = "budget.extension_denied" as const;
 
 // ===== Context events =====
 export const CONTEXT_SCOPE_SET = "context.scope_set" as const;
@@ -104,6 +107,9 @@ export type RentalActivityEventType =
   | typeof BUDGET_METER_STALE
   | typeof BUDGET_METER_RECOVERED
   | typeof BUDGET_EXTERNAL_USAGE_SUSPECTED
+  | typeof BUDGET_EXTENSION_REQUESTED
+  | typeof BUDGET_EXTENSION_APPROVED
+  | typeof BUDGET_EXTENSION_DENIED
   | typeof CONTEXT_SCOPE_SET
   | typeof CONTEXT_FILE_EXPOSED
   | typeof CONTEXT_FILE_BLOCKED
@@ -154,6 +160,9 @@ export const ALL_ACTIVITY_EVENT_TYPES: readonly RentalActivityEventType[] = [
   BUDGET_METER_STALE,
   BUDGET_METER_RECOVERED,
   BUDGET_EXTERNAL_USAGE_SUSPECTED,
+  BUDGET_EXTENSION_REQUESTED,
+  BUDGET_EXTENSION_APPROVED,
+  BUDGET_EXTENSION_DENIED,
   CONTEXT_SCOPE_SET,
   CONTEXT_FILE_EXPOSED,
   CONTEXT_FILE_BLOCKED,
@@ -227,6 +236,9 @@ export const AUTO_VERIFIED_EVENT_TYPES: ReadonlySet<RentalActivityEventType> =
     BUDGET_METER_STALE,
     BUDGET_METER_RECOVERED,
     BUDGET_EXTERNAL_USAGE_SUSPECTED,
+    BUDGET_EXTENSION_REQUESTED,
+    BUDGET_EXTENSION_APPROVED,
+    BUDGET_EXTENSION_DENIED,
     CONTEXT_SCOPE_SET,
     CONTEXT_FILE_EXPOSED,
     CONTEXT_FILE_BLOCKED,

@@ -237,6 +237,75 @@ export async function rentalReportUsage(
 }
 
 // ---------------------------------------------------------------------------
+// rental_request_budget_extension (p3.4)
+// ---------------------------------------------------------------------------
+
+export interface RentalRequestBudgetExtensionInput {
+  session_id: string;
+  requested_additional_lrt: number;
+  reason?: string;
+}
+
+export interface RentalRequestBudgetExtensionResult {
+  success: boolean;
+  request?: unknown;
+  session?: unknown;
+  error?: string;
+}
+
+export async function rentalRequestBudgetExtension(
+  deps: RentalToolDeps,
+  input: RentalRequestBudgetExtensionInput,
+): Promise<RentalRequestBudgetExtensionResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  if (
+    typeof input.requested_additional_lrt !== "number"
+    || !Number.isFinite(input.requested_additional_lrt)
+    || !Number.isInteger(input.requested_additional_lrt)
+    || input.requested_additional_lrt <= 0
+  ) {
+    return {
+      success: false,
+      error: "requested_additional_lrt must be a finite positive integer",
+    };
+  }
+
+  const path = `/api/rental/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/budget-extension-requests`;
+
+  const bodyPayload: Record<string, unknown> = {
+    requestedAdditionalLrt: input.requested_additional_lrt,
+  };
+  if (typeof input.reason === "string" && input.reason.trim()) {
+    bodyPayload.reason = input.reason.trim();
+  }
+
+  try {
+    const body = await deps.apiCall<{
+      request?: unknown;
+      session?: unknown;
+    }>(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(bodyPayload),
+    });
+
+    return {
+      success: true,
+      request: body?.request ?? null,
+      session: body?.session ?? null,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // rental_refresh_quota (p3.2 — wraps POST /api/rental/sessions/:id/refresh-quota)
 // ---------------------------------------------------------------------------
 
