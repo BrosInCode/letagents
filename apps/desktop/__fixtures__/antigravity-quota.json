@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "schema": "antigravity.quota.v1",
+  "observed_at": "2026-05-11T10:00:00.000Z",
+  "lanes": [
+    {
+      "lane_id": "gemini-2.5-pro",
+      "model": "gemini-2.5-pro",
+      "display_name": "Gemini 2.5 Pro",
+      "percent_remaining": 0.42,
+      "reset_at": "2026-05-11T18:00:00.000Z",
+      "last_event_at": "2026-05-11T09:55:00.000Z"
+    },
+    {
+      "lane_id": "gemini-2.5-flash",
+      "model": "gemini-2.5-flash",
+      "display_name": "Gemini 2.5 Flash",
+      "percent_remaining": 1.0,
+      "reset_at": "2026-05-11T18:00:00.000Z",
+      "last_event_at": null
+    },
+    {
+      "lane_id": "claude-haiku-4",
+      "model": "claude-haiku-4",
+      "display_name": "Claude Haiku 4",
+      "percent_remaining": 0.0,
+      "reset_at": "2026-05-11T20:30:00.000Z",
+      "last_event_at": "2026-05-11T09:59:00.000Z"
+    }
+  ]
+}
