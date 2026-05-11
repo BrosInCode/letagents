@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { boolean, check, foreignKey, index, integer, jsonb, pgEnum, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 import type { FocusRoomConclusionDetails } from "../focus-room-conclusion.js";
 import type {
@@ -421,6 +421,7 @@ export const room_agent_sessions = pgTable(
     room_idx: index("room_agent_sessions_room_id_idx").on(table.room_id),
     room_kind_idx: index("room_agent_sessions_room_kind_idx").on(table.room_id, table.session_kind),
     agent_key_idx: index("room_agent_sessions_agent_key_idx").on(table.agent_key),
+    owner_idx: index("room_agent_sessions_owner_account_id_idx").on(table.owner_account_id),
     active_worker_actor_label_idx: uniqueIndex("room_agent_sessions_active_worker_actor_label_idx")
       .on(table.room_id, table.actor_label)
       .where(sql`${table.session_kind} = 'worker' AND ${table.ended_at} IS NULL`),
@@ -644,6 +645,8 @@ export const room_participants = pgTable(
     room_hidden_idx: index("room_participants_room_hidden_idx").on(table.room_id, table.hidden_at),
     room_actor_idx: index("room_participants_room_actor_idx").on(table.room_id, table.actor_label),
     room_login_idx: index("room_participants_room_login_idx").on(table.room_id, table.github_login),
+    participant_key_idx: index("room_participants_participant_key_idx").on(table.participant_key),
+    github_login_idx: index("room_participants_github_login_idx").on(table.github_login),
   })
 );
 
@@ -661,6 +664,30 @@ export const project_admins = pgTable(
   (table) => ({
     pk: primaryKey({ name: "project_admins_pk", columns: [table.project_id, table.account_id] }),
     account_idx: index("project_admins_account_id_idx").on(table.account_id),
+  })
+);
+
+export const account_room_recents = pgTable(
+  "account_room_recents",
+  {
+    account_id: text("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    display_name: text("display_name"),
+    source: text("source"),
+    pinned: boolean("pinned").notNull().default(false),
+    archived: boolean("archived").notNull().default(false),
+    first_opened_at: timestamp("first_opened_at", { mode: "string", withTimezone: true }).notNull(),
+    last_opened_at: timestamp("last_opened_at", { mode: "string", withTimezone: true }).notNull(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ name: "account_room_recents_pk", columns: [table.account_id, table.room_id] }),
+    account_last_opened_idx: index("account_room_recents_account_last_opened_idx").on(table.account_id, table.last_opened_at),
+    room_idx: index("account_room_recents_room_id_idx").on(table.room_id),
   })
 );
 

@@ -6,6 +6,7 @@ const api: DesktopApi = {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
   },
   room: {
+    listAccountRooms: () => ipcRenderer.invoke("desktop:room:list-account-rooms"),
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),

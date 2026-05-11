@@ -534,11 +534,45 @@ export interface DesktopInviteRoomCreation {
   snapshot: DesktopRoomSnapshot;
 }
 
+export interface DesktopAccountFocusRoomEntry {
+  roomIdentifier: string;
+  displayName: string;
+  name: string;
+  kind: "focus";
+  parentRoomId: string | null;
+  focusKey: string | null;
+  sourceTaskId: string | null;
+  focusStatus: "active" | "concluded" | null;
+  role: "admin" | "participant";
+  source: string | null;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+}
+
+export interface DesktopAccountRoomEntry {
+  roomIdentifier: string;
+  displayName: string;
+  name: string;
+  kind: "main";
+  parentRoomId: string | null;
+  focusKey: string | null;
+  sourceTaskId: string | null;
+  focusStatus: "active" | "concluded" | null;
+  role: "admin" | "participant";
+  source: string | null;
+  pinned: boolean;
+  archived: boolean;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  focusRooms: DesktopAccountFocusRoomEntry[];
+}
+
 export interface DesktopApi {
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
   };
   room: {
+    listAccountRooms: () => Promise<DesktopAccountRoomEntry[]>;
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;

@@ -38,11 +38,11 @@
 .app-sidebar {
   display: grid;
   align-content: start;
-  gap: 20px;
+  gap: 16px;
   height: 100vh;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 22px 18px;
+  padding: 18px 14px;
   background: rgba(10, 10, 10, 0.92);
   border-right: 1px solid var(--border);
   backdrop-filter: blur(18px);
@@ -79,7 +79,11 @@
 }
 
 .sidebar-brand {
-  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  padding: 0 4px;
 }
 
 .sidebar-topbar {
@@ -149,6 +153,58 @@
   height: 16px;
 }
 
+.sidebar-brand-mark,
+.project-icon,
+.pin-mark,
+.system-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  color: var(--text);
+}
+
+.sidebar-brand-mark {
+  width: 34px;
+  height: 34px;
+  background:
+    linear-gradient(145deg, rgba(125, 211, 252, 0.18), rgba(167, 139, 250, 0.12)),
+    rgba(255, 255, 255, 0.055);
+  color: #e0f2fe;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.project-icon,
+.pin-mark,
+.system-icon {
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+}
+
+.project-icon svg,
+.pin-mark svg,
+.system-icon svg,
+.sidebar-icon-button svg,
+.project-open svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-icon path,
+.pin-mark path,
+.system-icon path,
+.sidebar-icon-button path,
+.project-open path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+}
+
 .desktop-shell[data-sidebar-mode="rail"] .sidebar-collapse-button svg {
   transform: rotate(180deg);
 }
@@ -182,9 +238,19 @@
 }
 
 .sidebar-brand h1 {
-  font-size: 1.25rem;
-  letter-spacing: -0.03em;
+  font-size: 1.05rem;
+  letter-spacing: 0;
   line-height: 1.1;
+}
+
+.sidebar-brand p {
+  margin: 3px 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .desktop-shell[data-sidebar-mode="rail"] .sidebar-brand h1 {
@@ -229,7 +295,7 @@
 .section-toggle {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   width: 100%;
   padding: 0;
   background: transparent;
@@ -237,11 +303,29 @@
   cursor: pointer;
 }
 
+.section-toggle .sidebar-heading {
+  flex: 1 1 auto;
+}
+
+.section-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
 .sidebar-cta {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 14px;
+  min-height: 42px;
+  padding: 0 12px;
   font-weight: 600;
   background: rgba(255, 255, 255, 0.04);
 }
@@ -250,6 +334,7 @@
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .project-icon,
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .project-open,
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pin-mark,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .system-icon,
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .toggle-glyph {
   color: rgba(250, 250, 250, 0.72);
 }
@@ -272,7 +357,7 @@
 .sidebar-icon-button {
   display: grid;
   place-items: center;
-  min-height: 44px;
+  min-height: 46px;
   padding: 0;
   font-size: 1rem;
   background: rgba(255, 255, 255, 0.04);
@@ -289,7 +374,7 @@
 .sidebar-row {
   display: grid;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 9px 10px;
 }
 
 .sidebar-row small,
@@ -365,6 +450,7 @@
 }
 
 .pinned-room[data-active="true"],
+.project-row[data-active="true"],
 .room-row[data-active="true"],
 .sidebar-row[data-active="true"],
 .sidebar-icon-button[data-active="true"] {
@@ -385,16 +471,21 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 4px 2px;
+  min-height: 42px;
+  padding: 5px 6px;
   background: transparent;
   border: 0;
-  border-radius: 0;
+  border-radius: 12px;
 }
 
 .project-row:hover {
   transform: none;
   border-color: transparent;
-  background: transparent;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.project-row[data-active="true"] {
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .project-row-main {
@@ -405,18 +496,50 @@
 }
 
 .project-icon,
-.project-open,
-.pin-mark {
+.project-open {
   color: var(--text-secondary);
   font-size: 0.92rem;
   flex-shrink: 0;
 }
 
 .project-open {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   cursor: pointer;
+  color: var(--text-tertiary);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
-.project-name {
+.project-open:hover {
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+}
+
+.project-copy,
+.system-copy,
+.pinned-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.project-copy small {
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-name,
+.system-copy > span {
   color: var(--text);
   font-size: 0.95rem;
   white-space: nowrap;
@@ -428,7 +551,7 @@
   position: relative;
   display: grid;
   gap: 5px;
-  padding-left: 24px;
+  padding-left: 20px;
 }
 
 .project-room-list::before {
@@ -436,7 +559,7 @@
   position: absolute;
   top: 8px;
   bottom: 8px;
-  left: 9px;
+  left: 8px;
   width: 1px;
   border-radius: 999px;
   background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16) 18%, rgba(255, 255, 255, 0.08) 82%, transparent);
@@ -444,15 +567,11 @@
 
 .pinned-room {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-}
-
-.pin-mark {
-  width: 18px;
-  text-align: center;
+  min-height: 50px;
+  padding: 9px 10px;
 }
 
 .pinned-title,
@@ -468,9 +587,15 @@
 .pinned-meta {
   color: var(--text-tertiary);
   font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .room-row {
+  position: relative;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
   padding: 8px 10px;
   background: transparent;
   border: 1px solid transparent;
@@ -484,8 +609,17 @@
 .room-focus {
   margin-left: 0;
   min-height: 44px;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 8px;
   border-radius: 12px;
+}
+
+.room-status-dot {
+  grid-row: 1 / span 2;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.7);
+  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.08);
 }
 
 .room-focus .room-title {
@@ -547,6 +681,18 @@
 
 .sidebar-system {
   margin-top: 6px;
+}
+
+.sidebar-row {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-height: 50px;
+}
+
+.sidebar-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-main {

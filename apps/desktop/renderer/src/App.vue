@@ -34,7 +34,7 @@
     <DesktopSidebar
       :sidebar-mode="sidebarMode"
       :active-entry="activeEntry"
-      :pinned-room="pinnedRoom"
+      :primary-room="currentParentRoom"
       :project-entries="projectEntries"
       :system-entries="systemEntries"
       :workers-entry="workersEntry"
@@ -43,7 +43,7 @@
       :collapsed-projects="collapsedProjects"
       @cycle-sidebar="cycleSidebar"
       @new-room="selectNewRoomEntry"
-      @select-entry="activeEntry = $event"
+      @select-entry="selectSidebarEntry"
       @toggle-section="toggleSection"
       @toggle-project="toggleProject"
     />
@@ -193,6 +193,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
+  DesktopAccountRoomEntry,
   DesktopAuthStatus,
   DesktopAppInfo,
   DesktopMcpInstallState,
@@ -219,6 +220,16 @@ import WorkerStatusView from "./components/desktop/content/WorkerStatusView.vue"
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode, SystemEntry } from "./components/desktop/types";
+import {
+  buildSidebarProjectGroups,
+  normalizeRoomIdentifier,
+  readStoredRecentRootRooms,
+  rememberRecentRootRooms,
+  rootPathLabel,
+  rootRoomEntryId,
+  type RecentRootRoom,
+  upsertRecentRootRoomSnapshot,
+} from "./domain/sidebar-rooms";
 
 const loading = ref(false);
 const sidebarMode = ref<SidebarMode>("expanded");
@@ -229,7 +240,10 @@ const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
+const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
 const selectedRootRoomIdentifier = ref<string | null>(readStoredSelectedRootRoomIdentifier());
+const recentRootRooms = ref<RecentRootRoom[]>(readStoredRecentRootRooms(recentRootRoomsStorageKey));
+const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
 const authBusy = ref(false);
@@ -455,10 +469,26 @@ function rememberActiveEntryId(entryId: string): void {
   }
 }
 
+function rememberRootRoomSnapshot(
+  snapshot: DesktopRoomSnapshot,
+  options: { rootPath?: string | null; meta?: string | null } = {}
+): void {
+  const rootPath = options.rootPath || repoStatus.value?.rootPath || appInfo.value?.workspaceRoot || null;
+  const nextRooms = upsertRecentRootRoomSnapshot({
+    snapshot,
+    recentRootRooms: recentRootRooms.value,
+    rootPath,
+    meta: options.meta || repoStatus.value?.branch || snapshot.room?.code || rootPathLabel(rootPath) || "Room",
+  });
+  recentRootRooms.value = nextRooms;
+  rememberRecentRootRooms(recentRootRoomsStorageKey, nextRooms);
+}
+
 const currentParentRoom = computed<RoomEntry>(() => ({
-  id: "room:parent:main",
+  id: rootRoomEntryId(rootRoomSnapshot.value?.roomIdentifier || selectedRootRoomIdentifier.value || repoName.value),
   type: "room",
   kind: "parent",
+  roomIdentifier: rootRoomSnapshot.value?.roomIdentifier || selectedRootRoomIdentifier.value || null,
   title: repoName.value,
   meta: repoStatus.value?.branch || "Parent room",
   sectionLabel: "Parent room",
@@ -467,38 +497,23 @@ const currentParentRoom = computed<RoomEntry>(() => ({
     "The main room should feel like home base: familiar, recent, and connected to the focused work happening around it.",
 }));
 
-const projectEntries = computed<ProjectGroup[]>(() => {
-  const parent = currentParentRoom.value;
-  return [
-    {
-      id: `project:${repoName.value}`,
-      roomName: repoName.value,
-      parent,
-      focusRooms: focusRooms.value.map(focusRoom => ({
-        id: `room:focus:${focusRoom.roomId}`,
-        type: "room",
-        kind: "focus",
-        title: focusRoom.displayName,
-        meta: focusRoom.code || focusRoom.sourceTaskId || "Focus room",
-        sectionLabel: "Focus room",
-        headline: "Focused work should stay close to the room it came from.",
-        description:
-          "A focus room gives one thread of work more space, without losing the connection back to the main room.",
-      })),
-    },
-  ];
-});
+const projectEntries = computed<ProjectGroup[]>(() => buildSidebarProjectGroups({
+  currentParentRoom: currentParentRoom.value,
+  focusRooms: focusRooms.value,
+  accountRooms: accountRooms.value,
+  recentRootRooms: recentRootRooms.value,
+}));
 
 const pinnedRoom = computed<RoomEntry>(() => ({
-  id: "room:pinned:current",
+  id: currentParentRoom.value.id,
   type: "room",
   kind: "parent",
-  title: `${repoName.value} - current`,
-  meta: "now",
-  sectionLabel: "Pinned room",
-  headline: "Come back to the room you were just in without thinking about it.",
-  description:
-    "Pinned rooms keep the places you return to most close by, so getting back into the flow feels instant.",
+  roomIdentifier: currentParentRoom.value.roomIdentifier,
+  title: currentParentRoom.value.title,
+  meta: currentParentRoom.value.meta,
+  sectionLabel: currentParentRoom.value.sectionLabel,
+  headline: currentParentRoom.value.headline,
+  description: currentParentRoom.value.description,
 }));
 
 const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
@@ -529,6 +544,10 @@ function restoreActiveEntryFromStorage(): boolean {
   if (!storedEntry) return false;
   activeEntry.value = storedEntry;
   return true;
+}
+
+function selectSidebarEntry(entry: SidebarEntry): void {
+  activeEntry.value = entry;
 }
 
 function selectNewRoomEntry() {
@@ -582,6 +601,7 @@ async function refresh(): Promise<void> {
       nextDiagnostics,
       nextAuthStatus,
       nextMcpInstallState,
+      nextAccountRooms,
     ] = await Promise.all([
       window.letagentsDesktop.app.getInfo(),
       window.letagentsDesktop.repos.getStatus(),
@@ -590,15 +610,18 @@ async function refresh(): Promise<void> {
       window.letagentsDesktop.diagnostics.getSnapshot(),
       window.letagentsDesktop.auth.getStatus(),
       window.letagentsDesktop.setup.getMcpInstallState(),
+      window.letagentsDesktop.room.listAccountRooms?.().catch(() => []),
     ]);
     appInfo.value = nextAppInfo;
     repoStatus.value = nextRepoStatus;
     workers.value = nextWorkers;
     rootRoomSnapshot.value = nextRootRoomSnapshot;
     selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
+    rememberRootRoomSnapshot(nextRootRoomSnapshot);
     diagnostics.value = nextDiagnostics;
     authStatus.value = nextAuthStatus;
     mcpInstallState.value = nextMcpInstallState;
+    accountRooms.value = nextAccountRooms || [];
     selectedMcpTargetIds.value = selectedMcpTargetIds.value.length
       ? selectedMcpTargetIds.value
       : defaultMcpTargetSelection(nextMcpInstallState);
@@ -656,7 +679,21 @@ async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | n
     return;
   }
 
+  const selectedRoomEntry = activeEntry.value;
   const roomIdentifier = resolveSelectedRoomIdentifier(baseRootSnapshot);
+  if (
+    selectedRoomEntry.kind === "parent"
+    && roomIdentifier
+    && normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(baseRootSnapshot.roomIdentifier)
+  ) {
+    const nextRootSnapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+    rootRoomSnapshot.value = nextRootSnapshot;
+    selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, nextRootSnapshot);
+    selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
+    rememberRootRoomSnapshot(nextRootSnapshot);
+    activeEntry.value = currentParentRoom.value;
+    return;
+  }
   if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
     selectedSnapshot.value = mergeRoomSnapshotMessages(selectedSnapshot.value, baseRootSnapshot);
     return;
@@ -829,11 +866,6 @@ function desktopMessageNumber(messageId: string): number {
   return Number(/^msg_(\d+)$/.exec(messageId)?.[1] || 0);
 }
 
-function normalizeRoomIdentifier(value: string | null | undefined): string | null {
-  const normalized = value?.trim().toLowerCase();
-  return normalized || null;
-}
-
 function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (!selectedSnapshotMatchesRoom(event.roomIdentifier)) return;
 
@@ -953,6 +985,7 @@ async function loadFirstRunRoomContext(): Promise<void> {
     rootRoomSnapshot.value = nextRootRoomSnapshot;
     selectedSnapshot.value = nextRootRoomSnapshot;
     selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
+    rememberRootRoomSnapshot(nextRootRoomSnapshot);
     reconcileActiveEntry();
   } catch {
     // First-run should still be usable if room preview is unavailable before auth.
@@ -962,9 +995,9 @@ async function loadFirstRunRoomContext(): Promise<void> {
 function resolveSelectedRoomIdentifier(baseRootSnapshot: DesktopRoomSnapshot | null): string | null {
   if (!baseRootSnapshot) return null;
   if (activeEntry.value.type !== "room") return baseRootSnapshot.roomIdentifier;
-  if (activeEntry.value.kind !== "focus") return baseRootSnapshot.roomIdentifier;
+  if (activeEntry.value.kind !== "focus") return activeEntry.value.roomIdentifier || baseRootSnapshot.roomIdentifier;
   const focusRoom = baseRootSnapshot.focusRooms.find((room) => `room:focus:${room.roomId}` === activeEntry.value.id);
-  return focusRoom?.identifier || null;
+  return activeEntry.value.roomIdentifier || focusRoom?.identifier || null;
 }
 
 function reconcileActiveEntry(): void {
@@ -976,12 +1009,15 @@ function reconcileActiveEntry(): void {
   if (activeEntry.value.type !== "room") return;
 
   if (activeEntry.value.kind === "focus") {
-    const nextFocus = projectEntries.value[0]?.focusRooms.find((room) => room.id === activeEntry.value.id);
+    const nextFocus = projectEntries.value
+      .flatMap((project) => project.focusRooms)
+      .find((room) => room.id === activeEntry.value.id);
     activeEntry.value = nextFocus || currentParentRoom.value;
     return;
   }
 
-  activeEntry.value = activeEntry.value.id === pinnedRoom.value.id ? pinnedRoom.value : currentParentRoom.value;
+  const nextParent = projectEntries.value.find((project) => project.parent.id === activeEntry.value.id)?.parent;
+  activeEntry.value = nextParent || currentParentRoom.value;
 }
 
 function getAuthRoomIdentifier(): string | null {
@@ -1117,10 +1153,14 @@ function goBackMcpOnboarding(): void {
   mcpWizardStep.value = mcpWizardStep.value === "done" ? "install" : "choose";
 }
 
-function openRoomSnapshot(snapshot: DesktopRoomSnapshot): void {
+function openRoomSnapshot(
+  snapshot: DesktopRoomSnapshot,
+  options: { rootPath?: string | null; meta?: string | null } = {}
+): void {
   rootRoomSnapshot.value = snapshot;
   selectedSnapshot.value = snapshot;
   selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
+  rememberRootRoomSnapshot(snapshot, options);
   activeEntry.value = currentParentRoom.value;
 }
 
@@ -1157,7 +1197,10 @@ async function openProjectRoomFromModal(): Promise<void> {
       newRoomFeedbackState.value = "error";
       return;
     }
-    openRoomSnapshot(result.snapshot);
+    openRoomSnapshot(result.snapshot, {
+      rootPath: result.repoPath,
+      meta: rootPathLabel(result.repoPath) || result.source || null,
+    });
     newRoomFeedback.value = result.warning
       ? `${result.warning} Room selected.`
       : "Project room selected.";
@@ -1180,7 +1223,7 @@ async function joinRoomCodeFromModal(): Promise<void> {
   newRoomFeedbackState.value = "info";
   try {
     const snapshot = await window.letagentsDesktop.room.getSnapshot(roomCode);
-    openRoomSnapshot(snapshot);
+    openRoomSnapshot(snapshot, { meta: snapshot.room?.code || "Joined room" });
     newRoomFeedback.value = snapshot.access.status === "ready"
       ? "Room selected."
       : snapshot.access.message;
@@ -1212,7 +1255,10 @@ async function pickRepoRoom(): Promise<void> {
       authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
       return;
     }
-    openRoomSnapshot(result.snapshot);
+    openRoomSnapshot(result.snapshot, {
+      rootPath: result.repoPath,
+      meta: rootPathLabel(result.repoPath) || result.source || null,
+    });
     const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
     authFeedback.value = result.warning
       ? `${result.warning} Room selected: ${roomLabel}.`
@@ -1234,7 +1280,7 @@ async function joinRoomCode(roomCode: string): Promise<void> {
   setupLoadError.value = null;
   try {
     const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
-    openRoomSnapshot(snapshot);
+    openRoomSnapshot(snapshot, { meta: snapshot.room?.code || "Joined room" });
     authFeedback.value = snapshot.access.status === "ready"
       ? "Room selected. Open it when you are ready."
       : snapshot.access.message;
