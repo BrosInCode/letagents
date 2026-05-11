@@ -61,6 +61,12 @@ import type {
   ActivityEvent,
   EmitActivityEventInput,
 } from "../rental/activity-emitter.js";
+import {
+  defaultQuotaLeaseOrchestratorDeps,
+  releaseSessionLease,
+  type ReleaseLeaseInput,
+  type ReleaseSessionLeaseResult,
+} from "../rental/quota-lease-orchestrator.js";
 
 // ===== Deps =====
 
@@ -114,6 +120,9 @@ export interface RentalInternalRouteDeps {
     },
   ) => Promise<typeof rental_sessions.$inferSelect | null>;
   emitActivityEvent: (input: EmitActivityEventInput) => Promise<ActivityEvent>;
+  releaseSessionLease?: (
+    input: ReleaseLeaseInput,
+  ) => Promise<ReleaseSessionLeaseResult>;
 }
 
 let cachedHeartbeatDeps: HeartbeatDeps | null = null;
@@ -171,6 +180,9 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
   async emitActivityEvent(input) {
     const mod = await import("../rental/activity-emitter.js");
     return mod.emitActivityEvent(input);
+  },
+  async releaseSessionLease(input) {
+    return releaseSessionLease(input, defaultQuotaLeaseOrchestratorDeps);
   },
 };
 
@@ -600,6 +612,11 @@ export function registerRentalInternalRoutes(
             payload: { summary: summary ?? null },
           });
         }
+        await deps.releaseSessionLease?.({
+          sessionId,
+          roomId: updated.room_id,
+          reason: "completed",
+        });
 
         res.json(updated);
       } catch (err) {
@@ -669,6 +686,11 @@ export function registerRentalInternalRoutes(
             payload: { reason: reason ?? null, cancelled_by: role },
           });
         }
+        await deps.releaseSessionLease?.({
+          sessionId,
+          roomId: updated.room_id,
+          reason: "cancelled",
+        });
 
         res.json(updated);
       } catch (err) {

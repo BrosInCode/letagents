@@ -255,7 +255,10 @@ export function registerRentalProviderRoutes(
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "unknown_error";
-        if (message.startsWith("invalid_transition")) {
+        if (
+          message.startsWith("invalid_transition")
+          || message.startsWith("quota_lease_")
+        ) {
           res.status(409).json({ error: message });
           return;
         }

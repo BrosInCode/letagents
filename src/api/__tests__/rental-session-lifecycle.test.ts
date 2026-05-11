@@ -435,6 +435,19 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(res.status, 409);
   });
 
+  it("POST accept returns 409 for quota lease conflicts", async () => {
+    deps.acceptSession = async () => {
+      throw new Error("quota_lease_lane_locked held_by=rsess_other");
+    };
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/accept"
+    );
+    assert.strictEqual(res.status, 409);
+    const json = (await res.json()) as { error: string };
+    assert.strictEqual(json.error, "quota_lease_lane_locked held_by=rsess_other");
+  });
+
   it("POST decline returns cancelled session", async () => {
     const res = await req(
       "POST",

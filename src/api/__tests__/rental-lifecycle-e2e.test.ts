@@ -33,6 +33,7 @@ import type {
 } from "../rental/usage-ingest.js";
 import type { HeartbeatDeps, SessionRecord } from "../rental/heartbeat.js";
 import { isValidTransition } from "../rental/session-state-machine.js";
+import type { ReleaseLeaseInput } from "../rental/quota-lease-orchestrator.js";
 
 type SessionStatus =
   | "requested"
@@ -139,6 +140,7 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
   let sessions: Map<string, MemorySession>;
   let events: MemoryEvent[];
   let meters: RentalUsageMeterRow[];
+  let leaseReleases: ReleaseLeaseInput[];
   let eventSeq: number;
 
   beforeEach(async () => {
@@ -146,6 +148,7 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     sessions = new Map();
     events = [];
     meters = [];
+    leaseReleases = [];
     eventSeq = 0;
 
     const express = (await import("express")).default;
@@ -298,6 +301,10 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
         return session as never;
       },
       emitActivityEvent: async (input) => emitActivityEvent(input) as never,
+      releaseSessionLease: async (input) => {
+        leaseReleases.push(input);
+        return { released: true, lease: null };
+      },
       ingestUsage: async (sessionId, report) => {
         const row = {
           id: `rusg_${meters.length + 1}`,
@@ -483,6 +490,9 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     });
     assert.equal(completed.success, true);
     assert.equal((completed.session as MemorySession).status, "completed");
+    assert.deepEqual(leaseReleases, [
+      { sessionId: created.id, roomId: ROOM_ID, reason: "completed" },
+    ]);
 
     const rejectedCancel = await rentalCancel(providerDeps, {
       session_id: created.id,
@@ -501,5 +511,42 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
         SESSION_COMPLETED,
       ],
     );
+  });
+
+  it("releases the quota lease when a provider cancels an active session", async () => {
+    const created = await requestAs<MemorySession>(RENTER_ID, "/api/rental/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        listingId: "rlst_e2e",
+        repoOwner: "BrosInCode",
+        repoName: "letagents",
+        baseBranch: "staging",
+        taskTitle: "Cancel validation",
+        taskPrompt: "Exercise rental cancellation",
+      }),
+    });
+
+    const providerDeps = {
+      apiCall: <T,>(path: string, options?: RequestInit) =>
+        requestAs<T>(PROVIDER_ID, path, options),
+    };
+
+    const accepted = await rentalAccept(providerDeps, { session_id: created.id });
+    assert.equal(accepted.success, true);
+
+    const provisioned = sessions.get(created.id)!;
+    provisioned.room_id = ROOM_ID;
+    provisioned.status = "active";
+
+    const cancelled = await rentalCancel(providerDeps, {
+      session_id: created.id,
+      reason: "provider stopped",
+    });
+
+    assert.equal(cancelled.success, true);
+    assert.equal((cancelled.session as MemorySession).status, "cancelled");
+    assert.deepEqual(leaseReleases, [
+      { sessionId: created.id, roomId: ROOM_ID, reason: "cancelled" },
+    ]);
   });
 });
