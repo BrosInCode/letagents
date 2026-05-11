@@ -33,6 +33,7 @@ const upsertRoomParticipant = dbModule?.upsertRoomParticipant;
 const archiveAccountRoomForAccount = accountRoomModule?.archiveAccountRoomForAccount;
 const deleteAccountRoomForAccount = accountRoomModule?.deleteAccountRoomForAccount;
 const getAccountRoomsForAccount = accountRoomModule?.getAccountRoomsForAccount;
+const updateAccountRoomPreferences = accountRoomModule?.updateAccountRoomPreferences;
 const upsertAccountRoomRecent = accountRoomModule?.upsertAccountRoomRecent;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
@@ -53,6 +54,7 @@ function requireTestDeps(): asserts db is NonNullable<typeof db> {
   assert.ok(archiveAccountRoomForAccount);
   assert.ok(deleteAccountRoomForAccount);
   assert.ok(getAccountRoomsForAccount);
+  assert.ok(updateAccountRoomPreferences);
   assert.ok(upsertAccountRoomRecent);
 }
 
@@ -264,7 +266,7 @@ test(
       roomId: participantRoom.id,
       login: "EmmyMay",
     });
-    assert.deepEqual(archived, { room_id: participantRoom.id, archived: true });
+    assert.deepEqual(archived, { room_id: participantRoom.id, archived: true, pinned: false });
 
     const visibleRooms = await getAccountRoomsForAccount(account.id, {
       login: "EmmyMay",
@@ -283,6 +285,9 @@ test(
     const focusOnlyTask = await createTask(focusOnlyParent.id, "Focused archive", "EmmyMay");
     const focusOnlyRoom = await createFocusRoomForTask(focusOnlyParent.id, focusOnlyTask.id);
     assert.ok(focusOnlyRoom);
+    const siblingTask = await createTask(focusOnlyParent.id, "Sibling focus", "SomeoneElse");
+    const siblingFocusRoom = await createFocusRoomForTask(focusOnlyParent.id, siblingTask.id);
+    assert.ok(siblingFocusRoom);
     await createRoomAgentSession({
       room_id: focusOnlyRoom.room.id,
       session_kind: "worker",
@@ -299,20 +304,88 @@ test(
       login: "EmmyMay",
       limit: 20,
     });
-    assert.equal(focusVisibleBeforeArchive.some((room) => room.room_id === focusOnlyParent.id), true);
+    const focusParentBeforeArchive = focusVisibleBeforeArchive.find((room) => room.room_id === focusOnlyParent.id);
+    assert.ok(focusParentBeforeArchive);
+    assert.deepEqual(
+      focusParentBeforeArchive.focus_rooms.map((room) => room.room_id),
+      [focusOnlyRoom.room.id]
+    );
 
     const archivedFocusParent = await archiveAccountRoomForAccount({
       accountId: account.id,
       roomId: focusOnlyParent.id,
       login: "EmmyMay",
     });
-    assert.deepEqual(archivedFocusParent, { room_id: focusOnlyParent.id, archived: true });
+    assert.deepEqual(archivedFocusParent, { room_id: focusOnlyParent.id, archived: true, pinned: false });
 
     const focusVisibleAfterArchive = await getAccountRoomsForAccount(account.id, {
       login: "EmmyMay",
       limit: 20,
     });
     assert.equal(focusVisibleAfterArchive.some((room) => room.room_id === focusOnlyParent.id), false);
+
+    const archivedFocusParents = await getAccountRoomsForAccount(account.id, {
+      login: "EmmyMay",
+      includeArchived: true,
+      limit: 20,
+    });
+    const archivedFocusParentEntry = archivedFocusParents.find((room) => room.room_id === focusOnlyParent.id);
+    assert.ok(archivedFocusParentEntry);
+    assert.deepEqual(
+      archivedFocusParentEntry.focus_rooms.map((room) => room.room_id),
+      [focusOnlyRoom.room.id]
+    );
+  }
+);
+
+test(
+  "updateAccountRoomPreferences pins and restores associated rooms",
+  { skip: requiresDatabase },
+  async () => {
+    requireTestDeps();
+
+    const account = await upsertAccount({
+      provider: "github",
+      provider_user_id: "acct-prefs-test",
+      login: "EmmyMay",
+      display_name: "EmmyMay",
+    });
+
+    const unrelatedRoom = await createProjectWithName("github.com/acct/prefs-unrelated");
+    const rejected = await updateAccountRoomPreferences({
+      accountId: account.id,
+      roomId: unrelatedRoom.id,
+      login: "EmmyMay",
+      pinned: true,
+    });
+    assert.equal(rejected, null);
+
+    const room = await createProjectWithName("github.com/acct/prefs-room");
+    await assignProjectAdmin(room.id, account.id);
+
+    const pinned = await updateAccountRoomPreferences({
+      accountId: account.id,
+      roomId: room.id,
+      login: "EmmyMay",
+      pinned: true,
+    });
+    assert.deepEqual(pinned, { room_id: room.id, pinned: true, archived: false });
+
+    const archived = await updateAccountRoomPreferences({
+      accountId: account.id,
+      roomId: room.id,
+      login: "EmmyMay",
+      archived: true,
+    });
+    assert.deepEqual(archived, { room_id: room.id, pinned: true, archived: true });
+
+    const restored = await updateAccountRoomPreferences({
+      accountId: account.id,
+      roomId: room.id,
+      login: "EmmyMay",
+      archived: false,
+    });
+    assert.deepEqual(restored, { room_id: room.id, pinned: true, archived: false });
   }
 );
 

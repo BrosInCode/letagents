@@ -6,7 +6,9 @@ const api: DesktopApi = {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
   },
   room: {
-    listAccountRooms: () => ipcRenderer.invoke("desktop:room:list-account-rooms"),
+    listAccountRooms: (options) => ipcRenderer.invoke("desktop:room:list-account-rooms", options ?? {}),
+    updateAccountRoom: (roomIdentifier: string, updates) =>
+      ipcRenderer.invoke("desktop:room:update-account-room", roomIdentifier, updates),
     leaveAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:leave-account-room", roomIdentifier),
     deleteAccountRoom: (roomIdentifier: string) =>

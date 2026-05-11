@@ -12,6 +12,7 @@ import type {
   DesktopAccountFocusRoomEntry,
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
+  DesktopAccountRoomListOptions,
   DesktopAuthAccount,
   DesktopAuthPollResult,
   DesktopAuthStartResult,
@@ -826,13 +827,20 @@ function mapDesktopAccountRoomActionResult(payload: Record<string, unknown>): De
       : "";
   return {
     roomIdentifier,
-    archived: payload.archived === true ? true : undefined,
+    pinned: payload.pinned === true ? true : payload.pinned === false ? false : undefined,
+    archived: payload.archived === true ? true : payload.archived === false ? false : undefined,
     deleted: payload.deleted === true ? true : undefined,
   };
 }
 
-async function listDesktopAccountRooms(): Promise<DesktopAccountRoomEntry[]> {
-  const response = await apiFetch<{ rooms?: unknown[] }>("/account/rooms?limit=50").catch((error) => {
+async function listDesktopAccountRooms(options: DesktopAccountRoomListOptions = {}): Promise<DesktopAccountRoomEntry[]> {
+  const params = new URLSearchParams();
+  params.set("limit", String(Math.max(1, Math.min(options.limit ?? 50, 100))));
+  if (options.includeArchived) {
+    params.set("include_archived", "true");
+  }
+
+  const response = await apiFetch<{ rooms?: unknown[] }>(`/account/rooms?${params}`).catch((error) => {
     if (error instanceof DesktopApiError && error.status === 401) return { rooms: [] };
     throw error;
   });
@@ -840,6 +848,21 @@ async function listDesktopAccountRooms(): Promise<DesktopAccountRoomEntry[]> {
     .filter((room): room is Record<string, unknown> => Boolean(room) && typeof room === "object")
     .map(mapDesktopAccountRoomEntry)
     .filter((room) => Boolean(room.roomIdentifier));
+}
+
+async function updateDesktopAccountRoom(
+  roomIdentifier: string,
+  updates: { pinned?: boolean; archived?: boolean }
+): Promise<DesktopAccountRoomActionResult> {
+  const response = await apiFetch<Record<string, unknown>>(
+    `/account/rooms/${encodeURIComponent(roomIdentifier)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    }
+  );
+  return mapDesktopAccountRoomActionResult(response);
 }
 
 async function leaveDesktopAccountRoom(roomIdentifier: string): Promise<DesktopAccountRoomActionResult> {
@@ -2636,7 +2659,17 @@ ipcMain.handle("desktop:app:get-info", async (): Promise<DesktopAppInfo> => ({
 
 ipcMain.handle(
   "desktop:room:list-account-rooms",
-  async (): Promise<DesktopAccountRoomEntry[]> => listDesktopAccountRooms()
+  async (_event, options?: DesktopAccountRoomListOptions): Promise<DesktopAccountRoomEntry[]> =>
+    listDesktopAccountRooms(options)
+);
+ipcMain.handle(
+  "desktop:room:update-account-room",
+  async (
+    _event,
+    roomIdentifier: string,
+    updates: { pinned?: boolean; archived?: boolean }
+  ): Promise<DesktopAccountRoomActionResult> =>
+    updateDesktopAccountRoom(roomIdentifier, updates)
 );
 ipcMain.handle(
   "desktop:room:leave-account-room",
