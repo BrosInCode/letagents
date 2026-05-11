@@ -14,7 +14,7 @@ import {
 } from "../../shared/agent-presence.js";
 import { ROOM_PARTICIPANT_KINDS } from "../../shared/room-participant.js";
 
-export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin"]);
+export const participantRoleEnum = pgEnum("participant_role", ["participant", "admin", "rental_participant"]);
 export const roomParticipantKindEnum = pgEnum("room_participant_kind", ROOM_PARTICIPANT_KINDS);
 export const taskStatusEnum = pgEnum("task_status", [
   "proposed",
@@ -55,6 +55,14 @@ export const coordinationDecisionEnum = pgEnum("coordination_decision", [
   "allow",
   "deny",
   "record",
+]);
+
+// ===== RENTAL (Phase 1) =====
+export const rentalVisibilityEnum = pgEnum("rental_visibility", [
+  "rental_visible",
+  "renter_only",
+  "provider_only",
+  "internal",
 ]);
 
 export const id_sequences = pgTable("id_sequences", {
@@ -703,6 +711,10 @@ export const messages = pgTable(
     text: text("text").notNull(),
     agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
+    // Rental Room Projection: visibility controls which participants see this message
+    visibility: rentalVisibilityEnum("visibility"),
+    // Links message to a rental session when sent by/for a rental participant
+    rental_session_id: text("rental_session_id"),
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
@@ -712,6 +724,13 @@ export const messages = pgTable(
     auto_prompt_idx: index("messages_auto_prompt_idx")
       .on(table.room_id, table.sender)
       .where(sql`${table.agent_prompt_kind} = 'auto'`),
+    // Rental projection filter: quickly find rental-visible messages for a session
+    rental_session_idx: index("messages_rental_session_id_idx")
+      .on(table.room_id, table.rental_session_id)
+      .where(sql`${table.rental_session_id} IS NOT NULL`),
+    rental_visibility_idx: index("messages_rental_visibility_idx")
+      .on(table.room_id, table.visibility)
+      .where(sql`${table.visibility} IS NOT NULL`),
     prompt_kind_check: check(
       "messages_agent_prompt_kind_check",
       sql`${table.agent_prompt_kind} IS NULL OR ${table.agent_prompt_kind} IN ('join', 'inline', 'auto')`
