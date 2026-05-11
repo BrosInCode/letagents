@@ -57,6 +57,10 @@ import {
   type SessionRecord,
 } from "../rental/heartbeat.js";
 import { isValidTransition } from "../rental/session-state-machine.js";
+import type {
+  ActivityEvent,
+  EmitActivityEventInput,
+} from "../rental/activity-emitter.js";
 
 // ===== Deps =====
 
@@ -96,6 +100,20 @@ export interface RentalInternalRouteDeps {
   getSessionForLiveness: (
     sessionId: string,
   ) => Promise<SessionRecord | null>;
+  getSessionLifecycle: (
+    sessionId: string,
+  ) => Promise<{
+    status: typeof rental_sessions.$inferSelect["status"];
+    room_id: string | null;
+  } | null>;
+  updateSessionLifecycle: (
+    sessionId: string,
+    update: {
+      status: "completed" | "cancelled";
+      endedAt: Date;
+    },
+  ) => Promise<typeof rental_sessions.$inferSelect | null>;
+  emitActivityEvent: (input: EmitActivityEventInput) => Promise<ActivityEvent>;
 }
 
 let cachedHeartbeatDeps: HeartbeatDeps | null = null;
@@ -127,6 +145,32 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
   async getSessionForLiveness(sessionId) {
     const deps = await defaultHeartbeatDeps();
     return deps.getSession(sessionId);
+  },
+  async getSessionLifecycle(sessionId) {
+    const [row] = await db
+      .select({
+        status: rental_sessions.status,
+        room_id: rental_sessions.room_id,
+      })
+      .from(rental_sessions)
+      .where(eq(rental_sessions.id, sessionId));
+    return row ?? null;
+  },
+  async updateSessionLifecycle(sessionId, update) {
+    const [updated] = await db
+      .update(rental_sessions)
+      .set({
+        status: update.status,
+        ended_at: update.endedAt,
+        updated_at: new Date(),
+      })
+      .where(eq(rental_sessions.id, sessionId))
+      .returning();
+    return updated ?? null;
+  },
+  async emitActivityEvent(input) {
+    const mod = await import("../rental/activity-emitter.js");
+    return mod.emitActivityEvent(input);
   },
 };
 
@@ -482,17 +526,12 @@ export function registerRentalInternalRoutes(
         : (role === "provider" ? "agent" : role ?? "agent");
 
       try {
-        const { emitActivityEvent } = await import("../rental/activity-emitter.js");
-        // Look up room_id for the session
-        const [sess] = await db
-          .select({ room_id: rental_sessions.room_id })
-          .from(rental_sessions)
-          .where(eq(rental_sessions.id, sessionId));
+        const sess = await deps.getSessionLifecycle(sessionId);
         if (!sess?.room_id) {
           res.status(409).json({ error: "session has no room_id" });
           return;
         }
-        const event = await emitActivityEvent({
+        const event = await deps.emitActivityEvent({
           sessionId,
           roomId: sess.room_id,
           eventType: body.event_type as any,
@@ -528,10 +567,7 @@ export function registerRentalInternalRoutes(
 
       try {
         // Read current status for transition validation
-        const [current] = await db
-          .select({ status: rental_sessions.status })
-          .from(rental_sessions)
-          .where(eq(rental_sessions.id, sessionId));
+        const current = await deps.getSessionLifecycle(sessionId);
         if (!current) {
           res.status(404).json({ error: "session not found" });
           return;
@@ -543,15 +579,10 @@ export function registerRentalInternalRoutes(
           return;
         }
 
-        const [updated] = await db
-          .update(rental_sessions)
-          .set({
-            status: "completed",
-            ended_at: new Date(),
-            updated_at: new Date(),
-          })
-          .where(eq(rental_sessions.id, sessionId))
-          .returning();
+        const updated = await deps.updateSessionLifecycle(sessionId, {
+          status: "completed",
+          endedAt: new Date(),
+        });
 
         if (!updated) {
           res.status(404).json({ error: "session not found" });
@@ -560,9 +591,8 @@ export function registerRentalInternalRoutes(
 
         // Emit session.completed event
         if (updated.room_id) {
-          const { emitActivityEvent } = await import("../rental/activity-emitter.js");
           const { SESSION_COMPLETED } = await import("../rental/activity-event-types.js");
-          await emitActivityEvent({
+          await deps.emitActivityEvent({
             sessionId,
             roomId: updated.room_id,
             eventType: SESSION_COMPLETED,
@@ -606,10 +636,7 @@ export function registerRentalInternalRoutes(
 
       try {
         // Read current status for transition validation
-        const [current] = await db
-          .select({ status: rental_sessions.status })
-          .from(rental_sessions)
-          .where(eq(rental_sessions.id, sessionId));
+        const current = await deps.getSessionLifecycle(sessionId);
         if (!current) {
           res.status(404).json({ error: "session not found" });
           return;
@@ -621,15 +648,10 @@ export function registerRentalInternalRoutes(
           return;
         }
 
-        const [updated] = await db
-          .update(rental_sessions)
-          .set({
-            status: "cancelled",
-            ended_at: new Date(),
-            updated_at: new Date(),
-          })
-          .where(eq(rental_sessions.id, sessionId))
-          .returning();
+        const updated = await deps.updateSessionLifecycle(sessionId, {
+          status: "cancelled",
+          endedAt: new Date(),
+        });
 
         if (!updated) {
           res.status(404).json({ error: "session not found" });
@@ -638,9 +660,8 @@ export function registerRentalInternalRoutes(
 
         // Emit session.cancelled event
         if (updated.room_id) {
-          const { emitActivityEvent } = await import("../rental/activity-emitter.js");
           const { SESSION_CANCELLED } = await import("../rental/activity-event-types.js");
-          await emitActivityEvent({
+          await deps.emitActivityEvent({
             sessionId,
             roomId: updated.room_id,
             eventType: SESSION_CANCELLED,
