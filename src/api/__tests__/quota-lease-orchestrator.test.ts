@@ -156,6 +156,21 @@ describe("acquireLease — happy path", () => {
       },
     );
   });
+
+  it("persists without emitting when the session has no room yet", async () => {
+    const result = await acquireLease(
+      {
+        sessionId: "rsess_pre_room",
+        roomId: null,
+        lane: makeLane(),
+        snapshot: makeSnapshot(),
+      },
+      deps,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(deps.persisted.length, 1);
+    assert.equal(deps.emitted.length, 0);
+  });
 });
 
 describe("acquireLease — lane_locked", () => {
@@ -330,5 +345,26 @@ describe("releaseSessionLease — active lease", () => {
     assert.equal(deps.emitted[0]!.eventType, SESSION_TEARDOWN_COMPLETED);
     const payload = deps.emitted[0]!.payload as { reason: string };
     assert.equal(payload.reason, "completed");
+  });
+
+  it("persists release without emitting when the session has no room yet", async () => {
+    const original = createLease({
+      sessionId: "rsess_1",
+      lane: makeLane(),
+      snapshot: makeSnapshot(),
+      nowIso: NOW,
+    });
+    const deps = makeDeps({
+      sessionLease: original,
+      nowIso: "2026-05-11T11:00:00.000Z",
+    });
+    const result = await releaseSessionLease(
+      { sessionId: "rsess_1", roomId: null, reason: "cancelled" },
+      deps,
+    );
+    assert.equal(result.released, true);
+    assert.equal(deps.persisted.length, 1);
+    assert.equal(deps.persisted[0]!.lease.releaseReason, "cancelled");
+    assert.equal(deps.emitted.length, 0);
   });
 });

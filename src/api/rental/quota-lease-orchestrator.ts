@@ -55,6 +55,7 @@ import {
   type QuotaLeaseReason,
   type QuotaLeaseSnapshot,
 } from "./quota-lease.js";
+import { rental_sessions } from "../db/schema.js";
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -110,8 +111,8 @@ export interface QuotaLeaseOrchestratorDeps {
 
 export interface AcquireLeaseInput {
   sessionId: string;
-  /** The session's room id — required for the activity event. */
-  roomId: string;
+  /** The session's room id. When absent, the lease is persisted but no event is emitted. */
+  roomId?: string | null;
   lane: QuotaLane;
   snapshot: QuotaLeaseSnapshot;
 }
@@ -163,7 +164,7 @@ export async function acquireLease(
   // (i.e. `available`). `same_session` re-entry is idempotent and
   // should not double-emit; we still persist (to refresh the
   // lastRefreshedAt) but skip the event.
-  if (decision.reason === QUOTA_LEASE_REASONS.AVAILABLE) {
+  if (decision.reason === QUOTA_LEASE_REASONS.AVAILABLE && input.roomId) {
     await deps.emitLeaseEvent({
       sessionId: input.sessionId,
       roomId: input.roomId,
@@ -206,7 +207,8 @@ export async function acquireLease(
 
 export interface ReleaseLeaseInput {
   sessionId: string;
-  roomId: string;
+  /** The session's room id. When absent, the lease is persisted but no event is emitted. */
+  roomId?: string | null;
   reason: string;
 }
 
@@ -228,22 +230,98 @@ export async function releaseSessionLease(
     return { released: false, lease: current };
   }
   await deps.persistSessionLease(input.sessionId, lease);
-  await deps.emitLeaseEvent({
-    sessionId: input.sessionId,
-    roomId: input.roomId,
-    eventType: SESSION_TEARDOWN_COMPLETED,
-    source: "system",
-    payload: {
-      reason: input.reason,
-      lane: {
-        provider: lease.lane.provider,
-        model: lease.lane.model,
-        quota_lane_id: lease.lane.quotaLaneId,
+  if (input.roomId) {
+    await deps.emitLeaseEvent({
+      sessionId: input.sessionId,
+      roomId: input.roomId,
+      eventType: SESSION_TEARDOWN_COMPLETED,
+      source: "system",
+      payload: {
+        reason: input.reason,
+        lane: {
+          provider: lease.lane.provider,
+          model: lease.lane.model,
+          quota_lane_id: lease.lane.quotaLaneId,
+        },
+        locked_at: lease.lockedAt,
+        released_at: lease.releasedAt,
+        last_refreshed_at: lease.lastRefreshedAt,
       },
-      locked_at: lease.lockedAt,
-      released_at: lease.releasedAt,
-      last_refreshed_at: lease.lastRefreshedAt,
-    },
-  });
+    });
+  }
   return { released: true, lease };
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asQuotaLease(value: unknown): QuotaLease | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.sessionId !== "string") return null;
+  if (!isRecord(value.lane)) return null;
+  if (typeof value.lane.provider !== "string") return null;
+  if (!isRecord(value.snapshot)) return null;
+  if (typeof value.lockedAt !== "string") return null;
+  if (typeof value.lastRefreshedAt !== "string") return null;
+  return value as unknown as QuotaLease;
+}
+
+async function getDb() {
+  const mod = await import("../db/client.js");
+  return mod.db;
+}
+
+export const defaultQuotaLeaseOrchestratorDeps: QuotaLeaseOrchestratorDeps = {
+  async loadActiveLeasesForLane(lane) {
+    const { sql } = await import("drizzle-orm");
+    const db = await getDb();
+    const rows = await db
+      .select({ quotaLease: rental_sessions.quota_lease })
+      .from(rental_sessions)
+      .where(sql`
+        ${rental_sessions.quota_lease} IS NOT NULL
+        AND ${rental_sessions.quota_lease}->>'releasedAt' IS NULL
+        AND ${rental_sessions.quota_lease}->'lane'->>'provider' = ${lane.provider}
+        AND COALESCE(${rental_sessions.quota_lease}->'lane'->>'model', '') = ${lane.model ?? ""}
+      `);
+    return rows
+      .map((row) => asQuotaLease(row.quotaLease))
+      .filter((lease): lease is QuotaLease => Boolean(lease));
+  },
+  async loadSessionLease(sessionId) {
+    const { eq } = await import("drizzle-orm");
+    const db = await getDb();
+    const [row] = await db
+      .select({ quotaLease: rental_sessions.quota_lease })
+      .from(rental_sessions)
+      .where(eq(rental_sessions.id, sessionId));
+    return asQuotaLease(row?.quotaLease);
+  },
+  async persistSessionLease(sessionId, lease) {
+    const { eq } = await import("drizzle-orm");
+    const db = await getDb();
+    await db
+      .update(rental_sessions)
+      .set({
+        quota_lease: lease,
+        native_quota_latest_snapshot: lease.snapshot,
+        meter_confidence: lease.snapshot.confidence,
+        updated_at: new Date(),
+      })
+      .where(eq(rental_sessions.id, sessionId));
+  },
+  async emitLeaseEvent(input) {
+    const { emitActivityEvent } = await import("./activity-emitter.js");
+    await emitActivityEvent({
+      sessionId: input.sessionId,
+      roomId: input.roomId,
+      eventType: input.eventType,
+      source: input.source,
+      payload: input.payload,
+    });
+  },
+  now() {
+    return new Date().toISOString();
+  },
+};

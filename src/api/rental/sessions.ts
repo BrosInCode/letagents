@@ -27,6 +27,23 @@ import {
   SESSION_CANCELLED,
   type RentalActivityEventType,
 } from "./activity-event-types.js";
+import {
+  acquireLease,
+  defaultQuotaLeaseOrchestratorDeps,
+  releaseSessionLease,
+  type AcquireLeaseFailure,
+  type QuotaLeaseOrchestratorDeps,
+} from "./quota-lease-orchestrator.js";
+import type {
+  QuotaLane,
+  QuotaLease,
+  QuotaLeaseSnapshot,
+} from "./quota-lease.js";
+import type {
+  NativeQuotaSnapshot,
+  QuotaConfidence,
+  QuotaUnit,
+} from "../../shared/rental/meter-types.js";
 
 import { isValidTransition } from "./session-state-machine.js";
 
@@ -64,6 +81,128 @@ export interface CreateSessionInput {
   // Quota limits
   lrtLimit?: number;
   timeLimitMinutes?: number;
+}
+
+type RentalSessionRow = typeof rental_sessions.$inferSelect;
+type RentalListingRow = typeof rental_listings.$inferSelect;
+
+const QUOTA_CONFIDENCE_VALUES = new Set<QuotaConfidence>([
+  "official_exact",
+  "local_exact",
+  "derived",
+  "calibrated",
+  "estimated",
+  "weak_estimate",
+  "unknown",
+]);
+
+const QUOTA_UNIT_VALUES = new Set<QuotaUnit>([
+  "tokens",
+  "credits",
+  "usd",
+  "requests",
+  "percent_window",
+  "time",
+  "unknown",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function confidenceOrUnknown(value: unknown): QuotaConfidence {
+  return typeof value === "string" && QUOTA_CONFIDENCE_VALUES.has(value as QuotaConfidence)
+    ? value as QuotaConfidence
+    : "unknown";
+}
+
+function unitOrUnknown(value: unknown): QuotaUnit {
+  return typeof value === "string" && QUOTA_UNIT_VALUES.has(value as QuotaUnit)
+    ? value as QuotaUnit
+    : "unknown";
+}
+
+export function buildQuotaLeaseInput(
+  session: Pick<RentalSessionRow, "id" | "room_id">,
+  listing: Pick<
+    RentalListingRow,
+    | "ide_kind"
+    | "model_label"
+    | "quota_lane_id"
+    | "native_quota_unit"
+    | "last_native_quota_snapshot"
+    | "last_quota_reset_at"
+    | "meter_confidence"
+  >,
+  nowIso: string = new Date().toISOString(),
+): {
+  sessionId: string;
+  roomId: string | null;
+  lane: QuotaLane;
+  snapshot: QuotaLeaseSnapshot;
+} {
+  const rawSnapshot = isRecord(listing.last_native_quota_snapshot)
+    ? listing.last_native_quota_snapshot as Partial<NativeQuotaSnapshot>
+    : null;
+  const rawResetAt = stringOrNull(rawSnapshot?.nativeResetAt)
+    ?? listing.last_quota_reset_at?.toISOString()
+    ?? null;
+
+  return {
+    sessionId: session.id,
+    roomId: session.room_id,
+    lane: {
+      provider: listing.ide_kind,
+      model: listing.model_label ?? null,
+      quotaLaneId: listing.quota_lane_id ?? null,
+    },
+    snapshot: {
+      nativeUnit: unitOrUnknown(rawSnapshot?.nativeUnit ?? listing.native_quota_unit),
+      nativeRemaining: finiteNumberOrNull(rawSnapshot?.nativeRemaining),
+      nativeResetAt: rawResetAt,
+      confidence: confidenceOrUnknown(rawSnapshot?.confidence ?? listing.meter_confidence),
+      observedAt: stringOrNull(rawSnapshot?.observedAt) ?? nowIso,
+    },
+  };
+}
+
+export function quotaLeaseError(result: AcquireLeaseFailure): Error {
+  const conflict = result.conflictingSessionId
+    ? ` held_by=${result.conflictingSessionId}`
+    : "";
+  return new Error(`quota_lease_${result.reason}${conflict}`);
+}
+
+export async function acquireQuotaLeaseForSession(
+  session: Pick<RentalSessionRow, "id" | "room_id">,
+  listing: Parameters<typeof buildQuotaLeaseInput>[1],
+  deps: QuotaLeaseOrchestratorDeps = defaultQuotaLeaseOrchestratorDeps,
+): Promise<QuotaLease> {
+  const result = await acquireLease(buildQuotaLeaseInput(session, listing, deps.now()), deps);
+  if (!result.ok) {
+    throw quotaLeaseError(result);
+  }
+  return result.lease;
+}
+
+export async function releaseQuotaLeaseForSession(
+  session: Pick<RentalSessionRow, "id" | "room_id">,
+  reason: string,
+  deps: QuotaLeaseOrchestratorDeps = defaultQuotaLeaseOrchestratorDeps,
+): Promise<void> {
+  await releaseSessionLease({
+    sessionId: session.id,
+    roomId: session.room_id,
+    reason,
+  }, deps);
 }
 
 export async function createSession(
@@ -164,10 +303,25 @@ export async function acceptSession(
     );
   }
 
+  const [listing] = await db
+    .select()
+    .from(rental_listings)
+    .where(eq(rental_listings.id, session.listing_id));
+  if (!listing) {
+    throw new Error("listing_not_found");
+  }
+
+  const lease = await acquireQuotaLeaseForSession(session, listing);
+
   const [updated] = await db
     .update(rental_sessions)
     .set({
       status: "accepted",
+      quota_lease: lease,
+      native_quota_unit: lease.snapshot.nativeUnit,
+      native_quota_start_snapshot: lease.snapshot,
+      native_quota_latest_snapshot: lease.snapshot,
+      meter_confidence: lease.snapshot.confidence,
       updated_at: new Date(),
     })
     .where(eq(rental_sessions.id, sessionId))
@@ -275,6 +429,8 @@ export async function cancelSession(
       payload: { cancelled_by: role },
     });
   }
+
+  await releaseQuotaLeaseForSession(updated, "cancelled");
 
   return updated;
 }
