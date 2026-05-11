@@ -68,6 +68,7 @@ type AccountRoomCandidate = {
   pinned: boolean;
   archived: boolean;
   canDelete: boolean;
+  directParentAccess: boolean;
   first_opened_at: string | null;
   last_opened_at: string | null;
 };
@@ -126,6 +127,7 @@ function mergeAccountRoomCandidate(
     pinned: existing.pinned || next.pinned,
     archived: existing.archived || next.archived,
     canDelete: existing.canDelete || next.canDelete,
+    directParentAccess: existing.directParentAccess || next.directParentAccess,
     first_opened_at: earlierTimestamp(existing.first_opened_at, next.first_opened_at),
     last_opened_at: laterTimestamp(existing.last_opened_at, next.last_opened_at),
   };
@@ -139,6 +141,7 @@ function normalizeAccountRoomCandidate(
     pinned?: boolean;
     archived?: boolean;
     canDelete?: boolean;
+    directParentAccess?: boolean;
     firstOpenedAt?: string | null;
     lastOpenedAt?: string | null;
   }
@@ -152,9 +155,17 @@ function normalizeAccountRoomCandidate(
     pinned: Boolean(options.pinned),
     archived: Boolean(options.archived),
     canDelete: Boolean(options.canDelete),
+    directParentAccess: Boolean(options.directParentAccess),
     first_opened_at: firstOpenedAt,
     last_opened_at: lastOpenedAt,
   };
+}
+
+function recentSourceHasDirectParentAccess(source: string | null): boolean {
+  return source === "create_invite"
+    || source === "open_room"
+    || source === "join"
+    || source === "recent";
 }
 
 function accountRoomDeleteReason(candidate: AccountRoomCandidate): string | null {
@@ -291,7 +302,7 @@ export async function archiveAccountRoomForAccount(input: {
   accountId: string;
   roomId: string;
   login?: string | null;
-}): Promise<{ room_id: string; archived: true } | null> {
+}): Promise<{ room_id: string; archived: true; pinned: boolean } | null> {
   const [room] = await db
     .select({ id: rooms.id, display_name: rooms.display_name, created_at: rooms.created_at })
     .from(rooms)
@@ -312,7 +323,7 @@ export async function archiveAccountRoomForAccount(input: {
   }
 
   const now = new Date().toISOString();
-  await db
+  const [updated] = await db
     .insert(account_room_recents)
     .values({
       account_id: input.accountId,
@@ -331,9 +342,14 @@ export async function archiveAccountRoomForAccount(input: {
         archived: true,
         updated_at: now,
       },
+    })
+    .returning({
+      room_id: account_room_recents.room_id,
+      archived: account_room_recents.archived,
+      pinned: account_room_recents.pinned,
     });
 
-  return { room_id: room.id, archived: true };
+  return updated ? { room_id: updated.room_id, archived: true, pinned: updated.pinned } : null;
 }
 
 export async function deleteAccountRoomForAccount(input: {
@@ -417,6 +433,70 @@ export async function deleteAccountRoomForAccount(input: {
   };
 }
 
+export async function updateAccountRoomPreferences(input: {
+  accountId: string;
+  roomId: string;
+  login?: string | null;
+  pinned?: boolean;
+  archived?: boolean;
+}): Promise<{ room_id: string; pinned: boolean; archived: boolean } | null> {
+  if (typeof input.pinned !== "boolean" && typeof input.archived !== "boolean") {
+    return null;
+  }
+
+  const [room] = await db
+    .select({ id: rooms.id, display_name: rooms.display_name })
+    .from(rooms)
+    .where(eq(rooms.id, input.roomId))
+    .limit(1);
+
+  if (!room) {
+    return null;
+  }
+
+  const hasAssociation = await accountHasRoomAssociation({
+    accountId: input.accountId,
+    roomId: room.id,
+    login: input.login,
+  });
+  if (!hasAssociation) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const insertPinned = input.pinned ?? false;
+  const insertArchived = input.archived ?? false;
+  const [updated] = await db
+    .insert(account_room_recents)
+    .values({
+      account_id: input.accountId,
+      room_id: room.id,
+      display_name: room.display_name,
+      source: "settings",
+      pinned: insertPinned,
+      archived: insertArchived,
+      first_opened_at: now,
+      last_opened_at: now,
+      updated_at: now,
+    })
+    .onConflictDoUpdate({
+      target: [account_room_recents.account_id, account_room_recents.room_id],
+      set: {
+        display_name: room.display_name,
+        pinned: typeof input.pinned === "boolean" ? input.pinned : sql`${account_room_recents.pinned}`,
+        archived: typeof input.archived === "boolean" ? input.archived : sql`${account_room_recents.archived}`,
+        updated_at: now,
+      },
+    })
+    .returning({
+      room_id: account_room_recents.room_id,
+      pinned: account_room_recents.pinned,
+      archived: account_room_recents.archived,
+    });
+
+  return updated ?? null;
+}
+
 export async function getAccountRoomsForAccount(
   accountId: string,
   options: {
@@ -452,6 +532,7 @@ export async function getAccountRoomsForAccount(
     addCandidate(normalizeAccountRoomCandidate(project, {
       role: "admin",
       source: "admin",
+      directParentAccess: project.kind === "main",
       firstOpenedAt: row.assigned_at,
       lastOpenedAt: row.assigned_at,
     }));
@@ -481,6 +562,7 @@ export async function getAccountRoomsForAccount(
       addCandidate(normalizeAccountRoomCandidate(project, {
         role: "participant",
         source: "participant",
+        directParentAccess: project.kind === "main",
         firstOpenedAt: row.last_seen_at,
         lastOpenedAt: row.last_seen_at,
       }));
@@ -502,6 +584,7 @@ export async function getAccountRoomsForAccount(
     addCandidate(normalizeAccountRoomCandidate(project, {
       role: "participant",
       source: "agent",
+      directParentAccess: project.kind === "main",
       firstOpenedAt: row.session_created_at,
       lastOpenedAt: row.last_seen_at,
     }));
@@ -532,6 +615,7 @@ export async function getAccountRoomsForAccount(
       pinned: row.pinned,
       archived: row.archived,
       canDelete: row.source === "create_invite",
+      directParentAccess: project.kind === "main" && recentSourceHasDirectParentAccess(row.source || "recent"),
       firstOpenedAt: row.first_opened_at,
       lastOpenedAt: row.last_opened_at,
     }));
@@ -566,7 +650,9 @@ export async function getAccountRoomsForAccount(
 
     if (candidate.project.kind === "main") {
       parentRoomIds.add(candidate.project.id);
-      directParentRoomIds.add(candidate.project.id);
+      if (candidate.directParentAccess) {
+        directParentRoomIds.add(candidate.project.id);
+      }
       parentCandidates.set(candidate.project.id, candidate);
       continue;
     }
@@ -596,6 +682,7 @@ export async function getAccountRoomsForAccount(
       parentCandidates.set(parent.id, normalizeAccountRoomCandidate(parent, {
         role: fallback?.role ?? "participant",
         source: fallback?.source ?? "focus",
+        directParentAccess: fallback?.directParentAccess ?? false,
         firstOpenedAt: fallback?.first_opened_at ?? parent.created_at,
         lastOpenedAt: fallback?.last_opened_at ?? parent.created_at,
       }));

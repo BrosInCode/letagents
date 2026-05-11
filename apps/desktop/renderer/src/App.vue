@@ -123,7 +123,7 @@
 
       <SettingsView
         v-else-if="activeEntry.id === 'system:settings'"
-        :account-rooms="accountRooms"
+        :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :auth-status="authStatus"
         :busy="loading || authBusy"
@@ -134,6 +134,8 @@
         @leave-room="leaveAccountRoom"
         @open-room="openAccountRoomFromSettings"
         @open-setup="activeEntry = setupEntry"
+        @restore-room="restoreAccountRoom"
+        @toggle-pin-room="toggleAccountRoomPin"
         @refresh="refreshSettings"
         @sign-out="signOut"
         @start-auth="startAuthFlow"
@@ -264,6 +266,7 @@ const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
 const selectedRootRoomIdentifier = ref<string | null>(readStoredSelectedRootRoomIdentifier());
 const recentRootRooms = ref<RecentRootRoom[]>(readStoredRecentRootRooms(recentRootRoomsStorageKey));
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
+const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
 const authBusy = ref(false);
@@ -632,6 +635,7 @@ async function refresh(): Promise<void> {
       nextAuthStatus,
       nextMcpInstallState,
       nextAccountRooms,
+      nextSettingsAccountRooms,
     ] = await Promise.all([
       window.letagentsDesktop.app.getInfo(),
       window.letagentsDesktop.repos.getStatus(),
@@ -640,7 +644,8 @@ async function refresh(): Promise<void> {
       window.letagentsDesktop.diagnostics.getSnapshot(),
       window.letagentsDesktop.auth.getStatus(),
       window.letagentsDesktop.setup.getMcpInstallState(),
-      window.letagentsDesktop.room.listAccountRooms?.().catch(() => []),
+      window.letagentsDesktop.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
+      window.letagentsDesktop.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
     ]);
     appInfo.value = nextAppInfo;
     repoStatus.value = nextRepoStatus;
@@ -652,6 +657,7 @@ async function refresh(): Promise<void> {
     authStatus.value = nextAuthStatus;
     mcpInstallState.value = nextMcpInstallState;
     accountRooms.value = nextAccountRooms || [];
+    settingsAccountRooms.value = nextSettingsAccountRooms || nextAccountRooms || [];
     selectedMcpTargetIds.value = selectedMcpTargetIds.value.length
       ? selectedMcpTargetIds.value
       : defaultMcpTargetSelection(nextMcpInstallState);
@@ -663,7 +669,12 @@ async function refresh(): Promise<void> {
 }
 
 async function refreshAccountRooms(): Promise<void> {
-  accountRooms.value = await window.letagentsDesktop.room.listAccountRooms?.().catch(() => []) || [];
+  const [nextAccountRooms, nextSettingsAccountRooms] = await Promise.all([
+    window.letagentsDesktop.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
+    window.letagentsDesktop.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
+  ]);
+  accountRooms.value = nextAccountRooms || [];
+  settingsAccountRooms.value = nextSettingsAccountRooms || nextAccountRooms || [];
 }
 
 async function refreshSettings(): Promise<void> {
@@ -1211,7 +1222,7 @@ function openRoomSnapshot(
   activeEntry.value = currentParentRoom.value;
 }
 
-function settingsRoomActionKey(action: "delete" | "leave", room: DesktopAccountRoomEntry): string {
+function settingsRoomActionKey(action: "delete" | "leave" | "pin" | "restore", room: DesktopAccountRoomEntry): string {
   return `${action}:${room.roomIdentifier}`;
 }
 
@@ -1264,8 +1275,50 @@ async function leaveAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
   }
 }
 
+async function toggleAccountRoomPin(room: DesktopAccountRoomEntry): Promise<void> {
+  const nextPinned = !room.pinned;
+  settingsRoomActionBusyKey.value = settingsRoomActionKey("pin", room);
+  settingsFeedback.value = { message: nextPinned ? `Pinning ${room.displayName}...` : `Unpinning ${room.displayName}...`, state: "info" };
+  try {
+    await window.letagentsDesktop.room.updateAccountRoom(room.roomIdentifier, { pinned: nextPinned });
+    await refreshAccountRooms();
+    settingsFeedback.value = {
+      message: nextPinned ? `${room.displayName} pinned.` : `${room.displayName} unpinned.`,
+      state: "success",
+    };
+  } catch (error) {
+    settingsFeedback.value = {
+      message: error instanceof Error ? error.message : `Could not update ${room.displayName}.`,
+      state: "error",
+    };
+  } finally {
+    settingsRoomActionBusyKey.value = null;
+  }
+}
+
+async function restoreAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
+  settingsRoomActionBusyKey.value = settingsRoomActionKey("restore", room);
+  settingsFeedback.value = { message: `Restoring ${room.displayName}...`, state: "info" };
+  try {
+    await window.letagentsDesktop.room.updateAccountRoom(room.roomIdentifier, { archived: false });
+    await refreshAccountRooms();
+    settingsFeedback.value = { message: `${room.displayName} restored to your sidebar.`, state: "success" };
+  } catch (error) {
+    settingsFeedback.value = {
+      message: error instanceof Error ? error.message : `Could not restore ${room.displayName}.`,
+      state: "error",
+    };
+  } finally {
+    settingsRoomActionBusyKey.value = null;
+  }
+}
+
 async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
-  if (!window.confirm(`Delete ${room.displayName}? This removes the room and its focus rooms for everyone.`)) {
+  const confirmation = window.prompt(
+    `Delete ${room.displayName}? This removes the room and its focus rooms for everyone.\n\nType the room identifier to confirm:`,
+    ""
+  );
+  if (confirmation !== room.roomIdentifier) {
     return;
   }
 
@@ -1275,6 +1328,9 @@ async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
     await window.letagentsDesktop.room.deleteAccountRoom(room.roomIdentifier);
     forgetRecentRootRoom(room.roomIdentifier);
     accountRooms.value = accountRooms.value.filter(
+      (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
+    );
+    settingsAccountRooms.value = settingsAccountRooms.value.filter(
       (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
     );
 

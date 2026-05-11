@@ -4,6 +4,7 @@ import {
   archiveAccountRoomForAccount,
   deleteAccountRoomForAccount,
   getAccountRoomsForAccount,
+  updateAccountRoomPreferences,
   type AccountRoomListEntry,
   type AccountRoomListFocusRoom,
 } from "../account-room-membership.js";
@@ -22,7 +23,7 @@ export interface AccountRoomRouteDeps {
     accountId: string;
     roomId: string;
     login?: string | null;
-  }): Promise<{ room_id: string; archived: true } | null>;
+  }): Promise<{ room_id: string; archived: true; pinned: boolean } | null>;
   deleteAccountRoomForAccount(input: {
     accountId: string;
     roomId: string;
@@ -32,12 +33,20 @@ export interface AccountRoomRouteDeps {
     error?: "not_found" | "forbidden";
     reason?: string;
   }>;
+  updateAccountRoomPreferences(input: {
+    accountId: string;
+    roomId: string;
+    login?: string | null;
+    pinned?: boolean;
+    archived?: boolean;
+  }): Promise<{ room_id: string; pinned: boolean; archived: boolean } | null>;
 }
 
 const defaultDeps: AccountRoomRouteDeps = {
   archiveAccountRoomForAccount,
   deleteAccountRoomForAccount,
   getAccountRoomsForAccount,
+  updateAccountRoomPreferences,
 };
 
 function toAccountFocusRoomResponse(room: AccountRoomListFocusRoom): Record<string, unknown> {
@@ -86,6 +95,11 @@ function accountRoomIdParam(req: AuthenticatedRequest): string {
   return decodeURIComponent((req.params as Record<string, string>)[0] || "").trim();
 }
 
+function booleanBodyValue(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  return undefined;
+}
+
 export function registerAccountRoomRoutes(
   app: Express,
   deps: AccountRoomRouteDeps = defaultDeps
@@ -122,6 +136,42 @@ export function registerAccountRoomRoutes(
       accountId: req.sessionAccount.account_id,
       roomId,
       login: req.sessionAccount.login,
+    });
+
+    if (!result) {
+      res.status(404).json({ error: "Room not found" });
+      return;
+    }
+
+    res.json(result);
+  });
+
+  app.patch(/^\/account\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const roomId = accountRoomIdParam(req);
+    if (!roomId) {
+      res.status(400).json({ error: "Room identifier is required" });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    const pinned = booleanBodyValue(body.pinned);
+    const archived = booleanBodyValue(body.archived);
+    if (typeof pinned !== "boolean" && typeof archived !== "boolean") {
+      res.status(400).json({ error: "No account room preference updates provided" });
+      return;
+    }
+
+    const result = await deps.updateAccountRoomPreferences({
+      accountId: req.sessionAccount.account_id,
+      roomId,
+      login: req.sessionAccount.login,
+      pinned,
+      archived,
     });
 
     if (!result) {

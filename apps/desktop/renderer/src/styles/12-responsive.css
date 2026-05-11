@@ -8,7 +8,9 @@
   .action-grid,
   .auth-panel,
   .auth-steps,
+  .settings-hero,
   .settings-grid,
+  .settings-room-toolbar,
   .first-run-github-step,
   .first-run-room-step,
   .mcp-selected-app,
@@ -159,18 +161,27 @@
   }
 
   .settings-section-header,
-  .settings-room-row {
+  .settings-room-header,
+  .settings-summary-grid {
     grid-template-columns: 1fr;
   }
 
-  .settings-section-actions,
-  .settings-room-actions {
+  .settings-hero-actions,
+  .settings-filter-group,
+  .settings-room-actions,
+  .settings-room-footer {
     grid-auto-flow: row;
     justify-content: stretch;
   }
 
-  .settings-room-actions .ghost-button {
+  .settings-room-actions .ghost-button,
+  .settings-room-footer .ghost-button,
+  .settings-room-footer .primary-button {
     width: 100%;
+  }
+
+  .settings-focus-list {
+    padding-left: 0;
   }
 }
 

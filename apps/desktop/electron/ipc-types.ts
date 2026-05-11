@@ -572,8 +572,14 @@ export interface DesktopAccountRoomEntry {
 
 export interface DesktopAccountRoomActionResult {
   roomIdentifier: string;
+  pinned?: boolean;
   archived?: boolean;
   deleted?: boolean;
+}
+
+export interface DesktopAccountRoomListOptions {
+  includeArchived?: boolean;
+  limit?: number;
 }
 
 export interface DesktopApi {
@@ -581,7 +587,11 @@ export interface DesktopApi {
     getInfo: () => Promise<DesktopAppInfo>;
   };
   room: {
-    listAccountRooms: () => Promise<DesktopAccountRoomEntry[]>;
+    listAccountRooms: (options?: DesktopAccountRoomListOptions) => Promise<DesktopAccountRoomEntry[]>;
+    updateAccountRoom: (
+      roomIdentifier: string,
+      updates: { pinned?: boolean; archived?: boolean }
+    ) => Promise<DesktopAccountRoomActionResult>;
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
