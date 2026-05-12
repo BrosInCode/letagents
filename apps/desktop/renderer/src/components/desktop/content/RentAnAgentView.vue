@@ -46,6 +46,14 @@
         <button
           type="button"
           class="rent-refresh-button"
+          data-testid="rent-an-agent-open-session"
+          @click="openSessionDetail(lastCreatedSession)"
+        >
+          Open
+        </button>
+        <button
+          type="button"
+          class="rent-refresh-button"
           data-testid="rent-an-agent-dismiss-banner"
           @click="lastCreatedSession = null"
         >
@@ -54,7 +62,7 @@
       </div>
     </article>
 
-    <RentProviderDashboard v-if="role === 'provider'" />
+    <RentProviderDashboard v-if="role === 'provider'" @open-session="openSessionDetail" />
     <template v-else>
 
     <div v-if="state === 'disabled'" class="surface-list" data-testid="rent-an-agent-disabled">
@@ -160,6 +168,12 @@
       @created="onSessionCreated"
     />
     </template>
+
+    <RentSessionDetailModal
+      :open="sessionDetailOpen"
+      :session="detailSession"
+      @close="closeSessionDetail"
+    />
   </section>
 </template>
 
@@ -167,6 +181,7 @@
 import { onMounted, ref, computed } from "vue";
 import type { DesktopRentalListing, DesktopRentalSession } from "../../../../../electron/ipc-types";
 import RentSessionCreateModal from "./RentSessionCreateModal.vue";
+import RentSessionDetailModal from "./RentSessionDetailModal.vue";
 import RentProviderDashboard from "./RentProviderDashboard.vue";
 
 defineProps<{
@@ -184,6 +199,8 @@ const errorMessage = ref<string | null>(null);
 const sessionModalOpen = ref(false);
 const selectedListing = ref<DesktopRentalListing | null>(null);
 const lastCreatedSession = ref<DesktopRentalSession | null>(null);
+const sessionDetailOpen = ref(false);
+const detailSession = ref<DesktopRentalSession | null>(null);
 
 const listingsSummary = computed(() => {
   if (state.value === "loading") return "Loading listings...";
@@ -280,6 +297,16 @@ function closeSessionModal(): void {
 function onSessionCreated(session: DesktopRentalSession): void {
   lastCreatedSession.value = session;
   void refresh();
+}
+
+function openSessionDetail(session: DesktopRentalSession): void {
+  detailSession.value = session;
+  sessionDetailOpen.value = true;
+}
+
+function closeSessionDetail(): void {
+  sessionDetailOpen.value = false;
+  detailSession.value = null;
 }
 </script>
 
