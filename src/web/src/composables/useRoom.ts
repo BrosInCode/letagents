@@ -1,4 +1,4 @@
-import { ref, readonly, onUnmounted, computed } from 'vue'
+import { ref, readonly, computed } from 'vue'
 import {
   isRepoBackedRoomId,
   type RoomGitHubEventsError,
@@ -23,6 +23,15 @@ import {
   mergeMessages,
 } from './room/data'
 import {
+  applyFocusRoomConclusion,
+  applyFocusRoomSettings,
+  concludeFocusRoom,
+  createStandaloneFocusRoom,
+  createTaskFocusRoom,
+  patchFocusRoomSettings,
+  upsertFocusRoomList,
+} from './room/focusRooms'
+import {
   getReplyPreviewText,
   getSenderColor,
   hasInlinePromptInjection,
@@ -31,21 +40,29 @@ import {
   normalizeAgentPromptKind,
   parseAgentIdentity,
 } from './room/identity'
+import { joinRoomSession, loadRoomBootstrap } from './room/join'
 import {
   fetchReasoningSessions,
   mergeReasoningSession,
   sortReasoningSessions,
 } from './room/reasoning'
+import { createPresenceController } from './room/presence'
 import {
   clearPersistedSession,
   loadPersistedSession,
   persistRoomSession,
 } from './room/session'
-import { playNotificationSound, soundEnabled, toggleSound } from './room/sound'
+import { soundEnabled, toggleSound } from './room/sound'
+import { createRoomStream } from './room/stream'
+import { HANDOFF_PRESENCE_PAGE_SIZE } from './room/constants'
 import {
-  HANDOFF_PRESENCE_PAGE_SIZE,
-  PRESENCE_REFRESH_INTERVAL_MS,
-} from './room/constants'
+  createRoomTask,
+  fetchTasksAndPresence,
+  patchRoomTask,
+  postTaskLeaseAction,
+  postTaskReviewLeaseAction,
+  setRoomTaskStalePromptMute,
+} from './room/taskActions'
 import type {
   FocusRoomConclusionDetails,
   FocusRoomInfo,
@@ -83,7 +100,6 @@ export {
   parseAgentIdentity,
 } from './room/identity'
 
-/** ── State ── */
 const messages = ref<RoomMessage[]>([])
 const messagesHasOlder = ref(false)
 const isLoadingOlderMessages = ref(false)
@@ -113,21 +129,15 @@ const isStreaming = ref(false)
 const connectionState = ref<'idle' | 'connecting' | 'live' | 'error'>('idle')
 const joinError = ref<RoomJoinError | null>(null)
 
-let eventSource: EventSource | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-let reconnectDelay = 1200
 let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
-let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null
-let presenceRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
-let participantRefreshTimer: ReturnType<typeof setInterval> | null = null
-let participantRefreshDebounceTimer: ReturnType<typeof setTimeout> | null = null
-let lastActivityHistoryRequest: {
+type ActivityHistoryRequest = {
   query?: string
   page?: number
   pageSize?: number
   kind?: RoomActivityHistoryKind
   roomId?: string
-} = {}
+}
+let lastActivityHistoryRequest: ActivityHistoryRequest = {}
 let activityHistoryRequestSequence = 0
 
 const githubEventsSupported = computed(() =>
@@ -163,17 +173,122 @@ function removeReasoningSession(sessionId: string) {
   )
 }
 
-async function refreshPresence(roomIdentifier: string) {
-  const nextPresence = await fetchPresence(roomIdentifier)
-  presence.value = nextPresence
-  boardHandoffPresence.value = nextPresence
+function upsertTask(task: RoomTask) {
+  const idx = tasks.value.findIndex((item) => item.id === task.id)
+  if (idx >= 0) {
+    const updated = [...tasks.value]
+    updated[idx] = task
+    tasks.value = updated
+    return
+  }
+  tasks.value = [...tasks.value, task]
 }
 
-async function refreshParticipants(roomIdentifier: string) {
-  const next = await fetchParticipants(roomIdentifier)
-  participants.value = next.participants
-  participantHiddenCount.value = next.hidden_count
+async function refreshTasksAndPresence(roomIdentifier: string) {
+  const next = await fetchTasksAndPresence(roomIdentifier)
+  tasks.value = next.tasks
+  presence.value = next.presence
+  boardHandoffPresence.value = next.presence
 }
+
+function resetRoomState(options: {
+  activityHistoryLoading: boolean
+  githubEventsLoading: boolean
+  connectionState: 'idle' | 'connecting'
+  activityHistoryRequest?: ActivityHistoryRequest
+}) {
+  activityHistoryRequestSequence += 1
+  room.value = null
+  messages.value = []
+  messagesHasOlder.value = false
+  isLoadingOlderMessages.value = false
+  tasks.value = []
+  focusRooms.value = []
+  presence.value = []
+  boardHandoffPresence.value = []
+  participants.value = []
+  participantHiddenCount.value = 0
+  activityHistory.value = null
+  activityHistoryLoading.value = options.activityHistoryLoading
+  activityHistoryError.value = ''
+  lastActivityHistoryRequest = options.activityHistoryRequest || {}
+  reasoningSessions.value = []
+  githubEvents.value = []
+  githubEventsAvailable.value = false
+  githubEventsHasMore.value = false
+  githubEventsError.value = null
+  githubEventsLoading.value = options.githubEventsLoading
+  isConnected.value = false
+  connectionState.value = options.connectionState
+  joinError.value = null
+}
+
+const {
+  refreshPresence,
+  refreshParticipants,
+  refreshRoomPresence,
+  refreshRoomReachability,
+  schedulePresenceRefresh,
+  scheduleParticipantRefresh,
+  startPresenceRefreshLoop,
+  startParticipantRefreshLoop,
+  stop: stopPresenceControllers,
+} = createPresenceController({
+  getRoomIdentifier: () => room.value?.identifier || null,
+  isCurrentRoom: (roomIdentifier) => room.value?.identifier === roomIdentifier,
+  setPresence: (nextPresence) => {
+    presence.value = nextPresence
+    boardHandoffPresence.value = nextPresence
+  },
+  setParticipants: (nextParticipants, hiddenCount) => {
+    participants.value = nextParticipants
+    participantHiddenCount.value = hiddenCount
+  },
+})
+
+const roomStream = createRoomStream({
+  setConnectionState: (state) => {
+    connectionState.value = state
+  },
+  setStreaming: (streaming) => {
+    isStreaming.value = streaming
+  },
+  appendMessage: (message) => {
+    if (messages.value.some((item) => item.id === message.id)) return false
+    messages.value = [...messages.value, message]
+    return true
+  },
+  onGitHubMessage: () => {
+    if (room.value && githubEventsSupported.value) {
+      scheduleGitHubEventsRefresh(
+        getGitHubEventsIdentifier(room.value),
+        githubEventsSupported.value,
+      )
+    }
+    if (room.value) {
+      void refreshTaskGithubStatus()
+    }
+  },
+  onTaskLifecycleMessage: () => {
+    if (!room.value) return
+    fetchTasks(room.value.identifier).then((nextTasks) => {
+      tasks.value = nextTasks
+    })
+  },
+  onAgentActivityMessage: () => {
+    if (room.value) {
+      schedulePresenceRefresh(room.value.identifier)
+    }
+  },
+  onParticipantActivityMessage: () => {
+    if (room.value) {
+      scheduleParticipantRefresh(room.value.identifier)
+    }
+  },
+  upsertTask,
+  upsertReasoningSession,
+  removeReasoningSession,
+})
 
 async function loadActivityHistory(options?: {
   query?: string
@@ -253,27 +368,6 @@ async function clearDisconnectedParticipants(): Promise<number> {
   }
 }
 
-async function refreshRoomPresence(): Promise<boolean> {
-  if (!room.value) return false
-  await refreshPresence(room.value.identifier)
-  return true
-}
-
-async function refreshRoomReachability(): Promise<boolean> {
-  if (!room.value) return false
-  const roomIdentifier = room.value.identifier
-  const [nextPresence, nextParticipantsPage] = await Promise.all([
-    fetchPresence(roomIdentifier),
-    fetchParticipants(roomIdentifier),
-  ])
-  if (room.value?.identifier !== roomIdentifier) return false
-  presence.value = nextPresence
-  boardHandoffPresence.value = nextPresence
-  participants.value = nextParticipantsPage.participants
-  participantHiddenCount.value = nextParticipantsPage.hidden_count
-  return true
-}
-
 async function refreshRoomMessages(): Promise<boolean> {
   if (!room.value) return false
   const roomIdentifier = room.value.identifier
@@ -282,58 +376,6 @@ async function refreshRoomMessages(): Promise<boolean> {
   messages.value = mergeMessages(messages.value, page.messages)
   messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
   return true
-}
-
-function schedulePresenceRefresh(roomIdentifier: string) {
-  if (presenceRefreshDebounceTimer) return
-  presenceRefreshDebounceTimer = setTimeout(() => {
-    presenceRefreshDebounceTimer = null
-    void refreshPresence(roomIdentifier)
-  }, 350)
-}
-
-function scheduleParticipantRefresh(roomIdentifier: string) {
-  if (participantRefreshDebounceTimer) return
-  participantRefreshDebounceTimer = setTimeout(() => {
-    participantRefreshDebounceTimer = null
-    void refreshParticipants(roomIdentifier)
-  }, 350)
-}
-
-function startPresenceRefreshLoop(roomIdentifier: string) {
-  stopPresenceRefreshLoop()
-  presenceRefreshTimer = setInterval(() => {
-    void refreshPresence(roomIdentifier)
-  }, PRESENCE_REFRESH_INTERVAL_MS)
-}
-
-function startParticipantRefreshLoop(roomIdentifier: string) {
-  stopParticipantRefreshLoop()
-  participantRefreshTimer = setInterval(() => {
-    void refreshParticipants(roomIdentifier)
-  }, PRESENCE_REFRESH_INTERVAL_MS)
-}
-
-function stopPresenceRefreshLoop() {
-  if (presenceRefreshTimer) {
-    clearInterval(presenceRefreshTimer)
-    presenceRefreshTimer = null
-  }
-  if (presenceRefreshDebounceTimer) {
-    clearTimeout(presenceRefreshDebounceTimer)
-    presenceRefreshDebounceTimer = null
-  }
-}
-
-function stopParticipantRefreshLoop() {
-  if (participantRefreshTimer) {
-    clearInterval(participantRefreshTimer)
-    participantRefreshTimer = null
-  }
-  if (participantRefreshDebounceTimer) {
-    clearTimeout(participantRefreshDebounceTimer)
-    participantRefreshDebounceTimer = null
-  }
 }
 
 async function refreshGitHubEvents(
@@ -484,168 +526,22 @@ async function refreshRoomFocusRooms(): Promise<boolean> {
 }
 
 function upsertFocusRoom(focusRoom: FocusRoomInfo) {
-  const idx = focusRooms.value.findIndex(
-    (item) => item.room_id === focusRoom.room_id,
-  )
-  if (idx >= 0) {
-    const updated = [...focusRooms.value]
-    updated[idx] = focusRoom
-    focusRooms.value = updated
-  } else {
-    focusRooms.value = [...focusRooms.value, focusRoom]
-  }
+  focusRooms.value = upsertFocusRoomList(focusRooms.value, focusRoom)
 }
 
-/** ── SSE Streaming ── */
 function startStreaming(roomIdentifier: string) {
-  stopStreaming()
-  connectionState.value = 'connecting'
-
-  const url = `${roomPath(roomIdentifier)}/messages/stream`
-  eventSource = new EventSource(url)
-
-  eventSource.onopen = () => {
-    connectionState.value = 'live'
-    isStreaming.value = true
-    reconnectDelay = 1200
-  }
-
-  eventSource.addEventListener('message', (e) => {
-    try {
-      const msg: RoomMessage = JSON.parse(e.data)
-      if (isPromptOnlyRoomMessage(msg)) {
-        return
-      }
-      const exists = messages.value.some((m) => m.id === msg.id)
-      if (!exists) {
-        messages.value = [...messages.value, msg]
-        playNotificationSound()
-
-        if (
-          (msg.source || '').toLowerCase() === 'github' ||
-          (msg.sender || '').toLowerCase() === 'github'
-        ) {
-          if (room.value && githubEventsSupported.value) {
-            scheduleGitHubEventsRefresh(
-              getGitHubEventsIdentifier(room.value),
-              githubEventsSupported.value,
-            )
-          }
-          // Also refresh task github status when new github events arrive
-          if (room.value) {
-            void refreshTaskGithubStatus()
-          }
-        }
-
-        // Auto-refresh board when task lifecycle messages arrive
-        if (msg.sender === 'letagents' && msg.text?.includes('task_')) {
-          if (room.value) {
-            fetchTasks(room.value.identifier).then((t) => {
-              tasks.value = t
-            })
-          }
-        }
-
-        if (
-          room.value &&
-          ((msg.source || '').toLowerCase() === 'agent' ||
-            msg.sender === 'letagents')
-        ) {
-          schedulePresenceRefresh(room.value.identifier)
-        }
-
-        if (
-          room.value &&
-          ((msg.source || '').toLowerCase() === 'agent' ||
-            (msg.source || '').toLowerCase() === 'browser')
-        ) {
-          scheduleParticipantRefresh(room.value.identifier)
-        }
-      }
-    } catch {
-      /* ignore parse errors */
-    }
-  })
-
-  eventSource.addEventListener('task_update', (e) => {
-    try {
-      const task: RoomTask = JSON.parse(e.data)
-      const idx = tasks.value.findIndex((t) => t.id === task.id)
-      if (idx >= 0) {
-        const updated = [...tasks.value]
-        updated[idx] = task
-        tasks.value = updated
-      } else {
-        tasks.value = [...tasks.value, task]
-      }
-    } catch {
-      /* ignore */
-    }
-  })
-
-  eventSource.addEventListener('reasoning_update', (e) => {
-    try {
-      const payload = JSON.parse(e.data)
-      const session = payload?.session || payload
-      const update =
-        payload?.update && typeof payload.update.id === 'string'
-          ? (payload.update as RoomReasoningUpdate)
-          : null
-      if (session?.id) {
-        upsertReasoningSession(session, update)
-      }
-    } catch {
-      /* ignore */
-    }
-  })
-
-  eventSource.addEventListener('reasoning_remove', (e) => {
-    try {
-      const payload = JSON.parse(e.data)
-      const sessionId =
-        typeof payload?.session_id === 'string'
-          ? payload.session_id
-          : typeof payload?.id === 'string'
-            ? payload.id
-            : ''
-      if (sessionId) {
-        removeReasoningSession(sessionId)
-      }
-    } catch {
-      /* ignore */
-    }
-  })
-
-  eventSource.onerror = () => {
-    connectionState.value = 'error'
-    isStreaming.value = false
-    eventSource?.close()
-    eventSource = null
-
-    reconnectTimer = setTimeout(() => {
-      startStreaming(roomIdentifier)
-    }, reconnectDelay)
-    reconnectDelay = Math.min(reconnectDelay * 1.5, 30000)
-  }
+  roomStream.start(roomIdentifier)
 }
 
 function stopStreaming() {
-  eventSource?.close()
-  eventSource = null
-  isStreaming.value = false
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
+  roomStream.stop()
   if (githubEventsRefreshTimer) {
     clearTimeout(githubEventsRefreshTimer)
     githubEventsRefreshTimer = null
   }
-  stopPresenceRefreshLoop()
-  stopParticipantRefreshLoop()
+  stopPresenceControllers()
 }
 
-/** ── Actions ── */
 async function sendMessage(
   text: string,
   sender?: string,
@@ -676,7 +572,6 @@ async function sendMessage(
       method: 'POST',
       body: JSON.stringify(body),
     })
-    // Optimistic add if SSE hasn't delivered it yet — skip prompt-only auto messages
     if (
       msg?.id &&
       !isPromptOnlyRoomMessage(msg) &&
@@ -699,11 +594,8 @@ async function sendMessage(
 async function addTask(title: string): Promise<boolean> {
   if (!room.value) return false
   try {
-    const data = await apiFetch(`${roomPath(room.value.identifier)}/tasks`, {
-      method: 'POST',
-      body: JSON.stringify({ title, created_by: 'human' }),
-    })
-    if (data.task) tasks.value = [...tasks.value, data.task]
+    const task = await createRoomTask(room.value.identifier, title)
+    if (task) tasks.value = [...tasks.value, task]
     return true
   } catch {
     return false
@@ -713,18 +605,9 @@ async function addTask(title: string): Promise<boolean> {
 async function createFocusRoom(taskId: string): Promise<FocusRoomInfo | null> {
   if (!room.value) return null
   try {
-    const data = await apiFetch(
-      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/focus-room`,
-      {
-        method: 'POST',
-        body: JSON.stringify({}),
-      },
-    )
-    const focusRoom = data.focus_room as FocusRoomInfo | undefined
+    const focusRoom = await createTaskFocusRoom(room.value.identifier, taskId)
     if (!focusRoom?.room_id) return null
-
     upsertFocusRoom(focusRoom)
-
     return focusRoom
   } catch {
     return null
@@ -739,18 +622,12 @@ async function createAdHocFocusRoom(
   if (!trimmedTitle) return null
 
   try {
-    const data = await apiFetch(
-      `${roomPath(room.value.identifier)}/focus-rooms`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ title: trimmedTitle }),
-      },
+    const focusRoom = await createStandaloneFocusRoom(
+      room.value.identifier,
+      trimmedTitle,
     )
-    const focusRoom = data.focus_room as FocusRoomInfo | undefined
     if (!focusRoom?.room_id) return null
-
     upsertFocusRoom(focusRoom)
-
     return focusRoom
   } catch {
     return null
@@ -768,43 +645,26 @@ async function shareFocusRoomResult(
   if (!trimmedSummary || !parentRoomId || !focusKey) return null
 
   try {
-    const data = await apiFetch(
-      `${roomPath(parentRoomId)}/focus/${encodeURIComponent(focusKey)}/conclude`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          summary: trimmedSummary,
-          conclusion_details: conclusionDetails,
-        }),
-      },
+    const result = await concludeFocusRoom(
+      parentRoomId,
+      focusKey,
+      trimmedSummary,
+      conclusionDetails,
     )
-    const focusRoom = (data.focus_room || data.room) as
-      | FocusRoomInfo
-      | undefined
+    const focusRoom = result.focusRoom
     if (!focusRoom?.room_id) return null
 
     upsertFocusRoom(focusRoom)
-    room.value = {
-      ...room.value,
-      displayName: focusRoom.display_name || room.value.displayName,
-      attachmentsEnabled:
-        focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
-      focusStatus: focusRoom.focus_status || room.value.focusStatus,
-      focusParentVisibility:
-        focusRoom.focus_parent_visibility || room.value.focusParentVisibility,
-      focusActivityScope:
-        focusRoom.focus_activity_scope || room.value.focusActivityScope,
-      focusGitHubEventRouting:
-        focusRoom.focus_github_event_routing ||
-        room.value.focusGitHubEventRouting,
-      concludedAt: focusRoom.concluded_at || room.value.concludedAt,
-      conclusionSummary: focusRoom.conclusion_summary || trimmedSummary,
-      conclusionDetails: focusRoom.conclusion_details || conclusionDetails,
-    }
+    room.value = applyFocusRoomConclusion(
+      room.value,
+      focusRoom,
+      trimmedSummary,
+      conclusionDetails,
+    )
 
     return {
       focusRoom,
-      parentMessagePosted: Boolean(data.message),
+      parentMessagePosted: result.parentMessagePosted,
     }
   } catch {
     return null
@@ -823,14 +683,11 @@ async function updateFocusRoomSettings(
   if (!parentRoomId || !focusKey) return null
 
   try {
-    const data = await apiFetch(
-      `${roomPath(parentRoomId)}/focus/${encodeURIComponent(focusKey)}/settings`,
-      {
-        method: 'PATCH',
-        body: JSON.stringify(settings),
-      },
+    const focusRoom = await patchFocusRoomSettings(
+      parentRoomId,
+      focusKey,
+      settings,
     )
-    const focusRoom = data.focus_room as FocusRoomInfo | undefined
     if (!focusRoom?.room_id) return null
 
     upsertFocusRoom(focusRoom)
@@ -838,14 +695,7 @@ async function updateFocusRoomSettings(
       room.value.kind === 'focus' &&
       room.value.projectId === focusRoom.room_id
     ) {
-      room.value = {
-        ...room.value,
-        attachmentsEnabled:
-          focusRoom.attachments_enabled ?? room.value.attachmentsEnabled,
-        focusParentVisibility: focusRoom.focus_parent_visibility,
-        focusActivityScope: focusRoom.focus_activity_scope,
-        focusGitHubEventRouting: focusRoom.focus_github_event_routing,
-      }
+      room.value = applyFocusRoomSettings(room.value, focusRoom)
     }
 
     return focusRoom
@@ -860,31 +710,9 @@ async function updateTask(
 ): Promise<boolean> {
   if (!room.value) return false
   try {
-    const data = await apiFetch(
-      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}`,
-      {
-        method: 'PATCH',
-        body: JSON.stringify(updates),
-      },
-    )
-    // Server returns the updated task at top level (not nested under .task)
-    const updatedTask = data.task || (data.id ? data : null)
-    if (updatedTask) {
-      const idx = tasks.value.findIndex((t) => t.id === taskId)
-      if (idx >= 0) {
-        const updated = [...tasks.value]
-        updated[idx] = updatedTask
-        tasks.value = updated
-      }
-    }
-    // Re-fetch to stay in sync (like legacy refreshBoard)
-    const [nextTasks, nextPresence] = await Promise.all([
-      fetchTasks(room.value.identifier),
-      fetchPresence(room.value.identifier),
-    ])
-    tasks.value = nextTasks
-    presence.value = nextPresence
-    boardHandoffPresence.value = nextPresence
+    const task = await patchRoomTask(room.value.identifier, taskId, updates)
+    if (task) upsertTask(task)
+    await refreshTasksAndPresence(room.value.identifier)
     return true
   } catch {
     return false
@@ -897,29 +725,13 @@ async function updateTaskLease(
 ): Promise<boolean> {
   if (!room.value) return false
   try {
-    const data = await apiFetch(
-      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
-      {
-        method: 'POST',
-        body: JSON.stringify(input),
-      },
+    const task = await postTaskLeaseAction(
+      room.value.identifier,
+      taskId,
+      input,
     )
-    const updatedTask = data.task || (data.id ? data : null)
-    if (updatedTask) {
-      const idx = tasks.value.findIndex((t) => t.id === taskId)
-      if (idx >= 0) {
-        const updated = [...tasks.value]
-        updated[idx] = updatedTask
-        tasks.value = updated
-      }
-    }
-    const [nextTasks, nextPresence] = await Promise.all([
-      fetchTasks(room.value.identifier),
-      fetchPresence(room.value.identifier),
-    ])
-    tasks.value = nextTasks
-    presence.value = nextPresence
-    boardHandoffPresence.value = nextPresence
+    if (task) upsertTask(task)
+    await refreshTasksAndPresence(room.value.identifier)
     return true
   } catch {
     return false
@@ -932,29 +744,13 @@ async function updateTaskReviewLease(
 ): Promise<boolean> {
   if (!room.value) return false
   try {
-    const data = await apiFetch(
-      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
-      {
-        method: 'POST',
-        body: JSON.stringify(input),
-      },
+    const task = await postTaskReviewLeaseAction(
+      room.value.identifier,
+      taskId,
+      input,
     )
-    const updatedTask = data.task || (data.id ? data : null)
-    if (updatedTask) {
-      const idx = tasks.value.findIndex((t) => t.id === taskId)
-      if (idx >= 0) {
-        const updated = [...tasks.value]
-        updated[idx] = updatedTask
-        tasks.value = updated
-      }
-    }
-    const [nextTasks, nextPresence] = await Promise.all([
-      fetchTasks(room.value.identifier),
-      fetchPresence(room.value.identifier),
-    ])
-    tasks.value = nextTasks
-    presence.value = nextPresence
-    boardHandoffPresence.value = nextPresence
+    if (task) upsertTask(task)
+    await refreshTasksAndPresence(room.value.identifier)
     return true
   } catch {
     return false
@@ -968,24 +764,13 @@ async function setTaskStalePromptMute(
 ): Promise<boolean> {
   if (!room.value) return false
   try {
-    const data = await apiFetch(
-      `${roomPath(room.value.identifier)}/tasks/${encodeURIComponent(taskId)}/stale-prompt-mute`,
-      {
-        method: muted ? 'POST' : 'DELETE',
-        body: JSON.stringify({
-          prompt_timestamp: options?.promptTimestamp ?? null,
-        }),
-      },
+    const task = await setRoomTaskStalePromptMute(
+      room.value.identifier,
+      taskId,
+      muted,
+      options,
     )
-    const updatedTask = data.task || (data.id ? data : null)
-    if (updatedTask) {
-      const idx = tasks.value.findIndex((t) => t.id === taskId)
-      if (idx >= 0) {
-        const updated = [...tasks.value]
-        updated[idx] = updatedTask
-        tasks.value = updated
-      }
-    }
+    if (task) upsertTask(task)
     tasks.value = await fetchTasks(room.value.identifier)
     return true
   } catch (error) {
@@ -997,7 +782,6 @@ async function setTaskStalePromptMute(
   }
 }
 
-/** ── Room Rename ── */
 async function renameRoom(newName: string): Promise<boolean> {
   if (!room.value) return false
   try {
@@ -1015,142 +799,56 @@ async function renameRoom(newName: string): Promise<boolean> {
   }
 }
 
-/** ── Join Room ── */
 async function joinRoom(roomIdentifier: string) {
-  // Clear active room state before attempting new join to prevent
-  // failed transitions from leaving stale room data that misdirects sends
   stopStreaming()
-  activityHistoryRequestSequence += 1
-  room.value = null
-  messages.value = []
-  messagesHasOlder.value = false
-  isLoadingOlderMessages.value = false
-  tasks.value = []
-  focusRooms.value = []
-  presence.value = []
-  boardHandoffPresence.value = []
-  participants.value = []
-  participantHiddenCount.value = 0
-  activityHistory.value = null
-  activityHistoryLoading.value = true
-  activityHistoryError.value = ''
-  lastActivityHistoryRequest = {
-    page: 1,
-    pageSize: 20,
-    kind: 'all',
-    roomId: roomIdentifier,
-  }
-  reasoningSessions.value = []
-  githubEvents.value = []
-  githubEventsAvailable.value = false
-  githubEventsHasMore.value = false
-  githubEventsError.value = null
-  githubEventsLoading.value = true
-  isConnected.value = false
-  connectionState.value = 'connecting'
-  joinError.value = null
+  resetRoomState({
+    activityHistoryLoading: true,
+    githubEventsLoading: true,
+    connectionState: 'connecting',
+    activityHistoryRequest: {
+      page: 1,
+      pageSize: 20,
+      kind: 'all',
+      roomId: roomIdentifier,
+    },
+  })
 
   try {
-    // Join via POST /rooms/:identifier/join
-    const project = await apiFetch(`${roomPath(roomIdentifier)}/join`, {
-      method: 'POST',
-    })
-
-    const joinedRoom: RoomInfo = {
-      projectId: project.room_id || roomIdentifier,
-      identifier: roomIdentifier,
-      code: project.code || '',
-      name: project.name || roomIdentifier,
-      displayName: project.display_name || project.name || roomIdentifier,
-      role: project.role || 'participant',
-      authenticated: !!project.authenticated,
-      kind: project.kind || 'main',
-      attachmentsEnabled: project.attachments_enabled !== false,
-      parentRoomId: project.parent_room_id || null,
-      focusKey: project.focus_key || null,
-      sourceTaskId: project.source_task_id || null,
-      focusStatus: project.focus_status || null,
-      focusParentVisibility:
-        project.focus_parent_visibility ||
-        project.focus_settings?.parent_visibility ||
-        null,
-      focusActivityScope:
-        project.focus_activity_scope ||
-        project.focus_settings?.activity_scope ||
-        null,
-      focusGitHubEventRouting:
-        project.focus_github_event_routing ||
-        project.focus_settings?.github_event_routing ||
-        null,
-      concludedAt: project.concluded_at || null,
-      conclusionSummary: project.conclusion_summary || null,
-      conclusionDetails: project.conclusion_details || null,
-    }
+    const joinedRoom = await joinRoomSession(roomIdentifier)
     room.value = joinedRoom
     isConnected.value = true
     persistRoomSession(room.value)
     const bootstrapActivityHistoryRequestId = activityHistoryRequestSequence
-
-    // Load existing room state in parallel
-    const githubEventsIdentifier = getGitHubEventsIdentifier(joinedRoom)
-    const supportsGitHubEvents = isRepoBackedRoomId(
-      getGitHubSupportIdentifier(joinedRoom),
+    const bootstrap = await loadRoomBootstrap(
+      joinedRoom,
+      lastActivityHistoryRequest,
     )
-    const [
-      messagePage,
-      tsks,
-      focused,
-      prs,
-      roomParticipantsPage,
-      history,
-      reasoning,
-      gh,
-      ghStatus,
-    ] = await Promise.all([
-      fetchMessages(roomIdentifier),
-      fetchTasks(roomIdentifier),
-      fetchFocusRooms(roomIdentifier),
-      fetchPresence(roomIdentifier),
-      fetchParticipants(roomIdentifier),
-      fetchActivityHistory(roomIdentifier, lastActivityHistoryRequest),
-      fetchReasoningSessions(roomIdentifier),
-      supportsGitHubEvents
-        ? fetchGitHubEvents(githubEventsIdentifier)
-        : Promise.resolve({
-            events: [],
-            available: false,
-            hasMore: false,
-            error: null,
-          }),
-      fetchTaskGithubStatus(roomIdentifier),
-    ])
-    messages.value = mergeMessages([], messagePage.messages)
-    messagesHasOlder.value = messagePage.hasOlder
-    tasks.value = tsks
-    focusRooms.value = focused
-    presence.value = prs
-    boardHandoffPresence.value = prs
-    participants.value = roomParticipantsPage.participants
-    participantHiddenCount.value = roomParticipantsPage.hidden_count
-    reasoningSessions.value = reasoning
+    messages.value = mergeMessages([], bootstrap.messagePage.messages)
+    messagesHasOlder.value = bootstrap.messagePage.hasOlder
+    tasks.value = bootstrap.tasks
+    focusRooms.value = bootstrap.focusRooms
+    presence.value = bootstrap.presence
+    boardHandoffPresence.value = bootstrap.presence
+    participants.value = bootstrap.participantsPage.participants
+    participantHiddenCount.value = bootstrap.participantsPage.hidden_count
+    reasoningSessions.value = bootstrap.reasoningSessions
     if (
       bootstrapActivityHistoryRequestId === activityHistoryRequestSequence &&
       room.value?.identifier === roomIdentifier
     ) {
-      activityHistory.value = history
+      activityHistory.value = bootstrap.activityHistory
       activityHistoryLoading.value = false
-      activityHistoryError.value = history
+      activityHistoryError.value = bootstrap.activityHistory
         ? ''
         : 'Could not load room activity history.'
     }
-    taskGithubStatus.value = ghStatus
-    githubEvents.value = gh.events
-    githubEventsAvailable.value = gh.available
-    githubEventsHasMore.value = gh.hasMore
-    githubEventsError.value = gh.error
+    taskGithubStatus.value = bootstrap.taskGithubStatus
+    githubEvents.value = bootstrap.githubEvents.events
+    githubEventsAvailable.value = bootstrap.githubEvents.available
+    githubEventsHasMore.value = bootstrap.githubEvents.hasMore
+    githubEventsError.value = bootstrap.githubEvents.error
     githubEventsLoading.value = false
 
-    // Start real-time streaming
     startPresenceRefreshLoop(roomIdentifier)
     startParticipantRefreshLoop(roomIdentifier)
     startStreaming(roomIdentifier)
@@ -1200,7 +898,6 @@ async function loadOlderMessages(): Promise<boolean> {
   }
 }
 
-/** ── Restore Session ── */
 async function restoreSession(): Promise<boolean> {
   const saved = loadPersistedSession()
   if (!saved) return false
@@ -1209,49 +906,22 @@ async function restoreSession(): Promise<boolean> {
 
 function leaveRoom() {
   stopStreaming()
-  activityHistoryRequestSequence += 1
-  room.value = null
-  messages.value = []
-  messagesHasOlder.value = false
-  isLoadingOlderMessages.value = false
-  tasks.value = []
-  focusRooms.value = []
-  presence.value = []
-  boardHandoffPresence.value = []
-  participants.value = []
-  participantHiddenCount.value = 0
-  activityHistory.value = null
-  activityHistoryLoading.value = false
-  activityHistoryError.value = ''
-  lastActivityHistoryRequest = {}
-  reasoningSessions.value = []
-  githubEvents.value = []
-  githubEventsAvailable.value = false
-  githubEventsHasMore.value = false
-  githubEventsError.value = null
-  githubEventsLoading.value = false
-  isConnected.value = false
-  connectionState.value = 'idle'
-  joinError.value = null
+  resetRoomState({
+    activityHistoryLoading: false,
+    githubEventsLoading: false,
+    connectionState: 'idle',
+  })
   clearPersistedSession()
 }
 
-/** ── Cleanup ── */
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', () => {
     stopStreaming()
   })
 }
 
-/** ── Composable ── */
 export function useRoom() {
-  onUnmounted(() => {
-    // Don't stop streaming on unmount — other components may need it
-    // Only stopStreaming when explicitly leaving
-  })
-
   return {
-    // State
     messages: readonly(messages),
     messagesHasOlder: readonly(messagesHasOlder),
     isLoadingOlderMessages: readonly(isLoadingOlderMessages),
@@ -1283,7 +953,6 @@ export function useRoom() {
     joinError: readonly(joinError),
     soundEnabled: readonly(soundEnabled),
 
-    // Actions
     joinRoom,
     leaveRoom,
     sendMessage,
@@ -1315,7 +984,6 @@ export function useRoom() {
     restoreSession,
     toggleSound,
 
-    // Utilities
     getSenderColor,
     parseAgentIdentity,
     isHumanSender,
