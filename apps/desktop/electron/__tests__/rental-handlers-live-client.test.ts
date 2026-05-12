@@ -611,6 +611,67 @@ test("get-usage falls back to the empty snapshot when sessionId is missing", asy
 });
 
 // ---------------------------------------------------------------------------
+// declare-quota-exhausted sync (p2.12)
+// ---------------------------------------------------------------------------
+
+test("declare-quota-exhausted forwards the local signal to declareQuotaExhausted", async () => {
+  const { client, calls } = makeFakeClient({
+    declareQuotaExhausted: { ok: true, status: 200, body: {} },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const signal = (await invoke(
+    handlers,
+    "desktop:rental:declare-quota-exhausted",
+    { provider: "cursor", model: "claude-3.7-sonnet" },
+  )) as { triggered: boolean; provider: string | null };
+
+  assert.equal(signal.triggered, true);
+  assert.equal(signal.provider, "cursor");
+
+  // Sync is fire-and-forget; give the microtask a tick to land.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "declareQuotaExhausted");
+  const sent = calls[0]?.args[0] as Record<string, unknown>;
+  assert.equal(sent.startTrigger, "quota_exhausted");
+  assert.equal(sent.triggerConfidence, "manual");
+  assert.equal(sent.renterLaneProvider, "cursor");
+  assert.equal(sent.renterLaneModel, "claude-3.7-sonnet");
+  assert.ok(typeof sent.renterLaneExhaustedAt === "string");
+});
+
+test("declare-quota-exhausted skips server sync when provider is missing", async () => {
+  const { client, calls } = makeFakeClient({
+    declareQuotaExhausted: { ok: true, status: 200, body: {} },
+  });
+  const handlers = captureHandlersWithClient(client);
+  await invoke(handlers, "desktop:rental:declare-quota-exhausted", {});
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.length, 0);
+});
+
+test("declare-quota-exhausted ignores api failures (best-effort sync)", async () => {
+  const { client, calls } = makeFakeClient({
+    declareQuotaExhausted: { ok: false, status: 500, error: "boom", body: null },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const signal = (await invoke(
+    handlers,
+    "desktop:rental:declare-quota-exhausted",
+    { provider: "cursor" },
+  )) as { triggered: boolean };
+
+  assert.equal(signal.triggered, true);
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.length, 1, "still attempts the sync once");
+});
+
+// ---------------------------------------------------------------------------
 // No-client regression: every wired channel still returns its stub shape
 // ---------------------------------------------------------------------------
 
