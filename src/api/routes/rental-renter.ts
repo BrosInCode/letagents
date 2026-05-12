@@ -45,6 +45,7 @@ import {
   type RenterQuotaStateStore,
   type RenterQuotaStatus,
 } from "../rental/renter-quota-state.js";
+import { projectSessionUsage } from "../rental/session-usage.js";
 import {
   listSessionActivityForUi,
   type SessionActivityRole,
@@ -633,6 +634,29 @@ export function registerRentalRenterRoutes(
         const message = err instanceof Error ? err.message : "unknown_error";
         return res.status(500).json({ error: message });
       }
+    },
+  );
+
+  // GET /api/rental/sessions/:id/usage — p2.11a
+  //
+  // Projects the existing `rental_sessions` row into the same shape
+  // the desktop `DesktopRentalUsageSnapshot` expects. Auth-gated by
+  // `getSessionById`, which only returns rows where the caller is
+  // the renter or the provider. Pure projection (no extra DB read)
+  // so the route is cheap; the latest native quota snapshot rides
+  // along from `native_quota_latest_snapshot` jsonb.
+  app.get(
+    "/api/rental/sessions/:id/usage",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const session = await deps.getSessionById(req.params.id as string, accountId);
+      if (!session) {
+        return res.status(404).json({ error: "session_not_found" });
+      }
+      return res.json(projectSessionUsage(session));
     },
   );
 

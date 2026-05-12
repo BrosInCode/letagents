@@ -422,6 +422,113 @@ describe("renter session route handlers", () => {
     assert.strictEqual(captured!.limit, 200);
     assert.strictEqual(captured!.verifiedOnly, false);
   });
+
+  // ===== p2.11a session-usage route =====
+
+  it("GET /api/rental/sessions/:id/usage projects the row into snapshot shape", async () => {
+    deps.getSessionById = async () => ({
+      id: "rsess_1",
+      status: "active",
+      renter_account_id: FAKE_ACCOUNT_ID,
+      provider_account_id: "acct_provider",
+      lrt_limit: 10_000,
+      lrt_reserved: 250,
+      lrt_used: 2_500,
+      budget_stop_threshold: "0.95",
+      time_limit_minutes: 60,
+      started_at: new Date("2026-05-12T10:00:00.000Z"),
+      ended_at: null,
+      native_quota_latest_snapshot: { provider: "antigravity" },
+      updated_at: new Date("2026-05-12T10:30:00.000Z"),
+    });
+    const res = await req("GET", "/api/rental/sessions/rsess_1/usage");
+    assert.strictEqual(res.status, 200);
+    const json = (await res.json()) as {
+      session_id: string;
+      lrt_limit: number;
+      lrt_reserved: number;
+      lrt_used: number;
+      lrt_remaining: number;
+      budget_stop_threshold: number;
+      time_limit_minutes: number;
+      started_at: string;
+      ends_at: string;
+      quota_snapshot: Record<string, unknown>;
+      updated_at: string;
+    };
+    assert.strictEqual(json.session_id, "rsess_1");
+    assert.strictEqual(json.lrt_limit, 10_000);
+    assert.strictEqual(json.lrt_reserved, 250);
+    assert.strictEqual(json.lrt_used, 2_500);
+    assert.strictEqual(json.lrt_remaining, 7_250);
+    assert.strictEqual(json.budget_stop_threshold, 0.95);
+    assert.strictEqual(json.time_limit_minutes, 60);
+    assert.strictEqual(json.started_at, "2026-05-12T10:00:00.000Z");
+    assert.strictEqual(json.ends_at, "2026-05-12T11:00:00.000Z");
+    assert.deepStrictEqual(json.quota_snapshot, { provider: "antigravity" });
+  });
+
+  it("GET /api/rental/sessions/:id/usage returns 404 when session hidden", async () => {
+    deps.getSessionById = async () => null;
+    const res = await req("GET", "/api/rental/sessions/secret/usage");
+    assert.strictEqual(res.status, 404);
+  });
+
+  it("GET /api/rental/sessions/:id/usage works for unbounded budget rows", async () => {
+    deps.getSessionById = async () => ({
+      id: "rsess_2",
+      status: "active",
+      renter_account_id: FAKE_ACCOUNT_ID,
+      provider_account_id: "acct_p",
+      lrt_limit: null,
+      lrt_reserved: 0,
+      lrt_used: 1_234,
+      budget_stop_threshold: null,
+      time_limit_minutes: null,
+      started_at: null,
+      ended_at: null,
+      native_quota_latest_snapshot: null,
+      updated_at: new Date("2026-05-12T10:00:00.000Z"),
+    });
+    const res = await req("GET", "/api/rental/sessions/rsess_2/usage");
+    assert.strictEqual(res.status, 200);
+    const json = (await res.json()) as {
+      lrt_limit: number | null;
+      lrt_remaining: number | null;
+      time_limit_minutes: number | null;
+      started_at: string | null;
+      ends_at: string | null;
+      quota_snapshot: unknown;
+    };
+    assert.strictEqual(json.lrt_limit, null);
+    assert.strictEqual(json.lrt_remaining, null);
+    assert.strictEqual(json.time_limit_minutes, null);
+    assert.strictEqual(json.started_at, null);
+    assert.strictEqual(json.ends_at, null);
+    assert.strictEqual(json.quota_snapshot, null);
+  });
+
+  it("GET /api/rental/sessions/:id/usage returns 401 when unauthenticated", async () => {
+    const express = (await import("express")).default;
+    const unauthedApp = express();
+    unauthedApp.use(express.json());
+    const { registerRentalRenterRoutes: register } = await import(
+      "../routes/rental-renter.js"
+    );
+    register(unauthedApp, deps as never);
+    const srv = await new Promise<http.Server>((resolve) => {
+      const s = unauthedApp.listen(0, () => resolve(s));
+    });
+    try {
+      const addr = srv.address() as import("net").AddressInfo;
+      const res = await fetch(
+        `http://127.0.0.1:${addr.port}/api/rental/sessions/rsess_1/usage`,
+      );
+      assert.strictEqual(res.status, 401);
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+  });
 });
 
 // ===== Provider Session Route Tests =====
