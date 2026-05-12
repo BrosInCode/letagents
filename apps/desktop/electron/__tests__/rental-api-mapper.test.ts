@@ -23,6 +23,7 @@ import {
   mapApiRequest,
   mapApiRequestArray,
   mapApiSession,
+  mapApiUsageSnapshot,
 } from "../rental/api-mapper.js";
 
 // ---------------------------------------------------------------------------
@@ -376,5 +377,101 @@ describe("array unwrap helpers", () => {
     assert.equal(a.length, 1);
     const b = mapApiActivityEventArray({ activity: [{ id: "rev_2", created_at: "x" }] });
     assert.equal(b.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mapApiUsageSnapshot (p2.11a)
+// ---------------------------------------------------------------------------
+
+describe("mapApiUsageSnapshot", () => {
+  it("round-trips snake_case fields into the desktop snapshot shape", () => {
+    const snap = mapApiUsageSnapshot(
+      {
+        session_id: "rsess_1",
+        lrt_limit: 10_000,
+        lrt_reserved: 250,
+        lrt_used: 2_500,
+        lrt_remaining: 7_250,
+        budget_stop_threshold: 0.95,
+        time_limit_minutes: 60,
+        started_at: "2026-05-12T10:00:00.000Z",
+        ends_at: "2026-05-12T11:00:00.000Z",
+        quota_snapshot: {
+          provider: "antigravity",
+          native_unit: "percent_window",
+          native_remaining: 0.2,
+          observed_at: "2026-05-12T10:25:00.000Z",
+        },
+        updated_at: "2026-05-12T10:30:00.000Z",
+      },
+      "fallback_id",
+    );
+    assert.equal(snap.sessionId, "rsess_1");
+    assert.equal(snap.lrtLimit, 10_000);
+    assert.equal(snap.lrtReserved, 250);
+    assert.equal(snap.lrtUsed, 2_500);
+    assert.equal(snap.lrtRemaining, 7_250);
+    assert.equal(snap.budgetStopThreshold, 0.95);
+    assert.equal(snap.timeLimitMinutes, 60);
+    assert.equal(snap.startedAt, "2026-05-12T10:00:00.000Z");
+    assert.equal(snap.endsAt, "2026-05-12T11:00:00.000Z");
+    assert.equal(snap.updatedAt, "2026-05-12T10:30:00.000Z");
+    assert.ok(snap.quotaSnapshot);
+    assert.equal(snap.quotaSnapshot!.provider, "antigravity");
+    assert.equal(snap.quotaSnapshot!.nativeRemaining, 0.2);
+  });
+
+  it("falls back to the provided sessionId when the body omits one", () => {
+    const snap = mapApiUsageSnapshot({}, "fallback_id");
+    assert.equal(snap.sessionId, "fallback_id");
+    assert.equal(snap.lrtLimit, null);
+    assert.equal(snap.lrtReserved, 0);
+    assert.equal(snap.lrtUsed, 0);
+    assert.equal(snap.lrtRemaining, null);
+    assert.equal(snap.budgetStopThreshold, null);
+    assert.equal(snap.timeLimitMinutes, null);
+    assert.equal(snap.startedAt, null);
+    assert.equal(snap.endsAt, null);
+    assert.equal(snap.quotaSnapshot, null);
+    assert.equal(snap.updatedAt, null);
+  });
+
+  it("accepts non-object input by treating it as an empty body", () => {
+    const snap = mapApiUsageSnapshot("oops", "fallback");
+    assert.equal(snap.sessionId, "fallback");
+    assert.equal(snap.lrtReserved, 0);
+    assert.equal(snap.lrtUsed, 0);
+  });
+
+  it("accepts camelCase keys as alternates", () => {
+    const snap = mapApiUsageSnapshot(
+      {
+        sessionId: "rsess_2",
+        lrtLimit: 5_000,
+        lrtUsed: 1_000,
+        lrtReserved: 100,
+        startedAt: "2026-05-12T09:00:00.000Z",
+        endsAt: "2026-05-12T10:00:00.000Z",
+        updatedAt: "2026-05-12T09:30:00.000Z",
+      },
+      "fallback",
+    );
+    assert.equal(snap.sessionId, "rsess_2");
+    assert.equal(snap.lrtLimit, 5_000);
+    assert.equal(snap.lrtUsed, 1_000);
+    assert.equal(snap.lrtReserved, 100);
+    assert.equal(snap.startedAt, "2026-05-12T09:00:00.000Z");
+  });
+
+  it("treats a non-object quota_snapshot as null", () => {
+    const snap = mapApiUsageSnapshot(
+      {
+        session_id: "rsess_3",
+        quota_snapshot: ["arr", "is", "not", "obj"],
+      },
+      "fallback",
+    );
+    assert.equal(snap.quotaSnapshot, null);
   });
 });

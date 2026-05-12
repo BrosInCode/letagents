@@ -262,6 +262,23 @@ export class RentalApiClient {
     );
   }
 
+  /**
+   * p2.11a — read the projected usage snapshot for a session. The
+   * server projects the session row directly into the snapshot
+   * shape (no extra DB read), so this is cheap to poll. Auth is
+   * gated server-side: the route only returns 200 when the caller
+   * is the renter or the provider on the session.
+   *
+   * The desktop `api-mapper` exposes `mapApiUsageSnapshot` for
+   * converting the wire shape into a `DesktopRentalUsageSnapshot`.
+   */
+  getSessionUsage(sessionId: string): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/usage`,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Internal (provider liveness + adapter snapshot ingest)
   // -------------------------------------------------------------------------
