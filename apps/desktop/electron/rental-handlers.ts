@@ -22,6 +22,7 @@ import type {
 import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
 import type { RentalApiClient } from "./rental/api-client.js";
 import {
+  mapApiActivityEventArray,
   mapApiListing,
   mapApiListingArray,
   mapApiRequest,
@@ -211,7 +212,15 @@ export function registerDesktopRentalIpcHandlers(
     }
     return buildStubRequest(sessionId, "declined");
   });
-  register("desktop:rental:get-activity", () => [] satisfies DesktopRentalActivityEvent[]);
+  register("desktop:rental:get-activity", async (_event, sessionId) => {
+    const id = String(sessionId ?? "");
+    if (!id) return [] satisfies DesktopRentalActivityEvent[];
+    if (apiClient) {
+      const result = await apiClient.getSessionActivity(id);
+      if (result.ok) return mapApiActivityEventArray(result.body);
+    }
+    return [] satisfies DesktopRentalActivityEvent[];
+  });
   register("desktop:rental:get-exposures", () => [] satisfies DesktopRentalExposure[]);
   register("desktop:rental:get-patches", () => [] satisfies DesktopRentalPatch[]);
   register("desktop:rental:get-usage", (_event, sessionId) => buildEmptyUsageSnapshot(String(sessionId)));

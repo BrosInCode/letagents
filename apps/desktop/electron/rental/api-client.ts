@@ -238,6 +238,30 @@ export class RentalApiClient {
     );
   }
 
+  /**
+   * p2.10a — read activity events visible to the caller's role on a
+   * session. Caller role is decided server-side from the session row;
+   * we just hand the API a session id and optional pagination knobs.
+   *
+   * Returns `{ events: [...] }` on success. The desktop `api-mapper`
+   * exposes `mapApiActivityEventArray` for converting the rows.
+   */
+  getSessionActivity(
+    sessionId: string,
+    opts: { limit?: number; verifiedOnly?: boolean } = {},
+  ): Promise<RentalApiResult<unknown>> {
+    const q = new URLSearchParams();
+    if (typeof opts.limit === "number" && Number.isFinite(opts.limit)) {
+      q.set("limit", String(Math.max(1, Math.floor(opts.limit))));
+    }
+    if (opts.verifiedOnly) q.set("verified_only", "true");
+    const suffix = q.toString();
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/activity${suffix ? `?${suffix}` : ""}`,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Internal (provider liveness + adapter snapshot ingest)
   // -------------------------------------------------------------------------
