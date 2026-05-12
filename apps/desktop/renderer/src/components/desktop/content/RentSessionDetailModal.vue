@@ -146,11 +146,41 @@
                   <span v-for="warning in patch.warnings" :key="warning">{{ warning }}</span>
                 </p>
                 <pre v-if="patch.diffPreview">{{ patch.diffPreview }}</pre>
+                <footer v-if="canActOnPatch(patch)" class="rent-detail-patch-actions">
+                  <button
+                    type="button"
+                    class="rent-create-secondary"
+                    :data-testid="`rent-detail-patch-request-changes-${patch.id}`"
+                    :disabled="patchActionBusyFor === patch.id"
+                    @click="requestPatchChanges(patch.id)"
+                  >
+                    {{ patchActionBusyFor === patch.id && patchActionKind === "changes" ? "Requesting..." : "Request changes" }}
+                  </button>
+                  <button
+                    type="button"
+                    class="rent-create-primary"
+                    :data-testid="`rent-detail-patch-approve-${patch.id}`"
+                    :disabled="patchActionBusyFor === patch.id"
+                    @click="approvePatch(patch.id)"
+                  >
+                    {{ patchActionBusyFor === patch.id && patchActionKind === "approve" ? "Approving..." : "Approve patch" }}
+                  </button>
+                </footer>
               </article>
             </section>
           </div>
 
           <footer class="rent-detail-footer">
+            <button
+              v-if="canCancel"
+              type="button"
+              class="rent-create-secondary rent-detail-cancel"
+              data-testid="rent-detail-cancel-session"
+              :disabled="cancelBusy"
+              @click="cancelSession"
+            >
+              {{ cancelBusy ? "Cancelling..." : "Cancel session" }}
+            </button>
             <button type="button" class="rent-create-secondary" @click="refresh" :disabled="anyLoading">
               {{ anyLoading ? "Refreshing..." : "Refresh" }}
             </button>
@@ -178,8 +208,9 @@ const props = defineProps<{
   session: DesktopRentalSession | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   close: [];
+  "session-updated": [session: DesktopRentalSession];
 }>();
 
 const tabs: Array<{ id: DetailTab; label: string }> = [
@@ -195,11 +226,20 @@ const patches = ref<DesktopRentalPatch[]>([]);
 const loadingUsage = ref(false);
 const loadingActivity = ref(false);
 const loadingPatches = ref(false);
+const cancelBusy = ref(false);
+const patchActionBusyFor = ref<string | null>(null);
+const patchActionKind = ref<"approve" | "changes" | null>(null);
 const errorMessage = ref<string | null>(null);
 
 const anyLoading = computed(
   () => loadingUsage.value || loadingActivity.value || loadingPatches.value,
 );
+
+const canCancel = computed(() => {
+  const status = props.session?.status;
+  if (!status) return false;
+  return ["pending", "queued", "starting", "active", "running", "in_progress"].includes(status);
+});
 
 watch(
   () => [props.open, props.session?.id] as const,
@@ -298,6 +338,79 @@ function formatTime(value: string | null | undefined): string {
     return new Date(value).toLocaleString();
   } catch {
     return value;
+  }
+}
+
+function canActOnPatch(patch: DesktopRentalPatch): boolean {
+  return ["pending", "needs_renter_approval", "passed_with_warnings"].includes(patch.gateStatus);
+}
+
+async function approvePatch(patchId: string): Promise<void> {
+  if (!props.session) return;
+  const bridge = window.letagentsDesktop?.rental;
+  if (!bridge?.approvePatch) return;
+  patchActionBusyFor.value = patchId;
+  patchActionKind.value = "approve";
+  errorMessage.value = null;
+  try {
+    const result = await bridge.approvePatch(props.session.id, patchId);
+    if (isDisabledResult(result)) {
+      errorMessage.value = "Rent an Agent is disabled.";
+      return;
+    }
+    await loadPatches(props.session.id, bridge);
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Could not approve the patch.";
+  } finally {
+    patchActionBusyFor.value = null;
+    patchActionKind.value = null;
+  }
+}
+
+async function requestPatchChanges(patchId: string): Promise<void> {
+  if (!props.session) return;
+  const bridge = window.letagentsDesktop?.rental;
+  if (!bridge?.requestPatchChanges) return;
+  const note = window.prompt("Why does this patch need changes?", "");
+  if (note === null) return;
+  patchActionBusyFor.value = patchId;
+  patchActionKind.value = "changes";
+  errorMessage.value = null;
+  try {
+    const result = await bridge.requestPatchChanges(props.session.id, patchId, note.trim() || "Changes requested.");
+    if (isDisabledResult(result)) {
+      errorMessage.value = "Rent an Agent is disabled.";
+      return;
+    }
+    await loadPatches(props.session.id, bridge);
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Could not request changes.";
+  } finally {
+    patchActionBusyFor.value = null;
+    patchActionKind.value = null;
+  }
+}
+
+async function cancelSession(): Promise<void> {
+  if (!props.session) return;
+  const bridge = window.letagentsDesktop?.rental;
+  if (!bridge?.cancelSession) return;
+  const confirmed = window.confirm("Cancel this rental session? The remaining LRT budget will be released.");
+  if (!confirmed) return;
+  cancelBusy.value = true;
+  errorMessage.value = null;
+  try {
+    const result = await bridge.cancelSession(props.session.id);
+    if (isDisabledResult(result)) {
+      errorMessage.value = "Rent an Agent is disabled.";
+      return;
+    }
+    emit("session-updated", result);
+    emit("close");
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "Could not cancel the session.";
+  } finally {
+    cancelBusy.value = false;
   }
 }
 </script>
@@ -455,5 +568,34 @@ function formatTime(value: string | null | undefined): string {
   border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
   background: transparent;
   color: inherit;
+}
+.rent-create-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.rent-create-primary {
+  appearance: none;
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: var(--color-accent, #4f7cff);
+  color: white;
+}
+.rent-create-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.rent-detail-patch-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+.rent-detail-cancel {
+  margin-right: auto;
+  border-color: color-mix(in srgb, var(--color-danger, #ff8a80) 50%, transparent);
+  color: var(--color-danger, #ff8a80);
 }
 </style>

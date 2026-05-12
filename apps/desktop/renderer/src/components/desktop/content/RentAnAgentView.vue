@@ -173,6 +173,7 @@
       :open="sessionDetailOpen"
       :session="detailSession"
       @close="closeSessionDetail"
+      @session-updated="onSessionUpdated"
     />
   </section>
 </template>
@@ -307,6 +308,13 @@ function openSessionDetail(session: DesktopRentalSession): void {
 function closeSessionDetail(): void {
   sessionDetailOpen.value = false;
   detailSession.value = null;
+}
+
+function onSessionUpdated(session: DesktopRentalSession): void {
+  if (lastCreatedSession.value && lastCreatedSession.value.id === session.id) {
+    lastCreatedSession.value = session;
+  }
+  void refresh();
 }
 </script>
 
