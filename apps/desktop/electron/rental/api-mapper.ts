@@ -38,6 +38,8 @@ import type {
   DesktopRentalContinuityMode,
   DesktopRentalIdeKind,
   DesktopRentalListing,
+  DesktopRentalListingInput,
+  DesktopRentalListingPatch,
   DesktopRentalListingStatus,
   DesktopRentalMeterConfidence,
   DesktopRentalMode,
@@ -728,6 +730,68 @@ export function toApiCreateSessionBody(
     ) {
       body.timeLimitMinutes = policy.maxDurationMinutes;
     }
+  }
+  return body;
+}
+
+/**
+ * Convert an outbound desktop listing create input into the API
+ * request shape. The provider routes already accept camelCase keys,
+ * so the mapper is a pass-through filter that drops `undefined` /
+ * blank values and trims the user-visible string fields.
+ */
+export function toApiListingCreateBody(
+  input: Partial<DesktopRentalListingInput>,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (typeof input.displayName === "string" && input.displayName.trim()) {
+    body.displayName = input.displayName.trim();
+  }
+  if (typeof input.ideKind === "string" && input.ideKind.trim()) {
+    body.ideKind = input.ideKind.trim();
+  }
+  const passThrough: Array<keyof DesktopRentalListingInput> = [
+    "modelLabel",
+    "quotaLaneId",
+    "quotaLaneLabel",
+    "supportedModes",
+    "defaultLrtLimit",
+    "defaultTimeLimitMinutes",
+    "manualAcceptRequired",
+  ];
+  for (const key of passThrough) {
+    const value = input[key];
+    if (value !== undefined) body[key as string] = value;
+  }
+  return body;
+}
+
+/**
+ * Convert an outbound desktop listing patch into the API request
+ * shape. Same pass-through approach as `toApiListingCreateBody`, but
+ * every field is optional.
+ */
+export function toApiListingPatchBody(
+  input: Partial<DesktopRentalListingPatch>,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input.displayName !== undefined) {
+    if (typeof input.displayName === "string" && input.displayName.trim()) {
+      body.displayName = input.displayName.trim();
+    }
+  }
+  const passThrough: Array<keyof DesktopRentalListingPatch> = [
+    "modelLabel",
+    "quotaLaneId",
+    "quotaLaneLabel",
+    "supportedModes",
+    "defaultLrtLimit",
+    "defaultTimeLimitMinutes",
+    "manualAcceptRequired",
+  ];
+  for (const key of passThrough) {
+    const value = input[key];
+    if (value !== undefined) body[key as string] = value;
   }
   return body;
 }
