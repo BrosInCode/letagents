@@ -135,6 +135,14 @@
             <span class="state-pill" :data-state="sessionStateFor(session.status)">
               {{ session.status }}
             </span>
+            <button
+              type="button"
+              class="rent-refresh-button"
+              :data-testid="`rent-provider-open-session-${session.id}`"
+              @click="emit('open-session', session)"
+            >
+              Open
+            </button>
           </div>
         </article>
       </section>
@@ -189,7 +197,12 @@
 import { computed, onMounted, ref } from "vue";
 import type {
   DesktopRentalProviderDashboard,
+  DesktopRentalSession,
 } from "../../../../../electron/ipc-types";
+
+const emit = defineEmits<{
+  "open-session": [session: DesktopRentalSession];
+}>();
 
 type ViewState = "loading" | "ready" | "error" | "disabled";
 
