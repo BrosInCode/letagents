@@ -28,6 +28,7 @@ import {
   mapApiRequest,
   mapApiRequestArray,
   mapApiSession,
+  mapApiUsageSnapshot,
   toApiCreateSessionBody,
   toApiListingCreateBody,
   toApiListingPatchBody,
@@ -223,7 +224,15 @@ export function registerDesktopRentalIpcHandlers(
   });
   register("desktop:rental:get-exposures", () => [] satisfies DesktopRentalExposure[]);
   register("desktop:rental:get-patches", () => [] satisfies DesktopRentalPatch[]);
-  register("desktop:rental:get-usage", (_event, sessionId) => buildEmptyUsageSnapshot(String(sessionId)));
+  register("desktop:rental:get-usage", async (_event, sessionId) => {
+    const id = String(sessionId ?? "");
+    if (!id) return buildEmptyUsageSnapshot(id);
+    if (apiClient) {
+      const result = await apiClient.getSessionUsage(id);
+      if (result.ok) return mapApiUsageSnapshot(result.body, id);
+    }
+    return buildEmptyUsageSnapshot(id);
+  });
   register("desktop:rental:get-own-quota-status", () => renterTriggerRuntime.getOwnQuotaStatus());
   register("desktop:rental:declare-quota-exhausted", (_event, input) =>
     renterTriggerRuntime.declareManual(normalizeManualDeclareInput(input))

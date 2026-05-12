@@ -536,6 +536,81 @@ test("resume-listing falls back to stub on api failure", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// get-usage wiring (p2.11b)
+// ---------------------------------------------------------------------------
+
+test("get-usage forwards to getSessionUsage and maps the response", async () => {
+  const { client, calls } = makeFakeClient({
+    getSessionUsage: {
+      ok: true,
+      status: 200,
+      body: {
+        session_id: "rsess_42",
+        lrt_limit: 10_000,
+        lrt_reserved: 100,
+        lrt_used: 2_500,
+        lrt_remaining: 7_400,
+        budget_stop_threshold: 0.95,
+        time_limit_minutes: 60,
+        started_at: "2026-05-12T10:00:00.000Z",
+        ends_at: "2026-05-12T11:00:00.000Z",
+        quota_snapshot: null,
+        updated_at: "2026-05-12T10:30:00.000Z",
+      },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(
+    handlers,
+    "desktop:rental:get-usage",
+    "rsess_42",
+  )) as {
+    sessionId: string;
+    lrtLimit: number;
+    lrtRemaining: number;
+    startedAt: string;
+    endsAt: string;
+  };
+  assert.equal(result.sessionId, "rsess_42");
+  assert.equal(result.lrtLimit, 10_000);
+  assert.equal(result.lrtRemaining, 7_400);
+  assert.equal(result.startedAt, "2026-05-12T10:00:00.000Z");
+  assert.equal(result.endsAt, "2026-05-12T11:00:00.000Z");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "getSessionUsage");
+  assert.equal(calls[0]?.args[0], "rsess_42");
+});
+
+test("get-usage falls back to the empty snapshot when the api returns an error", async () => {
+  const { client } = makeFakeClient({
+    getSessionUsage: { ok: false, status: 500, error: "boom", body: null },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(
+    handlers,
+    "desktop:rental:get-usage",
+    "rsess_42",
+  )) as {
+    sessionId: string;
+    lrtUsed: number;
+    lrtReserved: number;
+  };
+  assert.equal(result.sessionId, "rsess_42");
+  assert.equal(result.lrtUsed, 0);
+  assert.equal(result.lrtReserved, 0);
+});
+
+test("get-usage falls back to the empty snapshot when sessionId is missing", async () => {
+  const { client, calls } = makeFakeClient({});
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(handlers, "desktop:rental:get-usage", "")) as {
+    sessionId: string;
+  };
+  assert.equal(result.sessionId, "");
+  assert.equal(calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
 // No-client regression: every wired channel still returns its stub shape
 // ---------------------------------------------------------------------------
 
