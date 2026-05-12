@@ -65,6 +65,7 @@ import {
   resolveRoomIdentifierFromPath,
 } from "./repo-status.js";
 import { registerDesktopRentalIpcHandlers } from "./rental-handlers.js";
+import { RentalApiClient } from "./rental/api-client.js";
 import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2811,7 +2812,27 @@ ipcMain.handle(
   async (_event, roomIdentifier: string): Promise<DesktopGitHubIntegrationActionResult> =>
     openDesktopGitHubInstall(roomIdentifier)
 );
-registerDesktopRentalIpcHandlers(ipcMain, { renterTriggerRuntime });
+// Build the rental API client once at startup. The auth token is
+// resolved on every request via `readStoredAuth()` so sign-in /
+// sign-out cycles take effect without rebuilding the client.
+// The IPC handlers in `rental-handlers.ts` fall back to their
+// pre-p1.8c stubs when an API call fails, so a network outage or
+// missing auth never blocks the desktop UI from rendering.
+const rentalApiClient = new RentalApiClient({
+  apiBaseUrl: apiUrl,
+  async getAuthToken() {
+    try {
+      const stored = await readStoredAuth();
+      return stored.token ?? null;
+    } catch {
+      return null;
+    }
+  },
+});
+registerDesktopRentalIpcHandlers(ipcMain, {
+  renterTriggerRuntime,
+  apiClient: rentalApiClient,
+});
 ipcMain.handle("desktop:auth:get-status", async (): Promise<DesktopAuthStatus> => getDesktopAuthStatus());
 ipcMain.handle(
   "desktop:auth:start-device-flow",
