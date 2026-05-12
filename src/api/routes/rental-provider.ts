@@ -7,11 +7,13 @@
  *   PATCH  /api/rental/provider/listings/:id      — update listing
  *   POST   /api/rental/provider/listings/:id/pause   — pause listing
  *   POST   /api/rental/provider/listings/:id/resume  — resume listing
+ *   GET    /api/rental/provider/readiness         — provider-level readiness rollup
  *
  * All routes gated by LETAGENTS_RENT_ENABLED env flag.
  * Part of PR p1.1 (Phase 1: Session Lifecycle & Listings).
  *
- * Spec §6 (provider listing flow), §18.2 (session accept/decline).
+ * Spec §6 (provider listing flow), §18.2 (session accept/decline),
+ *      §22 (provider readiness rollup — p2.14).
  */
 
 import type { Express, Response } from "express";
@@ -21,6 +23,7 @@ import type {
   UpdateListingInput,
   RentalListing,
 } from "../rental/listings.js";
+import { projectProviderReadiness } from "../rental/provider-readiness.js";
 
 export interface RentalProviderRouteDeps {
   createListing(input: CreateListingInput): Promise<RentalListing>;
@@ -214,6 +217,23 @@ export function registerRentalProviderRoutes(
       res.status(500).json({ error: "Failed to resume listing" });
     }
   });
+
+  // GET /api/rental/provider/readiness — provider-level readiness rollup (p2.14)
+  app.get(
+    "/api/rental/provider/readiness",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireProviderAccountId(req, res);
+      if (!accountId) return;
+
+      try {
+        const listings = await deps.listMyListings(accountId);
+        res.json(projectProviderReadiness(listings));
+      } catch (error) {
+        res.status(500).json({ error: "Failed to compute readiness" });
+      }
+    }
+  );
 
   // ===== Session management routes (p1.3) =====
 
