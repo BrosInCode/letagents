@@ -718,6 +718,48 @@ function unwrapArray(raw: unknown, ...keys: string[]): unknown[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build the request body for `POST /api/rental/renter/declare-quota-exhausted`
+ * from a local `DesktopRentalRenterTriggerSignal`. The desktop's
+ * `RenterTriggerRuntime.declareManual` is the local source of truth;
+ * the server endpoint exists only so other surfaces (web, MCP,
+ * second desktop) can read the same declaration.
+ *
+ * Returns `null` when the local signal lacks a provider — the server
+ * validator (`parseTriggerContext`) rejects declarations without it,
+ * so we skip the network round-trip rather than 400 ourselves.
+ *
+ * The server enforces `startTrigger === "quota_exhausted"` on this
+ * endpoint (see `rental-renter.ts` p2.6c), so it's hardcoded here.
+ *
+ * Spec ref: §6.5 renter quota mirror.
+ */
+export function toApiDeclareQuotaBody(
+  signal: {
+    provider: string | null;
+    model: string | null;
+    confidence: DesktopRentalTriggerConfidence | null;
+    observedAt: string | null;
+    rawSignal: Record<string, unknown> | null;
+  },
+): Record<string, unknown> | null {
+  const provider = signal.provider?.trim();
+  if (!provider) return null;
+  const body: Record<string, unknown> = {
+    startTrigger: "quota_exhausted",
+    triggerConfidence: signal.confidence ?? "manual",
+    renterLaneProvider: provider,
+    renterLaneExhaustedAt:
+      signal.observedAt ?? new Date().toISOString(),
+  };
+  const model = signal.model?.trim();
+  if (model) body.renterLaneModel = model;
+  if (signal.rawSignal && typeof signal.rawSignal === "object") {
+    body.renterQuotaSignal = signal.rawSignal;
+  }
+  return body;
+}
+
+/**
  * Convert a `DesktopRentalStartInput` (renderer-side payload for
  * `desktop:rental:create-session`) into the body shape the server's
  * `POST /api/rental/sessions` expects.

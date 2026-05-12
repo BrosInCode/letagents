@@ -30,6 +30,7 @@ import {
   mapApiSession,
   mapApiUsageSnapshot,
   toApiCreateSessionBody,
+  toApiDeclareQuotaBody,
   toApiListingCreateBody,
   toApiListingPatchBody,
 } from "./rental/api-mapper.js";
@@ -234,9 +235,16 @@ export function registerDesktopRentalIpcHandlers(
     return buildEmptyUsageSnapshot(id);
   });
   register("desktop:rental:get-own-quota-status", () => renterTriggerRuntime.getOwnQuotaStatus());
-  register("desktop:rental:declare-quota-exhausted", (_event, input) =>
-    renterTriggerRuntime.declareManual(normalizeManualDeclareInput(input))
-  );
+  register("desktop:rental:declare-quota-exhausted", (_event, input) => {
+    const signal = renterTriggerRuntime.declareManual(normalizeManualDeclareInput(input));
+    if (apiClient) {
+      const body = toApiDeclareQuotaBody(signal);
+      if (body) {
+        void apiClient.declareQuotaExhausted(body).catch(() => {});
+      }
+    }
+    return signal;
+  });
   register("desktop:rental:approve-patch", (_event, sessionId, patchId) =>
     buildStubPatch(String(sessionId), String(patchId), "passed")
   );

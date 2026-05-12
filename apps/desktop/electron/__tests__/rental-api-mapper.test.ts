@@ -24,6 +24,7 @@ import {
   mapApiRequestArray,
   mapApiSession,
   mapApiUsageSnapshot,
+  toApiDeclareQuotaBody,
 } from "../rental/api-mapper.js";
 
 // ---------------------------------------------------------------------------
@@ -473,5 +474,120 @@ describe("mapApiUsageSnapshot", () => {
       "fallback",
     );
     assert.equal(snap.quotaSnapshot, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toApiDeclareQuotaBody (p2.12 — renter quota declaration sync)
+// ---------------------------------------------------------------------------
+
+describe("toApiDeclareQuotaBody", () => {
+  it("builds the canonical body from a populated signal", () => {
+    const body = toApiDeclareQuotaBody({
+      provider: "cursor",
+      model: "claude-3.7-sonnet",
+      confidence: "manual",
+      observedAt: "2026-05-12T10:00:00.000Z",
+      rawSignal: { manual: true, note: "out of quota" },
+    });
+    assert.ok(body);
+    assert.equal(body!.startTrigger, "quota_exhausted");
+    assert.equal(body!.triggerConfidence, "manual");
+    assert.equal(body!.renterLaneProvider, "cursor");
+    assert.equal(body!.renterLaneModel, "claude-3.7-sonnet");
+    assert.equal(body!.renterLaneExhaustedAt, "2026-05-12T10:00:00.000Z");
+    assert.deepEqual(body!.renterQuotaSignal, {
+      manual: true,
+      note: "out of quota",
+    });
+  });
+
+  it("returns null when the signal lacks a provider", () => {
+    assert.equal(
+      toApiDeclareQuotaBody({
+        provider: null,
+        model: "claude-3.7-sonnet",
+        confidence: "manual",
+        observedAt: "2026-05-12T10:00:00.000Z",
+        rawSignal: null,
+      }),
+      null,
+    );
+  });
+
+  it("returns null on whitespace-only provider", () => {
+    assert.equal(
+      toApiDeclareQuotaBody({
+        provider: "   ",
+        model: null,
+        confidence: "manual",
+        observedAt: null,
+        rawSignal: null,
+      }),
+      null,
+    );
+  });
+
+  it("omits renterLaneModel when missing or blank", () => {
+    const body = toApiDeclareQuotaBody({
+      provider: "cursor",
+      model: null,
+      confidence: "manual",
+      observedAt: "2026-05-12T10:00:00.000Z",
+      rawSignal: null,
+    });
+    assert.ok(body);
+    assert.equal("renterLaneModel" in body!, false);
+  });
+
+  it("falls back to current time when observedAt is null", () => {
+    const before = Date.now();
+    const body = toApiDeclareQuotaBody({
+      provider: "cursor",
+      model: "claude-3.7-sonnet",
+      confidence: "manual",
+      observedAt: null,
+      rawSignal: null,
+    });
+    const after = Date.now();
+    assert.ok(body);
+    const exhausted = Date.parse(body!.renterLaneExhaustedAt as string);
+    assert.ok(exhausted >= before && exhausted <= after);
+  });
+
+  it("defaults confidence to manual when null", () => {
+    const body = toApiDeclareQuotaBody({
+      provider: "cursor",
+      model: null,
+      confidence: null,
+      observedAt: "2026-05-12T10:00:00.000Z",
+      rawSignal: null,
+    });
+    assert.ok(body);
+    assert.equal(body!.triggerConfidence, "manual");
+  });
+
+  it("trims the provider before sending", () => {
+    const body = toApiDeclareQuotaBody({
+      provider: "  cursor  ",
+      model: null,
+      confidence: "manual",
+      observedAt: "2026-05-12T10:00:00.000Z",
+      rawSignal: null,
+    });
+    assert.ok(body);
+    assert.equal(body!.renterLaneProvider, "cursor");
+  });
+
+  it("omits renterQuotaSignal when rawSignal is null or non-object", () => {
+    const body = toApiDeclareQuotaBody({
+      provider: "cursor",
+      model: null,
+      confidence: "manual",
+      observedAt: "2026-05-12T10:00:00.000Z",
+      rawSignal: null,
+    });
+    assert.ok(body);
+    assert.equal("renterQuotaSignal" in body!, false);
   });
 });
