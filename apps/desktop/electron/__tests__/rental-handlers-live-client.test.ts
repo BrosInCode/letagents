@@ -330,6 +330,100 @@ test("decline-request forwards to declineRequest and maps to a request payload",
 });
 
 // ---------------------------------------------------------------------------
+// get-provider-dashboard (composed from listings + requests)
+// ---------------------------------------------------------------------------
+
+test("get-provider-dashboard composes live listings + pending requests", async () => {
+  const { client, calls } = makeFakeClient({
+    listProviderListings: {
+      ok: true,
+      status: 200,
+      body: {
+        listings: [
+          {
+            id: "listing_1",
+            display_name: "My agent",
+            ide_kind: "antigravity",
+            status: "active",
+            updated_at: "2026-05-11T10:00:00.000Z",
+          },
+        ],
+      },
+    },
+    listProviderRequests: {
+      ok: true,
+      status: 200,
+      body: [
+        {
+          id: "rsess_1",
+          listing_id: "listing_1",
+          status: "requested",
+          task_title: "Fix bug",
+          task_prompt: "...",
+          updated_at: "2026-05-11T10:00:00.000Z",
+        },
+      ],
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const dashboard = (await invoke(
+    handlers,
+    "desktop:rental:get-provider-dashboard",
+  )) as {
+    listings: Array<{ id: string }>;
+    pendingRequests: Array<{ sessionId: string; status: string }>;
+    activeSessions: unknown[];
+    readiness: { status: string };
+  };
+  const methodNames = calls.map((c) => c.method).sort();
+  assert.deepEqual(methodNames, ["listProviderListings", "listProviderRequests"]);
+  assert.equal(dashboard.listings.length, 1);
+  assert.equal(dashboard.listings[0]?.id, "listing_1");
+  assert.equal(dashboard.pendingRequests.length, 1);
+  assert.equal(dashboard.pendingRequests[0]?.sessionId, "rsess_1");
+  assert.equal(dashboard.pendingRequests[0]?.status, "pending");
+  // activeSessions / readiness still fall through to the empty
+  // dashboard shape (no endpoints yet).
+  assert.deepEqual(dashboard.activeSessions, []);
+  assert.equal(dashboard.readiness.status, "unknown");
+});
+
+test("get-provider-dashboard tolerates one side failing without nuking the other", async () => {
+  const { client } = makeFakeClient({
+    listProviderListings: {
+      ok: false,
+      status: 502,
+      error: "bad_gateway",
+      body: null,
+    },
+    listProviderRequests: {
+      ok: true,
+      status: 200,
+      body: { requests: [{ id: "rsess_x", updated_at: "2026-05-11T10:00:00.000Z" }] },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const dashboard = (await invoke(
+    handlers,
+    "desktop:rental:get-provider-dashboard",
+  )) as { listings: unknown[]; pendingRequests: Array<{ sessionId: string }> };
+  assert.deepEqual(dashboard.listings, []);
+  assert.equal(dashboard.pendingRequests.length, 1);
+  assert.equal(dashboard.pendingRequests[0]?.sessionId, "rsess_x");
+});
+
+test("get-provider-dashboard falls back to the empty stub when no apiClient", async () => {
+  const handlers = captureHandlersWithClient(null);
+  const dashboard = (await invoke(
+    handlers,
+    "desktop:rental:get-provider-dashboard",
+  )) as { listings: unknown[]; pendingRequests: unknown[]; readiness: { status: string } };
+  assert.deepEqual(dashboard.listings, []);
+  assert.deepEqual(dashboard.pendingRequests, []);
+  assert.equal(dashboard.readiness.status, "unknown");
+});
+
+// ---------------------------------------------------------------------------
 // No-client regression: every wired channel still returns its stub shape
 // ---------------------------------------------------------------------------
 
