@@ -10,6 +10,8 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 
+process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+
 import { isValidTransition } from "../rental/session-state-machine.js";
 
 // ===== State Machine Tests =====
@@ -329,6 +331,96 @@ describe("renter session route handlers", () => {
     };
     const res = await req("POST", "/api/rental/sessions/rsess_1/cancel");
     assert.strictEqual(res.status, 409);
+  });
+
+  // ===== p2.10a session-activity route =====
+
+  it("GET /api/rental/sessions/:id/activity returns events as renter", async () => {
+    deps.getSessionById = async () => ({
+      id: "rsess_1",
+      status: "active",
+      renter_account_id: FAKE_ACCOUNT_ID,
+      provider_account_id: "acct_provider_zzz",
+    });
+    let captured: { role?: string; limit?: number; verifiedOnly?: boolean } | null = null;
+    deps.listSessionActivity = async (
+      _sessionId: unknown,
+      opts: unknown,
+    ) => {
+      captured = opts as typeof captured extends infer T ? T : never;
+      return [
+        {
+          id: "evt_1",
+          session_id: "rsess_1",
+          room_id: "room_1",
+          event_type: "session.started",
+          source: "system",
+          verified: true,
+          visibility: "rental_visible",
+          payload: { hello: "world" },
+          created_at: new Date("2026-05-12T10:00:00Z"),
+        },
+      ];
+    };
+
+    const res = await req(
+      "GET",
+      "/api/rental/sessions/rsess_1/activity?limit=42&verified_only=true",
+    );
+    assert.strictEqual(res.status, 200);
+    const json = (await res.json()) as { events: Array<{ id: string }> };
+    assert.strictEqual(json.events.length, 1);
+    assert.strictEqual(json.events[0]?.id, "evt_1");
+    assert.strictEqual(captured!.role, "renter");
+    assert.strictEqual(captured!.limit, 42);
+    assert.strictEqual(captured!.verifiedOnly, true);
+  });
+
+  it("GET /api/rental/sessions/:id/activity uses provider role when caller is provider", async () => {
+    deps.getSessionById = async () => ({
+      id: "rsess_1",
+      status: "active",
+      renter_account_id: "acct_renter_zzz",
+      provider_account_id: FAKE_ACCOUNT_ID,
+    });
+    let captured: { role?: string } | null = null;
+    deps.listSessionActivity = async (
+      _sessionId: unknown,
+      opts: unknown,
+    ) => {
+      captured = opts as typeof captured extends infer T ? T : never;
+      return [];
+    };
+
+    const res = await req("GET", "/api/rental/sessions/rsess_1/activity");
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(captured!.role, "provider");
+  });
+
+  it("GET /api/rental/sessions/:id/activity returns 404 when session is hidden from caller", async () => {
+    deps.getSessionById = async () => null;
+    const res = await req("GET", "/api/rental/sessions/secret/activity");
+    assert.strictEqual(res.status, 404);
+  });
+
+  it("GET /api/rental/sessions/:id/activity defaults limit to 200 and verifiedOnly to false", async () => {
+    deps.getSessionById = async () => ({
+      id: "rsess_1",
+      status: "active",
+      renter_account_id: FAKE_ACCOUNT_ID,
+    });
+    let captured: { limit?: number; verifiedOnly?: boolean } | null = null;
+    deps.listSessionActivity = async (
+      _sessionId: unknown,
+      opts: unknown,
+    ) => {
+      captured = opts as typeof captured extends infer T ? T : never;
+      return [];
+    };
+    const res = await req("GET", "/api/rental/sessions/rsess_1/activity");
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(captured!.limit, 200);
+    assert.strictEqual(captured!.verifiedOnly, false);
   });
 });
 
