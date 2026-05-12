@@ -22,11 +22,14 @@ import type {
 import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
 import type { RentalApiClient } from "./rental/api-client.js";
 import {
+  mapApiListing,
   mapApiListingArray,
   mapApiRequest,
   mapApiRequestArray,
   mapApiSession,
   toApiCreateSessionBody,
+  toApiListingCreateBody,
+  toApiListingPatchBody,
 } from "./rental/api-mapper.js";
 
 export type DisabledRentalResult = {
@@ -99,18 +102,51 @@ export function registerDesktopRentalIpcHandlers(
       updatedAt: now(),
     };
   });
-  register("desktop:rental:create-listing", (_event, input) =>
-    buildStubListing("listing_stub", normalizeListingInput(input))
-  );
-  register("desktop:rental:update-listing", (_event, id, input) =>
-    buildStubListing(String(id), normalizeListingPatch(input))
-  );
-  register("desktop:rental:pause-listing", (_event, id) =>
-    buildStubListing(String(id), { status: "paused" })
-  );
-  register("desktop:rental:resume-listing", (_event, id) =>
-    buildStubListing(String(id), { status: "active" })
-  );
+  register("desktop:rental:create-listing", async (_event, input) => {
+    const normalized = normalizeListingInput(input);
+    if (apiClient) {
+      const result = await apiClient.createListing(toApiListingCreateBody(normalized));
+      if (result.ok) {
+        const mapped = mapApiListing(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubListing("listing_stub", normalized);
+  });
+  register("desktop:rental:update-listing", async (_event, id, input) => {
+    const listingId = String(id);
+    const normalized = normalizeListingPatch(input);
+    if (apiClient) {
+      const result = await apiClient.updateListing(listingId, toApiListingPatchBody(normalized));
+      if (result.ok) {
+        const mapped = mapApiListing(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubListing(listingId, normalized);
+  });
+  register("desktop:rental:pause-listing", async (_event, id) => {
+    const listingId = String(id);
+    if (apiClient) {
+      const result = await apiClient.pauseListing(listingId);
+      if (result.ok) {
+        const mapped = mapApiListing(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubListing(listingId, { status: "paused" });
+  });
+  register("desktop:rental:resume-listing", async (_event, id) => {
+    const listingId = String(id);
+    if (apiClient) {
+      const result = await apiClient.resumeListing(listingId);
+      if (result.ok) {
+        const mapped = mapApiListing(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubListing(listingId, { status: "active" });
+  });
   register("desktop:rental:refresh-quota", (_event, id) => buildEmptyQuotaSnapshot(String(id)));
   register("desktop:rental:run-preflight", (_event, id) => buildPreflightResult(typeof id === "string" ? id : null));
   register("desktop:rental:create-session", async (_event, input) => {

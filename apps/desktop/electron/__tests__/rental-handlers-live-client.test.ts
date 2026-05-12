@@ -424,6 +424,118 @@ test("get-provider-dashboard falls back to the empty stub when no apiClient", as
 });
 
 // ---------------------------------------------------------------------------
+// Listing CRUD wiring (p1.8f)
+// ---------------------------------------------------------------------------
+
+test("create-listing forwards to apiClient.createListing and maps the response", async () => {
+  const { client, calls } = makeFakeClient({
+    createListing: {
+      ok: true,
+      status: 201,
+      body: {
+        id: "listing_42",
+        display_name: "Antigravity desk",
+        ide_kind: "antigravity",
+        status: "active",
+        updated_at: "2026-05-12T10:00:00.000Z",
+      },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(handlers, "desktop:rental:create-listing", {
+    displayName: " Antigravity desk ",
+    ideKind: "antigravity",
+    supportedModes: ["scoped"],
+  })) as { id: string; displayName: string };
+
+  assert.equal(result.id, "listing_42");
+  assert.equal(result.displayName, "Antigravity desk");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "createListing");
+  // Outbound mapper trims user-visible strings.
+  const sentBody = calls[0]?.args[0] as { displayName?: string; ideKind?: string };
+  assert.equal(sentBody.displayName, "Antigravity desk");
+  assert.equal(sentBody.ideKind, "antigravity");
+});
+
+test("create-listing falls back to stub on api failure", async () => {
+  const { client } = makeFakeClient({
+    createListing: { ok: false, status: 500, error: "boom", body: null },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(handlers, "desktop:rental:create-listing", {
+    displayName: "Stub",
+    ideKind: "antigravity",
+  })) as { id: string };
+  assert.equal(result.id, "listing_stub");
+});
+
+test("update-listing forwards to apiClient.updateListing", async () => {
+  const { client, calls } = makeFakeClient({
+    updateListing: {
+      ok: true,
+      status: 200,
+      body: {
+        id: "listing_42",
+        display_name: "Updated label",
+        ide_kind: "antigravity",
+        status: "active",
+        updated_at: "2026-05-12T10:00:00.000Z",
+      },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(
+    handlers,
+    "desktop:rental:update-listing",
+    "listing_42",
+    { displayName: "Updated label" },
+  )) as { id: string; displayName: string };
+  assert.equal(result.displayName, "Updated label");
+  assert.equal(calls[0]?.args[0], "listing_42");
+  assert.deepEqual(calls[0]?.args[1], { displayName: "Updated label" });
+});
+
+test("pause-listing forwards to apiClient.pauseListing", async () => {
+  const { client, calls } = makeFakeClient({
+    pauseListing: {
+      ok: true,
+      status: 200,
+      body: {
+        id: "listing_42",
+        display_name: "Antigravity desk",
+        ide_kind: "antigravity",
+        status: "paused",
+        updated_at: "2026-05-12T10:00:00.000Z",
+      },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(
+    handlers,
+    "desktop:rental:pause-listing",
+    "listing_42",
+  )) as { status: string };
+  assert.equal(result.status, "paused");
+  assert.equal(calls[0]?.method, "pauseListing");
+  assert.equal(calls[0]?.args[0], "listing_42");
+});
+
+test("resume-listing falls back to stub on api failure", async () => {
+  const { client } = makeFakeClient({
+    resumeListing: { ok: false, status: 404, error: "missing", body: null },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(
+    handlers,
+    "desktop:rental:resume-listing",
+    "listing_404",
+  )) as { id: string; status: string };
+  assert.equal(result.id, "listing_404");
+  assert.equal(result.status, "active");
+});
+
+// ---------------------------------------------------------------------------
 // No-client regression: every wired channel still returns its stub shape
 // ---------------------------------------------------------------------------
 
