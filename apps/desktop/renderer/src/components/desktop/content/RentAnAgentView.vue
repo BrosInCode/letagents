@@ -9,8 +9,29 @@
       </p>
     </article>
 
+    <div class="rent-mode-toggle" role="tablist" aria-label="Rent an Agent role" data-testid="rent-mode-toggle">
+      <button
+        type="button"
+        role="tab"
+        :data-active="role === 'renter'"
+        data-testid="rent-mode-renter"
+        @click="role = 'renter'"
+      >
+        I want to rent
+      </button>
+      <button
+        type="button"
+        role="tab"
+        :data-active="role === 'provider'"
+        data-testid="rent-mode-provider"
+        @click="role = 'provider'"
+      >
+        I'm renting out
+      </button>
+    </div>
+
     <article
-      v-if="lastCreatedSession"
+      v-if="lastCreatedSession && role === 'renter'"
       class="surface-row single-line rent-session-banner"
       data-testid="rent-an-agent-session-created"
     >
@@ -32,6 +53,9 @@
         </button>
       </div>
     </article>
+
+    <RentProviderDashboard v-if="role === 'provider'" />
+    <template v-else>
 
     <div v-if="state === 'disabled'" class="surface-list" data-testid="rent-an-agent-disabled">
       <article class="surface-row single-line">
@@ -135,6 +159,7 @@
       @close="closeSessionModal"
       @created="onSessionCreated"
     />
+    </template>
   </section>
 </template>
 
@@ -142,12 +167,16 @@
 import { onMounted, ref, computed } from "vue";
 import type { DesktopRentalListing, DesktopRentalSession } from "../../../../../electron/ipc-types";
 import RentSessionCreateModal from "./RentSessionCreateModal.vue";
+import RentProviderDashboard from "./RentProviderDashboard.vue";
 
 defineProps<{
   roomIdentifier: string;
 }>();
 
 type ViewState = "loading" | "ready" | "error" | "disabled";
+type Role = "renter" | "provider";
+
+const role = ref<Role>("renter");
 
 const listings = ref<DesktopRentalListing[]>([]);
 const state = ref<ViewState>("loading");
@@ -281,5 +310,30 @@ function onSessionCreated(session: DesktopRentalSession): void {
 .rent-session-banner {
   background: color-mix(in srgb, var(--color-accent, #4f7cff) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--color-accent, #4f7cff) 30%, transparent);
+}
+.rent-mode-toggle {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--color-surface-2, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  margin: 0.5rem 0 0.25rem;
+  align-self: flex-start;
+}
+.rent-mode-toggle button {
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  border: none;
+  padding: 0.4rem 0.95rem;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.rent-mode-toggle button[data-active="true"] {
+  background: var(--color-accent, #4f7cff);
+  color: white;
 }
 </style>
