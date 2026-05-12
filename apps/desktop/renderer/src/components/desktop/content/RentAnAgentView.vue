@@ -9,6 +9,30 @@
       </p>
     </article>
 
+    <article
+      v-if="lastCreatedSession"
+      class="surface-row single-line rent-session-banner"
+      data-testid="rent-an-agent-session-created"
+    >
+      <div>
+        <p class="surface-title">Session started: {{ lastCreatedSession.taskTitle }}</p>
+        <p class="surface-subtitle">
+          <code>{{ lastCreatedSession.id }}</code> · {{ lastCreatedSession.mode }} ·
+          {{ lastCreatedSession.status }}
+        </p>
+      </div>
+      <div class="surface-meta">
+        <button
+          type="button"
+          class="rent-refresh-button"
+          data-testid="rent-an-agent-dismiss-banner"
+          @click="lastCreatedSession = null"
+        >
+          Dismiss
+        </button>
+      </div>
+    </article>
+
     <div v-if="state === 'disabled'" class="surface-list" data-testid="rent-an-agent-disabled">
       <article class="surface-row single-line">
         <div>
@@ -91,21 +115,46 @@
           <span class="state-pill" :data-state="statusState(listing.status)">
             {{ listing.status }}
           </span>
+          <button
+            type="button"
+            class="rent-refresh-button rent-start-button"
+            :data-testid="`rent-start-${listing.id}`"
+            :disabled="!canStart(listing)"
+            @click="openSessionModal(listing)"
+          >
+            Start rental
+          </button>
         </div>
       </article>
     </div>
+
+    <RentSessionCreateModal
+      :open="sessionModalOpen"
+      :listing="selectedListing"
+      :room-identifier="roomIdentifier"
+      @close="closeSessionModal"
+      @created="onSessionCreated"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref, computed } from "vue";
-import type { DesktopRentalListing } from "../../../../../electron/ipc-types";
+import type { DesktopRentalListing, DesktopRentalSession } from "../../../../../electron/ipc-types";
+import RentSessionCreateModal from "./RentSessionCreateModal.vue";
+
+defineProps<{
+  roomIdentifier: string;
+}>();
 
 type ViewState = "loading" | "ready" | "error" | "disabled";
 
 const listings = ref<DesktopRentalListing[]>([]);
 const state = ref<ViewState>("loading");
 const errorMessage = ref<string | null>(null);
+const sessionModalOpen = ref(false);
+const selectedListing = ref<DesktopRentalListing | null>(null);
+const lastCreatedSession = ref<DesktopRentalSession | null>(null);
 
 const listingsSummary = computed(() => {
   if (state.value === "loading") return "Loading listings...";
@@ -182,6 +231,27 @@ function statusState(status: string): string {
   if (normalized === "paused") return "away";
   return "offline";
 }
+
+function canStart(listing: DesktopRentalListing): boolean {
+  if (listing.status !== "active") return false;
+  if (listing.maxConcurrentSessions > 0 && listing.activeSessionCount >= listing.maxConcurrentSessions) return false;
+  return true;
+}
+
+function openSessionModal(listing: DesktopRentalListing): void {
+  selectedListing.value = listing;
+  sessionModalOpen.value = true;
+}
+
+function closeSessionModal(): void {
+  sessionModalOpen.value = false;
+  selectedListing.value = null;
+}
+
+function onSessionCreated(session: DesktopRentalSession): void {
+  lastCreatedSession.value = session;
+  void refresh();
+}
 </script>
 
 <style scoped>
@@ -202,5 +272,14 @@ function statusState(status: string): string {
 }
 .rent-refresh-button:not(:disabled):hover {
   background: var(--color-surface-3, rgba(255, 255, 255, 0.1));
+}
+.rent-start-button {
+  background: var(--color-accent, #4f7cff);
+  color: white;
+  border-color: transparent;
+}
+.rent-session-banner {
+  background: color-mix(in srgb, var(--color-accent, #4f7cff) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent, #4f7cff) 30%, transparent);
 }
 </style>

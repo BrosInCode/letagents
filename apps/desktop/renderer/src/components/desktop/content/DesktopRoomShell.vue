@@ -173,6 +173,7 @@
       <RentAnAgentView
         v-else
         key="rent"
+        :room-identifier="room.identifier"
       />
     </Transition>
 
