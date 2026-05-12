@@ -576,3 +576,61 @@ test("without apiClient every wired channel still returns its stub", async () =>
   )) as { status: string };
   assert.equal(decline.status, "declined");
 });
+
+// ---------------------------------------------------------------------------
+// get-activity wiring (p2.10b)
+// ---------------------------------------------------------------------------
+
+test("get-activity forwards to getSessionActivity and maps the response", async () => {
+  const { client, calls } = makeFakeClient({
+    getSessionActivity: {
+      ok: true,
+      status: 200,
+      body: {
+        events: [
+          {
+            id: "evt_1",
+            session_id: "rsess_42",
+            room_id: "room_1",
+            event_type: "session.started",
+            source: "system",
+            verified: true,
+            visibility: "rental_visible",
+            payload: { hello: "world" },
+            created_at: "2026-05-12T10:00:00.000Z",
+          },
+        ],
+      },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = (await invoke(
+    handlers,
+    "desktop:rental:get-activity",
+    "rsess_42",
+  )) as Array<{ id: string; sessionId: string }>;
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.id, "evt_1");
+  assert.equal(result[0]?.sessionId, "rsess_42");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "getSessionActivity");
+  assert.equal(calls[0]?.args[0], "rsess_42");
+});
+
+test("get-activity returns [] when the api returns an error", async () => {
+  const { client } = makeFakeClient({
+    getSessionActivity: { ok: false, status: 500, error: "boom", body: null },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const result = await invoke(handlers, "desktop:rental:get-activity", "rsess_42");
+  assert.deepEqual(result, []);
+});
+
+test("get-activity returns [] when sessionId is missing", async () => {
+  const { client, calls } = makeFakeClient({});
+  const handlers = captureHandlersWithClient(client);
+  const result = await invoke(handlers, "desktop:rental:get-activity", "");
+  assert.deepEqual(result, []);
+  assert.equal(calls.length, 0);
+});
