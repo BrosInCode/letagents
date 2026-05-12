@@ -67,6 +67,10 @@ import {
   type ReleaseLeaseInput,
   type ReleaseSessionLeaseResult,
 } from "../rental/quota-lease-orchestrator.js";
+import {
+  buildRefreshQuotaResponse,
+  parseProviderHint,
+} from "../rental/refresh-quota.js";
 
 // ===== Deps =====
 
@@ -98,6 +102,14 @@ export interface RentalInternalRouteDeps {
    * so we defer until route hit to keep test isolation).
    */
   heartbeatDeps: () => Promise<HeartbeatDeps>;
+  /**
+   * Read a session row for the refresh-quota route (p2.13). Returns
+   * the full row so the projector can read the renter-lane provider
+   * for the optional hint-match audit.
+   */
+  getSessionForRefreshQuota?: (
+    sessionId: string,
+  ) => Promise<typeof rental_sessions.$inferSelect | null>;
   /**
    * Read a session by id for liveness reporting. Mirrors the
    * `getSession` shape from heartbeat.ts so tests can inject one
@@ -151,6 +163,13 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
     return null;
   },
   heartbeatDeps: defaultHeartbeatDeps,
+  async getSessionForRefreshQuota(sessionId) {
+    const [row] = await db
+      .select()
+      .from(rental_sessions)
+      .where(eq(rental_sessions.id, sessionId));
+    return row ?? null;
+  },
   async getSessionForLiveness(sessionId) {
     const deps = await defaultHeartbeatDeps();
     return deps.getSession(sessionId);
@@ -511,6 +530,45 @@ export function registerRentalInternalRoutes(
 
       const info: LivenessInfo = getLivenessStatus(session);
       res.json(info);
+    },
+  );
+
+  // ===== Refresh quota (p2.13) =====
+  //
+  // The MCP `rental_refresh_quota` tool posts here. V1 semantics:
+  // we return the cached `native_quota_latest_snapshot` from the
+  // session row without push-polling the provider's adapter (no
+  // server→desktop push channel exists yet). `refreshed=false`
+  // documents that no new poll happened. Auth is the same renter-or-
+  // provider gate as the other internal routes.
+  app.post(
+    "/api/rental/sessions/:id/refresh-quota",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+
+      const providerHint = parseProviderHint(req.body);
+
+      const reader = deps.getSessionForRefreshQuota;
+      if (!reader) {
+        res.status(500).json({ error: "refresh_quota_unconfigured" });
+        return;
+      }
+
+      let session: typeof rental_sessions.$inferSelect | null;
+      try {
+        session = await reader(sessionId);
+      } catch {
+        res.status(500).json({ error: "refresh_quota_read_failed" });
+        return;
+      }
+      if (!session) {
+        res.status(404).json({ error: "session_not_found" });
+        return;
+      }
+
+      const body = buildRefreshQuotaResponse(session, providerHint);
+      res.json(body);
     },
   );
 

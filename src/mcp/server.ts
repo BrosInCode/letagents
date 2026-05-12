@@ -4547,19 +4547,35 @@ server.tool(
     };
   }
 );
-// ---------------------------------------------------------------------------
-// rental_refresh_quota — DEFERRED until POST /refresh-quota route lands (p2.8b)
-// ---------------------------------------------------------------------------
-// The handler (rentalRefreshQuota) and tests exist in rental-tools.ts /
-// rental-heartbeat.test.ts. Uncomment and register once the server-side
-// route is wired in p2.8b.
-//
-// server.tool(
-//   "rental_refresh_quota",
-//   "Trigger an on-demand quota refresh for a rental session...",
-//   { session_id: z.string(), provider: z.string().optional() },
-//   async ({ session_id, provider }) => { ... }
-// );
+server.tool(
+  "rental_refresh_quota",
+  "Read the most recent native quota snapshot recorded for a rental session (POST /api/rental/sessions/:id/refresh-quota). V1 returns the snapshot already stored on the session row by the desktop meter adapter pipeline; the server cannot push-poll a provider's adapter from here, so `refreshed` is false. Use this when the rented agent (or a renter UI) needs the freshest provider-side quota state visible to the server.",
+  {
+    session_id: z
+      .string()
+      .describe("Rental session id whose latest quota snapshot to read."),
+    provider: z
+      .string()
+      .optional()
+      .describe(
+        "Optional provider hint (e.g. 'antigravity', 'cursor'). Used only for an audit trail; the server returns whatever snapshot it has regardless.",
+      ),
+  },
+  async ({ session_id, provider }) => {
+    const result = await rentalRefreshQuota(rentalToolDeps, {
+      session_id,
+      provider,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
 
 server.tool(
   "rental_report_usage",
