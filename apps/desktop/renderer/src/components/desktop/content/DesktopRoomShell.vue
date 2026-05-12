@@ -164,10 +164,15 @@
       />
 
       <RoomDetailsView
-        v-else
+        v-else-if="activeTab === 'rooms'"
         key="rooms"
         :focus-rooms="focusRooms"
         :tasks="tasks"
+      />
+
+      <RentAnAgentView
+        v-else
+        key="rent"
       />
     </Transition>
 
@@ -203,6 +208,7 @@ import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
+import RentAnAgentView from "./RentAnAgentView.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
@@ -210,7 +216,7 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import { displayNameFromActor } from "../../../domain/agents";
 import { timestampValue } from "../../../domain/time";
 
-type RoomTabId = "chat" | "board" | "activity" | "rooms";
+type RoomTabId = "chat" | "board" | "activity" | "rooms" | "rent";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -271,6 +277,7 @@ const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null
   { id: "board", label: "Board", count: props.tasks.length },
   { id: "activity", label: "Activity", count: visibleParticipantCount.value + props.participantHiddenCount },
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
+  { id: "rent", label: "Rent an Agent", count: null },
 ]);
 const visibleParticipantCount = computed(() => props.participants.filter((participant) => !participant.hiddenAt).length);
 const visibleMessages = computed(() => {
