@@ -45,6 +45,12 @@ import {
   type RenterQuotaStateStore,
   type RenterQuotaStatus,
 } from "../rental/renter-quota-state.js";
+import {
+  listSessionActivityForUi,
+  type SessionActivityRole,
+  type SessionActivityRow,
+} from "../rental/session-activity.js";
+import { clampActivityLimit } from "../rental/session-activity-decisions.js";
 
 type Session = typeof rental_sessions.$inferSelect;
 
@@ -104,6 +110,19 @@ export interface RentalRenterRouteDeps {
   ) => Promise<BudgetExtensionDecisionResult>;
   // p2.6c renter-trigger state mirror
   renterQuotaState?: RenterQuotaStateStore;
+  /**
+   * p2.10a — session-activity read used by the desktop session-detail
+   * modal. Defaults to `listSessionActivityForUi` (DB-backed).
+   * Injection is intended for unit tests.
+   */
+  listSessionActivity?: (
+    sessionId: string,
+    opts: {
+      role: SessionActivityRole;
+      limit?: number;
+      verifiedOnly?: boolean;
+    },
+  ) => Promise<SessionActivityRow[]>;
 }
 
 export type ListingsRateLimiter = (renterKey: string) => boolean;
@@ -574,6 +593,47 @@ export function registerRentalRenterRoutes(
       }
       return res.json(session);
     }
+  );
+
+  // GET /api/rental/sessions/:id/activity — p2.10a
+  // Returns activity events visible to the caller's role (renter or
+  // provider) for the session, newest-first. The renderer's session
+  // -detail modal (p5.4) wires this in via the desktop IPC channel
+  // `desktop:rental:get-activity` once the matching client method
+  // lands.
+  app.get(
+    "/api/rental/sessions/:id/activity",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireAuth(req, res);
+      if (!accountId) return;
+
+      const sessionId = req.params.id as string;
+      const session = await deps.getSessionById(sessionId, accountId);
+      if (!session) {
+        return res.status(404).json({ error: "session_not_found" });
+      }
+
+      // getSessionById already enforces that the caller is either
+      // renter or provider. The role decides which visibility values
+      // are returned.
+      const role: SessionActivityRole =
+        session.renter_account_id === accountId ? "renter" : "provider";
+
+      const limit = clampActivityLimit(req.query.limit);
+      const verifiedOnly =
+        typeof req.query.verified_only === "string"
+        && /^(1|true|yes)$/i.test(req.query.verified_only);
+
+      try {
+        const list = deps.listSessionActivity ?? listSessionActivityForUi;
+        const events = await list(sessionId, { role, limit, verifiedOnly });
+        return res.json({ events });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "unknown_error";
+        return res.status(500).json({ error: message });
+      }
+    },
   );
 
   // POST /api/rental/sessions/:id/cancel
