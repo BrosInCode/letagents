@@ -119,6 +119,84 @@ describe("URL composition + auth header", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     assert.equal(headers.authorization, undefined);
   });
+
+  it("resolves the auth token from a sync getAuthToken on each request", async () => {
+    const { fetchFn, calls } = makeFetchHarness(() => ({ body: {} }));
+    let tokens = ["token_a", "token_b", "token_c"];
+    let i = 0;
+    const client = new RentalApiClient({
+      apiBaseUrl: "https://letagents.chat",
+      fetchFn,
+      getAuthToken: () => tokens[i++] ?? null,
+    });
+    await client.listProviderListings();
+    await client.listProviderListings();
+    await client.listProviderListings();
+    assert.equal(
+      (calls[0].init.headers as Record<string, string>).authorization,
+      "Bearer token_a",
+    );
+    assert.equal(
+      (calls[1].init.headers as Record<string, string>).authorization,
+      "Bearer token_b",
+    );
+    assert.equal(
+      (calls[2].init.headers as Record<string, string>).authorization,
+      "Bearer token_c",
+    );
+  });
+
+  it("resolves async getAuthToken (Promise<string>)", async () => {
+    const { fetchFn, calls } = makeFetchHarness(() => ({ body: {} }));
+    const client = new RentalApiClient({
+      apiBaseUrl: "https://letagents.chat",
+      fetchFn,
+      getAuthToken: async () => "lt_dyn_xyz",
+    });
+    await client.listProviderListings();
+    assert.equal(
+      (calls[0].init.headers as Record<string, string>).authorization,
+      "Bearer lt_dyn_xyz",
+    );
+  });
+
+  it("getAuthToken returning null / undefined / blank omits Authorization", async () => {
+    const { fetchFn, calls } = makeFetchHarness(() => ({ body: {} }));
+    const client = new RentalApiClient({
+      apiBaseUrl: "https://letagents.chat",
+      fetchFn,
+      getAuthToken: () => null,
+    });
+    await client.listProviderListings();
+    assert.equal((calls[0].init.headers as Record<string, string>).authorization, undefined);
+
+    const blank = makeFetchHarness(() => ({ body: {} }));
+    const client2 = new RentalApiClient({
+      apiBaseUrl: "https://letagents.chat",
+      fetchFn: blank.fetchFn,
+      getAuthToken: () => "   ",
+    });
+    await client2.listProviderListings();
+    assert.equal(
+      (blank.calls[0].init.headers as Record<string, string>).authorization,
+      undefined,
+    );
+  });
+
+  it("getAuthToken wins over a static authToken when both are provided", async () => {
+    const { fetchFn, calls } = makeFetchHarness(() => ({ body: {} }));
+    const client = new RentalApiClient({
+      apiBaseUrl: "https://letagents.chat",
+      fetchFn,
+      authToken: "static_token",
+      getAuthToken: () => "dynamic_token",
+    });
+    await client.listProviderListings();
+    assert.equal(
+      (calls[0].init.headers as Record<string, string>).authorization,
+      "Bearer dynamic_token",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

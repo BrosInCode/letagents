@@ -78,8 +78,19 @@ export interface RentalApiClientOptions {
    * Bearer token to send as `Authorization: Bearer <token>`. When
    * omitted the request goes unauthenticated; the server returns
    * 401 and the client surfaces that verbatim.
+   *
+   * Mutually exclusive with `getAuthToken`. When both are
+   * provided, `getAuthToken` wins.
    */
   authToken?: string | null;
+  /**
+   * Dynamic auth-token resolver. Called once per request, so the
+   * token can change across the client's lifetime (user signs in,
+   * signs out, token refresh, etc.) without rebuilding the
+   * client. Sync or async; returning null / undefined / empty
+   * sends the request unauthenticated.
+   */
+  getAuthToken?: () => string | null | undefined | Promise<string | null | undefined>;
   /**
    * Override `fetch` for tests. Defaults to `globalThis.fetch`.
    */
@@ -94,14 +105,28 @@ export interface RentalApiClientOptions {
 export class RentalApiClient {
   private readonly apiBaseUrl: string;
   private readonly authToken: string | null;
+  private readonly getAuthToken: RentalApiClientOptions["getAuthToken"];
   private readonly fetchFn: FetchLike;
   private readonly parseJson: (text: string) => unknown;
 
   constructor(options: RentalApiClientOptions) {
     this.apiBaseUrl = options.apiBaseUrl.replace(/\/+$/, "");
     this.authToken = options.authToken?.trim() || null;
+    this.getAuthToken = options.getAuthToken;
     this.fetchFn = options.fetchFn ?? (globalThis.fetch as FetchLike);
     this.parseJson = options.parseJson ?? JSON.parse;
+  }
+
+  private async resolveAuthToken(): Promise<string | null> {
+    if (this.getAuthToken) {
+      const value = await this.getAuthToken();
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+      }
+      return null;
+    }
+    return this.authToken;
   }
 
   // -------------------------------------------------------------------------
@@ -284,8 +309,9 @@ export class RentalApiClient {
       headers["content-type"] = "application/json";
       serializedBody = JSON.stringify(body);
     }
-    if (this.authToken) {
-      headers.authorization = `Bearer ${this.authToken}`;
+    const resolvedToken = await this.resolveAuthToken();
+    if (resolvedToken) {
+      headers.authorization = `Bearer ${resolvedToken}`;
     }
 
     let response: Response;
