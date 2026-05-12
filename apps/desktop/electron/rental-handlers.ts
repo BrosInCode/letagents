@@ -79,7 +79,26 @@ export function registerDesktopRentalIpcHandlers(
     }
     return [];
   });
-  register("desktop:rental:get-provider-dashboard", () => buildEmptyProviderDashboard());
+  register("desktop:rental:get-provider-dashboard", async () => {
+    if (!apiClient) return buildEmptyProviderDashboard();
+    // Compose the dashboard from two live API calls. We don't fail
+    // the whole dashboard if one side errors — the renderer can
+    // still show partial state. listings + pendingRequests is the
+    // minimum useful payload; activeSessions / quotaSnapshots /
+    // readiness fall through to the empty-dashboard shape until
+    // they get their own endpoints in a polish slice.
+    const [listingsResult, requestsResult] = await Promise.all([
+      apiClient.listProviderListings(),
+      apiClient.listProviderRequests(),
+    ]);
+    const empty = buildEmptyProviderDashboard();
+    return {
+      ...empty,
+      listings: listingsResult.ok ? mapApiListingArray(listingsResult.body) : empty.listings,
+      pendingRequests: requestsResult.ok ? mapApiRequestArray(requestsResult.body) : empty.pendingRequests,
+      updatedAt: now(),
+    };
+  });
   register("desktop:rental:create-listing", (_event, input) =>
     buildStubListing("listing_stub", normalizeListingInput(input))
   );
