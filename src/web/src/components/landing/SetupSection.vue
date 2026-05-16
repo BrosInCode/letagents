@@ -130,7 +130,7 @@ async function copyPrompt() {
 
 <style scoped>
 .setup-section {
-  padding: 120px 40px;
+  padding: 96px 40px 112px;
   max-width: var(--max-width);
   margin: 0 auto;
 }
@@ -138,10 +138,11 @@ async function copyPrompt() {
 .setup-title {
   font-size: 3rem;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   line-height: 1.15;
   margin-bottom: var(--space-md);
   color: var(--text);
+  text-wrap: balance;
 }
 
 .setup-sub {
@@ -265,8 +266,16 @@ async function copyPrompt() {
 }
 
 @media (max-width: 768px) {
-  .setup-section { padding: 80px 20px; }
-  .setup-title { font-size: 2.2rem; }
+  .setup-section { padding: 68px 20px 84px; }
+  .setup-title {
+    font-size: 2.35rem;
+    line-height: 1.12;
+  }
+  .setup-sub {
+    margin-bottom: 34px;
+    font-size: 1rem;
+    line-height: 1.58;
+  }
   .config-header { flex-direction: column; align-items: flex-start; padding: 10px 14px; }
   .ide-tabs { gap: 2px; }
   .ide-tab { padding: 5px 10px; font-size: 0.72rem; gap: 4px; }
@@ -276,7 +285,8 @@ async function copyPrompt() {
 }
 
 @media (max-width: 480px) {
-  .setup-section { padding: 64px 16px; }
+  .setup-section { padding: 56px 16px 72px; }
+  .setup-title { font-size: 2rem; }
   .config-card { border-radius: 16px; }
   .prompt-body { padding: 14px 16px; }
 }
