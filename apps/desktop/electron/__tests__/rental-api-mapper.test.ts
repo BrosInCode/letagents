@@ -19,6 +19,7 @@ import {
   mapApiActivityEventArray,
   mapApiListing,
   mapApiListingArray,
+  mapApiProviderReadiness,
   mapApiQuotaSnapshot,
   mapApiRequest,
   mapApiRequestArray,
@@ -589,5 +590,111 @@ describe("toApiDeclareQuotaBody", () => {
     });
     assert.ok(body);
     assert.equal("renterQuotaSignal" in body!, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mapApiProviderReadiness (p2.15)
+// ---------------------------------------------------------------------------
+
+describe("mapApiProviderReadiness", () => {
+  it("round-trips the documented snake_case wire shape", () => {
+    const readiness = mapApiProviderReadiness({
+      status: "ready",
+      summary: "2 listings: 2 active.",
+      blockers: [],
+      warnings: [],
+      badges: ["verified", "fast"],
+      checks: [
+        {
+          id: "listing:a",
+          label: "Active Agent",
+          status: "passed",
+          detail: "Listing is accepting rental requests.",
+        },
+      ],
+      last_checked_at: "2026-05-12T11:00:00.000Z",
+    });
+    assert.equal(readiness.status, "ready");
+    assert.equal(readiness.summary, "2 listings: 2 active.");
+    assert.deepEqual(readiness.badges, ["verified", "fast"]);
+    assert.equal(readiness.checks.length, 1);
+    assert.equal(readiness.checks[0]!.id, "listing:a");
+    assert.equal(readiness.checks[0]!.status, "passed");
+    assert.equal(readiness.checks[0]!.detail, "Listing is accepting rental requests.");
+    assert.equal(readiness.lastCheckedAt, "2026-05-12T11:00:00.000Z");
+  });
+
+  it("falls back to a safe unknown shape when given a non-object", () => {
+    for (const bad of [null, undefined, "", 0, [], "string"] as unknown[]) {
+      const out = mapApiProviderReadiness(bad);
+      assert.equal(out.status, "unknown");
+      assert.equal(out.summary, null);
+      assert.deepEqual(out.blockers, []);
+      assert.deepEqual(out.warnings, []);
+      assert.deepEqual(out.badges, []);
+      assert.deepEqual(out.checks, []);
+      assert.equal(out.lastCheckedAt, null);
+    }
+  });
+
+  it("clamps unknown status strings to 'unknown'", () => {
+    const out = mapApiProviderReadiness({
+      status: "wat",
+      last_checked_at: "2026-05-12T11:00:00.000Z",
+    });
+    assert.equal(out.status, "unknown");
+  });
+
+  it("accepts both snake_case and camelCase last_checked_at", () => {
+    const a = mapApiProviderReadiness({
+      status: "ready",
+      last_checked_at: "2026-05-12T11:00:00.000Z",
+    });
+    const b = mapApiProviderReadiness({
+      status: "ready",
+      lastCheckedAt: "2026-05-12T11:00:00.000Z",
+    });
+    assert.equal(a.lastCheckedAt, "2026-05-12T11:00:00.000Z");
+    assert.equal(b.lastCheckedAt, "2026-05-12T11:00:00.000Z");
+  });
+
+  it("drops checks with missing id/label and clamps unknown check statuses", () => {
+    const out = mapApiProviderReadiness({
+      status: "degraded",
+      checks: [
+        { id: "listing:a", label: "A", status: "passed", detail: null },
+        { id: "listing:b", label: "B", status: "wat", detail: "??" },
+        { label: "no id", status: "passed" },
+        { id: "no label", status: "passed" },
+        null,
+        "not an object",
+      ],
+    });
+    assert.equal(out.checks.length, 2);
+    assert.equal(out.checks[0]!.id, "listing:a");
+    assert.equal(out.checks[0]!.status, "passed");
+    assert.equal(out.checks[1]!.id, "listing:b");
+    assert.equal(out.checks[1]!.status, "unknown");
+  });
+
+  it("filters non-string entries from blockers/warnings/badges defensively", () => {
+    const out = mapApiProviderReadiness({
+      status: "blocked",
+      blockers: ["a", 42, null, "b"],
+      warnings: ["w"],
+      badges: ["verified", "", "fast", false],
+    });
+    assert.deepEqual(out.blockers, ["a", "b"]);
+    assert.deepEqual(out.warnings, ["w"]);
+    assert.deepEqual(out.badges, ["verified", "", "fast"]);
+  });
+
+  it("treats non-array checks as an empty list rather than throwing", () => {
+    const out = mapApiProviderReadiness({
+      status: "ready",
+      checks: "not-an-array",
+    });
+    assert.deepEqual(out.checks, []);
   });
 });

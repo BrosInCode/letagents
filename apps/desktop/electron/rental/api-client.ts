@@ -186,6 +186,18 @@ export class RentalApiClient {
     );
   }
 
+  /**
+   * p2.15 — read the provider-level readiness rollup for the
+   * authenticated provider. Server projects all of the caller's
+   * listings into a single `ApiProviderReadiness` (status + summary
+   * + blockers/warnings/badges + per-listing checks).
+   *
+   * Companion mapper: `mapApiProviderReadiness` in `api-mapper.ts`.
+   */
+  getProviderReadiness(): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>("GET", "/api/rental/provider/readiness");
+  }
+
   // -------------------------------------------------------------------------
   // Sessions — provider requests + renter create + lifecycle
   // -------------------------------------------------------------------------

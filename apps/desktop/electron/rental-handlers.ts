@@ -25,6 +25,7 @@ import {
   mapApiActivityEventArray,
   mapApiListing,
   mapApiListingArray,
+  mapApiProviderReadiness,
   mapApiRequest,
   mapApiRequestArray,
   mapApiSession,
@@ -87,21 +88,26 @@ export function registerDesktopRentalIpcHandlers(
   });
   register("desktop:rental:get-provider-dashboard", async () => {
     if (!apiClient) return buildEmptyProviderDashboard();
-    // Compose the dashboard from two live API calls. We don't fail
+    // Compose the dashboard from three live API calls. We don't fail
     // the whole dashboard if one side errors — the renderer can
     // still show partial state. listings + pendingRequests is the
-    // minimum useful payload; activeSessions / quotaSnapshots /
-    // readiness fall through to the empty-dashboard shape until
-    // they get their own endpoints in a polish slice.
-    const [listingsResult, requestsResult] = await Promise.all([
+    // minimum useful payload; activeSessions / quotaSnapshots
+    // still fall through to the empty-dashboard shape until they
+    // get their own endpoints. p2.15 wires the third pane —
+    // `/api/rental/provider/readiness` — into the existing rollup.
+    const [listingsResult, requestsResult, readinessResult] = await Promise.all([
       apiClient.listProviderListings(),
       apiClient.listProviderRequests(),
+      apiClient.getProviderReadiness(),
     ]);
     const empty = buildEmptyProviderDashboard();
     return {
       ...empty,
       listings: listingsResult.ok ? mapApiListingArray(listingsResult.body) : empty.listings,
       pendingRequests: requestsResult.ok ? mapApiRequestArray(requestsResult.body) : empty.pendingRequests,
+      readiness: readinessResult.ok
+        ? mapApiProviderReadiness(readinessResult.body)
+        : empty.readiness,
       updatedAt: now(),
     };
   });

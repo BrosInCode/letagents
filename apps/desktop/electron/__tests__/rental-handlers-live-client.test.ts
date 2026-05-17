@@ -333,7 +333,7 @@ test("decline-request forwards to declineRequest and maps to a request payload",
 // get-provider-dashboard (composed from listings + requests)
 // ---------------------------------------------------------------------------
 
-test("get-provider-dashboard composes live listings + pending requests", async () => {
+test("get-provider-dashboard composes live listings + pending requests + readiness", async () => {
   const { client, calls } = makeFakeClient({
     listProviderListings: {
       ok: true,
@@ -364,6 +364,26 @@ test("get-provider-dashboard composes live listings + pending requests", async (
         },
       ],
     },
+    getProviderReadiness: {
+      ok: true,
+      status: 200,
+      body: {
+        status: "ready",
+        summary: "1 listing: 1 active.",
+        blockers: [],
+        warnings: [],
+        badges: ["verified"],
+        checks: [
+          {
+            id: "listing:listing_1",
+            label: "My agent",
+            status: "passed",
+            detail: "Listing is accepting rental requests.",
+          },
+        ],
+        last_checked_at: "2026-05-12T11:00:00.000Z",
+      },
+    },
   });
   const handlers = captureHandlersWithClient(client);
   const dashboard = (await invoke(
@@ -373,19 +393,33 @@ test("get-provider-dashboard composes live listings + pending requests", async (
     listings: Array<{ id: string }>;
     pendingRequests: Array<{ sessionId: string; status: string }>;
     activeSessions: unknown[];
-    readiness: { status: string };
+    readiness: {
+      status: string;
+      summary: string | null;
+      badges: string[];
+      checks: Array<{ id: string }>;
+      lastCheckedAt: string | null;
+    };
   };
   const methodNames = calls.map((c) => c.method).sort();
-  assert.deepEqual(methodNames, ["listProviderListings", "listProviderRequests"]);
+  assert.deepEqual(methodNames, [
+    "getProviderReadiness",
+    "listProviderListings",
+    "listProviderRequests",
+  ]);
   assert.equal(dashboard.listings.length, 1);
   assert.equal(dashboard.listings[0]?.id, "listing_1");
   assert.equal(dashboard.pendingRequests.length, 1);
   assert.equal(dashboard.pendingRequests[0]?.sessionId, "rsess_1");
   assert.equal(dashboard.pendingRequests[0]?.status, "pending");
-  // activeSessions / readiness still fall through to the empty
-  // dashboard shape (no endpoints yet).
+  // activeSessions still falls through to the empty dashboard shape
+  // (no endpoint yet). readiness is now live.
   assert.deepEqual(dashboard.activeSessions, []);
-  assert.equal(dashboard.readiness.status, "unknown");
+  assert.equal(dashboard.readiness.status, "ready");
+  assert.equal(dashboard.readiness.summary, "1 listing: 1 active.");
+  assert.deepEqual(dashboard.readiness.badges, ["verified"]);
+  assert.equal(dashboard.readiness.checks.length, 1);
+  assert.equal(dashboard.readiness.lastCheckedAt, "2026-05-12T11:00:00.000Z");
 });
 
 test("get-provider-dashboard tolerates one side failing without nuking the other", async () => {
@@ -401,15 +435,23 @@ test("get-provider-dashboard tolerates one side failing without nuking the other
       status: 200,
       body: { requests: [{ id: "rsess_x", updated_at: "2026-05-11T10:00:00.000Z" }] },
     },
+    // getProviderReadiness intentionally unscripted — falls back to
+    // the "no_script" failure path, which the handler tolerates.
   });
   const handlers = captureHandlersWithClient(client);
   const dashboard = (await invoke(
     handlers,
     "desktop:rental:get-provider-dashboard",
-  )) as { listings: unknown[]; pendingRequests: Array<{ sessionId: string }> };
+  )) as {
+    listings: unknown[];
+    pendingRequests: Array<{ sessionId: string }>;
+    readiness: { status: string };
+  };
   assert.deepEqual(dashboard.listings, []);
   assert.equal(dashboard.pendingRequests.length, 1);
   assert.equal(dashboard.pendingRequests[0]?.sessionId, "rsess_x");
+  // readiness failed → falls through to the empty-dashboard shape
+  assert.equal(dashboard.readiness.status, "unknown");
 });
 
 test("get-provider-dashboard falls back to the empty stub when no apiClient", async () => {
@@ -421,6 +463,52 @@ test("get-provider-dashboard falls back to the empty stub when no apiClient", as
   assert.deepEqual(dashboard.listings, []);
   assert.deepEqual(dashboard.pendingRequests, []);
   assert.equal(dashboard.readiness.status, "unknown");
+});
+
+test("get-provider-dashboard surfaces live readiness even when listings/requests fail", async () => {
+  // Regression guard: readiness is composed independently of the
+  // listings/requests panes, so a partial-success dashboard should
+  // still show the readiness rollup.
+  const { client } = makeFakeClient({
+    listProviderListings: {
+      ok: false,
+      status: 503,
+      error: "service_unavailable",
+      body: null,
+    },
+    listProviderRequests: {
+      ok: false,
+      status: 503,
+      error: "service_unavailable",
+      body: null,
+    },
+    getProviderReadiness: {
+      ok: true,
+      status: 200,
+      body: {
+        status: "blocked",
+        summary: "No active listings.",
+        blockers: ["No active listings — every listing is either disabled or pending setup."],
+        warnings: [],
+        badges: [],
+        checks: [],
+        last_checked_at: "2026-05-12T11:05:00.000Z",
+      },
+    },
+  });
+  const handlers = captureHandlersWithClient(client);
+  const dashboard = (await invoke(
+    handlers,
+    "desktop:rental:get-provider-dashboard",
+  )) as {
+    listings: unknown[];
+    pendingRequests: unknown[];
+    readiness: { status: string; blockers: string[] };
+  };
+  assert.deepEqual(dashboard.listings, []);
+  assert.deepEqual(dashboard.pendingRequests, []);
+  assert.equal(dashboard.readiness.status, "blocked");
+  assert.equal(dashboard.readiness.blockers.length, 1);
 });
 
 // ---------------------------------------------------------------------------

@@ -45,8 +45,11 @@ import type {
   DesktopRentalMode,
   DesktopRentalNativeQuotaUnit,
   DesktopRentalPolicy,
+  DesktopRentalProviderReadiness,
+  DesktopRentalProviderReadinessCheck,
   DesktopRentalQuotaLease,
   DesktopRentalQuotaSnapshot,
+  DesktopRentalReadinessStatus,
   DesktopRentalRequest,
   DesktopRentalScope,
   DesktopRentalSession,
@@ -319,6 +322,87 @@ export function mapApiUsageSnapshot(
     endsAt: isoOrNull(obj.ends_at ?? obj.endsAt),
     quotaSnapshot: mapApiQuotaSnapshot(obj.quota_snapshot ?? obj.quotaSnapshot),
     updatedAt: isoOrNull(obj.updated_at ?? obj.updatedAt),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Provider readiness (p2.15)
+// ---------------------------------------------------------------------------
+
+const READINESS_STATUS_SET: ReadonlySet<DesktopRentalReadinessStatus> = new Set([
+  "ready",
+  "degraded",
+  "blocked",
+  "unknown",
+]);
+
+const CHECK_STATUS_SET: ReadonlySet<
+  DesktopRentalProviderReadinessCheck["status"]
+> = new Set(["passed", "warning", "failed", "unknown"]);
+
+function mapApiReadinessStatus(value: unknown): DesktopRentalReadinessStatus {
+  if (typeof value === "string" && (READINESS_STATUS_SET as Set<string>).has(value)) {
+    return value as DesktopRentalReadinessStatus;
+  }
+  return "unknown";
+}
+
+function mapApiReadinessCheck(
+  raw: unknown,
+): DesktopRentalProviderReadinessCheck | null {
+  if (!isObject(raw)) return null;
+  const id = readString(raw, "id");
+  const label = readString(raw, "label");
+  if (!id || !label) return null;
+  const statusRaw =
+    typeof raw.status === "string"
+      ? raw.status
+      : "unknown";
+  const status = (CHECK_STATUS_SET as Set<string>).has(statusRaw)
+    ? (statusRaw as DesktopRentalProviderReadinessCheck["status"])
+    : "unknown";
+  return {
+    id,
+    label,
+    status,
+    detail: readString(raw, "detail"),
+  };
+}
+
+/**
+ * p2.15 — map the server's `ApiProviderReadiness` (snake_case wire
+ * shape from `GET /api/rental/provider/readiness`) into the desktop
+ * `DesktopRentalProviderReadiness`. Defensive: returns an `unknown`
+ * status with empty arrays when the body is malformed.
+ */
+export function mapApiProviderReadiness(
+  raw: unknown,
+): DesktopRentalProviderReadiness {
+  if (!isObject(raw)) {
+    return {
+      status: "unknown",
+      summary: null,
+      blockers: [],
+      warnings: [],
+      badges: [],
+      checks: [],
+      lastCheckedAt: null,
+    };
+  }
+  const checksRaw = raw.checks ?? raw.checksList;
+  const checks: DesktopRentalProviderReadinessCheck[] = Array.isArray(checksRaw)
+    ? checksRaw
+        .map(mapApiReadinessCheck)
+        .filter((c): c is DesktopRentalProviderReadinessCheck => c !== null)
+    : [];
+  return {
+    status: mapApiReadinessStatus(raw.status),
+    summary: readString(raw, "summary"),
+    blockers: readStringArray(raw, "blockers"),
+    warnings: readStringArray(raw, "warnings"),
+    badges: readStringArray(raw, "badges"),
+    checks,
+    lastCheckedAt: isoOrNull(raw.last_checked_at ?? raw.lastCheckedAt),
   };
 }
 
