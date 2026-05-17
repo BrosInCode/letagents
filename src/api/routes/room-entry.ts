@@ -22,6 +22,12 @@ export interface RoomEntryRouteDeps {
   >;
 }
 
+export function buildRoomEntryPath(roomId: string, originalUrl?: string): string {
+  const queryIndex = originalUrl?.indexOf("?") ?? -1;
+  const suffix = queryIndex >= 0 && originalUrl ? originalUrl.slice(queryIndex) : "";
+  return `/in/${roomId}${suffix}`;
+}
+
 export function registerRoomEntryRoutes(
   app: Express,
   deps: RoomEntryRouteDeps
@@ -50,7 +56,7 @@ export function registerRoomEntryRoutes(
 
     const roomKey = `${provider}/${req.params.owner}/${req.params.repo}`;
     const normalized = normalizeRoomName(roomKey);
-    res.redirect(301, `/in/${normalized}`);
+    res.redirect(301, buildRoomEntryPath(normalized, req.originalUrl));
   });
 
   app.get(/^\/in\/(.+)$/, async (req: AuthenticatedRequest, res) => {
@@ -62,7 +68,7 @@ export function registerRoomEntryRoutes(
       const canonicalRoomId = project?.id ?? resolved.name;
 
       if (canonicalRoomId !== roomIdentifier) {
-        res.redirect(301, `/in/${canonicalRoomId}`);
+        res.redirect(301, buildRoomEntryPath(canonicalRoomId, req.originalUrl));
         return;
       }
 
@@ -70,7 +76,7 @@ export function registerRoomEntryRoutes(
         const decision = await deps.resolveGitHubRoomEntryDecision({
           roomName: canonicalRoomId,
           sessionAccount: req.sessionAccount,
-          redirectTo: `/in/${canonicalRoomId}`,
+          redirectTo: buildRoomEntryPath(canonicalRoomId, req.originalUrl),
         });
 
         if (decision.kind === "redirect") {

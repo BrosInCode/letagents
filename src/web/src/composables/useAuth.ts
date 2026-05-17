@@ -11,6 +11,46 @@ const isSignedIn = ref(false)
 const user = ref<AuthUser | null>(null)
 const isLoading = ref(false)
 
+interface SignInLocation {
+  pathname: string
+  search: string
+  hash: string
+}
+
+function getBrowserLocation(): SignInLocation | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  return window.location
+}
+
+export function resolveSignInRedirect(
+  redirectTo?: string,
+  location: SignInLocation | null = getBrowserLocation(),
+): string {
+  const explicitRedirect = redirectTo?.trim()
+  if (explicitRedirect) {
+    return explicitRedirect
+  }
+
+  if (!location) {
+    return '/'
+  }
+
+  const params = new URLSearchParams(location.search)
+  const queryRedirect = params.get('redirect_to')?.trim()
+  if (queryRedirect) {
+    return queryRedirect
+  }
+
+  const repoRoom = params.get('room')?.trim()
+  if (params.get('reason') === 'repo_signin_required' && repoRoom) {
+    return `/in/${repoRoom}`
+  }
+
+  return `${location.pathname || '/'}${location.search || ''}${location.hash || ''}`
+}
+
 /**
  * Composable for managing GitHub auth state.
  * Uses session cookies — calls the existing Express auth endpoints.
@@ -41,7 +81,7 @@ export function useAuth() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ redirect_to: redirectTo || window.location.pathname }),
+        body: JSON.stringify({ redirect_to: resolveSignInRedirect(redirectTo) }),
       })
       const data = await res.json()
       if (data.auth_url) {

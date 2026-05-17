@@ -741,8 +741,7 @@ async function retryJoin() {
 }
 
 async function handleSignIn() {
-  const roomId = route.params.roomId as string
-  await auth.signIn(roomId ? `/in/${roomId}` : '/')
+  await auth.signIn()
 }
 
 function normalizeRoomTab(rawValue: unknown): RoomTab {
