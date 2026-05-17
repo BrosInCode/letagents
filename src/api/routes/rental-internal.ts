@@ -80,6 +80,36 @@ import {
   type ContextSearchInput,
   type ContextSearchResult,
 } from "../rental/context-broker.js";
+import {
+  appendSignedChange as appendSignedChangeEntry,
+  SignedChangeJournalError,
+  type AppendSignedChangeInput,
+  type AppendSignedChangeResult,
+} from "../rental/signed-change-journal.js";
+import {
+  createDefaultPatchProposalDeps,
+  PatchProposalError,
+  proposePatch as proposePatchThroughGate,
+  type PersistedPatchProposal,
+  type ProposePatchInput,
+} from "../rental/patch-proposal.js";
+import {
+  createDefaultCommandBrokerDeps,
+  runWorkspaceCommand as runCommandThroughBroker,
+  type RunWorkspaceCommandInput,
+  type RunWorkspaceCommandResult,
+} from "../rental/command-broker.js";
+import {
+  COMMAND_ALLOWED,
+  COMMAND_BLOCKED,
+  COMMAND_OUTPUT,
+  COMMAND_REQUESTED,
+  COMMAND_RUN,
+  COMMAND_TIMED_OUT,
+  EDIT_PROPOSED,
+  PATCH_GATE_STARTED,
+  PATCH_PROPOSED,
+} from "../rental/activity-event-types.js";
 
 // ===== Deps =====
 
@@ -152,6 +182,18 @@ export interface RentalInternalRouteDeps {
     sessionId: string,
     input: Omit<ContextSearchInput, "sessionId">,
   ) => Promise<ContextSearchResult>;
+  appendSignedChange: (
+    sessionId: string,
+    input: Omit<AppendSignedChangeInput, "sessionId">,
+  ) => Promise<AppendSignedChangeResult>;
+  proposePatch: (
+    sessionId: string,
+    input: Omit<ProposePatchInput, "sessionId">,
+  ) => Promise<PersistedPatchProposal>;
+  runWorkspaceCommand: (
+    sessionId: string,
+    input: Omit<RunWorkspaceCommandInput, "sessionId">,
+  ) => Promise<RunWorkspaceCommandResult>;
 }
 
 let cachedHeartbeatDeps: HeartbeatDeps | null = null;
@@ -228,6 +270,24 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
   },
   async searchContext(sessionId, input) {
     return searchContext(createDefaultContextBrokerDeps(), {
+      sessionId,
+      ...input,
+    });
+  },
+  async appendSignedChange(sessionId, input) {
+    return appendSignedChangeEntry({
+      sessionId,
+      ...input,
+    });
+  },
+  async proposePatch(sessionId, input) {
+    return proposePatchThroughGate(createDefaultPatchProposalDeps(), {
+      sessionId,
+      ...input,
+    });
+  },
+  async runWorkspaceCommand(sessionId, input) {
+    return runCommandThroughBroker(createDefaultCommandBrokerDeps(), {
       sessionId,
       ...input,
     });
@@ -430,6 +490,40 @@ function contextErrorStatus(error: string | undefined): number {
   if (error === "secret_blocked" || error === "symlink_rejected") return 403;
   if (error.startsWith("workspace_")) return 409;
   return 500;
+}
+
+function normalizeIdempotencyKey(body: Record<string, unknown>): string | { error: string } {
+  const key = body.idempotencyKey ?? body.idempotency_key;
+  if (typeof key !== "string" || !key.trim()) {
+    return { error: "idempotencyKey is required" };
+  }
+  return key.trim();
+}
+
+function normalizePatchFiles(value: unknown): unknown[] | { error: string } {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { error: "files must be a non-empty array" };
+  }
+  return value;
+}
+
+async function emitRentalActivity(
+  deps: RentalInternalRouteDeps,
+  sessionId: string,
+  eventType: string,
+  source: "agent" | "patch_gate" | "tool" | "system",
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const session = await deps.getSessionLifecycle(sessionId);
+  if (!session?.room_id) return;
+  await deps.emitActivityEvent({
+    sessionId,
+    roomId: session.room_id,
+    eventType: eventType as any,
+    source,
+    payload,
+    verified: source !== "agent",
+  });
 }
 
 async function requireSessionAccess(
@@ -700,6 +794,192 @@ export function registerRentalInternalRoutes(
         return;
       }
       res.json(result);
+    },
+  );
+
+  // ===== Patch proposal and command broker tools (p5.3) =====
+  app.post(
+    "/api/rental/sessions/:id/patches/propose-edit",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+      if (!isPlainObject(req.body)) {
+        res.status(400).json({ error: "body must be an object" });
+        return;
+      }
+      const idempotencyKey = normalizeIdempotencyKey(req.body);
+      if (typeof idempotencyKey === "object") {
+        res.status(400).json({ error: idempotencyKey.error });
+        return;
+      }
+      const beforeContent = req.body.beforeContent ?? req.body.before_content;
+      const afterContent = req.body.afterContent ?? req.body.after_content;
+      if (typeof req.body.path !== "string" || !req.body.path.trim()) {
+        res.status(400).json({ error: "path is required" });
+        return;
+      }
+      if (typeof beforeContent !== "string" || typeof afterContent !== "string") {
+        res.status(400).json({ error: "beforeContent and afterContent are required" });
+        return;
+      }
+
+      try {
+        const result = await deps.appendSignedChange(sessionId, {
+          idempotencyKey,
+          edit: {
+            path: req.body.path,
+            beforeContent,
+            afterContent,
+            summary: typeof req.body.summary === "string" ? req.body.summary : null,
+            actorAgentKey: req.sessionAccount!.account_id,
+            toolName: "rental_propose_edit",
+          },
+        });
+        await emitRentalActivity(deps, sessionId, EDIT_PROPOSED, "agent", {
+          proposalId: result.proposal.id,
+          path: result.entry.path,
+          summary: result.entry.summary,
+          idempotent: result.idempotent,
+        });
+        res.status(result.idempotent ? 200 : 201).json({
+          success: true,
+          proposalId: result.proposal.id,
+          gateStatus: result.proposal.gate_status,
+          diffRef: result.proposal.diff_ref,
+          patch: result.patch,
+          idempotent: result.idempotent,
+        });
+      } catch (err) {
+        if (err instanceof SignedChangeJournalError) {
+          res.status(err.status).json({ success: false, error: err.message });
+          return;
+        }
+        res.status(500).json({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  app.post(
+    "/api/rental/sessions/:id/patches/propose-patch",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+      if (!isPlainObject(req.body)) {
+        res.status(400).json({ error: "body must be an object" });
+        return;
+      }
+      const idempotencyKey = normalizeIdempotencyKey(req.body);
+      if (typeof idempotencyKey === "object") {
+        res.status(400).json({ error: idempotencyKey.error });
+        return;
+      }
+      const files = normalizePatchFiles(req.body.files);
+      if (!Array.isArray(files)) {
+        res.status(400).json({ error: files.error });
+        return;
+      }
+
+      try {
+        await emitRentalActivity(deps, sessionId, PATCH_GATE_STARTED, "patch_gate", {
+          idempotencyKey,
+          fileCount: files.length,
+        });
+        const result = await deps.proposePatch(sessionId, {
+          idempotencyKey,
+          summary: typeof req.body.summary === "string" ? req.body.summary : null,
+          files: files as any,
+        });
+        await emitRentalActivity(deps, sessionId, PATCH_PROPOSED, "patch_gate", {
+          proposalId: result.proposal.id,
+          gateStatus: result.proposal.gate_status,
+          idempotent: result.idempotent,
+          warnings: result.gate.warnings,
+          rejectionReasons: result.gate.rejectionReasons,
+        });
+        res.status(result.idempotent ? 200 : 201).json({
+          success: true,
+          proposalId: result.proposal.id,
+          gateStatus: result.proposal.gate_status,
+          warnings: result.gate.warnings,
+          rejectionReasons: result.gate.rejectionReasons,
+          checks: result.gate.checks,
+          idempotent: result.idempotent,
+        });
+      } catch (err) {
+        if (err instanceof PatchProposalError) {
+          res.status(err.status).json({ success: false, error: err.message });
+          return;
+        }
+        res.status(500).json({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  app.post(
+    "/api/rental/sessions/:id/commands/run",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+      if (!isPlainObject(req.body)) {
+        res.status(400).json({ error: "body must be an object" });
+        return;
+      }
+      const timeoutMs = optionalPositiveInteger(req.body, "timeoutMs", 120_000);
+      if (typeof timeoutMs === "object") {
+        res.status(400).json({ error: timeoutMs.error });
+        return;
+      }
+
+      await emitRentalActivity(deps, sessionId, COMMAND_REQUESTED, "agent", {
+        argv: req.body.argv,
+      });
+      const result = await deps.runWorkspaceCommand(sessionId, {
+        argv: req.body.argv as string[],
+        timeoutMs,
+      });
+      if (result.error?.startsWith("command_blocked:")) {
+        await emitRentalActivity(deps, sessionId, COMMAND_BLOCKED, "system", {
+          argv: result.argv ?? req.body.argv,
+          error: result.error,
+        });
+        res.status(403).json(result);
+        return;
+      }
+      await emitRentalActivity(deps, sessionId, COMMAND_ALLOWED, "system", {
+        argv: result.argv ?? req.body.argv,
+      });
+      await emitRentalActivity(deps, sessionId, COMMAND_RUN, "tool", {
+        argv: result.argv ?? req.body.argv,
+      });
+      if (result.timedOut) {
+        await emitRentalActivity(deps, sessionId, COMMAND_TIMED_OUT, "system", {
+          argv: result.argv,
+          error: result.error ?? null,
+        });
+      }
+      if (result.success) {
+        await emitRentalActivity(deps, sessionId, COMMAND_OUTPUT, "tool", {
+          argv: result.argv,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
+      } else if (!result.timedOut) {
+        await emitRentalActivity(deps, sessionId, COMMAND_OUTPUT, "tool", {
+          argv: result.argv,
+          exitCode: result.exitCode ?? null,
+          stdout: result.stdout ?? "",
+          stderr: result.stderr ?? "",
+          error: result.error ?? null,
+        });
+      }
+      res.status(result.success ? 200 : 409).json(result);
     },
   );
 
