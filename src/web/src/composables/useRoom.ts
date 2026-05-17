@@ -174,6 +174,30 @@ export interface RoomTask {
   }>
 }
 
+function isRoomTaskPayload(value: unknown): value is RoomTask {
+  const candidate = value as Partial<RoomTask> | null | undefined
+  return Boolean(
+    candidate
+    && typeof candidate.id === 'string'
+    && typeof candidate.title === 'string'
+    && typeof candidate.status === 'string'
+  )
+}
+
+export function taskFromCreateTaskResponse(value: unknown): RoomTask | null {
+  const payload = value as { task?: unknown } | null | undefined
+  if (isRoomTaskPayload(payload?.task)) return payload.task
+  if (isRoomTaskPayload(value)) return value
+  return null
+}
+
+export function mergeCreatedTask(currentTasks: readonly RoomTask[], createdTask: RoomTask): RoomTask[] {
+  return [
+    ...currentTasks.filter(task => task.id !== createdTask.id),
+    createdTask,
+  ]
+}
+
 export interface TaskLeaseActionInput {
   action: 'release' | 'handoff'
   lease_id?: string | null
@@ -1591,12 +1615,27 @@ async function discardAttachmentUpload(roomIdentifier: string, uploadId: string)
 
 async function addTask(title: string): Promise<boolean> {
   if (!room.value) return false
+  const roomIdentifier = room.value.identifier
   try {
-    const data = await apiFetch(`${roomPath(room.value.identifier)}/tasks`, {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`, {
       method: 'POST',
       body: JSON.stringify({ title, created_by: 'human' }),
     })
-    if (data.task) tasks.value = [...tasks.value, data.task]
+    if (room.value?.identifier !== roomIdentifier) return false
+
+    const createdTask = taskFromCreateTaskResponse(data)
+    if (createdTask) {
+      tasks.value = mergeCreatedTask(tasks.value, createdTask)
+    }
+
+    await refreshRoomBoard()
+    if (
+      createdTask
+      && room.value?.identifier === roomIdentifier
+      && !tasks.value.some(task => task.id === createdTask.id)
+    ) {
+      tasks.value = mergeCreatedTask(tasks.value, createdTask)
+    }
     return true
   } catch {
     return false
