@@ -337,6 +337,13 @@
       "when": 1779066000000,
       "tag": "0047_rental_workspace_exposures",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1779152400000,
+      "tag": "0048_rental_patch_proposals",
+      "breakpoints": true
     }
   ]
 }
