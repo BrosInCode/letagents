@@ -98,6 +98,13 @@ describe("SecretFirewall — Path Denylist", () => {
     assert.ok(isPathBlocked(".aws/credentials"));
     assert.ok(isPathBlocked(".aws/config"));
   });
+
+  it("blocks service-account*.json wildcard", () => {
+    assert.ok(isPathBlocked("service-account.json"));
+    assert.ok(isPathBlocked("service_account.json"));
+    assert.ok(isPathBlocked("service-account-prod.json"));
+    assert.ok(isPathBlocked("service-account-12345.json"));
+  });
 });
 
 // ---------------------------------------------------------------------------

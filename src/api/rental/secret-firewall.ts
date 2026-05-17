@@ -176,6 +176,14 @@ function checkPathDenylist(filePath: string): FirewallFinding | null {
     };
   }
 
+  // Catch-all: service-account*.json glob
+  if (/^service[-_]account.*\.json$/i.test(basename)) {
+    return {
+      name: "Path denylist",
+      detail: `GCP service account: ${basename}`,
+    };
+  }
+
   // Nested credential directories — always blocked
   const nestedCredDirs = [
     { dir: ".ssh", reason: "SSH directory" },
@@ -276,14 +284,16 @@ function scanAndRedactEntropy(content: string): {
             });
 
             // Redact: replace the value inside the quotes
+            // Use lines[i] (not the stale 'line' var) for correct multi-replacement
+            const currentLine = lines[i];
             const matchStart = match.index!;
-            const quoteChar = line[matchStart];
+            const quoteChar = currentLine[matchStart];
             lines[i] =
-              line.slice(0, matchStart) +
+              currentLine.slice(0, matchStart) +
               quoteChar +
               "REDACTED_HIGH_ENTROPY" +
               quoteChar +
-              line.slice(matchStart + match[0].length);
+              currentLine.slice(matchStart + match[0].length);
             redactionCount++;
           }
         }
