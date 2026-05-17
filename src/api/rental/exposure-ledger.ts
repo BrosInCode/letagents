@@ -99,7 +99,8 @@ function normalizePath(filePath: string): string {
   let normalized = filePath.replace(/\\/g, "/");
 
   // Reject absolute paths — all exposure paths must be repo-relative
-  if (normalized.startsWith("/")) {
+  // Covers POSIX (/etc/passwd) and Windows (C:\Users\..., C:/Users/...)
+  if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) {
     throw new Error(
       `Absolute path rejected: "${filePath}" — paths must be repo-relative`,
     );
