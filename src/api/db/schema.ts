@@ -409,6 +409,70 @@ export const rental_usage_meters = pgTable(
   ],
 );
 
+// ===== RENTAL (Phase 4) =====
+export const rentalWorkspaceRetentionStatusEnum = pgEnum(
+  "rental_workspace_retention_status",
+  ["active", "archived", "expired", "deleted"],
+);
+
+/**
+ * Workspace manifest per spec §10.6.
+ *
+ * Records the materialized workspace for a rental session: the git
+ * base commit, the disposable work branch, which scope globs were
+ * applied, and retention lifecycle timestamps. The materializer
+ * creates a row when the workspace is first set up; the retention
+ * service marks it expired/deleted when TTL elapses.
+ */
+export const rental_workspace_manifests = pgTable(
+  "rental_workspace_manifests",
+  {
+    id: text("id").primaryKey(),
+    session_id: text("session_id").notNull(),
+    /** SHA of the base commit used for materialization. */
+    base_commit_sha: text("base_commit_sha").notNull(),
+    /** Disposable work branch created for the rental. */
+    work_branch: text("work_branch").notNull(),
+    /**
+     * JSON array of minimatch glob patterns that define what files
+     * are exposed into the rental workspace. Empty array = full repo.
+     */
+    scope_globs: jsonb("scope_globs").notNull().default([]),
+    /** Absolute path to the materialized workspace directory. */
+    workspace_path: text("workspace_path"),
+    /** Number of files materialized into the workspace. */
+    files_materialized: integer("files_materialized").notNull().default(0),
+    /** Total bytes of materialized files. */
+    bytes_materialized: integer("bytes_materialized").notNull().default(0),
+    retention_status: rentalWorkspaceRetentionStatusEnum("retention_status")
+      .notNull()
+      .default("active"),
+    materialized_at: timestamp("materialized_at", { withTimezone: true }),
+    /** When the workspace should be cleaned up. */
+    expires_at: timestamp("expires_at", { withTimezone: true }),
+    /** When the workspace was actually deleted from disk. */
+    deleted_at: timestamp("deleted_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: "rental_workspace_manifests_session_fk",
+      columns: [table.session_id],
+      foreignColumns: [rental_sessions.id],
+    }),
+    index("rental_workspace_manifests_session_id_idx").on(table.session_id),
+    index("rental_workspace_manifests_retention_idx").on(
+      table.retention_status,
+      table.expires_at,
+    ),
+  ],
+);
+
 export const id_sequences = pgTable("id_sequences", {
   name: text("name").primaryKey(),
   value: integer("value").notNull(),
