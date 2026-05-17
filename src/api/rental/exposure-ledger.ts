@@ -14,6 +14,7 @@
 
 import { and, eq, desc, sql } from "drizzle-orm";
 import { createHash } from "crypto";
+import * as path from "path";
 import {
   rental_workspace_exposures,
   type rentalExposureTypeEnum,
@@ -83,6 +84,50 @@ export interface ExposureLedgerDeps {
 }
 
 // ---------------------------------------------------------------------------
+// Path normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a file path for consistent storage and lookup.
+ * - Strips leading slashes (all paths are repo-relative)
+ * - Resolves `..` and `.` segments
+ * - Rejects paths that escape the repo root
+ * - Normalizes backslashes to forward slashes
+ */
+function normalizePath(filePath: string): string {
+  // Normalize separators
+  let normalized = filePath.replace(/\\/g, "/");
+
+  // Strip leading slashes — all paths are repo-relative
+  normalized = normalized.replace(/^\/+/, "");
+
+  // Resolve . and .. segments
+  const segments = normalized.split("/");
+  const resolved: string[] = [];
+
+  for (const seg of segments) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (resolved.length === 0) {
+        throw new Error(
+          `Path traversal detected: "${filePath}" escapes repo root`,
+        );
+      }
+      resolved.pop();
+    } else {
+      resolved.push(seg);
+    }
+  }
+
+  const result = resolved.join("/");
+  if (!result) {
+    throw new Error(`Empty path after normalization: "${filePath}"`);
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Core operations
 // ---------------------------------------------------------------------------
 
@@ -112,7 +157,7 @@ export async function recordExposure(
   const row = {
     id,
     session_id: input.sessionId,
-    path: input.path,
+    path: normalizePath(input.path),
     exposure_type: input.exposureType,
     reason: input.reason ?? null,
     redaction_count: input.redactionCount ?? 0,
@@ -168,7 +213,7 @@ export async function findExposure(
     .where(
       and(
         eq(rental_workspace_exposures.session_id, sessionId),
-        eq(rental_workspace_exposures.path, filePath),
+        eq(rental_workspace_exposures.path, normalizePath(filePath)),
       ),
     )
     .orderBy(desc(rental_workspace_exposures.created_at));
@@ -179,6 +224,11 @@ export async function findExposure(
 /**
  * Check if a file path was exposed in a session.
  * Used by Patch Gate to validate edits.
+ *
+ * Returns true only when:
+ * 1. The exposure exists
+ * 2. The exposure type is 'file' (not search_result, directory_listing, etc.)
+ * 3. The secret scan status is NOT 'blocked' (blocked = never exposed)
  */
 export async function isPathExposed(
   deps: ExposureLedgerDeps,
@@ -186,7 +236,15 @@ export async function isPathExposed(
   filePath: string,
 ): Promise<boolean> {
   const exposure = await findExposure(deps, sessionId, filePath);
-  return exposure !== null;
+  if (!exposure) return false;
+
+  // Only file-type exposures authorize patch edits
+  if (exposure.exposure_type !== "file") return false;
+
+  // Blocked files were never actually exposed
+  if (exposure.secret_scan_status === "blocked") return false;
+
+  return true;
 }
 
 /**
