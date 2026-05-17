@@ -473,6 +473,73 @@ export const rental_workspace_manifests = pgTable(
   ],
 );
 
+// ===== RENTAL (Phase 4 — Workspace Exposures) =====
+export const rentalExposureTypeEnum = pgEnum("rental_exposure_type", [
+  "file",
+  "search_result",
+  "directory_listing",
+  "command_output",
+]);
+
+export const rentalSecretScanStatusEnum = pgEnum("rental_secret_scan_status", [
+  "passed",
+  "redacted",
+  "blocked",
+]);
+
+/**
+ * Workspace exposure ledger per spec §19.4.
+ *
+ * Records every file or context fragment exposed to the provider
+ * agent during a rental session. Used by:
+ * - Patch Gate: validates edits only touch exposed files
+ * - Renter UI: shows what was shared
+ * - Audit: post-session disclosure record
+ */
+export const rental_workspace_exposures = pgTable(
+  "rental_workspace_exposures",
+  {
+    id: text("id").primaryKey(),
+    session_id: text("session_id").notNull(),
+    /** Relative path within the workspace. */
+    path: text("path").notNull(),
+    exposure_type: rentalExposureTypeEnum("exposure_type").notNull(),
+    /** Why this file was exposed (e.g. "scope glob match", "renter approved"). */
+    reason: text("reason"),
+    /** Number of secret values redacted before exposure. */
+    redaction_count: integer("redaction_count").notNull().default(0),
+    /** Result of the Secret Firewall scan. */
+    secret_scan_status: rentalSecretScanStatusEnum("secret_scan_status")
+      .notNull()
+      .default("passed"),
+    /** Who requested this exposure (agent key or "system"). */
+    requested_by: text("requested_by"),
+    /** Who approved it (renter account ID, "auto", or null if auto-approved). */
+    approved_by: text("approved_by"),
+    /** Scope ID linking to the workspace manifest scope_globs entry. */
+    scope_id: text("scope_id"),
+    /** File size in bytes at time of exposure. */
+    bytes_exposed: integer("bytes_exposed").notNull().default(0),
+    /** SHA-256 hash of the exposed content (for diff auditing). */
+    content_hash: text("content_hash"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    foreignKey({
+      name: "rental_workspace_exposures_session_fk",
+      columns: [table.session_id],
+      foreignColumns: [rental_sessions.id],
+    }),
+    index("rental_workspace_exposures_session_id_idx").on(table.session_id),
+    index("rental_workspace_exposures_session_path_idx").on(
+      table.session_id,
+      table.path,
+    ),
+  ],
+);
+
 export const id_sequences = pgTable("id_sequences", {
   name: text("name").primaryKey(),
   value: integer("value").notNull(),
