@@ -144,7 +144,11 @@ function normalizeRepoPath(path: string): string {
   if (!trimmed) {
     throw new SignedChangeJournalError("edit path is required", "invalid_input", 400);
   }
-  if (trimmed.startsWith("/") || trimmed.split("/").includes("..")) {
+  if (
+    trimmed.startsWith("/") ||
+    /^[a-zA-Z]:/.test(trimmed) ||
+    trimmed.split("/").includes("..")
+  ) {
     throw new SignedChangeJournalError(
       "edit path must be repo-relative",
       "invalid_input",

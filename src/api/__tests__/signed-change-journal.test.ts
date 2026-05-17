@@ -267,6 +267,22 @@ describe("appendSignedChange", () => {
       /repo-relative/,
     );
   });
+
+  it("rejects Windows drive-root edit paths", async () => {
+    const { deps } = buildDeps();
+    await assert.rejects(
+      appendSignedChange({
+        sessionId: "rsess_1",
+        idempotencyKey: "edit-1",
+        edit: {
+          path: "C:\\Users\\kd\\secret.ts",
+          beforeContent: "one\n",
+          afterContent: "two\n",
+        },
+      }, deps),
+      /repo-relative/,
+    );
+  });
 });
 
 describe("reconstructPatch", () => {
