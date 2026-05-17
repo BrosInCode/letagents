@@ -181,13 +181,36 @@ describe("PatchGate — Validation", () => {
     cleanupWorkspace(tmpDir);
   });
 
-  it("allows creation of new files without exposure check", async () => {
+  // FIX #4: creates now require exposure check too
+  it("rejects creation of new files when not exposed", async () => {
     tmpDir = createTmpWorkspace();
-    const deps = createDeps(tmpDir, new Set());
+    const deps = createDeps(tmpDir, new Set()); // nothing exposed
 
     const result = await validatePatch(deps, {
       sessionId: "s1",
       idempotencyKey: "k7",
+      files: [
+        {
+          path: "src/new-file.ts",
+          operation: "create",
+          content: 'export const foo = "bar";',
+        },
+      ],
+    });
+
+    assert.equal(result.verdict, "rejected");
+    assert.ok(result.rejectionReasons[0].includes("not exposed"));
+
+    cleanupWorkspace(tmpDir);
+  });
+
+  it("allows creation of new files when exposed", async () => {
+    tmpDir = createTmpWorkspace();
+    const deps = createDeps(tmpDir, new Set(["src/new-file.ts"])); // exposed
+
+    const result = await validatePatch(deps, {
+      sessionId: "s1",
+      idempotencyKey: "k7b",
       files: [
         {
           path: "src/new-file.ts",
@@ -260,7 +283,8 @@ describe("PatchGate — Validation", () => {
     cleanupWorkspace(tmpDir);
   });
 
-  it("passes with warnings when secrets are redacted", async () => {
+  // FIX #1: verify redacted content is stored in check result
+  it("stores redacted content for apply phase", async () => {
     tmpDir = createTmpWorkspace();
     const deps = createDeps(tmpDir, new Set(["src/index.ts"]), {
       scanContent: async (_path, content) => ({
@@ -285,6 +309,9 @@ describe("PatchGate — Validation", () => {
     assert.equal(result.verdict, "passed_with_warnings");
     assert.ok(result.warnings.some((w) => w.includes("redacted")));
     assert.equal(result.checks[0].secretsRedacted, 2);
+    // Verify sanitized content is stored
+    assert.ok(result.checks[0].sanitizedContent?.includes("REDACTED"));
+    assert.ok(!result.checks[0].sanitizedContent?.includes("secret"));
 
     cleanupWorkspace(tmpDir);
   });
@@ -332,11 +359,34 @@ describe("PatchGate — Validation", () => {
     cleanupWorkspace(tmpDir);
   });
 
+  // FIX #3: diff-only proposals are rejected
+  it("rejects diff-only proposals", async () => {
+    tmpDir = createTmpWorkspace();
+    const deps = createDeps(tmpDir, new Set(["src/index.ts"]));
+
+    const result = await validatePatch(deps, {
+      sessionId: "s1",
+      idempotencyKey: "k12b",
+      files: [
+        {
+          path: "src/index.ts",
+          operation: "modify",
+          diff: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+      ],
+    });
+
+    assert.equal(result.verdict, "rejected");
+    assert.ok(result.rejectionReasons[0].includes("diff-only"));
+
+    cleanupWorkspace(tmpDir);
+  });
+
   it("passes valid multi-file patch", async () => {
     tmpDir = createTmpWorkspace();
     const deps = createDeps(
       tmpDir,
-      new Set(["src/index.ts", "src/utils.ts"]),
+      new Set(["src/index.ts", "src/utils.ts", "src/new.ts"]),
     );
 
     const result = await validatePatch(deps, {
@@ -408,9 +458,45 @@ describe("PatchGate — Apply", () => {
     cleanupWorkspace(tmpDir);
   });
 
+  // FIX #1: verify redacted content is what gets written to disk
+  it("applies redacted content from Secret Firewall", async () => {
+    tmpDir = createTmpWorkspace();
+    const deps = createDeps(tmpDir, new Set(["src/index.ts"]), {
+      scanContent: async (_path, content) => ({
+        blocked: false,
+        redactionCount: 1,
+        content: content.replace("my-secret-key", "REDACTED"),
+      }),
+    });
+
+    const validation = await validatePatch(deps, {
+      sessionId: "s1",
+      idempotencyKey: "apply_redact",
+      files: [
+        {
+          path: "src/index.ts",
+          operation: "modify",
+          content: 'const apiKey = "my-secret-key";',
+        },
+      ],
+    });
+
+    assert.equal(validation.verdict, "passed_with_warnings");
+
+    const applied = await applyPatch(deps, validation);
+    assert.ok(applied.appliedAt);
+
+    // Verify REDACTED content was written, not original
+    const content = fs.readFileSync(path.join(tmpDir, "src/index.ts"), "utf-8");
+    assert.ok(content.includes("REDACTED"), "should contain REDACTED");
+    assert.ok(!content.includes("my-secret-key"), "should NOT contain original secret");
+
+    cleanupWorkspace(tmpDir);
+  });
+
   it("creates new files with parent directories", async () => {
     tmpDir = createTmpWorkspace();
-    const deps = createDeps(tmpDir, new Set());
+    const deps = createDeps(tmpDir, new Set(["src/deep/nested/file.ts"]));
 
     const validation = await validatePatch(deps, {
       sessionId: "s1",
@@ -482,6 +568,69 @@ describe("PatchGate — Apply", () => {
       () => applyPatch(deps, result),
       /Cannot apply a rejected patch/,
     );
+  });
+
+  // FIX #2: needs_renter_approval throws without explicit approval
+  it("throws when applying needs_renter_approval without approval flag", async () => {
+    tmpDir = createTmpWorkspace();
+    fs.writeFileSync(path.join(tmpDir, "package.json"), "{}");
+    execFileSync("git", ["add", "package.json"], { cwd: tmpDir });
+    execFileSync("git", ["commit", "-m", "add pkg"], { cwd: tmpDir });
+
+    const deps = createDeps(tmpDir, new Set(["package.json"]));
+
+    const validation = await validatePatch(deps, {
+      sessionId: "s1",
+      idempotencyKey: "apply_approval",
+      files: [
+        {
+          path: "package.json",
+          operation: "modify",
+          content: '{"name": "modified"}',
+        },
+      ],
+    });
+
+    assert.equal(validation.verdict, "needs_renter_approval");
+
+    await assert.rejects(
+      () => applyPatch(deps, validation),
+      /needs_renter_approval/,
+    );
+
+    cleanupWorkspace(tmpDir);
+  });
+
+  // FIX #2: needs_renter_approval succeeds WITH explicit approval
+  it("applies needs_renter_approval when renterApproved is true", async () => {
+    tmpDir = createTmpWorkspace();
+    fs.writeFileSync(path.join(tmpDir, "package.json"), "{}");
+    execFileSync("git", ["add", "package.json"], { cwd: tmpDir });
+    execFileSync("git", ["commit", "-m", "add pkg"], { cwd: tmpDir });
+
+    const deps = createDeps(tmpDir, new Set(["package.json"]));
+
+    const validation = await validatePatch(deps, {
+      sessionId: "s1",
+      idempotencyKey: "apply_approved",
+      files: [
+        {
+          path: "package.json",
+          operation: "modify",
+          content: '{"name": "modified"}',
+        },
+      ],
+    });
+
+    assert.equal(validation.verdict, "needs_renter_approval");
+
+    const applied = await applyPatch(deps, validation, { renterApproved: true });
+    assert.ok(applied.appliedAt);
+
+    const content = fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8");
+    assert.equal(content, '{"name": "modified"}');
+
+    cleanupWorkspace(tmpDir);
   });
 
   it("rolls back on failure", async () => {

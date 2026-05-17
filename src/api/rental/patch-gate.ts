@@ -9,11 +9,14 @@
  * applied to the rental workspace. Checks include:
  *
  * 1. **Scope validation**: Every changed file must be an exposed `file`
- *    type with non-blocked secret scan status.
+ *    type with non-blocked secret scan status. Includes creates.
  * 2. **Path safety**: Reject absolute, traversal, and sensitive paths.
- * 3. **Diff well-formedness**: Validate unified diff format.
- * 4. **Secret scan**: Run Secret Firewall on proposed content.
+ * 3. **Content requirement**: Diff-only proposals are rejected until
+ *    diff application is implemented.
+ * 4. **Secret scan**: Run Secret Firewall on proposed content. When
+ *    secrets are redacted, the redacted version replaces the original.
  * 5. **Atomic apply**: Apply patches transactionally — all or nothing.
+ *    Git commit failure triggers full rollback.
  */
 
 import { execFileSync } from "child_process";
@@ -37,7 +40,7 @@ export interface PatchFile {
   operation: "modify" | "create" | "delete";
   /** New content (required for modify/create, omitted for delete). */
   content?: string;
-  /** Unified diff (optional alternative to full content). */
+  /** Unified diff — currently rejected; reserved for future use. */
   diff?: string;
 }
 
@@ -58,6 +61,8 @@ export interface PatchCheckResult {
   reason?: string;
   warnings: string[];
   secretsRedacted: number;
+  /** The content that will actually be written (after redaction). */
+  sanitizedContent?: string;
 }
 
 export interface PatchGateResult {
@@ -224,33 +229,42 @@ export async function validatePatch(
       warnings.push(`Sensitive file modified: ${normalizedPath}`);
     }
 
-    // 2. Scope validation — every modified file must be exposed
-    if (file.operation !== "create") {
-      const exposed = await deps.isPathExposed(
-        proposal.sessionId,
-        normalizedPath,
+    // 2. Scope validation — ALL operations require exposure check
+    //    (creates included — agent can only create files in exposed scope)
+    const exposed = await deps.isPathExposed(
+      proposal.sessionId,
+      normalizedPath,
+    );
+    if (!exposed) {
+      check.reason = `File not exposed in session: "${normalizedPath}"`;
+      checks.push(check);
+      rejectionReasons.push(
+        `${normalizedPath}: not exposed — edits only allowed on exposed files`,
       );
-      if (!exposed) {
-        check.reason = `File not exposed in session: "${normalizedPath}"`;
+      continue;
+    }
+
+    // 3. Content validation — diff-only is rejected until diff apply is implemented
+    if (file.operation !== "delete") {
+      if (file.diff && !file.content) {
+        check.reason = `Diff-only patches are not yet supported — provide full content`;
         checks.push(check);
         rejectionReasons.push(
-          `${normalizedPath}: not exposed — edits only allowed on exposed files`,
+          `${normalizedPath}: diff-only patches not supported`,
         );
         continue;
       }
-    }
 
-    // 3. Content validation
-    if (file.operation !== "delete") {
-      if (!file.content && !file.diff) {
-        check.reason = `No content or diff provided for ${file.operation}`;
+      if (!file.content) {
+        check.reason = `No content provided for ${file.operation}`;
         checks.push(check);
         rejectionReasons.push(`${normalizedPath}: no content provided`);
         continue;
       }
 
-      // 4. Secret scan on proposed content
-      if (deps.scanContent && file.content) {
+      // 4. Secret scan on proposed content — write REDACTED version back
+      let contentToApply = file.content;
+      if (deps.scanContent) {
         const scanResult = await deps.scanContent(normalizedPath, file.content);
 
         if (scanResult.blocked) {
@@ -270,8 +284,13 @@ export async function validatePatch(
           warnings.push(
             `${normalizedPath}: ${scanResult.redactionCount} secrets redacted`,
           );
+          // Use the redacted content instead of the original
+          contentToApply = scanResult.content;
         }
       }
+
+      // Store the sanitized content for apply phase
+      check.sanitizedContent = contentToApply;
     }
 
     // 5. For modifications, verify the target file exists
@@ -330,22 +349,40 @@ export async function validatePatch(
 
 /**
  * Apply a validated patch to the workspace.
- * Should only be called after `validatePatch` returns a non-rejected verdict.
+ *
+ * Only applies patches with verdict "passed" or "passed_with_warnings".
+ * "needs_renter_approval" requires explicit renter approval (renterApproved flag).
+ * "rejected" always throws.
  *
  * Applies atomically:
  * - Creates a backup of each modified/deleted file
- * - Applies all changes
- * - On failure, rolls back all changes from backup
- * - On success, commits to the workspace branch
+ * - Applies all changes using SANITIZED content (post-redaction)
+ * - Stages and commits to git
+ * - On ANY failure (including git), rolls back all changes from backup
  */
 export async function applyPatch(
   deps: PatchGateDeps,
   result: PatchGateResult,
+  opts?: { renterApproved?: boolean },
 ): Promise<PatchGateResult> {
   const log = deps.log ?? (() => {});
 
   if (result.verdict === "rejected") {
     throw new Error("Cannot apply a rejected patch");
+  }
+
+  if (result.verdict === "needs_renter_approval" && !opts?.renterApproved) {
+    throw new Error(
+      "Cannot apply patch with verdict 'needs_renter_approval' without explicit renter approval",
+    );
+  }
+
+  // Build a map from normalized path → sanitized content from checks
+  const sanitizedContentMap = new Map<string, string>();
+  for (const check of result.checks) {
+    if (check.sanitizedContent !== undefined) {
+      sanitizedContentMap.set(check.file, check.sanitizedContent);
+    }
   }
 
   const backups = new Map<string, { content: Buffer | null; existed: boolean }>();
@@ -366,7 +403,7 @@ export async function applyPatch(
       }
     }
 
-    // Phase 2: Apply changes
+    // Phase 2: Apply changes — use SANITIZED content
     for (const file of result.proposal.files) {
       const normalizedPath = normalizePatchPath(file.path);
       const fullPath = path.join(deps.workspacePath, normalizedPath);
@@ -374,7 +411,9 @@ export async function applyPatch(
       switch (file.operation) {
         case "create":
         case "modify": {
-          if (!file.content) {
+          // Use sanitized content (post-redaction) from validation
+          const content = sanitizedContentMap.get(normalizedPath) ?? file.content;
+          if (!content) {
             throw new Error(`No content for ${file.operation}: ${normalizedPath}`);
           }
           // Ensure parent directory exists
@@ -382,7 +421,7 @@ export async function applyPatch(
           if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
           }
-          fs.writeFileSync(fullPath, file.content, "utf-8");
+          fs.writeFileSync(fullPath, content, "utf-8");
           log(`Applied ${file.operation}: ${normalizedPath}`);
           break;
         }
@@ -396,56 +435,50 @@ export async function applyPatch(
       }
     }
 
-    // Phase 3: Stage and commit
-    try {
-      const filePaths = result.proposal.files.map((f) =>
-        normalizePatchPath(f.path),
-      );
+    // Phase 3: Stage and commit — failure triggers full rollback
+    const filePaths = result.proposal.files.map((f) =>
+      normalizePatchPath(f.path),
+    );
 
-      // Stage all changed files
-      execFileSync("git", ["add", "--", ...filePaths], {
+    // Stage all changed files
+    execFileSync("git", ["add", "--", ...filePaths], {
+      cwd: deps.workspacePath,
+      timeout: 10_000,
+    });
+
+    // Also stage deletions
+    const deletions = result.proposal.files
+      .filter((f) => f.operation === "delete")
+      .map((f) => normalizePatchPath(f.path));
+
+    if (deletions.length > 0) {
+      execFileSync("git", ["rm", "--cached", "--ignore-unmatch", "--", ...deletions], {
         cwd: deps.workspacePath,
         timeout: 10_000,
       });
-
-      // Also stage deletions
-      const deletions = result.proposal.files
-        .filter((f) => f.operation === "delete")
-        .map((f) => normalizePatchPath(f.path));
-
-      if (deletions.length > 0) {
-        execFileSync("git", ["rm", "--cached", "--ignore-unmatch", "--", ...deletions], {
-          cwd: deps.workspacePath,
-          timeout: 10_000,
-        });
-      }
-
-      // Commit
-      const commitMsg = [
-        `rental: ${result.proposal.summary ?? "agent patch"}`,
-        "",
-        `Session: ${result.proposal.sessionId}`,
-        `Key: ${result.proposal.idempotencyKey}`,
-        `Files: ${result.proposal.files.length}`,
-        `Verdict: ${result.verdict}`,
-      ].join("\n");
-
-      execFileSync("git", ["commit", "-m", commitMsg, "--allow-empty"], {
-        cwd: deps.workspacePath,
-        timeout: 15_000,
-      });
-
-      log(`Committed patch to workspace branch`);
-    } catch (gitErr) {
-      log(`Git commit failed, changes are on disk but uncommitted: ${gitErr}`);
-      // Don't roll back — files are valid, just not committed
-      result.warnings.push("Changes applied but git commit failed");
     }
+
+    // Commit
+    const commitMsg = [
+      `rental: ${result.proposal.summary ?? "agent patch"}`,
+      "",
+      `Session: ${result.proposal.sessionId}`,
+      `Key: ${result.proposal.idempotencyKey}`,
+      `Files: ${result.proposal.files.length}`,
+      `Verdict: ${result.verdict}`,
+    ].join("\n");
+
+    execFileSync("git", ["commit", "-m", commitMsg, "--allow-empty"], {
+      cwd: deps.workspacePath,
+      timeout: 15_000,
+    });
+
+    log(`Committed patch to workspace branch`);
 
     result.appliedAt = new Date();
     return result;
   } catch (err) {
-    // Rollback
+    // Rollback — restores files AND resets git index
     log(`Patch apply failed, rolling back: ${err}`);
 
     for (const [filePath, backup] of backups) {
@@ -459,6 +492,16 @@ export async function applyPatch(
       } catch (rollbackErr) {
         log(`Rollback failed for ${filePath}: ${rollbackErr}`);
       }
+    }
+
+    // Reset git index to match working tree after rollback
+    try {
+      execFileSync("git", ["reset", "HEAD", "--"], {
+        cwd: deps.workspacePath,
+        timeout: 10_000,
+      });
+    } catch {
+      // Best-effort index reset
     }
 
     throw new Error(`Patch apply failed and rolled back: ${err}`);
