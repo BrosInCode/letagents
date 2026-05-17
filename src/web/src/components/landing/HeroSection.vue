@@ -71,19 +71,21 @@ onUnmounted(() => {
 
 <style scoped>
 .hero {
-  padding: 140px 40px 100px;
+  padding: 148px 40px 92px;
   text-align: center;
   max-width: var(--max-width);
   margin: 0 auto;
 }
 
 .hero-headline {
-  font-size: clamp(3rem, 8vw, 6.5rem);
+  max-width: 760px;
+  margin: 0 auto var(--space-lg);
+  font-size: 5.8rem;
   font-weight: 900;
-  letter-spacing: -0.04em;
-  line-height: 1.05;
-  margin-bottom: var(--space-lg);
+  letter-spacing: 0;
+  line-height: 1.03;
   color: #fafafa;
+  text-wrap: balance;
 }
 
 .hero-rotating {
@@ -98,11 +100,12 @@ onUnmounted(() => {
 }
 
 .hero-sub {
-  font-size: 1.2rem;
+  font-size: 1.12rem;
   color: var(--text-secondary);
-  max-width: 580px;
-  margin: 0 auto var(--space-2xl);
-  line-height: 1.7;
+  max-width: 620px;
+  margin: 0 auto 40px;
+  line-height: 1.65;
+  text-wrap: balance;
 }
 
 .hero-actions {
@@ -110,6 +113,8 @@ onUnmounted(() => {
   gap: var(--space-md);
   justify-content: center;
   flex-wrap: wrap;
+  margin: 0 auto;
+  max-width: 460px;
 }
 
 .btn-white {
@@ -153,14 +158,55 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .hero { padding: 120px 20px 80px; }
-  .hero-actions { flex-direction: column; width: 100%; }
-  .btn-white, .btn-ghost-lg { width: 100%; justify-content: center; }
+  .hero { padding: 112px 20px 64px; }
+  .hero-headline {
+    max-width: 520px;
+    font-size: 3.45rem;
+    line-height: 1.08;
+    margin-bottom: 18px;
+  }
+  .hero-sub {
+    max-width: 470px;
+    margin-bottom: 30px;
+    font-size: 1rem;
+    line-height: 1.58;
+  }
+  .hero-actions {
+    flex-direction: column;
+    width: 100%;
+    max-width: 420px;
+    gap: 10px;
+  }
+  .btn-white, .btn-ghost-lg {
+    width: 100%;
+    min-height: 52px;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 900px) and (min-width: 769px) {
+  .hero { padding: 128px 32px 72px; }
+  .hero-headline {
+    font-size: 4.4rem;
+  }
 }
 
 @media (max-width: 480px) {
-  .hero { padding: 112px 16px 72px; }
-  .hero-headline { word-break: break-word; }
-  .hero-sub { font-size: 1rem; margin-bottom: 36px; }
+  .hero { padding: 96px 16px 56px; }
+  .hero-headline {
+    font-size: 2.65rem;
+    line-height: 1.08;
+    word-break: normal;
+  }
+  .hero-sub {
+    margin-bottom: 28px;
+    font-size: 0.96rem;
+  }
+}
+
+@media (max-width: 360px) {
+  .hero-headline {
+    font-size: 2.35rem;
+  }
 }
 </style>

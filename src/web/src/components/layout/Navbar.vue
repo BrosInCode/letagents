@@ -48,15 +48,80 @@
         Open a Room →
       </RouterLink>
     </div>
+
+    <RouterLink to="/#start" class="btn btn-primary btn-sm nav-mobile-primary" @click="mobileMenuOpen = false">
+      Open Room
+    </RouterLink>
+    <button
+      class="nav-mobile-toggle"
+      type="button"
+      :aria-expanded="mobileMenuOpen"
+      aria-label="Toggle navigation"
+      @click="mobileMenuOpen = !mobileMenuOpen"
+    >
+      <CloseIcon v-if="mobileMenuOpen" :size="18" />
+      <MenuIcon v-else :size="18" />
+    </button>
+
+    <div v-if="mobileMenuOpen" class="nav-mobile-panel">
+      <div class="nav-mobile-grid">
+        <RouterLink
+          v-for="link in sectionLinks"
+          :key="`mobile-${link.to}`"
+          :to="link.to"
+          class="nav-mobile-link"
+          @click="mobileMenuOpen = false"
+        >
+          {{ link.label }}
+        </RouterLink>
+        <RouterLink to="/docs" class="nav-mobile-link" @click="mobileMenuOpen = false">Docs</RouterLink>
+        <a
+          href="https://github.com/BrosInCode/letagents"
+          target="_blank"
+          class="nav-mobile-link"
+          @click="mobileMenuOpen = false"
+        >
+          GitHub
+        </a>
+      </div>
+
+      <div class="nav-mobile-auth">
+        <template v-if="!auth.isSignedIn.value">
+          <button class="btn btn-ghost btn-sm nav-mobile-auth-button" @click="auth.signIn(); mobileMenuOpen = false">
+            <GitHubIcon :size="16" />
+            Sign In
+          </button>
+        </template>
+        <template v-else>
+          <div class="nav-mobile-user">
+            <img
+              v-if="auth.user.value?.avatar_url"
+              :src="auth.user.value.avatar_url"
+              :alt="auth.user.value.login"
+              class="nav-avatar"
+            />
+            <div v-else class="nav-avatar-fallback">
+              {{ auth.user.value?.login?.charAt(0)?.toUpperCase() || '?' }}
+            </div>
+            <span class="nav-mobile-username">{{ auth.user.value?.login }}</span>
+          </div>
+          <button class="nav-signout nav-mobile-signout" @click="auth.signOut(); mobileMenuOpen = false">Sign Out</button>
+        </template>
+      </div>
+    </div>
   </nav>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
+import CloseIcon from '@/components/icons/CloseIcon.vue'
 import GitHubIcon from '@/components/icons/GitHubIcon.vue'
+import MenuIcon from '@/components/icons/MenuIcon.vue'
 
 const auth = useAuth()
+const route = useRoute()
 
 const sectionLinks = [
   { to: '/#setup', label: 'Setup' },
@@ -64,6 +129,7 @@ const sectionLinks = [
 ]
 
 const isScrolled = ref(false)
+const mobileMenuOpen = ref(false)
 
 function onScroll() {
   isScrolled.value = window.scrollY > 20
@@ -71,6 +137,7 @@ function onScroll() {
 
 onMounted(() => window.addEventListener('scroll', onScroll, { passive: true }))
 onUnmounted(() => window.removeEventListener('scroll', onScroll))
+watch(() => route.fullPath, () => { mobileMenuOpen.value = false })
 </script>
 
 <style scoped>
@@ -128,6 +195,7 @@ onUnmounted(() => window.removeEventListener('scroll', onScroll))
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   text-decoration: none;
   color: var(--text);
   transition: opacity var(--duration-fast);
@@ -158,8 +226,9 @@ onUnmounted(() => window.removeEventListener('scroll', onScroll))
 .nav-name {
   font-size: 0.9rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
 }
 
 /* Links */
@@ -308,6 +377,88 @@ onUnmounted(() => window.removeEventListener('scroll', onScroll))
   border-color: rgba(255, 255, 255, 0.15);
 }
 
+.nav-mobile-primary,
+.nav-mobile-toggle,
+.nav-mobile-panel {
+  display: none;
+}
+
+.nav-mobile-toggle {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: rgba(255, 255, 255, 0.84);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.nav-mobile-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: rgba(12, 12, 12, 0.96);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+}
+
+.nav-mobile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.nav-mobile-link,
+.nav-mobile-auth-button,
+.nav-mobile-signout {
+  min-height: 42px;
+}
+
+.nav-mobile-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: rgba(255, 255, 255, 0.76);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 0.84rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.nav-mobile-auth {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.nav-mobile-user {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.nav-mobile-username {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .navbar { padding: 10px 18px; left: 16px; right: 16px; gap: 8px; }
@@ -318,9 +469,72 @@ onUnmounted(() => window.removeEventListener('scroll', onScroll))
   .nav-username { display: none; }
 }
 
+@media (max-width: 760px) {
+  .navbar {
+    padding: 10px 12px;
+    left: 12px;
+    right: 12px;
+    top: 8px;
+  }
+
+  .nav-links {
+    display: none;
+  }
+
+  .nav-brand {
+    flex: 1 1 auto;
+  }
+
+  .nav-name {
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nav-mobile-primary,
+  .nav-mobile-toggle {
+    display: inline-flex;
+  }
+
+  .nav-mobile-primary {
+    margin-left: auto;
+    padding: 7px 12px;
+    font-size: 0.8rem;
+  }
+
+  .nav-mobile-panel {
+    display: block;
+  }
+}
+
 @media (max-width: 480px) {
   .navbar { padding: 10px 12px; left: 8px; right: 8px; top: 6px; border-radius: var(--radius-lg); }
   .nav-logo { width: 26px; height: 26px; }
-  .nav-name { font-size: 0.8rem; }
+  .nav-name { max-width: 132px; font-size: 0.8rem; }
+}
+
+@media (max-width: 360px) {
+  .navbar {
+    padding: 9px 10px;
+  }
+
+  .nav-logo {
+    width: 24px;
+    height: 24px;
+  }
+
+  .nav-name {
+    max-width: 104px;
+  }
+
+  .nav-mobile-primary {
+    padding: 7px 9px;
+    font-size: 0.75rem;
+  }
+
+  .nav-mobile-toggle {
+    width: 36px;
+    height: 36px;
+  }
 }
 </style>

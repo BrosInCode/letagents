@@ -193,7 +193,7 @@ code, pre {
 .section-title {
   font-size: 2.2rem;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   line-height: 1.15;
   margin-bottom: var(--space-md);
 }
@@ -270,4 +270,3 @@ code, pre {
     }
   }
 }
-
