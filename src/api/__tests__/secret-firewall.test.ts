@@ -254,3 +254,32 @@ describe("SecretFirewall — Content Scan", () => {
     assert.equal(result.verdict, "passed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: multi-entropy on same line
+// ---------------------------------------------------------------------------
+
+describe("SecretFirewall — Regression", () => {
+  it("redacts multiple high-entropy strings on the same line", () => {
+    // Two high-entropy strings on the same line — both should be redacted
+    const secret1 = "aB3cD4eF5gH6iJ7kL8mN9oP0q";  // entropy > 4.5
+    const secret2 = "xY1zW2vU3tS4rQ5pO6nM7lK8jI";  // entropy > 4.5
+    const content = `config("${secret1}", "${secret2}");`;
+    const result = scanFile("src/config.ts", content);
+
+    // Both should be redacted
+    assert.ok(
+      !result.content!.includes(secret1),
+      "first secret should be redacted",
+    );
+    assert.ok(
+      !result.content!.includes(secret2),
+      "second secret should be redacted",
+    );
+    // Content should still be valid
+    assert.ok(
+      result.content!.includes("config("),
+      "surrounding code should be preserved",
+    );
+  });
+});
