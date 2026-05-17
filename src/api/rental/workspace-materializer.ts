@@ -8,10 +8,17 @@
  * The materializer is invoked when a rental session transitions to
  * "accepted" — the provider's agent gets a filtered checkout of the
  * renter's repo limited to the agreed scope globs.
+ *
+ * Security notes (review feedback):
+ * - All git commands use execFileSync with argument arrays (no shell injection)
+ * - Scope filtering uses file copy, not deletion (no tracked git deletions)
+ * - Always-blocked secret paths (.env, .git-credentials, etc.) are excluded
+ *   even in Trusted Open mode
+ * - Commit SHA and branch names are validated before use
  */
 
 import { eq } from "drizzle-orm";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -28,14 +35,12 @@ import { rental_workspace_manifests } from "../db/schema.js";
  * - `?` matches a single non-`/` character
  */
 function simpleGlobMatch(pattern: string, filepath: string): boolean {
-  // Convert glob pattern to regex
   let regexStr = "^";
   let i = 0;
   while (i < pattern.length) {
     const ch = pattern[i];
     if (ch === "*") {
       if (pattern[i + 1] === "*") {
-        // ** matches everything including /
         if (pattern[i + 2] === "/") {
           regexStr += "(?:.*/)?";
           i += 3;
@@ -44,7 +49,6 @@ function simpleGlobMatch(pattern: string, filepath: string): boolean {
           i += 2;
         }
       } else {
-        // * matches everything except /
         regexStr += "[^/]*";
         i++;
       }
@@ -65,6 +69,71 @@ function simpleGlobMatch(pattern: string, filepath: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Always-blocked secret paths (spec §10.3 / §12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Paths that are ALWAYS excluded, even in Trusted Open mode.
+ * These are known secret file paths that must never be exposed
+ * to a provider agent.
+ */
+const ALWAYS_BLOCKED_PATHS = [
+  ".env",
+  ".env.local",
+  ".env.production",
+  ".env.development",
+  ".env.staging",
+  ".env.*",
+  ".git-credentials",
+  ".netrc",
+  ".npmrc",
+  ".pypirc",
+  ".docker/config.json",
+  "**/.ssh/*",
+  "**/id_rsa",
+  "**/id_ed25519",
+  "**/*.pem",
+  "**/*.key",
+  "**/*.p12",
+  "**/*.pfx",
+  "**/secrets.yaml",
+  "**/secrets.yml",
+  "**/secrets.json",
+  "**/.vault-token",
+  "**/credentials.json",
+  "**/service-account*.json",
+];
+
+function isAlwaysBlocked(relPath: string): boolean {
+  return ALWAYS_BLOCKED_PATHS.some((pattern) =>
+    simpleGlobMatch(pattern, relPath),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Input validation
+// ---------------------------------------------------------------------------
+
+const COMMIT_SHA_REGEX = /^[0-9a-f]{7,40}$/i;
+const SAFE_BRANCH_CHARS = /^[a-zA-Z0-9\/_.-]+$/;
+
+function validateCommitSha(sha: string): void {
+  if (!COMMIT_SHA_REGEX.test(sha)) {
+    throw new Error(
+      `Invalid commit SHA: ${sha}. Must be 7-40 hex characters.`,
+    );
+  }
+}
+
+function validateBranchName(name: string): void {
+  if (!SAFE_BRANCH_CHARS.test(name)) {
+    throw new Error(
+      `Invalid branch name: ${name}. Contains unsafe characters.`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -77,7 +146,8 @@ export interface MaterializeWorkspaceInput {
   baseCommitSha: string;
   /**
    * Minimatch glob patterns that define which files are exposed.
-   * Empty array = full repo (Trusted Open Mode).
+   * Empty array = full repo (Trusted Open Mode) — still applies
+   * the always-blocked denylist.
    */
   scopeGlobs: string[];
   /** Optional override for the workspace root directory. */
@@ -128,10 +198,11 @@ const DEFAULT_WORKSPACE_ROOT = path.join(
 /**
  * Materialize a scoped workspace for a rental session.
  *
+ * Architecture (review-hardened):
  * 1. Creates a bare clone (or reuses cached) of the repo
- * 2. Creates a disposable work branch from the base commit
- * 3. Creates a git worktree checkout at a fresh temp path
- * 4. Applies scope-glob filter (deletes out-of-scope files)
+ * 2. Verifies the base commit exists
+ * 3. Copies matching files to a flat directory (no .git, no tracked deletions)
+ * 4. Applies always-blocked denylist even in Trusted Open mode
  * 5. Records the manifest row
  */
 export async function materializeWorkspace(
@@ -142,24 +213,27 @@ export async function materializeWorkspace(
   const workspaceRoot = input.workspaceRoot ?? DEFAULT_WORKSPACE_ROOT;
   const ttlHours = input.ttlHours ?? 24;
 
+  // Validate inputs
+  validateCommitSha(input.baseCommitSha);
+
   // Ensure workspace root exists
   fs.mkdirSync(workspaceRoot, { recursive: true });
 
-  // 1. Bare clone (or reuse cached)
+  // 1. Bare clone (or reuse cached) — using execFileSync for safety
   const repoHash = hashString(input.repoUrl);
   const barePath = path.join(workspaceRoot, ".bare-cache", repoHash);
 
   if (!fs.existsSync(barePath)) {
     log(`Cloning bare repo: ${input.repoUrl}`);
     fs.mkdirSync(path.dirname(barePath), { recursive: true });
-    execSync(`git clone --bare "${input.repoUrl}" "${barePath}"`, {
+    execFileSync("git", ["clone", "--bare", input.repoUrl, barePath], {
       timeout: 120_000,
       stdio: "pipe",
     });
   } else {
     log(`Reusing cached bare clone: ${barePath}`);
     try {
-      execSync("git fetch --all --prune", {
+      execFileSync("git", ["fetch", "--all", "--prune"], {
         cwd: barePath,
         timeout: 60_000,
         stdio: "pipe",
@@ -171,7 +245,7 @@ export async function materializeWorkspace(
 
   // 2. Verify base commit exists
   try {
-    execSync(`git cat-file -t ${input.baseCommitSha}`, {
+    execFileSync("git", ["cat-file", "-t", input.baseCommitSha], {
       cwd: barePath,
       timeout: 10_000,
       stdio: "pipe",
@@ -182,38 +256,56 @@ export async function materializeWorkspace(
     );
   }
 
-  // 3. Create disposable work branch
+  // 3. Create workspace via file copy (not git worktree — avoids tracked deletions)
+  const manifestId = deps.generateId();
+  const workspacePath = path.join(workspaceRoot, manifestId);
   const workBranch = `rental/${input.sessionId}`;
+
+  validateBranchName(workBranch);
+
+  // Create disposable branch in bare repo for tracking
   try {
-    execSync(`git branch "${workBranch}" ${input.baseCommitSha}`, {
-      cwd: barePath,
-      timeout: 10_000,
-      stdio: "pipe",
-    });
+    execFileSync(
+      "git",
+      ["branch", workBranch, input.baseCommitSha],
+      { cwd: barePath, timeout: 10_000, stdio: "pipe" },
+    );
   } catch {
-    // Branch may already exist from a re-materialization
     log(`Work branch ${workBranch} may already exist, continuing`);
   }
 
-  // 4. Create worktree checkout
-  const manifestId = deps.generateId();
-  const workspacePath = path.join(workspaceRoot, manifestId);
+  // Use git archive to extract files (no .git dir, no tracked deletions)
+  fs.mkdirSync(workspacePath, { recursive: true });
+  execFileSync(
+    "git",
+    ["archive", "--format=tar", input.baseCommitSha],
+    {
+      cwd: barePath,
+      timeout: 60_000,
+      stdio: ["pipe", fs.openSync(path.join(workspacePath, ".archive.tar"), "w"), "pipe"],
+    },
+  );
 
-  execSync(`git worktree add "${workspacePath}" "${workBranch}"`, {
-    cwd: barePath,
-    timeout: 60_000,
-    stdio: "pipe",
-  });
-  log(`Created worktree at ${workspacePath}`);
+  // Extract the tar
+  execFileSync(
+    "tar",
+    ["xf", ".archive.tar"],
+    { cwd: workspacePath, timeout: 60_000, stdio: "pipe" },
+  );
 
-  // 5. Apply scope-glob filter
-  const { fileCount, byteCount } = applyScopeFilter(
+  // Remove the temp tar
+  fs.unlinkSync(path.join(workspacePath, ".archive.tar"));
+
+  log(`Extracted files to ${workspacePath}`);
+
+  // 4. Apply scope filter + always-blocked denylist
+  const { fileCount, byteCount } = applyScopeAndDenylist(
     workspacePath,
     input.scopeGlobs,
     log,
   );
 
-  // 6. Record manifest
+  // 5. Record manifest
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000);
 
@@ -263,42 +355,52 @@ export async function getActiveManifest(
 }
 
 // ---------------------------------------------------------------------------
-// Scope filter
+// Scope + denylist filter
 // ---------------------------------------------------------------------------
 
 /**
- * Delete files that don't match any scope glob. If scopeGlobs is
- * empty, all files are kept (Trusted Open Mode).
+ * Remove files that don't match scope globs AND apply the always-blocked
+ * denylist. Unlike the previous implementation, this works on a plain
+ * directory (no .git) so removals don't create tracked deletions.
+ *
+ * If scopeGlobs is empty (Trusted Open), all files pass scope — but
+ * always-blocked paths are STILL removed per spec §10.3.
  */
-function applyScopeFilter(
+function applyScopeAndDenylist(
   workspacePath: string,
   scopeGlobs: string[],
   log: (msg: string) => void,
 ): { fileCount: number; byteCount: number } {
-  // Empty globs = full repo, no filtering
-  if (scopeGlobs.length === 0) {
-    return countFiles(workspacePath);
-  }
-
   const allFiles = walkDir(workspacePath);
-  let removedCount = 0;
+  let removedScope = 0;
+  let removedDenylist = 0;
 
   for (const absPath of allFiles) {
     const relPath = path.relative(workspacePath, absPath);
-    // Skip .git directory
-    if (relPath.startsWith(".git")) continue;
 
-    const matches = scopeGlobs.some((glob) => simpleGlobMatch(glob, relPath));
-    if (!matches) {
+    // Always-blocked denylist — even in Trusted Open
+    if (isAlwaysBlocked(relPath)) {
       fs.unlinkSync(absPath);
-      removedCount++;
+      removedDenylist++;
+      continue;
+    }
+
+    // Scope check — empty globs = all pass
+    if (scopeGlobs.length > 0) {
+      const matches = scopeGlobs.some((glob) => simpleGlobMatch(glob, relPath));
+      if (!matches) {
+        fs.unlinkSync(absPath);
+        removedScope++;
+      }
     }
   }
 
   // Clean up empty directories
   cleanEmptyDirs(workspacePath);
 
-  log(`Scope filter: removed ${removedCount} out-of-scope files`);
+  log(
+    `Filter: removed ${removedScope} out-of-scope, ${removedDenylist} blocked`,
+  );
   return countFiles(workspacePath);
 }
 
@@ -321,7 +423,6 @@ function walkDir(dir: string): string[] {
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === ".git") continue; // Skip .git
       results.push(...walkDir(fullPath));
     } else {
       results.push(fullPath);
@@ -333,7 +434,7 @@ function walkDir(dir: string): string[] {
 function cleanEmptyDirs(dir: string): void {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isDirectory() && entry.name !== ".git") {
+    if (entry.isDirectory()) {
       const fullPath = path.join(dir, entry.name);
       cleanEmptyDirs(fullPath);
       try {

@@ -6,16 +6,18 @@
  *
  * - Marks expired manifests when TTL elapses
  * - Deletes workspace directories from disk
- * - Cleans up git worktrees and disposable branches
- * - Archives manifests for completed sessions
+ * - Processes archived manifests (session complete → cleanup)
  *
  * Designed to run as a periodic sweep (e.g. cron or on-demand).
+ *
+ * Review feedback applied:
+ * - archiveWorkspace sets status to "expired" directly (not "archived")
+ *   so retention sweep will pick it up and delete from disk
+ * - No git worktree pruning needed (materializer uses git archive)
  */
 
-import { and, eq, lt, sql } from "drizzle-orm";
-import { execSync } from "child_process";
+import { and, eq, lt, or } from "drizzle-orm";
 import * as fs from "fs";
-import * as path from "path";
 import { rental_workspace_manifests } from "../db/schema.js";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +27,6 @@ import { rental_workspace_manifests } from "../db/schema.js";
 export interface RetentionSweepResult {
   expiredCount: number;
   deletedCount: number;
-  archivedCount: number;
   errors: Array<{ manifestId: string; error: string }>;
 }
 
@@ -52,7 +53,9 @@ export interface WorkspaceRetentionDeps {
  *
  * 1. Find all "active" manifests past their expires_at → mark "expired"
  * 2. Find all "expired" manifests → delete workspace from disk → mark "deleted"
- * 3. Return summary
+ *
+ * Note: archiveWorkspace() now sets status directly to "expired" with
+ * expires_at = now, so archived sessions are picked up in step 1/2.
  */
 export async function runRetentionSweep(
   deps: WorkspaceRetentionDeps,
@@ -62,7 +65,6 @@ export async function runRetentionSweep(
   const result: RetentionSweepResult = {
     expiredCount: 0,
     deletedCount: 0,
-    archivedCount: 0,
     errors: [],
   };
 
@@ -98,6 +100,7 @@ export async function runRetentionSweep(
   }
 
   // Step 2: Delete expired workspaces from disk
+  // This catches both TTL-expired and archive-expired manifests
   const expiredManifests = (await deps.db
     .select()
     .from(rental_workspace_manifests)
@@ -106,13 +109,12 @@ export async function runRetentionSweep(
     )) as Array<{
     id: string;
     workspace_path: string | null;
-    work_branch: string;
   }>;
 
   for (const manifest of expiredManifests) {
     try {
       if (manifest.workspace_path) {
-        await deleteWorkspaceFromDisk(manifest.workspace_path, log);
+        deleteWorkspaceFromDisk(manifest.workspace_path, log);
       }
 
       await deps.db
@@ -138,8 +140,11 @@ export async function runRetentionSweep(
 
 /**
  * Archive a workspace manifest (e.g. when a session completes).
- * Marks retention_status = "archived" but does NOT delete from disk
- * immediately — the next retention sweep will handle that.
+ * Sets retention_status = "expired" and expires_at = now so the
+ * next retention sweep will delete it from disk.
+ *
+ * Fixed per review: previously set "archived" status which the sweep
+ * never processed, leaving workspaces on disk forever.
  */
 export async function archiveWorkspace(
   deps: WorkspaceRetentionDeps,
@@ -149,8 +154,7 @@ export async function archiveWorkspace(
   await deps.db
     .update(rental_workspace_manifests)
     .set({
-      retention_status: "archived",
-      // Set expires_at to now so next sweep picks it up for cleanup
+      retention_status: "expired",
       expires_at: now,
       updated_at: now,
     })
@@ -167,46 +171,19 @@ export async function archiveWorkspace(
 // ---------------------------------------------------------------------------
 
 /**
- * Remove a workspace directory from disk and clean up the git worktree
- * reference if the bare cache is still present.
+ * Remove a workspace directory from disk.
+ * Since the materializer uses git archive (no .git dir, no worktree),
+ * cleanup is a simple recursive delete.
  */
-async function deleteWorkspaceFromDisk(
+function deleteWorkspaceFromDisk(
   workspacePath: string,
   log: (msg: string) => void,
-): Promise<void> {
+): void {
   if (!fs.existsSync(workspacePath)) {
     log(`Workspace path ${workspacePath} already absent`);
     return;
   }
 
-  // Try to prune the git worktree from the bare cache
-  const gitFile = path.join(workspacePath, ".git");
-  if (fs.existsSync(gitFile)) {
-    try {
-      const gitFileContent = fs.readFileSync(gitFile, "utf-8");
-      const bareMatch = gitFileContent.match(/gitdir:\s*(.+)/);
-      if (bareMatch) {
-        const bareWorktreePath = path.resolve(
-          workspacePath,
-          bareMatch[1].trim(),
-        );
-        const bareRepoPath = path.resolve(bareWorktreePath, "..", "..");
-        if (fs.existsSync(bareRepoPath)) {
-          execSync(`git worktree remove --force "${workspacePath}"`, {
-            cwd: bareRepoPath,
-            timeout: 30_000,
-            stdio: "pipe",
-          });
-          log(`Pruned worktree from bare cache`);
-          return; // worktree remove already deletes the directory
-        }
-      }
-    } catch {
-      log(`Could not prune worktree cleanly, falling back to rm -rf`);
-    }
-  }
-
-  // Fallback: recursive delete
   fs.rmSync(workspacePath, { recursive: true, force: true });
   log(`Removed workspace directory: ${workspacePath}`);
 }

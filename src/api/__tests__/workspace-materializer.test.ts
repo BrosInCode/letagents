@@ -165,7 +165,7 @@ describe("WorkspaceMaterializer", () => {
       "workspace should be under root",
     );
     assert.equal(result.workBranch, "rental/session_test_1");
-    assert.ok(result.filesMaterialized >= 4, "should have ≥4 files");
+    assert.ok(result.filesMaterialized >= 3, "should have ≥3 files (minus .env)");
     assert.ok(result.bytesMaterialized > 0, "should have >0 bytes");
 
     // Workspace directory should exist
@@ -173,6 +173,12 @@ describe("WorkspaceMaterializer", () => {
     assert.ok(
       fs.existsSync(path.join(result.workspacePath, "src", "index.ts")),
       "src/index.ts exists",
+    );
+
+    // .env should be blocked even in Trusted Open mode (always-blocked denylist)
+    assert.ok(
+      !fs.existsSync(path.join(result.workspacePath, ".env")),
+      ".env should be blocked even in Trusted Open mode",
     );
   });
 
@@ -273,7 +279,7 @@ describe("WorkspaceMaterializer", () => {
 // ---------------------------------------------------------------------------
 
 describe("WorkspaceRetention", () => {
-  it("archiveWorkspace marks manifest as archived", async () => {
+  it("archiveWorkspace marks manifest as expired for sweep pickup", async () => {
     let updatedStatus: string | null = null;
     const archiveDb = {
       update: () => ({
@@ -292,7 +298,7 @@ describe("WorkspaceRetention", () => {
 
     await archiveWorkspace({ db: archiveDb }, "session_archive_1");
 
-    assert.equal(updatedStatus, "archived", "should set status to archived");
+    assert.equal(updatedStatus, "expired", "should set status to expired for sweep");
   });
 
   it("retention sweep processes expired workspaces", async () => {
