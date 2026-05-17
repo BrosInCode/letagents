@@ -132,7 +132,7 @@ const props = defineProps<{
   tasks: TaskData[]
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   acceptTask: [taskId: string]
   claimTask: [taskId: string]
   cancelTask: [taskId: string]
@@ -168,6 +168,7 @@ const taskGroups = computed(() => {
 function addTask() {
   const title = newTaskTitle.value.trim()
   if (!title) return
+  emit('addTask', title)
   newTaskTitle.value = ''
 }
 
