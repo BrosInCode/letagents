@@ -19,97 +19,14 @@ import {
 } from "../rental/exposure-ledger.js";
 
 // ---------------------------------------------------------------------------
-// Mock DB — filters by session_id and path from the where clause
+// Mock DB — filters by session_id and path
 // ---------------------------------------------------------------------------
 
+/**
+ * Creates a mock DB that actually filters by session_id and path.
+ * Uses a simple array store with field-matching filter logic.
+ */
 function createMockDb() {
-  const exposures = new Map<string, Record<string, unknown>>();
-
-  return {
-    exposures,
-    db: {
-      insert: () => ({
-        values: (v: Record<string, unknown>) => ({
-          returning: async () => {
-            exposures.set(v.id as string, { ...v });
-            return [v];
-          },
-        }),
-      }),
-      select: () => ({
-        from: () => ({
-          where: (condition: unknown) => ({
-            orderBy: async () => {
-              // Extract filter criteria from the condition object
-              // The condition is an `and(eq(...), eq(...))` from drizzle
-              // We'll parse the stored rows and filter by matching fields
-              const allRows = Array.from(exposures.values());
-
-              // Simple heuristic: extract session_id and path from condition string
-              const condStr = JSON.stringify(condition);
-
-              return allRows.filter((row) => {
-                // If we can find session_id in the condition, filter on it
-                let matches = true;
-
-                // Check each row against condition fields encoded in the condition
-                // drizzle eq() produces objects; we inspect the stringified form
-                for (const [key, val] of Object.entries(row)) {
-                  if (
-                    (key === "session_id" || key === "path") &&
-                    condStr.includes(String(val))
-                  ) {
-                    // keep matching
-                  }
-                }
-
-                return matches;
-              });
-            },
-          }),
-        }),
-      }),
-    } as unknown as ExposureLedgerDeps["db"],
-  };
-}
-
-/**
- * More precise mock that actually filters by session_id and path.
- */
-function createFilteringMockDb() {
-  const exposures: Record<string, unknown>[] = [];
-
-  const db = {
-    insert: () => ({
-      values: (v: Record<string, unknown>) => ({
-        returning: async () => {
-          exposures.push({ ...v });
-          return [v];
-        },
-      }),
-    }),
-    select: () => ({
-      from: () => ({
-        where: (_condition: unknown) => ({
-          orderBy: async () => {
-            // We can't easily parse drizzle conditions, but we can use a
-            // closure-based approach: the test controls what's in the store
-            // Return all rows sorted by created_at desc — the caller
-            // (findExposure) takes [0], so newest first is correct
-            return [...exposures].reverse();
-          },
-        }),
-      }),
-    }),
-  } as unknown as ExposureLedgerDeps["db"];
-
-  return { exposures, db };
-}
-
-/**
- * Isolated mock: stores per-session, filters by session+path.
- */
-function createIsolatedMockDb() {
   const store: Record<string, unknown>[] = [];
 
   const db = {
@@ -125,12 +42,17 @@ function createIsolatedMockDb() {
       from: () => ({
         where: (condition: unknown) => ({
           orderBy: async () => {
-            // Return rows matching session/path extracted from condition
-            // Since we can't parse drizzle SQL easily, return all and let
-            // the caller filter — but we can do basic session matching
-            // by inspecting the condition stringification
-            const condStr = String(condition);
-            return [...store].reverse();
+            // Filter rows using the condition.
+            // Drizzle's eq/and produce objects with queryChunks.
+            // We extract field values by inspecting the condition tree.
+            const filters = extractFilters(condition);
+            const filtered = store.filter((row) => {
+              for (const [key, val] of Object.entries(filters)) {
+                if (row[key] !== val) return false;
+              }
+              return true;
+            });
+            return [...filtered].reverse(); // newest first
           },
         }),
       }),
@@ -138,6 +60,56 @@ function createIsolatedMockDb() {
   } as unknown as ExposureLedgerDeps["db"];
 
   return { store, db };
+}
+
+/**
+ * Extract field=value filters from drizzle eq/and conditions.
+ * Drizzle's eq() produces objects like:
+ *   { queryChunks: [Column, Param] }
+ * We walk the tree to find session_id and path filters.
+ */
+function extractFilters(
+  condition: unknown,
+): Record<string, string> {
+  const filters: Record<string, string> = {};
+
+  if (!condition || typeof condition !== "object") return filters;
+
+  const cond = condition as Record<string, unknown>;
+
+  // Handle `and(eq(...), eq(...))`
+  if (Array.isArray(cond.queryChunks)) {
+    // Single eq()
+    const chunks = cond.queryChunks as unknown[];
+    if (chunks.length >= 2) {
+      const col = chunks[0] as Record<string, unknown> | undefined;
+      const param = chunks[1] as Record<string, unknown> | undefined;
+      if (col?.name && param?.value !== undefined) {
+        filters[col.name as string] = param.value as string;
+      }
+    }
+  }
+
+  // Handle `and()` wrapper — it's a SQL with nested queryChunks
+  if (cond.queryChunks && Array.isArray(cond.queryChunks)) {
+    for (const chunk of cond.queryChunks as unknown[]) {
+      if (chunk && typeof chunk === "object") {
+        const sub = chunk as Record<string, unknown>;
+        if (sub.queryChunks && Array.isArray(sub.queryChunks)) {
+          const subChunks = sub.queryChunks as unknown[];
+          if (subChunks.length >= 2) {
+            const col = subChunks[0] as Record<string, unknown> | undefined;
+            const param = subChunks[1] as Record<string, unknown> | undefined;
+            if (col?.name && param?.value !== undefined) {
+              filters[col.name as string] = param.value as string;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return filters;
 }
 
 let idCounter = 0;
@@ -151,7 +123,7 @@ function mockGenerateId(): string {
 
 describe("ExposureLedger — Recording", () => {
   it("records a file exposure with content hash", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     const result = await recordExposure(deps, {
@@ -173,7 +145,7 @@ describe("ExposureLedger — Recording", () => {
   });
 
   it("records exposure without content (size 0, no hash)", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     const result = await recordExposure(deps, {
@@ -187,7 +159,7 @@ describe("ExposureLedger — Recording", () => {
   });
 
   it("records redacted exposure", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     const result = await recordExposure(deps, {
@@ -203,22 +175,22 @@ describe("ExposureLedger — Recording", () => {
     assert.equal(result.redaction_count, 1);
   });
 
-  it("normalizes paths on record", async () => {
-    const { db, exposures } = createFilteringMockDb();
+  it("normalizes paths with . and .. segments", async () => {
+    const { db, store } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
       sessionId: "session_norm",
-      path: "/src/./utils/../index.ts",
+      path: "src/./utils/../index.ts",
       exposureType: "file",
     });
 
-    const stored = exposures[0];
+    const stored = store[0];
     assert.equal(stored.path, "src/index.ts", "path should be normalized");
   });
 
-  it("rejects traversal paths", async () => {
-    const { db } = createFilteringMockDb();
+  it("rejects traversal paths that escape repo root", async () => {
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await assert.rejects(
@@ -232,11 +204,27 @@ describe("ExposureLedger — Recording", () => {
       "should reject path traversal",
     );
   });
+
+  it("rejects absolute paths", async () => {
+    const { db } = createMockDb();
+    const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
+
+    await assert.rejects(
+      () =>
+        recordExposure(deps, {
+          sessionId: "session_abs",
+          path: "/etc/passwd",
+          exposureType: "file",
+        }),
+      /absolute/i,
+      "should reject absolute paths",
+    );
+  });
 });
 
 describe("ExposureLedger — Query", () => {
   it("listExposures returns all exposures for a session", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -255,7 +243,7 @@ describe("ExposureLedger — Query", () => {
   });
 
   it("findExposure returns a specific exposure by path", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -271,7 +259,7 @@ describe("ExposureLedger — Query", () => {
 
 describe("ExposureLedger — isPathExposed authorization", () => {
   it("returns true for exposed file with passed scan", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -286,7 +274,7 @@ describe("ExposureLedger — isPathExposed authorization", () => {
   });
 
   it("returns true for exposed file with redacted scan", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -302,7 +290,7 @@ describe("ExposureLedger — isPathExposed authorization", () => {
   });
 
   it("returns false for blocked exposures", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -317,7 +305,7 @@ describe("ExposureLedger — isPathExposed authorization", () => {
   });
 
   it("returns false for non-file exposure types", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -331,7 +319,7 @@ describe("ExposureLedger — isPathExposed authorization", () => {
   });
 
   it("returns false for directory_listing type", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -347,7 +335,7 @@ describe("ExposureLedger — isPathExposed authorization", () => {
 
 describe("ExposureLedger — Summary", () => {
   it("getExposureSummary computes correct totals", async () => {
-    const { db } = createFilteringMockDb();
+    const { db } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     await recordExposure(deps, {
@@ -382,7 +370,7 @@ describe("ExposureLedger — Summary", () => {
 
 describe("ExposureLedger — Batch", () => {
   it("recordBatchExposures records multiple files", async () => {
-    const { db, exposures } = createFilteringMockDb();
+    const { db, store } = createMockDb();
     const deps: ExposureLedgerDeps = { db, generateId: mockGenerateId };
 
     const count = await recordBatchExposures(deps, "session_8", [
@@ -392,6 +380,6 @@ describe("ExposureLedger — Batch", () => {
     ]);
 
     assert.equal(count, 3, "should record 3 exposures");
-    assert.equal(exposures.length, 3, "mock db should have 3 entries");
+    assert.equal(store.length, 3, "mock db should have 3 entries");
   });
 });

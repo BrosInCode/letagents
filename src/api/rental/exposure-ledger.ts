@@ -98,8 +98,12 @@ function normalizePath(filePath: string): string {
   // Normalize separators
   let normalized = filePath.replace(/\\/g, "/");
 
-  // Strip leading slashes — all paths are repo-relative
-  normalized = normalized.replace(/^\/+/, "");
+  // Reject absolute paths — all exposure paths must be repo-relative
+  if (normalized.startsWith("/")) {
+    throw new Error(
+      `Absolute path rejected: "${filePath}" — paths must be repo-relative`,
+    );
+  }
 
   // Resolve . and .. segments
   const segments = normalized.split("/");
