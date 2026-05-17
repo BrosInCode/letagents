@@ -71,6 +71,15 @@ import {
   buildRefreshQuotaResponse,
   parseProviderHint,
 } from "../rental/refresh-quota.js";
+import {
+  createDefaultContextBrokerDeps,
+  readContextFile,
+  searchContext,
+  type ContextReadFileInput,
+  type ContextReadFileResult,
+  type ContextSearchInput,
+  type ContextSearchResult,
+} from "../rental/context-broker.js";
 
 // ===== Deps =====
 
@@ -135,6 +144,14 @@ export interface RentalInternalRouteDeps {
   releaseSessionLease?: (
     input: ReleaseLeaseInput,
   ) => Promise<ReleaseSessionLeaseResult>;
+  readContextFile: (
+    sessionId: string,
+    input: Omit<ContextReadFileInput, "sessionId">,
+  ) => Promise<ContextReadFileResult>;
+  searchContext: (
+    sessionId: string,
+    input: Omit<ContextSearchInput, "sessionId">,
+  ) => Promise<ContextSearchResult>;
 }
 
 let cachedHeartbeatDeps: HeartbeatDeps | null = null;
@@ -202,6 +219,18 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
   },
   async releaseSessionLease(input) {
     return releaseSessionLease(input, defaultQuotaLeaseOrchestratorDeps);
+  },
+  async readContextFile(sessionId, input) {
+    return readContextFile(createDefaultContextBrokerDeps(), {
+      sessionId,
+      ...input,
+    });
+  },
+  async searchContext(sessionId, input) {
+    return searchContext(createDefaultContextBrokerDeps(), {
+      sessionId,
+      ...input,
+    });
   },
 };
 
@@ -365,6 +394,42 @@ function parseReconcile(body: unknown): BudgetReconcileInput | { error: string }
   const reservedCostLrt = finiteNonNegativeField(body, "reservedCostLrt");
   if (typeof reservedCostLrt !== "number") return reservedCostLrt;
   return { actualCostLrt, reservedCostLrt };
+}
+
+function optionalPositiveInteger(
+  body: Record<string, unknown>,
+  field: string,
+  max: number,
+): number | undefined | { error: string } {
+  const value = body[field];
+  if (value === undefined || value === null) return undefined;
+  if (
+    typeof value !== "number"
+    || !Number.isFinite(value)
+    || !Number.isInteger(value)
+    || value <= 0
+  ) {
+    return { error: `${field} must be a positive integer` };
+  }
+  return Math.min(value, max);
+}
+
+function contextErrorStatus(error: string | undefined): number {
+  if (!error) return 500;
+  if (
+    error.includes("required")
+    || error.includes("absolute_path")
+    || error.includes("traversal")
+    || error.includes("null byte")
+  ) {
+    return 400;
+  }
+  if (error === "file_not_found") return 404;
+  if (error === "not_a_file") return 400;
+  if (error.startsWith("file_too_large")) return 413;
+  if (error === "secret_blocked" || error === "symlink_rejected") return 403;
+  if (error.startsWith("workspace_")) return 409;
+  return 500;
 }
 
 async function requireSessionAccess(
@@ -569,6 +634,72 @@ export function registerRentalInternalRoutes(
 
       const body = buildRefreshQuotaResponse(session, providerHint);
       res.json(body);
+    },
+  );
+
+  // ===== Context Broker tools (p4.4) =====
+  app.post(
+    "/api/rental/sessions/:id/context/read-file",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+      if (!isPlainObject(req.body)) {
+        res.status(400).json({ error: "body must be an object" });
+        return;
+      }
+      if (typeof req.body.path !== "string" || !req.body.path.trim()) {
+        res.status(400).json({ error: "path is required" });
+        return;
+      }
+      const maxBytes = optionalPositiveInteger(req.body, "maxBytes", 1024 * 1024);
+      if (typeof maxBytes === "object") {
+        res.status(400).json({ error: maxBytes.error });
+        return;
+      }
+
+      const result = await deps.readContextFile(sessionId, {
+        path: req.body.path,
+        maxBytes,
+        requestedBy: req.sessionAccount!.account_id,
+      });
+      if (!result.success) {
+        res.status(contextErrorStatus(result.error)).json(result);
+        return;
+      }
+      res.json(result);
+    },
+  );
+
+  app.post(
+    "/api/rental/sessions/:id/context/search",
+    async (req: AuthenticatedRequest, res) => {
+      const sessionId = await requireSessionAccess(req, res, deps);
+      if (!sessionId) return;
+      if (!isPlainObject(req.body)) {
+        res.status(400).json({ error: "body must be an object" });
+        return;
+      }
+      if (typeof req.body.query !== "string" || !req.body.query.trim()) {
+        res.status(400).json({ error: "query is required" });
+        return;
+      }
+      const maxResults = optionalPositiveInteger(req.body, "maxResults", 100);
+      if (typeof maxResults === "object") {
+        res.status(400).json({ error: maxResults.error });
+        return;
+      }
+
+      const result = await deps.searchContext(sessionId, {
+        query: req.body.query,
+        maxResults,
+        caseSensitive: req.body.caseSensitive === true,
+        requestedBy: req.sessionAccount!.account_id,
+      });
+      if (!result.success) {
+        res.status(contextErrorStatus(result.error)).json(result);
+        return;
+      }
+      res.json(result);
     },
   );
 
