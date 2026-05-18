@@ -146,8 +146,33 @@
                   <span v-for="warning in patch.warnings" :key="warning">{{ warning }}</span>
                 </p>
                 <pre v-if="patch.diffPreview">{{ patch.diffPreview }}</pre>
-                <footer v-if="canActOnPatch(patch)" class="rent-detail-patch-actions">
+                <p v-else-if="patch.diffRef" class="rent-detail-diff-ref">
+                  {{ patch.diffRef }}
+                </p>
+                <ul v-if="patch.checkResults.length" class="rent-detail-checks">
+                  <li v-for="check in patch.checkResults" :key="check.id">
+                    <span class="state-pill" :data-state="patchCheckState(check.status)">
+                      {{ check.status }}
+                    </span>
+                    <span>{{ check.label }}</span>
+                    <small v-if="check.detail">{{ check.detail }}</small>
+                  </li>
+                </ul>
+                <a
+                  v-if="patch.prUrl"
+                  class="rent-detail-pr-link"
+                  :href="patch.prUrl"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open PR
+                </a>
+                <footer
+                  v-if="canRequestPatchChanges(patch) || canApprovePatch(patch)"
+                  class="rent-detail-patch-actions"
+                >
                   <button
+                    v-if="canRequestPatchChanges(patch)"
                     type="button"
                     class="rent-create-secondary"
                     :data-testid="`rent-detail-patch-request-changes-${patch.id}`"
@@ -157,6 +182,7 @@
                     {{ patchActionBusyFor === patch.id && patchActionKind === "changes" ? "Requesting..." : "Request changes" }}
                   </button>
                   <button
+                    v-if="canApprovePatch(patch)"
                     type="button"
                     class="rent-create-primary"
                     :data-testid="`rent-detail-patch-approve-${patch.id}`"
@@ -329,6 +355,14 @@ function statusState(status: string): string {
 function patchState(status: string): string {
   if (status === "passed") return "connected";
   if (status === "passed_with_warnings" || status === "needs_renter_approval") return "starting";
+  if (status === "needs_revision" || status === "rejected") return "failed";
+  return "offline";
+}
+
+function patchCheckState(status: string): string {
+  if (status === "passed") return "connected";
+  if (status === "warning" || status === "running" || status === "pending") return "starting";
+  if (status === "failed") return "failed";
   return "offline";
 }
 
@@ -341,8 +375,14 @@ function formatTime(value: string | null | undefined): string {
   }
 }
 
-function canActOnPatch(patch: DesktopRentalPatch): boolean {
-  return ["pending", "needs_renter_approval", "passed_with_warnings"].includes(patch.gateStatus);
+function canApprovePatch(patch: DesktopRentalPatch): boolean {
+  if (patch.prUrl) return false;
+  return ["passed", "passed_with_warnings", "needs_renter_approval"].includes(patch.gateStatus);
+}
+
+function canRequestPatchChanges(patch: DesktopRentalPatch): boolean {
+  if (patch.prUrl) return false;
+  return ["pending", "passed", "passed_with_warnings", "needs_renter_approval"].includes(patch.gateStatus);
 }
 
 async function approvePatch(patchId: string): Promise<void> {
@@ -539,6 +579,37 @@ async function cancelSession(): Promise<void> {
   border-radius: 0.4rem;
   max-height: 18rem;
   overflow: auto;
+}
+.rent-detail-diff-ref {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  color: var(--color-muted, rgba(255, 255, 255, 0.68));
+  overflow-wrap: anywhere;
+}
+.rent-detail-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+.rent-detail-checks li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.35rem 0.55rem;
+  font-size: 0.82rem;
+}
+.rent-detail-checks small {
+  grid-column: 2;
+  color: var(--color-muted, rgba(255, 255, 255, 0.62));
+  overflow-wrap: anywhere;
+}
+.rent-detail-pr-link {
+  width: fit-content;
+  font-size: 0.85rem;
+  color: var(--color-accent, #4f7cff);
 }
 .rent-detail-warnings {
   display: flex;
