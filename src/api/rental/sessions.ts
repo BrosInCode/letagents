@@ -78,6 +78,8 @@ export interface CreateSessionInput {
   renterLaneExhaustedAt?: Date;
   renterLaneRefreshEta?: Date;
   renterQuotaSignal?: Record<string, unknown>;
+  approvedScope?: unknown;
+  policy?: unknown;
   // Quota limits
   lrtLimit?: number;
   timeLimitMinutes?: number;
@@ -245,6 +247,8 @@ export async function createSession(
       task_prompt: input.taskPrompt,
       mode: requestedMode,
       continuity_mode: input.continuityMode ?? "smart_handoff",
+      approved_scope: input.approvedScope ?? null,
+      policy: input.policy ?? null,
       status: "requested",
       lrt_limit: input.lrtLimit ?? listing.default_lrt_limit,
       time_limit_minutes:

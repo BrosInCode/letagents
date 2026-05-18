@@ -852,9 +852,9 @@ export function toApiDeclareQuotaBody(
  * apply its own defaults (mode → "scoped", continuityMode →
  * "smart_handoff") rather than echoing partial inputs.
  *
- * `lrtLimit` and `timeLimitMinutes` are lifted out of the
- * renderer's `policy` envelope because the API surfaces them at
- * the top level.
+ * `approvedScope` and the `policy` envelope are forwarded for
+ * persistence; `lrtLimit` and `timeLimitMinutes` are also lifted out
+ * because the API surfaces those scheduling limits at the top level.
  *
  * Spec ref: §6.2 renter session-create flow + §19.2 rental_sessions
  * D3 columns.
@@ -879,6 +879,7 @@ export function toApiCreateSessionBody(
     "renterLaneExhaustedAt",
     "renterLaneRefreshEta",
     "renterQuotaSignal",
+    "approvedScope",
   ];
   for (const key of passThrough) {
     const value = input[key];
@@ -888,6 +889,7 @@ export function toApiCreateSessionBody(
   }
   const policy = input.policy;
   if (policy) {
+    body.policy = policy;
     if (typeof policy.maxLrt === "number" && Number.isFinite(policy.maxLrt)) {
       body.lrtLimit = policy.maxLrt;
     }

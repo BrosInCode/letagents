@@ -83,6 +83,8 @@ export interface RentalRenterRouteDeps {
     renterLaneExhaustedAt?: Date;
     renterLaneRefreshEta?: Date;
     renterQuotaSignal?: Record<string, unknown>;
+    approvedScope?: unknown;
+    policy?: unknown;
     lrtLimit?: number;
     timeLimitMinutes?: number;
   }): Promise<Session>;
@@ -514,6 +516,9 @@ export function registerRentalRenterRoutes(
         taskPrompt,
         mode,
         continuityMode,
+        approvedScope,
+        approved_scope,
+        policy,
         lrtLimit,
         timeLimitMinutes,
       } = req.body;
@@ -553,6 +558,8 @@ export function registerRentalRenterRoutes(
           taskPrompt: taskPrompt.trim(),
           mode,
           continuityMode,
+          approvedScope: approvedScope ?? approved_scope ?? null,
+          policy: policy ?? null,
           startTrigger: triggerContext.value.startTrigger,
           triggerConfidence: triggerContext.value.triggerConfidence,
           renterLaneProvider: triggerContext.value.renterLaneProvider,
