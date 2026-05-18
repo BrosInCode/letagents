@@ -29,6 +29,7 @@ import type {
   DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
   DesktopPendingDeviceAuth,
+  DesktopRentalActivityEvent,
   DesktopReasoningSession,
   DesktopReasoningSessionDetail,
   DesktopReasoningUpdate,
@@ -66,6 +67,7 @@ import {
 } from "./repo-status.js";
 import { registerDesktopRentalIpcHandlers } from "./rental-handlers.js";
 import { RentalApiClient } from "./rental/api-client.js";
+import { mapApiActivityEvent } from "./rental/api-mapper.js";
 import { RenterTriggerRuntime } from "./rental/renter-trigger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -921,6 +923,21 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (mainWindow?.isDestroyed()) return;
   mainWindow?.webContents.send("desktop:room:stream-event", event);
+}
+
+function readStreamActivity(payload: Record<string, unknown>): DesktopRentalActivityEvent | null {
+  const rawActivity = payload.activity;
+  return mapApiActivityEvent(rawActivity ?? payload);
+}
+
+function readPatchIdFromActivityPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const obj = payload as Record<string, unknown>;
+  return typeof obj.patch_id === "string"
+    ? obj.patch_id
+    : typeof obj.patchId === "string"
+      ? obj.patchId
+      : null;
 }
 
 async function fetchRoomSnapshot(requestedRoomIdentifier?: string | null): Promise<DesktopRoomSnapshot> {
@@ -2187,6 +2204,36 @@ function handleRoomStreamFrame(roomIdentifier: string, eventName: string, data: 
     if (sessionId) {
       emitRoomStreamEvent({ type: "reasoning_remove", roomIdentifier: eventRoomIdentifier, sessionId });
     }
+    return;
+  }
+
+  if (eventName === "rental_activity") {
+    const activity = readStreamActivity(payload);
+    if (activity) {
+      emitRoomStreamEvent({ type: "rental_activity", roomIdentifier: eventRoomIdentifier, activity });
+    }
+    return;
+  }
+
+  if (eventName === "rental_patch") {
+    const activity = readStreamActivity(payload);
+    emitRoomStreamEvent({
+      type: "rental_patch",
+      roomIdentifier: eventRoomIdentifier,
+      activity,
+      patchId: readPatchIdFromActivityPayload(activity?.payload ?? null),
+    });
+    return;
+  }
+
+  if (eventName === "rental_usage") {
+    const activity = readStreamActivity(payload);
+    emitRoomStreamEvent({
+      type: "rental_usage",
+      roomIdentifier: eventRoomIdentifier,
+      activity,
+      sessionId: activity?.sessionId || null,
+    });
     return;
   }
 

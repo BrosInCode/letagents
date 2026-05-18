@@ -10,6 +10,8 @@
  * Part of PR p1.2b.
  */
 
+import { EventEmitter } from "node:events";
+
 import { db } from "../db/client.js";
 import { rental_activity_events } from "../db/schema.js";
 import {
@@ -44,6 +46,12 @@ export interface ActivityEvent {
   payload: unknown;
   created_at: Date;
 }
+
+export interface RentalActivityCreatedEvent {
+  activity: ActivityEvent;
+}
+
+export const rentalActivityEvents = new EventEmitter();
 
 function generateEventId(): string {
   const timestamp = Date.now().toString(36);
@@ -105,6 +113,7 @@ export async function emitActivityEvent(
     })
     .returning();
 
+  rentalActivityEvents.emit("activity:created", { activity: row } satisfies RentalActivityCreatedEvent);
   return row;
 }
 
@@ -149,5 +158,8 @@ export async function emitActivityEvents(
     .values(values)
     .returning();
 
+  for (const row of rows) {
+    rentalActivityEvents.emit("activity:created", { activity: row } satisfies RentalActivityCreatedEvent);
+  }
   return rows;
 }

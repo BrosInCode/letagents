@@ -33,6 +33,11 @@ import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
 } from "../../shared/room-agent-prompts.js";
+import {
+  rentalActivityEvents,
+  type ActivityEvent,
+  type RentalActivityCreatedEvent,
+} from "../rental/activity-emitter.js";
 import { parseAgentActorLabel } from "../../shared/agent-identity.js";
 import {
   normalizeAttachmentUploadRequest,
@@ -105,6 +110,7 @@ export interface RoomMessageRouteDeps {
   messageEvents: EventEmitter;
   taskEvents: EventEmitter;
   reasoningEvents: EventEmitter;
+  rentalActivityEvents?: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
@@ -133,6 +139,37 @@ export interface RoomMessageRouteDeps {
     sessionAccount?: AuthenticatedRequest["sessionAccount"];
     timestamp?: string;
   }): Promise<void>;
+}
+
+function rentalActivityPayload(
+  projectId: string,
+  activity: ActivityEvent,
+): Record<string, unknown> {
+  return {
+    room_id: projectId,
+    activity: {
+      ...activity,
+      room_id: projectId,
+    },
+  };
+}
+
+function rentalActivityStreamNames(activity: ActivityEvent): string[] {
+  const names = ["rental_activity"];
+  if (
+    activity.event_type.startsWith("patch.") ||
+    activity.event_type.startsWith("patch_gate.") ||
+    activity.event_type.startsWith("edit.")
+  ) {
+    names.push("rental_patch");
+  }
+  if (
+    activity.event_type.startsWith("budget.") ||
+    activity.event_type.startsWith("command.")
+  ) {
+    names.push("rental_usage");
+  }
+  return names;
 }
 
 export function registerRoomMessageRoutes(
@@ -535,14 +572,26 @@ export function registerRoomMessageRoutes(
       res.write(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
     };
 
+    const rentalEvents = deps.rentalActivityEvents ?? rentalActivityEvents;
+    const onRentalActivityCreated = (event: RentalActivityCreatedEvent) => {
+      const activity = event.activity;
+      if (activity.room_id !== projectId) return;
+      const payload = rentalActivityPayload(project.id, activity);
+      for (const streamName of rentalActivityStreamNames(activity)) {
+        res.write(`event: ${streamName}\ndata: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+
     deps.messageEvents.on("message:created", onMessageCreated);
     deps.taskEvents.on("task:updated", onTaskUpdated);
     deps.reasoningEvents.on("reasoning:updated", onReasoningUpdated);
     deps.reasoningEvents.on("reasoning:removed", onReasoningRemoved);
+    rentalEvents.on("activity:created", onRentalActivityCreated);
 
     req.on("close", () => {
       deps.messageEvents.off("message:created", onMessageCreated);
       deps.taskEvents.off("task:updated", onTaskUpdated);
+      rentalEvents.off("activity:created", onRentalActivityCreated);
       if (endDelivery) {
         void endDelivery().catch((error: unknown) => {
           console.error(`[room messages stream] failed to end agent delivery for ${project.id}`, error);

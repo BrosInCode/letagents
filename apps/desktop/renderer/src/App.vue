@@ -958,6 +958,15 @@ function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
     return;
   }
 
+  if (
+    event.type === "rental_activity" ||
+    event.type === "rental_patch" ||
+    event.type === "rental_usage"
+  ) {
+    scheduleLiveMetadataRefresh(0);
+    return;
+  }
+
   if (event.type === "rental_quota_exhausted") {
     scheduleLiveMetadataRefresh(0);
   }

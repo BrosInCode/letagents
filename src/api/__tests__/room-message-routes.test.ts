@@ -14,6 +14,7 @@ function createDeps() {
     messageEvents: new EventEmitter(),
     taskEvents: new EventEmitter(),
     reasoningEvents: new EventEmitter(),
+    rentalActivityEvents: new EventEmitter(),
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
     requireParticipant: unused,
@@ -291,6 +292,86 @@ test("desktop owner-token streams do not require worker delivery credentials", a
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers.get("Content-Type"), "text/event-stream");
   assert.match(res.writes.join(""), /: connected/);
+});
+
+test("room streams forward rental activity and patch frames", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {},
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+
+  let closeHandler: (() => void) | null = null;
+  const req = {
+    params: { 0: "room_1" },
+    headers: { "x-letagents-desktop-client": "1" },
+    authKind: "owner_token",
+    on(event: string, handler: () => void) {
+      if (event === "close") closeHandler = handler;
+      return this;
+    },
+  };
+  const res = {
+    statusCode: 200,
+    headers: new Map<string, string>(),
+    writes: [] as string[],
+    writableEnded: false,
+    socket: { setKeepAlive() {} },
+    setHeader(name: string, value: string) {
+      this.headers.set(name, value);
+    },
+    flushHeaders() {},
+    write(chunk: string) {
+      this.writes.push(chunk);
+      return true;
+    },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.writes.push(JSON.stringify(body));
+      return this;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+  };
+
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/");
+  assert.ok(handler);
+  await handler(req, res);
+  deps.rentalActivityEvents.emit("activity:created", {
+    activity: {
+      id: "rev_1",
+      session_id: "rsess_1",
+      room_id: "room_1",
+      event_type: "patch.proposed",
+      source: "patch_gate",
+      verified: true,
+      visibility: "rental_visible",
+      payload: { patch_id: "rpatch_1" },
+      created_at: new Date("2026-05-12T10:00:00.000Z"),
+    },
+  });
+  closeHandler?.();
+
+  const output = res.writes.join("");
+  assert.match(output, /event: rental_activity/);
+  assert.match(output, /event: rental_patch/);
+  assert.match(output, /"patch_id":"rpatch_1"/);
+  assert.doesNotMatch(output, /event: rental_usage/);
 });
 
 test("agent-shaped message writes require a registered worker session", async () => {
