@@ -25,8 +25,16 @@ export interface RentalPatchPullRequestInput {
   repoName: string;
   baseBranch: string;
   workBranch: string | null | undefined;
+  patchFiles?: RentalPatchPullRequestFile[];
+  commitMessage?: string | null;
   title: string;
   body?: string | null;
+}
+
+export interface RentalPatchPullRequestFile {
+  path: string;
+  operation: "modify" | "create" | "delete";
+  content?: string;
 }
 
 export interface RentalPatchPullRequest {
@@ -35,6 +43,7 @@ export interface RentalPatchPullRequest {
   title: string;
   headRef: string | null;
   baseRef: string | null;
+  commitSha?: string | null;
 }
 
 export interface RentalGitHubPrDeps {
@@ -110,6 +119,7 @@ async function githubApiRequest(input: {
   method: string;
   token: string;
   body?: unknown;
+  allowNotFound?: boolean;
 }): Promise<unknown> {
   const response = await input.fetchImpl(input.url, {
     method: input.method,
@@ -122,6 +132,10 @@ async function githubApiRequest(input: {
     },
     body: input.body === undefined ? undefined : JSON.stringify(input.body),
   });
+
+  if (input.allowNotFound && response.status === 404) {
+    return null;
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -191,6 +205,183 @@ function parsePullRequestResult(result: unknown): RentalPatchPullRequest {
   };
 }
 
+function parseSha(result: unknown, code: string): string {
+  if (typeof result !== "object" || result === null) {
+    throw new RentalGitHubPrError(code, 502);
+  }
+  const sha = (result as Record<string, unknown>).sha;
+  if (typeof sha !== "string" || !sha.trim()) {
+    throw new RentalGitHubPrError(code, 502);
+  }
+  return sha;
+}
+
+function parseRefObjectSha(result: unknown, code: string): string {
+  if (typeof result !== "object" || result === null) {
+    throw new RentalGitHubPrError(code, 502);
+  }
+  const object = (result as Record<string, unknown>).object;
+  if (typeof object !== "object" || object === null) {
+    throw new RentalGitHubPrError(code, 502);
+  }
+  const sha = (object as Record<string, unknown>).sha;
+  if (typeof sha !== "string" || !sha.trim()) {
+    throw new RentalGitHubPrError(code, 502);
+  }
+  return sha;
+}
+
+function parseCommitTreeSha(result: unknown): string {
+  if (typeof result !== "object" || result === null) {
+    throw new RentalGitHubPrError("github_commit_response_invalid", 502);
+  }
+  const tree = (result as Record<string, unknown>).tree;
+  if (typeof tree !== "object" || tree === null) {
+    throw new RentalGitHubPrError("github_commit_response_invalid", 502);
+  }
+  const sha = (tree as Record<string, unknown>).sha;
+  if (typeof sha !== "string" || !sha.trim()) {
+    throw new RentalGitHubPrError("github_commit_response_invalid", 502);
+  }
+  return sha;
+}
+
+function encodeGitRefPath(ref: string): string {
+  return encodeURI(ref.trim()).replace(/#/g, "%23").replace(/\?/g, "%3F");
+}
+
+function normalizePatchPath(filePath: string): string {
+  const normalizedInput = filePath.replace(/\\/g, "/");
+  const segments = normalizedInput
+    .replace(/^\.\//, "")
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".");
+  if (
+    normalizedInput.startsWith("/") ||
+    normalizedInput.includes("\0") ||
+    segments.includes("..") ||
+    /^[a-zA-Z]:/.test(normalizedInput)
+  ) {
+    throw new RentalGitHubPrError("invalid_patch_path", 409);
+  }
+  const normalized = segments.join("/");
+  if (!normalized) {
+    throw new RentalGitHubPrError("invalid_patch_path", 409);
+  }
+  return normalized;
+}
+
+function toGitTreeEntry(file: RentalPatchPullRequestFile): Record<string, unknown> {
+  const path = normalizePatchPath(file.path);
+  if (file.operation === "delete") {
+    return {
+      path,
+      mode: "100644",
+      type: "blob",
+      sha: null,
+    };
+  }
+  if (typeof file.content !== "string") {
+    throw new RentalGitHubPrError("patch_content_missing", 409);
+  }
+  return {
+    path,
+    mode: "100644",
+    type: "blob",
+    content: file.content,
+  };
+}
+
+async function createPatchCommitBranch(input: {
+  fetchImpl: typeof fetch;
+  token: string;
+  fullName: string;
+  baseBranch: string;
+  workBranch: string;
+  patchFiles: RentalPatchPullRequestFile[];
+  commitMessage: string;
+}): Promise<string> {
+  if (input.patchFiles.length === 0) {
+    throw new RentalGitHubPrError("patch_files_required", 409);
+  }
+
+  const repoUrl = `https://api.github.com/repos/${encodeURI(input.fullName)}`;
+  const baseRef = encodeGitRefPath(`heads/${input.baseBranch}`);
+  const workRef = encodeGitRefPath(`heads/${input.workBranch}`);
+
+  const baseRefResult = await githubApiRequest({
+    fetchImpl: input.fetchImpl,
+    url: `${repoUrl}/git/ref/${baseRef}`,
+    method: "GET",
+    token: input.token,
+  });
+  const baseCommitSha = parseRefObjectSha(
+    baseRefResult,
+    "github_base_ref_response_invalid",
+  );
+
+  const baseCommit = await githubApiRequest({
+    fetchImpl: input.fetchImpl,
+    url: `${repoUrl}/git/commits/${baseCommitSha}`,
+    method: "GET",
+    token: input.token,
+  });
+  const baseTreeSha = parseCommitTreeSha(baseCommit);
+
+  const tree = await githubApiRequest({
+    fetchImpl: input.fetchImpl,
+    url: `${repoUrl}/git/trees`,
+    method: "POST",
+    token: input.token,
+    body: {
+      base_tree: baseTreeSha,
+      tree: input.patchFiles.map(toGitTreeEntry),
+    },
+  });
+  const treeSha = parseSha(tree, "github_tree_response_invalid");
+
+  const commit = await githubApiRequest({
+    fetchImpl: input.fetchImpl,
+    url: `${repoUrl}/git/commits`,
+    method: "POST",
+    token: input.token,
+    body: {
+      message: input.commitMessage,
+      tree: treeSha,
+      parents: [baseCommitSha],
+    },
+  });
+  const commitSha = parseSha(commit, "github_commit_response_invalid");
+
+  const existingRef = await githubApiRequest({
+    fetchImpl: input.fetchImpl,
+    url: `${repoUrl}/git/ref/${workRef}`,
+    method: "GET",
+    token: input.token,
+    allowNotFound: true,
+  });
+
+  if (existingRef) {
+    await githubApiRequest({
+      fetchImpl: input.fetchImpl,
+      url: `${repoUrl}/git/refs/${workRef}`,
+      method: "PATCH",
+      token: input.token,
+      body: { sha: commitSha, force: true },
+    });
+  } else {
+    await githubApiRequest({
+      fetchImpl: input.fetchImpl,
+      url: `${repoUrl}/git/refs`,
+      method: "POST",
+      token: input.token,
+      body: { ref: `refs/heads/${input.workBranch}`, sha: commitSha },
+    });
+  }
+
+  return commitSha;
+}
+
 export async function openRentalPatchPullRequest(
   input: RentalPatchPullRequestInput,
   deps: RentalGitHubPrDeps = defaultRentalGitHubPrDeps,
@@ -211,6 +402,17 @@ export async function openRentalPatchPullRequest(
     installationId: installation.installation_id,
     fetchImpl,
   });
+  const commitSha = input.patchFiles?.length
+    ? await createPatchCommitBranch({
+        fetchImpl,
+        token,
+        fullName,
+        baseBranch,
+        workBranch,
+        patchFiles: input.patchFiles,
+        commitMessage: input.commitMessage?.trim() || input.title,
+      })
+    : null;
 
   const result = await githubApiRequest({
     fetchImpl,
@@ -226,5 +428,5 @@ export async function openRentalPatchPullRequest(
     },
   });
 
-  return parsePullRequestResult(result);
+  return { ...parsePullRequestResult(result), commitSha };
 }

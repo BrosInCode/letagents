@@ -53,8 +53,26 @@ function makePatch(overrides: Partial<RentalPatchProposalRow> = {}): RentalPatch
     gate_status: "passed",
     risk_score: null,
     warnings: [],
-    check_results: { checks: [], warnings: [] },
-    journal_entry: null,
+    check_results: {
+      checks: [{
+        file: "src/index.ts",
+        operation: "modify",
+        passed: true,
+        warnings: [],
+        secretsRedacted: 0,
+        sanitizedContent: 'export const fixed = true;\n',
+      }],
+      warnings: [],
+    },
+    journal_entry: {
+      version: 1,
+      files: [{
+        path: "src/index.ts",
+        operation: "modify",
+        content: 'export const fixed = true;\n',
+      }],
+      proposedAt: "2026-05-12T09:00:00.000Z",
+    },
     idempotency_key: "patch-1",
     request_hash: "request-hash",
     response_hash: "response-hash",
@@ -68,6 +86,7 @@ function makeDeps(patch: RentalPatchProposalRow, session: RentalSessionRow) {
   const events: unknown[] = [];
   const transitions: string[] = [];
   const patchUpdates: unknown[] = [];
+  const pullRequests: unknown[] = [];
   const deps: RentalPatchReviewDeps = {
     now: () => NOW,
     listPatches: async () => [patch],
@@ -99,15 +118,19 @@ function makeDeps(patch: RentalPatchProposalRow, session: RentalSessionRow) {
         created_at: NOW,
       };
     },
-    openPullRequest: async () => ({
-      number: 422,
-      url: "https://github.com/BrosInCode/letagents/pull/422",
-      title: "Rental patch: Fix failing tests",
-      headRef: "letagents/rent/session-1",
-      baseRef: "staging",
-    }),
+    openPullRequest: async (input) => {
+      pullRequests.push(input);
+      return {
+        number: 422,
+        url: "https://github.com/BrosInCode/letagents/pull/422",
+        title: "Rental patch: Fix failing tests",
+        headRef: "letagents/rent/session-1",
+        baseRef: "staging",
+        commitSha: "commit_1",
+      };
+    },
   };
-  return { deps, events, transitions, patchUpdates };
+  return { deps, events, transitions, patchUpdates, pullRequests };
 }
 
 describe("patch review orchestration", () => {
@@ -135,7 +158,7 @@ describe("patch review orchestration", () => {
   it("approve opens a GitHub PR, records review metadata, and advances active → patch_review → pr_opened", async () => {
     const session = makeSession({ status: "active" });
     const patch = makePatch({ gate_status: "passed_with_warnings" });
-    const { deps, events, transitions, patchUpdates } = makeDeps(patch, session);
+    const { deps, events, transitions, patchUpdates, pullRequests } = makeDeps(patch, session);
 
     const result = await approvePatchForRenter(
       session,
@@ -154,6 +177,55 @@ describe("patch review orchestration", () => {
       .checkResults.review;
     assert.equal(review.status, "approved");
     assert.equal(review.note, "ship it");
+    assert.equal(review.commit_sha, "commit_1");
+    const prInput = pullRequests[0] as {
+      files: Array<{ path: string; operation: string; content?: string }>;
+      commitMessage: string;
+    };
+    assert.deepEqual(prInput.files, [{
+      path: "src/index.ts",
+      operation: "modify",
+      content: 'export const fixed = true;\n',
+    }]);
+    assert.match(prInput.commitMessage, /Patch: rpatch_1/);
+  });
+
+  it("approve uses sanitized patch content when preparing the pull request branch", async () => {
+    const session = makeSession({ status: "patch_review" });
+    const patch = makePatch({
+      check_results: {
+        checks: [{
+          file: "src/index.ts",
+          operation: "modify",
+          passed: true,
+          warnings: ["1 secret redacted"],
+          secretsRedacted: 1,
+          sanitizedContent: 'const token = "REDACTED";\n',
+        }],
+        warnings: [{ message: "secret redacted" }],
+      },
+      journal_entry: {
+        version: 1,
+        files: [{
+          path: "./src/index.ts",
+          operation: "modify",
+          content: 'const token = "raw-secret";\n',
+        }],
+        proposedAt: "2026-05-12T09:00:00.000Z",
+      },
+    });
+    const { deps, pullRequests } = makeDeps(patch, session);
+
+    await approvePatchForRenter(session, RENTER, patch.id, {}, deps);
+
+    const prInput = pullRequests[0] as {
+      files: Array<{ path: string; operation: string; content?: string }>;
+    };
+    assert.deepEqual(prInput.files, [{
+      path: "src/index.ts",
+      operation: "modify",
+      content: 'const token = "REDACTED";\n',
+    }]);
   });
 
   it("request changes marks the patch needs_revision and returns patch_review sessions to active", async () => {
