@@ -555,6 +555,15 @@ describe("provider session route handlers (p1.3 additions)", () => {
       listMyListings: async () => [],
       acceptSession: async () => ({ id: "rsess_1", status: "accepted" }),
       declineSession: async () => ({ id: "rsess_1", status: "cancelled" }),
+      provisionSession: async (input: Record<string, unknown>) => ({
+        roomId: "rroom_1",
+        participantId: "rpart_1",
+        session: {
+          id: input.sessionId,
+          room_id: "rroom_1",
+          status: "provisioning",
+        },
+      }),
       listProviderRequests: async () => [
         { id: "rsess_1", status: "requested" },
       ],
@@ -563,6 +572,9 @@ describe("provider session route handlers (p1.3 additions)", () => {
     app.use((req: import("express").Request, _res, next) => {
       (req as Record<string, unknown>).sessionAccount = {
         account_id: FAKE_PROVIDER_ID,
+        login: "provider-login",
+        display_name: "Provider Login",
+        provider_user_id: "12345",
       };
       next();
     });
@@ -645,6 +657,42 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(res.status, 409);
     const json = (await res.json()) as { error: string };
     assert.strictEqual(json.error, "quota_lease_lane_locked held_by=rsess_other");
+  });
+
+  it("POST provision returns a rental room and provisioning session", async () => {
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/provision",
+      { parentRoomId: "github.com/BrosInCode/letagents" },
+    );
+    assert.strictEqual(res.status, 201);
+    const json = (await res.json()) as {
+      roomId: string;
+      participantId: string;
+      session: { status: string };
+    };
+    assert.strictEqual(json.roomId, "rroom_1");
+    assert.strictEqual(json.participantId, "rpart_1");
+    assert.strictEqual(json.session.status, "provisioning");
+  });
+
+  it("POST provision validates parent room and maps invalid status", async () => {
+    const missingParent = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/provision",
+      {},
+    );
+    assert.strictEqual(missingParent.status, 400);
+
+    deps.provisionSession = async () => {
+      throw new Error("invalid_status: session must be accepted to provision");
+    };
+    const badStatus = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/provision",
+      { parentRoomId: "room_1" },
+    );
+    assert.strictEqual(badStatus.status, 409);
   });
 
   it("POST decline returns cancelled session", async () => {

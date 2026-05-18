@@ -62,6 +62,10 @@ export interface ProvisionRentalRoomInput {
   providerGithubId?: string;
 }
 
+export interface ProvisionRentalRoomForProviderInput extends ProvisionRentalRoomInput {
+  providerAccountId: string;
+}
+
 export interface RentalRoomResult {
   roomId: string;
   participantId: string;
@@ -177,6 +181,26 @@ export async function provisionRentalRoom(
     participantId,
     session: updated,
   };
+}
+
+/**
+ * Provider-scoped wrapper for the route layer. This keeps the public
+ * provision endpoint from leaking whether another provider owns a session.
+ */
+export async function provisionRentalRoomForProvider(
+  input: ProvisionRentalRoomForProviderInput,
+): Promise<RentalRoomResult | null> {
+  const [session] = await db
+    .select({ id: rental_sessions.id })
+    .from(rental_sessions)
+    .where(
+      and(
+        eq(rental_sessions.id, input.sessionId),
+        eq(rental_sessions.provider_account_id, input.providerAccountId),
+      ),
+    );
+  if (!session) return null;
+  return provisionRentalRoom(input);
 }
 
 /**

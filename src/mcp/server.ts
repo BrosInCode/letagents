@@ -97,6 +97,7 @@ import {
   rentalListRequests,
   rentalProposeEdit,
   rentalProposePatch,
+  rentalProvision,
   rentalReadFile,
   rentalRefreshQuota,
   rentalRequestBudgetExtension,
@@ -4473,6 +4474,38 @@ server.tool(
     const result = await rentalAccept(rentalToolDeps, {
       session_id,
       idempotency_key,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "rental_provision",
+  "Provision an accepted Rent an Agent session into a rental room. Creates the provider-visible rental room, moves the session to 'provisioning', and returns the room id. Call this after rental_accept and before rental_heartbeat.",
+  {
+    session_id: z
+      .string()
+      .describe("Rental session id to provision."),
+    parent_room_id: z
+      .string()
+      .describe("Parent room id/identifier where the renter started the session."),
+    provider_display_name: z
+      .string()
+      .optional()
+      .describe("Optional display name for the provider participant in the rental room."),
+  },
+  async ({ session_id, parent_room_id, provider_display_name }) => {
+    const result = await rentalProvision(rentalToolDeps, {
+      session_id,
+      parent_room_id,
+      provider_display_name,
     });
     return {
       content: [
