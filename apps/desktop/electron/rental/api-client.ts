@@ -292,6 +292,41 @@ export class RentalApiClient {
   }
 
   // -------------------------------------------------------------------------
+  // Patch review — renter-facing p5.4 endpoints
+  // -------------------------------------------------------------------------
+
+  getPatches(sessionId: string): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/patches`,
+    );
+  }
+
+  approvePatch(
+    sessionId: string,
+    patchId: string,
+    body: Record<string, unknown> = {},
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/patches/${encodeURIComponent(patchId)}/approve`,
+      body,
+    );
+  }
+
+  requestPatchChanges(
+    sessionId: string,
+    patchId: string,
+    body: Record<string, unknown> = {},
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/patches/${encodeURIComponent(patchId)}/request-changes`,
+      body,
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Internal (provider liveness + adapter snapshot ingest)
   // -------------------------------------------------------------------------
 
