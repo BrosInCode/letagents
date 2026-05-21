@@ -25,6 +25,8 @@ import {
   mapApiActivityEventArray,
   mapApiListing,
   mapApiListingArray,
+  mapApiPatch,
+  mapApiPatchArray,
   mapApiProviderReadiness,
   mapApiRequest,
   mapApiRequestArray,
@@ -230,7 +232,15 @@ export function registerDesktopRentalIpcHandlers(
     return [] satisfies DesktopRentalActivityEvent[];
   });
   register("desktop:rental:get-exposures", () => [] satisfies DesktopRentalExposure[]);
-  register("desktop:rental:get-patches", () => [] satisfies DesktopRentalPatch[]);
+  register("desktop:rental:get-patches", async (_event, sessionId) => {
+    const id = String(sessionId ?? "");
+    if (!id) return [] satisfies DesktopRentalPatch[];
+    if (apiClient) {
+      const result = await apiClient.getPatches(id);
+      if (result.ok) return mapApiPatchArray(result.body);
+    }
+    return [] satisfies DesktopRentalPatch[];
+  });
   register("desktop:rental:get-usage", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
     if (!id) return buildEmptyUsageSnapshot(id);
@@ -251,12 +261,32 @@ export function registerDesktopRentalIpcHandlers(
     }
     return signal;
   });
-  register("desktop:rental:approve-patch", (_event, sessionId, patchId) =>
-    buildStubPatch(String(sessionId), String(patchId), "passed")
-  );
-  register("desktop:rental:request-patch-changes", (_event, sessionId, patchId) =>
-    buildStubPatch(String(sessionId), String(patchId), "needs_revision")
-  );
+  register("desktop:rental:approve-patch", async (_event, sessionId, patchId) => {
+    const id = String(sessionId ?? "");
+    const patch = String(patchId ?? "");
+    if (apiClient && id && patch) {
+      const result = await apiClient.approvePatch(id, patch);
+      if (result.ok) {
+        const mapped = mapApiPatch(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubPatch(id, patch, "passed");
+  });
+  register("desktop:rental:request-patch-changes", async (_event, sessionId, patchId, note) => {
+    const id = String(sessionId ?? "");
+    const patch = String(patchId ?? "");
+    if (apiClient && id && patch) {
+      const result = await apiClient.requestPatchChanges(id, patch, {
+        note: typeof note === "string" ? note : "",
+      });
+      if (result.ok) {
+        const mapped = mapApiPatch(result.body);
+        if (mapped) return mapped;
+      }
+    }
+    return buildStubPatch(id, patch, "needs_revision");
+  });
   register("desktop:rental:approve-context-request", (_event, sessionId, approvalId) =>
     buildStubContextApproval(String(sessionId), String(approvalId), "approved")
   );

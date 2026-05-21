@@ -19,6 +19,8 @@ import {
   mapApiActivityEventArray,
   mapApiListing,
   mapApiListingArray,
+  mapApiPatch,
+  mapApiPatchArray,
   mapApiProviderReadiness,
   mapApiQuotaSnapshot,
   mapApiRequest,
@@ -346,6 +348,71 @@ describe("mapApiActivityEvent", () => {
 });
 
 // ---------------------------------------------------------------------------
+// mapApiPatch
+// ---------------------------------------------------------------------------
+
+describe("mapApiPatch", () => {
+  it("maps a rental_patch_proposals row into the desktop patch review shape", () => {
+    const patch = mapApiPatch({
+      id: "rpatch_1",
+      session_id: "rsess_1",
+      source: "explicit_patch",
+      summary: "Fix auth",
+      diff_ref: "sha256:abc",
+      diff_preview: "diff --git a/src/a.ts b/src/a.ts\n",
+      gate_status: "passed_with_warnings",
+      risk_score: 3,
+      warnings: [{ message: "Sensitive path" }, "Check warning"],
+      check_results: {
+        warnings: ["Gate warning"],
+        review: { pr_url: "https://github.com/BrosInCode/letagents/pull/1" },
+        checks: [
+          {
+            file: "src/a.ts",
+            operation: "modify",
+            passed: true,
+            warnings: ["needs renter approval"],
+          },
+        ],
+      },
+      created_at: "2026-05-11T10:00:00.000Z",
+      updated_at: "2026-05-11T10:05:00.000Z",
+    });
+    assert.ok(patch);
+    assert.equal(patch!.id, "rpatch_1");
+    assert.equal(patch!.sessionId, "rsess_1");
+    assert.equal(patch!.gateStatus, "passed_with_warnings");
+    assert.equal(patch!.diffPreview, "diff --git a/src/a.ts b/src/a.ts\n");
+    assert.equal(patch!.warnings.length, 3);
+    assert.equal(patch!.checkResults[0]!.status, "warning");
+    assert.equal(patch!.prUrl, "https://github.com/BrosInCode/letagents/pull/1");
+  });
+
+  it("accepts approve/request-changes envelopes and clamps malformed values", () => {
+    const patch = mapApiPatch({
+      patch: {
+        id: "rpatch_2",
+        sessionId: "rsess_1",
+        source: "unknown",
+        gateStatus: "bogus",
+        checkResults: [
+          {
+            id: "lint",
+            label: "Lint",
+            status: "passed",
+            completedAt: "2026-05-11T10:05:00.000Z",
+          },
+        ],
+      },
+    });
+    assert.ok(patch);
+    assert.equal(patch!.source, "explicit_patch");
+    assert.equal(patch!.gateStatus, "pending");
+    assert.equal(patch!.checkResults[0]!.id, "lint");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Array helpers
 // ---------------------------------------------------------------------------
 
@@ -379,6 +446,14 @@ describe("array unwrap helpers", () => {
     assert.equal(a.length, 1);
     const b = mapApiActivityEventArray({ activity: [{ id: "rev_2", created_at: "x" }] });
     assert.equal(b.length, 1);
+  });
+
+  it("mapApiPatchArray accepts the { patches: [] } envelope", () => {
+    const patches = mapApiPatchArray({
+      patches: [{ id: "rpatch_1", updated_at: "2026-05-11T10:00:00.000Z" }],
+    });
+    assert.equal(patches.length, 1);
+    assert.equal(patches[0]!.id, "rpatch_1");
   });
 });
 

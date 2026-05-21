@@ -489,6 +489,24 @@ describe("endpoint URL + verb sanity", () => {
         method: "POST",
         pathPattern: /\/api\/rental\/renter\/declare-quota-exhausted$/,
       },
+      {
+        label: "getPatches",
+        run: (c) => c.getPatches("rsess_1"),
+        method: "GET",
+        pathPattern: /\/api\/rental\/sessions\/rsess_1\/patches$/,
+      },
+      {
+        label: "approvePatch",
+        run: (c) => c.approvePatch("rsess_1", "rpatch_1"),
+        method: "POST",
+        pathPattern: /\/api\/rental\/sessions\/rsess_1\/patches\/rpatch_1\/approve$/,
+      },
+      {
+        label: "requestPatchChanges",
+        run: (c) => c.requestPatchChanges("rsess_1", "rpatch_1", { note: "revise" }),
+        method: "POST",
+        pathPattern: /\/api\/rental\/sessions\/rsess_1\/patches\/rpatch_1\/request-changes$/,
+      },
     ];
 
     for (const exp of expectations) {
