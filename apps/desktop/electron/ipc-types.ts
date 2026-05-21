@@ -970,6 +970,23 @@ export type DesktopRoomStreamEvent =
       sessionId: string;
     }
   | {
+      type: "rental_activity";
+      roomIdentifier: string;
+      activity: DesktopRentalActivityEvent;
+    }
+  | {
+      type: "rental_patch";
+      roomIdentifier: string;
+      activity: DesktopRentalActivityEvent | null;
+      patchId: string | null;
+    }
+  | {
+      type: "rental_usage";
+      roomIdentifier: string;
+      activity: DesktopRentalActivityEvent | null;
+      sessionId: string | null;
+    }
+  | {
       type: "rental_quota_exhausted";
       roomIdentifier: string;
       signal: DesktopRentalRenterTriggerSignal;
