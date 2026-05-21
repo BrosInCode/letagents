@@ -236,4 +236,15 @@ jobs:
               exit 1
             }
 
+            curl -fsS http://127.0.0.1:3001/api/rental/listings >/tmp/letagents-rental-listings-smoke.json || {
+              echo "Rental listings smoke failed!"
+              docker compose logs --tail 20
+              exit 1
+            }
+            if grep -q '"rent_disabled"' /tmp/letagents-rental-listings-smoke.json; then
+              echo "Rental routes are still disabled after deploy!"
+              docker compose logs --tail 20
+              exit 1
+            fi
+
             echo "Deploy successful (${IMAGE_TAG})"
