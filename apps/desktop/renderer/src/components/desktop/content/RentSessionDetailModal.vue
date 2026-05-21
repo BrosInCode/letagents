@@ -272,6 +272,7 @@ const canCancel = computed(() => {
     "blocked",
     "patch_review",
     "pr_opened",
+    "budget_exhausted",
     "stale",
     // Backward-compatible aliases from early desktop mocks/API drafts.
     "pending",
@@ -362,10 +363,10 @@ function isDisabledResult(value: unknown): boolean {
 }
 
 function statusState(status: string): string {
-  if (status === "active" || status === "patch_review" || status === "pr_opened") return "active";
-  if (status === "requested" || status === "accepted" || status === "provisioning") return "starting";
-  if (status === "blocked") return "failed";
-  if (status === "completed" || status === "cancelled") return "offline";
+  if (["active", "patch_review", "pr_opened", "running", "in_progress"].includes(status)) return "active";
+  if (["requested", "accepted", "provisioning", "queued", "pending", "starting"].includes(status)) return "starting";
+  if (["blocked", "stale", "budget_exhausted", "failed"].includes(status)) return "failed";
+  if (["completed", "cancelled", "expired"].includes(status)) return "offline";
   return "offline";
 }
 

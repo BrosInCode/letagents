@@ -83,7 +83,7 @@
               type="button"
               class="rent-refresh-button rent-action-decline"
               :data-testid="`rent-provider-decline-${request.id}`"
-              :disabled="actionBusyFor === request.id || (request.status !== 'requested' && request.status !== 'pending')"
+              :disabled="actionBusyFor === request.id || !canActOnRequest(request.status)"
               @click="decline(request.id)"
             >
               {{ actionBusyFor === request.id && actionKind === "decline" ? "Declining..." : "Decline" }}
@@ -92,7 +92,7 @@
               type="button"
               class="rent-refresh-button rent-action-accept"
               :data-testid="`rent-provider-accept-${request.id}`"
-              :disabled="actionBusyFor === request.id || (request.status !== 'requested' && request.status !== 'pending')"
+              :disabled="actionBusyFor === request.id || !canActOnRequest(request.status)"
               @click="accept(request.id)"
             >
               {{ actionBusyFor === request.id && actionKind === "accept" ? "Accepting..." : "Accept" }}
@@ -344,7 +344,8 @@ function listingState(status: string): string {
 function sessionStateFor(status: string): string {
   if (status === "active" || status === "patch_review" || status === "pr_opened" || status === "in_progress" || status === "running") return "active";
   if (status === "requested" || status === "accepted" || status === "provisioning" || status === "queued" || status === "pending" || status === "starting") return "starting";
-  if (status === "blocked" || status === "stale") return "failed";
+  if (status === "blocked" || status === "stale" || status === "budget_exhausted" || status === "failed") return "failed";
+  if (status === "expired" || status === "completed" || status === "cancelled") return "offline";
   return "offline";
 }
 
@@ -353,6 +354,10 @@ function requestState(status: string): string {
   if (status === "accepted") return "connected";
   if (status === "provisioning") return "active";
   return "offline";
+}
+
+function canActOnRequest(status: string): boolean {
+  return status === "requested" || status === "pending";
 }
 </script>
 
