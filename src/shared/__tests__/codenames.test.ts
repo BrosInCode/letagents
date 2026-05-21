@@ -1,21 +1,22 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
 import { AGENT_CODENAMES, AGENT_CODENAME_SPACE, codenameFromIndex } from "../codenames.js";
 
-describe("codenameFromIndex", () => {
-  it("keeps the full two-part combination space for one-word codenames", () => {
-    expect(AGENT_CODENAME_SPACE).toBe(AGENT_CODENAMES.length * AGENT_CODENAMES.length);
-  });
+test("codenameFromIndex keeps the full two-part combination space for one-word codenames", () => {
+  assert.equal(AGENT_CODENAME_SPACE, AGENT_CODENAMES.length * AGENT_CODENAMES.length);
+});
 
-  it("returns fused one-word names for new codenames", () => {
-    const codename = codenameFromIndex(0);
+test("codenameFromIndex returns fused one-word names for new codenames", () => {
+  const codename = codenameFromIndex(0);
 
-    expect(codename.name).toBe("amberamber");
-    expect(codename.display_name).toBe("AmberAmber");
-    expect(codename.name.includes("-")).toBe(false);
-    expect(codename.display_name.includes(" ")).toBe(false);
-  });
+  assert.equal(codename.name, "amberamber");
+  assert.equal(codename.display_name, "AmberAmber");
+  assert.equal(codename.name.includes("-"), false);
+  assert.equal(codename.display_name.includes(" "), false);
+});
 
-  it("keeps distinct indices distinct", () => {
-    expect(codenameFromIndex(0)).not.toEqual(codenameFromIndex(1));
-    expect(codenameFromIndex(AGENT_CODENAMES.length)).not.toEqual(codenameFromIndex(1));
-  });
+test("codenameFromIndex keeps distinct indices distinct", () => {
+  assert.notDeepEqual(codenameFromIndex(0), codenameFromIndex(1));
+  assert.notDeepEqual(codenameFromIndex(AGENT_CODENAMES.length), codenameFromIndex(1));
 });
