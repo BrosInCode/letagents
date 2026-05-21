@@ -203,6 +203,41 @@ export interface RentalReportUsageResult {
   error?: string;
 }
 
+export interface RentalReadFileInput {
+  session_id: string;
+  path: string;
+  max_bytes?: number;
+}
+
+export interface RentalReadFileResult {
+  success: boolean;
+  path?: string;
+  content?: string;
+  secretScanStatus?: string;
+  redactionCount?: number;
+  findings?: unknown[];
+  bytes?: number;
+  manifestId?: string;
+  error?: string;
+}
+
+export interface RentalSearchInput {
+  session_id: string;
+  query: string;
+  max_results?: number;
+  case_sensitive?: boolean;
+}
+
+export interface RentalSearchResult {
+  success: boolean;
+  query?: string;
+  results?: unknown[];
+  count?: number;
+  truncated?: boolean;
+  manifestId?: string;
+  error?: string;
+}
+
 export async function rentalReportUsage(
   deps: RentalToolDeps,
   input: RentalReportUsageInput,
@@ -228,6 +263,99 @@ export async function rentalReportUsage(
       body: JSON.stringify(input.report),
     });
     return { success: true, meter };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// rental_read_file / rental_search (p4.4 — Context Broker)
+// ---------------------------------------------------------------------------
+
+export async function rentalReadFile(
+  deps: RentalToolDeps,
+  input: RentalReadFileInput,
+): Promise<RentalReadFileResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  if (typeof input.path !== "string" || !input.path.trim()) {
+    return { success: false, error: "path is required" };
+  }
+  if (
+    input.max_bytes !== undefined
+    && (
+      typeof input.max_bytes !== "number"
+      || !Number.isFinite(input.max_bytes)
+      || !Number.isInteger(input.max_bytes)
+      || input.max_bytes <= 0
+    )
+  ) {
+    return { success: false, error: "max_bytes must be a positive integer" };
+  }
+
+  const body: Record<string, unknown> = {
+    path: input.path.trim(),
+  };
+  if (input.max_bytes !== undefined) body.maxBytes = input.max_bytes;
+
+  try {
+    return await deps.apiCall<RentalReadFileResult>(
+      `/api/rental/sessions/${encodeURIComponent(input.session_id.trim())}/context/read-file`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function rentalSearch(
+  deps: RentalToolDeps,
+  input: RentalSearchInput,
+): Promise<RentalSearchResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  if (typeof input.query !== "string" || !input.query.trim()) {
+    return { success: false, error: "query is required" };
+  }
+  if (
+    input.max_results !== undefined
+    && (
+      typeof input.max_results !== "number"
+      || !Number.isFinite(input.max_results)
+      || !Number.isInteger(input.max_results)
+      || input.max_results <= 0
+    )
+  ) {
+    return { success: false, error: "max_results must be a positive integer" };
+  }
+
+  const body: Record<string, unknown> = {
+    query: input.query.trim(),
+  };
+  if (input.max_results !== undefined) body.maxResults = input.max_results;
+  if (typeof input.case_sensitive === "boolean") {
+    body.caseSensitive = input.case_sensitive;
+  }
+
+  try {
+    return await deps.apiCall<RentalSearchResult>(
+      `/api/rental/sessions/${encodeURIComponent(input.session_id.trim())}/context/search`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
   } catch (err) {
     return {
       success: false,

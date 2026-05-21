@@ -21,6 +21,8 @@ import {
   rentalDecline,
   rentalHeartbeat,
   rentalReportUsage,
+  rentalReadFile,
+  rentalSearch,
   type RentalToolDeps,
 } from "../rental-tools.js";
 
@@ -464,5 +466,96 @@ describe("rentalReportUsage", () => {
     });
     assert.equal(res.success, false);
     assert.match(res.error ?? "", /invalid_delta/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rental_read_file / rental_search (p4.4)
+// ---------------------------------------------------------------------------
+
+describe("rentalReadFile", () => {
+  it("rejects empty path without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalReadFile(deps, {
+      session_id: "rsess_1",
+      path: "",
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /path/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /context/read-file with path and maxBytes", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps(
+      { success: true, path: "src/index.ts", content: "hello" },
+      captured,
+    );
+    const res = await rentalReadFile(deps, {
+      session_id: "rsess/context",
+      path: " src/index.ts ",
+      max_bytes: 4096,
+    });
+
+    assert.equal(res.success, true);
+    assert.equal(
+      captured[0]!.path,
+      "/api/rental/sessions/rsess%2Fcontext/context/read-file",
+    );
+    assert.equal(captured[0]!.options?.method, "POST");
+    const body = JSON.parse(String(captured[0]!.options?.body ?? "null"));
+    assert.deepEqual(body, { path: "src/index.ts", maxBytes: 4096 });
+  });
+
+  it("surfaces apiCall errors as success: false", async () => {
+    const deps = makeFailingDeps(new Error("workspace_not_ready"));
+    const res = await rentalReadFile(deps, {
+      session_id: "rsess_1",
+      path: "src/index.ts",
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /workspace_not_ready/);
+  });
+});
+
+describe("rentalSearch", () => {
+  it("rejects empty query without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalSearch(deps, {
+      session_id: "rsess_1",
+      query: " ",
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /query/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /context/search with literal search options", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps(
+      { success: true, query: "hello", results: [], count: 0 },
+      captured,
+    );
+    const res = await rentalSearch(deps, {
+      session_id: "rsess_1",
+      query: " hello ",
+      max_results: 10,
+      case_sensitive: true,
+    });
+
+    assert.equal(res.success, true);
+    assert.equal(
+      captured[0]!.path,
+      "/api/rental/sessions/rsess_1/context/search",
+    );
+    assert.equal(captured[0]!.options?.method, "POST");
+    const body = JSON.parse(String(captured[0]!.options?.body ?? "null"));
+    assert.deepEqual(body, {
+      query: "hello",
+      maxResults: 10,
+      caseSensitive: true,
+    });
   });
 });
