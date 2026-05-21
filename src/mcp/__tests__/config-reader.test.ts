@@ -1,7 +1,10 @@
-import { findLetagentsConfig, getRoomFromConfig } from "../config-reader";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, rmSync } from "fs";
+import assert from "node:assert/strict";
+import test, { afterEach, mock } from "node:test";
+import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+
+import { findLetagentsConfig, getRoomFromConfig } from "../config-reader.js";
 
 // Helper to create temp directories with config files
 function createTempDir(): string {
@@ -18,26 +21,26 @@ function cleanup(dir: string) {
   }
 }
 
-describe("findLetagentsConfig", () => {
-  let tempDir: string;
+// ── findLetagentsConfig ─────────────────────────────────
 
-  afterEach(() => {
-    if (tempDir) cleanup(tempDir);
-  });
-
-  it("returns config when .letagents.json is in the start directory", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig returns config when .letagents.json is in the start directory", () => {
+  const tempDir = createTempDir();
+  try {
     writeFileSync(
       join(tempDir, ".letagents.json"),
       JSON.stringify({ room: "github.com/BrosInCode/letagents" })
     );
 
     const config = findLetagentsConfig(tempDir);
-    expect(config).toEqual({ room: "github.com/BrosInCode/letagents" });
-  });
+    assert.deepEqual(config, { room: "github.com/BrosInCode/letagents" });
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("walks up to find config in parent directory", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig walks up to find config in parent directory", () => {
+  const tempDir = createTempDir();
+  try {
     const childDir = join(tempDir, "src", "mcp");
     mkdirSync(childDir, { recursive: true });
     writeFileSync(
@@ -46,85 +49,121 @@ describe("findLetagentsConfig", () => {
     );
 
     const config = findLetagentsConfig(childDir);
-    expect(config).toEqual({ room: "gitlab.com/team/project" });
-  });
+    assert.deepEqual(config, { room: "gitlab.com/team/project" });
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("returns null when no config file exists", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig returns null when no config file exists", () => {
+  const tempDir = createTempDir();
+  try {
     const config = findLetagentsConfig(tempDir);
-    expect(config).toBeNull();
-  });
+    assert.equal(config, null);
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("returns null for config with missing room field", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig returns null for config with missing room field", () => {
+  const tempDir = createTempDir();
+  try {
     writeFileSync(
       join(tempDir, ".letagents.json"),
       JSON.stringify({ version: "1.0" })
     );
 
     // Suppress console.error for this test
-    const spy = jest.spyOn(console, "error").mockImplementation();
-    const config = findLetagentsConfig(tempDir);
-    expect(config).toBeNull();
-    spy.mockRestore();
-  });
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const config = findLetagentsConfig(tempDir);
+      assert.equal(config, null);
+    } finally {
+      console.error = originalError;
+    }
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("returns null for config with empty room field", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig returns null for config with empty room field", () => {
+  const tempDir = createTempDir();
+  try {
     writeFileSync(
       join(tempDir, ".letagents.json"),
       JSON.stringify({ room: "" })
     );
 
-    const spy = jest.spyOn(console, "error").mockImplementation();
-    const config = findLetagentsConfig(tempDir);
-    expect(config).toBeNull();
-    spy.mockRestore();
-  });
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const config = findLetagentsConfig(tempDir);
+      assert.equal(config, null);
+    } finally {
+      console.error = originalError;
+    }
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("returns null for invalid JSON", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig returns null for invalid JSON", () => {
+  const tempDir = createTempDir();
+  try {
     writeFileSync(join(tempDir, ".letagents.json"), "not valid json {{{");
 
-    const spy = jest.spyOn(console, "error").mockImplementation();
-    const config = findLetagentsConfig(tempDir);
-    expect(config).toBeNull();
-    spy.mockRestore();
-  });
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const config = findLetagentsConfig(tempDir);
+      assert.equal(config, null);
+    } finally {
+      console.error = originalError;
+    }
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("trims whitespace from room name", () => {
-    tempDir = createTempDir();
+test("findLetagentsConfig trims whitespace from room name", () => {
+  const tempDir = createTempDir();
+  try {
     writeFileSync(
       join(tempDir, ".letagents.json"),
       JSON.stringify({ room: "  github.com/BrosInCode/letagents  " })
     );
 
     const config = findLetagentsConfig(tempDir);
-    expect(config).toEqual({ room: "github.com/BrosInCode/letagents" });
-  });
+    assert.deepEqual(config, { room: "github.com/BrosInCode/letagents" });
+  } finally {
+    cleanup(tempDir);
+  }
 });
 
-describe("getRoomFromConfig", () => {
-  let tempDir: string;
+// ── getRoomFromConfig ───────────────────────────────────
 
-  afterEach(() => {
-    if (tempDir) cleanup(tempDir);
-  });
-
-  it("returns room string when config exists", () => {
-    tempDir = createTempDir();
+test("getRoomFromConfig returns room string when config exists", () => {
+  const tempDir = createTempDir();
+  try {
     writeFileSync(
       join(tempDir, ".letagents.json"),
       JSON.stringify({ room: "github.com/BrosInCode/letagents" })
     );
 
     const room = getRoomFromConfig(tempDir);
-    expect(room).toBe("github.com/BrosInCode/letagents");
-  });
+    assert.equal(room, "github.com/BrosInCode/letagents");
+  } finally {
+    cleanup(tempDir);
+  }
+});
 
-  it("returns null when no config exists", () => {
-    tempDir = createTempDir();
+test("getRoomFromConfig returns null when no config exists", () => {
+  const tempDir = createTempDir();
+  try {
     const room = getRoomFromConfig(tempDir);
-    expect(room).toBeNull();
-  });
+    assert.equal(room, null);
+  } finally {
+    cleanup(tempDir);
+  }
 });
