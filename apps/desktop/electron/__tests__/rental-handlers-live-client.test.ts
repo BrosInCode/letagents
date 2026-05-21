@@ -208,14 +208,27 @@ test("create-session forwards a mapped body and maps the response back", async (
     },
   })) as { id: string };
   assert.equal(calls[0]?.method, "createSession");
-  // The body should be the API-shape mapped version (no policy
-  // envelope; lrtLimit + timeLimitMinutes lifted out).
+  // The body should persist scope/policy while also lifting scheduler
+  // limits out for the API's top-level columns.
   const body = (calls[0]?.args[0] ?? {}) as Record<string, unknown>;
   assert.equal(body.listingId, "listing_1");
   assert.equal(body.repoOwner, "BrosInCode");
+  assert.deepEqual(body.approvedScope, {
+    includePaths: [],
+    excludePaths: [],
+    protectedPaths: [],
+    notes: null,
+  });
+  assert.deepEqual(body.policy, {
+    maxLrt: 10000,
+    maxDurationMinutes: 60,
+    maxPatchBytes: null,
+    allowCommands: false,
+    allowNetwork: false,
+    requirePatchGate: true,
+  });
   assert.equal(body.lrtLimit, 10000);
   assert.equal(body.timeLimitMinutes, 60);
-  assert.equal(body.policy, undefined, "policy envelope is NOT forwarded");
   assert.equal(out.id, "rsess_42");
 });
 

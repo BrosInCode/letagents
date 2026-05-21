@@ -238,10 +238,27 @@ describe("renter session route handlers", () => {
       baseBranch: "main",
       taskTitle: "Fix tests",
       taskPrompt: "Please fix failing tests",
+      approvedScope: {
+        includePaths: ["src/**"],
+        excludePaths: ["dist/**"],
+        protectedPaths: [".env"],
+      },
+      policy: {
+        allowCommands: false,
+        allowNetwork: false,
+        requirePatchGate: true,
+      },
     });
     assert.strictEqual(res.status, 201);
-    const json = (await res.json()) as { id: string; status: string };
+    const json = (await res.json()) as {
+      id: string;
+      status: string;
+      approvedScope: { includePaths: string[] };
+      policy: { requirePatchGate: boolean };
+    };
     assert.strictEqual(json.status, "requested");
+    assert.deepEqual(json.approvedScope.includePaths, ["src/**"]);
+    assert.equal(json.policy.requirePatchGate, true);
   });
 
   it("returns 404 when listing not found", async () => {
