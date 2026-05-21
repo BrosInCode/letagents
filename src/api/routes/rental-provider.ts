@@ -7,6 +7,7 @@
  *   PATCH  /api/rental/provider/listings/:id      — update listing
  *   POST   /api/rental/provider/listings/:id/pause   — pause listing
  *   POST   /api/rental/provider/listings/:id/resume  — resume listing
+ *   POST   /api/rental/provider/sessions/:id/provision — provision accepted session
  *   GET    /api/rental/provider/readiness         — provider-level readiness rollup
  *
  * All routes gated by LETAGENTS_RENT_ENABLED env flag.
@@ -23,6 +24,10 @@ import type {
   UpdateListingInput,
   RentalListing,
 } from "../rental/listings.js";
+import type {
+  ProvisionRentalRoomForProviderInput,
+  RentalRoomResult,
+} from "../rental/room-projection.js";
 import { projectProviderReadiness } from "../rental/provider-readiness.js";
 
 export interface RentalProviderRouteDeps {
@@ -50,6 +55,9 @@ export interface RentalProviderRouteDeps {
     sessionId: string,
     providerAccountId: string
   ): Promise<unknown | null>;
+  provisionSession(
+    input: ProvisionRentalRoomForProviderInput,
+  ): Promise<RentalRoomResult | null>;
   listProviderRequests(providerAccountId: string): Promise<unknown[]>;
 }
 
@@ -283,6 +291,59 @@ export function registerRentalProviderRoutes(
           return;
         }
         res.status(500).json({ error: "Failed to accept session" });
+      }
+    }
+  );
+
+  // POST /api/rental/provider/sessions/:id/provision — create rental room
+  app.post(
+    "/api/rental/provider/sessions/:id/provision",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireProviderAccountId(req, res);
+      if (!accountId) return;
+
+      const parentRoomId = typeof req.body?.parentRoomId === "string"
+        ? req.body.parentRoomId.trim()
+        : typeof req.body?.parent_room_id === "string"
+          ? req.body.parent_room_id.trim()
+          : "";
+      if (!parentRoomId) {
+        res.status(400).json({ error: "parentRoomId is required" });
+        return;
+      }
+
+      const account = req.sessionAccount;
+      const providerDisplayName = typeof req.body?.providerDisplayName === "string"
+        && req.body.providerDisplayName.trim()
+        ? req.body.providerDisplayName.trim()
+        : typeof req.body?.provider_display_name === "string"
+          && req.body.provider_display_name.trim()
+          ? req.body.provider_display_name.trim()
+          : account?.display_name || account?.login || "Rental Agent";
+
+      try {
+        const result = await deps.provisionSession({
+          sessionId: req.params.id as string,
+          providerAccountId: accountId,
+          parentRoomId,
+          providerDisplayName,
+          providerGithubLogin: account?.login ?? undefined,
+          providerGithubId: account?.provider_user_id ?? undefined,
+        });
+        if (!result) {
+          res.status(404).json({ error: "session_not_found" });
+          return;
+        }
+        res.status(201).json(result);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "unknown_error";
+        if (message.startsWith("invalid_status")) {
+          res.status(409).json({ error: message });
+          return;
+        }
+        res.status(500).json({ error: "Failed to provision session" });
       }
     }
   );

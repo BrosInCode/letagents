@@ -10,6 +10,7 @@ import {
   rentalComplete,
   rentalHeartbeat,
   rentalListRequests,
+  rentalProvision,
   rentalReportUsage,
   rentalRequestBudgetExtension,
 } from "../../mcp/rental-tools.js";
@@ -276,6 +277,32 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
         });
         return session as never;
       },
+      provisionSession: async (input) => {
+        const session = sessions.get(input.sessionId);
+        if (!session || session.provider_account_id !== input.providerAccountId) {
+          return null;
+        }
+        if (session.room_id) {
+          return {
+            roomId: session.room_id,
+            participantId: "rpart_e2e",
+            session: session as never,
+          };
+        }
+        if (!isValidTransition(session.status, "provisioning")) {
+          throw new Error(
+            `invalid_status: session must be accepted to provision, got ${session.status}`,
+          );
+        }
+        session.room_id = "rroom_e2e";
+        session.status = "provisioning";
+        session.updated_at = new Date();
+        return {
+          roomId: "rroom_e2e",
+          participantId: "rpart_e2e",
+          session: session as never,
+        };
+      },
       declineSession: async () => null,
     });
 
@@ -438,9 +465,14 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     assert.equal(accepted.success, true);
     assert.equal((accepted.session as MemorySession).status, "accepted");
 
-    const provisioned = sessions.get(created.id)!;
-    provisioned.room_id = ROOM_ID;
-    provisioned.status = "provisioning";
+    const provisioned = await rentalProvision(providerDeps, {
+      session_id: created.id,
+      parent_room_id: ROOM_ID,
+      provider_display_name: "Provider Agent",
+    });
+    assert.equal(provisioned.success, true);
+    assert.equal(provisioned.room_id, "rroom_e2e");
+    assert.equal((provisioned.session as MemorySession).status, "provisioning");
 
     const heartbeat = await rentalHeartbeat(providerDeps, {
       session_id: created.id,
@@ -449,6 +481,15 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     assert.equal(heartbeat.status, "active");
     assert.equal(heartbeat.transitioned, true);
     assert.equal(sessions.get(created.id)!.status, "active");
+
+    const provisionRetry = await rentalProvision(providerDeps, {
+      session_id: created.id,
+      parent_room_id: ROOM_ID,
+      provider_display_name: "Provider Agent",
+    });
+    assert.equal(provisionRetry.success, true);
+    assert.equal(provisionRetry.room_id, "rroom_e2e");
+    assert.equal((provisionRetry.session as MemorySession).status, "active");
 
     const usage = await rentalReportUsage(providerDeps, {
       session_id: created.id,
@@ -491,7 +532,7 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     assert.equal(completed.success, true);
     assert.equal((completed.session as MemorySession).status, "completed");
     assert.deepEqual(leaseReleases, [
-      { sessionId: created.id, roomId: ROOM_ID, reason: "completed" },
+      { sessionId: created.id, roomId: "rroom_e2e", reason: "completed" },
     ]);
 
     const rejectedCancel = await rentalCancel(providerDeps, {

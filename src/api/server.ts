@@ -208,6 +208,7 @@ import {
   getSessionById,
   listProviderRequests,
 } from "./rental/sessions.js";
+import { provisionRentalRoomForProvider } from "./rental/room-projection.js";
 import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
@@ -1345,6 +1346,7 @@ registerRentalProviderRoutes(app, {
   // p1.3 session deps
   acceptSession,
   declineSession,
+  provisionSession: provisionRentalRoomForProvider,
   listProviderRequests,
 });
 // Register internal routes before renter routes so the shared terminal

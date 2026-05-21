@@ -9,6 +9,7 @@
  *
  *   GET    /api/rental/provider/requests
  *   POST   /api/rental/provider/sessions/:id/accept
+ *   POST   /api/rental/provider/sessions/:id/provision
  *   POST   /api/rental/provider/sessions/:id/decline
  *
  * Spec refs: §6 (provider flow), §18.2 (accept/decline transitions).
@@ -75,6 +76,20 @@ export interface RentalAcceptResult {
   idempotency_key?: string;
 }
 
+export interface RentalProvisionInput {
+  session_id: string;
+  parent_room_id: string;
+  provider_display_name?: string;
+}
+
+export interface RentalProvisionResult {
+  success: boolean;
+  room_id?: string;
+  participant_id?: string;
+  session?: unknown;
+  error?: string;
+}
+
 function validateSessionId(input: { session_id?: string }): string | null {
   const v = input.session_id;
   if (typeof v !== "string" || !v.trim()) return "session_id is required";
@@ -117,6 +132,48 @@ export async function rentalAccept(
       success: false,
       error: err instanceof Error ? err.message : String(err),
       ...(idemKey ? { idempotency_key: idemKey } : {}),
+    };
+  }
+}
+
+export async function rentalProvision(
+  deps: RentalToolDeps,
+  input: RentalProvisionInput,
+): Promise<RentalProvisionResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  const parentRoomId = input.parent_room_id?.trim();
+  if (!parentRoomId) {
+    return { success: false, error: "parent_room_id is required" };
+  }
+
+  const path = `/api/rental/provider/sessions/${encodeURIComponent(
+    input.session_id.trim(),
+  )}/provision`;
+  const body: Record<string, unknown> = { parentRoomId };
+  const displayName = input.provider_display_name?.trim();
+  if (displayName) body.providerDisplayName = displayName;
+
+  try {
+    const result = await deps.apiCall<{
+      roomId?: string;
+      participantId?: string;
+      session?: unknown;
+    }>(path, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    return {
+      success: true,
+      room_id: typeof result?.roomId === "string" ? result.roomId : undefined,
+      participant_id:
+        typeof result?.participantId === "string" ? result.participantId : undefined,
+      session: result?.session,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
     };
   }
 }

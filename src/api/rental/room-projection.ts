@@ -62,6 +62,10 @@ export interface ProvisionRentalRoomInput {
   providerGithubId?: string;
 }
 
+export interface ProvisionRentalRoomForProviderInput extends ProvisionRentalRoomInput {
+  providerAccountId: string;
+}
+
 export interface RentalRoomResult {
   roomId: string;
   participantId: string;
@@ -117,66 +121,131 @@ export async function provisionRentalRoom(
 ): Promise<RentalRoomResult> {
   const { sessionId, parentRoomId, providerDisplayName } = input;
 
-  // 1. Verify session
+  return db.transaction(async (tx) => {
+    const ensureParticipant = async (roomId: string): Promise<string> => {
+      const [existing] = await tx
+        .select({ id: participants.id })
+        .from(participants)
+        .where(
+          and(
+            eq(participants.room_id, roomId),
+            eq(participants.role, "rental_participant"),
+          ),
+        )
+        .limit(1);
+      if (existing) return existing.id;
+
+      const participantId = generateParticipantId();
+      await tx.insert(participants).values({
+        id: participantId,
+        room_id: roomId,
+        display_name: providerDisplayName,
+        github_login: input.providerGithubLogin ?? null,
+        github_id: input.providerGithubId ?? null,
+        role: "rental_participant",
+        created_at: new Date().toISOString(),
+      });
+      return participantId;
+    };
+
+    // Lock the session row so concurrent provision attempts serialize around
+    // the accepted -> provisioning transition and cannot create duplicate rooms.
+    const [session] = await tx
+      .select()
+      .from(rental_sessions)
+      .where(eq(rental_sessions.id, sessionId))
+      .for("update");
+
+    if (!session) {
+      throw new Error("session_not_found");
+    }
+
+    if (session.room_id) {
+      return {
+        roomId: session.room_id,
+        participantId: await ensureParticipant(session.room_id),
+        session,
+      };
+    }
+
+    if (session.status !== "accepted") {
+      throw new Error(
+        `invalid_status: session must be accepted to provision, got ${session.status}`
+      );
+    }
+
+    const focusKey = `rental:${sessionId}`;
+    const [existingRoom] = await tx
+      .select({ id: rooms.id })
+      .from(rooms)
+      .where(
+        and(
+          eq(rooms.parent_room_id, parentRoomId),
+          eq(rooms.focus_key, focusKey),
+        ),
+      )
+      .limit(1);
+
+    const roomId = existingRoom?.id ?? generateRoomId();
+    const now = new Date().toISOString();
+
+    if (!existingRoom) {
+      await tx.insert(rooms).values({
+        id: roomId,
+        display_name: `Rental: ${session.task_title}`,
+        kind: "focus",
+        parent_room_id: parentRoomId,
+        focus_key: focusKey,
+        focus_status: "active",
+        focus_parent_visibility: "summary_only",
+        focus_activity_scope: "task_and_branch",
+        created_at: now,
+      });
+    }
+
+    const participantId = await ensureParticipant(roomId);
+
+    // 4+5. Update session with room_id and advance to provisioning
+    const [updated] = await tx
+      .update(rental_sessions)
+      .set({
+        room_id: roomId,
+        status: "provisioning",
+        updated_at: new Date(),
+      })
+      .where(eq(rental_sessions.id, sessionId))
+      .returning();
+
+    if (!updated) {
+      throw new Error("session_not_found");
+    }
+
+    return {
+      roomId,
+      participantId,
+      session: updated,
+    };
+  });
+}
+
+/**
+ * Provider-scoped wrapper for the route layer. This keeps the public
+ * provision endpoint from leaking whether another provider owns a session.
+ */
+export async function provisionRentalRoomForProvider(
+  input: ProvisionRentalRoomForProviderInput,
+): Promise<RentalRoomResult | null> {
   const [session] = await db
-    .select()
+    .select({ id: rental_sessions.id })
     .from(rental_sessions)
-    .where(eq(rental_sessions.id, sessionId));
-
-  if (!session) {
-    throw new Error("session_not_found");
-  }
-  if (session.status !== "accepted") {
-    throw new Error(
-      `invalid_status: session must be accepted to provision, got ${session.status}`
+    .where(
+      and(
+        eq(rental_sessions.id, input.sessionId),
+        eq(rental_sessions.provider_account_id, input.providerAccountId),
+      ),
     );
-  }
-
-  // 2. Create rental room
-  const roomId = generateRoomId();
-  const now = new Date().toISOString();
-
-  await db.insert(rooms).values({
-    id: roomId,
-    display_name: `Rental: ${session.task_title}`,
-    kind: "focus",
-    parent_room_id: parentRoomId,
-    focus_key: `rental:${sessionId}`,
-    focus_status: "active",
-    focus_parent_visibility: "summary_only",
-    focus_activity_scope: "task_and_branch",
-    created_at: now,
-  });
-
-  // 3. Add provider as rental_participant
-  const participantId = generateParticipantId();
-
-  await db.insert(participants).values({
-    id: participantId,
-    room_id: roomId,
-    display_name: providerDisplayName,
-    github_login: input.providerGithubLogin ?? null,
-    github_id: input.providerGithubId ?? null,
-    role: "rental_participant",
-    created_at: now,
-  });
-
-  // 4+5. Update session with room_id and advance to provisioning
-  const [updated] = await db
-    .update(rental_sessions)
-    .set({
-      room_id: roomId,
-      status: "provisioning",
-      updated_at: new Date(),
-    })
-    .where(eq(rental_sessions.id, sessionId))
-    .returning();
-
-  return {
-    roomId,
-    participantId,
-    session: updated,
-  };
+  if (!session) return null;
+  return provisionRentalRoom(input);
 }
 
 /**

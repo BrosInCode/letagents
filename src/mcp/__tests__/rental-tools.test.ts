@@ -23,6 +23,7 @@ import {
   rentalReportUsage,
   rentalProposeEdit,
   rentalProposePatch,
+  rentalProvision,
   rentalReadFile,
   rentalRunCommand,
   rentalSearch,
@@ -211,6 +212,64 @@ describe("rentalAccept", () => {
 // ---------------------------------------------------------------------------
 // rental_decline
 // ---------------------------------------------------------------------------
+
+describe("rentalProvision", () => {
+  it("rejects missing ids without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const missingSession = await rentalProvision(deps, {
+      session_id: "",
+      parent_room_id: "room_1",
+    });
+    assert.equal(missingSession.success, false);
+    assert.match(missingSession.error ?? "", /session_id/);
+
+    const missingParent = await rentalProvision(deps, {
+      session_id: "rsess_1",
+      parent_room_id: "",
+    });
+    assert.equal(missingParent.success, false);
+    assert.match(missingParent.error ?? "", /parent_room_id/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST provision with parent room and display name", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({
+      roomId: "rroom_1",
+      participantId: "rpart_1",
+      session: { id: "rsess_1", status: "provisioning" },
+    }, captured);
+
+    const res = await rentalProvision(deps, {
+      session_id: "rsess_1",
+      parent_room_id: "github.com/BrosInCode/letagents",
+      provider_display_name: "Provider Agent",
+    });
+
+    assert.equal(res.success, true);
+    assert.equal(res.room_id, "rroom_1");
+    assert.equal(res.participant_id, "rpart_1");
+    assert.deepEqual(res.session, { id: "rsess_1", status: "provisioning" });
+    assert.equal(captured[0].path, "/api/rental/provider/sessions/rsess_1/provision");
+    assert.equal(captured[0].options?.method, "POST");
+    const body = JSON.parse(String(captured[0].options?.body ?? "{}"));
+    assert.deepEqual(body, {
+      parentRoomId: "github.com/BrosInCode/letagents",
+      providerDisplayName: "Provider Agent",
+    });
+  });
+
+  it("surfaces provision apiCall errors", async () => {
+    const deps = makeFailingDeps(new Error("invalid_status"));
+    const res = await rentalProvision(deps, {
+      session_id: "rsess_1",
+      parent_room_id: "room_1",
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /invalid_status/);
+  });
+});
 
 describe("rentalDecline", () => {
   it("rejects missing session_id", async () => {
