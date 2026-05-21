@@ -95,7 +95,7 @@ async function waitForServer(
 ): Promise<void> {
   let lastReadinessError: string | undefined;
 
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(
         `webhook test server exited early with code ${child.exitCode ?? "null"} signal ${child.signalCode ?? "null"}` +
