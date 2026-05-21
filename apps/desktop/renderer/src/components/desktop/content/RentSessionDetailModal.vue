@@ -264,7 +264,22 @@ const anyLoading = computed(
 const canCancel = computed(() => {
   const status = props.session?.status;
   if (!status) return false;
-  return ["pending", "queued", "starting", "active", "running", "in_progress"].includes(status);
+  return [
+    "requested",
+    "accepted",
+    "provisioning",
+    "active",
+    "blocked",
+    "patch_review",
+    "pr_opened",
+    "stale",
+    // Backward-compatible aliases from early desktop mocks/API drafts.
+    "pending",
+    "queued",
+    "starting",
+    "running",
+    "in_progress",
+  ].includes(status);
 });
 
 watch(
