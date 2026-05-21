@@ -282,6 +282,13 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
         if (!session || session.provider_account_id !== input.providerAccountId) {
           return null;
         }
+        if (session.room_id) {
+          return {
+            roomId: session.room_id,
+            participantId: "rpart_e2e",
+            session: session as never,
+          };
+        }
         if (!isValidTransition(session.status, "provisioning")) {
           throw new Error(
             `invalid_status: session must be accepted to provision, got ${session.status}`,
@@ -474,6 +481,15 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     assert.equal(heartbeat.status, "active");
     assert.equal(heartbeat.transitioned, true);
     assert.equal(sessions.get(created.id)!.status, "active");
+
+    const provisionRetry = await rentalProvision(providerDeps, {
+      session_id: created.id,
+      parent_room_id: ROOM_ID,
+      provider_display_name: "Provider Agent",
+    });
+    assert.equal(provisionRetry.success, true);
+    assert.equal(provisionRetry.room_id, "rroom_e2e");
+    assert.equal((provisionRetry.session as MemorySession).status, "active");
 
     const usage = await rentalReportUsage(providerDeps, {
       session_id: created.id,

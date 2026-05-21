@@ -676,6 +676,33 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(json.session.status, "provisioning");
   });
 
+  it("POST provision returns an existing rental room on idempotent retry", async () => {
+    deps.provisionSession = async (input: Record<string, unknown>) => ({
+      roomId: "rroom_existing",
+      participantId: "rpart_existing",
+      session: {
+        id: input.sessionId,
+        room_id: "rroom_existing",
+        status: "active",
+      },
+    });
+
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/provision",
+      { parentRoomId: "github.com/BrosInCode/letagents" },
+    );
+    assert.strictEqual(res.status, 201);
+    const json = (await res.json()) as {
+      roomId: string;
+      participantId: string;
+      session: { status: string };
+    };
+    assert.strictEqual(json.roomId, "rroom_existing");
+    assert.strictEqual(json.participantId, "rpart_existing");
+    assert.strictEqual(json.session.status, "active");
+  });
+
   it("POST provision validates parent room and maps invalid status", async () => {
     const missingParent = await req(
       "POST",
