@@ -425,6 +425,14 @@ function approvalTransitionPlan(status: RentalSessionRow["status"]): RentalSessi
   );
 }
 
+function idempotentApprovalRepairPlan(
+  status: RentalSessionRow["status"],
+): RentalSessionRow["status"][] {
+  if (status === "active") return ["patch_review", "pr_opened"];
+  if (status === "patch_review") return ["pr_opened"];
+  return [];
+}
+
 function assertCanRequestChanges(status: RentalSessionRow["status"]): void {
   if (status === "active" || status === "patch_review") return;
   throw new PatchReviewError(
@@ -474,8 +482,14 @@ export async function approvePatchForRenter(
   const patch = requirePatch(await deps.getPatch(session.id, normalizedPatchId));
   const existingPullRequest = existingApprovedPullRequest(patch);
   if (existingPullRequest) {
-    return {
+    const repairedSession = await applySessionTransitions(
       session,
+      idempotentApprovalRepairPlan(session.status),
+      deps.now(),
+      deps,
+    );
+    return {
+      session: repairedSession,
       patch: projectPatchForReview(patch),
       pullRequest: existingPullRequest,
       event: null,
