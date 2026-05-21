@@ -5,6 +5,7 @@
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { promises as fs } from "fs";
 import * as os from "os";
@@ -19,6 +20,10 @@ import type {
 const { PatchProposalError, proposePatch } = await import("../rental/patch-proposal.js");
 
 let workspaceRoot: string;
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 beforeEach(async () => {
   workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "patch-proposal-test-"));
@@ -138,6 +143,49 @@ describe("proposePatch", () => {
     assert.equal(inserted.length, 1);
     assert.equal(second.idempotent, true);
     assert.equal(second.proposal.id, first.proposal.id);
+  });
+
+  it("persists and replays redacted patch content after Secret Firewall sanitization", async () => {
+    const { deps, inserted } = makeDeps();
+    const secret = `ghp_${"A".repeat(36)}`;
+    const content = `export const token = "${secret}";\n`;
+    const input = {
+      sessionId: "rsess_1",
+      idempotencyKey: "patch-1",
+      files: [
+        {
+          path: "src/index.ts",
+          operation: "modify" as const,
+          content,
+        },
+      ],
+    };
+
+    const first = await proposePatch(deps, input);
+    const journalEntry = inserted[0]!.journal_entry as {
+      files: Array<{ content?: string }>;
+    };
+    const persistedJson = JSON.stringify(journalEntry);
+
+    assert.equal(first.gate.verdict, "passed_with_warnings");
+    assert.doesNotMatch(persistedJson, /ghp_/);
+    assert.match(journalEntry.files[0]!.content ?? "", /REDACTED_GITHUB_PAT/);
+    assert.equal(
+      inserted[0]!.diff_ref,
+      `sha256:${sha256(JSON.stringify(journalEntry.files))}`,
+    );
+    assert.notEqual(
+      inserted[0]!.diff_ref,
+      `sha256:${sha256(JSON.stringify(input.files))}`,
+    );
+
+    const second = await proposePatch(deps, input);
+    assert.equal(second.idempotent, true);
+    assert.doesNotMatch(JSON.stringify(second.gate.proposal.files), /ghp_/);
+    assert.match(
+      second.gate.proposal.files[0]?.content ?? "",
+      /REDACTED_GITHUB_PAT/,
+    );
   });
 
   it("persists rejected gate results for unexposed files", async () => {

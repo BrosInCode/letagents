@@ -128,7 +128,13 @@ export async function proposePatch(
     }
     return {
       proposal: existing,
-      gate: gateFromStoredProposal(existing, sessionId, idempotencyKey, summary, files),
+      gate: gateFromStoredProposal(
+        existing,
+        sessionId,
+        idempotencyKey,
+        summary,
+        filesFromStoredProposal(existing) ?? files,
+      ),
       idempotent: true,
     };
   }
@@ -156,6 +162,7 @@ export async function proposePatch(
 
   const proposalId = deps.generateId();
   const checkResults = gateToCheckResults(gate, manifest?.id ?? null);
+  const sanitizedFiles = filesWithSanitizedContent(files, gate);
   const responseHash = stableHash({
     proposalId,
     sessionId,
@@ -168,7 +175,7 @@ export async function proposePatch(
       id: proposalId,
       session_id: sessionId,
       source: "explicit_patch",
-      diff_ref: `sha256:${sha256(JSON.stringify(files))}`,
+      diff_ref: `sha256:${sha256(JSON.stringify(sanitizedFiles))}`,
       summary,
       gate_status: gate.verdict,
       risk_score: null,
@@ -176,7 +183,7 @@ export async function proposePatch(
       check_results: checkResults,
       journal_entry: {
         version: 1,
-        files,
+        files: sanitizedFiles,
         proposedAt: deps.now().toISOString(),
       },
       idempotency_key: idempotencyKey,
@@ -190,7 +197,13 @@ export async function proposePatch(
     if (!winner || winner.request_hash !== requestHash) throw err;
     return {
       proposal: winner,
-      gate: gateFromStoredProposal(winner, sessionId, idempotencyKey, summary, files),
+      gate: gateFromStoredProposal(
+        winner,
+        sessionId,
+        idempotencyKey,
+        summary,
+        filesFromStoredProposal(winner) ?? files,
+      ),
       idempotent: true,
     };
   }
@@ -268,6 +281,41 @@ function gateToCheckResults(
     rejectionReasons: gate.rejectionReasons,
     manifestId,
   };
+}
+
+function filesWithSanitizedContent(
+  files: PatchFile[],
+  gate: PatchGateResult,
+): PatchFile[] {
+  return files.map((file, index) => {
+    const check = gate.checks[index];
+    const sanitizedContent = check?.sanitizedContent;
+    return {
+      ...file,
+      path: check?.file ?? file.path,
+      content: sanitizedContent ?? file.content,
+    };
+  });
+}
+
+function filesFromStoredProposal(
+  row: RentalPatchProposalRow,
+): PatchFile[] | null {
+  const journalEntry = row.journal_entry;
+  if (!isRecord(journalEntry) || !Array.isArray(journalEntry.files)) {
+    return null;
+  }
+  return journalEntry.files.filter(isRecord).map((file) => ({
+    path: typeof file.path === "string" ? file.path : "",
+    operation:
+      file.operation === "modify" ||
+      file.operation === "create" ||
+      file.operation === "delete"
+        ? file.operation
+        : "modify",
+    content: typeof file.content === "string" ? file.content : undefined,
+    diff: typeof file.diff === "string" ? file.diff : undefined,
+  }));
 }
 
 function gateFromStoredProposal(
