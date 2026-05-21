@@ -228,6 +228,34 @@ describe("patch review orchestration", () => {
     }]);
   });
 
+  it("idempotent approve repairs active sessions with existing approved PR metadata", async () => {
+    const session = makeSession({ status: "active" });
+    const patch = makePatch({
+      check_results: {
+        ...makePatch().check_results,
+        review: {
+          status: "approved",
+          pr_url: "https://github.com/BrosInCode/letagents/pull/422",
+          pr_number: 422,
+          pr_title: "Rental patch: Fix failing tests",
+          pr_head_ref: "letagents/rent/session-1",
+          pr_base_ref: "staging",
+        },
+      },
+    });
+    const { deps, events, transitions, patchUpdates, pullRequests } = makeDeps(patch, session);
+
+    const result = await approvePatchForRenter(session, RENTER, patch.id, {}, deps);
+
+    assert.equal(result.idempotent, true);
+    assert.equal(result.session.status, "pr_opened");
+    assert.equal(result.pullRequest?.url, "https://github.com/BrosInCode/letagents/pull/422");
+    assert.deepEqual(transitions, ["patch_review", "pr_opened"]);
+    assert.equal(pullRequests.length, 0);
+    assert.equal(patchUpdates.length, 0);
+    assert.equal(events.length, 0);
+  });
+
   it("request changes marks the patch needs_revision and returns patch_review sessions to active", async () => {
     const session = makeSession({ status: "patch_review" });
     const patch = makePatch({ gate_status: "needs_renter_approval" });
