@@ -21,7 +21,10 @@ import {
   rentalDecline,
   rentalHeartbeat,
   rentalReportUsage,
+  rentalProposeEdit,
+  rentalProposePatch,
   rentalReadFile,
+  rentalRunCommand,
   rentalSearch,
   type RentalToolDeps,
 } from "../rental-tools.js";
@@ -556,6 +559,122 @@ describe("rentalSearch", () => {
       query: "hello",
       maxResults: 10,
       caseSensitive: true,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rental_propose_edit / rental_propose_patch / rental_run_command (p5.3)
+// ---------------------------------------------------------------------------
+
+describe("rentalProposeEdit", () => {
+  it("rejects missing idempotency key without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalProposeEdit(deps, {
+      session_id: "rsess_1",
+      idempotency_key: "",
+      path: "src/index.ts",
+      before_content: "old",
+      after_content: "new",
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /idempotency/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /patches/propose-edit with whole-file contents", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({ success: true, proposalId: "rpatch_1" }, captured);
+    const res = await rentalProposeEdit(deps, {
+      session_id: "rsess_1",
+      idempotency_key: " edit-1 ",
+      path: " src/index.ts ",
+      before_content: "old\n",
+      after_content: "new\n",
+      summary: " update ",
+    });
+
+    assert.equal(res.success, true);
+    assert.equal(captured[0]!.path, "/api/rental/sessions/rsess_1/patches/propose-edit");
+    assert.equal(captured[0]!.options?.method, "POST");
+    const body = JSON.parse(String(captured[0]!.options?.body ?? "null"));
+    assert.deepEqual(body, {
+      idempotencyKey: "edit-1",
+      path: "src/index.ts",
+      beforeContent: "old\n",
+      afterContent: "new\n",
+      summary: "update",
+    });
+  });
+});
+
+describe("rentalProposePatch", () => {
+  it("rejects empty file arrays without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalProposePatch(deps, {
+      session_id: "rsess_1",
+      idempotency_key: "patch-1",
+      files: [],
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /files/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /patches/propose-patch with files and summary", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({ success: true, proposalId: "rpatch_2" }, captured);
+    const files = [{ path: "src/index.ts", operation: "modify", content: "new" }];
+    const res = await rentalProposePatch(deps, {
+      session_id: "rsess_1",
+      idempotency_key: "patch-1",
+      files,
+      summary: "Update index",
+    });
+
+    assert.equal(res.success, true);
+    assert.equal(captured[0]!.path, "/api/rental/sessions/rsess_1/patches/propose-patch");
+    assert.equal(captured[0]!.options?.method, "POST");
+    const body = JSON.parse(String(captured[0]!.options?.body ?? "null"));
+    assert.deepEqual(body, {
+      idempotencyKey: "patch-1",
+      files,
+      summary: "Update index",
+    });
+  });
+});
+
+describe("rentalRunCommand", () => {
+  it("rejects empty argv without calling apiCall", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({}, captured);
+    const res = await rentalRunCommand(deps, {
+      session_id: "rsess_1",
+      argv: [],
+    });
+    assert.equal(res.success, false);
+    assert.match(res.error ?? "", /argv/);
+    assert.equal(captured.length, 0);
+  });
+
+  it("calls POST /commands/run with trimmed argv and timeout", async () => {
+    const captured: CapturedCall[] = [];
+    const deps = makeDeps({ success: true, exitCode: 0 }, captured);
+    const res = await rentalRunCommand(deps, {
+      session_id: "rsess_1",
+      argv: [" node ", "--test", "src/foo.test.ts"],
+      timeout_ms: 5000,
+    });
+
+    assert.equal(res.success, true);
+    assert.equal(captured[0]!.path, "/api/rental/sessions/rsess_1/commands/run");
+    assert.equal(captured[0]!.options?.method, "POST");
+    const body = JSON.parse(String(captured[0]!.options?.body ?? "null"));
+    assert.deepEqual(body, {
+      argv: ["node", "--test", "src/foo.test.ts"],
+      timeoutMs: 5000,
     });
   });
 });
