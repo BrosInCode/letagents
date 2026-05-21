@@ -374,6 +374,140 @@ test("room streams forward rental activity and patch frames", async () => {
   assert.doesNotMatch(output, /event: rental_usage/);
 });
 
+test("room stream does NOT forward internal/provider_only/renter_only rental activity events", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {},
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+
+  let closeHandler: (() => void) | null = null;
+  const req = {
+    params: { 0: "room_1" },
+    headers: { "x-letagents-desktop-client": "1" },
+    authKind: "owner_token",
+    on(event: string, handler: () => void) {
+      if (event === "close") closeHandler = handler;
+      return this;
+    },
+  };
+  const res = {
+    statusCode: 200,
+    headers: new Map<string, string>(),
+    writes: [] as string[],
+    writableEnded: false,
+    socket: { setKeepAlive() {} },
+    setHeader(name: string, value: string) {
+      this.headers.set(name, value);
+    },
+    flushHeaders() {},
+    write(chunk: string) {
+      this.writes.push(chunk);
+      return true;
+    },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.writes.push(JSON.stringify(body));
+      return this;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+  };
+
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/");
+  assert.ok(handler);
+  await handler(req, res);
+
+  // Emit internal event (budget.meter_stale) — should NOT appear on generic stream
+  deps.rentalActivityEvents.emit("activity:created", {
+    activity: {
+      id: "rev_internal",
+      session_id: "rsess_1",
+      room_id: "room_1",
+      event_type: "budget.meter_stale",
+      source: "system",
+      verified: true,
+      visibility: "internal",
+      payload: {},
+      created_at: new Date("2026-05-12T10:00:00.000Z"),
+    },
+  });
+
+  // Emit provider_only event (agent.note) — should NOT appear on generic stream
+  deps.rentalActivityEvents.emit("activity:created", {
+    activity: {
+      id: "rev_provider",
+      session_id: "rsess_1",
+      room_id: "room_1",
+      event_type: "agent.note",
+      source: "agent",
+      verified: false,
+      visibility: "provider_only",
+      payload: { note: "thinking..." },
+      created_at: new Date("2026-05-12T10:01:00.000Z"),
+    },
+  });
+
+  // Emit renter_only event — should NOT appear on generic stream
+  deps.rentalActivityEvents.emit("activity:created", {
+    activity: {
+      id: "rev_renter",
+      session_id: "rsess_1",
+      room_id: "room_1",
+      event_type: "session.silence_nudge_sent",
+      source: "system",
+      verified: true,
+      visibility: "renter_only",
+      payload: {},
+      created_at: new Date("2026-05-12T10:02:00.000Z"),
+    },
+  });
+
+  // Emit rental_visible event (session.started) — SHOULD appear on generic stream
+  deps.rentalActivityEvents.emit("activity:created", {
+    activity: {
+      id: "rev_visible",
+      session_id: "rsess_1",
+      room_id: "room_1",
+      event_type: "session.started",
+      source: "system",
+      verified: true,
+      visibility: "rental_visible",
+      payload: { session_id: "rsess_1" },
+      created_at: new Date("2026-05-12T10:03:00.000Z"),
+    },
+  });
+
+  closeHandler?.();
+
+  const output = res.writes.join("");
+
+  // Only rental_visible event should produce frames
+  assert.match(output, /event: rental_activity/, "rental_visible event should produce a rental_activity frame");
+  assert.match(output, /rev_visible/, "rental_visible event payload should be present");
+
+  // Internal, provider_only, renter_only must NOT produce any frames
+  assert.doesNotMatch(output, /rev_internal/, "internal event must not leak to generic stream");
+  assert.doesNotMatch(output, /rev_provider/, "provider_only event must not leak to generic stream");
+  assert.doesNotMatch(output, /rev_renter/, "renter_only event must not leak to generic stream");
+  assert.doesNotMatch(output, /budget\.meter_stale/, "budget.meter_stale must not produce SSE frame");
+});
+
 test("agent-shaped message writes require a registered worker session", async () => {
   let messageCreated = false;
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();

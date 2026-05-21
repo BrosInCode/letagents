@@ -576,6 +576,9 @@ export function registerRoomMessageRoutes(
     const onRentalActivityCreated = (event: RentalActivityCreatedEvent) => {
       const activity = event.activity;
       if (activity.room_id !== projectId) return;
+      // Generic room stream is not role-aware — only forward rental_visible events.
+      // Internal, provider_only, and renter_only events must not leak here.
+      if (activity.visibility !== "rental_visible") return;
       const payload = rentalActivityPayload(project.id, activity);
       for (const streamName of rentalActivityStreamNames(activity)) {
         res.write(`event: ${streamName}\ndata: ${JSON.stringify(payload)}\n\n`);
