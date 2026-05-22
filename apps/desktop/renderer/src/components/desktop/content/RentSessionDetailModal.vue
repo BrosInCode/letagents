@@ -264,7 +264,23 @@ const anyLoading = computed(
 const canCancel = computed(() => {
   const status = props.session?.status;
   if (!status) return false;
-  return ["pending", "queued", "starting", "active", "running", "in_progress"].includes(status);
+  return [
+    "requested",
+    "accepted",
+    "provisioning",
+    "active",
+    "blocked",
+    "patch_review",
+    "pr_opened",
+    "budget_exhausted",
+    "stale",
+    // Backward-compatible aliases from early desktop mocks/API drafts.
+    "pending",
+    "queued",
+    "starting",
+    "running",
+    "in_progress",
+  ].includes(status);
 });
 
 watch(
@@ -347,8 +363,10 @@ function isDisabledResult(value: unknown): boolean {
 }
 
 function statusState(status: string): string {
-  if (status === "active" || status === "running" || status === "in_progress") return "active";
-  if (status === "queued" || status === "pending" || status === "starting") return "starting";
+  if (["active", "patch_review", "pr_opened", "running", "in_progress"].includes(status)) return "active";
+  if (["requested", "accepted", "provisioning", "queued", "pending", "starting"].includes(status)) return "starting";
+  if (["blocked", "stale", "budget_exhausted", "failed"].includes(status)) return "failed";
+  if (["completed", "cancelled", "expired"].includes(status)) return "offline";
   return "offline";
 }
 
