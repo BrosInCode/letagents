@@ -1,0 +1,270 @@
+import { dialog } from "electron";
+import { Buffer } from "node:buffer";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+
+import type {
+  DesktopDroppedAttachmentContent,
+  DesktopRoomMessage,
+  DesktopStagedAttachment,
+} from "../ipc-types.js";
+import { apiFetch, readStoredAuth } from "./auth.js";
+import { apiUrl, attachmentProtocolScheme } from "./paths.js";
+import { focusMainWindow, getMainWindow } from "./window.js";
+
+export function mapRoomMessageAttachmentPayload(attachment: {
+  id?: string | null;
+  name?: string | null;
+  file_name?: string | null;
+  filename?: string | null;
+  mime_type?: string | null;
+  content_type?: string | null;
+  size_bytes?: number | null;
+  byte_size?: number | null;
+  url?: string | null;
+  download_url?: string | null;
+  data_url?: string | null;
+  content_base64?: string | null;
+}): DesktopRoomMessage["attachments"][number] {
+  const rawUrl = attachment.url || null;
+  const rawDownloadUrl = attachment.download_url || null;
+  return {
+    id: attachment.id || null,
+    name: attachment.name || null,
+    fileName: attachment.file_name || attachment.filename || null,
+    mimeType: attachment.mime_type || attachment.content_type || null,
+    sizeBytes: attachment.size_bytes ?? attachment.byte_size ?? null,
+    url: rawUrl ? proxiedAttachmentUrl(rawUrl) : null,
+    downloadUrl: rawDownloadUrl ? proxiedAttachmentUrl(rawDownloadUrl) : null,
+    dataUrl: attachment.data_url || null,
+    contentBase64: attachment.content_base64 || null,
+  };
+}
+
+function proxiedAttachmentUrl(rawUrl: string): string {
+  if (!shouldProxyAttachmentUrl(rawUrl)) return rawUrl;
+  const encoded = Buffer.from(rawUrl, "utf8").toString("base64url");
+  return `${attachmentProtocolScheme}://download/${encoded}`;
+}
+
+function shouldProxyAttachmentUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("/")) return true;
+  try {
+    const target = new URL(trimmed);
+    return target.origin === new URL(apiUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function resolveAttachmentProxyTarget(rawUrl: string): URL {
+  const apiOrigin = new URL(apiUrl).origin;
+  const target = rawUrl.startsWith("/")
+    ? new URL(rawUrl, apiOrigin)
+    : new URL(rawUrl);
+  if (target.origin !== apiOrigin) {
+    throw new Error("Attachment proxy target is outside LetAgents API.");
+  }
+  return target;
+}
+
+export async function handleAttachmentProtocolRequest(
+  request: Request,
+): Promise<Response> {
+  try {
+    const requestUrl = new URL(request.url);
+    const encodedTarget = requestUrl.pathname.replace(/^\/+/, "");
+    if (!encodedTarget) {
+      return new Response("Missing attachment target.", { status: 400 });
+    }
+
+    const rawTarget = Buffer.from(encodedTarget, "base64url").toString("utf8");
+    const target = resolveAttachmentProxyTarget(rawTarget);
+    const storedAuth = await readStoredAuth();
+    const headers = new Headers();
+    if (storedAuth.token) {
+      headers.set("Authorization", `Bearer ${storedAuth.token}`);
+    }
+
+    const response = await fetch(target, { headers });
+    return response;
+  } catch (error) {
+    return new Response(
+      error instanceof Error ? error.message : "Attachment unavailable.",
+      { status: 502 },
+    );
+  }
+}
+
+export async function pickAndStageDesktopAttachments(
+  roomIdentifier: string,
+): Promise<DesktopStagedAttachment[]> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before attaching files.");
+  }
+
+  focusMainWindow();
+  const result = await dialog.showOpenDialog({
+    title: "Attach files",
+    buttonLabel: "Attach",
+    properties: ["openFile", "multiSelections"],
+  });
+  if (result.canceled || result.filePaths.length === 0) return [];
+
+  const staged: DesktopStagedAttachment[] = [];
+  for (const filePath of result.filePaths) {
+    staged.push(
+      await stageDesktopAttachmentFile(trimmedRoomIdentifier, filePath),
+    );
+  }
+  return staged;
+}
+
+export async function stageDroppedDesktopAttachmentContents(
+  roomIdentifier: string,
+  files: DesktopDroppedAttachmentContent[],
+): Promise<DesktopStagedAttachment[]> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before attaching files.");
+  }
+
+  const droppedFiles = files
+    .map((file) => ({
+      fileName: file.fileName?.trim() || "attachment",
+      mimeType:
+        file.mimeType?.trim() || guessMimeType(file.fileName || "attachment"),
+      sizeBytes: file.sizeBytes,
+      contentBase64: file.contentBase64,
+    }))
+    .filter((file) => file.contentBase64);
+  if (droppedFiles.length === 0) return [];
+
+  const staged: DesktopStagedAttachment[] = [];
+  for (const file of droppedFiles) {
+    const fileBuffer = Buffer.from(file.contentBase64, "base64");
+    staged.push(
+      await stageDesktopAttachmentBuffer(
+        trimmedRoomIdentifier,
+        fileBuffer,
+        file.fileName,
+        file.mimeType || guessMimeType(file.fileName),
+      ),
+    );
+  }
+  return staged;
+}
+
+async function stageDesktopAttachmentFile(
+  roomIdentifier: string,
+  filePath: string,
+  displayFileName?: string,
+): Promise<DesktopStagedAttachment> {
+  const fileBuffer = await readFile(filePath);
+  const fileName = displayFileName || basename(filePath);
+  const mimeType = guessMimeType(fileName);
+  return stageDesktopAttachmentBuffer(
+    roomIdentifier,
+    fileBuffer,
+    fileName,
+    mimeType,
+  );
+}
+
+async function stageDesktopAttachmentBuffer(
+  roomIdentifier: string,
+  fileBuffer: Buffer,
+  fileName: string,
+  mimeType: string,
+): Promise<DesktopStagedAttachment> {
+  const target = await apiFetch<{
+    upload_id?: string;
+    upload_url?: string;
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    attachment?: { upload_id?: string };
+  }>(`/rooms/${encodeURIComponent(roomIdentifier)}/attachments/uploads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file_name: fileName,
+      mime_type: mimeType,
+      size_bytes: fileBuffer.byteLength,
+    }),
+  });
+
+  const uploadId = target.upload_id || target.attachment?.upload_id;
+  const uploadUrl = target.upload_url || target.url;
+  if (!uploadId || !uploadUrl) {
+    throw new Error(`${fileName} could not be staged.`);
+  }
+
+  const uploadHeaders = new Headers(target.headers || {});
+  if (
+    ![...uploadHeaders.keys()].some(
+      (key) => key.toLowerCase() === "content-type",
+    )
+  ) {
+    uploadHeaders.set("Content-Type", mimeType);
+  }
+  const uploadBody = new Uint8Array(fileBuffer).buffer;
+  const uploadResponse = await fetch(uploadUrl, {
+    method: target.method || "PUT",
+    headers: uploadHeaders,
+    body: uploadBody,
+  });
+  if (!uploadResponse.ok) {
+    await discardDesktopAttachment(roomIdentifier, uploadId).catch(
+      () => undefined,
+    );
+    throw new Error(
+      `${fileName} upload failed with HTTP ${uploadResponse.status}.`,
+    );
+  }
+
+  return {
+    uploadId,
+    fileName,
+    mimeType,
+    sizeBytes: fileBuffer.byteLength,
+    previewDataUrl: mimeType.startsWith("image/")
+      ? `data:${mimeType};base64,${fileBuffer.toString("base64")}`
+      : null,
+  };
+}
+
+export async function discardDesktopAttachment(
+  roomIdentifier: string,
+  uploadId: string,
+): Promise<void> {
+  if (!roomIdentifier.trim() || !uploadId.trim()) return;
+  await apiFetch(
+    `/rooms/${encodeURIComponent(roomIdentifier.trim())}/attachments/uploads/${encodeURIComponent(uploadId.trim())}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+function guessMimeType(fileName: string): string {
+  const extension = fileName.split(".").pop()?.toLowerCase();
+  const map: Record<string, string> = {
+    gif: "image/gif",
+    heic: "image/heic",
+    jpeg: "image/jpeg",
+    jpg: "image/jpeg",
+    json: "application/json",
+    md: "text/markdown",
+    pdf: "application/pdf",
+    png: "image/png",
+    txt: "text/plain",
+    webp: "image/webp",
+  };
+  return extension
+    ? map[extension] || "application/octet-stream"
+    : "application/octet-stream";
+}
