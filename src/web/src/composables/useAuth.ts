@@ -24,6 +24,13 @@ function getBrowserLocation(): SignInLocation | null {
   return window.location
 }
 
+function appendLocationHash(redirectTo: string, hash: string): string {
+  if (!hash || redirectTo.includes('#')) {
+    return redirectTo
+  }
+  return `${redirectTo}${hash.startsWith('#') ? hash : `#${hash}`}`
+}
+
 export function resolveSignInRedirect(
   redirectTo?: string,
   location: SignInLocation | null = getBrowserLocation(),
@@ -38,14 +45,18 @@ export function resolveSignInRedirect(
   }
 
   const params = new URLSearchParams(location.search)
-  const queryRedirect = params.get('redirect_to')?.trim()
-  if (queryRedirect) {
-    return queryRedirect
-  }
+  const isRepoSigninBounce =
+    location.pathname === '/' && params.get('reason') === 'repo_signin_required'
+  if (isRepoSigninBounce) {
+    const queryRedirect = params.get('redirect_to')?.trim()
+    if (queryRedirect) {
+      return appendLocationHash(queryRedirect, location.hash)
+    }
 
-  const repoRoom = params.get('room')?.trim()
-  if (params.get('reason') === 'repo_signin_required' && repoRoom) {
-    return `/in/${repoRoom}`
+    const repoRoom = params.get('room')?.trim()
+    if (repoRoom) {
+      return appendLocationHash(`/in/${repoRoom}`, location.hash)
+    }
   }
 
   return `${location.pathname || '/'}${location.search || ''}${location.hash || ''}`

@@ -741,7 +741,7 @@ async function retryJoin() {
 }
 
 async function handleSignIn() {
-  await auth.signIn()
+  await auth.signIn(route.fullPath || '/')
 }
 
 function normalizeRoomTab(rawValue: unknown): RoomTab {
