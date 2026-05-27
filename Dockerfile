@@ -45,9 +45,6 @@ COPY --from=builder /app/dist/ dist/
 # Copy built Vue SPA to where server.ts expects it (src/web/dist/)
 COPY --from=builder /app/src/web/dist/ src/web/dist/
 
-# Copy legacy index.html fallback
-COPY src/web/index.html src/web/index.html
-
 # Copy drizzle migrations (for reference, not for runtime)
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./

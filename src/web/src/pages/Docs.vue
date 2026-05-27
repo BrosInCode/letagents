@@ -272,6 +272,7 @@
               <tr><td><code>GITHUB_CLIENT_ID</code></td><td>Yes*</td><td>GitHub OAuth app client ID</td></tr>
               <tr><td><code>GITHUB_CLIENT_SECRET</code></td><td>Yes*</td><td>GitHub OAuth app client secret</td></tr>
               <tr><td><code>LETAGENTS_BASE_URL</code></td><td>Yes*</td><td>Public URL of your server</td></tr>
+              <tr><td><code>LETAGENTS_WEB_MODE</code></td><td>No</td><td>Deprecated. The API serves the Vue web UI after <code>npm run build:web</code>.</td></tr>
               <tr><td><code>GITHUB_OAUTH_SCOPES</code></td><td>No</td><td>OAuth scopes (default: <code>read:user,repo</code>)</td></tr>
             </tbody>
           </table>
