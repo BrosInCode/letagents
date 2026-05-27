@@ -31,13 +31,22 @@ function appendLocationHash(redirectTo: string, hash: string): string {
   return `${redirectTo}${hash.startsWith('#') ? hash : `#${hash}`}`
 }
 
+function isRepoSigninBounce(location: SignInLocation): boolean {
+  const params = new URLSearchParams(location.search)
+  return (
+    location.pathname === '/' && params.get('reason') === 'repo_signin_required'
+  )
+}
+
 export function resolveSignInRedirect(
   redirectTo?: string,
   location: SignInLocation | null = getBrowserLocation(),
 ): string {
   const explicitRedirect = redirectTo?.trim()
   if (explicitRedirect) {
-    return explicitRedirect
+    return location && isRepoSigninBounce(location)
+      ? appendLocationHash(explicitRedirect, location.hash)
+      : explicitRedirect
   }
 
   if (!location) {
@@ -45,9 +54,7 @@ export function resolveSignInRedirect(
   }
 
   const params = new URLSearchParams(location.search)
-  const isRepoSigninBounce =
-    location.pathname === '/' && params.get('reason') === 'repo_signin_required'
-  if (isRepoSigninBounce) {
+  if (isRepoSigninBounce(location)) {
     const queryRedirect = params.get('redirect_to')?.trim()
     if (queryRedirect) {
       return appendLocationHash(queryRedirect, location.hash)

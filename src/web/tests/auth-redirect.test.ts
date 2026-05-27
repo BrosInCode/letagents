@@ -14,6 +14,28 @@ test('resolveSignInRedirect prefers an explicit redirect', () => {
   )
 })
 
+test('resolveSignInRedirect appends landing hash to explicit repo bounce redirect', () => {
+  assert.equal(
+    resolveSignInRedirect('/in/github.com/owner/repo?view=board', {
+      pathname: '/',
+      search: '?reason=repo_signin_required&room=github.com%2Fowner%2Frepo&redirect_to=%2Fin%2Fgithub.com%2Fowner%2Frepo%3Fview%3Dboard',
+      hash: '#thread-1',
+    }),
+    '/in/github.com/owner/repo?view=board#thread-1',
+  )
+})
+
+test('resolveSignInRedirect leaves explicit redirects unchanged off repo bounce', () => {
+  assert.equal(
+    resolveSignInRedirect('/in/github.com/owner/repo', {
+      pathname: '/docs',
+      search: '?section=auth',
+      hash: '#github',
+    }),
+    '/in/github.com/owner/repo',
+  )
+})
+
 test('resolveSignInRedirect uses repo-room redirect_to from the landing bounce', () => {
   assert.equal(
     resolveSignInRedirect(undefined, {
