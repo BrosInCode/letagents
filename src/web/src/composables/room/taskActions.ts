@@ -7,6 +7,33 @@ import type {
   TaskReviewLeaseActionInput,
 } from './types'
 
+function isRoomTaskPayload(value: unknown): value is RoomTask {
+  const candidate = value as Partial<RoomTask> | null | undefined
+  return Boolean(
+    candidate &&
+      typeof candidate.id === 'string' &&
+      typeof candidate.title === 'string' &&
+      typeof candidate.status === 'string',
+  )
+}
+
+export function taskFromCreateTaskResponse(value: unknown): RoomTask | null {
+  const payload = value as { task?: unknown } | null | undefined
+  if (isRoomTaskPayload(payload?.task)) return payload.task
+  if (isRoomTaskPayload(value)) return value
+  return null
+}
+
+export function mergeCreatedTask(
+  currentTasks: readonly RoomTask[],
+  createdTask: RoomTask,
+): RoomTask[] {
+  return [
+    ...currentTasks.filter((task) => task.id !== createdTask.id),
+    createdTask,
+  ]
+}
+
 export function taskFromMutationResult(
   taskId: string,
   data: any,
@@ -33,7 +60,7 @@ export async function createRoomTask(
     method: 'POST',
     body: JSON.stringify({ title, created_by: 'human' }),
   })
-  return data.task || null
+  return taskFromCreateTaskResponse(data)
 }
 
 export async function patchRoomTask(

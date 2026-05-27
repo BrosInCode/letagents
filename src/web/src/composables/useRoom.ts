@@ -58,10 +58,12 @@ import { HANDOFF_PRESENCE_PAGE_SIZE } from './room/constants'
 import {
   createRoomTask,
   fetchTasksAndPresence,
+  mergeCreatedTask,
   patchRoomTask,
   postTaskLeaseAction,
   postTaskReviewLeaseAction,
   setRoomTaskStalePromptMute,
+  taskFromCreateTaskResponse,
 } from './room/taskActions'
 import type {
   FocusRoomConclusionDetails,
@@ -99,6 +101,7 @@ export {
   normalizeAgentPromptKind,
   parseAgentIdentity,
 } from './room/identity'
+export { mergeCreatedTask, taskFromCreateTaskResponse } from './room/taskActions'
 
 const messages = ref<RoomMessage[]>([])
 const messagesHasOlder = ref(false)
@@ -593,9 +596,20 @@ async function sendMessage(
 
 async function addTask(title: string): Promise<boolean> {
   if (!room.value) return false
+  const roomIdentifier = room.value.identifier
   try {
-    const task = await createRoomTask(room.value.identifier, title)
-    if (task) tasks.value = [...tasks.value, task]
+    const task = await createRoomTask(roomIdentifier, title)
+    if (room.value?.identifier !== roomIdentifier) return false
+    if (task) tasks.value = mergeCreatedTask(tasks.value, task)
+
+    await refreshRoomBoard()
+    if (
+      task &&
+      room.value?.identifier === roomIdentifier &&
+      !tasks.value.some((item) => item.id === task.id)
+    ) {
+      tasks.value = mergeCreatedTask(tasks.value, task)
+    }
     return true
   } catch {
     return false
