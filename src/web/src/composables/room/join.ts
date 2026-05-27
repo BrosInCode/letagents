@@ -45,12 +45,12 @@ interface RoomJoinResponse {
   display_name?: string
   role?: string
   authenticated?: boolean
-  kind?: string
+  kind?: RoomInfo['kind']
   attachments_enabled?: boolean
   parent_room_id?: string | null
   focus_key?: string | null
   source_task_id?: string | null
-  focus_status?: string | null
+  focus_status?: RoomInfo['focusStatus']
   focus_parent_visibility?: RoomInfo['focusParentVisibility']
   focus_activity_scope?: RoomInfo['focusActivityScope']
   focus_github_event_routing?: RoomInfo['focusGitHubEventRouting']
