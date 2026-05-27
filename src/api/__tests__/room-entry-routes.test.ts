@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomEntryRoutes } = await import("../routes/room-entry.js");
+const { buildRoomEntryPath, registerRoomEntryRoutes } = await import("../routes/room-entry.js");
 
 function createDeps() {
   return {
@@ -27,4 +27,19 @@ test("registerRoomEntryRoutes preserves public entry route order", () => {
     { method: "get", path: "/^\\/in\\/(.+)$/" },
     { method: "get", path: "/rooms/resolve/:identifier" },
   ]);
+});
+
+test("buildRoomEntryPath preserves the original room query string", () => {
+  assert.equal(
+    buildRoomEntryPath(
+      "github.com/brosincode/letagents",
+      "/in/github.com/BrosInCode/letagents?view=board"
+    ),
+    "/in/github.com/brosincode/letagents?view=board"
+  );
+
+  assert.equal(
+    buildRoomEntryPath("github.com/brosincode/letagents", "/in/github.com/BrosInCode/letagents"),
+    "/in/github.com/brosincode/letagents"
+  );
 });
