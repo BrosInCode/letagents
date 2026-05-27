@@ -262,13 +262,12 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     mutation: CoordinationMutationKind;
     outputIntent?: string | null;
   }) {
-    const lease = await deps.createTaskLease({
+    const leaseInput: Parameters<TaskCoordinationEnforcementDeps["createTaskLease"]>[0] = {
       room_id: input.roomId,
       task_id: input.taskId,
       kind: "work",
       agent_key: input.actorKey,
       agent_instance_id: input.actorInstanceId,
-      agent_session_id: input.actorSessionId,
       actor_label: input.actorLabel,
       branch_ref: buildLeasedBranchRef({
         taskId: input.taskId,
@@ -276,7 +275,12 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       }),
       created_by: input.actorLabel,
       output_intent: input.outputIntent ?? input.mutation,
-    });
+    };
+    if (input.actorSessionId) {
+      leaseInput.agent_session_id = input.actorSessionId;
+    }
+
+    const lease = await deps.createTaskLease(leaseInput);
     await recordCoordinationDecision({
       roomId: input.roomId,
       taskId: input.taskId,
