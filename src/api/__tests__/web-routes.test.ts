@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-process.env.LETAGENTS_WEB_MODE = "legacy";
+process.env.LETAGENTS_WEB_MODE = "vue";
 const { normalizeWebMode, registerWebRoutes } = await import("../routes/web.js");
 
-test("normalizeWebMode accepts vue and defaults to legacy", (t) => {
+test("normalizeWebMode accepts vue and defaults to Vue", (t) => {
   const originalWarn = console.warn;
   console.warn = () => {};
   t.after(() => {
@@ -13,17 +13,20 @@ test("normalizeWebMode accepts vue and defaults to legacy", (t) => {
 
   assert.equal(normalizeWebMode("vue"), "vue");
   assert.equal(normalizeWebMode(" VUE "), "vue");
-  assert.equal(normalizeWebMode(undefined), "legacy");
-  assert.equal(normalizeWebMode(""), "legacy");
-  assert.equal(normalizeWebMode("legacy"), "legacy");
-  assert.equal(normalizeWebMode("unknown"), "legacy");
+  assert.equal(normalizeWebMode(undefined), "vue");
+  assert.equal(normalizeWebMode(""), "vue");
+  assert.equal(normalizeWebMode("legacy"), "vue");
+  assert.equal(normalizeWebMode("unknown"), "vue");
 });
 
-test("registerWebRoutes preserves legacy route registration order", (t) => {
+test("registerWebRoutes preserves route registration order", (t) => {
   const originalLog = console.log;
+  const originalWarn = console.warn;
   console.log = () => {};
+  console.warn = () => {};
   t.after(() => {
     console.log = originalLog;
+    console.warn = originalWarn;
   });
 
   const calls: Array<{ method: "get" | "use"; path: string }> = [];
@@ -42,9 +45,9 @@ test("registerWebRoutes preserves legacy route registration order", (t) => {
   registerWebRoutes(app as never);
 
   assert.deepEqual(calls, [
+    { method: "use", path: "<static>" },
     { method: "get", path: "/" },
     { method: "get", path: "/docs" },
     { method: "get", path: "/app" },
-    { method: "use", path: "<static>" },
   ]);
 });
