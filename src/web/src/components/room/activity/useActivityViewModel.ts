@@ -814,10 +814,13 @@ export function useActivityViewModel(props: ActivityViewProps) {
     reasoningCardTitle,
     reasoningCardSummary,
     reasoningStatusLabel,
+    livenessCapabilityLabel,
+    reasoningTimestamp,
     connectionLabel,
     getTaskLink,
     changeHistoryPage,
     handleClearDisconnected,
     formatLastSeen,
+    previewMessage,
   }
 }

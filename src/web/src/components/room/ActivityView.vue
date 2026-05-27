@@ -777,11 +777,14 @@ const {
   reasoningCardTitle,
   reasoningCardSummary,
   reasoningStatusLabel,
+  livenessCapabilityLabel,
+  reasoningTimestamp,
   connectionLabel,
   getTaskLink,
   changeHistoryPage,
   handleClearDisconnected,
   formatLastSeen,
+  previewMessage,
 } = useActivityViewModel(props)
 </script>
 
