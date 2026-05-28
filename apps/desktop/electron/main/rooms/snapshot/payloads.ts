@@ -1,6 +1,6 @@
 import type { DesktopReasoningSession } from "../../../ipc-types.js";
-import type { mapRoomMessagePayload } from "../messages.js";
-import type { mapDesktopTaskSummaryPayload } from "../tasks.js";
+import type { RoomMessagePayload } from "../messages/mappers.js";
+import type { DesktopTaskSummaryPayload } from "../tasks/mappers.js";
 
 export interface FocusRoomsResponse {
   focus_rooms?: Array<{
@@ -142,12 +142,12 @@ export interface ActivityTaskPayload {
 }
 
 export interface MessagesResponse {
-  messages?: Parameters<typeof mapRoomMessagePayload>[0][];
+  messages?: RoomMessagePayload[];
 }
 
 export interface RoomSnapshotData {
   focusRoomsData: FocusRoomsResponse;
-  tasksData: { tasks?: Parameters<typeof mapDesktopTaskSummaryPayload>[0][] };
+  tasksData: { tasks?: DesktopTaskSummaryPayload[] };
   participantsData: ParticipantsResponse;
   presenceData: PresenceResponse;
   reasoningData: ReasoningResponse;

@@ -7,9 +7,9 @@ import type {
   DesktopRoomMessage,
   DesktopTaskSummary,
 } from "../../../ipc-types.js";
-import { mapRoomMessagePayload } from "../messages.js";
-import { mapDesktopReasoningSessionPayload } from "../reasoning.js";
-import { mapDesktopTaskSummaryPayload } from "../tasks.js";
+import { mapRoomMessagePayload } from "../messages/mappers.js";
+import { mapDesktopReasoningSessionPayload } from "../reasoning/mappers.js";
+import { mapDesktopTaskSummaryPayload } from "../tasks/mappers.js";
 import type {
   ActivityHistoryResponse,
   ActivityTaskPayload,
