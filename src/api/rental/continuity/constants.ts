@@ -1,0 +1,2 @@
+export const CONTINUITY_FILE_CAP = 20;
+export const CONTINUITY_COMMAND_CAP = 10;
