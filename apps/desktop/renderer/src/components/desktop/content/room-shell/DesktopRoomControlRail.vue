@@ -57,7 +57,7 @@ import type {
   DesktopGitHubIntegrationStatus,
   DesktopRoomInfo,
 } from "../../../../../../electron/ipc-types";
-import DesktopRoomActionPanel from "../DesktopRoomActionPanel.vue";
+import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 
 const props = defineProps<{
   actionPanelOpen: boolean;

@@ -12,6 +12,12 @@ import {
   mergeRoomMessages,
 } from "../src/components/desktop/content/room-shell/messages";
 import {
+  readLiquidGlassEnabled,
+  readNotificationPermission,
+  readNotificationsEnabled,
+  readSoundEnabled,
+} from "../src/components/desktop/content/room-shell/preferences";
+import {
   buildAgentFallbackReasoningSession,
   inferAgentFallbackStatus,
   latestMessageForAgent,
@@ -106,6 +112,41 @@ describe("desktop room shell helpers", () => {
   });
 });
 
+describe("desktop room shell preferences", () => {
+  it("reads persisted desktop room preferences and defaults", () => {
+    withLocalStorage({
+      "letagents-desktop:sound": "off",
+      "letagents-desktop:notifications": "on",
+      "letagents-desktop:liquid-glass": "off",
+    }, () => {
+      assert.equal(readSoundEnabled(), false);
+      assert.equal(readNotificationsEnabled(), true);
+      assert.equal(readLiquidGlassEnabled(), false);
+    });
+
+    withLocalStorage({}, () => {
+      assert.equal(readSoundEnabled(), true);
+      assert.equal(readNotificationsEnabled(), false);
+      assert.equal(readLiquidGlassEnabled(), true);
+    });
+  });
+
+  it("falls back when storage or notification APIs are unavailable", () => {
+    withThrowingLocalStorage(() => {
+      assert.equal(readSoundEnabled(), true);
+      assert.equal(readNotificationsEnabled(), false);
+      assert.equal(readLiquidGlassEnabled(), true);
+    });
+
+    withNotificationPermission("denied", () => {
+      assert.equal(readNotificationPermission(), "denied");
+    });
+    withNotificationPermission(null, () => {
+      assert.equal(readNotificationPermission(), "unsupported");
+    });
+  });
+});
+
 function roomMessage(overrides: Partial<DesktopRoomMessage>): DesktopRoomMessage {
   return {
     id: "msg_1",
@@ -144,4 +185,62 @@ function reasoningSession(id: string, actorLabel: string, updatedAt: string): De
     createdAt: "2026-05-28T00:00:00.000Z",
     updatedAt,
   };
+}
+
+function withLocalStorage(entries: Record<string, string>, callback: () => void): void {
+  withWindow({
+    localStorage: {
+      getItem(key: string): string | null {
+        return entries[key] ?? null;
+      },
+    },
+  }, callback);
+}
+
+function withThrowingLocalStorage(callback: () => void): void {
+  withWindow({
+    localStorage: {
+      getItem(): string | null {
+        throw new Error("storage unavailable");
+      },
+    },
+  }, callback);
+}
+
+function withWindow(value: object, callback: () => void): void {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value,
+  });
+  try {
+    callback();
+  } finally {
+    restoreGlobalProperty("window", previous);
+  }
+}
+
+function withNotificationPermission(permission: NotificationPermission | null, callback: () => void): void {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "Notification");
+  if (permission) {
+    Object.defineProperty(globalThis, "Notification", {
+      configurable: true,
+      value: { permission },
+    });
+  } else {
+    delete (globalThis as { Notification?: unknown }).Notification;
+  }
+  try {
+    callback();
+  } finally {
+    restoreGlobalProperty("Notification", previous);
+  }
+}
+
+function restoreGlobalProperty(key: "Notification" | "window", descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor) {
+    Object.defineProperty(globalThis, key, descriptor);
+  } else {
+    delete (globalThis as Record<typeof key, unknown>)[key];
+  }
 }
