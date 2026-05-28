@@ -86,11 +86,3 @@
   background: rgba(248, 113, 113, 0.1);
   color: #fecaca;
 }
-
-.desktop-task-empty {
-  display: grid;
-  place-items: center;
-  min-height: 86px;
-  color: var(--text-tertiary);
-  font-size: 0.82rem;
-}
