@@ -1,0 +1,257 @@
+import { computed, ref } from "vue";
+import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../../electron/ipc-types";
+import { sortTasks } from "../../../../domain/tasks";
+import { normalizeRoom, readableStatus } from "./formatters";
+import { parseReviewCandidateValue, reviewAssignmentCandidates as getReviewAssignmentCandidates } from "./review-candidates";
+import { reviewLeases, shouldShowReviewPanel, workLease } from "./task-state";
+import type { TaskAction, TaskGroup } from "./types";
+
+interface RoomBoardControllerProps {
+  roomIdentifier: string;
+  tasks: DesktopTaskSummary[];
+  presence: DesktopAgentPresence[];
+  workers: WorkerSnapshot[];
+}
+
+type RoomBoardEmit = {
+  (event: "task-updated", task: DesktopTaskSummary): void;
+  (event: "refresh-room"): void;
+};
+
+const STATUS_ORDER = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review", "merged", "done", "cancelled"];
+
+export function useRoomBoardController(
+  props: RoomBoardControllerProps,
+  emit: RoomBoardEmit
+) {
+  const newTaskTitle = ref("");
+  const busyAction = ref<string | null>(null);
+  const errorMessage = ref<string | null>(null);
+  const selectedReviewerByTask = ref<Record<string, string>>({});
+  const collapsedGroups = ref(new Set<string>());
+
+  const localWorker = computed(() =>
+    props.workers.find((worker) =>
+      worker.agentSessionId
+      && normalizeRoom(worker.roomId) === normalizeRoom(props.roomIdentifier)
+      && ["connected", "away"].includes(worker.state)
+    ) || null
+  );
+
+  const groupedTasks = computed<TaskGroup[]>(() => {
+    const groups = new Map<string, DesktopTaskSummary[]>();
+    for (const task of sortTasks(props.tasks)) {
+      const status = task.status || "proposed";
+      if (!groups.has(status)) groups.set(status, []);
+      groups.get(status)?.push(task);
+    }
+    return STATUS_ORDER
+      .filter((status) => groups.has(status))
+      .map((status) => ({
+        status,
+        label: readableStatus(status),
+        tasks: groups.get(status) || [],
+      }));
+  });
+
+  async function addTask(): Promise<void> {
+    const title = newTaskTitle.value.trim();
+    if (!title) return;
+    await runBoardMutation("add", async () => {
+      const result = await window.letagentsDesktop.room.addTask(props.roomIdentifier, title);
+      newTaskTitle.value = "";
+      return result.task;
+    });
+  }
+
+  function toggleGroup(status: string): void {
+    const next = new Set(collapsedGroups.value);
+    if (next.has(status)) {
+      next.delete(status);
+    } else {
+      next.add(status);
+    }
+    collapsedGroups.value = next;
+  }
+
+  function actionsFor(task: DesktopTaskSummary): TaskAction[] {
+    const actions: TaskAction[] = [];
+    const work = workLease(task);
+    const review = reviewLeases(task)[0] || null;
+    const worker = localWorker.value;
+    const workerOwnsTask = Boolean(worker && work && (
+      work.agentSessionId === worker.agentSessionId
+      || (!!work.agentKey && work.agentKey === worker.agentKey)
+    ));
+    const workerReviewsTask = Boolean(worker && review && (
+      review.agentSessionId === worker.agentSessionId
+      || (!!review.agentKey && review.agentKey === worker.agentKey)
+    ));
+
+    if (task.status === "proposed") {
+      actions.push(statusAction("accept", "Accept", "primary", "accepted"));
+      actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
+    }
+    if (task.status === "accepted") {
+      if (worker && !work) {
+        actions.push(workerAction("claim", "Claim", "primary"));
+      }
+      actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
+    }
+    if (task.status === "assigned" && workerOwnsTask) {
+      actions.push(workerAction("start", "Start", "primary"));
+      actions.push(workerAction("block", "Block", "neutral"));
+    }
+    if (task.status === "in_progress" && workerOwnsTask) {
+      actions.push(workerAction("submit_review", "Submit review", "primary"));
+      actions.push(workerAction("block", "Block", "neutral"));
+    }
+    if (task.status === "blocked" && workerOwnsTask) {
+      actions.push(workerAction("resume", "Resume", "primary"));
+      actions.push(workerAction("submit_review", "Submit review", "neutral"));
+    }
+    if (task.status === "in_review") {
+      if (workerReviewsTask) {
+        actions.push(workerAction("block", "Request changes", "danger"));
+      }
+      actions.push(statusAction("merged", "Mark Merged", "primary", "merged"));
+    }
+    if (task.status === "merged") {
+      actions.push(statusAction("done", "Mark Done", "primary", "done"));
+      actions.push(statusAction("reopen", "Reopen", "neutral", "accepted"));
+    }
+    if (work) {
+      actions.push({
+        id: "release-work",
+        label: "Release lane",
+        tone: "neutral",
+        run: async (nextTask) => (await window.letagentsDesktop.room.updateTaskLease(props.roomIdentifier, nextTask.id, {
+          action: "release",
+          lease_id: work.id,
+          reason: `Released work lease for ${nextTask.id} from desktop board.`,
+        })).task,
+      });
+    }
+    if (review) {
+      actions.push({
+        id: "release-review",
+        label: "Release review",
+        tone: "neutral",
+        run: async (nextTask) => {
+          if (workerReviewsTask) {
+            return (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
+              action: "release",
+              lease_id: review.id,
+              reason: `Released board review authority for ${nextTask.id} from desktop board.`,
+            })).task;
+          }
+          return (await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, nextTask.id, {
+            action: "release",
+            lease_id: review.id,
+            reason: `Released board review authority for ${nextTask.id} from desktop board.`,
+          })).task;
+        },
+      });
+    }
+    if (canClaimReview(task)) {
+      actions.push({
+        id: "claim-review",
+        label: "Claim review",
+        tone: "primary",
+        run: async (nextTask) => (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
+          action: "claim",
+          reason: `Claimed board review authority for ${nextTask.id} from desktop board.`,
+        })).task,
+      });
+    }
+
+    return actions;
+  }
+
+  function setSelectedReviewer(taskId: string, value: string): void {
+    selectedReviewerByTask.value = {
+      ...selectedReviewerByTask.value,
+      [taskId]: value,
+    };
+  }
+
+  function reviewAssignmentCandidates(task: DesktopTaskSummary): DesktopAgentPresence[] {
+    return getReviewAssignmentCandidates(task, props.presence);
+  }
+
+  async function runTaskAction(task: DesktopTaskSummary, action: TaskAction): Promise<void> {
+    await runBoardMutation(`${task.id}:${action.id}`, () => action.run(task));
+  }
+
+  async function assignReview(task: DesktopTaskSummary): Promise<void> {
+    const selected = parseReviewCandidateValue(selectedReviewerByTask.value[task.id] || "");
+    if (!selected) return;
+    await runBoardMutation(`${task.id}:assign-review`, async () => {
+      const result = await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, task.id, {
+        action: "assign",
+        target_actor_key: selected.agentKey,
+        target_actor_instance_id: selected.agentInstanceId,
+        target_agent_session_id: selected.agentSessionId,
+        reason: `Assigned board review authority for ${task.id} from desktop board.`,
+      });
+      setSelectedReviewer(task.id, "");
+      return result.task;
+    });
+  }
+
+  async function runBoardMutation(id: string, mutation: () => Promise<DesktopTaskSummary>): Promise<void> {
+    busyAction.value = id;
+    errorMessage.value = null;
+    try {
+      const task = await mutation();
+      emit("task-updated", task);
+      emit("refresh-room");
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "Task update failed.";
+    } finally {
+      busyAction.value = null;
+    }
+  }
+
+  function statusAction(id: string, label: string, tone: TaskAction["tone"], status: string): TaskAction {
+    return {
+      id,
+      label,
+      tone,
+      run: async (task) => (await window.letagentsDesktop.room.updateTask(props.roomIdentifier, task.id, { status })).task,
+    };
+  }
+
+  function workerAction(
+    action: "claim" | "start" | "block" | "resume" | "submit_review",
+    label: string,
+    tone: TaskAction["tone"]
+  ): TaskAction {
+    return {
+      id: action,
+      label,
+      tone,
+      run: async (task) => (await window.letagentsDesktop.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
+    };
+  }
+
+  function canClaimReview(task: DesktopTaskSummary): boolean {
+    return Boolean(localWorker.value) && shouldShowReviewPanel(task) && reviewLeases(task).length === 0;
+  }
+
+  return {
+    actionsFor,
+    addTask,
+    assignReview,
+    busyAction,
+    collapsedGroups,
+    errorMessage,
+    groupedTasks,
+    newTaskTitle,
+    reviewAssignmentCandidates,
+    runTaskAction,
+    selectedReviewerByTask,
+    setSelectedReviewer,
+    toggleGroup,
+  };
+}
