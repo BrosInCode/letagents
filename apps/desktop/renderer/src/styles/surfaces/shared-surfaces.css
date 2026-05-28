@@ -1,0 +1,149 @@
+.hero-panel,
+.surface-intro,
+.stat-card,
+.action-card,
+.surface-row {
+  padding: 22px;
+}
+
+.hero-panel {
+  gap: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+    var(--bg-card);
+  border-radius: var(--radius-2xl);
+}
+
+.hero-kicker {
+  color: #d4d4d8;
+}
+
+.hero-panel h3,
+.surface-intro h3 {
+  font-size: 2rem;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+  max-width: 760px;
+}
+
+.hero-copy,
+.surface-intro p {
+  max-width: 760px;
+}
+
+.hero-actions {
+  grid-auto-flow: column;
+  justify-content: start;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.stats-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stat-card strong {
+  font-size: 1.1rem;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.stat-card small {
+  font-size: 0.86rem;
+}
+
+.action-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.action-card {
+  text-align: left;
+  padding: 18px;
+}
+
+.action-card strong {
+  display: block;
+  font-size: 1.02rem;
+  margin-bottom: 6px;
+}
+
+.action-card p {
+  font-size: 0.92rem;
+}
+
+.surface-intro {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.surface-list {
+  gap: 12px;
+}
+
+.surface-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.surface-row[data-current="true"] {
+  border-color: rgba(34, 197, 94, 0.24);
+}
+
+.surface-row.single-line {
+  display: block;
+}
+
+.surface-title {
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.surface-subtitle {
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.surface-meta {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.state-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e4e4e7;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.state-pill[data-state="connected"],
+.state-pill[data-state="active"],
+.state-pill[data-state="installed"] {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.state-pill[data-state="away"],
+.state-pill[data-state="starting"] {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.state-pill[data-state="offline"],
+.state-pill[data-state="failed"] {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+code {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+}
