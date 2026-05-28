@@ -1,0 +1,190 @@
+.activity-detail-kicker {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--activity-blue);
+}
+
+.activity-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.activity-detail-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--space-sm, 8px);
+}
+
+.detail-stat {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--activity-surface-soft);
+  border: 1px solid var(--activity-border);
+}
+
+.detail-stat strong {
+  font-size: 0.96rem;
+  color: var(--text, #fafafa);
+}
+
+.detail-stat span {
+  font-size: 0.72rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-detail-description {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--activity-text-secondary);
+}
+
+.activity-detail-section {
+  display: grid;
+  gap: 10px;
+}
+
+.activity-detail-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-detail-section-header h4 {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-detail-section-header span {
+  font-size: 0.74rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-message-list,
+.activity-thinking-list,
+.activity-reasoning-list {
+  display: grid;
+  gap: var(--space-sm, 8px);
+}
+
+.activity-message-card,
+.activity-reasoning-card,
+.activity-liveness-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
+}
+
+.activity-liveness-card {
+  display: grid;
+  justify-content: stretch;
+  gap: 8px;
+}
+
+.activity-liveness-card > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-liveness-card strong {
+  color: var(--activity-text);
+  font-size: 0.86rem;
+}
+
+.activity-liveness-card span,
+.activity-liveness-card p {
+  margin: 0;
+  color: var(--activity-text-tertiary);
+  font-size: 0.78rem;
+}
+
+.activity-message-card {
+  display: grid;
+  gap: 6px;
+}
+
+.activity-message-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.72rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-message-card p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text, #fafafa);
+}
+
+.activity-reasoning-card {
+  display: grid;
+  gap: 10px;
+}
+
+.activity-reasoning-header,
+.activity-reasoning-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-reasoning-header strong {
+  color: var(--text, #fafafa);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.activity-reasoning-header span,
+.activity-reasoning-meta span {
+  font-size: 0.72rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-reasoning-card p {
+  margin: 0;
+  color: var(--activity-text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.activity-reasoning-action {
+  justify-self: start;
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.1);
+  color: #bfdbfe;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 9px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.activity-reasoning-action:hover,
+.activity-reasoning-action:focus-visible {
+  background: rgba(59, 130, 246, 0.16);
+  border-color: rgba(147, 197, 253, 0.34);
+  outline: none;
+}
