@@ -13,7 +13,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
     "build:web": "cd src/web && npm install && npx vite build",
     "build:desktop": "npm --prefix apps/desktop run build",
     "build:all": "npm run build && npm run build:web",

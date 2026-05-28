@@ -1,0 +1,105 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import {
+  ensureAgentIdentity,
+  getRememberedRoomPresence,
+  heartbeatRoomPresence,
+  syncRoomPresence,
+  toPublicAgentIdentity,
+} from "../../runtime.js";
+import { createTask, listTasks } from "./api.js";
+import {
+  resolveTaskToolIdentity,
+  resolveTaskToolTarget,
+  taskActorPayload,
+} from "./context.js";
+import { jsonToolResponse, taskToolError } from "./response.js";
+import { TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
+
+export function registerTaskBoardTools(server: McpServer): void {
+  server.tool(
+    "add_task",
+    "Add a new task to the room board. Tasks normally start as 'proposed' and must be " +
+      "accepted before an agent can claim them. Agent-created tasks require coordinator " +
+      "acceptance before they become claimable. Use this when a human or agent identifies " +
+      "work that needs to be done.",
+    {
+      title: z.string().describe("Short task title, e.g. 'Wire up Jest test runner'"),
+      description: z.string().optional().describe("Longer description of what needs to be done"),
+      created_by: z
+        .string()
+        .optional()
+        .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
+      source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
+      ...workerTaskIdentitySchema,
+    },
+    async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id }) => {
+      const target = resolveTaskToolTarget(room_id);
+      if (!target) return taskToolError("Not in a room. Join one first.");
+
+      const { identity, agentSession } = await resolveTaskToolIdentity(target, agent_session_id);
+      const task = await createTask(target, {
+        title,
+        description,
+        created_by: identity.actor_label,
+        ...taskActorPayload(identity, agentSession),
+        source_message_id,
+      });
+
+      await syncRoomPresence(
+        target.effectiveRoomId,
+        identity,
+        getRememberedRoomPresence(target.effectiveRoomId, identity),
+        agentSession
+      );
+
+      return jsonToolResponse(
+        { success: true, task, agent_identity: toPublicAgentIdentity(identity) },
+        2
+      );
+    }
+  );
+
+  server.tool(
+    "get_board",
+    "Get the current task board for the room. By default shows only open tasks " +
+      "(not done/cancelled). Agents should check this on startup and when idle to " +
+      "see if there is unassigned work to claim.",
+    {
+      status: z.enum(TASK_STATUSES).optional().describe("Filter by specific status"),
+      open_only: z.boolean().optional().describe("If true (default), only show tasks not done/cancelled"),
+      room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
+    },
+    async ({ status, open_only, room_id }) => {
+      const target = resolveTaskToolTarget(room_id);
+      if (!target) return taskToolError("Not in a room. Join one first.");
+
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      if (open_only !== false) params.set("open", "true");
+
+      const allTasks: unknown[] = [];
+      let afterCursor: string | undefined;
+
+      for (;;) {
+        const pageParams = new URLSearchParams(params);
+        if (afterCursor) pageParams.set("after", afterCursor);
+        const qs = pageParams.toString();
+
+        const result = await listTasks(target, qs);
+
+        const tasks = result.tasks ?? [];
+        allTasks.push(...tasks);
+
+        if (!result.has_more || tasks.length === 0) break;
+        const lastTask = tasks[tasks.length - 1];
+        if (!lastTask?.id) break;
+        afterCursor = lastTask.id;
+      }
+
+      await heartbeatRoomPresence(target.effectiveRoomId, await ensureAgentIdentity());
+
+      return jsonToolResponse({ success: true, tasks: allTasks }, 2);
+    }
+  );
+}
