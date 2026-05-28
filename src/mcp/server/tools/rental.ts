@@ -29,9 +29,9 @@ export function registerRentalTools(server: McpServer): void {
   // incoming session requests and accept/decline them. All three wrap
   // /api/rental/provider/* and are gated server-side by LETAGENTS_RENT_ENABLED.
   //
-  // Handler logic lives in `./rental-tools.ts` so it can be unit-tested without
-  // booting an MCP transport. The registrations here are thin wrappers that
-  // inject the live `apiCall` and shape the response into the MCP content
+  // Handler logic lives under `src/mcp/rental-tools/` so it can be unit-tested
+  // without booting an MCP transport. The registrations here are thin wrappers
+  // that inject the live `apiCall` and shape the response into the MCP content
   // envelope.
   //
   // Spec refs: §6 (provider listing flow), §18.2 (accept/decline state
