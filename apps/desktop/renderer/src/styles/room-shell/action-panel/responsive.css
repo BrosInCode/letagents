@@ -1,0 +1,35 @@
+@media (max-width: 1180px) {
+  .desktop-room-inspector {
+    grid-template-columns: 1fr;
+    max-height: min(64vh, 620px);
+  }
+}
+
+@media (max-width: 620px) {
+  .desktop-room-property-row,
+  .desktop-room-github-pill {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .desktop-room-property-row > :last-child,
+  .desktop-room-github-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .desktop-room-link-line,
+  .desktop-room-title-control {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .desktop-room-title-control {
+    flex-direction: column;
+  }
+
+  .desktop-room-link-line button,
+  .desktop-room-title-control button,
+  .desktop-room-github-pill button {
+    width: 100%;
+  }
+}
