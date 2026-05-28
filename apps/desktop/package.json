@@ -12,7 +12,9 @@
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
+    "test": "npm run test:renderer && npm run test:electron",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
+    "test:electron": "node --import tsx --test electron/__tests__/*.test.ts",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
