@@ -1,0 +1,198 @@
+.desktop-github-event {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
+  min-height: 132px;
+  padding: 16px 18px 18px 16px;
+  border: 1px solid color-mix(in srgb, var(--event-accent) 32%, rgba(255, 255, 255, 0.08));
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--event-accent) 14%, transparent), transparent 34%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018) 58%, rgba(255, 255, 255, 0.008)),
+    rgba(16, 16, 16, 0.86);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 14px 34px rgba(0, 0, 0, 0.22),
+    0 0 24px color-mix(in srgb, var(--event-accent) 8%, transparent);
+  backdrop-filter: blur(16px) saturate(1.12);
+  --event-accent: var(--text-tertiary);
+  --event-accent-soft: rgba(255, 255, 255, 0.04);
+}
+
+.desktop-github-event::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  pointer-events: none;
+  border-radius: 19px;
+  background:
+    linear-gradient(150deg, rgba(255, 255, 255, 0.08), transparent 32%, color-mix(in srgb, var(--event-accent) 5%, transparent) 78%, transparent),
+    linear-gradient(90deg, color-mix(in srgb, var(--event-accent) 8%, transparent), transparent 34%);
+}
+
+.desktop-github-event::after {
+  content: "";
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  left: 0;
+  width: 3px;
+  pointer-events: none;
+  border-radius: 999px;
+  background: var(--event-accent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--event-accent) 42%, transparent);
+  opacity: 0.78;
+}
+
+.desktop-github-event-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--event-accent) 18%, rgba(255, 255, 255, 0.04)), rgba(255, 255, 255, 0.022)),
+    color-mix(in srgb, var(--event-accent) 12%, rgba(17, 17, 17, 0.88));
+  color: var(--event-accent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--event-accent) 28%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 10px 22px color-mix(in srgb, var(--event-accent) 12%, transparent);
+  z-index: 1;
+}
+
+.desktop-github-event-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.desktop-github-event-content {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  z-index: 1;
+}
+
+.desktop-github-event-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.desktop-github-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.052);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.desktop-github-chip.is-brand {
+  border-color: color-mix(in srgb, var(--event-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--event-accent) 11%, rgba(17, 17, 17, 0.88));
+  color: var(--event-accent);
+}
+
+.desktop-github-chip.is-status {
+  border-color: color-mix(in srgb, var(--event-accent) 24%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--event-accent) 13%, rgba(255, 255, 255, 0.04));
+  color: var(--text-secondary);
+}
+
+.desktop-github-chip.is-task {
+  border-color: rgba(245, 158, 11, 0.1);
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+}
+
+.desktop-github-event strong {
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.desktop-github-event p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.desktop-github-event-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 32px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in srgb, var(--event-accent) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--event-accent) 10%, rgba(17, 17, 17, 0.88));
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-decoration: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 6px 16px color-mix(in srgb, var(--event-accent) 8%, transparent);
+}
+
+.desktop-github-event-link:hover {
+  filter: brightness(1.08);
+}
+
+.desktop-github-event[data-tone="violet"] {
+  --event-accent: #8b7cf6;
+  --event-accent-soft: rgba(139, 124, 246, 0.24);
+}
+
+.desktop-github-event[data-tone="emerald"] {
+  --event-accent: #20c997;
+  --event-accent-soft: rgba(32, 201, 151, 0.24);
+}
+
+.desktop-github-event[data-tone="rose"] {
+  --event-accent: #ff5d73;
+  --event-accent-soft: rgba(255, 93, 115, 0.24);
+}
+
+.desktop-github-event[data-tone="amber"] {
+  --event-accent: #f7b955;
+  --event-accent-soft: rgba(247, 185, 85, 0.22);
+}
+
+.desktop-github-event[data-tone="sky"] {
+  --event-accent: #4aa8ff;
+  --event-accent-soft: rgba(74, 168, 255, 0.23);
+}
+
+.desktop-github-event[data-tone="slate"] {
+  --event-accent: #9ca3af;
+  --event-accent-soft: rgba(156, 163, 175, 0.14);
+}
+
+@media (max-width: 640px) {
+  .desktop-github-event {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-github-event-icon {
+    width: 32px;
+    height: 32px;
+  }
+}

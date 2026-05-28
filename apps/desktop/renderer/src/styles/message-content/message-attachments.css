@@ -1,0 +1,66 @@
+.room-message-attachments {
+  display: grid;
+  gap: 8px;
+  max-width: min(100%, 460px);
+  margin-top: 10px;
+}
+
+.room-message-attachment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.115);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font: inherit;
+  text-decoration: none;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.room-message-attachment:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.055);
+  border-color: color-mix(in srgb, var(--avatar-color, #71717a) 38%, rgba(255, 255, 255, 0.12));
+}
+
+.room-message-attachment.is-image {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.room-message-attachment img {
+  width: 52px;
+  height: 52px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.room-message-attachment img {
+  object-fit: cover;
+}
+
+.room-message-attachment span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.room-message-attachment strong,
+.room-message-attachment small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-message-attachment small {
+  color: var(--text-tertiary);
+}

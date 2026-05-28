@@ -1,0 +1,178 @@
+.desktop-long-message-html {
+  color: var(--text);
+  font-size: 1rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.desktop-long-message-html :is(a) {
+  color: #60a5fa;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.desktop-long-message-html :is(a):hover {
+  text-decoration: underline;
+}
+
+.desktop-long-message-html :is(code) {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.85em;
+}
+
+.desktop-long-message {
+  min-width: 0;
+}
+
+.desktop-long-message-content {
+  position: relative;
+  min-width: 0;
+}
+
+.desktop-long-message-content.collapsed {
+  max-height: 260px;
+  overflow: hidden;
+}
+
+.desktop-long-message-fade {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 64px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, rgba(16, 16, 16, 0.96) 86%);
+}
+
+.desktop-long-message-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.desktop-long-message-actions span {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.desktop-long-message-actions button,
+.desktop-reader-header button,
+.desktop-reader-footer button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 850;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.desktop-long-message-actions button:hover,
+.desktop-reader-header button:hover,
+.desktop-reader-footer button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.desktop-reader-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 28% 12%, rgba(255, 255, 255, 0.08), transparent 28%),
+    rgba(5, 5, 5, 0.82);
+  backdrop-filter: blur(18px);
+  animation: room-panel-in 160ms var(--ease-out);
+}
+
+.desktop-reader-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(960px, calc(100vw - 48px));
+  max-height: min(86vh, 900px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.07), transparent 34%),
+    rgba(13, 13, 13, 0.98);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
+}
+
+.desktop-reader-dialog:focus {
+  outline: none;
+}
+
+.desktop-reader-header,
+.desktop-reader-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.desktop-reader-footer {
+  justify-content: flex-end;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 0;
+}
+
+.desktop-reader-header p,
+.desktop-reader-header h2 {
+  margin: 0;
+}
+
+.desktop-reader-header p {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.desktop-reader-header h2 {
+  margin-top: 4px;
+  font-size: 1.05rem;
+}
+
+.desktop-reader-content {
+  overflow: auto;
+  padding: 22px;
+  line-height: 1.68;
+}
+
+.desktop-reader-footer .primary {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--text);
+  color: #090909;
+}
+
+.mention-token {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.14);
+  color: #7dd3fc;
+  font-weight: 800;
+}
