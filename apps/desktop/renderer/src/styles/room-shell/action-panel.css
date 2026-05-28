@@ -1,6 +1,7 @@
 @import "./action-panel/panel-and-inspector.css";
 @import "./action-panel/identity-properties.css";
 @import "./action-panel/controls.css";
+@import "./action-panel/shared.css";
 @import "./action-panel/links-title.css";
 @import "./action-panel/github.css";
 @import "./action-panel/notes-toggle.css";
