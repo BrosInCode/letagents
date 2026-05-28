@@ -1,0 +1,40 @@
+.desktop-attachment-draft span {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 9px;
+  min-width: 0;
+}
+
+.desktop-attachment-preview {
+  grid-row: span 2;
+  width: 42px;
+  height: 42px;
+  border-radius: 9px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.desktop-attachment-draft strong,
+.desktop-attachment-draft small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-attachment-draft small {
+  color: var(--text-tertiary);
+}
+
+.desktop-attachment-draft button {
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.desktop-attachment-draft button:hover {
+  color: var(--text);
+}

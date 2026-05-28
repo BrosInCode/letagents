@@ -1,0 +1,67 @@
+.desktop-composer:focus-within {
+  border-color: rgba(255, 255, 255, 0.13);
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.016),
+    inset 0 1px 0 rgba(255, 255, 255, 0.085),
+    0 7px 20px rgba(0, 0, 0, 0.16);
+}
+
+.desktop-composer-identity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 14px;
+  color: var(--text-tertiary);
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.desktop-composer-identity > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-reply {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 11px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px 12px 0 0;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-composer-reply div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.desktop-composer-reply strong {
+  font-size: 0.74rem;
+}
+
+.desktop-composer-reply span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-reply button {
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  font-weight: 850;
+}
+
+.desktop-composer-reply button:hover {
+  color: var(--text);
+}

@@ -1,0 +1,40 @@
+.desktop-attachment-drafts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.desktop-attachment-draft {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 360px;
+  padding: 8px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.desktop-attachment-draft.is-pending {
+  border-color: rgba(125, 211, 252, 0.18);
+  background:
+    linear-gradient(145deg, rgba(125, 211, 252, 0.08), rgba(255, 255, 255, 0.035)),
+    rgba(255, 255, 255, 0.035);
+  color: var(--text-secondary);
+}
+
+.desktop-attachment-pending-icon {
+  grid-row: span 2;
+  width: 42px;
+  height: 42px;
+  border: 2px solid rgba(125, 211, 252, 0.22);
+  border-top-color: #7dd3fc;
+  border-radius: 999px;
+  animation: attachment-pending-spin 860ms linear infinite;
+}
+
+@keyframes attachment-pending-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
