@@ -21,7 +21,7 @@ import {
 import {
   evaluateReviewLeaseRouting,
   leaseMatchesActor,
-} from "../../coordination-policy.js";
+} from "../../coordination-policy/index.js";
 import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";

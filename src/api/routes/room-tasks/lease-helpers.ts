@@ -1,5 +1,5 @@
 import type { TaskLease, TaskStatus } from "../../db.js";
-import { leaseMatchesActor } from "../../coordination-policy.js";
+import { leaseMatchesActor } from "../../coordination-policy/index.js";
 
 export const LEASE_RECOVERY_ACTIVE_STATUSES = new Set<TaskStatus>([
   "assigned",

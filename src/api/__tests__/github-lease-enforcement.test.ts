@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { CoordinationDecisionResult, CoordinationLeaseLike } from "../coordination-policy.js";
+import type { CoordinationDecisionResult, CoordinationLeaseLike } from "../coordination-policy/index.js";
 import {
   LETAGENTS_LEASE_CHECK_NAME,
   buildGitHubLeaseEnforcementPlan,

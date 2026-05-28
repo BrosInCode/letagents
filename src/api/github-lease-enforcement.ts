@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-import type { CoordinationDecisionResult, CoordinationLeaseLike } from "./coordination-policy.js";
+import type { CoordinationDecisionResult, CoordinationLeaseLike } from "./coordination-policy/index.js";
 import type { GitHubAppConfig } from "./github-config.js";
 import type { RepoPullRequestRef } from "./repo-workflow.js";
 
