@@ -48,6 +48,14 @@ export function validatePatchPath(filePath: string): {
   }
 
   const normalizedPath = segments.join("/");
+  if (!normalizedPath) {
+    return {
+      valid: false,
+      reason: `Empty path rejected: "${filePath}"`,
+      sensitive: false,
+    };
+  }
+
   return {
     valid: true,
     sensitive: SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(normalizedPath)),
