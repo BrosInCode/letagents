@@ -36,7 +36,6 @@ import { parseUsageEvents } from "./codex/events.js";
 import {
   emptyDelta,
   latestRateLimits,
-  readUsageDeltaFromEvents,
   sumUsageEvents,
 } from "./codex/totals.js";
 import type {

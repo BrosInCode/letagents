@@ -3,7 +3,10 @@ import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { DiscoveredCodexFile } from "./types.js";
+interface DiscoveredCodexFile {
+  path: string;
+  mtimeMs: number;
+}
 
 export function defaultCodexSessionsDir(homeOverride?: string): string {
   return join(homeOverride ?? homedir(), ".codex", "sessions");

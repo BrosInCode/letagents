@@ -38,8 +38,3 @@ export interface CodexUsageTotals {
   cacheReadTokens: number;
   reasoningTokens: number;
 }
-
-export interface DiscoveredCodexFile {
-  path: string;
-  mtimeMs: number;
-}
