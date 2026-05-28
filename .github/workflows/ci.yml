@@ -50,8 +50,8 @@ jobs:
       - name: Type check desktop
         run: npm --prefix apps/desktop run typecheck
 
-      - name: Test desktop renderer
-        run: npm --prefix apps/desktop run test:renderer
+      - name: Test desktop
+        run: npm --prefix apps/desktop test
 
       - name: Build desktop
         run: npm --prefix apps/desktop run build
