@@ -63,7 +63,7 @@ export function registerRentalProviderTools({
 
   server.tool(
     "rental_decline",
-    "Decline a pending Rent an Agent session request. Transitions the session from 'requested' to 'cancelled' per spec §18.2. An optional reason is forwarded in the decline body.",
+    "Decline a pending Rent an Agent session request. Transitions the session from 'requested' to 'cancelled' per spec §18.2. An optional reason is forwarded in the request body.",
     {
       session_id: z.string().describe("Rental session id to decline."),
       idempotency_key: z
