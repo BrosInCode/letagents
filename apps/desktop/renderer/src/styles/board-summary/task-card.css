@@ -1,0 +1,118 @@
+.desktop-board-task-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  margin-bottom: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: rgba(19, 19, 22, 0.78);
+  transition: border-color 150ms var(--ease-out), background 150ms var(--ease-out);
+}
+
+.desktop-board-task-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(24, 24, 28, 0.84);
+}
+
+.desktop-board-task-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.desktop-board-task-heading {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.desktop-board-task-id {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid rgba(147, 197, 253, 0.42);
+  border-radius: 4px;
+  background: rgba(147, 197, 253, 0.08);
+  color: #93c5fd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.desktop-board-task-heading h4 {
+  flex: 1;
+  min-width: min(100%, 12rem);
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.desktop-board-status-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 0.6rem;
+  font-weight: 800;
+  line-height: 1.55;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.desktop-board-status-badge[data-status="proposed"] { color: #a1a1aa; border-color: rgba(161, 161, 170, 0.38); }
+.desktop-board-status-badge[data-status="accepted"] { color: #60a5fa; border-color: rgba(96, 165, 250, 0.38); }
+.desktop-board-status-badge[data-status="assigned"] { color: #c084fc; border-color: rgba(192, 132, 252, 0.38); }
+.desktop-board-status-badge[data-status="in_progress"] { color: #fbbf24; border-color: rgba(251, 191, 36, 0.38); }
+.desktop-board-status-badge[data-status="blocked"] { color: #f87171; border-color: rgba(248, 113, 113, 0.38); }
+.desktop-board-status-badge[data-status="in_review"] { color: #38bdf8; border-color: rgba(56, 189, 248, 0.38); }
+.desktop-board-status-badge[data-status="merged"] { color: #34d399; border-color: rgba(52, 211, 153, 0.38); }
+.desktop-board-status-badge[data-status="done"] { color: #22c55e; border-color: rgba(34, 197, 94, 0.38); }
+.desktop-board-status-badge[data-status="cancelled"] { color: #64748b; border-color: rgba(100, 116, 139, 0.38); }
+
+.desktop-board-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+}
+
+.desktop-board-person-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.desktop-board-person-chip small {
+  color: var(--text-tertiary);
+  font-size: 0.58rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.desktop-board-person-chip strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-board-task-description {
+  margin: 0 0 2px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
