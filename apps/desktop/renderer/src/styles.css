@@ -1,5 +1,10 @@
 @import "./styles/01-base.css";
-@import "./styles/02-app-shell-sidebar.css";
+@import "./styles/app-shell/layout.css";
+@import "./styles/app-shell/shared-primitives.css";
+@import "./styles/app-shell/sidebar.css";
+@import "./styles/app-shell/sidebar-rooms.css";
+@import "./styles/app-shell/main-content.css";
+@import "./styles/app-shell/motion.css";
 @import "./styles/03-room-shell.css";
 @import "./styles/04-room-chat-stream.css";
 @import "./styles/05-board-summary.css";

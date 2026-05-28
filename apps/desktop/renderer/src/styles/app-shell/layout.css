@@ -1,0 +1,35 @@
+.desktop-shell {
+  display: grid;
+  grid-template-columns: 296px minmax(0, 1fr);
+  height: 100vh;
+  overflow: hidden;
+  transition: grid-template-columns var(--duration-slow) var(--ease-spring);
+}
+
+.desktop-shell[data-sidebar-mode="rail"] {
+  grid-template-columns: 88px minmax(0, 1fr);
+}
+
+.desktop-shell[data-sidebar-mode="hidden"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.desktop-onboarding-shell {
+  display: grid;
+  min-height: 100vh;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 18% 8%, rgba(255, 255, 255, 0.075), transparent 28%),
+    radial-gradient(circle at 86% 92%, rgba(255, 255, 255, 0.035), transparent 34%),
+    var(--bg);
+}
+
+.desktop-onboarding-shell .mcp-onboarding {
+  width: min(1240px, 100%);
+  margin: auto;
+}
+
+.desktop-onboarding-shell .first-run-wizard {
+  width: min(1380px, calc(100vw - 72px));
+  margin: auto;
+}

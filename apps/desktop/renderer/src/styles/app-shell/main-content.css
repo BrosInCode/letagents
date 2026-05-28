@@ -1,0 +1,58 @@
+.app-main {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: start;
+  gap: 26px;
+  height: 100vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 26px 32px 32px;
+  animation: main-enter var(--duration-normal) var(--ease-out);
+}
+
+.app-main[data-room-entry="true"] {
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+}
+
+.app-topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.app-topbar[data-room-entry="true"] {
+  align-items: center;
+  min-height: 44px;
+}
+
+.topbar-spacer {
+  flex: 1;
+}
+
+.app-topbar h2 {
+  font-size: 2rem;
+  letter-spacing: -0.04em;
+}
+
+.topbar-actions {
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-reveal-button {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  padding: 0;
+}
+
+.sidebar-reveal-button svg {
+  width: 16px;
+  height: 16px;
+  transform: rotate(180deg);
+}

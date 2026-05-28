@@ -1,0 +1,289 @@
+.app-sidebar {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  height: 100vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px 14px;
+  background: rgba(10, 10, 10, 0.92);
+  border-right: 1px solid var(--border);
+  backdrop-filter: blur(18px);
+  animation: sidebar-enter var(--duration-normal) var(--ease-out);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
+  border-right-color: rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 24% 10%, rgba(255, 255, 255, 0.09), transparent 30%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.022) 44%, rgba(255, 255, 255, 0.008)),
+    rgba(8, 8, 8, 0.58);
+  box-shadow:
+    inset -1px 0 0 rgba(255, 255, 255, 0.055),
+    inset 1px 0 0 rgba(255, 255, 255, 0.035),
+    18px 0 42px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(30px) saturate(1.28);
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  padding: 0 4px;
+}
+
+.sidebar-topbar {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.sidebar-collapse-button {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-collapse-button,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-row,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-icon-button {
+  border-color: transparent;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.078), rgba(255, 255, 255, 0.022) 54%, rgba(255, 255, 255, 0.008)),
+    rgba(255, 255, 255, 0.022);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.105),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.024),
+    0 9px 22px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(22px) saturate(1.22);
+}
+
+.sidebar-collapse-button:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-accent);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-collapse-button:hover,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta:hover,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room:hover,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-row:hover,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row:hover,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-icon-button:hover {
+  border-color: transparent;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.038) 54%, rgba(255, 255, 255, 0.014)),
+    rgba(255, 255, 255, 0.044);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.028),
+    0 12px 28px rgba(0, 0, 0, 0.15);
+}
+
+.sidebar-collapse-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar-brand-mark,
+.project-icon,
+.pin-mark,
+.system-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  color: var(--text);
+}
+
+.sidebar-brand-mark {
+  width: 34px;
+  height: 34px;
+  background:
+    linear-gradient(145deg, rgba(125, 211, 252, 0.18), rgba(167, 139, 250, 0.12)),
+    rgba(255, 255, 255, 0.055);
+  color: #e0f2fe;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.project-icon,
+.pin-mark,
+.system-icon {
+  width: 28px;
+  height: 28px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+}
+
+.project-icon svg,
+.pin-mark svg,
+.system-icon svg,
+.sidebar-icon-button svg,
+.project-open svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-icon path,
+.pin-mark path,
+.system-icon path,
+.sidebar-icon-button path,
+.project-open path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+}
+
+.desktop-shell[data-sidebar-mode="rail"] .sidebar-collapse-button svg {
+  transform: rotate(180deg);
+}
+
+.desktop-shell[data-sidebar-mode="rail"] .sidebar-brand {
+  margin-bottom: 0;
+}
+
+.sidebar-brand h1 {
+  font-size: 1.05rem;
+  letter-spacing: 0;
+  line-height: 1.1;
+}
+
+.sidebar-brand p {
+  margin: 3px 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.desktop-shell[data-sidebar-mode="rail"] .sidebar-brand h1 {
+  display: none;
+}
+
+.section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.section-toggle .sidebar-heading {
+  flex: 1 1 auto;
+}
+
+.section-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.sidebar-cta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .cta-plus,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .project-icon,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .project-open,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pin-mark,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .system-icon,
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .toggle-glyph {
+  color: rgba(250, 250, 250, 0.72);
+}
+
+.cta-plus {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+}
+
+.sidebar-collapsed-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.sidebar-icon-button {
+  display: grid;
+  place-items: center;
+  min-height: 46px;
+  padding: 0;
+  font-size: 1rem;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-icon-button[data-active="true"] {
+  border-color: var(--border-accent);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.toggle-glyph {
+  color: var(--text-tertiary);
+  font-size: 0.86rem;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.toggle-glyph[data-collapsed="true"],
+.project-open[data-collapsed="true"] {
+  transform: rotate(-90deg);
+}
+
+.pinned-room[data-active="true"],
+.room-row[data-active="true"],
+.sidebar-row[data-active="true"] {
+  border-color: var(--border-accent);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room[data-active="true"],
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-row[data-active="true"],
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row[data-active="true"],
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-icon-button[data-active="true"] {
+  border-color: transparent;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.044) 52%, rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.055);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.045),
+    0 12px 26px rgba(0, 0, 0, 0.15);
+}
