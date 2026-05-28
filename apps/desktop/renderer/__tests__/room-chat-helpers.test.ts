@@ -20,6 +20,9 @@ import {
   latestReasoningForAgent,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
 import { buildThreadSummaries } from "../src/components/desktop/content/room-chat/thread-utils";
+import { parseGitHubEvent } from "../src/components/desktop/content/desktop-chat-message/github-event";
+import { parseSenderIdentity } from "../src/components/desktop/content/desktop-chat-message/identity";
+import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
 
 describe("room chat helpers", () => {
   it("builds image attachment ids and data URLs consistently", () => {
@@ -72,6 +75,41 @@ describe("room chat helpers", () => {
     assert.equal(latestReasoningForAgent(target, [oldSession, newSession])?.id, "reasoning_new");
     assert.equal(hasReasoningStreamSurface(target, []), true);
     assert.equal(hasReasoningStreamSurface({ ...target, ideLabel: null }, [presenceEntry()]), true);
+  });
+
+  it("parses desktop chat sender identity labels", () => {
+    assert.deepEqual(parseSenderIdentity({ sender: "Noether | Emmy's agent | codex" }), {
+      displayName: "Noether",
+      ownerAttribution: "Emmy's agent",
+      ideLabel: "Codex",
+    });
+    assert.deepEqual(parseSenderIdentity({ sender: "Codex Helper" }), {
+      displayName: "Codex Helper",
+      ownerAttribution: null,
+      ideLabel: "Codex",
+    });
+  });
+
+  it("maps GitHub room messages to desktop event cards", () => {
+    const event = parseGitHubEvent({
+      ...roomMessage("github_1", null),
+      sender: "github",
+      source: "github",
+      text: "PR #12 opened in BrosInCode/letagents linked to task_1: Split message cards https://github.com/BrosInCode/letagents/pull/12",
+    });
+
+    assert.equal(event?.kind, "pull-request");
+    assert.equal(event?.kindLabel, "Pull request");
+    assert.equal(event?.statusLabel, "opened");
+    assert.equal(event?.taskId, "task_1");
+    assert.equal(event?.urlLabel, "Open pull request");
+  });
+
+  it("renders desktop message text with escaped markup and search highlights", () => {
+    assert.equal(
+      renderMessageText("Hello <script> @Noether **ship** https://example.com", "ship"),
+      'Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>',
+    );
   });
 });
 
