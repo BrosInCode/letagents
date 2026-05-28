@@ -2,4 +2,5 @@
 @import "./task-board/column-shell.css";
 @import "./task-board/task-card.css";
 @import "./task-board/review-actions.css";
+@import "./task-board/empty-state.css";
 @import "./task-board/task-detail-panel.css";
