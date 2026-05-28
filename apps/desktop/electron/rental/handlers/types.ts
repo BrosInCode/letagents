@@ -9,15 +9,22 @@ export type DisabledRentalResult = {
 
 export type RentalIpcMain = Pick<IpcMain, "handle">;
 export type RentalIpcHandler = (_event: unknown, ...args: unknown[]) => unknown;
+export type RentalIpcRegistrar = (
+  channel: string,
+  handler: RentalIpcHandler,
+) => void;
 
 export interface DesktopRentalHandlerOptions {
   enabled?: boolean;
   renterTriggerRuntime?: RenterTriggerRuntime;
-  /**
-   * Optional live API client. When provided, the IPC channels for listings
-   * discovery, provider requests, and session lifecycle call the server and
-   * surface the mapped DesktopRental* shape. When omitted, channels fall back
-   * to stub responses so the UI stays renderable.
-   */
   apiClient?: RentalApiClient | null;
 }
+
+export interface RentalIpcRegistrationContext {
+  apiClient: RentalApiClient | null;
+  renterTriggerRuntime: RenterTriggerRuntime;
+}
+
+export const disabledRentalResult: DisabledRentalResult = Object.freeze({
+  enabled: false,
+});
