@@ -38,26 +38,19 @@ export function validatePatchPath(filePath: string): {
     };
   }
 
-  const segments = normalized.split("/");
-  let depth = 0;
-  for (const segment of segments) {
-    if (segment === "..") {
-      depth--;
-      if (depth < 0) {
-        return {
-          valid: false,
-          reason: `Path traversal detected: "${filePath}"`,
-          sensitive: false,
-        };
-      }
-    } else if (segment !== "." && segment !== "") {
-      depth++;
-    }
+  const segments = patchPathSegments(normalized);
+  if (segments.includes("..")) {
+    return {
+      valid: false,
+      reason: `Path traversal detected: "${filePath}"`,
+      sensitive: false,
+    };
   }
 
+  const normalizedPath = segments.join("/");
   return {
     valid: true,
-    sensitive: SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(normalized)),
+    sensitive: SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(normalizedPath)),
   };
 }
 
@@ -65,10 +58,16 @@ export function validatePatchPath(filePath: string): {
  * Normalize a file path for consistent comparison.
  */
 export function normalizePatchPath(filePath: string): string {
+  const pathCheck = validatePatchPath(filePath);
+  if (!pathCheck.valid) {
+    throw new Error(pathCheck.reason);
+  }
+  return patchPathSegments(filePath.replace(/\\/g, "/")).join("/");
+}
+
+function patchPathSegments(filePath: string): string[] {
   return filePath
-    .replace(/\\/g, "/")
     .replace(/^\.\//, "")
     .split("/")
-    .filter((segment) => segment !== "" && segment !== ".")
-    .join("/");
+    .filter((segment) => segment !== "" && segment !== ".");
 }

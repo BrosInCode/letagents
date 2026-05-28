@@ -40,7 +40,7 @@ export async function validatePatch(
 
   for (const file of proposal.files) {
     const pathCheck = validatePatchPath(file.path);
-    const normalizedPath = normalizePatchPath(file.path);
+    const normalizedPath = pathCheck.valid ? normalizePatchPath(file.path) : file.path;
     const check: PatchCheckResult = {
       file: normalizedPath,
       operation: file.operation,

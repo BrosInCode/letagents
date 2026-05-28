@@ -141,6 +141,24 @@ describe("PatchGate — Validation", () => {
     assert.ok(result.rejectionReasons[0].includes("traversal"));
   });
 
+  it("rejects non-escaping parent path segments", async () => {
+    const deps = createDeps("/tmp/fake", new Set(["README.md"]));
+    const result = await validatePatch(deps, {
+      sessionId: "s1",
+      idempotencyKey: "k4_parent_segment",
+      files: [
+        {
+          path: "src/../README.md",
+          operation: "modify",
+          content: "data",
+        },
+      ],
+    });
+
+    assert.equal(result.verdict, "rejected");
+    assert.ok(result.rejectionReasons[0].includes("traversal"));
+  });
+
   it("rejects null bytes in paths", async () => {
     const deps = createDeps("/tmp/fake", new Set());
     const result = await validatePatch(deps, {
