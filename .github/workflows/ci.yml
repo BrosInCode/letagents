@@ -223,6 +223,13 @@ jobs:
             git fetch origin staging
             git checkout ${{ github.sha }}
 
+            # Keep enough room for the app and migrator image pulls.
+            docker system df || true
+            docker container prune -f || true
+            docker image prune -af || true
+            docker builder prune -af || true
+            docker system df || true
+
             # Pull the exact images built by this CI run
             docker pull "ghcr.io/brosincode/letagents:${IMAGE_TAG}"
             docker pull "ghcr.io/brosincode/letagents:${IMAGE_TAG}-migrate"
