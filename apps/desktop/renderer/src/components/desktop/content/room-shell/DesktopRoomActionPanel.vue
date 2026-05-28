@@ -141,7 +141,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { DesktopGitHubIntegrationStatus, DesktopRoomInfo } from "../../../../../electron/ipc-types";
+import type { DesktopGitHubIntegrationStatus, DesktopRoomInfo } from "../../../../../../electron/ipc-types";
 
 const props = defineProps<{
   open: boolean;
