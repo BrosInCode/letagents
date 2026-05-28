@@ -1,0 +1,59 @@
+.room-thread-marker {
+  width: fit-content;
+  margin: 8px 0 0 12px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--avatar-color, #71717a) 28%, rgba(255, 255, 255, 0.1));
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .room-thread-marker {
+  border-color: rgba(255, 255, 255, 0.14);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.04) 56%, rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.055);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    0 10px 26px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(16px) saturate(1.2);
+}
+
+.room-chat-message.jump-target .room-message-bubble {
+  border-color: color-mix(in srgb, var(--avatar-color, #71717a) 56%, rgba(255, 255, 255, 0.22));
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.045) 44%, rgba(255, 255, 255, 0.022)),
+    linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, #71717a) 16%, transparent), transparent 44%);
+}
+
+.room-chat-message.is-search-active .room-message-bubble {
+  border-color: rgba(251, 191, 36, 0.38);
+  border-left-color: #fbbf24;
+  box-shadow:
+    0 0 0 3px rgba(251, 191, 36, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.message-search-hit {
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.28);
+  color: #fff7ed;
+}
+
+.room-empty-card {
+  display: grid;
+  place-items: center;
+  gap: 7px;
+  min-height: 360px;
+  text-align: center;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.room-empty-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
