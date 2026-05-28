@@ -1,0 +1,38 @@
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  transition: all var(--duration-fast);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.nav-btn-sm {
+  padding: 6px 14px;
+  font-size: 0.82rem;
+}
+
+.nav-btn-primary {
+  background: rgba(255, 255, 255, 0.9);
+  color: #0a0a0a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.nav-btn-primary:hover {
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(255, 255, 255, 0.15);
+}
+
+.nav-btn-ghost {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.nav-btn-ghost:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.15);
+}
