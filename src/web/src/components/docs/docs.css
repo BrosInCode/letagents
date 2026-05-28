@@ -1,0 +1,312 @@
+.docs-page {
+  background: var(--bg-0, #0a0a0a);
+  min-height: 100vh;
+}
+
+.docs-page .docs-layout {
+  display: flex;
+  min-height: 100vh;
+  padding-top: 80px;
+}
+
+.docs-page .sidebar {
+  position: fixed;
+  top: 80px;
+  left: 0;
+  bottom: 0;
+  width: 260px;
+  padding: 24px 16px 40px 24px;
+  border-right: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: var(--bg-0, #0a0a0a);
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.docs-page .sidebar-section {
+  margin-bottom: 28px;
+}
+
+.docs-page .sidebar-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+  color: var(--text-tertiary, #8b8b96);
+  padding: 0 12px;
+  margin-bottom: 6px;
+}
+
+.docs-page .sidebar-link {
+  display: block;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-secondary, #a1a1aa);
+  text-decoration: none;
+  transition: color 180ms, background 180ms;
+}
+
+.docs-page .sidebar-link:hover,
+.docs-page .sidebar-link.active {
+  color: var(--text, #fafafa);
+  background: rgba(228,228,231,0.1);
+}
+
+.docs-page .docs-content {
+  margin-left: 260px;
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  max-width: 780px;
+  padding: 48px 48px 100px;
+}
+
+.docs-page .doc-section {
+  margin-bottom: 64px;
+  scroll-margin-top: 100px;
+}
+
+.docs-page .doc-section:last-child {
+  margin-bottom: 0;
+}
+
+.docs-page .doc-section h2 {
+  font-size: 1.6rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+
+.docs-page .doc-section h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-top: 32px;
+  margin-bottom: 8px;
+}
+
+.docs-page .doc-section p {
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.92rem;
+  margin-bottom: 16px;
+  line-height: 1.7;
+}
+
+.docs-page .doc-section p a {
+  color: var(--text, #fafafa);
+  text-decoration: underline;
+}
+
+.docs-page .doc-section ul,
+.docs-page .doc-section ol {
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.92rem;
+  padding-left: 20px;
+  margin-bottom: 16px;
+  line-height: 1.7;
+}
+
+.docs-page .doc-section li {
+  margin-bottom: 6px;
+}
+
+.docs-page .doc-section li strong {
+  color: var(--text, #fafafa);
+}
+
+.docs-page .doc-section code {
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 0.82em;
+}
+
+.docs-page .doc-section p code,
+.docs-page .doc-section li code,
+.docs-page .doc-section td code {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  padding: 1px 6px;
+  border-radius: 5px;
+  color: var(--text, #fafafa);
+}
+
+.docs-page .callout {
+  padding: 16px 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.docs-page .callout-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.docs-page .callout p {
+  margin-bottom: 0;
+  color: inherit;
+}
+
+.docs-page .callout-tip {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+
+.docs-page .callout-info {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: #93c5fd;
+}
+
+.docs-page .callout-danger {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.docs-page .room-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.docs-page .room-card {
+  background: var(--surface, #161616);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 8px;
+  padding: 20px;
+  transition: border-color 200ms;
+}
+
+.docs-page .room-card:hover {
+  border-color: rgba(255,255,255,0.14);
+}
+
+.docs-page .room-card h4 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.docs-page .room-card p {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #a1a1aa);
+  margin-bottom: 0;
+}
+
+.docs-page .lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.docs-page .lifecycle-step {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.docs-page .lifecycle-arrow {
+  color: var(--text-tertiary, #8b8b96);
+  font-size: 0.8rem;
+  margin: 0 2px;
+}
+
+.docs-page .doc-table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin-bottom: 20px;
+  font-size: 0.85rem;
+}
+
+.docs-page .doc-table th,
+.docs-page .doc-table td {
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+
+.docs-page .doc-table th {
+  font-weight: 700;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.docs-page .doc-table td {
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.docs-page .sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 40;
+}
+
+.docs-page .sidebar-toggle {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 200;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--surface, #161616);
+  border: 1px solid rgba(255,255,255,0.14);
+  color: var(--text, #fafafa);
+  font-size: 1.2rem;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+
+@media (max-width: 800px) {
+  .docs-page .sidebar {
+    transform: translateX(-100%);
+    transition: transform 250ms ease;
+    width: 280px;
+    background: var(--surface, #111);
+    top: 0;
+    padding-top: 90px;
+  }
+
+  .docs-page .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .docs-page .sidebar-toggle {
+    display: flex;
+  }
+
+  .docs-page .docs-content {
+    margin-left: 0;
+    padding: 32px 20px 80px;
+  }
+
+  .docs-page .doc-section h2 {
+    font-size: 1.3rem;
+  }
+}
