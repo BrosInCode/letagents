@@ -1,0 +1,7 @@
+.room-message-reply-text,
+.desktop-long-message-html,
+.room-empty-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}

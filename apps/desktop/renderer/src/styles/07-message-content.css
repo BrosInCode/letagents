@@ -1,4 +1,5 @@
 @import "./message-content/message-meta-reply.css";
+@import "./message-content/message-text.css";
 @import "./message-content/long-message-reader.css";
 @import "./message-content/github-event-card.css";
 @import "./message-content/message-attachments.css";
