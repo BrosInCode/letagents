@@ -4,6 +4,7 @@ import type {
   FocusParentVisibility,
   FocusRoomConclusionDetails,
 } from './focus'
+import type { RoomParticipant } from './presence'
 import type { RoomKind } from './shared'
 
 export interface RoomInfo {
@@ -36,4 +37,9 @@ export interface RoomJoinError {
   message: string
   roomId: string | null
   deviceFlowUrl: string | null
+}
+
+export interface RoomParticipantsPage {
+  participants: RoomParticipant[]
+  hidden_count: number
 }
