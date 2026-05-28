@@ -16,7 +16,7 @@ if (testDatabaseUrl) {
 const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
-const accountRoomModule = testDatabaseUrl ? await import("../account-room-membership.js") : null;
+const accountRoomModule = testDatabaseUrl ? await import("../account-room-membership/index.js") : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;

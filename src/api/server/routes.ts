@@ -1,6 +1,6 @@
 import type { Express } from "express";
 
-import { upsertAccountRoomRecent } from "../account-room-membership.js";
+import { upsertAccountRoomRecent } from "../account-room-membership/index.js";
 import { getProjectById } from "../db.js";
 import { toGitHubWebhookId } from "../github-app-sync.js";
 import {
