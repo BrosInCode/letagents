@@ -162,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -192,6 +192,7 @@ import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
+import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import {
   diagnosticsEntry,
   settingsEntry,
@@ -200,10 +201,8 @@ import {
   workersEntry,
 } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
-import { defaultMcpTargetSelection, fallbackMcpInstallState } from "./domain/mcp-install";
 import {
   readStoredRecentRootRooms,
-  rootPathLabel,
 } from "./domain/sidebar-rooms";
 
 const loading = ref(false);
@@ -266,22 +265,6 @@ const {
 
 let unsubscribeRoomStream: (() => void) | null = null;
 
-const showMcpInstaller = computed(() => {
-  if (!mcpInstallState.value) return false;
-  return activeEntry.value.id === setupEntry.id;
-});
-
-const showFirstRunGate = computed(() => {
-  return !mcpInstallState.value || !mcpInstallState.value.completed || !authStatus.value?.authenticated;
-});
-
-const visibleMcpInstallState = computed<DesktopMcpInstallState>(() => {
-  return mcpInstallState.value || fallbackMcpInstallState;
-});
-
-const setupApiAvailable = computed(() => {
-  return Boolean(window.letagentsDesktop?.setup);
-});
 const {
   clearLiveMetadataRefreshInterval,
   clearLiveMetadataRefreshTimer,
@@ -339,17 +322,13 @@ const {
 } = useDesktopAuthFlow({
   authStatus,
   getRoomIdentifier: () => getAuthRoomIdentifier(),
-  isFirstRunGate: () => showFirstRunGate.value,
+  isFirstRunGate: () => !mcpInstallState.value || !mcpInstallState.value.completed || !authStatus.value?.authenticated,
   onFirstRunAuthorized: async () => {
     await loadFirstRunRoomContext();
     firstRunStage.value = "room";
   },
   onAuthorized: () => refresh(),
   onSignedOut: () => refresh(),
-});
-
-const firstRunFeedback = computed(() => {
-  return mcpInstallFeedback.value || authFeedback.value || setupLoadError.value;
 });
 
 const {
@@ -391,196 +370,42 @@ const {
   refreshAccountRooms: () => refreshAccountRooms(),
 });
 
-async function loadFirstRunSetup(): Promise<void> {
-  loading.value = true;
-  setupLoadError.value = null;
-  try {
-    if (!window.letagentsDesktop?.setup) {
-      throw new Error("The desktop bridge is stale. Restart LetAgents Desktop so setup can install MCP automatically.");
-    }
-    const [nextMcpInstallState, nextAuthStatus] = await Promise.all([
-      window.letagentsDesktop.setup.getMcpInstallState(),
-      window.letagentsDesktop.auth.getStatus(),
-    ]);
-    mcpInstallState.value = nextMcpInstallState;
-    authStatus.value = nextAuthStatus;
-    await loadFirstRunRoomContext();
-    selectedMcpTargetIds.value = selectedMcpTargetIds.value.length
-      ? selectedMcpTargetIds.value
-      : defaultMcpTargetSelection(nextMcpInstallState);
-    firstRunStage.value = nextMcpInstallState.completed ? "github" : "mcp";
-
-    if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
-      await refresh();
-    }
-  } catch (error) {
-    setupLoadError.value = error instanceof Error
-      ? `Setup could not load yet: ${error.message}. Restart the desktop window if this keeps happening.`
-      : "Setup could not load yet. Restart the desktop window if this keeps happening.";
-    mcpInstallState.value = fallbackMcpInstallState;
-    selectedMcpTargetIds.value = selectedMcpTargetIds.value.length
-      ? selectedMcpTargetIds.value
-      : defaultMcpTargetSelection(fallbackMcpInstallState);
-    firstRunStage.value = "mcp";
-  } finally {
-    loading.value = false;
-  }
-}
-
-function selectMcpTarget(targetId: DesktopMcpInstallTargetId): void {
-  selectedMcpTargetIds.value = selectedMcpTargetIds.value.includes(targetId)
-    ? selectedMcpTargetIds.value.filter((id) => id !== targetId)
-    : [...selectedMcpTargetIds.value, targetId];
-  mcpInstallFeedback.value = null;
-}
-
-function selectAllMcpTargets(): void {
-  selectedMcpTargetIds.value = visibleMcpInstallState.value.targets.map((target) => target.id);
-  mcpInstallFeedback.value = null;
-}
-
-function clearMcpTargetSelection(): void {
-  selectedMcpTargetIds.value = [];
-  mcpInstallFeedback.value = null;
-}
-
-function continueMcpOnboarding(): void {
-  mcpInstallFeedback.value = null;
-  mcpWizardStep.value = "install";
-}
-
-function goBackMcpOnboarding(): void {
-  mcpInstallFeedback.value = null;
-  mcpWizardStep.value = mcpWizardStep.value === "done" ? "install" : "choose";
-}
-
-async function pickRepoRoom(): Promise<void> {
-  loading.value = true;
-  mcpInstallFeedback.value = null;
-  authFeedback.value = "Opening the repo picker...";
-  setupLoadError.value = null;
-  try {
-    if (!window.letagentsDesktop?.repos?.pickRoom) {
-      throw new Error("Restart LetAgents Desktop so the repo picker can open.");
-    }
-    const result = await window.letagentsDesktop.repos.pickRoom();
-    if (result.canceled) return;
-    if (result.error || !result.snapshot) {
-      authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
-      return;
-    }
-    openRoomSnapshot(result.snapshot, {
-      rootPath: result.repoPath,
-      meta: rootPathLabel(result.repoPath) || result.source || null,
-    });
-    const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
-    authFeedback.value = result.warning
-      ? `${result.warning} Room selected: ${roomLabel}.`
-      : `Repo room selected: ${roomLabel}. Open it when you are ready.`;
-  } catch (error) {
-    authFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the repo picker.";
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function joinRoomCode(roomCode: string): Promise<void> {
-  const roomIdentifier = roomCode.trim();
-  if (!roomIdentifier) return;
-
-  loading.value = true;
-  mcpInstallFeedback.value = null;
-  authFeedback.value = null;
-  setupLoadError.value = null;
-  try {
-    const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
-    openRoomSnapshot(snapshot, { meta: snapshot.room?.code || "Joined room" });
-    authFeedback.value = snapshot.access.status === "ready"
-      ? "Room selected. Open it when you are ready."
-      : snapshot.access.message;
-  } catch (error) {
-    authFeedback.value = error instanceof Error ? error.message : "LetAgents could not join that room.";
-  } finally {
-    loading.value = false;
-  }
-}
-
-function goBackFirstRun(): void {
-  mcpInstallFeedback.value = null;
-  authFeedback.value = null;
-  setupLoadError.value = null;
-
-  if (firstRunStage.value === "room") {
-    firstRunStage.value = "github";
-    return;
-  }
-
-  if (firstRunStage.value === "github") {
-    firstRunStage.value = "mcp";
-    mcpWizardStep.value = "done";
-    return;
-  }
-
-  goBackMcpOnboarding();
-}
-
-async function installSelectedMcpTargets(): Promise<void> {
-  const targetIds = [...selectedMcpTargetIds.value];
-  if (!targetIds.length) {
-    mcpInstallFeedback.value = "Choose at least one app.";
-    return;
-  }
-
-  mcpInstallBusy.value = true;
-  mcpInstallFeedback.value = null;
-  setupLoadError.value = null;
-  try {
-    if (!window.letagentsDesktop?.setup) {
-      throw new Error("Restart LetAgents Desktop so setup can install MCP automatically.");
-    }
-    const result = await window.letagentsDesktop.setup.installMcpServers(targetIds);
-    mcpInstallState.value = result.installState;
-    selectedMcpTargetIds.value = result.targets.map((target) => target.id);
-    mcpInstallFeedback.value = result.message;
-    mcpWizardStep.value = "done";
-  } catch (error) {
-    mcpInstallFeedback.value = error instanceof Error
-      ? error.message
-      : "LetAgents could not update these apps' MCP settings.";
-  } finally {
-    mcpInstallBusy.value = false;
-  }
-}
-
-async function completeMcpOnboarding(): Promise<void> {
-  mcpInstallFeedback.value = null;
-  setupLoadError.value = null;
-  firstRunStage.value = "github";
-}
-
-function continueToRoomConfirmation(): void {
-  authFeedback.value = null;
-  void loadFirstRunRoomContext();
-  firstRunStage.value = "room";
-}
-
-async function finishFirstRunOnboarding(): Promise<void> {
-  mcpInstallBusy.value = true;
-  mcpInstallFeedback.value = null;
-  setupLoadError.value = null;
-  try {
-    if (!window.letagentsDesktop?.setup) {
-      throw new Error("Restart LetAgents Desktop so setup can finish.");
-    }
-    mcpInstallState.value = await window.letagentsDesktop.setup.completeMcpOnboarding();
-    activeEntry.value = pinnedRoom.value;
-    await refresh();
-  } catch (error) {
-    authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";
-  } finally {
-    mcpInstallBusy.value = false;
-  }
-}
+const {
+  clearMcpTargetSelection,
+  completeMcpOnboarding,
+  continueMcpOnboarding,
+  continueToRoomConfirmation,
+  finishFirstRunOnboarding,
+  firstRunFeedback,
+  goBackFirstRun,
+  goBackMcpOnboarding,
+  installSelectedMcpTargets,
+  joinRoomCode,
+  loadFirstRunSetup,
+  pickRepoRoom,
+  selectAllMcpTargets,
+  selectMcpTarget,
+  setupApiAvailable,
+  showFirstRunGate,
+  showMcpInstaller,
+  visibleMcpInstallState,
+} = useDesktopSetupOnboarding({
+  activeEntry,
+  authFeedback,
+  authStatus,
+  firstRunStage,
+  loading,
+  loadFirstRunRoomContext,
+  mcpInstallBusy,
+  mcpInstallFeedback,
+  mcpInstallState,
+  mcpWizardStep,
+  openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
+  pinnedRoom,
+  refresh: () => refresh(),
+  selectedMcpTargetIds,
+  setupLoadError,
+});
 
 watch(
   () => activeEntry.value,
