@@ -12,6 +12,7 @@
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
+    "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
@@ -22,6 +23,7 @@
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
     "electron": "^37.2.0",
+    "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vite": "^6.3.4",
     "vue-tsc": "^2.2.8",

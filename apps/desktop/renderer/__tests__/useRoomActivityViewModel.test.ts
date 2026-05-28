@@ -1,0 +1,164 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { nextTick, reactive } from "vue";
+
+import { useRoomActivityViewModel } from "../src/components/desktop/content/room-activity/useRoomActivityViewModel";
+import type { RoomActivityViewModelInput } from "../src/components/desktop/content/room-activity/useRoomActivityViewModel";
+
+function createProps(overrides: Partial<RoomActivityViewModelInput> = {}): RoomActivityViewModelInput {
+  return {
+    recentActivity: [],
+    participants: [],
+    liveClearedCount: 0,
+    presence: [],
+    reasoningSessions: [],
+    tasks: [],
+    messages: [],
+    workers: [],
+    ...overrides,
+  };
+}
+
+describe("useRoomActivityViewModel", () => {
+  it("groups reachable workers and exposes the selected live participant", async () => {
+    const props = reactive(createProps({
+      participants: [
+        {
+          participantKey: "agent:reviewer",
+          kind: "agent",
+          displayName: "Review Agent",
+          actorLabel: "agent:reviewer",
+          ownerLabel: "team",
+          ideLabel: "Codex",
+          githubLogin: null,
+          agentKey: null,
+          sourceFlags: ["presence"],
+          activityState: "active",
+          hiddenAt: null,
+          lastRoomActivityAt: "2026-05-28T03:00:00.000Z",
+          lastLiveHeartbeatAt: "2026-05-28T03:04:00.000Z",
+          lastSeenAt: "2026-05-28T03:04:00.000Z",
+        },
+      ],
+      presence: [
+        {
+          agentSessionId: "session-1",
+          actorLabel: "agent:reviewer",
+          displayName: "Review Agent",
+          ownerLabel: "team",
+          ideLabel: "Codex",
+          runtime: "codex",
+          sessionKind: "worker",
+          sourceFlags: ["delivery"],
+          freshness: "active",
+          activityState: "active",
+          status: "working",
+          statusText: "reviewing the branch",
+          lastHeartbeatAt: "2026-05-28T03:05:00.000Z",
+          roomId: "room-1",
+          livenessObservation: null,
+        },
+      ],
+      messages: [
+        {
+          id: "msg-1",
+          text: "[status] reviewing the branch",
+          sender: "agent:reviewer",
+          actorLabel: "agent:reviewer",
+          timestamp: "2026-05-28T03:05:00.000Z",
+          source: "mcp",
+          agentIdentity: { actorLabel: "agent:reviewer" },
+        },
+      ],
+      tasks: [
+        {
+          id: "task-1",
+          title: "Review branch",
+          description: null,
+          status: "in_progress",
+          assignee: "agent:reviewer",
+          assigneeAgentKey: null,
+          createdBy: null,
+          prUrl: null,
+          workflowArtifacts: [],
+          workflowRefs: [],
+          activeLeases: [],
+          activeLocks: [],
+          stalePromptState: null,
+          createdAt: null,
+          updatedAt: "2026-05-28T03:05:00.000Z",
+        },
+      ],
+    } as Partial<RoomActivityViewModelInput>));
+
+    const model = useRoomActivityViewModel(props);
+    await nextTick();
+
+    assert.equal(model.reachableAgents.value.length, 1);
+    assert.equal(model.agentSignalAgents.value.length, 1);
+    assert.equal(model.selectedLiveParticipant.value?.label, "Review Agent");
+    assert.equal(model.connectionLabel(model.selectedLiveParticipant.value!), "connected");
+    assert.equal(
+      model.summaryCards.value.find((card) => card.label === "Reachable agents")?.value,
+      1,
+    );
+  });
+
+  it("keeps selected live and history rows pointed at visible entries", async () => {
+    const props = reactive(createProps({
+      recentActivity: [
+        {
+          id: "history-1",
+          participantKind: "agent",
+          participantDisplayName: "History Agent",
+          participantActorLabel: "agent:history",
+          activityState: "offline",
+          firstSeenAt: "2026-05-28T02:00:00.000Z",
+          lastRoomActivityAt: "2026-05-28T03:00:00.000Z",
+          messageCount: 2,
+          reasoningSessionCount: 0,
+          currentTasks: [],
+          completedTasks: [],
+          createdTasks: [],
+          room: { id: "room-1", displayName: "Main room" },
+        },
+      ],
+      presence: [
+        {
+          roomId: "room-1",
+          actorLabel: "agent:history",
+          agentKey: null,
+          agentInstanceId: null,
+          agentSessionId: "session-history",
+          sessionKind: "worker",
+          runtime: "codex",
+          displayName: "History Agent",
+          ownerLabel: null,
+          ideLabel: null,
+          status: "idle",
+          statusText: null,
+          lastHeartbeatAt: "2026-05-28T03:05:00.000Z",
+          freshness: "active",
+          activityState: "active",
+          sourceFlags: ["delivery"],
+          livenessObservation: null,
+        },
+      ],
+    } as Partial<RoomActivityViewModelInput>));
+
+    const model = useRoomActivityViewModel(props);
+    await nextTick();
+
+    assert.equal(model.selectedLiveKey.value, "agent:session-history");
+    assert.equal(model.selectedHistoryKey.value, "history-1");
+    assert.equal(model.selectedHistoryEntry.value?.participantDisplayName, "History Agent");
+
+    props.presence = [];
+    props.recentActivity = [];
+    await nextTick();
+
+    assert.equal(model.selectedLiveKey.value, null);
+    assert.equal(model.selectedHistoryKey.value, null);
+    assert.equal(model.selectedHistoryEntry.value, null);
+  });
+});

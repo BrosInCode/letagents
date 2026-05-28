@@ -38,6 +38,18 @@ jobs:
       - name: Build Vue app
         run: npm run build:web
 
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Type check desktop
+        run: npm --prefix apps/desktop run typecheck
+
+      - name: Test desktop renderer
+        run: npm --prefix apps/desktop run test:renderer
+
+      - name: Build desktop
+        run: npm --prefix apps/desktop run build
+
   # ── DB-backed integration tests ──
   integration-tests:
     runs-on: ubuntu-latest
