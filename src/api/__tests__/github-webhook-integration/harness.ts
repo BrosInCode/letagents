@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import { once } from "node:events";
 import path from "node:path";
+import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
@@ -11,6 +12,9 @@ export const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) {
   process.env.DB_URL = testDatabaseUrl;
 }
+
+export const repoRoomName = "github.com/brosincode/letagents";
+export const databaseSkipReason = "set TEST_DB_URL to run DB-backed webhook integration tests";
 
 type DbClientModule = typeof import("../../db/client.js");
 type DbModule = typeof import("../../db.js");
@@ -65,6 +69,83 @@ export function requireWebhookDbHelpers(): WebhookDbHelpers {
   }
 
   return dbHelpers;
+}
+
+export interface WebhookIntegrationContext extends WebhookDbHelpers {
+  port: number;
+}
+
+export async function createRepoRoom(context: Pick<WebhookDbHelpers, "createProjectWithName">) {
+  return context.createProjectWithName(repoRoomName);
+}
+
+export async function createAssignedTask(
+  context: Pick<WebhookDbHelpers, "createTask" | "updateTask">,
+  roomId: string,
+  title: string,
+  assignee = "OliveWolf"
+) {
+  const task = await context.createTask(roomId, title, assignee);
+  await context.updateTask(roomId, task.id, { status: "accepted" });
+  await context.updateTask(roomId, task.id, { status: "assigned" });
+  return task;
+}
+
+export async function createInReviewTaskWithLease(
+  context: Pick<WebhookDbHelpers, "createTask" | "updateTask">,
+  input: {
+    roomId: string;
+    title: string;
+    prUrl: string;
+    branchRef: string;
+    assignee?: string;
+  }
+) {
+  const task = await createAssignedTask(context, input.roomId, input.title, input.assignee);
+  await context.updateTask(input.roomId, task.id, { status: "in_progress" });
+  await context.updateTask(input.roomId, task.id, {
+    status: "in_review",
+    pr_url: input.prUrl,
+  });
+  await createWorkLeaseForPr({
+    roomId: input.roomId,
+    taskId: task.id,
+    prUrl: input.prUrl,
+    branchRef: input.branchRef,
+  });
+  return task;
+}
+
+export function webhookIntegrationTest(
+  name: string,
+  fn: (context: WebhookIntegrationContext) => Promise<void>
+): void {
+  test(
+    name,
+    {
+      concurrency: false,
+      skip: requiresDatabase ? databaseSkipReason : false,
+    },
+    async (t) => {
+      await resetDatabase();
+
+      const { child, port } = await startServer();
+      t.after(async () => {
+        await stopServer(child);
+      });
+
+      await fn({
+        ...requireWebhookDbHelpers(),
+        port,
+      });
+    }
+  );
+}
+
+if (!requiresDatabase) {
+  test.after(async () => {
+    await pool?.end();
+  });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -246,17 +327,6 @@ export async function postGitHubWebhook(input: {
   const body = await response.json();
   assert.equal(response.status, 202);
   return body;
-}
-
-export function buildRepositoryPayload() {
-  return {
-    id: 4242,
-    full_name: "BrosInCode/letagents",
-    name: "letagents",
-    owner: {
-      login: "BrosInCode",
-    },
-  };
 }
 
 export async function createWorkLeaseForPr(input: {
