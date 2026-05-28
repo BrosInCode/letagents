@@ -4,8 +4,8 @@ import {
   buildRepoRoomId,
   formatRepoPullRequestEventMessage,
   formatRepoRepositoryEventMessage,
-  type RepoPullRequestRef,
 } from "./repo-workflow.js";
+import { toGitHubRepoPullRequestRef } from "./github-pull-request-ref.js";
 
 export interface GitHubWebhookAccount {
   id: number | string;
@@ -179,20 +179,6 @@ export function getGitHubInstallationTarget(
 
 export { extractReferencedTaskId } from "./repo-workflow.js";
 
-function toRepoPullRequestRef(pullRequest: GitHubWebhookPullRequest): RepoPullRequestRef {
-  return {
-    number: pullRequest.number,
-    title: pullRequest.title,
-    url: pullRequest.html_url,
-    body: pullRequest.body,
-    headRef: pullRequest.head?.ref,
-    headSha: pullRequest.head?.sha,
-    merged: pullRequest.merged,
-    authorLogin: pullRequest.user?.login,
-    mergedByLogin: pullRequest.merged_by?.login,
-  };
-}
-
 export function formatGitHubPullRequestEventMessage(input: {
   action: string;
   repositoryFullName: string;
@@ -204,7 +190,7 @@ export function formatGitHubPullRequestEventMessage(input: {
     provider: "github",
     action: input.action,
     repositoryFullName: input.repositoryFullName,
-    pullRequest: toRepoPullRequestRef(input.pullRequest),
+    pullRequest: toGitHubRepoPullRequestRef(input.pullRequest),
     senderLogin: input.senderLogin,
     linkedTaskId: input.linkedTaskId,
   });
