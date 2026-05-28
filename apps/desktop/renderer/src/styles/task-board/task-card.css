@@ -1,0 +1,150 @@
+.desktop-task-card {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  animation: room-panel-in 180ms var(--ease-out);
+}
+
+.desktop-task-card.is-selected {
+  border-color: rgba(147, 197, 253, 0.32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(147, 197, 253, 0.08);
+}
+
+.desktop-task-card-header,
+.desktop-task-meta-grid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.desktop-task-card-header {
+  justify-content: space-between;
+}
+
+.desktop-task-card h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.96rem;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
+}
+
+.desktop-task-title-block,
+.desktop-task-links,
+.desktop-task-coordination,
+.desktop-task-actions,
+.desktop-task-review-assign {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.desktop-task-id {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid rgba(147, 197, 253, 0.35);
+  border-radius: 7px;
+  background: rgba(147, 197, 253, 0.08);
+  color: #bfdbfe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.desktop-task-description {
+  margin: -3px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.desktop-task-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.desktop-task-meta-grid span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-task-meta-grid small {
+  color: var(--text-tertiary);
+  font-size: 0.65rem;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.desktop-task-meta-grid strong {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-task-pr-link {
+  width: fit-content;
+  color: #93c5fd;
+  font-size: 0.78rem;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.desktop-task-pr-link:hover {
+  text-decoration: underline;
+}
+
+.desktop-task-chip {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-task-chip[data-kind="review"] {
+  border-color: rgba(56, 189, 248, 0.28);
+  background: rgba(56, 189, 248, 0.08);
+  color: #bae6fd;
+}
+
+.desktop-task-chip[data-kind="lock"] {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+}
+
+.desktop-task-chip[data-kind="stale"] {
+  border-color: rgba(251, 191, 36, 0.28);
+  background: rgba(251, 191, 36, 0.09);
+  color: #fde68a;
+}
+
+.desktop-task-chip[data-kind="muted"] {
+  border-color: rgba(148, 163, 184, 0.28);
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+}
+
+.desktop-task-actions {
+  padding-top: 2px;
+}
