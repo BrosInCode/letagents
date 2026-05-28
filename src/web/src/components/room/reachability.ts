@@ -1,8 +1,10 @@
 import {
   parseAgentIdentity,
-  type RoomAgentPresence,
-  type RoomParticipant,
-} from '../../composables/useRoom'
+} from '../../composables/room/identity'
+import type {
+  RoomAgentPresence,
+  RoomParticipant,
+} from '../../composables/room/types'
 
 export interface MentionCandidate {
   key: string
