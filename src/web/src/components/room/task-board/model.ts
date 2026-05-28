@@ -41,28 +41,7 @@ export interface TaskGroup {
 }
 
 export type TaskLease = NonNullable<RoomTask['active_leases']>[number]
-
-export interface TaskLeaseActionPayload {
-  taskId: string
-  action: 'release' | 'handoff'
-  lease_id?: string | null
-  target_actor_key?: string | null
-  target_actor_instance_id?: string | null
-  target_agent_session_id?: string | null
-  reason?: string | null
-  onSettled?: () => void
-}
-
-export interface TaskReviewLeaseActionPayload {
-  taskId: string
-  action: 'assign' | 'release'
-  lease_id?: string | null
-  target_actor_key?: string | null
-  target_actor_instance_id?: string | null
-  target_agent_session_id?: string | null
-  reason?: string | null
-  onSettled?: () => void
-}
+export type { TaskLeaseActionPayload, TaskReviewLeaseActionPayload } from './types'
 
 export function useTaskGroups(tasks: Ref<readonly RoomTask[]>) {
   return computed<TaskGroup[]>(() => {
