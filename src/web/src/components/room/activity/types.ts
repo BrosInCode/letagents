@@ -23,6 +23,12 @@ export type ParticipantWorkState =
   | 'reviewing'
   | 'blocked'
   | 'responding'
+export type ActivityViewMode = 'live' | 'history'
+
+export interface ActivitySummaryCard {
+  value: number
+  label: string
+}
 
 export interface ParticipantWorkSignal {
   state: ParticipantWorkState
@@ -94,6 +100,8 @@ export interface ActivityTaskListItem {
   status: string
   workflow_refs: ReadonlyArray<{ label: string; url: string }>
 }
+
+export type ActivityRosterParticipant = ActivityParticipant | HistoryParticipant
 
 export interface ActivityViewProps {
   roomIdentifier: string
