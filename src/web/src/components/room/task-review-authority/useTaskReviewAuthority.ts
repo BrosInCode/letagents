@@ -55,6 +55,7 @@ export function useTaskReviewAuthority(
       candidate => getWorkerCandidateKey(candidate) === selectedReviewer.value,
     ) ?? null
   )
+  const canAssignSelectedReviewer = computed(() => Boolean(selectedReviewCandidate.value))
 
   function reviewLeaseMatchesWork(lease: TaskLease): boolean {
     return leaseMatchesWork(lease, workLease.value)
@@ -95,6 +96,7 @@ export function useTaskReviewAuthority(
     badgeLabel,
     badgeVariant,
     canAssignReview,
+    canAssignSelectedReviewer,
     formatActorName: formatAuthorityActorName,
     formatCandidate: formatWorkerCandidate,
     getCandidateKey: getWorkerCandidateKey,

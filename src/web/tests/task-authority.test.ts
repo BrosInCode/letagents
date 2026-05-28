@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { reactive } from 'vue'
 
 import type { RoomAgentPresence, RoomTask } from '../src/composables/useRoom'
 import {
@@ -15,6 +16,8 @@ import {
   getReviewCandidates,
   getReviewState,
 } from '../src/components/room/task-review-authority/model'
+import { useTaskLeaseAuthority } from '../src/components/room/task-lease-authority/useTaskLeaseAuthority'
+import { useTaskReviewAuthority } from '../src/components/room/task-review-authority/useTaskReviewAuthority'
 
 type TaskLease = NonNullable<RoomTask['active_leases']>[number]
 
@@ -187,4 +190,53 @@ test('review authority helpers exclude work holders and current reviewers', () =
   )
 
   assert.deepEqual(candidates.map(candidate => candidate.agent_key), ['clio'])
+})
+
+test('lease and review action state tracks stale selected candidates', () => {
+  const workLease = lease({ agent_key: 'ada', agent_session_id: 'session_a' })
+  const bob = presence({
+    actor_label: 'Bob | Codex',
+    agent_key: 'bob',
+    agent_instance_id: 'instance_b',
+    agent_session_id: 'session_b',
+    display_name: 'Bob',
+  })
+  const sourceTask = task({ active_leases: [workLease] })
+  const props = reactive({
+    task: sourceTask,
+    presence: [presence(), bob] as RoomAgentPresence[],
+    canManageLeases: true,
+    updating: false,
+  })
+  const emitted: unknown[] = []
+  const leaseAuthority = useTaskLeaseAuthority(props, (_event, payload) => {
+    emitted.push(payload)
+  })
+
+  leaseAuthority.selectedHandoffTarget.value = leaseAuthority.getHandoffCandidateKey(bob)
+  assert.equal(leaseAuthority.canHandoffLease.value, true)
+
+  props.presence = [presence()]
+  assert.equal(leaseAuthority.canHandoffLease.value, false)
+  leaseAuthority.handleHandoffLease()
+  assert.deepEqual(emitted, [])
+
+  const reviewProps = reactive({
+    task: sourceTask,
+    presence: [presence(), bob] as RoomAgentPresence[],
+    canManageReviewLeases: true,
+    updating: false,
+  })
+  const reviewEmitted: unknown[] = []
+  const reviewAuthority = useTaskReviewAuthority(reviewProps, (_event, payload) => {
+    reviewEmitted.push(payload)
+  })
+
+  reviewAuthority.selectedReviewer.value = reviewAuthority.getCandidateKey(bob)
+  assert.equal(reviewAuthority.canAssignSelectedReviewer.value, true)
+
+  reviewProps.presence = [presence()]
+  assert.equal(reviewAuthority.canAssignSelectedReviewer.value, false)
+  reviewAuthority.handleAssignReviewer()
+  assert.deepEqual(reviewEmitted, [])
 })

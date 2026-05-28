@@ -60,6 +60,7 @@ export function useTaskLeaseAuthority(
       candidate => getWorkerCandidateKey(candidate) === selectedHandoffTarget.value,
     ) ?? null
   )
+  const canHandoffLease = computed(() => Boolean(selectedHandoffCandidate.value))
 
   function settlePending() {
     pendingAction.value = null
@@ -99,6 +100,7 @@ export function useTaskLeaseAuthority(
     authority,
     badgeLabel,
     badgeVariant,
+    canHandoffLease,
     formatActorName: formatAuthorityActorName,
     formatHandoffCandidate: formatWorkerCandidate,
     getHandoffCandidateKey: getWorkerCandidateKey,

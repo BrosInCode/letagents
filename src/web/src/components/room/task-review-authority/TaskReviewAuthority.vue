@@ -61,7 +61,7 @@
       <AppButton
         variant="secondary"
         size="sm"
-        :disabled="updating || !selectedReviewer"
+        :disabled="updating || !canAssignSelectedReviewer"
         :loading="pendingAction === 'assign'"
         @click="handleAssignReviewer"
       >
@@ -98,6 +98,7 @@ const {
   badgeLabel,
   badgeVariant,
   canAssignReview,
+  canAssignSelectedReviewer,
   formatActorName,
   formatCandidate,
   getCandidateKey,

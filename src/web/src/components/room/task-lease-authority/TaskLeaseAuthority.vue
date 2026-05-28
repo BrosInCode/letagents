@@ -69,7 +69,7 @@
             class="lease-authority__button lease-authority__button--handoff"
             variant="secondary"
             size="sm"
-            :disabled="updating || !selectedHandoffTarget"
+            :disabled="updating || !canHandoffLease"
             :loading="pendingAction === 'handoff'"
             @click="handleHandoffLease"
           >
@@ -112,6 +112,7 @@ const {
   authority,
   badgeLabel,
   badgeVariant,
+  canHandoffLease,
   formatActorName,
   formatHandoffCandidate,
   getHandoffCandidateKey,
