@@ -1,7 +1,6 @@
 .desktop-room-link-line button,
 .desktop-room-title-control button,
-.desktop-room-github-pill button,
-.desktop-room-search-strip button {
+.desktop-room-github-pill button {
   min-height: 30px;
   padding: 0 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -18,18 +17,28 @@
 
 .desktop-room-link-line button:hover,
 .desktop-room-title-control button:hover:not(:disabled),
-.desktop-room-github-pill button:hover:not(:disabled),
-.desktop-room-search-strip button:hover:not(:disabled) {
+.desktop-room-github-pill button:hover:not(:disabled) {
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.1);
 }
 
 .desktop-room-title-control button:disabled,
-.desktop-room-github-pill button:disabled,
-.desktop-room-search-strip button:disabled {
+.desktop-room-github-pill button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.desktop-room-action-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(239, 68, 68, 0.18);
+  border-radius: var(--radius-md);
+  background: rgba(239, 68, 68, 0.08);
+  color: #ff8a8a;
+  font-size: 0.76rem;
+  line-height: 1.36;
 }
 
 .desktop-room-action-kicker {

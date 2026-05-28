@@ -1,12 +1,38 @@
 import type { GitHubWebhookPayload } from "../github-app.js";
 import {
   buildDeliveryScopedKey,
-  buildInstallationRepositoriesKey,
-  getInstallationState,
   toGitHubId,
 } from "./helpers.js";
-import { SUPPORTED_INSTALLATION_REPOSITORY_ACTIONS } from "./supported-actions.js";
 import type { MaterializedGitHubRoomEvent } from "./types.js";
+
+const SUPPORTED_INSTALLATION_REPOSITORY_ACTIONS = new Set(["added", "removed"]);
+
+function getInstallationState(action: string): string {
+  if (action === "deleted") {
+    return "deleted";
+  }
+  if (action === "suspend") {
+    return "suspended";
+  }
+  return "active";
+}
+
+function buildInstallationRepositoriesKey(
+  installationId: string,
+  action: string,
+  repositories: GitHubWebhookPayload["repositories_added"] | GitHubWebhookPayload["repositories_removed"],
+): string | null {
+  const repositoryIds = (repositories ?? [])
+    .map((repository) => toGitHubId(repository.id))
+    .filter((value): value is string => Boolean(value))
+    .sort();
+
+  if (repositoryIds.length === 0) {
+    return null;
+  }
+
+  return `installation_repositories:${installationId}:${action}:${repositoryIds.join(",")}`;
+}
 
 export function materializeInstallationEvent(
   payload: GitHubWebhookPayload,
