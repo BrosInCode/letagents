@@ -57,6 +57,7 @@ import { createRoomStream } from './room/stream'
 import { createRoomTaskMutations } from './room/taskMutations'
 
 export type * from './room/types'
+export type { ConnectionState } from './room/state'
 export {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   focusRoomSettingsFrom,

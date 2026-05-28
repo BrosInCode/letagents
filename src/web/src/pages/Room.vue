@@ -43,110 +43,62 @@
       @retry="retryJoin"
     />
 
-    <div v-if="isConnected" class="room-view-viewport">
-      <Transition :name="tabTransitionName">
-        <MessageList
-          v-if="activeTab === 'chat'"
-          key="chat"
-          ref="messageListRef"
-          class="room-tab-panel"
-          :messages="messages"
-          :roomIdentifier="room?.identifier || ''"
-          :reasoningSessions="reasoningSessions"
-          :hasOlderMessages="messagesHasOlder"
-          :isLoadingOlderMessages="isLoadingOlderMessages"
-          :searchQuery="searchQuery"
-          :stalePromptTaskStates="stalePromptTaskStates"
-          @loadOlder="loadOlderMessages"
-          @reply="selectedReply = $event"
-          @openImageViewer="openImageViewer"
-          @toggleStalePromptMute="handleToggleStalePromptMute"
-        />
-
-        <GitHubEventFeed
-          v-else-if="githubEventsSupported && activeTab === 'events'"
-          key="events"
-          class="room-tab-panel"
-          :events="githubEvents"
-          :repository="githubEventsRepository"
-          :isAvailable="githubEventsAvailable"
-          :hasMore="githubEventsHasMore"
-          :errorMessage="githubEventsError?.message || null"
-          :isLoading="githubEventsLoading"
-        />
-
-        <TaskBoard
-          v-else-if="activeTab === 'board'"
-          key="board"
-          class="room-tab-panel"
-          :tasks="tasks"
-          :presence="boardHandoffPresence"
-          :canManageLeases="room?.role === 'admin'"
-          :taskGithubStatus="taskGithubStatus"
-          @addTask="handleAddTask"
-          @updateTask="handleUpdateTask"
-          @leaseAction="handleTaskLeaseAction"
-          @reviewLeaseAction="handleTaskReviewLeaseAction"
-          @focusTask="handleFocusTask"
-        />
-
-        <ActivityView
-          v-else-if="activeTab === 'activity'"
-          key="activity"
-          class="room-tab-panel"
-          :roomIdentifier="room?.identifier || ''"
-          :currentRoom="room"
-          :focusRooms="focusRooms"
-          :messages="messages"
-          :participants="participants"
-          :liveClearedCount="participantHiddenCount"
-          :presence="presence"
-          :reasoningSessions="reasoningSessions"
-          :tasks="tasks"
-          :activityHistory="activityHistory"
-          :activityHistoryLoading="activityHistoryLoading"
-          :activityHistoryError="activityHistoryError"
-          :canManageParticipants="room?.role === 'admin'"
-          :loadActivityHistory="loadActivityHistory"
-          :clearDisconnectedParticipants="clearDisconnectedParticipants"
-          :taskGithubStatus="taskGithubStatus"
-          :isLoading="activityLoading"
-        />
-
-        <FocusRoomsView
-          v-else
-          key="rooms"
-          class="room-tab-panel"
-          :tasks="tasks"
-          :focusRooms="focusRooms"
-          :selectedTaskId="focusDraftTaskId"
-          :roomLabel="roomTitle"
-          :roomAddress="focusParentAddress"
-          :isFocusRoom="room?.kind === 'focus'"
-          :sourceTaskId="room?.sourceTaskId || null"
-          :focusKey="room?.focusKey || null"
-          :focusStatus="room?.focusStatus || null"
-          :focusSettings="{
-            parent_visibility: room?.focusParentVisibility || 'summary_only',
-            activity_scope: room?.focusActivityScope || 'task_and_branch',
-            github_event_routing: room?.focusGitHubEventRouting || 'task_and_branch',
-          }"
-          :conclusionSummary="room?.conclusionSummary || null"
-          :conclusionDetails="room?.conclusionDetails || null"
-          :isCreatingFocusRoom="creatingFocusRoomTaskId !== null"
-          :isCreatingAdHocFocusRoom="creatingAdHocFocusRoom"
-          :isSharingFocusResult="sharingFocusResult"
-          :isUpdatingFocusSettings="updatingFocusSettings"
-          @selectTask="focusDraftTaskId = $event"
-          @createFocusRoom="handleFocusTask"
-          @createAdHocFocusRoom="handleCreateAdHocFocusRoom"
-          @openFocusRoom="handleOpenFocusRoom"
-          @openParentRoom="handleOpenParentRoom"
-          @shareResults="handleShareFocusResults"
-          @updateFocusSettings="handleUpdateFocusSettings"
-        />
-      </Transition>
-    </div>
+    <RoomTabPanels
+      v-if="isConnected"
+      ref="roomTabPanelsRef"
+      :activeTab="activeTab"
+      :tabTransitionName="tabTransitionName"
+      :messages="messages"
+      :messagesHasOlder="messagesHasOlder"
+      :isLoadingOlderMessages="isLoadingOlderMessages"
+      :tasks="tasks"
+      :focusRooms="focusRooms"
+      :presence="presence"
+      :boardHandoffPresence="boardHandoffPresence"
+      :participants="participants"
+      :reasoningSessions="reasoningSessions"
+      :participantHiddenCount="participantHiddenCount"
+      :activityHistory="activityHistory"
+      :activityHistoryLoading="activityHistoryLoading"
+      :activityHistoryError="activityHistoryError"
+      :taskGithubStatus="taskGithubStatus"
+      :githubEvents="githubEvents"
+      :githubEventsAvailable="githubEventsAvailable"
+      :githubEventsHasMore="githubEventsHasMore"
+      :githubEventsError="githubEventsError"
+      :githubEventsSupported="githubEventsSupported"
+      :githubEventsLoading="githubEventsLoading"
+      :activityLoading="activityLoading"
+      :room="room"
+      :searchQuery="searchQuery"
+      :stalePromptTaskStates="stalePromptTaskStates"
+      :githubEventsRepository="githubEventsRepository"
+      :focusDraftTaskId="focusDraftTaskId"
+      :roomTitle="roomTitle"
+      :focusParentAddress="focusParentAddress"
+      :focusSettings="focusSettings"
+      :creatingFocusRoomTaskId="creatingFocusRoomTaskId"
+      :creatingAdHocFocusRoom="creatingAdHocFocusRoom"
+      :sharingFocusResult="sharingFocusResult"
+      :updatingFocusSettings="updatingFocusSettings"
+      :loadActivityHistory="loadActivityHistory"
+      :clearDisconnectedParticipants="clearDisconnectedParticipants"
+      @loadOlder="loadOlderMessages"
+      @reply="selectedReply = $event"
+      @openImageViewer="openImageViewer"
+      @toggleStalePromptMute="handleToggleStalePromptMute"
+      @addTask="handleAddTask"
+      @updateTask="handleUpdateTask"
+      @leaseAction="handleTaskLeaseAction"
+      @reviewLeaseAction="handleTaskReviewLeaseAction"
+      @focusTask="handleFocusTask"
+      @selectFocusTask="focusDraftTaskId = $event"
+      @createAdHocFocusRoom="handleCreateAdHocFocusRoom"
+      @openFocusRoom="handleOpenFocusRoom"
+      @openParentRoom="handleOpenParentRoom"
+      @shareResults="handleShareFocusResults"
+      @updateFocusSettings="handleUpdateFocusSettings"
+    />
 
     <Composer
       v-if="activeTab === 'chat' && isConnected"
@@ -195,20 +147,17 @@ import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import RoomConnectionError from './room/RoomConnectionError.vue'
 import RoomMobileNav from './room/RoomMobileNav.vue'
-import MessageList from '@/components/room/MessageList.vue'
-import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
+import RoomTabPanels from './room/RoomTabPanels.vue'
 import Composer from '@/components/room/Composer.vue'
-import TaskBoard from '@/components/room/TaskBoard.vue'
-import ActivityView from '@/components/room/ActivityView.vue'
-import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
+import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRoomTabs } from './room/useRoomTabs'
+import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
 import type {
   OutgoingMessageAttachment,
   RoomMessage,
-  StalePromptTaskState,
 } from '@/composables/useRoom'
 
 const route = useRoute()
@@ -272,7 +221,7 @@ const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const searchQuery = ref('')
-const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
+const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const {
   activeTab,
@@ -296,29 +245,26 @@ const {
   showPreviousImage,
 } = useRoomImages(messages)
 
-const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
-const senderName = computed(() => auth.user.value?.login || 'anonymous')
-const roomTitle = computed(() => room.value?.displayName || 'Connecting...')
-const rulesBoardAvailable = computed(() => {
-  const identifiers = [
-    room.value?.projectId,
-    room.value?.name,
-    room.value?.parentRoomId,
-  ]
-  return identifiers.some(value => value?.startsWith('github.com/'))
+const matchCount = computed(() => roomTabPanelsRef.value?.matchCount ?? 0)
+const {
+  senderName,
+  roomTitle,
+  rulesBoardAvailable,
+  roomSubtitle,
+  focusParentAddress,
+  githubEventsRepository,
+  focusSettings,
+  showGitHubSignIn,
+  joinErrorTitle,
+  joinErrorBody,
+  stalePromptTaskStates,
+} = useRoomPresentation({
+  room,
+  tasks,
+  joinError,
+  connectionState,
+  authUser: auth.user,
 })
-const roomSubtitle = computed(() =>
-  room.value?.kind === 'focus'
-    ? `Focus Room: ${room.value.parentRoomId || 'parent'}${room.value.sourceTaskId ? ` / ${room.value.sourceTaskId}` : ''}`
-    : room.value
-    ? `Room: ${room.value.name}`
-    : connectionState.value === 'connecting' ? 'Joining room...' : 'Create a new room or join one.'
-)
-const focusParentAddress = computed(() =>
-  room.value?.kind === 'focus' && room.value.parentRoomId
-    ? room.value.parentRoomId
-    : room.value?.identifier || room.value?.name || ''
-)
 const {
   focusDraftTaskId,
   creatingFocusRoomTaskId,
@@ -345,47 +291,25 @@ const {
     syncViewQuery('rooms', 'push')
   },
 })
+const {
+  handleAddTask,
+  handleTaskLeaseAction,
+  handleTaskReviewLeaseAction,
+  handleToggleStalePromptMute,
+  handleUpdateTask,
+} = useRoomTaskHandlers({
+  addTask,
+  updateTask,
+  updateTaskLease,
+  updateTaskReviewLease,
+  setTaskStalePromptMute,
+  toast,
+})
 
 function openRulesFromDrawer() {
   drawerOpen.value = false
   rulesBoardOpen.value = true
 }
-const githubEventsRepository = computed(() =>
-  room.value?.kind === 'focus' && room.value.parentRoomId
-    ? room.value.parentRoomId
-    : room.value?.name || room.value?.identifier || null
-)
-const showGitHubSignIn = computed(() => joinError.value?.code === 'NOT_AUTHENTICATED')
-const joinErrorTitle = computed(() => {
-  if (joinError.value?.code === 'NOT_AUTHENTICATED') {
-    return 'GitHub sign-in required'
-  }
-  if (joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
-    return 'No repo access'
-  }
-  return 'Could not connect to room.'
-})
-const joinErrorBody = computed(() => {
-  if (joinError.value?.code === 'NOT_AUTHENTICATED') {
-    return 'This repo-backed room requires GitHub sign-in before you can join.'
-  }
-  if (joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
-    const login = auth.user.value?.login
-    return login
-      ? `Signed in as ${login}, but that account does not have access to this private repo room.`
-      : 'Your current account does not have access to this private repo room.'
-  }
-  return joinError.value?.message || 'Could not connect to room.'
-})
-const stalePromptTaskStates = computed<Record<string, StalePromptTaskState>>(() =>
-  Object.fromEntries(
-    tasks.value.map(task => [task.id, {
-      isStale: Boolean(task.stale_prompt_state?.is_stale),
-      muted: Boolean(task.stale_prompt_state?.muted),
-      taskUpdatedAt: task.updated_at,
-    }])
-  )
-)
 
 async function handleSend(
   text: string,
@@ -400,88 +324,6 @@ async function handleSend(
   }
   toast.error(lastSendError.value || 'Message could not be sent.')
   return false
-}
-
-async function handleAddTask(title: string) {
-  await addTask(title)
-}
-
-async function handleUpdateTask(taskId: string, updates: { status: string }) {
-  const updated = await updateTask(taskId, updates as any)
-  if (!updated) {
-    toast.error('Task status could not be updated.')
-  }
-}
-
-async function handleTaskLeaseAction(payload: {
-  taskId: string
-  action: 'release' | 'handoff'
-  lease_id?: string | null
-  target_actor_key?: string | null
-  target_actor_instance_id?: string | null
-  target_agent_session_id?: string | null
-  reason?: string | null
-  onSettled?: () => void
-}) {
-  try {
-    const updated = await updateTaskLease(payload.taskId, {
-      action: payload.action,
-      lease_id: payload.lease_id ?? null,
-      target_actor_key: payload.target_actor_key ?? null,
-      target_actor_instance_id: payload.target_actor_instance_id ?? null,
-      target_agent_session_id: payload.target_agent_session_id ?? null,
-      reason: payload.reason ?? null,
-    })
-    if (!updated) {
-      toast.error('Task lease could not be updated.')
-    }
-  } catch {
-    toast.error('Task lease could not be updated.')
-  } finally {
-    payload.onSettled?.()
-  }
-}
-
-async function handleTaskReviewLeaseAction(payload: {
-  taskId: string
-  action: 'assign' | 'release'
-  lease_id?: string | null
-  target_actor_key?: string | null
-  target_actor_instance_id?: string | null
-  target_agent_session_id?: string | null
-  reason?: string | null
-  onSettled?: () => void
-}) {
-  try {
-    const updated = await updateTaskReviewLease(payload.taskId, {
-      action: payload.action,
-      lease_id: payload.lease_id ?? null,
-      target_actor_key: payload.target_actor_key ?? null,
-      target_actor_instance_id: payload.target_actor_instance_id ?? null,
-      target_agent_session_id: payload.target_agent_session_id ?? null,
-      reason: payload.reason ?? null,
-    })
-    if (!updated) {
-      toast.error('Task review authority could not be updated.')
-    }
-  } catch {
-    toast.error('Task review authority could not be updated.')
-  } finally {
-    payload.onSettled?.()
-  }
-}
-
-async function handleToggleStalePromptMute(payload: {
-  taskId: string
-  muted: boolean
-  promptTimestamp: string
-}) {
-  const updated = await setTaskStalePromptMute(payload.taskId, payload.muted, {
-    promptTimestamp: payload.promptTimestamp,
-  })
-  if (!updated) {
-    toast.error('Stale task reminder preference could not be updated.')
-  }
 }
 
 async function handleRename() {
@@ -562,44 +404,6 @@ watch(activeTab, async (tab) => {
   height: 100vh;
   background: var(--bg-0, #09090b);
   color: var(--text, #fafafa);
-}
-
-.room-view-viewport {
-  position: relative;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.room-tab-panel {
-  height: 100%;
-  min-height: 0;
-}
-
-.tab-slide-forward-enter-active,
-.tab-slide-forward-leave-active,
-.tab-slide-back-enter-active,
-.tab-slide-back-leave-active {
-  transition: transform 240ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)), opacity 200ms ease;
-}
-
-.tab-slide-forward-leave-active,
-.tab-slide-back-leave-active {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-}
-
-.tab-slide-forward-enter-from,
-.tab-slide-back-leave-to {
-  opacity: 0;
-  transform: translateX(28px);
-}
-
-.tab-slide-forward-leave-to,
-.tab-slide-back-enter-from {
-  opacity: 0;
-  transform: translateX(-28px);
 }
 
 @media (max-width: 768px) {
