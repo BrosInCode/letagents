@@ -194,7 +194,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   type OutgoingMessageAttachment,
   type RoomAgentPresence,
@@ -203,12 +203,11 @@ import {
   parseAgentIdentity,
   getReplyPreviewText,
 } from '@/composables/useRoom'
-import { buildMentionCandidates, normalizeMentionToken, type MentionCandidate } from './reachability'
-
-const KEEP_POLLING_INTERVAL_MS = 20_000
-const PREFS_KEY = 'lac-prompt-prefs'
-const MAX_ATTACHMENTS = 4
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+import { buildMentionCandidates } from './reachability'
+import { MAX_ATTACHMENTS } from './composer/types'
+import { useComposerAttachments } from './composer/useComposerAttachments'
+import { useComposerMentions } from './composer/useComposerMentions'
+import { useComposerPrompts } from './composer/useComposerPrompts'
 
 const props = withDefaults(defineProps<{
   senderName?: string
@@ -244,122 +243,11 @@ const emit = defineEmits<{
 
 const text = ref('')
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
-const fileInputEl = ref<HTMLInputElement | null>(null)
-const menuEl = ref<HTMLDivElement | null>(null)
-const menuOpen = ref(false)
-const autoKeepPolling = ref(false)
-const injectPrompt = ref(false)
-const attachmentDrafts = ref<AttachmentDraft[]>([])
-const attachmentError = ref('')
-const isDragActive = ref(false)
-const mentionQuery = ref('')
-const mentionStart = ref(-1)
-const mentionEnd = ref(-1)
-const mentionActiveIndex = ref(0)
-let mentionReachabilityRefreshAt = 0
-let mentionReachabilityRefreshInFlight = false
 const isSending = ref(false)
 
-let keepPollingTimer: ReturnType<typeof setInterval> | null = null
-let keepPollingInFlight = false
-let dragDepth = 0
-
-interface AttachmentDraft {
-  id: string
-  name: string
-  type: string
-  size: number
-  file: File
-  uploadId: string | null
-  uploadState: 'idle' | 'uploading' | 'uploaded' | 'error'
-  uploadMessage: string
-  abortController: AbortController | null
-  previewUrl: string | null
-  previewState: 'idle' | 'loading' | 'loaded' | 'error'
-}
-
-const replyDisplayName = computed(() => {
-  const reply = props.replyTo
-  if (!reply?.sender) return 'unknown'
-  return parseAgentIdentity(reply.sender).displayName || reply.sender
-})
-
-const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
+const roomIdentifierRef = computed(() => props.roomIdentifier)
+const disabledRef = computed(() => props.disabled)
 const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
-const dropAttachmentsEnabled = computed(() => attachmentsAvailable.value && !props.disabled && !isSending.value)
-const eagerUploadsEnabled = computed(() =>
-  Boolean(props.stageAttachmentDraft && props.roomIdentifier && attachmentsAvailable.value)
-)
-
-const mentionCandidates = computed<MentionCandidate[]>(() => {
-  return buildMentionCandidates({
-    participants: props.participants,
-    presence: props.presence,
-    senderName: props.senderName,
-  })
-})
-
-const filteredMentionCandidates = computed(() => {
-  const query = mentionQuery.value.trim().toLowerCase()
-  const filtered = mentionCandidates.value
-    .filter((candidate) => !query || candidate.search.includes(query))
-
-  // Guarantee humans (priority >= 2) are never pushed off by a flood of agents
-  const agents = filtered.filter((c) => c.priority < 2)
-  const humans = filtered.filter((c) => c.priority >= 2)
-  const maxAgents = Math.max(0, 8 - humans.length)
-  return [...agents.slice(0, maxAgents), ...humans].slice(0, 8)
-})
-
-const mentionMenuOpen = computed(() =>
-  mentionStart.value >= 0 && filteredMentionCandidates.value.length > 0
-)
-
-// ── Prompt mode label ──
-const promptMode = computed(() => {
-  if (autoKeepPolling.value && injectPrompt.value) return 'auto+inject'
-  if (autoKeepPolling.value) return 'auto'
-  if (injectPrompt.value) return 'inject'
-  return 'off'
-})
-
-const promptLabel = computed(() => {
-  const labels: Record<string, string> = {
-    off: 'Inject',
-    auto: 'Auto poll',
-    inject: 'Inject on',
-    'auto+inject': 'Auto + inject',
-  }
-  return labels[promptMode.value] || 'Inject'
-})
-
-// ── Persistence ──
-function prefsKey(): string {
-  const room = props.roomIdentifier
-  return room ? `lac-prompt-prefs:${room}` : PREFS_KEY
-}
-
-function persistPrefs() {
-  try {
-    localStorage.setItem(prefsKey(), JSON.stringify({
-      autoKeepPolling: autoKeepPolling.value,
-      injectPrompt: injectPrompt.value,
-    }))
-  } catch { /* silent */ }
-}
-
-function loadPrefs() {
-  try {
-    const raw = localStorage.getItem(prefsKey())
-    if (!raw) return
-    const saved = JSON.parse(raw)
-    autoKeepPolling.value = Boolean(saved.autoKeepPolling)
-    injectPrompt.value = Boolean(saved.injectPrompt)
-  } catch {
-    autoKeepPolling.value = false
-    injectPrompt.value = false
-  }
-}
 
 async function submitComposerMessage(
   bodyText: string,
@@ -374,152 +262,79 @@ async function submitComposerMessage(
   return true
 }
 
-// ── Auto-poll loop ──
-async function sendAutoPollingPrompt() {
-  if (!props.roomIdentifier || keepPollingInFlight) return
-  keepPollingInFlight = true
-  try {
-    await submitComposerMessage('', 'auto', null, [])
-  } finally {
-    keepPollingInFlight = false
-  }
-}
+const {
+  menuEl,
+  menuOpen,
+  autoKeepPolling,
+  injectPrompt,
+  promptMode,
+  promptLabel,
+  toggleAutoKeepPolling,
+  toggleInjectPrompt,
+} = useComposerPrompts({
+  roomIdentifier: roomIdentifierRef,
+  submitComposerMessage,
+})
 
-function startKeepPollingLoop(sendImmediately = true) {
-  stopKeepPollingLoop()
-  if (!autoKeepPolling.value || !props.roomIdentifier) return
+const {
+  fileInputEl,
+  attachmentDrafts,
+  attachmentError,
+  isDragActive,
+  dropAttachmentsEnabled,
+  hasUploadingAttachments,
+  hasFailedAttachments,
+  attachmentStatusSummary,
+  attachmentSecondaryText,
+  markAttachmentPreviewLoaded,
+  markAttachmentPreviewError,
+  openFilePicker,
+  handleFileSelection,
+  handleDragEnter,
+  handleDragOver,
+  handleDragLeave,
+  handleDrop,
+  removeAttachment,
+  clearAttachments,
+  buildOutgoingAttachments,
+} = useComposerAttachments({
+  disabled: disabledRef,
+  isSending,
+  attachmentsAvailable,
+  roomIdentifier: roomIdentifierRef,
+  stageAttachmentDraft: computed(() => props.stageAttachmentDraft),
+  discardAttachmentDraft: computed(() => props.discardAttachmentDraft),
+})
 
-  if (sendImmediately) {
-    sendAutoPollingPrompt()
-  }
+const replyDisplayName = computed(() => {
+  const reply = props.replyTo
+  if (!reply?.sender) return 'unknown'
+  return parseAgentIdentity(reply.sender).displayName || reply.sender
+})
 
-  keepPollingTimer = setInterval(() => {
-    sendAutoPollingPrompt()
-  }, KEEP_POLLING_INTERVAL_MS)
-}
+const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
 
-function stopKeepPollingLoop() {
-  if (keepPollingTimer) {
-    clearInterval(keepPollingTimer)
-    keepPollingTimer = null
-  }
-}
-
-// ── Toggle handlers ──
-function toggleAutoKeepPolling() {
-  autoKeepPolling.value = !autoKeepPolling.value
-  persistPrefs()
-
-  if (autoKeepPolling.value) {
-    startKeepPollingLoop()
-  } else {
-    stopKeepPollingLoop()
-  }
-}
-
-function toggleInjectPrompt() {
-  injectPrompt.value = !injectPrompt.value
-  persistPrefs()
-}
-
-// ── Close menu on outside click ──
-function handleDocClick(e: MouseEvent) {
-  if (menuOpen.value && menuEl.value && !menuEl.value.contains(e.target as Node)) {
-    menuOpen.value = false
-  }
-}
-
-function resetMentionContext() {
-  mentionQuery.value = ''
-  mentionStart.value = -1
-  mentionEnd.value = -1
-  mentionActiveIndex.value = 0
-}
-
-function requestMentionReachabilityRefresh() {
-  if (!props.refreshReachability || mentionReachabilityRefreshInFlight) return
-
-  const now = Date.now()
-  if (now - mentionReachabilityRefreshAt < 2000) return
-
-  mentionReachabilityRefreshAt = now
-  mentionReachabilityRefreshInFlight = true
-  Promise.resolve(props.refreshReachability())
-    .catch(() => undefined)
-    .finally(() => {
-      mentionReachabilityRefreshInFlight = false
-    })
-}
-
-function syncMentionContext() {
-  const textarea = textareaEl.value
-  if (!textarea) {
-    resetMentionContext()
-    return
-  }
-
-  const cursor = textarea.selectionStart ?? text.value.length
-  const beforeCursor = text.value.slice(0, cursor)
-  const match = beforeCursor.match(/(^|[\s(])@([A-Za-z0-9._-]*)$/)
-  if (!match) {
-    resetMentionContext()
-    return
-  }
-
-  const wasClosed = mentionStart.value < 0
-  mentionQuery.value = (match[2] || '').toLowerCase()
-  mentionStart.value = cursor - mentionQuery.value.length - 1
-  mentionEnd.value = cursor
-  mentionActiveIndex.value = 0
-  if (wasClosed) {
-    requestMentionReachabilityRefresh()
-  }
-}
-
-function moveMentionSelection(direction: number) {
-  if (!filteredMentionCandidates.value.length) return
-  const size = filteredMentionCandidates.value.length
-  mentionActiveIndex.value = (mentionActiveIndex.value + direction + size) % size
-}
-
-function selectMention(candidate: MentionCandidate) {
-  if (mentionStart.value < 0 || mentionEnd.value < 0) return
-
-  const nextChar = text.value.slice(mentionEnd.value, mentionEnd.value + 1)
-  const suffix = nextChar && /\s/.test(nextChar) ? '' : ' '
-  const insertion = `@${candidate.mention}${suffix}`
-  const newCursor = mentionStart.value + insertion.length
-
-  text.value = `${text.value.slice(0, mentionStart.value)}${insertion}${text.value.slice(mentionEnd.value)}`
-  resetMentionContext()
-
-  nextTick(() => {
-    textareaEl.value?.focus()
-    textareaEl.value?.setSelectionRange(newCursor, newCursor)
+const mentionCandidates = computed(() => {
+  return buildMentionCandidates({
+    participants: props.participants,
+    presence: props.presence,
+    senderName: props.senderName,
   })
-}
+})
 
-const hasUploadingAttachments = computed(() =>
-  attachmentDrafts.value.some((attachment) => attachment.uploadState === 'uploading')
-)
-
-const hasFailedAttachments = computed(() =>
-  eagerUploadsEnabled.value
-    && attachmentDrafts.value.some((attachment) => attachment.uploadState === 'error')
-)
-
-const attachmentStatusSummary = computed(() => {
-  if (hasUploadingAttachments.value) {
-    const count = attachmentDrafts.value.filter((attachment) => attachment.uploadState === 'uploading').length
-    return count === 1 ? 'Uploading 1 attachment...' : `Uploading ${count} attachments...`
-  }
-  if (hasFailedAttachments.value) {
-    const count = attachmentDrafts.value.filter((attachment) => attachment.uploadState === 'error').length
-    return count === 1
-      ? 'Remove the failed attachment before sending.'
-      : 'Remove the failed attachments before sending.'
-  }
-  return ''
+const {
+  filteredMentionCandidates,
+  mentionMenuOpen,
+  mentionActiveIndex,
+  resetMentionContext,
+  syncMentionContext,
+  moveMentionSelection,
+  selectMention,
+} = useComposerMentions({
+  text,
+  textareaEl,
+  mentionCandidates,
+  refreshReachability: computed(() => props.refreshReachability),
 })
 
 const canSend = computed(() =>
@@ -530,297 +345,6 @@ const canSend = computed(() =>
   && (text.value.trim().length > 0 || attachmentDrafts.value.length > 0)
 )
 
-function updateAttachmentDraft(id: string, update: (draft: AttachmentDraft) => AttachmentDraft) {
-  attachmentDrafts.value = attachmentDrafts.value.map((attachment) =>
-    attachment.id === id ? update(attachment) : attachment
-  )
-}
-
-function findAttachmentDraft(id: string): AttachmentDraft | undefined {
-  return attachmentDrafts.value.find((attachment) => attachment.id === id)
-}
-
-function releaseAttachmentPreview(attachment: AttachmentDraft) {
-  if (attachment.previewUrl) {
-    URL.revokeObjectURL(attachment.previewUrl)
-  }
-}
-
-function describeAttachmentUploadError(error: unknown, fileName: string): string {
-  if (error instanceof DOMException && error.name === 'AbortError') {
-    return `${fileName} upload was cancelled.`
-  }
-  const message = error instanceof Error ? error.message.trim() : ''
-  if (/attachment object storage is not configured/i.test(message)) {
-    return 'Attachments are unavailable right now.'
-  }
-  return message || `${fileName} could not be uploaded.`
-}
-
-function attachmentSecondaryText(attachment: AttachmentDraft): string {
-  const size = formatFileSize(attachment.size)
-  if (attachment.uploadState === 'uploading') {
-    return size ? `Uploading... · ${size}` : 'Uploading...'
-  }
-  if (attachment.uploadState === 'uploaded') {
-    return size ? `Ready · ${size}` : 'Ready'
-  }
-  if (attachment.uploadState === 'error') {
-    return size ? `Upload failed · ${size}` : 'Upload failed'
-  }
-  return size
-}
-
-function markAttachmentPreviewLoaded(id: string) {
-  updateAttachmentDraft(id, (attachment) => ({
-    ...attachment,
-    previewState: 'loaded',
-  }))
-}
-
-function markAttachmentPreviewError(id: string) {
-  updateAttachmentDraft(id, (attachment) => ({
-    ...attachment,
-    previewState: 'error',
-  }))
-}
-
-async function startAttachmentDraftUpload(id: string) {
-  const attachment = findAttachmentDraft(id)
-  if (!attachment || !props.stageAttachmentDraft || !props.roomIdentifier) return
-
-  const abortController = new AbortController()
-  updateAttachmentDraft(id, (draft) => ({
-    ...draft,
-    abortController,
-    uploadState: 'uploading',
-    uploadMessage: '',
-  }))
-
-  try {
-    const staged = await props.stageAttachmentDraft(props.roomIdentifier, {
-      file_name: attachment.name,
-      mime_type: attachment.type,
-      size_bytes: attachment.size,
-      file: attachment.file,
-    }, abortController.signal)
-
-    if (!findAttachmentDraft(id)) return
-
-    updateAttachmentDraft(id, (draft) => ({
-      ...draft,
-      uploadId: staged.upload_id,
-      uploadState: 'uploaded',
-      uploadMessage: '',
-      abortController: null,
-    }))
-  } catch (error) {
-    if (!findAttachmentDraft(id)) return
-    if (abortController.signal.aborted) return
-
-    const uploadMessage = describeAttachmentUploadError(error, attachment.name)
-    updateAttachmentDraft(id, (draft) => ({
-      ...draft,
-      uploadState: 'error',
-      uploadMessage,
-      uploadId: null,
-      abortController: null,
-    }))
-    attachmentError.value = uploadMessage
-  }
-}
-
-async function discardUploadedAttachment(attachment: AttachmentDraft) {
-  if (!props.discardAttachmentDraft || !props.roomIdentifier || !attachment.uploadId) return
-  try {
-    await props.discardAttachmentDraft(props.roomIdentifier, attachment.uploadId)
-  } catch {
-    attachmentError.value = `${attachment.name} could not be removed from draft storage.`
-  }
-}
-
-function openFilePicker() {
-  attachmentError.value = ''
-  if (isSending.value) {
-    attachmentError.value = 'Wait for the current send to finish.'
-    return
-  }
-  if (!attachmentsAvailable.value) {
-    attachmentError.value = 'Attachments are unavailable right now.'
-    return
-  }
-  fileInputEl.value?.click()
-}
-
-async function handleFileSelection(event: Event) {
-  const input = event.target as HTMLInputElement
-  const selected = Array.from(input.files || [])
-  input.value = ''
-  if (!selected.length) return
-
-  await addAttachmentFiles(selected)
-}
-
-async function addAttachmentFiles(selected: readonly File[]) {
-  if (!selected.length) return
-
-  attachmentError.value = ''
-  if (props.disabled) {
-    attachmentError.value = 'Attachments cannot be added right now.'
-    return
-  }
-  if (isSending.value) {
-    attachmentError.value = 'Wait for the current send to finish.'
-    return
-  }
-  if (!attachmentsAvailable.value) {
-    attachmentError.value = 'Attachments are unavailable right now.'
-    return
-  }
-  const availableSlots = Math.max(0, MAX_ATTACHMENTS - attachmentDrafts.value.length)
-  const acceptedFiles = selected.slice(0, availableSlots)
-  if (selected.length > availableSlots) {
-    attachmentError.value = `Attach up to ${MAX_ATTACHMENTS} files per message.`
-  }
-
-  for (const file of acceptedFiles) {
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      attachmentError.value = `${file.name} is larger than ${formatFileSize(MAX_ATTACHMENT_BYTES)}.`
-      continue
-    }
-    try {
-      const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
-      const id = `${file.name}-${file.size}-${file.lastModified}-${globalThis.crypto?.randomUUID?.() || Date.now()}`
-      const draft: AttachmentDraft = {
-        id,
-        name: file.name,
-        type: file.type || 'application/octet-stream',
-        size: file.size,
-        file,
-        uploadId: null,
-        uploadState: eagerUploadsEnabled.value ? 'uploading' : 'idle',
-        uploadMessage: '',
-        abortController: null,
-        previewUrl,
-        previewState: previewUrl ? 'loading' : 'idle',
-      }
-      attachmentDrafts.value = [
-        ...attachmentDrafts.value,
-        draft,
-      ]
-      if (eagerUploadsEnabled.value) {
-        void startAttachmentDraftUpload(id)
-      }
-    } catch {
-      attachmentError.value = `${file.name} could not be attached.`
-    }
-  }
-}
-
-function dragContainsFiles(event: DragEvent): boolean {
-  const types = Array.from(event.dataTransfer?.types || [])
-  return types.includes('Files')
-}
-
-function resetDragState() {
-  dragDepth = 0
-  isDragActive.value = false
-}
-
-function handleDragEnter(event: DragEvent) {
-  if (!dragContainsFiles(event)) return
-  event.preventDefault()
-  if (!dropAttachmentsEnabled.value) return
-  dragDepth += 1
-  isDragActive.value = true
-}
-
-function handleDragOver(event: DragEvent) {
-  if (!dragContainsFiles(event)) return
-  event.preventDefault()
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = dropAttachmentsEnabled.value ? 'copy' : 'none'
-  }
-  if (!dropAttachmentsEnabled.value) {
-    isDragActive.value = false
-    return
-  }
-  isDragActive.value = true
-}
-
-function handleDragLeave(event: DragEvent) {
-  if (!dragContainsFiles(event)) return
-  if (!dropAttachmentsEnabled.value) return
-  if (dragDepth > 0) {
-    dragDepth -= 1
-  }
-  if (dragDepth === 0) {
-    isDragActive.value = false
-  }
-}
-
-async function handleDrop(event: DragEvent) {
-  const dropped = Array.from(event.dataTransfer?.files || [])
-  if (dropped.length) {
-    event.preventDefault()
-  }
-  resetDragState()
-  if (!dropped.length) return
-  await addAttachmentFiles(dropped)
-}
-
-function removeAttachment(id: string) {
-  if (isSending.value) return
-  const attachment = findAttachmentDraft(id)
-  if (!attachment) return
-
-  attachment.abortController?.abort()
-  releaseAttachmentPreview(attachment)
-  attachmentDrafts.value = attachmentDrafts.value.filter((draft) => draft.id !== id)
-
-  if (attachment.uploadId) {
-    void discardUploadedAttachment(attachment)
-  }
-}
-
-function clearAttachments(options: { discardUploads?: boolean } = {}) {
-  const drafts = attachmentDrafts.value
-  attachmentDrafts.value = []
-  const shouldDiscardUploads = Boolean(options.discardUploads && !isSending.value)
-
-  for (const attachment of drafts) {
-    attachment.abortController?.abort()
-    releaseAttachmentPreview(attachment)
-    if (shouldDiscardUploads && attachment.uploadId) {
-      void discardUploadedAttachment(attachment)
-    }
-  }
-}
-
-function formatFileSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = bytes
-  let unitIndex = 0
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024
-    unitIndex += 1
-  }
-  const precision = size >= 10 || unitIndex === 0 ? 0 : 1
-  return `${size.toFixed(precision)} ${units[unitIndex]}`
-}
-
-function buildOutgoingAttachments(): OutgoingMessageAttachment[] {
-  return attachmentDrafts.value.map((attachment) => ({
-    file_name: attachment.name,
-    mime_type: attachment.type,
-    size_bytes: attachment.size,
-    file: attachment.file,
-    upload_id: attachment.uploadId,
-  }))
-}
-
-// ── Send ──
 async function handleSend() {
   const trimmed = text.value.trim()
   if (!canSend.value) return
@@ -830,7 +354,6 @@ async function handleSend() {
     return
   }
 
-  // Determine agent_prompt_kind for this message
   const kind = injectPrompt.value ? 'inline' : null
   isSending.value = true
   try {
@@ -888,45 +411,24 @@ function handleKeyUp(e: KeyboardEvent) {
   }
 }
 
-// ── Lifecycle ──
 onMounted(() => {
   textareaEl.value?.focus()
-  loadPrefs()
-  document.addEventListener('click', handleDocClick)
-  // Start auto-poll if it was persisted on
-  if (autoKeepPolling.value && props.roomIdentifier) {
-    startKeepPollingLoop(false)
-  }
 })
 
 onUnmounted(() => {
-  stopKeepPollingLoop()
   clearAttachments({ discardUploads: true })
-  document.removeEventListener('click', handleDocClick)
 })
 
-// Reload prefs + restart loop when room changes
 watch(() => props.roomIdentifier, (newId, oldId) => {
   if (oldId && newId !== oldId && attachmentDrafts.value.length > 0) {
     clearAttachments({ discardUploads: true })
     attachmentError.value = ''
-  }
-  stopKeepPollingLoop()
-  loadPrefs()
-  if (newId && autoKeepPolling.value) {
-    startKeepPollingLoop(false)
   }
 })
 
 watch(() => props.replyTo, (newVal) => {
   if (newVal) {
     textareaEl.value?.focus()
-  }
-})
-
-watch(filteredMentionCandidates, (candidates) => {
-  if (mentionActiveIndex.value >= candidates.length) {
-    mentionActiveIndex.value = 0
   }
 })
 </script>
