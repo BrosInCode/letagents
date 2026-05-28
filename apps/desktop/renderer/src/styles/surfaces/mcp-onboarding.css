@@ -1,0 +1,294 @@
+.mcp-onboarding {
+  display: grid;
+  max-width: 1240px;
+}
+
+.mcp-wizard-card {
+  display: grid;
+  gap: 24px;
+  min-height: 660px;
+  padding: clamp(28px, 4vw, 54px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255, 255, 255, 0.09), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    var(--bg-card);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.36);
+  animation: room-shell-enter var(--duration-normal) var(--ease-out);
+}
+
+.mcp-wizard-header {
+  display: grid;
+  gap: 14px;
+}
+
+.mcp-wizard-header h1 {
+  max-width: 880px;
+  margin: 0;
+  font-size: clamp(2.8rem, 7vw, 5.8rem);
+  line-height: 0.94;
+  letter-spacing: -0.075em;
+}
+
+.mcp-wizard-header > p:not(.hero-kicker) {
+  max-width: 760px;
+  font-size: 1.04rem;
+}
+
+.mcp-wizard-header p:not(.hero-kicker),
+.mcp-choice-card small,
+.mcp-install-step p,
+.mcp-done-step p,
+.mcp-selected-app small,
+.mcp-feedback {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.mcp-progress {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mcp-progress span {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-align: center;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.mcp-progress span strong,
+.mcp-progress span small {
+  display: inline;
+}
+
+.mcp-progress span small {
+  font: inherit;
+}
+
+.mcp-progress span[data-active="true"] {
+  border-color: var(--border-accent);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.mcp-progress span[data-complete="true"] {
+  border-color: rgba(34, 197, 94, 0.22);
+  color: var(--green);
+}
+
+.mcp-choice-step {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.mcp-choice-tools {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.mcp-choice-card,
+.mcp-selected-app {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: rgba(20, 20, 20, 0.68);
+}
+
+.mcp-choice-card {
+  min-height: 164px;
+  padding: 22px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transform: translateY(0);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.mcp-choice-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-accent);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.mcp-choice-card[data-selected="true"] {
+  border-color: var(--border-accent);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.12), transparent 42%),
+    rgba(255, 255, 255, 0.075);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.mcp-choice-check {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  font-weight: 900;
+}
+
+.mcp-choice-check svg {
+  width: 17px;
+  height: 17px;
+}
+
+.mcp-target-status {
+  display: inline-grid;
+  place-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  font-weight: 850;
+}
+
+.mcp-target-status[data-status="installed"] {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.mcp-target-status[data-status="needs_attention"] {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.mcp-choice-card[data-selected="true"] .mcp-choice-check {
+  background: #f5f5f5;
+  color: #09090b;
+}
+
+.mcp-target-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 62px;
+  height: 62px;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.18), transparent 42%),
+    rgba(255, 255, 255, 0.075);
+  color: var(--text);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 12px 26px rgba(0, 0, 0, 0.18);
+}
+
+.mcp-target-stack {
+  display: flex;
+  align-items: center;
+}
+
+.mcp-target-stack .mcp-target-mark + .mcp-target-mark {
+  margin-left: -18px;
+}
+
+.mcp-target-stack .mcp-target-mark:nth-child(n + 4) {
+  display: none;
+}
+
+.mcp-harness-icon {
+  width: 46px;
+  height: 46px;
+  object-fit: contain;
+  user-select: none;
+  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.28));
+}
+
+.mcp-target-main {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.mcp-target-main strong {
+  font-size: 1.08rem;
+}
+
+.mcp-install-step,
+.mcp-done-step {
+  display: grid;
+  align-content: center;
+  gap: 18px;
+  min-height: 310px;
+}
+
+.mcp-selected-app {
+  padding: 24px;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(255, 255, 255, 0.08), transparent 34%),
+    rgba(255, 255, 255, 0.035);
+}
+
+.mcp-selected-app strong,
+.mcp-done-step strong {
+  display: block;
+  font-size: 1.35rem;
+}
+
+.mcp-done-step {
+  justify-items: center;
+  text-align: center;
+}
+
+.mcp-done-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 82px;
+  height: 82px;
+  border-radius: 999px;
+  background: #f5f5f5;
+  color: #09090b;
+  font-weight: 900;
+}
+
+.mcp-done-mark svg {
+  width: 34px;
+  height: 34px;
+}
+
+.mcp-wizard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: auto;
+}
+
+.mcp-feedback {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.035);
+}

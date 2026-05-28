@@ -8,5 +8,9 @@
 @import "./styles/08-composer-agent-reasoning.css";
 @import "./styles/09-room-rules-image-viewer.css";
 @import "./styles/10-activity.css";
-@import "./styles/11-surfaces-onboarding.css";
+@import "./styles/surfaces/shared-surfaces.css";
+@import "./styles/surfaces/settings.css";
+@import "./styles/surfaces/auth-onboarding.css";
+@import "./styles/surfaces/mcp-onboarding.css";
+@import "./styles/surfaces/first-run.css";
 @import "./styles/12-responsive.css";
