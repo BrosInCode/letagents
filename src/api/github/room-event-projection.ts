@@ -47,7 +47,7 @@ import {
   evaluateWorkflowArtifactMutation,
   leaseMatchesWorkflowArtifact,
   type CoordinationDecisionResult,
-} from "../coordination-policy/index.js";
+} from "../coordination-policy.js";
 import { emitProjectMessage } from "../server/events.js";
 import {
   emitGitHubEventToAllParentRepoFocusRooms,

@@ -24,7 +24,7 @@ import {
 import {
   findApplicableLock,
   leaseMatchesActor,
-} from "../../coordination-policy/index.js";
+} from "../../coordination-policy.js";
 import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { isDesktopHumanWrite, resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";

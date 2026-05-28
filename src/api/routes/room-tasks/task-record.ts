@@ -19,7 +19,7 @@ import {
   normalizeTaskActorKey,
   requiresTaskOwnershipGuard,
 } from "../../task-ownership.js";
-import { findBoardReviewLeaseForMerge } from "../../coordination-policy/index.js";
+import { findBoardReviewLeaseForMerge } from "../../coordination-policy.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";
 import type { RoomTaskRouteDeps } from "./types.js";

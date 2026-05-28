@@ -14,7 +14,7 @@ import {
   type CoordinationLeaseLike,
   type CoordinationLockLike,
   type CoordinationTaskLike,
-} from "../coordination-policy/index.js";
+} from "../coordination-policy.js";
 
 function lease(overrides: Partial<CoordinationLeaseLike> = {}): CoordinationLeaseLike {
   return {

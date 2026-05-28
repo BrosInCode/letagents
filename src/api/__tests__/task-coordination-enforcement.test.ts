@@ -13,7 +13,7 @@ import type {
   CoordinationLeaseLike,
   CoordinationLockLike,
   CoordinationTaskLike,
-} from "../coordination-policy/index.js";
+} from "../coordination-policy.js";
 import {
   createTaskCoordinationEnforcement,
   type TaskCoordinationEnforcementDeps,

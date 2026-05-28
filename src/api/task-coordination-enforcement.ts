@@ -14,7 +14,7 @@ import {
   type CoordinationLockLike,
   type CoordinationMutationKind,
   type CoordinationTaskLike,
-} from "./coordination-policy/index.js";
+} from "./coordination-policy.js";
 import { buildLeasedBranchRef } from "./github-lease-enforcement.js";
 import {
   classifyTaskCoordinationMutation,

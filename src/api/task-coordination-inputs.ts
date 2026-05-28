@@ -1,5 +1,5 @@
 import type { TaskLeaseKind, TaskStatus } from "./db.js";
-import type { CoordinationMutationKind } from "./coordination-policy/index.js";
+import type { CoordinationMutationKind } from "./coordination-policy.js";
 
 export interface TaskCoordinationUpdatePatch {
   status?: TaskStatus;
