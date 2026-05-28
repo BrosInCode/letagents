@@ -1,0 +1,246 @@
+.pinned-room,
+.project-row,
+.room-row,
+.sidebar-row {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+}
+
+.project-list {
+  gap: 12px;
+}
+
+.project-group {
+  display: grid;
+  gap: 6px;
+}
+
+.project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 5px 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+}
+
+.project-row:hover {
+  transform: none;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.project-row[data-active="true"] {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.project-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.project-icon,
+.project-open {
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  flex-shrink: 0;
+}
+
+.project-open {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.project-open:hover {
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+}
+
+.project-copy,
+.system-copy,
+.pinned-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.project-copy small {
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-name,
+.system-copy > span {
+  color: var(--text);
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-room-list {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  padding-left: 20px;
+}
+
+.project-room-list::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 8px;
+  width: 1px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16) 18%, rgba(255, 255, 255, 0.08) 82%, transparent);
+}
+
+.pinned-room {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 9px 10px;
+}
+
+.pinned-title,
+.room-title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+  font-size: 0.93rem;
+}
+
+.pinned-meta {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-row {
+  position: relative;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+}
+
+.room-parent {
+  margin-top: 2px;
+}
+
+.room-focus {
+  margin-left: 0;
+  min-height: 44px;
+  padding: 7px 10px 7px 8px;
+  border-radius: 12px;
+}
+
+.room-status-dot {
+  grid-row: 1 / span 2;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(125, 211, 252, 0.7);
+  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.08);
+}
+
+.room-focus .room-title {
+  font-size: 0.84rem;
+  line-height: 1.2;
+}
+
+.room-focus .room-meta {
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-focus {
+  border-color: transparent;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.012) 58%, rgba(255, 255, 255, 0.004)),
+    rgba(255, 255, 255, 0.01);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.016),
+    0 4px 12px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(18px) saturate(1.18);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-focus:hover {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02) 58%, rgba(255, 255, 255, 0.008)),
+    rgba(255, 255, 255, 0.018);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 7px 18px rgba(0, 0, 0, 0.12);
+}
+
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-focus[data-active="true"] {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.038) 58%, rgba(255, 255, 255, 0.014)),
+    rgba(255, 255, 255, 0.044);
+  box-shadow:
+    inset 3px 0 0 rgba(167, 139, 250, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 10px 24px rgba(0, 0, 0, 0.16);
+}
+
+.room-meta {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+
+.room-empty {
+  margin: 4px 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.84rem;
+}
+
+.empty-copy {
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+}
+
+.sidebar-system {
+  margin-top: 6px;
+}
+
+.sidebar-row {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-height: 50px;
+}
+
+.sidebar-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
