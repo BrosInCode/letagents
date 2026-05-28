@@ -46,6 +46,7 @@
 }
 
 .desktop-room-shell[data-liquid-glass="true"] .desktop-mention-panel {
+  border-color: rgba(255, 255, 255, 0.14);
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.026) 54%, rgba(255, 255, 255, 0.01)),
     rgba(13, 13, 13, 0.88);
@@ -86,10 +87,12 @@
 
 .desktop-room-shell[data-liquid-glass="true"] .desktop-mention-option[data-active="true"],
 .desktop-room-shell[data-liquid-glass="true"] .desktop-mention-option:hover {
+  border-color: rgba(255, 255, 255, 0.14);
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.034)),
     rgba(255, 255, 255, 0.045);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(16px) saturate(1.2);
 }
 
 .desktop-mention-option span {

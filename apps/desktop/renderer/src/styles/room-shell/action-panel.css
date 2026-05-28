@@ -1,0 +1,502 @@
+.desktop-room-action-panel {
+  background: rgba(9, 9, 9, 0.98);
+  padding: 12px 16px;
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-action-panel {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.022) 56%, rgba(255, 255, 255, 0.01)),
+    rgba(9, 9, 9, 0.68);
+  backdrop-filter: blur(22px) saturate(1.2);
+}
+
+.desktop-room-inspector {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.78fr) minmax(460px, 1.22fr);
+  gap: 12px;
+  max-height: min(58vh, 560px);
+  overflow-y: auto;
+  padding-right: 8px;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.desktop-room-inspector::-webkit-scrollbar {
+  width: 6px;
+}
+
+.desktop-room-inspector::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.desktop-room-inspector::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.desktop-room-inspector::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.desktop-room-identity-card,
+.desktop-room-github-pill,
+.desktop-room-property-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.026);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-identity-card,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-github-pill,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-property-row,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-link-line,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-inline-note {
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.032) 52%, rgba(255, 255, 255, 0.014)),
+    rgba(255, 255, 255, 0.028);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 12px 28px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px) saturate(1.18);
+}
+
+.desktop-room-identity-card {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 220px;
+  padding: 14px;
+  border-radius: var(--radius-md);
+}
+
+.desktop-room-inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.desktop-room-inspector-header h4 {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 1.05rem;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.desktop-room-property-list {
+  display: grid;
+  gap: 8px;
+}
+
+.desktop-room-property-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  text-align: left;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-property-row:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-property-row:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.046) 52%, rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.042);
+}
+
+.desktop-room-property-copy,
+.desktop-room-github-summary > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-room-property-row strong,
+.desktop-room-github-pill strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 820;
+}
+
+.desktop-room-property-row small,
+.desktop-room-github-pill small,
+.desktop-room-inline-note,
+.desktop-room-action-error {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.36;
+}
+
+.desktop-room-action-error {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
+  border: 1px solid rgba(239, 68, 68, 0.18);
+  border-radius: var(--radius-md);
+  background: rgba(239, 68, 68, 0.08);
+  color: #ff8a8a;
+}
+
+.desktop-room-link-line button,
+.desktop-room-title-control button,
+.desktop-room-github-pill button,
+.desktop-room-search-strip button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 820;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-link-line button:hover,
+.desktop-room-title-control button:hover:not(:disabled),
+.desktop-room-github-pill button:hover:not(:disabled),
+.desktop-room-search-strip button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.desktop-room-title-control button:disabled,
+.desktop-room-github-pill button:disabled,
+.desktop-room-search-strip button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.desktop-room-action-kicker {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-weight: 820;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.desktop-room-action-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.desktop-room-action-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.desktop-room-action-icon.is-blue {
+  color: #93c5fd;
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.desktop-room-action-icon.is-amber {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.desktop-room-action-icon.is-emerald {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.12);
+}
+
+.desktop-room-action-icon.is-glass {
+  color: #bae6fd;
+  background: rgba(125, 211, 252, 0.12);
+}
+
+.desktop-room-action-icon.is-slate {
+  color: #cbd5e1;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.desktop-room-link-line,
+.desktop-room-title-control,
+.desktop-room-github-pill {
+  align-items: center;
+  gap: 12px;
+}
+
+.desktop-room-title-control {
+  display: flex;
+}
+
+.desktop-room-link-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 58px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.desktop-room-link-line div {
+  min-width: 0;
+}
+
+.desktop-room-link-line small {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text-tertiary);
+  font-size: 0.66rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.desktop-room-link-line span {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-room-title-control input {
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.84rem;
+}
+
+.desktop-room-title-control input:focus {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.desktop-room-github-pill {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  min-width: 0;
+  min-height: 82px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+}
+
+.desktop-room-github-pill[data-state="connected"] {
+  border-color: rgba(34, 197, 94, 0.18);
+}
+
+.desktop-room-github-pill[data-state="error"] {
+  border-color: rgba(239, 68, 68, 0.22);
+  background: rgba(239, 68, 68, 0.045);
+}
+
+.desktop-room-github-summary,
+.desktop-room-github-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.desktop-room-github-summary {
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.desktop-room-github-actions {
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.desktop-room-github-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.04);
+}
+
+.desktop-room-github-dot[data-state="connected"] {
+  background: #22c55e;
+  box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.11);
+}
+
+.desktop-room-github-dot[data-state="ready"],
+.desktop-room-github-dot[data-state="loading"] {
+  background: #f59e0b;
+  box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.11);
+}
+
+.desktop-room-github-dot[data-state="error"] {
+  background: #ef4444;
+  box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
+}
+
+.desktop-room-row-action,
+.desktop-room-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
+.desktop-room-status-chip[data-state="connected"],
+.desktop-room-status-chip[data-state="on"] {
+  border-color: rgba(34, 197, 94, 0.18);
+  background: rgba(34, 197, 94, 0.09);
+  color: #86efac;
+}
+
+.desktop-room-status-chip[data-state="ready"],
+.desktop-room-status-chip[data-state="checking"],
+.desktop-room-status-chip[data-state="loading"] {
+  border-color: rgba(245, 158, 11, 0.2);
+  background: rgba(245, 158, 11, 0.09);
+  color: #fcd34d;
+}
+
+.desktop-room-status-chip[data-state="error"],
+.desktop-room-status-chip[data-state="blocked"] {
+  border-color: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.09);
+  color: #fca5a5;
+}
+
+.desktop-room-inline-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.desktop-room-inline-note p {
+  margin: 0;
+}
+
+.desktop-room-inline-note[data-state="error"] {
+  border-color: rgba(239, 68, 68, 0.18);
+  background: rgba(239, 68, 68, 0.08);
+  color: #ff8a8a;
+}
+
+.desktop-room-mini-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+}
+
+.desktop-room-inline-note[data-state="error"] .desktop-room-mini-dot {
+  background: #ef4444;
+}
+
+.desktop-room-toggle {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-toggle span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-toggle[data-active="true"] {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.13);
+}
+
+.desktop-room-toggle[data-active="true"] span {
+  transform: translateX(16px);
+  background: #86efac;
+}
+
+@media (max-width: 1180px) {
+  .desktop-room-inspector {
+    grid-template-columns: 1fr;
+    max-height: min(64vh, 620px);
+  }
+}
+
+@media (max-width: 620px) {
+  .desktop-room-property-row,
+  .desktop-room-github-pill {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .desktop-room-property-row > :last-child,
+  .desktop-room-github-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .desktop-room-link-line,
+  .desktop-room-title-control {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .desktop-room-title-control {
+    flex-direction: column;
+  }
+
+  .desktop-room-link-line button,
+  .desktop-room-title-control button,
+  .desktop-room-github-pill button {
+    width: 100%;
+  }
+}
