@@ -153,11 +153,8 @@ import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRoomTabs } from './room/useRoomTabs'
+import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
-import type {
-  TaskLeaseActionPayload,
-  TaskReviewLeaseActionPayload,
-} from './room/types'
 import type {
   OutgoingMessageAttachment,
   RoomMessage,
@@ -294,6 +291,20 @@ const {
     syncViewQuery('rooms', 'push')
   },
 })
+const {
+  handleAddTask,
+  handleTaskLeaseAction,
+  handleTaskReviewLeaseAction,
+  handleToggleStalePromptMute,
+  handleUpdateTask,
+} = useRoomTaskHandlers({
+  addTask,
+  updateTask,
+  updateTaskLease,
+  updateTaskReviewLease,
+  setTaskStalePromptMute,
+  toast,
+})
 
 function openRulesFromDrawer() {
   drawerOpen.value = false
@@ -313,70 +324,6 @@ async function handleSend(
   }
   toast.error(lastSendError.value || 'Message could not be sent.')
   return false
-}
-
-async function handleAddTask(title: string) {
-  await addTask(title)
-}
-
-async function handleUpdateTask(taskId: string, updates: { status: string }) {
-  const updated = await updateTask(taskId, updates as any)
-  if (!updated) {
-    toast.error('Task status could not be updated.')
-  }
-}
-
-async function handleTaskLeaseAction(payload: TaskLeaseActionPayload) {
-  try {
-    const updated = await updateTaskLease(payload.taskId, {
-      action: payload.action,
-      lease_id: payload.lease_id ?? null,
-      target_actor_key: payload.target_actor_key ?? null,
-      target_actor_instance_id: payload.target_actor_instance_id ?? null,
-      target_agent_session_id: payload.target_agent_session_id ?? null,
-      reason: payload.reason ?? null,
-    })
-    if (!updated) {
-      toast.error('Task lease could not be updated.')
-    }
-  } catch {
-    toast.error('Task lease could not be updated.')
-  } finally {
-    payload.onSettled?.()
-  }
-}
-
-async function handleTaskReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
-  try {
-    const updated = await updateTaskReviewLease(payload.taskId, {
-      action: payload.action,
-      lease_id: payload.lease_id ?? null,
-      target_actor_key: payload.target_actor_key ?? null,
-      target_actor_instance_id: payload.target_actor_instance_id ?? null,
-      target_agent_session_id: payload.target_agent_session_id ?? null,
-      reason: payload.reason ?? null,
-    })
-    if (!updated) {
-      toast.error('Task review authority could not be updated.')
-    }
-  } catch {
-    toast.error('Task review authority could not be updated.')
-  } finally {
-    payload.onSettled?.()
-  }
-}
-
-async function handleToggleStalePromptMute(payload: {
-  taskId: string
-  muted: boolean
-  promptTimestamp: string
-}) {
-  const updated = await setTaskStalePromptMute(payload.taskId, payload.muted, {
-    promptTimestamp: payload.promptTimestamp,
-  })
-  if (!updated) {
-    toast.error('Stale task reminder preference could not be updated.')
-  }
 }
 
 async function handleRename() {
