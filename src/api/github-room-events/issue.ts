@@ -1,16 +1,22 @@
 import type { GitHubWebhookPayload } from "../github-app.js";
-import {
-  buildDeliveryScopedKey,
-  toRepoIssueRef,
-} from "./helpers.js";
-import {
-  SUPPORTED_ISSUE_ACTIONS,
-  SUPPORTED_ISSUE_COMMENT_ACTIONS,
-} from "./supported-actions.js";
+import type { RepoIssueRef } from "../repo-workflow.js";
+import { buildDeliveryScopedKey } from "./helpers.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
 } from "./types.js";
+
+const SUPPORTED_ISSUE_ACTIONS = new Set(["opened", "reopened", "closed"]);
+const SUPPORTED_ISSUE_COMMENT_ACTIONS = new Set(["created"]);
+
+function toRepoIssueRef(payload: NonNullable<GitHubWebhookPayload["issue"]>): RepoIssueRef {
+  return {
+    number: payload.number,
+    title: payload.title,
+    url: payload.html_url,
+    isPullRequest: Boolean(payload.pull_request),
+  };
+}
 
 export function materializeIssueEvent(
   payload: GitHubWebhookPayload,
@@ -20,15 +26,11 @@ export function materializeIssueEvent(
   repoIdentity: string,
   base: GitHubRepoEventBase,
 ): MaterializedGitHubRoomEvent | null {
-  if (!SUPPORTED_ISSUE_ACTIONS.has(action)) {
+  if (!SUPPORTED_ISSUE_ACTIONS.has(action) || !payload.issue) {
     return null;
   }
 
   const issue = toRepoIssueRef(payload.issue);
-  if (!issue) {
-    return null;
-  }
-
   return {
     event_type: "issue",
     action,
@@ -61,15 +63,11 @@ export function materializeIssueCommentEvent(
   repoIdentity: string,
   base: GitHubRepoEventBase,
 ): MaterializedGitHubRoomEvent | null {
-  if (!SUPPORTED_ISSUE_COMMENT_ACTIONS.has(action)) {
+  if (!SUPPORTED_ISSUE_COMMENT_ACTIONS.has(action) || !payload.issue || !payload.comment) {
     return null;
   }
 
   const issue = toRepoIssueRef(payload.issue);
-  if (!issue || !payload.comment) {
-    return null;
-  }
-
   return {
     event_type: "issue_comment",
     action,

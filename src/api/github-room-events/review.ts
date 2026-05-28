@@ -1,13 +1,12 @@
 import type { GitHubWebhookPayload } from "../github-app.js";
-import {
-  buildDeliveryScopedKey,
-  toRepoPullRequestRef,
-} from "./helpers.js";
-import { SUPPORTED_PULL_REQUEST_REVIEW_ACTIONS } from "./supported-actions.js";
+import { toGitHubRepoPullRequestRef } from "../github-pull-request-ref.js";
+import { buildDeliveryScopedKey } from "./helpers.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
 } from "./types.js";
+
+const SUPPORTED_PULL_REQUEST_REVIEW_ACTIONS = new Set(["submitted", "dismissed"]);
 
 export function materializePullRequestReviewEvent(
   payload: GitHubWebhookPayload,
@@ -17,15 +16,15 @@ export function materializePullRequestReviewEvent(
   repoIdentity: string,
   base: GitHubRepoEventBase,
 ): MaterializedGitHubRoomEvent | null {
-  if (!SUPPORTED_PULL_REQUEST_REVIEW_ACTIONS.has(action)) {
+  if (
+    !SUPPORTED_PULL_REQUEST_REVIEW_ACTIONS.has(action) ||
+    !payload.pull_request ||
+    !payload.review
+  ) {
     return null;
   }
 
-  const pullRequest = toRepoPullRequestRef(payload.pull_request);
-  if (!pullRequest || !payload.review) {
-    return null;
-  }
-
+  const pullRequest = toGitHubRepoPullRequestRef(payload.pull_request);
   const reviewState = action === "dismissed" ? "dismissed" : payload.review.state;
   const reviewActorLogin = payload.review.user?.login ?? actorLogin ?? null;
 

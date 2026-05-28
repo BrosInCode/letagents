@@ -1,14 +1,33 @@
 import type { GitHubWebhookPayload } from "../github-app.js";
 import {
   buildDeliveryScopedKey,
-  getPreviousRepositoryFullName,
   toGitHubId,
 } from "./helpers.js";
-import { SUPPORTED_REPOSITORY_ACTIONS } from "./supported-actions.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
 } from "./types.js";
+
+const SUPPORTED_REPOSITORY_ACTIONS = new Set(["renamed", "transferred"]);
+
+function getPreviousRepositoryFullName(
+  payload: GitHubWebhookPayload,
+  action: string,
+  repository: NonNullable<GitHubWebhookPayload["repository"]>,
+): string | null {
+  if (action === "renamed" && payload.changes?.repository?.name?.from) {
+    const ownerLogin = repository.owner?.login
+      ?? repository.full_name.split("/", 1)[0]
+      ?? "";
+    return `${ownerLogin}/${payload.changes.repository.name.from}`;
+  }
+
+  if (action === "transferred" && payload.changes?.owner?.from?.login) {
+    return `${payload.changes.owner.from.login}/${repository.name}`;
+  }
+
+  return null;
+}
 
 export function materializeRepositoryEvent(
   payload: GitHubWebhookPayload,
@@ -22,7 +41,7 @@ export function materializeRepositoryEvent(
     return null;
   }
 
-  const oldFullName = getPreviousRepositoryFullName(payload);
+  const oldFullName = getPreviousRepositoryFullName(payload, action, payload.repository);
   if (!oldFullName) {
     return null;
   }

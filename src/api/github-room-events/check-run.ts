@@ -1,10 +1,11 @@
 import type { GitHubWebhookPayload } from "../github-app.js";
 import { buildDeliveryScopedKey } from "./helpers.js";
-import { SUPPORTED_CHECK_RUN_ACTIONS } from "./supported-actions.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
 } from "./types.js";
+
+const SUPPORTED_CHECK_RUN_ACTIONS = new Set(["completed"]);
 
 export function materializeCheckRunEvent(
   payload: GitHubWebhookPayload,
