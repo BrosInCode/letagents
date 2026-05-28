@@ -1,115 +1,47 @@
 <template>
   <section class="desktop-room-shell" :data-liquid-glass="liquidGlassEnabled" data-testid="desktop-room-shell">
-    <header class="desktop-room-header" data-testid="desktop-room-header">
-      <div class="desktop-room-heading">
-        <h3>{{ room.displayName }}</h3>
-        <p class="desktop-room-subtitle">
-          {{ room.kind === "focus" ? "A focused thread linked back to the main room." : "The main place for conversation, tasks, and coordination." }}
-        </p>
-      </div>
+    <DesktopRoomHeader
+      :room="room"
+      :tabs="tabs"
+      :active-tab="activeTab"
+      :search-open="searchOpen"
+      :action-panel-open="actionPanelOpen"
+      @toggle-search="toggleSearch"
+      @toggle-action-panel="actionPanelOpen = !actionPanelOpen"
+      @select-tab="selectTab"
+    />
 
-      <div class="desktop-room-header-actions">
-        <div class="desktop-room-tools" data-testid="desktop-room-tools">
-          <button
-            class="desktop-room-tool"
-            type="button"
-            :data-active="searchOpen"
-            data-testid="desktop-room-search-toggle"
-            @click="toggleSearch"
-          >
-            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-            </svg>
-            Find
-          </button>
-          <button
-            class="desktop-room-tool"
-            type="button"
-            :data-active="actionPanelOpen"
-            data-testid="desktop-room-actions-toggle"
-            @click="actionPanelOpen = !actionPanelOpen"
-          >
-            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-            </svg>
-            Settings
-          </button>
-        </div>
-
-        <nav class="desktop-room-tabs" role="tablist" aria-label="Room navigation" data-testid="desktop-room-tabs">
-          <button
-            v-for="tab in tabs"
-            :key="tab.id"
-            class="desktop-room-tab"
-            :data-active="activeTab === tab.id"
-            :data-testid="`desktop-room-tab-${tab.id}`"
-            role="tab"
-            :aria-selected="activeTab === tab.id"
-            type="button"
-            @click="selectTab(tab.id)"
-          >
-            <span>{{ tab.label }}</span>
-            <small v-if="tab.count !== null">{{ tab.count }}</small>
-          </button>
-        </nav>
-
-        <div class="desktop-room-badges">
-          <span v-if="room.code" class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
-          <span class="desktop-room-badge" data-testid="desktop-room-role">{{ room.role }}</span>
-        </div>
-      </div>
-    </header>
-
-    <div v-if="actionPanelOpen || searchOpen" class="desktop-room-control-rail" data-testid="desktop-room-control-rail">
-      <DesktopRoomActionPanel
-        :open="actionPanelOpen"
-        :room="room"
-        :room-url="roomUrl"
-        :copied="roomLinkCopied"
-        :sound-enabled="soundEnabled"
-        :notifications-enabled="notificationsEnabled"
-        :notification-permission="notificationPermission"
-        :liquid-glass-enabled="liquidGlassEnabled"
-        :rename-busy="renameBusy"
-        :rename-error="renameError"
-        :github-status="githubStatus"
-        :github-loading="githubLoading"
-        :github-busy="githubBusy"
-        :github-error="githubError"
-        @copy-room-link="copyRoomLink"
-        @open-rules="openRules"
-        @toggle-sound="toggleSound"
-        @toggle-notifications="toggleNotifications"
-        @toggle-liquid-glass="toggleLiquidGlass"
-        @rename-room="renameRoom"
-        @refresh-github="refreshGitHubIntegration"
-        @install-github="installGitHubIntegration"
-        @export-chat="exportChat"
-      />
-
-      <div v-if="searchOpen" class="desktop-room-search-strip" data-testid="desktop-room-search-strip">
-        <label>
-          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-          </svg>
-          <input
-            ref="searchInputElement"
-            v-model="searchQuery"
-            type="search"
-            placeholder="Search messages"
-            data-testid="desktop-room-search-input"
-            @keydown.enter.prevent="moveSearch(1)"
-            @keydown.escape.prevent="closeSearch"
-          >
-        </label>
-        <span>{{ searchSummary }}</span>
-        <div>
-          <button type="button" :disabled="!searchResults.length" @click="moveSearch(-1)">Previous</button>
-          <button type="button" :disabled="!searchResults.length" @click="moveSearch(1)">Next</button>
-          <button type="button" @click="closeSearch">Close</button>
-        </div>
-      </div>
-    </div>
+    <DesktopRoomControlRail
+      v-model:search-query="searchQuery"
+      :action-panel-open="actionPanelOpen"
+      :search-open="searchOpen"
+      :room="room"
+      :room-url="roomUrl"
+      :copied="roomLinkCopied"
+      :sound-enabled="soundEnabled"
+      :notifications-enabled="notificationsEnabled"
+      :notification-permission="notificationPermission"
+      :liquid-glass-enabled="liquidGlassEnabled"
+      :rename-busy="renameBusy"
+      :rename-error="renameError"
+      :github-status="githubStatus"
+      :github-loading="githubLoading"
+      :github-busy="githubBusy"
+      :github-error="githubError"
+      :search-summary="searchSummary"
+      :search-results-count="searchResults.length"
+      @copy-room-link="copyRoomLink"
+      @open-rules="openRules"
+      @toggle-sound="toggleSound"
+      @toggle-notifications="toggleNotifications"
+      @toggle-liquid-glass="toggleLiquidGlass"
+      @rename-room="renameRoom"
+      @refresh-github="refreshGitHubIntegration"
+      @install-github="installGitHubIntegration"
+      @export-chat="exportChat"
+      @move-search="moveSearch"
+      @close-search="closeSearch"
+    />
 
     <Transition name="room-panel" mode="out-in">
       <RoomChatView
@@ -192,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -205,7 +137,6 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
-import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
@@ -214,10 +145,25 @@ import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
-import { displayNameFromActor } from "../../../domain/agents";
-import { timestampValue } from "../../../domain/time";
-
-type RoomTabId = "chat" | "board" | "activity" | "rooms" | "rent";
+import { latestReasoningSessionForTarget } from "../../../domain/reasoning";
+import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
+import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
+import {
+  compareRoomMessages,
+  encodeRoomPathIdentifier,
+  mergeRoomMessages,
+} from "./room-shell/messages";
+import {
+  readLiquidGlassEnabled,
+  readNotificationPermission,
+  readNotificationsEnabled,
+  readSoundEnabled,
+} from "./room-shell/preferences";
+import {
+  buildAgentFallbackReasoningSession,
+  sanitizeFallbackId,
+} from "./room-shell/reasoningFallback";
+import type { RoomTab, RoomTabId } from "./room-shell/types";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -244,7 +190,6 @@ const rulesOpen = ref(false);
 const searchOpen = ref(false);
 const searchQuery = ref("");
 const activeSearchIndex = ref(0);
-const searchInputElement = ref<HTMLInputElement | null>(null);
 const roomLinkCopied = ref(false);
 const renameBusy = ref(false);
 const renameError = ref<string | null>(null);
@@ -273,7 +218,7 @@ const emit = defineEmits<{
   "refresh-room": [];
 }>();
 
-const tabs = computed<Array<{ id: RoomTabId; label: string; count: number | null }>>(() => [
+const tabs = computed<RoomTab[]>(() => [
   { id: "chat", label: "Chat", count: visibleMessages.value.length },
   { id: "board", label: "Board", count: props.tasks.length },
   { id: "activity", label: "Activity", count: visibleParticipantCount.value + props.participantHiddenCount },
@@ -307,11 +252,17 @@ const selectedReasoningSession = computed(() => {
   const directSession = props.reasoningSessions.find((session) => session.id === selectedReasoningSessionId.value);
   if (directSession) return directSession;
   const target = selectedReasoningFallbackTarget.value;
-  return target ? latestReasoningSessionForTarget(target) : null;
+  return target ? latestReasoningSessionForTarget(target, props.reasoningSessions) : null;
 });
 const selectedReasoningSessionForInspector = computed(() =>
   selectedReasoningSession.value
-  || (selectedReasoningFallbackTarget.value ? buildAgentFallbackReasoningSession(selectedReasoningFallbackTarget.value) : null)
+  || (selectedReasoningFallbackTarget.value
+    ? buildAgentFallbackReasoningSession(
+        selectedReasoningFallbackTarget.value,
+        props.room.identifier,
+        roomMessagesForAgentInsight.value,
+      )
+    : null)
   || selectedReasoningSessionCache.value
 );
 const searchSummary = computed(() => {
@@ -385,121 +336,17 @@ function openAgentReasoningFallback(target: AgentModalTarget): void {
   const actorLabel = target.actorLabel || target.sender || target.displayName;
   selectedReasoningSessionId.value = `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`;
   selectedReasoningFallbackTarget.value = target;
-  selectedReasoningSessionCache.value = buildAgentFallbackReasoningSession(target);
+  selectedReasoningSessionCache.value = buildAgentFallbackReasoningSession(
+    target,
+    props.room.identifier,
+    roomMessagesForAgentInsight.value,
+  );
 }
 
 function closeReasoningInspector(): void {
   selectedReasoningSessionId.value = null;
   selectedReasoningSessionCache.value = null;
   selectedReasoningFallbackTarget.value = null;
-}
-
-function latestReasoningSessionForTarget(target: AgentModalTarget): DesktopReasoningSession | null {
-  const keys = agentTargetKeys(target);
-  if (!keys.length) return null;
-  return props.reasoningSessions
-    .filter((session) => reasoningSessionKeys(session).some((key) => keys.includes(key)))
-    .sort((left, right) => timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt))[0] || null;
-}
-
-function buildAgentFallbackReasoningSession(target: AgentModalTarget): DesktopReasoningSession {
-  const actorLabel = target.actorLabel || target.sender || target.displayName;
-  const latestMessage = latestMessageForAgent(target);
-  const latestText = latestMessage ? stripStatusPrefix(latestMessage.text) : "";
-  const timestamp = latestMessage?.timestamp || new Date().toISOString();
-  const status = inferAgentFallbackStatus(latestText);
-  const summary = latestText
-    ? `No live reasoning stream yet. Latest room activity: ${latestText}`
-    : "No live reasoning stream yet.";
-  const checking = latestText
-    ? "No reasoning stream has been published yet; showing the agent's latest room activity while waiting for Codex runtime events."
-    : "Waiting for Codex runtime events or reasoning updates.";
-  const nextAction = latestText
-    ? "This view will switch to live reasoning when the agent publishes a stream event or reasoning update."
-    : "This view will update when the agent publishes its first reasoning update.";
-
-  return {
-    id: `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`,
-    roomId: props.room.identifier,
-    actorLabel,
-    agentKey: null,
-    taskId: null,
-    title: "Waiting for live reasoning",
-    status,
-    summary,
-    latestPayload: {
-      summary,
-      goal: `${target.displayName} reasoning`,
-      checking,
-      next_action: nextAction,
-      status,
-    },
-    goal: `${target.displayName} reasoning`,
-    checking,
-    hypothesis: null,
-    blocker: null,
-    nextAction,
-    milestone: null,
-    confidence: null,
-    closedAt: null,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-  };
-}
-
-function latestMessageForAgent(target: AgentModalTarget): DesktopRoomMessage | null {
-  const keys = agentTargetKeys(target);
-  if (!keys.length) return null;
-  return [...roomMessagesForAgentInsight.value]
-    .reverse()
-    .find((message) => message.source === "agent" && messageKeys(message).some((key) => keys.includes(key))) || null;
-}
-
-function agentTargetKeys(target: AgentModalTarget): string[] {
-  return [
-    target.actorLabel,
-    target.sender,
-    target.displayName,
-    displayNameFromActor(target.actorLabel),
-  ].map(normalizeAgentIdentity).filter(Boolean);
-}
-
-function reasoningSessionKeys(session: DesktopReasoningSession): string[] {
-  return [
-    session.actorLabel,
-    displayNameFromActor(session.actorLabel),
-    session.agentKey,
-  ].map(normalizeAgentIdentity).filter(Boolean);
-}
-
-function messageKeys(message: DesktopRoomMessage): string[] {
-  return [
-    message.sender,
-    message.actorLabel,
-    message.agentIdentity?.actorLabel,
-    message.agentIdentity?.displayName,
-    displayNameFromActor(message.sender),
-  ].map(normalizeAgentIdentity).filter(Boolean);
-}
-
-function normalizeAgentIdentity(value: string | null | undefined): string {
-  return String(value || "").trim().toLowerCase();
-}
-
-function stripStatusPrefix(value: string): string {
-  return value.replace(/^\[status\]\s*/i, "").trim();
-}
-
-function inferAgentFallbackStatus(value: string): "idle" | "working" | "reviewing" | "blocked" {
-  const text = value.toLowerCase();
-  if (text.includes("blocked")) return "blocked";
-  if (text.includes("review")) return "reviewing";
-  if (/(working|debugging|checking|inspecting|running|testing|building|implementing)/i.test(text)) return "working";
-  return "idle";
-}
-
-function sanitizeFallbackId(value: string): string {
-  return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "agent";
 }
 
 async function sendRoomMessage(text: string, replyTo: string | null = null, attachments: Array<{ upload_id: string }> = []): Promise<void> {
@@ -523,9 +370,6 @@ async function sendRoomMessage(text: string, replyTo: string | null = null, atta
 
 function toggleSearch(): void {
   searchOpen.value = !searchOpen.value;
-  if (searchOpen.value) {
-    void nextTick(() => searchInputElement.value?.focus());
-  }
 }
 
 function closeSearch(): void {
@@ -660,42 +504,6 @@ function desktopBridgeUpgradeMessage(): string {
   return "Restart LetAgents Desktop to load the latest room tools.";
 }
 
-function mergeRoomMessages(current: readonly DesktopRoomMessage[], incoming: readonly DesktopRoomMessage[]): DesktopRoomMessage[] {
-  const byId = new Map<string, DesktopRoomMessage>();
-  for (const message of current) {
-    if (!isHiddenChatMessage(message)) {
-      byId.set(message.id, message);
-    }
-  }
-  for (const message of incoming) {
-    if (!isHiddenChatMessage(message)) {
-      byId.set(message.id, message);
-    }
-  }
-  return [...byId.values()].sort(compareRoomMessages);
-}
-
-function isHiddenChatMessage(message: DesktopRoomMessage): boolean {
-  if (message.agentPromptKind === "auto" && !message.text.trim()) return true;
-  return message.source === "agent" && /^\[status\]\s*/i.test(message.text || "");
-}
-
-function compareRoomMessages(left: DesktopRoomMessage, right: DesktopRoomMessage): number {
-  const leftNumber = messageNumber(left.id);
-  const rightNumber = messageNumber(right.id);
-  if (leftNumber && rightNumber && leftNumber !== rightNumber) return leftNumber - rightNumber;
-  const leftTime = Date.parse(left.timestamp || "");
-  const rightTime = Date.parse(right.timestamp || "");
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
-  if (leftNumber && !rightNumber) return -1;
-  if (!leftNumber && rightNumber) return 1;
-  return left.id.localeCompare(right.id);
-}
-
-function messageNumber(messageId: string): number {
-  return Number(/^msg_(\d+)$/.exec(messageId)?.[1] || 0);
-}
-
 async function discardAttachment(uploadId: string): Promise<void> {
   await window.letagentsDesktop.room.discardAttachment(props.room.identifier, uploadId);
 }
@@ -718,42 +526,6 @@ async function loadOlderMessages(): Promise<void> {
   } finally {
     loadingOlderMessages.value = false;
   }
-}
-
-function encodeRoomPathIdentifier(identifier: string): string {
-  return String(identifier)
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-}
-
-function readSoundEnabled(): boolean {
-  try {
-    return window.localStorage.getItem("letagents-desktop:sound") !== "off";
-  } catch {
-    return true;
-  }
-}
-
-function readNotificationsEnabled(): boolean {
-  try {
-    return window.localStorage.getItem("letagents-desktop:notifications") === "on";
-  } catch {
-    return false;
-  }
-}
-
-function readLiquidGlassEnabled(): boolean {
-  try {
-    return window.localStorage.getItem("letagents-desktop:liquid-glass") !== "off";
-  } catch {
-    return true;
-  }
-}
-
-function readNotificationPermission(): NotificationPermission | "unsupported" {
-  if (typeof Notification === "undefined") return "unsupported";
-  return Notification.permission;
 }
 
 function playRoomSound(kind: "send" | "notification"): void {

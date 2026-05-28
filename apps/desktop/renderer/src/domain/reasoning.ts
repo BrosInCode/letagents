@@ -1,4 +1,44 @@
 import type { DesktopReasoningSession } from "../../../electron/ipc-types";
+import { displayNameFromActor, normalizeAgentKey } from "./agents";
+import { timestampValue } from "./time";
+
+export interface ReasoningAgentTarget {
+  actorLabel: string | null;
+  displayName: string;
+  ideLabel?: string | null;
+  sender: string;
+}
+
+export function latestReasoningSessionForTarget(
+  target: ReasoningAgentTarget,
+  sessions: readonly DesktopReasoningSession[],
+): DesktopReasoningSession | null {
+  const keys = reasoningAgentTargetKeys(target);
+  if (!keys.length) return null;
+  return sessions
+    .filter((session) => reasoningSessionAgentKeys(session).some((key) => keys.includes(key)))
+    .sort((left, right) =>
+      timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt)
+      || String(right.id).localeCompare(String(left.id))
+    )[0] || null;
+}
+
+export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[] {
+  return [
+    target.actorLabel,
+    target.sender,
+    target.displayName,
+    actorDisplayNameKey(target.actorLabel),
+  ].map(normalizeAgentKey).filter(Boolean);
+}
+
+export function reasoningSessionAgentKeys(session: DesktopReasoningSession): string[] {
+  return [
+    session.actorLabel,
+    actorDisplayNameKey(session.actorLabel),
+    session.agentKey,
+  ].map(normalizeAgentKey).filter(Boolean);
+}
 
 export function reasoningTitle(session: DesktopReasoningSession): string {
   return session.title || session.latestPayload?.goal || session.summary || session.goal || "Thinking";
@@ -42,4 +82,8 @@ export function reasoningStatus(session: DesktopReasoningSession): string {
   return status
     ? status.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase())
     : "Active";
+}
+
+function actorDisplayNameKey(actorLabel: string | null | undefined): string | null {
+  return actorLabel ? displayNameFromActor(actorLabel) : null;
 }
