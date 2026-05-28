@@ -1,82 +1,62 @@
 import { randomUUID } from "crypto";
-import { spawn } from "child_process";
-import { createServer } from "net";
 import { resolve } from "path";
+
 import {
   getCurrentCodexLiveSession,
-  getStoredAuth,
   getStoredCodexLiveSession,
-  readLocalState,
   saveCodexLiveSession,
   updateCodexLiveSession,
   type CodexLiveSessionState,
   type StoredAgentSessionState,
 } from "./local-state.js";
-import { encodeRoomIdPath, type JoinedVia } from "./room-id.js";
-import type { AgentPresenceStatus } from "../shared/agent-presence.js";
+import type { JoinedVia } from "./room-id.js";
+import {
+  isServerReady,
+  launchAppServer,
+  resolveCodexServerUrl,
+  terminateSpawnedProcess,
+  waitForServer,
+} from "./codex-session/app-server.js";
+import { createCodexRuntimeBridgeController } from "./codex-session/runtime-bridge.js";
+import {
+  RpcClient,
+  type ThreadReadResult,
+  type ThreadStartResult,
+  type TurnStartResult,
+} from "./codex-session/rpc-client.js";
+import {
+  deriveCodexLiveSessionStatus,
+  extractThreadStatus,
+  extractTurnStatus,
+  isLikelyMaterializingError,
+  isTerminalCodexSessionStatus,
+  parseStartupObservationMs,
+  sleep,
+  STARTUP_POLL_INTERVAL_MS,
+  summarizeItems,
+} from "./codex-session/session-status.js";
+import {
+  buildStartPrompt,
+  DEFAULT_STOP_PHRASE,
+  formatDeadline,
+  makeToken,
+} from "./codex-session/start-prompt.js";
+import {
+  isCodexAgentSessionMarker,
+  summarizeCodexReasoningNotificationForTest,
+  summarizeCodexRuntimeNotificationForTest,
+  summarizeCodexRuntimeSnapshotForTest,
+} from "./codex-session/runtime-summary.js";
 
-const DEFAULT_SERVER_HOST = "127.0.0.1";
-const DEFAULT_STOP_PHRASE = "/stop-codex-room";
-const DEFAULT_TIMEOUT_MS = 15_000;
-const DEFAULT_STARTUP_OBSERVATION_MS = 8_000;
-const STARTUP_POLL_INTERVAL_MS = 500;
-const SESSION_MONITOR_INTERVAL_MS = 30_000;
-const CODEX_RUNTIME_STREAM_SOURCE = "codex_app_server";
-const CODEX_RUNTIME_STREAM_THROTTLE_MS = 750;
-const CODEX_RUNTIME_STREAM_REPEAT_MS = 30_000;
-const CODEX_RUNTIME_STREAM_SNAPSHOT_INTERVAL_MS = 2_000;
-const CODEX_RUNTIME_STREAM_BIND_RETRY_MS = 1_000;
-const CODEX_RUNTIME_STREAM_BIND_RETRY_ATTEMPTS = 30;
-
-function getWebSocketCtor(): typeof WebSocket {
-  const ctor = globalThis.WebSocket;
-  if (!ctor) {
-    throw new Error("Codex live sessions require a Node runtime with global WebSocket support (Node >= 22).");
-  }
-  return ctor;
-}
-
-interface RpcResultEnvelope {
-  id?: number;
-  method?: string;
-  params?: unknown;
-  error?: { message?: string } | unknown;
-  result?: unknown;
-}
-
-interface RpcNotification {
-  method: string;
-  params?: unknown;
-}
-
-interface ThreadStartResult {
-  thread?: { id?: string };
-}
-
-interface TurnStartResult {
-  turn?: { id?: string };
-}
-
-interface ThreadReadTurnItem {
-  type?: string;
-  text?: string;
-  phase?: string;
-  content?: Array<{ text?: string }>;
-}
-
-interface ThreadReadTurn {
-  id?: string;
-  status?: string | { status?: string };
-  items?: ThreadReadTurnItem[];
-  output?: ThreadReadTurnItem[];
-}
-
-interface ThreadReadResult {
-  thread?: {
-    status?: { type?: string } | string;
-    turns?: ThreadReadTurn[];
-  };
-}
+export {
+  deriveCodexLiveSessionStatus,
+} from "./codex-session/session-status.js";
+export {
+  isCodexAgentSessionMarker,
+  summarizeCodexReasoningNotificationForTest,
+  summarizeCodexRuntimeNotificationForTest,
+  summarizeCodexRuntimeSnapshotForTest,
+} from "./codex-session/runtime-summary.js";
 
 export interface LocalCodexSessionStatus {
   session: CodexLiveSessionState;
@@ -104,38 +84,16 @@ export interface StartLocalCodexSessionResult {
   reused: boolean;
 }
 
+const SESSION_MONITOR_INTERVAL_MS = 30_000;
+
 /** Track spawned server PIDs for cleanup on process exit. */
 const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
-const codexRuntimeBridgeClients = new Map<string, RpcClient>();
-const codexRuntimeBridgeSnapshotTimers = new Map<string, ReturnType<typeof setInterval>>();
-const codexRuntimeBridgeBindTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const codexRuntimeBridgeLastPost = new Map<string, { signature: string; postedAt: number }>();
-const codexReasoningStreams = new Map<string, Map<number, string>>();
 
-type CodexRuntimeReasoningSummary = {
-  summary: string;
-  status: AgentPresenceStatus;
-  checking: string;
-  next_action: string;
-};
-
-function terminateSpawnedProcess(pid: number): void {
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, "SIGTERM");
-      return;
-    }
-  } catch {
-    // Fall back to the direct process below.
-  }
-
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    // Already gone.
-  }
-}
+const runtimeBridge = createCodexRuntimeBridgeController({
+  inspectSession: (sessionId) => inspectLocalCodexSession(sessionId),
+  isTerminalStatus: isTerminalCodexSessionStatus,
+});
 
 let cleanupRegistered = false;
 function registerProcessCleanup(): void {
@@ -148,20 +106,12 @@ function registerProcessCleanup(): void {
     }
     sessionMonitorTimers.clear();
 
-    for (const client of codexRuntimeBridgeClients.values()) {
-      client.close();
-    }
-    codexRuntimeBridgeClients.clear();
+    runtimeBridge.cleanup();
 
     for (const pid of spawnedServerPids) {
       terminateSpawnedProcess(pid);
     }
     spawnedServerPids.clear();
-
-    for (const timer of codexRuntimeBridgeBindTimers.values()) {
-      clearTimeout(timer);
-    }
-    codexRuntimeBridgeBindTimers.clear();
   };
 
   process.on("exit", cleanup);
@@ -169,875 +119,17 @@ function registerProcessCleanup(): void {
   process.on("SIGTERM", () => { cleanup(); process.exit(143); });
 }
 
-class RpcClient {
-  private readonly serverUrl: string;
-  private readonly onNotification?: (notification: RpcNotification) => void;
-  private ws: WebSocket | null = null;
-  private nextId = 1;
-  private readonly pending = new Map<
-    number,
-    {
-      resolve: (value: unknown) => void;
-      reject: (error: Error) => void;
-    }
-  >();
-
-  constructor(serverUrl: string, onNotification?: (notification: RpcNotification) => void) {
-    this.serverUrl = serverUrl;
-    this.onNotification = onNotification;
-  }
-
-  async connect(): Promise<void> {
-    const WS = getWebSocketCtor();
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WS(this.serverUrl);
-      this.ws = ws;
-
-      ws.onopen = () => resolve();
-      ws.onerror = () => reject(new Error(`WebSocket error connecting to ${this.serverUrl}`));
-      ws.onmessage = (event) => this.handleMessage(String(event.data));
-      ws.onclose = () => {
-        for (const pending of this.pending.values()) {
-          pending.reject(new Error("WebSocket closed"));
-        }
-        this.pending.clear();
-      };
-    });
-
-    await this.request("initialize", {
-      clientInfo: { name: "letagents-local-codex-session", version: "0.1.0" },
-      capabilities: { experimentalApi: true },
-    });
-    this.ws?.send(JSON.stringify({ method: "initialized" }));
-  }
-
-  async request<T>(method: string, params?: unknown): Promise<T> {
-    const id = this.nextId++;
-    const payload: Record<string, unknown> = { jsonrpc: "2.0", id, method };
-    if (params !== undefined) {
-      payload.params = params;
-    }
-
-    return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: (value) => resolve(value as T),
-        reject,
-      });
-      this.ws?.send(JSON.stringify(payload));
-    });
-  }
-
-  close(): void {
-    if (this.ws?.readyState === getWebSocketCtor().OPEN) {
-      this.ws.close();
-    }
-  }
-
-  private handleMessage(raw: string): void {
-    let message: RpcResultEnvelope;
-
-    try {
-      message = JSON.parse(raw) as RpcResultEnvelope;
-    } catch {
-      return;
-    }
-
-    if (message.id === undefined) {
-      if (typeof message.method === "string") {
-        this.onNotification?.({ method: message.method, params: message.params });
-      }
-      return;
-    }
-
-    const pending = this.pending.get(message.id);
-    if (!pending) {
-      return;
-    }
-
-    this.pending.delete(message.id);
-    if (message.error) {
-      pending.reject(
-        new Error(
-          typeof message.error === "object" && message.error && "message" in message.error
-            ? String(message.error.message || JSON.stringify(message.error))
-            : JSON.stringify(message.error)
-        )
-      );
-      return;
-    }
-
-    pending.resolve(message.result);
-  }
-}
-
-function readyUrlFromServerUrl(serverUrl: string): string {
-  const url = new URL(serverUrl);
-  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
-  url.pathname = "/readyz";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
-
-async function isServerReady(serverUrl: string): Promise<boolean> {
-  try {
-    const response = await fetch(readyUrlFromServerUrl(serverUrl), {
-      signal: AbortSignal.timeout(1_000),
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForServer(serverUrl: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<boolean> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await isServerReady(serverUrl)) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  return false;
-}
-
-async function allocateLoopbackServerUrl(): Promise<string> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, DEFAULT_SERVER_HOST, () => resolve());
-  });
-
-  const address = server.address();
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    });
-  });
-
-  if (!address || typeof address === "string") {
-    throw new Error("Unable to allocate a loopback Codex app-server port.");
-  }
-
-  return `ws://${DEFAULT_SERVER_HOST}:${address.port}`;
-}
-
-async function resolveCodexServerUrl(explicitServerUrl?: string): Promise<string> {
-  if (explicitServerUrl) {
-    return explicitServerUrl;
-  }
-
-  const configuredServerUrl = process.env.LETAGENTS_CODEX_SERVER_URL?.trim();
-  if (configuredServerUrl) {
-    return configuredServerUrl;
-  }
-
-  return allocateLoopbackServerUrl();
-}
-
-function launchAppServer(serverUrl: string, codexBin: string): number | null {
-  const child = spawn(codexBin, ["app-server", "--listen", serverUrl], {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
-  return child.pid ?? null;
-}
-
-function makeToken(): string {
-  return `LOCAL_CODEX_ROOM_${randomUUID()}`;
-}
-
-function formatDeadline(minutes: number): { utc: string | null } {
-  if (minutes <= 0) {
-    return { utc: null };
-  }
-
-  const deadline = new Date(Date.now() + minutes * 60 * 1000);
-  return {
-    utc: deadline.toISOString().replace("T", " ").replace(".000Z", " UTC"),
-  };
-}
-
-function buildJoinInstruction(joinedVia: JoinedVia, roomIdentifier: string): string {
-  if (joinedVia === "join_code") {
-    return `Call the LetAgents MCP tool join_code with {"code":"${roomIdentifier}","session_mode":"current"}.`;
-  }
-
-  return `Call the LetAgents MCP tool join_room with {"name":"${roomIdentifier}","session_mode":"current"}.`;
-}
-
-function buildStartPrompt(input: {
-  room_identifier: string;
-  joined_via: JoinedVia;
-  cwd: string;
-  stop_phrase: string;
-  token: string;
-  deadline_utc: string | null;
-  max_minutes: number;
-}): string {
-  const deadlineInstruction =
-    input.max_minutes > 0 && input.deadline_utc
-      ? `Hard stop deadline: ${input.deadline_utc}. Stop when the stop phrase appears or when that deadline is reached, whichever comes first.`
-      : "There is no hard deadline. Stop only when the stop phrase appears or when you are interrupted.";
-
-  return [
-    "Run as a persistent local Codex worker for a LetAgents room.",
-    `Primary working directory: ${input.cwd}. Use this repository/worktree when the room asks for implementation or repo work.`,
-    deadlineInstruction,
-    "",
-    "Instructions:",
-    `1. ${buildJoinInstruction(input.joined_via, input.room_identifier)}`,
-    "2. Call register_agent_session with session_kind=\"worker\" and runtime=\"codex\". Keep the returned agent_session_id.",
-    "3. Pass that agent_session_id to wait_for_messages, send_message, post_status, and task tools whenever the tool accepts it.",
-    "4. Do not start another live session. Join the room inline in this worker only.",
-    "5. Read the room and task board before contributing so you have current context.",
-    "6. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
-    "7. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive.",
-    "8. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
-    "9. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
-    `10. Stop immediately if a browser/user room message text exactly equals: ${input.stop_phrase}`,
-    `11. When stopping, reply in this thread with exactly: ${input.token}_DONE`,
-    "",
-    "Constraints:",
-    "- Do not narrate hidden chain-of-thought.",
-    "- Do not spam the room with keepalive messages.",
-    "- Stay in the room continuously until stopped.",
-  ].join("\n");
-}
-
-function extractTurnStatus(turn: ThreadReadTurn | null | undefined): string | null {
-  if (!turn) {
-    return null;
-  }
-
-  if (typeof turn.status === "string") {
-    return turn.status;
-  }
-
-  if (turn.status && typeof turn.status === "object" && "status" in turn.status) {
-    return typeof turn.status.status === "string" ? turn.status.status : null;
-  }
-
-  return null;
-}
-
-function extractThreadStatus(thread: ThreadReadResult["thread"] | undefined): string | null {
-  if (!thread?.status) {
-    return null;
-  }
-
-  if (typeof thread.status === "string") {
-    return thread.status;
-  }
-
-  return typeof thread.status.type === "string" ? thread.status.type : null;
-}
-
-function summarizeItems(items: ThreadReadTurnItem[] | undefined): Array<Record<string, unknown>> {
-  return (items ?? []).slice(-6).map((item) => {
-    if (item.type === "agentMessage") {
-      return { type: item.type, phase: item.phase, text: item.text ?? null };
-    }
-
-    if (item.type === "userMessage") {
-      return {
-        type: item.type,
-        text: (item.content ?? []).map((part) => part.text ?? "").join("\n"),
-      };
-    }
-
-    return { type: item.type ?? "unknown" };
-  });
-}
-
-export function deriveCodexLiveSessionStatus(
-  session: CodexLiveSessionState,
-  serverReachable: boolean,
-  threadStatus: string | null,
-  turnStatus: string | null
-): CodexLiveSessionState["status"] {
-  if (threadStatus === "systemError" || threadStatus === "error" || turnStatus === "failed") {
-    return "failed";
-  }
-
-  if (turnStatus === "completed") {
-    return "completed";
-  }
-
-  if (turnStatus === "interrupted") {
-    return "interrupted";
-  }
-
-  if (turnStatus === "inProgress" || threadStatus === "active") {
-    return "running";
-  }
-
-  if (!serverReachable) {
-    return session.status === "completed" || session.status === "interrupted"
-      ? session.status
-      : "unknown";
-  }
-
-  if (session.status === "starting") {
-    return "starting";
-  }
-
-  return session.status;
-}
-
-function isTerminalCodexSessionStatus(status: CodexLiveSessionState["status"]): boolean {
-  return status === "completed" || status === "interrupted" || status === "failed";
-}
-
-function parseStartupObservationMs(): number {
-  const parsed = Number.parseInt(process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS ?? "", 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return DEFAULT_STARTUP_OBSERVATION_MS;
-  }
-
-  return parsed;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function apiUrl(): string {
-  return (process.env.LETAGENTS_API_URL || "http://localhost:3001").replace(/\/+$/, "");
-}
-
-function authorizationHeader(): string | null {
-  const token = process.env.LETAGENTS_TOKEN || getStoredAuth()?.token || "";
-  return token ? `Bearer ${token}` : null;
-}
-
-async function codexBridgeApiCall<T>(path: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(options?.headers as Record<string, string> | undefined),
-  };
-  const authorization = authorizationHeader();
-  if (authorization && !headers.Authorization) {
-    headers.Authorization = authorization;
-  }
-
-  const response = await fetch(`${apiUrl()}${path}`, {
-    ...options,
-    headers,
-  });
-  if (!response.ok) {
-    throw new Error(`LetAgents API ${response.status}: ${await response.text()}`);
-  }
-  return (await response.json()) as T;
-}
-
-function codexWorkerSessionsForRoom(roomId: string): StoredAgentSessionState[] {
-  const state = readLocalState();
-  return Object.values(state.agent_sessions ?? {}).filter((session) =>
-    session.room_id === roomId &&
-    session.session_kind === "worker" &&
-    isCodexAgentSessionMarker(session) &&
-    Boolean(session.session_id && session.session_token) &&
-    !session.ended_at
-  );
-}
-
-function codexWorkerSessionForLiveSession(session: CodexLiveSessionState): StoredAgentSessionState | null {
-  const state = readLocalState();
-  const candidates = codexWorkerSessionsForRoom(session.room_id);
-
-  if (session.agent_session_id) {
-    const bound = state.agent_sessions?.[session.agent_session_id] ?? null;
-    if (
-      bound &&
-      candidates.some((candidate) => candidate.session_id === bound.session_id)
-    ) {
-      return bound;
-    }
-  }
-
-  const startedAt = Date.parse(session.started_at);
-  const afterLiveSessionStart = candidates
-    .filter((candidate) => {
-      const createdAt = Date.parse(candidate.created_at);
-      return Number.isFinite(startedAt) && Number.isFinite(createdAt) && createdAt >= startedAt - 1000;
-    })
-    .sort((left, right) => left.created_at.localeCompare(right.created_at));
-  if (afterLiveSessionStart.length) {
-    return afterLiveSessionStart[0] ?? null;
-  }
-
-  const currentSessionId = state.current_agent_session_ids?.[session.room_id];
-  const current = currentSessionId ? state.agent_sessions?.[currentSessionId] ?? null : null;
-  if (current && candidates.some((candidate) => candidate.session_id === current.session_id)) {
-    return current;
-  }
-
-  return candidates.sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at))[0] ?? null;
-}
-
-export function isCodexAgentSessionMarker(session: {
-  runtime?: string | null;
-  ide_label?: string | null;
-  liveness_capability?: string | null;
-  tool_bridge_id?: string | null;
-}): boolean {
-  const runtime = String(session.runtime ?? "").trim().toLowerCase();
-  const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
-  const livenessCapability = String(session.liveness_capability ?? "").trim().toLowerCase();
-  const toolBridgeId = String(session.tool_bridge_id ?? "").trim().toLowerCase();
-
-  return runtime === "codex" ||
-    ideLabel === "codex" ||
-    livenessCapability.includes("codex") ||
-    /(^|:)codex(:|$)/.test(toolBridgeId);
-}
-
-function statusForCodexRuntimeMethod(method: string): AgentPresenceStatus {
-  if (/blocked|error|failed/i.test(method)) return "blocked";
-  if (/completed|finished|done|stopped|interrupted/i.test(method)) return "idle";
-  return "working";
-}
-
-function compactRuntimeParam(value: unknown): string | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  const item = typeof record.item === "object" && record.item
-    ? record.item as Record<string, unknown>
-    : record;
-  const type = typeof item.type === "string" ? item.type : null;
-  const name = typeof item.name === "string"
-    ? item.name
-    : typeof item.command === "string"
-      ? item.command
-      : null;
-  if (type && name) return `${type}: ${name}`;
-  return type || name;
-}
-
-function notificationRecord(notification: RpcNotification): Record<string, unknown> {
-  return notification.params && typeof notification.params === "object"
-    ? notification.params as Record<string, unknown>
-    : {};
-}
-
-function reasoningStreamKey(record: Record<string, unknown>): string | null {
-  const threadId = typeof record.threadId === "string" ? record.threadId : "";
-  const turnId = typeof record.turnId === "string" ? record.turnId : "";
-  const itemId = typeof record.itemId === "string"
-    ? record.itemId
-    : typeof (record.item as Record<string, unknown> | undefined)?.id === "string"
-      ? String((record.item as Record<string, unknown>).id)
-      : "";
-  return threadId && turnId && itemId ? `${threadId}:${turnId}:${itemId}` : null;
-}
-
-function ensureReasoningStream(key: string): Map<number, string> {
-  const existing = codexReasoningStreams.get(key);
-  if (existing) return existing;
-  const next = new Map<number, string>();
-  codexReasoningStreams.set(key, next);
-  return next;
-}
-
-function coerceReasoningSummaryParts(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((part) => {
-    if (typeof part === "string") return part;
-    if (part && typeof part === "object" && "text" in part) {
-      return String((part as { text?: unknown }).text ?? "");
-    }
-    return "";
-  }).map((part) => part.trim()).filter(Boolean);
-}
-
-function reasoningSummaryFromStream(stream: Map<number, string>): string {
-  return [...stream.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([, value]) => value.trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
-export function summarizeCodexReasoningNotificationForTest(
-  notification: RpcNotification
-): CodexRuntimeReasoningSummary | null {
-  const method = notification.method.trim();
-  if (!method.startsWith("item/reasoning/") && method !== "item/started" && method !== "item/completed") {
-    return null;
-  }
-
-  const record = notificationRecord(notification);
-  const item = record.item && typeof record.item === "object"
-    ? record.item as Record<string, unknown>
-    : null;
-  const itemType = typeof item?.type === "string" ? item.type : "";
-  if ((method === "item/started" || method === "item/completed") && itemType !== "reasoning") {
-    return null;
-  }
-
-  const key = reasoningStreamKey(record);
-  if (!key) {
-    return null;
-  }
-
-  if (method === "item/reasoning/summaryTextDelta") {
-    const summaryIndex = typeof record.summaryIndex === "number" ? record.summaryIndex : 0;
-    const delta = typeof record.delta === "string" ? record.delta : "";
-    const stream = ensureReasoningStream(key);
-    stream.set(summaryIndex, `${stream.get(summaryIndex) ?? ""}${delta}`);
-    const summary = reasoningSummaryFromStream(stream);
-    return {
-      summary: summary || "Codex reasoning summary is streaming.",
-      status: "working",
-      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: readable reasoning summary`,
-      next_action: "Continue streaming the Codex reasoning summary.",
-    };
-  }
-
-  if (method === "item/reasoning/summaryPartAdded") {
-    const summaryIndex = typeof record.summaryIndex === "number" ? record.summaryIndex : 0;
-    const stream = ensureReasoningStream(key);
-    stream.set(summaryIndex, stream.get(summaryIndex) ?? "");
-    return {
-      summary: reasoningSummaryFromStream(stream) || "Codex started a new reasoning summary section.",
-      status: "working",
-      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: reasoning summary section ${summaryIndex + 1}`,
-      next_action: "Continue streaming the Codex reasoning summary.",
-    };
-  }
-
-  if (method === "item/reasoning/textDelta") {
-    return {
-      summary: "Codex raw reasoning text is streaming.",
-      status: "working",
-      checking: "Raw reasoning text is available from Codex app-server but hidden by LetAgents by default.",
-      next_action: "Wait for readable reasoning summary deltas or other runtime progress.",
-    };
-  }
-
-  const stream = ensureReasoningStream(key);
-  const summaryParts = coerceReasoningSummaryParts(item?.summary);
-  if (summaryParts.length) {
-    summaryParts.forEach((part, index) => stream.set(index, part));
-  }
-  const summary = reasoningSummaryFromStream(stream);
-  const completed = method === "item/completed";
-  if (completed) {
-    codexReasoningStreams.delete(key);
-  }
-
-  return {
-    summary: summary || (completed ? "Codex reasoning summary completed." : "Codex reasoning summary started."),
-    status: completed ? "idle" : "working",
-    checking: `${CODEX_RUNTIME_STREAM_SOURCE}: readable reasoning item`,
-    next_action: completed ? "Waiting for the next Codex runtime event." : "Streaming readable Codex reasoning.",
-  };
-}
-
-export function summarizeCodexRuntimeNotificationForTest(notification: RpcNotification): {
-  summary: string;
-  status: AgentPresenceStatus;
-  checking: string;
-  next_action: string;
-} {
-  const reasoningSummary = summarizeCodexReasoningNotificationForTest(notification);
-  if (reasoningSummary) {
-    return reasoningSummary;
-  }
-
-  const method = notification.method.trim();
-  const detail = compactRuntimeParam(notification.params);
-  const readableMethod = method.replaceAll("/", " ");
-  const status = statusForCodexRuntimeMethod(method);
-  const suffix = detail ? ` (${detail})` : "";
-
-  if (/^thread\//i.test(method)) {
-    return {
-      summary: `Codex ${readableMethod}${suffix}`,
-      status,
-      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: ${method}`,
-      next_action: status === "idle" ? "Waiting for the next room event." : "Continuing the Codex worker turn.",
-    };
-  }
-
-  if (/^turn\//i.test(method)) {
-    return {
-      summary: `Codex ${readableMethod}${suffix}`,
-      status,
-      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: ${method}`,
-      next_action: status === "idle" ? "Turn finished; waiting for room activity." : "Streaming turn progress.",
-    };
-  }
-
-  if (/^item\//i.test(method)) {
-    return {
-      summary: `Codex ${readableMethod}${suffix}`,
-      status,
-      checking: detail ? `Handling ${detail}.` : `${CODEX_RUNTIME_STREAM_SOURCE}: ${method}`,
-      next_action: status === "idle" ? "Waiting for the next runtime item." : "Continuing runtime work.",
-    };
-  }
-
-  return {
-    summary: `Codex runtime event: ${readableMethod}${suffix}`,
-    status,
-    checking: `${CODEX_RUNTIME_STREAM_SOURCE}: ${method}`,
-    next_action: status === "idle" ? "Waiting for the next runtime event." : "Continuing runtime work.",
-  };
-}
-
-export function summarizeCodexRuntimeSnapshotForTest(input: {
-  turnStatus?: unknown;
-  threadStatus?: unknown;
-  recentItems?: Array<Record<string, unknown>>;
-}): CodexRuntimeReasoningSummary | null {
-  const recentItems = input.recentItems ?? [];
-  const latestItem = [...recentItems].reverse().find((item) => {
-    const type = String(item.type ?? "");
-    return type === "agentMessage" || type === "userMessage";
-  });
-  const latestText = typeof latestItem?.text === "string" ? latestItem.text.trim() : "";
-  const latestType = String(latestItem?.type ?? "");
-  const turnStatus = typeof input.turnStatus === "string" ? input.turnStatus : "";
-  const threadStatus = typeof input.threadStatus === "string" ? input.threadStatus : "";
-  const status = statusForCodexRuntimeMethod(`${threadStatus} ${turnStatus} ${latestType}`);
-
-  if (latestText) {
-    return {
-      summary: latestType === "agentMessage" ? latestText : "Codex worker received room input.",
-      status,
-      checking: latestType === "agentMessage"
-        ? "Latest Codex worker message from app-server snapshot."
-        : latestText,
-      next_action: status === "idle" ? "Waiting for the next room event." : "Continuing the Codex worker turn.",
-    };
-  }
-
-  if (turnStatus || threadStatus) {
-    const statusText = [threadStatus && `thread ${threadStatus}`, turnStatus && `turn ${turnStatus}`]
-      .filter(Boolean)
-      .join(", ");
-    return {
-      summary: `Codex worker ${statusText}.`,
-      status,
-      checking: `${CODEX_RUNTIME_STREAM_SOURCE}: snapshot`,
-      next_action: status === "idle" ? "Waiting for the next room event." : "Monitoring Codex worker progress.",
-    };
-  }
-
-  return null;
-}
-
-async function postCodexRuntimeReasoningSummary(
-  session: CodexLiveSessionState,
-  summary: CodexRuntimeReasoningSummary
-): Promise<void> {
-  const workerSession = codexWorkerSessionForLiveSession(session);
-  if (!workerSession) {
-    return;
-  }
-
-  const signature = `${session.session_id}:${summary.summary}:${summary.status}`;
-  const lastPost = codexRuntimeBridgeLastPost.get(session.session_id);
-  if (
-    lastPost?.signature === signature &&
-    Date.now() - lastPost.postedAt < CODEX_RUNTIME_STREAM_REPEAT_MS
-  ) {
-    return;
-  }
-  if (lastPost && Date.now() - lastPost.postedAt < CODEX_RUNTIME_STREAM_THROTTLE_MS) {
-    return;
-  }
-  codexRuntimeBridgeLastPost.set(session.session_id, { signature, postedAt: Date.now() });
-
-  const roomPath = `/rooms/${encodeRoomIdPath(session.room_id)}/reasoning-sessions`;
-  const body = {
-    actor_label: workerSession.actor_label,
-    agent_key: workerSession.agent_key,
-    agent_session_id: workerSession.session_id,
-    agent_session_token: workerSession.session_token,
-    summary: summary.summary,
-    goal: "Stream Codex runtime progress for this LetAgents room.",
-    checking: summary.checking,
-    next_action: summary.next_action,
-    status: summary.status,
-  };
-
-  if (session.reasoning_session_id) {
-    try {
-      await codexBridgeApiCall(
-        `${roomPath}/${encodeURIComponent(session.reasoning_session_id)}/updates`,
-        {
-          method: "POST",
-          body: JSON.stringify(body),
-        }
-      );
-      return;
-    } catch {
-      updateCodexLiveSession(session.session_id, (current) => ({
-        ...current,
-        reasoning_session_id: null,
-        updated_at: new Date().toISOString(),
-      }));
-    }
-  }
-
-  const created = await codexBridgeApiCall<{
-    session?: { id?: string };
-  }>(roomPath, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-  const reasoningSessionId = created.session?.id;
-  if (reasoningSessionId) {
-    updateCodexLiveSession(session.session_id, (current) => ({
-      ...current,
-      reasoning_session_id: reasoningSessionId,
-      updated_at: new Date().toISOString(),
-    }));
-  }
-}
-
-async function postCodexRuntimeReasoningUpdate(
-  session: CodexLiveSessionState,
-  notification: RpcNotification
-): Promise<void> {
-  await postCodexRuntimeReasoningSummary(
-    session,
-    summarizeCodexRuntimeNotificationForTest(notification)
-  );
-}
-
-function startCodexRuntimeStreamBridge(session: CodexLiveSessionState, client: RpcClient): void {
-  stopCodexRuntimeStreamBridge(session.session_id);
-  codexRuntimeBridgeClients.set(session.session_id, client);
-  void inspectLocalCodexSession(session.session_id).catch(() => {
-    // The periodic snapshot bridge will retry while the session remains reachable.
-  });
-  const snapshotTimer = setInterval(() => {
-    void inspectLocalCodexSession(session.session_id).then((status) => {
-      if (
-        !status ||
-        !status.server_reachable ||
-        isTerminalCodexSessionStatus(status.session.status)
-      ) {
-        stopCodexRuntimeStreamBridge(session.session_id);
-      }
-    }).catch(() => {
-      stopCodexRuntimeStreamBridge(session.session_id);
-    });
-  }, CODEX_RUNTIME_STREAM_SNAPSHOT_INTERVAL_MS);
-  snapshotTimer.unref?.();
-  codexRuntimeBridgeSnapshotTimers.set(session.session_id, snapshotTimer);
-}
-
-async function maybeStartCodexRuntimeStreamBridge(session: CodexLiveSessionState): Promise<void> {
-  if (codexRuntimeBridgeClients.has(session.session_id)) {
-    return;
-  }
-
-  if (!codexWorkerSessionForLiveSession(session)) {
-    return;
-  }
-
-  const client = new RpcClient(session.server_url, (notification) => {
-    const latest = getStoredCodexLiveSession(session.session_id) ?? session;
-    void postCodexRuntimeReasoningUpdate(latest, notification).catch(() => {
-      // Runtime notifications should never break the worker turn.
-    });
-  });
-  await client.connect();
-  startCodexRuntimeStreamBridge(session, client);
-}
-
 export async function bindCodexRuntimeStreamBridgeForAgentSession(
   workerSession: StoredAgentSessionState
 ): Promise<boolean> {
-  if (!isCodexAgentSessionMarker(workerSession) || workerSession.session_kind !== "worker") {
-    return false;
-  }
-
-  const liveSession = getCurrentCodexLiveSession(workerSession.room_id);
-  if (!liveSession || isTerminalCodexSessionStatus(liveSession.status)) {
-    return false;
-  }
-
-  const boundSession =
-    updateCodexLiveSession(liveSession.session_id, (current) => ({
-      ...current,
-      agent_session_id: workerSession.session_id,
-      updated_at: new Date().toISOString(),
-    })) ?? liveSession;
-
-  await maybeStartCodexRuntimeStreamBridge(boundSession);
-  return true;
+  return runtimeBridge.bindForAgentSession(workerSession);
 }
 
 export function scheduleCodexRuntimeStreamBridgeBind(
   workerSession: StoredAgentSessionState,
-  attempts = CODEX_RUNTIME_STREAM_BIND_RETRY_ATTEMPTS
+  attempts?: number
 ): void {
-  if (!isCodexAgentSessionMarker(workerSession) || workerSession.session_kind !== "worker") {
-    return;
-  }
-
-  const existing = codexRuntimeBridgeBindTimers.get(workerSession.session_id);
-  if (existing) {
-    clearTimeout(existing);
-  }
-
-  const attemptBind = (remainingAttempts: number) => {
-    void bindCodexRuntimeStreamBridgeForAgentSession(workerSession)
-      .then((bound) => {
-        if (bound || remainingAttempts <= 1) {
-          codexRuntimeBridgeBindTimers.delete(workerSession.session_id);
-          return;
-        }
-
-        const timer = setTimeout(
-          () => attemptBind(remainingAttempts - 1),
-          CODEX_RUNTIME_STREAM_BIND_RETRY_MS
-        );
-        timer.unref?.();
-        codexRuntimeBridgeBindTimers.set(workerSession.session_id, timer);
-      })
-      .catch(() => {
-        if (remainingAttempts <= 1) {
-          codexRuntimeBridgeBindTimers.delete(workerSession.session_id);
-          return;
-        }
-
-        const timer = setTimeout(
-          () => attemptBind(remainingAttempts - 1),
-          CODEX_RUNTIME_STREAM_BIND_RETRY_MS
-        );
-        timer.unref?.();
-        codexRuntimeBridgeBindTimers.set(workerSession.session_id, timer);
-      });
-  };
-
-  attemptBind(attempts);
-}
-
-function stopCodexRuntimeStreamBridge(sessionId: string): void {
-  const client = codexRuntimeBridgeClients.get(sessionId);
-  if (client) {
-    client.close();
-    codexRuntimeBridgeClients.delete(sessionId);
-  }
-  const snapshotTimer = codexRuntimeBridgeSnapshotTimers.get(sessionId);
-  if (snapshotTimer) {
-    clearInterval(snapshotTimer);
-    codexRuntimeBridgeSnapshotTimers.delete(sessionId);
-  }
-  codexRuntimeBridgeLastPost.delete(sessionId);
+  runtimeBridge.scheduleBind(workerSession, attempts);
 }
 
 function clearSessionMonitor(sessionId: string): void {
@@ -1072,11 +164,11 @@ function scheduleOwnedSessionMonitor(session: CodexLiveSessionState): void {
           !status.server_reachable ||
           isTerminalCodexSessionStatus(status.session.status)
         ) {
-          stopCodexRuntimeStreamBridge(session.session_id);
+          runtimeBridge.stop(session.session_id);
           clearSessionMonitor(session.session_id);
           return;
         }
-        void maybeStartCodexRuntimeStreamBridge(status.session).catch(() => {
+        void runtimeBridge.maybeStart(status.session).catch(() => {
           // The monitor should keep supervising even when the optional stream bridge is unavailable.
         });
       })
@@ -1085,7 +177,7 @@ function scheduleOwnedSessionMonitor(session: CodexLiveSessionState): void {
         if (latest?.launched_server) {
           killOwnedAppServer(latest);
         }
-        stopCodexRuntimeStreamBridge(session.session_id);
+        runtimeBridge.stop(session.session_id);
         clearSessionMonitor(session.session_id);
       });
   }, SESSION_MONITOR_INTERVAL_MS);
@@ -1181,11 +273,6 @@ function toSessionState(input: {
     started_at: now,
     updated_at: now,
   };
-}
-
-function isLikelyMaterializingError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("not materialized yet");
 }
 
 export function toPublicCodexLiveSession(
@@ -1286,7 +373,7 @@ export async function inspectLocalCodexSession(
       recentItems,
     });
     if (snapshotSummary) {
-      void postCodexRuntimeReasoningSummary(updated, snapshotSummary).catch(() => {
+      void runtimeBridge.postReasoningSummary(updated, snapshotSummary).catch(() => {
         // Snapshot-derived reasoning should never break session inspection.
       });
     }
@@ -1340,7 +427,7 @@ export async function startLocalCodexSession(
       (inspected.session.status === "running" || inspected.session.status === "starting")
     ) {
       scheduleOwnedSessionMonitor(inspected.session);
-      await maybeStartCodexRuntimeStreamBridge(inspected.session);
+      await runtimeBridge.maybeStart(inspected.session);
       return { session: inspected.session, reused: true };
     }
   }
@@ -1375,7 +462,10 @@ export async function startLocalCodexSession(
         ? getStoredCodexLiveSession(notificationSession.session_id) ?? notificationSession
         : null;
       if (!session) return;
-      void postCodexRuntimeReasoningUpdate(session, notification).catch(() => {
+      void runtimeBridge.postReasoningSummary(
+        session,
+        summarizeCodexRuntimeNotificationForTest(notification)
+      ).catch(() => {
         // Runtime notifications should never break the worker turn.
       });
     });
@@ -1436,7 +526,7 @@ export async function startLocalCodexSession(
     try {
       const verifiedSession = await waitForWorkerStartup(session);
       scheduleOwnedSessionMonitor(verifiedSession);
-      startCodexRuntimeStreamBridge(verifiedSession, client);
+      runtimeBridge.start(verifiedSession, client);
       client = null;
       startupSucceeded = true;
       return { session: verifiedSession, reused: false };
