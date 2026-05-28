@@ -31,7 +31,7 @@ async function copy() {
   position: relative;
   background: #111;
   border: 1px solid var(--border, rgba(255,255,255,0.08));
-  border-radius: 10px;
+  border-radius: 8px;
   margin-bottom: 20px;
   overflow: hidden;
 }
@@ -72,5 +72,10 @@ async function copy() {
   overflow-x: auto;
   color: var(--text-secondary, #a1a1aa);
   margin: 0;
+}
+
+.code-block code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 </style>
