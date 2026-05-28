@@ -1,0 +1,100 @@
+.desktop-board-workflow-links,
+.desktop-board-task-actions,
+.desktop-board-review-assign {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.desktop-board-workflow-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.desktop-board-workflow-links a:hover {
+  color: var(--text);
+}
+
+.desktop-board-workflow-links svg {
+  width: 12px;
+  height: 12px;
+}
+
+.desktop-board-review-assign select {
+  min-width: min(100%, 190px);
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: rgba(10, 10, 10, 0.54);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.74rem;
+}
+
+.desktop-board-action-button {
+  min-height: 29px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.desktop-board-action-button:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+}
+
+.desktop-board-action-button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.desktop-board-action-button[data-tone="primary"] {
+  border-color: rgba(96, 165, 250, 0.3);
+  color: #93c5fd;
+}
+
+.desktop-board-action-button[data-tone="danger"] {
+  border-color: rgba(248, 113, 113, 0.3);
+  color: #f87171;
+}
+
+.desktop-board-empty {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.desktop-board-empty h3 {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.desktop-board-empty p {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.desktop-board-empty code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.78rem;
+}
