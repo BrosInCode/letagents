@@ -1,0 +1,7 @@
+.desktop-task-empty {
+  display: grid;
+  place-items: center;
+  min-height: 86px;
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+}
