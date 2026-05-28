@@ -1,0 +1,143 @@
+.focus-detail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  overflow: hidden;
+}
+
+.focus-detail-inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.focus-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.focus-room-state {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.focus-room-state[data-state="concluded"] {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+
+.focus-facts {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.focus-facts div {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background: var(--bg-0, #09090b);
+}
+
+.focus-facts dt {
+  color: var(--text-tertiary, #a1a1aa);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.focus-facts dd {
+  margin: 0;
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.focus-audit-card {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line, #27272a);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at top right, rgba(96, 165, 250, 0.08), transparent 44%),
+    var(--bg-0, #09090b);
+}
+
+.focus-audit-card p {
+  margin: 0;
+  color: var(--text-tertiary, #a1a1aa);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.focus-audit-card .focus-eyebrow {
+  margin: 0;
+}
+
+.focus-audit-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.focus-audit-list li {
+  position: relative;
+  padding-left: 14px;
+  color: var(--text-tertiary, #a1a1aa);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.focus-audit-list li::before {
+  content: "";
+  position: absolute;
+  top: 0.65em;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: #60a5fa;
+  transform: translateY(-50%);
+}
+
+.focus-closeout-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.focus-closeout-facts div {
+  display: grid;
+  gap: 4px;
+}
+
+.focus-closeout-facts dt {
+  color: var(--muted, #71717a);
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.focus-closeout-facts dd {
+  margin: 0;
+  color: var(--text, #fafafa);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
