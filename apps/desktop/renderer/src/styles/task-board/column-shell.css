@@ -1,0 +1,80 @@
+.desktop-task-column {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 360px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 42%),
+    rgba(255, 255, 255, 0.018);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-column,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-card,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-empty,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-board-filters,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-detail-panel,
+.desktop-room-shell[data-liquid-glass="true"] .stat-card,
+.desktop-room-shell[data-liquid-glass="true"] .surface-intro,
+.desktop-room-shell[data-liquid-glass="true"] .surface-row,
+.desktop-room-shell[data-liquid-glass="true"] .room-empty-card {
+  border-color: rgba(255, 255, 255, 0.115);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.028) 54%, rgba(255, 255, 255, 0.014)),
+    rgba(12, 12, 12, 0.58);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.105),
+    0 14px 34px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px) saturate(1.14);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-card,
+.desktop-room-shell[data-liquid-glass="true"] .surface-row,
+.desktop-room-shell[data-liquid-glass="true"] .stat-card {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.034) 54%, rgba(255, 255, 255, 0.014)),
+    rgba(14, 14, 14, 0.52);
+}
+
+.desktop-task-column-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 6px;
+}
+
+.desktop-task-column-header span {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.desktop-task-column-header strong {
+  display: inline-grid;
+  place-items: center;
+  min-width: 34px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.desktop-task-card,
+.desktop-task-empty {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(10, 10, 10, 0.52);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-meta-grid span,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-task-column-header strong,
+.desktop-room-shell[data-liquid-glass="true"] .state-pill,
+.desktop-room-shell[data-liquid-glass="true"] code {
+  border-color: rgba(255, 255, 255, 0.115);
+  background: rgba(255, 255, 255, 0.052);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
