@@ -2,38 +2,18 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import type { RoomActivityHistoryKind } from '../../../composables/room/types'
 import { buildAgentReachabilitySources } from '../reachability'
 import {
-  connectionLabel,
-  getActivityTaskLink,
-  historyDetailNote,
-  historyLastSeenLabel,
-  historyParticipantNote,
-  livenessCapabilityLabel,
-  participantMeta,
-  participantNote,
-  reasoningCardSummary,
-  reasoningCardTitle,
-  reasoningStatusLabel,
-} from './displayHelpers'
-import {
   buildHistoryParticipant,
   buildHistoryRoomOptions,
   countHistoryOpenTasks,
   resolveHistoryRoomOption,
 } from './historyModel'
-import { TASK_STATUS_LABELS } from './labels'
 import {
   buildAgentParticipant,
   buildHumanParticipant,
   compareParticipants,
   groupAgentMessagesByActor,
 } from './liveParticipants'
-import {
-  formatLastSeen,
-  previewMessage,
-  reasoningTimestamp,
-} from './time'
 import type {
-  ActivityTaskListItem,
   ActivityViewProps,
   HistoryRoomOption,
 } from './types'
@@ -275,12 +255,6 @@ export function useActivityViewModel(props: ActivityViewProps) {
     }
   })
 
-  function getTaskLink(
-    task: ActivityTaskListItem,
-  ): { label: string; url: string } | null {
-    return getActivityTaskLink(task, props.taskGithubStatus)
-  }
-
   function changeHistoryPage(page: number): void {
     void requestHistory(page)
   }
@@ -307,7 +281,6 @@ export function useActivityViewModel(props: ActivityViewProps) {
     historyKind,
     historyRoomId,
     clearBusy,
-    TASK_STATUS_LABELS,
     connectedAgents,
     workingAgents,
     recentlyDisconnectedAgents,
@@ -329,21 +302,7 @@ export function useActivityViewModel(props: ActivityViewProps) {
     selectedParticipant,
     selectedReasoningSession,
     selectedHistoryParticipant,
-    participantMeta,
-    participantNote,
-    historyLastSeenLabel,
-    historyParticipantNote,
-    historyDetailNote,
-    reasoningCardTitle,
-    reasoningCardSummary,
-    reasoningStatusLabel,
-    livenessCapabilityLabel,
-    reasoningTimestamp,
-    connectionLabel,
-    getTaskLink,
     changeHistoryPage,
     handleClearDisconnected,
-    formatLastSeen,
-    previewMessage,
   }
 }
