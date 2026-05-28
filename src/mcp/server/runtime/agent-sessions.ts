@@ -1,0 +1,125 @@
+import {
+  getStoredAgentSession,
+  type StoredAgentIdentityState,
+  type StoredAgentSessionState,
+} from "../../local-state.js";
+import { normalizeAgentBaseName } from "../../../shared/codenames.js";
+import { formatOwnerAttribution } from "../../../shared/agent-identity.js";
+import {
+  LETAGENTS_AGENT_SESSION_ID_HEADER,
+  LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
+} from "../../../shared/request-headers.js";
+
+export function buildAgentDeliveryHeaders(
+  agentSession?: StoredAgentSessionState | null
+): Record<string, string> {
+  if (!agentSession) {
+    return {};
+  }
+
+  return {
+    [LETAGENTS_AGENT_SESSION_ID_HEADER]: agentSession.session_id,
+    [LETAGENTS_AGENT_SESSION_TOKEN_HEADER]: agentSession.session_token,
+  };
+}
+
+export function toPublicAgentSession(session: StoredAgentSessionState | null): Record<string, unknown> | null {
+  if (!session) {
+    return null;
+  }
+
+  return {
+    session_id: session.session_id,
+    room_id: session.room_id,
+    session_kind: session.session_kind,
+    runtime: session.runtime,
+    host_id: session.host_id ?? null,
+    host_kind: session.host_kind ?? null,
+    host_label: session.host_label ?? null,
+    liveness_capability: session.liveness_capability ?? null,
+    tool_bridge_id: session.tool_bridge_id ?? null,
+    actor_label: session.actor_label,
+    agent_key: session.agent_key,
+    agent_instance_id: session.agent_instance_id ?? null,
+    display_name: session.display_name,
+    owner_label: session.owner_label,
+    ide_label: session.ide_label,
+    created_at: session.created_at,
+    updated_at: session.updated_at,
+    last_seen_at: session.last_seen_at,
+    ended_at: session.ended_at ?? null,
+  };
+}
+
+export function resolveAgentSession(
+  roomId: string | null | undefined,
+  sessionId?: string | null
+): StoredAgentSessionState | null {
+  if (!sessionId) {
+    return null;
+  }
+  const session = getStoredAgentSession(sessionId);
+  if (!session) {
+    throw new Error(`Unknown agent_session_id: ${sessionId}`);
+  }
+  if (session.ended_at) {
+    throw new Error(`agent_session_id ${sessionId} ended at ${session.ended_at}`);
+  }
+  if (roomId && session.room_id !== roomId) {
+    throw new Error(`agent_session_id ${sessionId} is registered for ${session.room_id}, not ${roomId}`);
+  }
+  return session;
+}
+
+export function identityFromAgentSession(session: StoredAgentSessionState): StoredAgentIdentityState {
+  return {
+    name: normalizeAgentBaseName(session.display_name),
+    display_name: session.display_name,
+    owner_label: session.owner_label,
+    owner_attribution: formatOwnerAttribution(session.owner_label),
+    ide_label: session.ide_label,
+    actor_label: session.actor_label,
+    canonical_key: session.agent_key,
+    runtime_key: `agent_session:${session.session_id}`,
+    source: "api",
+    resolved_at: session.updated_at,
+  };
+}
+
+export function requireWorkerAgentSession(
+  roomId: string | null | undefined,
+  sessionId?: string | null
+): StoredAgentSessionState {
+  const session = resolveAgentSession(roomId, sessionId);
+  if (!session) {
+    throw new Error(
+      "Registered worker agent_session_id is required for this write action. " +
+        "Call register_agent_session for this room first, then pass the returned agent_session_id explicitly."
+    );
+  }
+  if (session.session_kind !== "worker") {
+    throw new Error("Worker agent_session_id is required for this write action.");
+  }
+  return session;
+}
+
+export async function resolveWorkerToolIdentity(input: {
+  roomId?: string | null;
+  agentSessionId?: string | null;
+}): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
+  const agentSession = requireWorkerAgentSession(input.roomId, input.agentSessionId);
+  return {
+    identity: identityFromAgentSession(agentSession),
+    agentSession,
+  };
+}
+
+export function agentSessionCredentials(agentSession: StoredAgentSessionState): {
+  agent_session_id: string;
+  agent_session_token: string;
+} {
+  return {
+    agent_session_id: agentSession.session_id,
+    agent_session_token: agentSession.session_token,
+  };
+}
