@@ -1,19 +1,27 @@
 export {
   evaluateTaskAdmission,
   findDuplicateCoordinationIntent,
+} from "./duplicates.js";
+export {
   isActiveCoordinationLease,
   leaseMatchesActor,
   findActorLease,
+} from "./leases.js";
+export {
   isActiveCoordinationLock,
   lockAppliesToTask,
   findApplicableLock,
-  evaluateCoordinationMutation,
+} from "./locks.js";
+export { evaluateCoordinationMutation } from "./mutations.js";
+export {
   evaluateReviewLeaseRouting,
   findBoardReviewLeaseForMerge,
+} from "./review.js";
+export {
   evaluateWorkflowArtifactMutation,
   findWorkflowArtifactLease,
   leaseMatchesWorkflowArtifact,
-} from "./coordination-policy/index.js";
+} from "./workflow-artifacts.js";
 export type {
   CoordinationActor,
   CoordinationAdmissionResult,
@@ -27,4 +35,4 @@ export type {
   CoordinationTaskLike,
   CoordinationWorkIntent,
   ReviewLeaseRoutingResult,
-} from "./coordination-policy/index.js";
+} from "./types.js";
