@@ -1,31 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { registerDesktopRentalIpcHandlers } from "../rental-handlers.js";
-
-type CapturedHandler = (_event: any, ...args: any[]) => unknown;
-
-function captureHandlers(
-  enabled: boolean,
-  options: Parameters<typeof registerDesktopRentalIpcHandlers>[1] = {},
-): Map<string, CapturedHandler> {
-  const handlers = new Map<string, CapturedHandler>();
-  registerDesktopRentalIpcHandlers(
-    {
-      handle(channel: string, handler: CapturedHandler) {
-        handlers.set(channel, handler);
-      },
-    },
-    { enabled, ...options }
-  );
-  return handlers;
-}
-
-async function invoke(handlers: Map<string, CapturedHandler>, channel: string, ...args: unknown[]) {
-  const handler = handlers.get(channel);
-  assert.ok(handler, `expected ${channel} to be registered`);
-  return handler(null, ...args);
-}
+import { captureHandlers, invoke } from "./rental-handlers-live-client/harness.js";
 
 test("rental IPC handlers return disabled marker when feature flag is off", async () => {
   const handlers = captureHandlers(false);
@@ -92,87 +68,6 @@ test("enabled rental IPC creates typed session and patch stubs", async () => {
   const patch = await invoke(handlers, "desktop:rental:approve-patch", "session_1", "patch_1");
   assert.equal((patch as { sessionId: string }).sessionId, "session_1");
   assert.equal((patch as { gateStatus: string }).gateStatus, "passed");
-});
-
-test("rental IPC maps live patch review API responses when an apiClient is provided", async () => {
-  const calls: string[] = [];
-  const apiClient = {
-    async getPatches(sessionId: string) {
-      calls.push(`get:${sessionId}`);
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          patches: [
-            {
-              id: "rpatch_1",
-              session_id: sessionId,
-              source: "explicit_patch",
-              summary: "Fix tests",
-              gate_status: "passed",
-              updated_at: "2026-05-11T10:00:00.000Z",
-            },
-          ],
-        },
-      };
-    },
-    async approvePatch(sessionId: string, patchId: string) {
-      calls.push(`approve:${sessionId}:${patchId}`);
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          patch: {
-            id: patchId,
-            session_id: sessionId,
-            source: "explicit_patch",
-            gate_status: "passed",
-            check_results: {
-              review: { pr_url: "https://github.com/BrosInCode/letagents/pull/1" },
-            },
-            updated_at: "2026-05-11T10:01:00.000Z",
-          },
-        },
-      };
-    },
-    async requestPatchChanges(sessionId: string, patchId: string, body: Record<string, unknown>) {
-      calls.push(`changes:${sessionId}:${patchId}:${body.note}`);
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          patch: {
-            id: patchId,
-            session_id: sessionId,
-            source: "explicit_patch",
-            gate_status: "needs_revision",
-            updated_at: "2026-05-11T10:02:00.000Z",
-          },
-        },
-      };
-    },
-  };
-  const handlers = captureHandlers(true, { apiClient: apiClient as never });
-
-  const patches = await invoke(handlers, "desktop:rental:get-patches", "rsess_1");
-  assert.equal((patches as Array<{ id: string }>)[0]!.id, "rpatch_1");
-
-  const approved = await invoke(handlers, "desktop:rental:approve-patch", "rsess_1", "rpatch_1");
-  assert.equal((approved as { prUrl: string }).prUrl, "https://github.com/BrosInCode/letagents/pull/1");
-
-  const changed = await invoke(
-    handlers,
-    "desktop:rental:request-patch-changes",
-    "rsess_1",
-    "rpatch_1",
-    "Please tighten tests",
-  );
-  assert.equal((changed as { gateStatus: string }).gateStatus, "needs_revision");
-  assert.deepEqual(calls, [
-    "get:rsess_1",
-    "approve:rsess_1:rpatch_1",
-    "changes:rsess_1:rpatch_1:Please tighten tests",
-  ]);
 });
 
 test("enabled rental IPC exposes renter-side quota trigger status and manual declaration", async () => {
