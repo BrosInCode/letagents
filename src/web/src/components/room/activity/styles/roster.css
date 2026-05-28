@@ -1,0 +1,112 @@
+.activity-roster {
+  display: grid;
+  gap: var(--space-sm, 8px);
+}
+
+.activity-roster-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+}
+
+.activity-roster-item:hover,
+.activity-roster-item[data-selected='true'] {
+  border-color: color-mix(in srgb, var(--activity-blue) 42%, transparent);
+  background: var(--activity-blue-dim);
+  transform: translateY(-1px);
+}
+
+.activity-roster-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-roster-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.activity-roster-name {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text, #fafafa);
+  line-height: 1.35;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-roster-meta {
+  margin-top: 3px;
+  font-size: 0.74rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-roster-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--activity-text-secondary);
+}
+
+.activity-roster-status span:first-of-type:not(.activity-status-dot) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-reasoning-pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #93c5fd;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.activity-work-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-roster-seen {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #71717a;
+  flex-shrink: 0;
+}
+
+.activity-status-dot[data-status='idle'] { background: var(--activity-text-tertiary); }
+.activity-status-dot[data-status='working'] { background: var(--activity-blue); }
+.activity-status-dot[data-status='reviewing'] { background: var(--activity-amber); }
+.activity-status-dot[data-status='blocked'] { background: var(--activity-red); }
+
+.activity-group-empty,
+.activity-detail-empty {
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px dashed var(--activity-border-strong);
+  color: var(--activity-text-tertiary);
+  font-size: 0.8rem;
+}

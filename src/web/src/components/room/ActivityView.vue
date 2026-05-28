@@ -788,4 +788,8 @@ const {
 } = useActivityViewModel(props)
 </script>
 
-<style scoped src="./activity/ActivityView.css"></style>
+<style scoped src="./activity/styles/base.css"></style>
+<style scoped src="./activity/styles/roster.css"></style>
+<style scoped src="./activity/styles/detail.css"></style>
+<style scoped src="./activity/styles/toolbar-history.css"></style>
+<style scoped src="./activity/styles/responsive.css"></style>

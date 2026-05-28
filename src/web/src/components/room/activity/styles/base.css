@@ -1,0 +1,233 @@
+.activity-panel {
+  --activity-border: var(--border, rgba(255, 255, 255, 0.06));
+  --activity-border-strong: var(--border-strong, rgba(255, 255, 255, 0.12));
+  --activity-surface: var(--bg-card, #141414);
+  --activity-surface-soft: var(--accent-dim, rgba(255, 255, 255, 0.04));
+  --activity-surface-hover: var(--accent-hover, rgba(255, 255, 255, 0.08));
+  --activity-text-secondary: var(--text-secondary, #a1a1aa);
+  --activity-text-tertiary: var(--text-tertiary, #71717a);
+  --activity-blue: var(--blue, #3b82f6);
+  --activity-blue-dim: var(--blue-dim, rgba(59, 130, 246, 0.1));
+  --activity-green: var(--green, #22c55e);
+  --activity-green-dim: var(--green-dim, rgba(34, 197, 94, 0.1));
+  --activity-amber: var(--amber, #f59e0b);
+  --activity-amber-dim: var(--amber-dim, rgba(245, 158, 11, 0.1));
+  --activity-red: var(--red, #ef4444);
+  --activity-red-dim: var(--red-dim, rgba(239, 68, 68, 0.1));
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-lg, 24px);
+}
+
+.activity-refresh-indicator {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-bottom: var(--space-sm, 8px);
+  padding: 8px 10px;
+  border: 1px solid var(--activity-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--activity-surface) 88%, transparent);
+  color: var(--activity-text-secondary);
+  font-size: 0.78rem;
+  backdrop-filter: blur(10px);
+}
+
+.activity-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--activity-blue) 22%, transparent);
+  border-top-color: var(--activity-blue);
+  border-radius: 999px;
+  animation: activity-spin 0.8s linear infinite;
+}
+
+@keyframes activity-spin {
+  to { transform: rotate(360deg); }
+}
+
+.activity-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-sm, 8px);
+  margin-bottom: var(--space-lg, 24px);
+}
+
+.summary-card {
+  display: grid;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
+}
+
+.summary-card strong {
+  font-size: 1.08rem;
+  color: var(--text, #fafafa);
+  line-height: 1.2;
+}
+
+.summary-card span {
+  font-size: 0.76rem;
+  color: var(--activity-text-tertiary);
+}
+
+.activity-empty {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  text-align: center;
+  color: var(--muted, #71717a);
+}
+
+.activity-empty h3 {
+  margin-bottom: 6px;
+  color: var(--text, #fafafa);
+  font-size: 0.95rem;
+}
+
+.activity-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.76fr);
+  gap: var(--space-lg, 24px);
+  align-items: start;
+}
+
+.activity-groups {
+  display: grid;
+  gap: var(--space-lg, 24px);
+}
+
+.activity-group {
+  display: grid;
+  gap: 10px;
+}
+
+.activity-detail {
+  display: grid;
+  gap: 12px;
+  padding: var(--space-md, 16px);
+  border-radius: 8px;
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface);
+}
+
+.activity-group-header,
+.activity-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-group-header {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--activity-border);
+}
+
+.activity-group-header h3,
+.activity-detail-header h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  color: var(--text, #fafafa);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-ide-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: var(--activity-surface-hover);
+  color: var(--activity-text-secondary);
+  border: 1px solid var(--activity-border);
+}
+
+.activity-group-header p,
+.activity-detail-header p {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--activity-text-tertiary);
+  line-height: 1.45;
+}
+
+.activity-group-count,
+.activity-kind-pill,
+.activity-connection-pill,
+.activity-status-pill,
+.activity-work-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.activity-group-count,
+.activity-kind-pill {
+  border: 1px solid var(--activity-border);
+  background: var(--activity-surface-soft);
+  color: var(--activity-text-secondary);
+}
+
+.activity-connection-pill[data-connection='active'] {
+  background: var(--activity-green-dim);
+  color: var(--activity-green);
+}
+
+.activity-connection-pill[data-connection='away'] {
+  background: var(--activity-blue-dim);
+  color: var(--activity-blue);
+}
+
+.activity-connection-pill[data-connection='offline'] {
+  background: var(--activity-surface-hover);
+  color: var(--activity-text-secondary);
+}
+
+.activity-status-pill[data-status='idle'] { background: var(--activity-surface-hover); color: var(--activity-text-secondary); }
+.activity-status-pill[data-status='working'] { background: var(--activity-blue-dim); color: var(--activity-blue); }
+.activity-status-pill[data-status='reviewing'] { background: var(--activity-amber-dim); color: var(--activity-amber); }
+.activity-status-pill[data-status='blocked'] { background: var(--activity-red-dim); color: var(--activity-red); }
+
+.activity-work-pill {
+  background: var(--activity-surface-hover);
+  color: var(--activity-text-secondary);
+}
+
+.activity-work-pill[data-work-state='working'] {
+  background: var(--activity-blue-dim);
+  color: var(--activity-blue);
+}
+
+.activity-work-pill[data-work-state='reviewing'] {
+  background: var(--activity-amber-dim);
+  color: var(--activity-amber);
+}
+
+.activity-work-pill[data-work-state='blocked'] {
+  background: var(--activity-red-dim);
+  color: var(--activity-red);
+}
+
+.activity-work-pill[data-work-state='responding'] {
+  background: var(--activity-green-dim);
+  color: var(--activity-green);
+}
