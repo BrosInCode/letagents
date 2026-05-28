@@ -2,6 +2,11 @@ import type {
   DesktopAgentPresence,
   DesktopReasoningSession,
 } from "../../../../../../electron/ipc-types";
+import { normalizeAgentKey } from "../../../../domain/agents";
+import {
+  latestReasoningSessionForTarget,
+  reasoningAgentTargetKeys,
+} from "../../../../domain/reasoning";
 import type { AgentModalTarget } from "../DesktopChatMessage.vue";
 
 interface AgentReasoningLauncherOptions {
@@ -30,22 +35,14 @@ export function latestReasoningForAgent(
   target: AgentModalTarget,
   sessions: readonly DesktopReasoningSession[],
 ): DesktopReasoningSession | null {
-  const keys = agentIdentityKeys(target);
-  if (!keys.length) return null;
-
-  return sessions
-    .filter((session) => reasoningSessionKeys(session).some((key) => keys.includes(key)))
-    .sort((left, right) =>
-      reasoningTime(right) - reasoningTime(left)
-      || String(right.id).localeCompare(String(left.id))
-    )[0] || null;
+  return latestReasoningSessionForTarget(target, sessions);
 }
 
 export function hasReasoningStreamSurface(
   target: AgentModalTarget,
   presenceEntries: readonly DesktopAgentPresence[],
 ): boolean {
-  const keys = agentIdentityKeys(target);
+  const keys = reasoningAgentTargetKeys(target);
   const markerText = [
     target.ideLabel,
     target.sender,
@@ -58,7 +55,7 @@ export function hasReasoningStreamSurface(
       presence.actorLabel,
       presence.displayName,
       presence.agentKey,
-    ].map(normalizeAgentIdentity).filter(Boolean);
+    ].map(normalizeAgentKey).filter(Boolean);
     if (!presenceKeys.some((key) => keys.includes(key))) return false;
 
     const capability = String(presence.livenessObservation?.livenessCapability || "").toLowerCase();
@@ -71,34 +68,4 @@ export function hasReasoningStreamSurface(
       runtime === "codex" ||
       ideLabel === "codex";
   });
-}
-
-function agentIdentityKeys(target: AgentModalTarget): string[] {
-  return [
-    target.actorLabel,
-    target.sender,
-    target.displayName,
-    displayNameFromActorLabel(target.actorLabel),
-  ].map(normalizeAgentIdentity).filter(Boolean);
-}
-
-function reasoningSessionKeys(session: DesktopReasoningSession): string[] {
-  return [
-    session.actorLabel,
-    displayNameFromActorLabel(session.actorLabel),
-    session.agentKey,
-  ].map(normalizeAgentIdentity).filter(Boolean);
-}
-
-function normalizeAgentIdentity(value: string | null | undefined): string {
-  return String(value || "").trim().toLowerCase();
-}
-
-function displayNameFromActorLabel(value: string | null | undefined): string {
-  return String(value || "").split("|")[0]?.trim() || "";
-}
-
-function reasoningTime(session: DesktopReasoningSession): number {
-  const parsed = Date.parse(String(session.updatedAt || session.createdAt || ""));
-  return Number.isFinite(parsed) ? parsed : 0;
 }
