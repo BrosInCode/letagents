@@ -25,6 +25,7 @@ import {
   setStoredAuth,
   touchRoomSession,
   updateCodexLiveSession,
+  updateLocalState,
   type CodexLiveSessionState,
   type PendingDeviceAuthState,
   type StoredAgentIdentityState,
@@ -208,7 +209,7 @@ test("agent session helpers maintain current sessions per room and skip ended se
 
 test("room session helpers preserve join metadata and update current room on touch", () => {
   withTempLocalState(() => {
-    const saved = saveRoomSession({
+    saveRoomSession({
       room_id: "room_1",
       code: "ABCD-1234",
       display_name: "Room One",
@@ -216,12 +217,23 @@ test("room session helpers preserve join metadata and update current room on tou
       last_message_id: "msg_1",
     });
 
+    const originalJoinedAt = "2026-05-28T00:00:00.000Z";
+    updateLocalState((state) => {
+      const session = state.room_sessions?.room_1;
+      assert.ok(session);
+      session.joined_at = originalJoinedAt;
+      if (state.current_room?.room_id === "room_1") {
+        state.current_room = { ...state.current_room, joined_at: originalJoinedAt };
+      }
+      return state;
+    });
+
     const resaved = saveRoomSession({
       room_id: "room_1",
       joined_via: "auto",
     });
 
-    assert.equal(resaved.joined_at, saved.joined_at);
+    assert.equal(resaved.joined_at, originalJoinedAt);
     assert.equal(resaved.code, "ABCD-1234");
     assert.equal(resaved.display_name, "Room One");
     assert.equal(resaved.last_message_id, "msg_1");

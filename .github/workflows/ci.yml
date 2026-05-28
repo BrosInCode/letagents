@@ -29,6 +29,9 @@ jobs:
       - name: Type check (server)
         run: npx tsc --noEmit
 
+      - name: Test MCP helpers
+        run: npm run test:mcp
+
       - name: Install Vue dependencies
         run: cd src/web && npm ci
 
