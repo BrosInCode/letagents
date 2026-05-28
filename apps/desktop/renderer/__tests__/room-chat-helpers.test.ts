@@ -7,14 +7,14 @@ import type {
   DesktopRoomMessage,
   DesktopRoomMessageAttachment,
 } from "../../electron/ipc-types";
+import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
   attachmentHref,
   attachmentKey,
   attachmentMeta,
-  formatBytes,
   imageAttachmentId,
   isImageAttachment,
-} from "../src/components/desktop/content/room-chat/attachment-utils";
+} from "../src/components/desktop/content/desktop-chat-message/attachments";
 import {
   hasReasoningStreamSurface,
   latestReasoningForAgent,

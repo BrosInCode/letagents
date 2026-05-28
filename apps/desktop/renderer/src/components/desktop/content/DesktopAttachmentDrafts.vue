@@ -40,7 +40,7 @@
 
 <script setup lang="ts">
 import type { DesktopStagedAttachment } from "../../../../../electron/ipc-types";
-import { formatBytes } from "./room-chat/attachment-utils";
+import { formatBytes } from "./attachments/formatting";
 
 export interface PendingAttachmentDraft {
   localId: string;

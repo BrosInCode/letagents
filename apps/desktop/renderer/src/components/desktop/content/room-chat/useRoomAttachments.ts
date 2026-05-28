@@ -4,8 +4,8 @@ import type {
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
+import { formatBytes } from "../attachments/formatting";
 import {
-  formatBytes,
   hasDraggedFiles,
   readDroppedAttachmentContent,
   toPendingAttachmentDraft,

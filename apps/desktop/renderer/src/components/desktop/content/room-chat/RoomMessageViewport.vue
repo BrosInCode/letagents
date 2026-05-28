@@ -46,7 +46,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
-import DesktopChatMessage, { type AgentModalTarget } from "../DesktopChatMessage.vue";
+import DesktopChatMessage from "../DesktopChatMessage.vue";
+import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { buildThreadSummaries } from "./thread-utils";
 
 const props = defineProps<{

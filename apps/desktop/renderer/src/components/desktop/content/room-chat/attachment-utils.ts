@@ -1,52 +1,5 @@
-import type {
-  DesktopDroppedAttachmentContent,
-  DesktopRoomMessageAttachment,
-} from "../../../../../../electron/ipc-types";
+import type { DesktopDroppedAttachmentContent } from "../../../../../../electron/ipc-types";
 import type { PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
-
-export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-export function attachmentName(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.fileName || attachment.name || "attachment";
-}
-
-export function attachmentMimeType(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.mimeType || "application/octet-stream";
-}
-
-export function attachmentHref(attachment: DesktopRoomMessageAttachment): string {
-  if (attachment.url) return attachment.url;
-  if (attachment.downloadUrl) return attachment.downloadUrl;
-  if (attachment.dataUrl) return attachment.dataUrl;
-  if (attachment.contentBase64) return `data:${attachmentMimeType(attachment)};base64,${attachment.contentBase64}`;
-  return "#";
-}
-
-export function attachmentKey(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.id || `${attachmentName(attachment)}-${attachment.sizeBytes || 0}-${attachmentMimeType(attachment)}`;
-}
-
-export function imageAttachmentId(messageId: string, attachment: DesktopRoomMessageAttachment): string {
-  return `${messageId}:${attachmentKey(attachment)}`;
-}
-
-export function attachmentMeta(attachment: DesktopRoomMessageAttachment): string {
-  return [attachmentMimeType(attachment), formatBytes(attachment.sizeBytes || 0)].filter(Boolean).join(" · ");
-}
-
-export function isImageAttachment(attachment: DesktopRoomMessageAttachment): boolean {
-  return attachmentMimeType(attachment).startsWith("image/") && attachmentHref(attachment) !== "#";
-}
 
 export function hasDraggedFiles(event: DragEvent): boolean {
   return Array.from(event.dataTransfer?.types || []).includes("Files");
