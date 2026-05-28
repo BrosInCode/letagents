@@ -219,16 +219,21 @@ jobs:
 
             cd "${{ secrets.DEPLOY_PATH }}"
 
-            # Fetch and checkout the exact commit that triggered this deploy
-            git fetch origin staging
-            git checkout ${{ github.sha }}
-
-            # Keep enough room for the app and migrator image pulls.
+            # Keep enough room before Git and Docker writes on the deploy host.
+            df -h || true
             docker system df || true
             docker container prune -f || true
             docker image prune -af || true
             docker builder prune -af || true
             docker system df || true
+            df -h || true
+
+            # Clear a stale lock left by a failed checkout on a full disk.
+            rm -f .git/index.lock
+
+            # Fetch and checkout the exact commit that triggered this deploy
+            git fetch origin staging
+            git checkout ${{ github.sha }}
 
             # Pull the exact images built by this CI run
             docker pull "ghcr.io/brosincode/letagents:${IMAGE_TAG}"
