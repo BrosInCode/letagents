@@ -7,7 +7,7 @@ import {
   updateAccountRoomPreferences,
   type AccountRoomListEntry,
   type AccountRoomListFocusRoom,
-} from "../account-room-membership/index.js";
+} from "../account-room-membership.js";
 import type { AuthenticatedRequest } from "../http-helpers.js";
 
 export interface AccountRoomRouteDeps {
