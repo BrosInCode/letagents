@@ -1,7 +1,8 @@
-import { ref } from "vue";
+import { ref, type Ref } from "vue";
 import type { DesktopAuthStatus } from "../../../electron/ipc-types";
 
 interface DesktopAuthFlowOptions {
+  authStatus?: Ref<DesktopAuthStatus | null>;
   getRoomIdentifier: () => string | null;
   isFirstRunGate: () => boolean;
   onFirstRunAuthorized: () => Promise<void>;
@@ -10,7 +11,7 @@ interface DesktopAuthFlowOptions {
 }
 
 export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
-  const authStatus = ref<DesktopAuthStatus | null>(null);
+  const authStatus = options.authStatus ?? ref<DesktopAuthStatus | null>(null);
   const authBusy = ref(false);
   const authFeedback = ref<string | null>(null);
   let authPollTimer: number | null = null;
