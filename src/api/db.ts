@@ -10,9 +10,9 @@ export type { TaskLock, StaleTaskPromptMute, CoordinationEvent, TaskOwnershipSta
 export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCreateCanonicalRoom, getProjectByName, getAllProjects, getProjectByCode, getRoomAlias } from "./db/rooms.js";
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
 export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
-export { getGitHubRepositoryLinkById, upsertGitHubRepositoryLink, migrateGitHubRepositoryCanonicalRoom, upsertGitHubAppInstallation, markGitHubAppInstallationUninstalled, setGitHubAppInstallationSuspended, upsertGitHubAppRepository, markGitHubAppRepositoryRemoved } from "./db/github.js";
-export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, getGitHubRoomEvents } from "./db/github.js";
-export { getTasksGitHubArtifactStatus } from "./db/github.js";
+export { getGitHubRepositoryLinkById, upsertGitHubRepositoryLink, migrateGitHubRepositoryCanonicalRoom, upsertGitHubAppInstallation, markGitHubAppInstallationUninstalled, setGitHubAppInstallationSuspended, upsertGitHubAppRepository, markGitHubAppRepositoryRemoved } from "./db/github/index.js";
+export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, getGitHubRoomEvents } from "./db/github/index.js";
+export { getTasksGitHubArtifactStatus } from "./db/github/index.js";
 export { addMessage, getMessages, getLatestMessages, getMessagesBefore, getMessagesAfter, getRoomMessageCountsBySender, getMessageAttachment, createMessageAttachmentUpload } from "./db/messages.js";
 export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
 export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, markRoomAgentDeliveryConnected, markRoomAgentDeliveryHeartbeat, markRoomAgentDeliveryDisconnected, forceDisconnectRoomAgentDeliverySession, getRoomAgentDeliverySessions, getReachableWorkerDeliverySessionForAgentSession } from "./db/presence.js";
