@@ -1,93 +1,15 @@
 import type {
-  DesktopRoomMessage,
   DesktopRoomMessagesPage,
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
-import { mapRoomMessageAttachmentPayload } from "../attachments.js";
 import { roomMessageHistoryPageSize } from "../paths.js";
+import {
+  mapRoomMessagePayload,
+  type RoomMessagePayload,
+} from "./messages/mappers.js";
 
-export function mapRoomMessagePayload(message: {
-  id: string;
-  sender: string;
-  text: string;
-  attachments?: Array<{
-    id?: string | null;
-    name?: string | null;
-    file_name?: string | null;
-    filename?: string | null;
-    mime_type?: string | null;
-    content_type?: string | null;
-    size_bytes?: number | null;
-    byte_size?: number | null;
-    url?: string | null;
-    download_url?: string | null;
-    data_url?: string | null;
-    content_base64?: string | null;
-  }> | null;
-  agent_prompt_kind?: string | null;
-  source?: string | null;
-  timestamp: string;
-  reply_to?: {
-    id: string;
-    sender: string;
-    text: string;
-    source?: string | null;
-    timestamp: string;
-  } | null;
-  agent_identity?: {
-    name?: string | null;
-    display_name?: string | null;
-    owner_label?: string | null;
-    owner_attribution?: string | null;
-    ide_label?: string | null;
-    actor_label?: string | null;
-  } | null;
-}): DesktopRoomMessage {
-  return {
-    id: message.id,
-    sender: message.sender,
-    text: message.text,
-    attachments: (message.attachments || []).map(
-      mapRoomMessageAttachmentPayload,
-    ),
-    agentPromptKind: message.agent_prompt_kind || null,
-    source: message.source || null,
-    timestamp: message.timestamp,
-    actorLabel: message.agent_identity?.actor_label || null,
-    agentIdentity: mapRoomMessageAgentIdentity(message.agent_identity || null),
-    replyTo: message.reply_to
-      ? {
-          id: message.reply_to.id,
-          sender: message.reply_to.sender,
-          text: message.reply_to.text,
-          source: message.reply_to.source || null,
-          timestamp: message.reply_to.timestamp,
-        }
-      : null,
-  };
-}
-
-function mapRoomMessageAgentIdentity(
-  identity: {
-    name?: string | null;
-    display_name?: string | null;
-    owner_label?: string | null;
-    owner_attribution?: string | null;
-    ide_label?: string | null;
-    actor_label?: string | null;
-  } | null,
-): DesktopRoomMessage["agentIdentity"] {
-  if (!identity) return null;
-  return {
-    name: identity.name || null,
-    displayName: identity.display_name || null,
-    ownerLabel: identity.owner_label || null,
-    ownerAttribution: identity.owner_attribution || null,
-    ideLabel: identity.ide_label || null,
-    actorLabel: identity.actor_label || null,
-  };
-}
+export { mapRoomMessagePayload, type RoomMessagePayload };
 
 export async function sendDesktopRoomMessage(
   roomIdentifier: string,
@@ -107,44 +29,22 @@ export async function sendDesktopRoomMessage(
   const storedAuth = await readStoredAuth();
   const sender =
     storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
-  const message = await apiFetch<{
-    id: string;
-    sender: string;
-    text: string;
-    attachments?:
-      | Parameters<typeof mapRoomMessageAttachmentPayload>[0][]
-      | null;
-    agent_prompt_kind?: string | null;
-    source?: string | null;
-    timestamp: string;
-    reply_to?: {
-      id: string;
-      sender: string;
-      text: string;
-      source?: string | null;
-      timestamp: string;
-    } | null;
-    agent_identity?: {
-      name?: string | null;
-      display_name?: string | null;
-      owner_label?: string | null;
-      owner_attribution?: string | null;
-      ide_label?: string | null;
-      actor_label?: string | null;
-    } | null;
-  }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-LetAgents-Desktop-Client": "1",
+  const message = await apiFetch<RoomMessagePayload>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
+      body: JSON.stringify({
+        sender,
+        text: trimmedText,
+        reply_to: replyTo || null,
+        attachments,
+      }),
     },
-    body: JSON.stringify({
-      sender,
-      text: trimmedText,
-      reply_to: replyTo || null,
-      attachments,
-    }),
-  });
+  );
 
   return {
     message: mapRoomMessagePayload(message),
@@ -163,7 +63,7 @@ export async function getDesktopRoomMessagesBefore(
   }
 
   const page = await apiFetch<{
-    messages?: Parameters<typeof mapRoomMessagePayload>[0][];
+    messages?: RoomMessagePayload[];
     has_older?: boolean;
     has_more?: boolean;
   }>(
