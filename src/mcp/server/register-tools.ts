@@ -10,7 +10,7 @@ import {
   registerRoomJoinTools,
   registerRoomResumeTool,
 } from "./tools/rooms.js";
-import { registerTaskTools } from "./tools/tasks.js";
+import { registerTaskTools } from "./tools/tasks/index.js";
 
 export function registerTools(server: McpServer): void {
   registerRoomJoinTools(server);

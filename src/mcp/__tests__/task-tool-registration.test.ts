@@ -1,0 +1,63 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerTaskTools } from "../server/tools/tasks/index.js";
+
+type ToolRegistration = {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  handler: unknown;
+};
+
+function collectTaskToolRegistrations(): ToolRegistration[] {
+  const registrations: ToolRegistration[] = [];
+  const server = {
+    tool(name: string, description: string, schema: Record<string, unknown>, handler: unknown) {
+      registrations.push({ name, description, schema, handler });
+    },
+  };
+
+  registerTaskTools(server as unknown as McpServer);
+  return registrations;
+}
+
+test("registerTaskTools preserves the public task tool surface", () => {
+  const registrations = collectTaskToolRegistrations();
+
+  assert.deepEqual(registrations.map((registration) => registration.name), [
+    "add_task",
+    "get_board",
+    "get_room_events",
+    "claim_task",
+    "update_task",
+    "complete_task",
+    "claim_task_review",
+    "release_task_review",
+    "release_task_lease",
+    "handoff_task_lease",
+  ]);
+  assert.ok(registrations.every((registration) => typeof registration.handler === "function"));
+});
+
+test("worker task mutations keep registered worker-session inputs", () => {
+  const registrations = collectTaskToolRegistrations();
+  const workerToolNames = new Set([
+    "add_task",
+    "claim_task",
+    "update_task",
+    "complete_task",
+    "claim_task_review",
+    "release_task_review",
+    "release_task_lease",
+    "handoff_task_lease",
+  ]);
+
+  for (const registration of registrations) {
+    if (!workerToolNames.has(registration.name)) continue;
+
+    assert.ok("room_id" in registration.schema, `${registration.name} should accept room_id`);
+    assert.ok("conversation_id" in registration.schema, `${registration.name} should accept conversation_id`);
+    assert.ok("agent_session_id" in registration.schema, `${registration.name} should accept agent_session_id`);
+  }
+});
