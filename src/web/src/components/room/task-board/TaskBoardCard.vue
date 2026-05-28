@@ -97,10 +97,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { type RoomAgentPresence, type RoomTask, type TaskGitHubArtifactStatus } from '@/composables/useRoom'
-import TaskLeaseAuthority from '../TaskLeaseAuthority.vue'
+import TaskLeaseAuthority from '../task-lease-authority/TaskLeaseAuthority.vue'
 import TaskMergeReadiness from '../TaskMergeReadiness.vue'
 import TaskPersonChip from '../TaskPersonChip.vue'
-import TaskReviewAuthority from '../TaskReviewAuthority.vue'
+import TaskReviewAuthority from '../task-review-authority/TaskReviewAuthority.vue'
 import {
   canFocusTask,
   formatActorName,
