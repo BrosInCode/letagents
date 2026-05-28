@@ -1,0 +1,92 @@
+.desktop-composer-shortcut {
+  flex: 0 1 auto;
+  text-align: right;
+  opacity: 0.42;
+}
+
+.desktop-composer-input {
+  width: 100%;
+  min-height: 26px;
+  max-height: 96px;
+  resize: vertical;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.28;
+}
+
+.desktop-composer-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.desktop-composer-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.desktop-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.desktop-composer-hint,
+.desktop-composer-error {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-error {
+  color: #ff8a8a;
+}
+
+.desktop-composer-send {
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--text);
+  color: #080808;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.desktop-composer-attach {
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--text-secondary);
+}
+
+.desktop-composer-attach svg {
+  width: 13px;
+  height: 13px;
+}
+
+.desktop-composer-attach:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+.desktop-composer-attach:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.desktop-composer-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
