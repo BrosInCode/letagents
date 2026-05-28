@@ -35,6 +35,9 @@ jobs:
       - name: Type check (Vue)
         run: cd src/web && npx vue-tsc --noEmit
 
+      - name: Test Vue helpers
+        run: npm run test:web
+
       - name: Build Vue app
         run: npm run build:web
 

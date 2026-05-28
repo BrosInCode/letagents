@@ -17,6 +17,7 @@
     "build:web": "cd src/web && npm install && npx vite build",
     "build:desktop": "npm --prefix apps/desktop run build",
     "build:all": "npm run build && npm run build:web",
+    "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/api/migrate.ts",
     "db:studio": "drizzle-kit studio",
