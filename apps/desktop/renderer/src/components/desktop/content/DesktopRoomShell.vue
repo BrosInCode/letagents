@@ -124,12 +124,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, toRef } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
   DesktopFocusRoomInfo,
-  DesktopGitHubIntegrationStatus,
   DesktopParticipantSummary,
   DesktopRoomInfo,
   DesktopRoomMessage,
@@ -138,32 +137,25 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
-import type { AgentModalTarget } from "./DesktopChatMessage.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RentAnAgentView from "./RentAnAgentView.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
-import { latestReasoningSessionForTarget } from "../../../domain/reasoning";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
-import {
-  compareRoomMessages,
-  encodeRoomPathIdentifier,
-  mergeRoomMessages,
-} from "./room-shell/messages";
-import {
-  readLiquidGlassEnabled,
-  readNotificationPermission,
-  readNotificationsEnabled,
-  readSoundEnabled,
-} from "./room-shell/preferences";
-import {
-  buildAgentFallbackReasoningSession,
-  sanitizeFallbackId,
-} from "./room-shell/reasoningFallback";
+import { encodeRoomPathIdentifier } from "./room-shell/messages";
+import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
+import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
+import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
+import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
+import {
+  useDesktopRoomPreferences,
+  watchRoomNotifications,
+} from "./room-shell/useDesktopRoomPreferences";
+import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -178,45 +170,102 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
 }>();
 
-const activeTab = ref<RoomTabId>("chat");
-const sendingMessage = ref(false);
-const sendError = ref<string | null>(null);
-const olderMessages = ref<DesktopRoomMessage[]>([]);
-const localMessages = ref<DesktopRoomMessage[]>([]);
-const hasOlderMessages = ref(true);
-const loadingOlderMessages = ref(false);
-const actionPanelOpen = ref(false);
-const rulesOpen = ref(false);
-const searchOpen = ref(false);
-const searchQuery = ref("");
-const activeSearchIndex = ref(0);
-const roomLinkCopied = ref(false);
-const renameBusy = ref(false);
-const renameError = ref<string | null>(null);
-const githubStatus = ref<DesktopGitHubIntegrationStatus | null>(null);
-const githubLoading = ref(false);
-const githubBusy = ref(false);
-const githubError = ref<string | null>(null);
-const soundEnabled = ref(readSoundEnabled());
-const notificationsEnabled = ref(readNotificationsEnabled());
-const liquidGlassEnabled = ref(readLiquidGlassEnabled());
-const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
-const messageHistoryPageSize = 150;
-const chatScrollTop = ref<number | null>(null);
-const chatDraftText = ref("");
-const selectedReasoningSessionId = ref<string | null>(null);
-const selectedReasoningSessionCache = ref<DesktopReasoningSession | null>(null);
-const selectedReasoningFallbackTarget = ref<AgentModalTarget | null>(null);
-let audioContext: AudioContext | null = null;
-let observedLatestMessageId: string | null = null;
-const ownMessageIds = new Set<string>();
-
 const emit = defineEmits<{
   "message-sent": [message: DesktopRoomMessage];
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
 }>();
+
+const roomRef = toRef(props, "room");
+const messagesRef = toRef(props, "messages");
+const reasoningSessionsRef = toRef(props, "reasoningSessions");
+const activeTab = ref<RoomTabId>("chat");
+const actionPanelOpen = ref(false);
+const rulesOpen = ref(false);
+const roomLinkCopied = ref(false);
+const visibleParticipantCount = computed(() =>
+  props.participants.filter((participant) => !participant.hiddenAt).length
+);
+const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
+
+const {
+  soundEnabled,
+  notificationsEnabled,
+  liquidGlassEnabled,
+  notificationPermission,
+  toggleSound,
+  toggleNotifications,
+  toggleLiquidGlass,
+  playRoomSound,
+  showRoomNotification,
+} = useDesktopRoomPreferences();
+
+const {
+  sendingMessage,
+  sendError,
+  hasOlderMessages,
+  loadingOlderMessages,
+  chatScrollTop,
+  chatDraftText,
+  ownMessageIds,
+  visibleMessages,
+  roomMessagesForAgentInsight,
+  sendRoomMessage,
+  discardAttachment,
+  loadOlderMessages,
+} = useDesktopRoomMessages({
+  room: roomRef,
+  messages: messagesRef,
+  playRoomSound,
+  onMessageSent: (message) => emit("message-sent", message),
+});
+
+const {
+  searchOpen,
+  searchQuery,
+  searchResults,
+  activeSearchMessageId,
+  searchSummary,
+  toggleSearch,
+  closeSearch,
+  moveSearch,
+} = useDesktopRoomSearch(visibleMessages);
+
+const {
+  selectedReasoningSessionId,
+  selectedReasoningSessionForInspector,
+  openReasoningInspector,
+  openAgentReasoningFallback,
+  closeReasoningInspector,
+} = useDesktopReasoningInspector({
+  roomIdentifier: computed(() => props.room.identifier),
+  reasoningSessions: reasoningSessionsRef,
+  roomMessagesForAgentInsight,
+});
+
+const {
+  renameBusy,
+  renameError,
+  githubStatus,
+  githubLoading,
+  githubBusy,
+  githubError,
+  renameRoom,
+  refreshGitHubIntegration,
+  installGitHubIntegration,
+} = useDesktopRoomGitHub({
+  room: roomRef,
+  onRoomRenamed: (room) => emit("room-renamed", room),
+  refreshRoom: () => emit("refresh-room"),
+});
+
+watchRoomNotifications({
+  visibleMessages,
+  ownMessageIds,
+  playRoomSound,
+  showRoomNotification: (message) => showRoomNotification(message, props.room.displayName),
+});
 
 const tabs = computed<RoomTab[]>(() => [
   { id: "chat", label: "Chat", count: visibleMessages.value.length },
@@ -225,163 +274,10 @@ const tabs = computed<RoomTab[]>(() => [
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
   { id: "rent", label: "Rent an Agent", count: null },
 ]);
-const visibleParticipantCount = computed(() => props.participants.filter((participant) => !participant.hiddenAt).length);
-const visibleMessages = computed(() => {
-  return mergeRoomMessages([...olderMessages.value, ...props.messages], localMessages.value);
-});
-const roomMessagesForAgentInsight = computed(() =>
-  [...olderMessages.value, ...props.messages, ...localMessages.value].sort(compareRoomMessages)
-);
-const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
-const normalizedSearchQuery = computed(() => searchQuery.value.trim().toLowerCase());
-const searchResults = computed(() => {
-  const query = normalizedSearchQuery.value;
-  if (!query) return [];
-  return visibleMessages.value.filter((message) => {
-    const haystack = [
-      message.sender,
-      message.text,
-      message.replyTo?.text || "",
-      ...message.attachments.map((attachment) => attachment.fileName || attachment.name || ""),
-    ].join("\n").toLowerCase();
-    return haystack.includes(query);
-  });
-});
-const activeSearchMessageId = computed(() => searchResults.value[activeSearchIndex.value]?.id || null);
-const selectedReasoningSession = computed(() => {
-  const directSession = props.reasoningSessions.find((session) => session.id === selectedReasoningSessionId.value);
-  if (directSession) return directSession;
-  const target = selectedReasoningFallbackTarget.value;
-  return target ? latestReasoningSessionForTarget(target, props.reasoningSessions) : null;
-});
-const selectedReasoningSessionForInspector = computed(() =>
-  selectedReasoningSession.value
-  || (selectedReasoningFallbackTarget.value
-    ? buildAgentFallbackReasoningSession(
-        selectedReasoningFallbackTarget.value,
-        props.room.identifier,
-        roomMessagesForAgentInsight.value,
-      )
-    : null)
-  || selectedReasoningSessionCache.value
-);
-const searchSummary = computed(() => {
-  if (!normalizedSearchQuery.value) return "Type to search this room.";
-  if (!searchResults.value.length) return "No messages found.";
-  return `${activeSearchIndex.value + 1} of ${searchResults.value.length}`;
-});
-
-watch(
-  () => props.messages.map((message) => message.id).join("|"),
-  () => {
-    const serverIds = new Set(props.messages.map((message) => message.id));
-    localMessages.value = localMessages.value.filter((message) => !serverIds.has(message.id));
-  }
-);
-
-watch(
-  () => visibleMessages.value.at(-1)?.id || null,
-  (messageId) => {
-    if (!messageId) return;
-    if (!observedLatestMessageId) {
-      observedLatestMessageId = messageId;
-      return;
-    }
-    if (messageId === observedLatestMessageId) return;
-    observedLatestMessageId = messageId;
-    const message = visibleMessages.value.find((entry) => entry.id === messageId);
-    if (!message || ownMessageIds.has(message.id)) return;
-    playRoomSound("notification");
-    showRoomNotification(message);
-  }
-);
-
-watch(searchResults, (results) => {
-  if (activeSearchIndex.value >= results.length) {
-    activeSearchIndex.value = Math.max(0, results.length - 1);
-  }
-});
-
-watch(
-  () => props.room.identifier,
-  () => {
-    chatScrollTop.value = null;
-    chatDraftText.value = "";
-    selectedReasoningSessionId.value = null;
-    selectedReasoningSessionCache.value = null;
-    selectedReasoningFallbackTarget.value = null;
-    void refreshGitHubIntegration();
-  },
-  { immediate: true },
-);
-
-watch(selectedReasoningSession, (session) => {
-  if (session) {
-    selectedReasoningSessionCache.value = session;
-  }
-});
 
 function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
   emit("refresh-room");
-}
-
-function openReasoningInspector(sessionId: string): void {
-  selectedReasoningSessionId.value = sessionId;
-  selectedReasoningSessionCache.value = props.reasoningSessions.find((session) => session.id === sessionId) || null;
-  selectedReasoningFallbackTarget.value = null;
-}
-
-function openAgentReasoningFallback(target: AgentModalTarget): void {
-  const actorLabel = target.actorLabel || target.sender || target.displayName;
-  selectedReasoningSessionId.value = `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`;
-  selectedReasoningFallbackTarget.value = target;
-  selectedReasoningSessionCache.value = buildAgentFallbackReasoningSession(
-    target,
-    props.room.identifier,
-    roomMessagesForAgentInsight.value,
-  );
-}
-
-function closeReasoningInspector(): void {
-  selectedReasoningSessionId.value = null;
-  selectedReasoningSessionCache.value = null;
-  selectedReasoningFallbackTarget.value = null;
-}
-
-async function sendRoomMessage(text: string, replyTo: string | null = null, attachments: Array<{ upload_id: string }> = []): Promise<void> {
-  const trimmedText = text.trim();
-  if (!trimmedText && attachments.length === 0) return;
-
-  sendingMessage.value = true;
-  sendError.value = null;
-  try {
-    const result = await window.letagentsDesktop.room.sendMessage(props.room.identifier, trimmedText, replyTo, attachments);
-    ownMessageIds.add(result.message.id);
-    localMessages.value = mergeRoomMessages(localMessages.value, [result.message]);
-    playRoomSound("send");
-    emit("message-sent", result.message);
-  } catch (error) {
-    sendError.value = error instanceof Error ? error.message : "Message could not be sent.";
-  } finally {
-    sendingMessage.value = false;
-  }
-}
-
-function toggleSearch(): void {
-  searchOpen.value = !searchOpen.value;
-}
-
-function closeSearch(): void {
-  searchOpen.value = false;
-  searchQuery.value = "";
-  activeSearchIndex.value = 0;
-}
-
-function moveSearch(delta: 1 | -1): void {
-  const count = searchResults.value.length;
-  if (!count) return;
-  activeSearchIndex.value = (activeSearchIndex.value + delta + count) % count;
 }
 
 function openRules(): void {
@@ -401,165 +297,7 @@ async function copyRoomLink(): Promise<void> {
   }
 }
 
-async function renameRoom(displayName: string): Promise<void> {
-  renameBusy.value = true;
-  renameError.value = null;
-  try {
-    const roomBridge = getRoomBridge();
-    if (typeof roomBridge?.rename !== "function") {
-      renameError.value = desktopBridgeUpgradeMessage();
-      return;
-    }
-    const updated = await roomBridge.rename(props.room.identifier, displayName);
-    emit("room-renamed", updated);
-    emit("refresh-room");
-  } catch (error) {
-    renameError.value = error instanceof Error ? error.message : "Room could not be renamed.";
-  } finally {
-    renameBusy.value = false;
-  }
-}
-
-async function refreshGitHubIntegration(): Promise<void> {
-  githubLoading.value = true;
-  githubError.value = null;
-  try {
-    const roomBridge = getRoomBridge();
-    if (typeof roomBridge?.getGitHubIntegrationStatus !== "function") {
-      githubStatus.value = null;
-      githubError.value = desktopBridgeUpgradeMessage();
-      return;
-    }
-    githubStatus.value = await roomBridge.getGitHubIntegrationStatus(props.room.identifier);
-  } catch (error) {
-    githubStatus.value = null;
-    githubError.value = error instanceof Error ? error.message : "GitHub status could not be checked.";
-  } finally {
-    githubLoading.value = false;
-  }
-}
-
-async function installGitHubIntegration(): Promise<void> {
-  githubBusy.value = true;
-  githubError.value = null;
-  try {
-    const roomBridge = getRoomBridge();
-    if (typeof roomBridge?.openGitHubInstall !== "function") {
-      githubError.value = desktopBridgeUpgradeMessage();
-      return;
-    }
-    const result = await roomBridge.openGitHubInstall(props.room.identifier);
-    if (!result.opened) githubError.value = result.message;
-  } catch (error) {
-    githubError.value = error instanceof Error ? error.message : "GitHub could not be opened.";
-  } finally {
-    githubBusy.value = false;
-  }
-}
-
-function toggleSound(): void {
-  soundEnabled.value = !soundEnabled.value;
-  window.localStorage.setItem("letagents-desktop:sound", soundEnabled.value ? "on" : "off");
-  if (soundEnabled.value) playRoomSound("send");
-}
-
-async function toggleNotifications(): Promise<void> {
-  if (typeof Notification === "undefined") {
-    notificationPermission.value = "unsupported";
-    return;
-  }
-  if (!notificationsEnabled.value && Notification.permission === "default") {
-    notificationPermission.value = await Notification.requestPermission();
-  } else {
-    notificationPermission.value = Notification.permission;
-  }
-  notificationsEnabled.value = !notificationsEnabled.value && notificationPermission.value === "granted";
-  window.localStorage.setItem("letagents-desktop:notifications", notificationsEnabled.value ? "on" : "off");
-}
-
-function toggleLiquidGlass(): void {
-  liquidGlassEnabled.value = !liquidGlassEnabled.value;
-  window.localStorage.setItem("letagents-desktop:liquid-glass", liquidGlassEnabled.value ? "on" : "off");
-}
-
 function exportChat(): void {
-  if (!visibleMessages.value.length) return;
-  const lines = visibleMessages.value.map((message) =>
-    `[${new Date(message.timestamp).toLocaleString()}] ${message.sender}: ${message.text}`
-  );
-  const blob = new Blob([lines.join("\n")], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `letagents-${props.room.displayName.replace(/[^a-z0-9-]+/gi, "-").toLowerCase()}-${Date.now()}.txt`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function getRoomBridge(): Partial<typeof window.letagentsDesktop.room> | undefined {
-  return window.letagentsDesktop?.room as Partial<typeof window.letagentsDesktop.room> | undefined;
-}
-
-function desktopBridgeUpgradeMessage(): string {
-  return "Restart LetAgents Desktop to load the latest room tools.";
-}
-
-async function discardAttachment(uploadId: string): Promise<void> {
-  await window.letagentsDesktop.room.discardAttachment(props.room.identifier, uploadId);
-}
-
-async function loadOlderMessages(): Promise<void> {
-  if (loadingOlderMessages.value || !hasOlderMessages.value) return;
-  const firstMessageId = visibleMessages.value[0]?.id;
-  if (!firstMessageId) {
-    hasOlderMessages.value = false;
-    return;
-  }
-
-  loadingOlderMessages.value = true;
-  try {
-    const page = await window.letagentsDesktop.room.getMessagesBefore(props.room.identifier, firstMessageId, messageHistoryPageSize);
-    olderMessages.value = [...page.messages, ...olderMessages.value];
-    hasOlderMessages.value = page.hasOlder;
-  } catch {
-    hasOlderMessages.value = false;
-  } finally {
-    loadingOlderMessages.value = false;
-  }
-}
-
-function playRoomSound(kind: "send" | "notification"): void {
-  if (!soundEnabled.value) return;
-  try {
-    const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextCtor) return;
-    if (!audioContext) audioContext = new AudioContextCtor();
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-    const now = audioContext.currentTime;
-    const startFrequency = kind === "send" ? 740 : 880;
-    const endFrequency = kind === "send" ? 980 : 660;
-    oscillator.frequency.setValueAtTime(startFrequency, now);
-    oscillator.frequency.setValueAtTime(endFrequency, now + 0.07);
-    gain.gain.setValueAtTime(0.09, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-    oscillator.start(now);
-    oscillator.stop(now + 0.2);
-  } catch {
-    // Audio can be unavailable before a user gesture; the toggle will retry later.
-  }
-}
-
-function showRoomNotification(message: DesktopRoomMessage): void {
-  if (!notificationsEnabled.value || typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  if (document.visibilityState === "visible" && document.hasFocus()) return;
-  const sender = message.sender.split("|")[0]?.trim() || "LetAgents";
-  const body = message.text.trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
-  new Notification(`${sender} in ${props.room.displayName}`, {
-    body,
-    silent: true,
-  });
+  exportRoomChat(props.room, visibleMessages.value);
 }
 </script>
