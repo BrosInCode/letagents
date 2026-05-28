@@ -107,8 +107,6 @@ import {
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 
-export type { AgentModalTarget } from "./desktop-chat-message/types";
-
 const props = defineProps<{
   message: DesktopRoomMessage;
   threadCount: number;

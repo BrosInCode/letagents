@@ -7,7 +7,7 @@ import {
   attachmentMeta,
   attachmentName,
   isImageAttachment,
-} from "./attachment-utils";
+} from "../desktop-chat-message/attachments";
 import { displaySender, formatDateTime } from "./message-format";
 
 export function useRoomImages(messages: Readonly<Ref<DesktopRoomMessage[]>>) {

@@ -68,7 +68,7 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
-import type { AgentModalTarget } from "./DesktopChatMessage.vue";
+import type { AgentModalTarget } from "./desktop-chat-message/types";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher";

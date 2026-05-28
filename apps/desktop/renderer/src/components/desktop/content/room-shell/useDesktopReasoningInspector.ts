@@ -4,7 +4,7 @@ import type {
   DesktopRoomMessage,
 } from "../../../../../../electron/ipc-types";
 import { latestReasoningSessionForTarget } from "../../../../domain/reasoning";
-import type { AgentModalTarget } from "../DesktopChatMessage.vue";
+import type { AgentModalTarget } from "../desktop-chat-message/types";
 import {
   buildAgentFallbackReasoningSession,
   sanitizeFallbackId,

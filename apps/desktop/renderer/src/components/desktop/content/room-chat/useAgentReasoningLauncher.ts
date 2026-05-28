@@ -7,7 +7,7 @@ import {
   latestReasoningSessionForTarget,
   reasoningAgentTargetKeys,
 } from "../../../../domain/reasoning";
-import type { AgentModalTarget } from "../DesktopChatMessage.vue";
+import type { AgentModalTarget } from "../desktop-chat-message/types";
 
 interface AgentReasoningLauncherOptions {
   presence: () => DesktopAgentPresence[];

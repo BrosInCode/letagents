@@ -33,12 +33,12 @@
 import type { DesktopRoomMessageAttachment } from "../../../../../../electron/ipc-types";
 import {
   attachmentHref,
+  attachmentDisplayMeta,
   attachmentKey,
-  attachmentMimeType,
   attachmentName,
   imageAttachmentId,
   isImageAttachment,
-} from "../room-chat/attachment-utils";
+} from "./attachments";
 
 defineProps<{
   messageId: string;
@@ -48,23 +48,4 @@ defineProps<{
 defineEmits<{
   "open-image": [imageId: string];
 }>();
-
-function attachmentDisplayMeta(attachment: DesktopRoomMessageAttachment): string {
-  return [
-    attachmentMimeType(attachment),
-    formatDisplayBytes(attachment.sizeBytes || 0),
-  ].filter(Boolean).join(" · ");
-}
-
-function formatDisplayBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size.toFixed(size >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
 </script>
