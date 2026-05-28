@@ -28,6 +28,12 @@
   min-width: 0;
 }
 
+.desktop-room-github-summary > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
 .desktop-room-github-actions {
   align-items: center;
   justify-content: flex-end;
@@ -58,40 +64,15 @@
   box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
 }
 
-.desktop-room-row-action,
-.desktop-room-status-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  padding: 0 9px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--text-secondary);
-  font-size: 0.72rem;
+.desktop-room-github-pill strong {
+  color: var(--text);
+  font-size: 0.84rem;
   font-weight: 820;
-  white-space: nowrap;
 }
 
-.desktop-room-status-chip[data-state="connected"],
-.desktop-room-status-chip[data-state="on"] {
-  border-color: rgba(34, 197, 94, 0.18);
-  background: rgba(34, 197, 94, 0.09);
-  color: #86efac;
-}
-
-.desktop-room-status-chip[data-state="ready"],
-.desktop-room-status-chip[data-state="checking"],
-.desktop-room-status-chip[data-state="loading"] {
-  border-color: rgba(245, 158, 11, 0.2);
-  background: rgba(245, 158, 11, 0.09);
-  color: #fcd34d;
-}
-
-.desktop-room-status-chip[data-state="error"],
-.desktop-room-status-chip[data-state="blocked"] {
-  border-color: rgba(239, 68, 68, 0.2);
-  background: rgba(239, 68, 68, 0.09);
-  color: #fca5a5;
+.desktop-room-github-pill small {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.36;
 }
