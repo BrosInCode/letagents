@@ -32,6 +32,9 @@ jobs:
       - name: Test MCP helpers
         run: npm run test:mcp
 
+      - name: Test headless Antigravity helpers
+        run: npm run test:headless-antigravity
+
       - name: Install Vue dependencies
         run: cd src/web && npm ci
 

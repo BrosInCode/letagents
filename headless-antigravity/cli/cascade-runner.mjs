@@ -30,6 +30,7 @@ export async function runCascadeMode({
   scanAllLs,
   verbose,
   log,
+  resolveAcrossLsInstances = resolveCascadeAcrossLsInstances,
 }) {
   const maxPolls = Number(env.ANTIGRAVITY_MAX_POLLS || 40);
   const delayMs = Number(env.ANTIGRAVITY_POLL_MS || 1500);
@@ -47,7 +48,7 @@ export async function runCascadeMode({
         "--scan-all-ls / ANTIGRAVITY_SCAN_ALL_LS requires ANTIGRAVITY_CASCADE_ID and/or --resolve-cascade (or ANTIGRAVITY_RESOLVE_CASCADE=1).",
       );
     }
-    const resolved = await resolveCascadeAcrossLsInstances({
+    const resolved = await resolveAcrossLsInstances({
       wantCascadeId: reuseCascadeId,
       workspaceUri,
       log,
