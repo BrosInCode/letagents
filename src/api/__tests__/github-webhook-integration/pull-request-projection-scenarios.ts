@@ -145,7 +145,7 @@ webhookIntegrationTest(
     });
 
     assert.equal(firstResult.status, "processed");
-    assert.equal(secondResult.status, "processed");
+    assert.equal(secondResult.duplicate, true);
 
     const updatedTask = await getTaskById(room.id, task.id);
     assert.equal(updatedTask?.status, "in_review");
