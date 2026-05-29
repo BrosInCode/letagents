@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPresignedAttachmentDownload } from "../attachment-storage.js";
+import { createPresignedAttachmentDownload } from "../messages/attachment-storage.js";
 
 process.env.ATTACHMENT_S3_BUCKET = "letagents-attachments-test";
 process.env.ATTACHMENT_S3_REGION = "us-east-1";

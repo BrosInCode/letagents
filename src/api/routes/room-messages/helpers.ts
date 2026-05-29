@@ -1,8 +1,8 @@
 import type { Response } from "express";
 
 import type { Project } from "../../db.js";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
-import { normalizeRoomId } from "../../room-routing.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import type { RoomMessageRouteDeps } from "./types.js";
 
 export function routeParam(req: AuthenticatedRequest, index: number): string {

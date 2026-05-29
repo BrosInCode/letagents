@@ -7,9 +7,9 @@ import {
 import {
   parseLimit,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
-import { getFocusRoomSettings } from "../room-formatting.js";
-import { normalizeRoomId } from "../room-routing.js";
+} from "../http/helpers.js";
+import { getFocusRoomSettings } from "../rooms/formatting.js";
+import { normalizeRoomId } from "../rooms/routing.js";
 
 export interface RoomEventRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;

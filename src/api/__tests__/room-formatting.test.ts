@@ -17,7 +17,7 @@ const {
   formatFocusRoomReference,
   getFocusRoomSettings,
   toRoomResponse,
-} = await import("../room-formatting.js");
+} = await import("../rooms/formatting.js");
 
 function project(overrides: Partial<Project> = {}): Project {
   return {

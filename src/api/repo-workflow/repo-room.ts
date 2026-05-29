@@ -1,4 +1,4 @@
-import { normalizeRoomName } from "../room-routing.js";
+import { normalizeRoomName } from "../rooms/routing.js";
 import { getProviderHost, HOST_TO_PROVIDER } from "./providers.js";
 import type { RepoRoomRef, RepoWorkflowProvider } from "./types.js";
 

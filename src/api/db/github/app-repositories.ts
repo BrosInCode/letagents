@@ -1,6 +1,6 @@
 import { desc, eq } from "drizzle-orm";
 
-import { normalizeRoomName } from "../../room-routing.js";
+import { normalizeRoomName } from "../../rooms/routing.js";
 import { db } from "../client.js";
 import { toGitHubAppRepository } from "../mappers.js";
 import { github_app_repositories } from "../schema.js";

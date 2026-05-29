@@ -10,17 +10,17 @@ import {
   getReachableWorkerDeliverySessionForAgentSession,
   getTaskById,
 } from "../../db.js";
-import { buildLeasedBranchRef } from "../../github-lease-enforcement.js";
+import { buildLeasedBranchRef } from "../../github/lease-enforcement.js";
 import {
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
-import { normalizeRoomId } from "../../room-routing.js";
+} from "../../http/helpers.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import {
   normalizeTaskActorInstanceId,
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
-} from "../../task-ownership.js";
+} from "../../tasks/ownership.js";
 import {
   findApplicableLock,
   leaseMatchesActor,

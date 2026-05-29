@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { AgentPromptKind } from "../../shared/room-agent-prompts.js";
 import type { Message, Project } from "../db.js";
-import { createTaskActivityMessageEmitters } from "../task-activity-messages.js";
+import { createTaskActivityMessageEmitters } from "../tasks/activity-messages.js";
 
 interface EmittedMessage {
   projectId: string;

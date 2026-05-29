@@ -15,12 +15,12 @@ import {
   buildGitHubRepoRoomId,
   getGitHubRepositoryOwnerLogin,
   type GitHubWebhookPayload,
-} from "../github-app.js";
+} from "./app.js";
 import {
   createGitHubAppSync,
   toGitHubWebhookId,
-} from "../github-app-sync.js";
-import { materializeGitHubWebhookEvent } from "../github-room-events.js";
+} from "./app-sync.js";
+import { materializeGitHubWebhookEvent } from "./room-events.js";
 import {
   handleMaterializedGitHubRoomEvent,
   persistMaterializedGitHubRoomEvent,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Pool } from "pg";
 
-import { repairAdHocFocusLineage, type RepairClient } from "../focus-lineage-repair.js";
+import { repairAdHocFocusLineage, type RepairClient } from "../focus-rooms/lineage-repair.js";
 
 const TEST_DB_URL = process.env.TEST_DB_URL || process.env.DB_URL;
 

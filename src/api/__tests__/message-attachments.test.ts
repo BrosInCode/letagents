@@ -7,7 +7,7 @@ import {
   formatAttachmentContentDisposition,
   normalizeAttachmentUploadRequest,
   normalizeMessageAttachmentReferences,
-} from "../message-attachments.js";
+} from "../messages/attachments.js";
 
 test("normalizeAttachmentUploadRequest accepts frontend metadata aliases", () => {
   const attachment = normalizeAttachmentUploadRequest({

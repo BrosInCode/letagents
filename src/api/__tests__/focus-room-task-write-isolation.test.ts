@@ -6,7 +6,7 @@ const {
   createFocusParentBoardWriteIsolationEnforcer,
   getOriginRoomIdFromRequest,
   shouldIsolateFocusRoomParentBoardWrites,
-} = await import("../focus-room-task-write-isolation.js");
+} = await import("../focus-rooms/task-write-isolation.js");
 const { LETAGENTS_ORIGIN_ROOM_ID_HEADER } = await import("../../shared/request-headers.js");
 
 function makeFocusRoom(overrides: Record<string, unknown> = {}) {

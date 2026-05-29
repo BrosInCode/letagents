@@ -9,8 +9,8 @@ import {
 import {
   respondWithInternalError,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
-import { normalizeRoomId } from "../../room-routing.js";
+} from "../../http/helpers.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import {
   isSuppressibleDisconnectedPresence,
   normalizeActorLabel,

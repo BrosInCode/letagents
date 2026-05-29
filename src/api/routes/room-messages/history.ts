@@ -11,11 +11,11 @@ import {
   parseLimit,
   parsePollTimeout,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
+} from "../../http/helpers.js";
 import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
-} from "../../room-agent-delivery.js";
+} from "../../rooms/agent-delivery.js";
 import { isDesktopHumanClient } from "./request-identity.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type {

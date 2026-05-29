@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveGitHubRepoRoomAccessDecision } from "../github-repo-access.js";
+import { resolveGitHubRepoRoomAccessDecision } from "../github/repo-access.js";
 
 test("resolveGitHubRepoRoomAccessDecision allows anonymous access to public GitHub repo rooms", async () => {
   const decision = await resolveGitHubRepoRoomAccessDecision(

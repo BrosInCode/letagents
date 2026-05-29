@@ -8,7 +8,7 @@ import {
   type AccountRoomListEntry,
   type AccountRoomListFocusRoom,
 } from "../account-room-membership.js";
-import type { AuthenticatedRequest } from "../http-helpers.js";
+import type { AuthenticatedRequest } from "../http/helpers.js";
 
 export interface AccountRoomRouteDeps {
   getAccountRoomsForAccount(

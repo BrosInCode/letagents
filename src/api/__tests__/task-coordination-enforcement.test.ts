@@ -7,7 +7,7 @@ import type {
   TaskLeaseKind,
   TaskOwnershipState,
 } from "../db.js";
-import type { AuthenticatedRequest } from "../http-helpers.js";
+import type { AuthenticatedRequest } from "../http/helpers.js";
 import type {
   CoordinationFocusRoomLike,
   CoordinationLeaseLike,
@@ -17,7 +17,7 @@ import type {
 import {
   createTaskCoordinationEnforcement,
   type TaskCoordinationEnforcementDeps,
-} from "../task-coordination-enforcement.js";
+} from "../tasks/coordination-enforcement.js";
 
 const actorLabel = "DawnWinter | EmmyMay's agent | Agent";
 const actorKey = "EmmyMay/dawnwinter";

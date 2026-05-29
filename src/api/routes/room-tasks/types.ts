@@ -2,9 +2,9 @@ import type { EventEmitter } from "events";
 import type { Response } from "express";
 
 import type { Project, Task, TaskLeaseKind, TaskStatus, getTaskOwnershipState } from "../../db.js";
-import type { FocusParentBoardWriteIsolationDecision } from "../../focus-room-task-write-isolation.js";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
-import type { buildTaskUpdatePatch } from "../../task-ownership.js";
+import type { FocusParentBoardWriteIsolationDecision } from "../../focus-rooms/task-write-isolation.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
+import type { buildTaskUpdatePatch } from "../../tasks/ownership.js";
 
 export type RoomRole = "admin" | "participant" | "anonymous";
 export type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];

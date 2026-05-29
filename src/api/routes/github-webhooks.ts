@@ -5,17 +5,17 @@ import {
   recordGitHubWebhookDelivery,
   type GitHubWebhookDeliveryStatus,
 } from "../db.js";
-import { getGitHubAppConfig } from "../github-config.js";
+import { getGitHubAppConfig } from "../github/config.js";
 import {
   buildGitHubRepoRoomId,
   getGitHubWebhookMetadata,
   verifyGitHubWebhookSignature,
   type GitHubWebhookPayload,
-} from "../github-app.js";
+} from "../github/app.js";
 import {
   respondWithInternalError,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
+} from "../http/helpers.js";
 
 type WebhookProcessingResult = {
   status: Exclude<GitHubWebhookDeliveryStatus, "received">;

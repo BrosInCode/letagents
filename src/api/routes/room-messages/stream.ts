@@ -3,11 +3,11 @@ import type { Express } from "express";
 import {
   startSseStream,
   stopSseStream,
-} from "../../sse.js";
+} from "../../http/sse.js";
 import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
-} from "../../room-agent-delivery.js";
+} from "../../rooms/agent-delivery.js";
 import {
   isPromptOnlyAgentMessage,
 } from "../../../shared/room-agent-prompts.js";
@@ -28,7 +28,7 @@ import type {
   RoomMessageRouteDeps,
   TaskUpdatedEvent,
 } from "./types.js";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 
 export function registerMessageStreamRoute(
   app: Express,

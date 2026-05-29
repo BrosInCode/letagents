@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Message, RoomAgentPresence } from "../db.js";
-import { buildFallbackRoomParticipants } from "../room-participant-fallback.js";
+import { buildFallbackRoomParticipants } from "../rooms/participant-fallback.js";
 
 function makeMessage(overrides: Partial<Message> = {}): Message {
   return {

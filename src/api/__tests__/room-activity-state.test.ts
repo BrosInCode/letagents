@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RoomAgentPresence, RoomParticipant } from "../db.js";
-import type { RoomActivityHistoryEntry } from "../room-activity-history.js";
+import type { RoomActivityHistoryEntry } from "../rooms/activity-history.js";
 import {
   decorateRoomActivityHistoryEntriesWithPresence,
   decorateRoomParticipantsWithPresence,
-} from "../room-activity-state.js";
+} from "../rooms/activity-state.js";
 
 const presence: RoomAgentPresence[] = [
   {

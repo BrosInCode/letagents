@@ -1,6 +1,6 @@
 import type { Express } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import {
   COMMAND_ALLOWED,
   COMMAND_BLOCKED,

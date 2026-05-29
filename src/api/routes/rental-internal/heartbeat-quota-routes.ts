@@ -1,6 +1,6 @@
 import type { Express } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { rental_sessions } from "../../db/schema.js";
 import {
   getLivenessStatus,

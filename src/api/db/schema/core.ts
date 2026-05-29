@@ -1,11 +1,11 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
-import type { FocusRoomConclusionDetails } from "../../focus-room-conclusion.js";
+import type { FocusRoomConclusionDetails } from "../../focus-rooms/conclusion.js";
 import type {
   FocusActivityScope,
   FocusGitHubEventRouting,
   FocusParentVisibility,
-} from "../../focus-room-settings.js";
+} from "../../focus-rooms/settings.js";
 
 export const id_sequences = pgTable("id_sequences", {
   name: text("name").primaryKey(),

@@ -1,4 +1,4 @@
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { parseAgentActorLabel } from "../../../shared/agent-identity.js";
 
 export function hasAgentSessionCredentials(input: {

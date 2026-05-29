@@ -18,7 +18,7 @@
  */
 
 import type { Express, Response } from "express";
-import type { AuthenticatedRequest } from "../http-helpers.js";
+import type { AuthenticatedRequest } from "../http/helpers.js";
 import type {
   CreateListingInput,
   UpdateListingInput,

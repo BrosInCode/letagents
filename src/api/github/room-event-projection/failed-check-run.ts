@@ -4,7 +4,7 @@ import {
   type Project,
   type Task,
 } from "../../db.js";
-import type { FocusGitHubRoutingContext } from "../../focus-room-settings.js";
+import type { FocusGitHubRoutingContext } from "../../focus-rooms/settings.js";
 import type { RepoRoomEvent } from "../../repo-workflow.js";
 import {
   buildFailedCheckRunTaskDescription,
@@ -12,7 +12,7 @@ import {
   isFailedCheckRunEvent,
   mergeFailedCheckRunTaskWorkflowArtifacts,
   shouldReopenTaskForFailedCheckRun,
-} from "../../check-run-autotasks.js";
+} from "../check-run-autotasks.js";
 import { emitTaskLifecycleStatusMessage } from "../../server/room-services.js";
 
 export async function maybeAutoCreateTaskForFailedCheckRun(

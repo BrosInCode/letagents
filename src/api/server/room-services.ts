@@ -15,12 +15,12 @@ import {
   upsertRoomParticipant,
   updateTaskLeaseWorkflowRefs,
 } from "../db.js";
-import { createGitHubFocusIsolationResolver } from "../github-focus-isolation.js";
-import { createFocusParentBoardWriteIsolationEnforcer } from "../focus-room-task-write-isolation.js";
-import { createRoomParticipantRecorder } from "../room-participants.js";
-import { createStaleWorkPromptEmitter } from "../stale-work.js";
-import { createTaskActivityMessageEmitters } from "../task-activity-messages.js";
-import { createTaskCoordinationEnforcement } from "../task-coordination-enforcement.js";
+import { createGitHubFocusIsolationResolver } from "../github/focus-isolation.js";
+import { createFocusParentBoardWriteIsolationEnforcer } from "../focus-rooms/task-write-isolation.js";
+import { createRoomParticipantRecorder } from "../rooms/participants.js";
+import { createStaleWorkPromptEmitter } from "../tasks/stale-work.js";
+import { createTaskActivityMessageEmitters } from "../tasks/activity-messages.js";
+import { createTaskCoordinationEnforcement } from "../tasks/coordination-enforcement.js";
 import { emitProjectMessage } from "./events.js";
 
 export const {

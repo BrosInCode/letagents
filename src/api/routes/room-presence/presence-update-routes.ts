@@ -6,10 +6,10 @@ import {
 } from "../../db.js";
 import {
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
-import { buildSyntheticPresenceEntry } from "../../presence-fallback.js";
-import { normalizeRoomId } from "../../room-routing.js";
-import { requireWorkerRequestAgentIdentity } from "../../request-agent-identity.js";
+} from "../../http/helpers.js";
+import { buildSyntheticPresenceEntry } from "../../presence/fallback.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
+import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
   type AgentPresenceStatus,

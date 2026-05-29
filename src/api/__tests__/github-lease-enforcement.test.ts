@@ -7,7 +7,7 @@ import {
   buildGitHubLeaseEnforcementPlan,
   buildLeasedBranchRef,
   publishGitHubLeaseEnforcement,
-} from "../github-lease-enforcement.js";
+} from "../github/lease-enforcement.js";
 
 function lease(overrides: Partial<CoordinationLeaseLike> = {}): CoordinationLeaseLike {
   return {

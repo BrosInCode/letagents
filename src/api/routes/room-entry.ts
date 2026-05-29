@@ -1,13 +1,13 @@
 import type { Express } from "express";
 
 import { getProjectById } from "../db.js";
-import type { AuthenticatedRequest } from "../http-helpers.js";
+import type { AuthenticatedRequest } from "../http/helpers.js";
 import {
   isKnownProvider,
   normalizeRoomId,
   normalizeRoomName,
   resolveRoomIdentifier,
-} from "../room-routing.js";
+} from "../rooms/routing.js";
 import { sendAppPage } from "./web.js";
 
 export interface RoomEntryRouteDeps {

@@ -12,16 +12,16 @@ import {
   evaluateWorkflowArtifactMutation,
   type CoordinationDecisionResult,
 } from "../../coordination-policy.js";
-import type { FocusGitHubRoutingContext } from "../../focus-room-settings.js";
-import { getGitHubAppConfig } from "../../github-config.js";
+import type { FocusGitHubRoutingContext } from "../../focus-rooms/settings.js";
+import { getGitHubAppConfig } from "../config.js";
 import {
   buildGitHubLeaseEnforcementPlan,
   publishGitHubLeaseEnforcement,
   resolveGitHubLeaseEnforcementMode,
-} from "../../github-lease-enforcement.js";
+} from "../lease-enforcement.js";
 import {
   getPullRequestWorkflowRef,
-} from "../../repo-event-task-resolution.js";
+} from "../repo-event-task-resolution.js";
 import {
   projectRepoRoomEvent,
   shouldAutoPromptForBoardProjection,

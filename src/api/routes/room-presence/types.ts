@@ -1,7 +1,7 @@
 import type { Response } from "express";
 
 import type { Project } from "../../db.js";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 
 export interface RoomPresenceRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;

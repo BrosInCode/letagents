@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getGitHubAppConfig, getGitHubOAuthConfig, hasGitHubAppConfig } from "../github-config.js";
+import { getGitHubAppConfig, getGitHubOAuthConfig, hasGitHubAppConfig } from "../github/config.js";
 
 function withEnv(
   values: Record<string, string | undefined>,

@@ -2,7 +2,7 @@ import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
 import { getProjectById } from "../db.js";
-import { toGitHubWebhookId } from "../github-app-sync.js";
+import { toGitHubWebhookId } from "../github/app-sync.js";
 import {
   getProjectAccessRoomId,
   isRepoBackedProject,
@@ -13,22 +13,22 @@ import {
   resolveGitHubRoomEntryDecision,
   resolveProjectRole,
   resolveRepoRoomAccessDecision,
-} from "../room-access.js";
+} from "../rooms/access.js";
 import {
   resolveCanonicalRoomRequestId,
   resolveRoomOrReply,
-} from "../room-resolution.js";
-import { normalizeOptionalString } from "../task-coordination-inputs.js";
+} from "../rooms/resolution.js";
+import { normalizeOptionalString } from "../tasks/coordination-inputs.js";
 import {
   parseOptionalAgentPromptKind,
   parseOptionalReplyToMessageId,
   shouldIncludePromptOnlyMessages,
-} from "../message-inputs.js";
+} from "../messages/inputs.js";
 import {
   formatFocusRoomConclusionMessage,
   toRoomResponse,
-} from "../room-formatting.js";
-import { resolveRequestAuth } from "../request-auth.js";
+} from "../rooms/formatting.js";
+import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account-rooms.js";
 import {
   registerAuthRoutes,

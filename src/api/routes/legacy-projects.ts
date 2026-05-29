@@ -15,8 +15,8 @@ import {
 import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
-} from "../http-helpers.js";
-import { isInviteCode, normalizeRoomId } from "../room-routing.js";
+} from "../http/helpers.js";
+import { isInviteCode, normalizeRoomId } from "../rooms/routing.js";
 
 export interface LegacyProjectRouteDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;

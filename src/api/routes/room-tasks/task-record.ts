@@ -10,15 +10,15 @@ import {
 import {
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
+} from "../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../repo-workflow.js";
-import { normalizeRoomId } from "../../room-routing.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
   normalizeTaskActorKey,
   requiresTaskOwnershipGuard,
-} from "../../task-ownership.js";
+} from "../../tasks/ownership.js";
 import { findBoardReviewLeaseForMerge } from "../../coordination-policy.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";

@@ -1,6 +1,6 @@
 import type { Express } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { isValidTransition } from "../../rental/session-state-machine.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 import { requireAccountId, requireRentEnabled, requireSessionAccess } from "./helpers.js";

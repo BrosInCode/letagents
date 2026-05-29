@@ -16,9 +16,9 @@ import {
   parseLimit,
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
-import { normalizeRoomId } from "../room-routing.js";
-import { requireWorkerRequestAgentIdentity } from "../request-agent-identity.js";
+} from "../http/helpers.js";
+import { normalizeRoomId } from "../rooms/routing.js";
+import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import {
   normalizeAgentPresenceStatus,
   type AgentPresenceStatus,

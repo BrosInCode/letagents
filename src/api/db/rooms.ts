@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 
-import { generateRoomDisplayName, normalizeRoomDisplayName } from "../room-display-name.js";
-import { isInviteCode, normalizeRoomId, normalizeRoomName } from "../room-routing.js";
+import { generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
+import { isInviteCode, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { id_sequences, room_aliases, rooms } from "./schema.js";
 import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, type RoomSequenceExecutor } from "./utils.js";

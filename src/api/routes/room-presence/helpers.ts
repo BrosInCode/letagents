@@ -3,10 +3,10 @@ import type {
   RoomAgentPresence,
   RoomParticipant,
 } from "../../db.js";
-import { buildFallbackRoomParticipants } from "../../room-participant-fallback.js";
-import { normalizeRoomId } from "../../room-routing.js";
+import { buildFallbackRoomParticipants } from "../../rooms/participant-fallback.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import { isWithinRecentlyOfflineWindow } from "../../../shared/room-agent-activity.js";
-import type { RoomActivityHistoryKind } from "../../room-activity-history.js";
+import type { RoomActivityHistoryKind } from "../../rooms/activity-history.js";
 
 export function toPublicRoomAgentPresence(presence: RoomAgentPresence): RoomAgentPresence {
   return {

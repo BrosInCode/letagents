@@ -1,7 +1,7 @@
 import {
   insertGitHubRoomEvent,
 } from "../../db.js";
-import type { MaterializedGitHubRoomEvent } from "../../github-room-events.js";
+import type { MaterializedGitHubRoomEvent } from "../room-events.js";
 
 export async function persistMaterializedGitHubRoomEvent(
   event: MaterializedGitHubRoomEvent,

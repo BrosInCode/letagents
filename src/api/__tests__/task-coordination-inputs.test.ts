@@ -5,7 +5,7 @@ import {
   classifyTaskCoordinationMutation,
   getTaskUpdatePrUrlBinding,
   normalizeOptionalString,
-} from "../task-coordination-inputs.js";
+} from "../tasks/coordination-inputs.js";
 
 test("normalizeOptionalString trims non-empty strings and normalizes other values", () => {
   assert.equal(normalizeOptionalString(" value "), "value");

@@ -4,7 +4,7 @@ import {
   getStaleTaskPromptMutes,
   type Task,
 } from "../../db.js";
-import { getTaskStalePromptState } from "../../stale-work.js";
+import { getTaskStalePromptState } from "../../tasks/stale-work.js";
 
 export async function attachTaskDetails(projectId: string, task: Task) {
   const [leases, locks, stalePromptMutes] = await Promise.all([

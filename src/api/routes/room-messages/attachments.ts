@@ -9,15 +9,15 @@ import {
 import {
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
+} from "../../http/helpers.js";
 import {
   createAttachmentObjectKey,
   deleteAttachmentObject,
   createPresignedAttachmentDownload,
   createPresignedAttachmentUpload,
   isAttachmentStorageConfigured,
-} from "../../attachment-storage.js";
-import { normalizeAttachmentUploadRequest } from "../../message-attachments.js";
+} from "../../messages/attachment-storage.js";
+import { normalizeAttachmentUploadRequest } from "../../messages/attachments.js";
 import {
   resolveParticipantRoom,
   routeParam,

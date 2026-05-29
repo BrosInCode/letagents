@@ -3,8 +3,8 @@ import express from "express";
 import {
   registerHttpMiddleware,
   type HttpMiddlewareDeps,
-} from "../http-middleware.js";
-import { resolveRequestAuth } from "../request-auth.js";
+} from "../http/middleware.js";
+import { resolveRequestAuth } from "../request/auth.js";
 import { registerApiRoutes } from "./routes.js";
 
 export function createApiApp() {

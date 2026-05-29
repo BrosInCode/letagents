@@ -1,9 +1,9 @@
 import crypto from "crypto";
 import { and, asc, eq, inArray } from "drizzle-orm";
 
-import { DEFAULT_FOCUS_ROOM_SETTINGS, type FocusRoomSettingsPatch } from "../focus-room-settings.js";
-import type { FocusRoomConclusionDetails } from "../focus-room-conclusion.js";
-import { normalizeRoomDisplayName } from "../room-display-name.js";
+import { DEFAULT_FOCUS_ROOM_SETTINGS, type FocusRoomSettingsPatch } from "../focus-rooms/settings.js";
+import type { FocusRoomConclusionDetails } from "../focus-rooms/conclusion.js";
+import { normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { db } from "./client.js";
 import { id_sequences, rooms } from "./schema.js";
 import { getRoomScopedSequenceNames, isUniqueConstraintError, nextPrefixedId } from "./utils.js";

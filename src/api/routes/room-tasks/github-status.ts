@@ -4,8 +4,8 @@ import {
   getTasksGitHubArtifactStatus,
   type TaskGitHubArtifactStatus,
 } from "../../db.js";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
-import { normalizeRoomId } from "../../room-routing.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
 export function registerTaskGitHubStatusRoute(

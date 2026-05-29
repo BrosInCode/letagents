@@ -16,8 +16,8 @@ import {
 import {
   getGitHubAppConfig,
   type GitHubAppConfig,
-} from "../github-config.js";
-import { createGitHubAppJwt } from "../github-lease-enforcement.js";
+} from "../github/config.js";
+import { createGitHubAppJwt } from "../github/lease-enforcement.js";
 
 export interface RentalPatchPullRequestInput {
   repoProvider: string | null | undefined;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Project, Task } from "../db.js";
-import { createGitHubFocusIsolationResolver } from "../github-focus-isolation.js";
+import { createGitHubFocusIsolationResolver } from "../github/focus-isolation.js";
 
 function makeTask(id: string, roomId = "parent"): Pick<Task, "id" | "room_id"> {
   return { id, room_id: roomId };
