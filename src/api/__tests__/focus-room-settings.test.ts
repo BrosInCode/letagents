@@ -8,7 +8,7 @@ import {
   shouldRouteGitHubEventToFocusRoom,
   shouldPostFocusRoomEventToParent,
   validateFocusRoomSettingsPatch,
-} from "../focus-room-settings.js";
+} from "../focus-rooms/settings.js";
 
 test("normalizeFocusRoomSettings applies defaults for missing persisted settings", () => {
   assert.deepEqual(normalizeFocusRoomSettings(null), DEFAULT_FOCUS_ROOM_SETTINGS);

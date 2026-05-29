@@ -16,20 +16,20 @@ import {
   parseLimit,
   respondWithInternalError,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
+} from "../../http/helpers.js";
 import {
   buildRoomActivityHistoryEntries,
   decorateRoomActivityHistoryEntriesWithCounts,
   filterRoomActivityHistoryEntries,
   paginateRoomActivityHistoryEntries,
   sortRoomActivityHistoryEntries,
-} from "../../room-activity-history.js";
+} from "../../rooms/activity-history.js";
 import {
   decorateRoomActivityHistoryEntriesWithPresence,
   decorateRoomParticipantsWithPresence,
-} from "../../room-activity-state.js";
-import { buildFallbackRoomParticipants } from "../../room-participant-fallback.js";
-import { normalizeRoomId } from "../../room-routing.js";
+} from "../../rooms/activity-state.js";
+import { buildFallbackRoomParticipants } from "../../rooms/participant-fallback.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import {
   buildRoomActivityHistoryParticipants,
   normalizeHistoryKind,

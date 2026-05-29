@@ -4,8 +4,8 @@ import {
   assignProjectAdmin,
   type Project,
 } from "../db.js";
-import type { AuthenticatedRequest } from "../http-helpers.js";
-import { normalizeRoomId } from "../room-routing.js";
+import type { AuthenticatedRequest } from "../http/helpers.js";
+import { normalizeRoomId } from "../rooms/routing.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 

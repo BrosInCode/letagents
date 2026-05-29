@@ -8,7 +8,7 @@ import {
   STALE_TASK_THRESHOLD_MS,
   STALE_WORK_PROMPT_COOLDOWN_MS,
   selectStaleTaskAutoPrompt,
-} from "../stale-work.js";
+} from "../tasks/stale-work.js";
 
 const NOW = Date.parse("2026-04-07T21:00:00.000Z");
 

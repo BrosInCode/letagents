@@ -1,5 +1,5 @@
 import type { Express } from "express";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { PublicRentalListing } from "../../rental/listings.js";
 import type { RentalRenterRouteDeps } from "./types.js";
 import { parseFilters, requireRentEnabled, resolveRenterKey } from "./helpers.js";

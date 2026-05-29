@@ -8,7 +8,7 @@ import {
   formatGitHubPullRequestEventMessage,
   formatGitHubRepositoryEventMessage,
   verifyGitHubWebhookSignature,
-} from "../github-app.js";
+} from "../github/app.js";
 
 test("verifyGitHubWebhookSignature accepts a valid sha256 signature", () => {
   const body = Buffer.from(JSON.stringify({ action: "opened", number: 42 }));

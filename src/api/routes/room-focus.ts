@@ -15,25 +15,25 @@ import {
 import {
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
+} from "../http/helpers.js";
 import {
   normalizeFocusRoomSettings,
   shouldPostFocusRoomEventToParent,
   validateFocusRoomSettingsPatch,
-} from "../focus-room-settings.js";
+} from "../focus-rooms/settings.js";
 import {
   normalizeFocusRoomConclusionDetails,
   type FocusRoomConclusionDetails,
-} from "../focus-room-conclusion.js";
-import { normalizeRoomId } from "../room-routing.js";
+} from "../focus-rooms/conclusion.js";
+import { normalizeRoomId } from "../rooms/routing.js";
 import {
   requireWorkerRequestAgentIdentity,
   type ResolvedRequestAgentIdentity,
-} from "../request-agent-identity.js";
+} from "../request/agent-identity.js";
 import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
-} from "../task-ownership.js";
+} from "../tasks/ownership.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;

@@ -8,7 +8,7 @@ import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
   requiresTaskOwnershipGuard,
-} from "../task-ownership.js";
+} from "../tasks/ownership.js";
 
 test("buildTaskUpdatePatch preserves assignee when the field is omitted", () => {
   const result = buildTaskUpdatePatch({

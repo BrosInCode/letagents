@@ -16,14 +16,14 @@ import {
   parsePollTimeout,
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
-import { requireWorkerRequestAgentIdentity } from "../request-agent-identity.js";
+} from "../http/helpers.js";
+import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
-} from "../room-agent-delivery.js";
-import { normalizeRoomId } from "../room-routing.js";
-import { startSseStream, stopSseStream } from "../sse.js";
+} from "../rooms/agent-delivery.js";
+import { normalizeRoomId } from "../rooms/routing.js";
+import { startSseStream, stopSseStream } from "../http/sse.js";
 import {
   isPromptOnlyAgentMessage,
   type AgentPromptKind,
@@ -32,11 +32,11 @@ import { parseAgentActorLabel } from "../../shared/agent-identity.js";
 import {
   normalizeMessageAttachmentReferences,
   type NormalizedMessageAttachmentReference,
-} from "../message-attachments.js";
+} from "../messages/attachments.js";
 import {
   createPresignedAttachmentDownload,
   isAttachmentStorageConfigured,
-} from "../attachment-storage.js";
+} from "../messages/attachment-storage.js";
 
 interface MessageCreatedEvent {
   projectId: string;

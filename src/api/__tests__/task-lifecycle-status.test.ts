@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { TaskStatus } from "../db.js";
-import { formatTaskLifecycleStatus } from "../task-lifecycle-status.js";
+import { formatTaskLifecycleStatus } from "../tasks/lifecycle-status.js";
 
 function statusMessage(input: {
   status: TaskStatus;

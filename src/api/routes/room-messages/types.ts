@@ -8,8 +8,8 @@ import type {
   ReasoningSessionUpdate,
   Task,
 } from "../../db.js";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
-import type { NormalizedMessageAttachmentReference } from "../../message-attachments.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
+import type { NormalizedMessageAttachmentReference } from "../../messages/attachments.js";
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface MessageCreatedEvent {

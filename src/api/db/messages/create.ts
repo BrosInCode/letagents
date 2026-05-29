@@ -3,7 +3,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   assertAttachmentTotalByteSize,
   type NormalizedMessageAttachmentReference,
-} from "../../message-attachments.js";
+} from "../../messages/attachments.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,

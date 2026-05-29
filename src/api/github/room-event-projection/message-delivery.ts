@@ -1,5 +1,5 @@
 import type { Project, Task } from "../../db.js";
-import type { FocusGitHubRoutingContext } from "../../focus-room-settings.js";
+import type { FocusGitHubRoutingContext } from "../../focus-rooms/settings.js";
 import {
   formatRepoRoomEventMessage,
   type RepoRoomEvent,

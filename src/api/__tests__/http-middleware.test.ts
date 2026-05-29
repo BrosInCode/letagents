@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { registerHttpMiddleware } = await import("../http-middleware.js");
+const { registerHttpMiddleware } = await import("../http/middleware.js");
 
 function createDeps() {
   return {

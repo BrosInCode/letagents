@@ -1,6 +1,6 @@
 import type { Express } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { BudgetOrchestratorError } from "../../rental/budget-orchestrator.js";
 import { UsageIngestError } from "../../rental/usage-ingest.js";
 import type { RentalInternalRouteDeps } from "./types.js";

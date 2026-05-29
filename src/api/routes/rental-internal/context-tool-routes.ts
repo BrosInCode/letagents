@@ -1,6 +1,6 @@
 import type { Express } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 import { requireSessionAccess } from "./helpers.js";
 import { contextErrorStatus, isPlainObject, optionalPositiveInteger } from "./validation.js";

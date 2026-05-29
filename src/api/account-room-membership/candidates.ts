@@ -1,5 +1,5 @@
 import { rooms } from "../db/schema.js";
-import { isInviteCode } from "../room-routing.js";
+import { isInviteCode } from "../rooms/routing.js";
 import type {
   AccountRoomCandidate,
   AccountRoomListFocusRoom,

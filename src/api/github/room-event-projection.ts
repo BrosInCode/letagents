@@ -3,11 +3,11 @@ import {
   type GitHubWebhookDeliveryStatus,
   type Project,
 } from "../db.js";
-import type { MaterializedGitHubRoomEvent } from "../github-room-events.js";
+import type { MaterializedGitHubRoomEvent } from "./room-events.js";
 import {
   emptyRepoRoomEventTaskResolution,
   toGitHubRoutingContext,
-} from "../repo-event-task-resolution.js";
+} from "./repo-event-task-resolution.js";
 import { getHardIsolatedFocusRoomForGitHubEvent } from "../server/room-services.js";
 import { maybeAutoCreateTaskForFailedCheckRun } from "./room-event-projection/failed-check-run.js";
 import { emitRepoRoomEventProjectionMessage } from "./room-event-projection/message-delivery.js";

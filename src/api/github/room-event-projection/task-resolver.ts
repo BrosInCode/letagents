@@ -11,7 +11,7 @@ import {
 } from "../../coordination-policy.js";
 import {
   createRepoRoomEventTaskResolver,
-} from "../../repo-event-task-resolution.js";
+} from "../repo-event-task-resolution.js";
 
 export const { resolveLinkedTaskForRepoRoomEvent } = createRepoRoomEventTaskResolver({
   findTaskByWorkflowArtifactMatches,

@@ -1,6 +1,6 @@
 import type { Response } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 import { isRentEnabled } from "./validation.js";
 

@@ -10,7 +10,7 @@ import {
   isFailedCheckRunEvent,
   mergeFailedCheckRunTaskWorkflowArtifacts,
   shouldReopenTaskForFailedCheckRun,
-} from "../check-run-autotasks.js";
+} from "../github/check-run-autotasks.js";
 
 function buildCheckRunEvent(
   overrides: Partial<RepoCheckRunEvent["checkRun"]> = {}

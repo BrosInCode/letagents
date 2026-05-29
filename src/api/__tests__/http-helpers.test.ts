@@ -8,7 +8,7 @@ import {
   parsePollTimeout,
   sanitizeRedirectPath,
   setSessionCookie,
-} from "../http-helpers.js";
+} from "../http/helpers.js";
 
 test("parseLimit accepts positive integers only", () => {
   assert.equal(parseLimit(undefined), undefined);

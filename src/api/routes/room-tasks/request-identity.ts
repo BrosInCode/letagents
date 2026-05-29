@@ -1,10 +1,10 @@
 import type { Response } from "express";
 
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import {
   requireWorkerRequestAgentIdentity,
   type ResolvedRequestAgentIdentity,
-} from "../../request-agent-identity.js";
+} from "../../request/agent-identity.js";
 
 export type OwnerTokenWorkerWriteIdentity =
   | { kind: "not_owner_token" }

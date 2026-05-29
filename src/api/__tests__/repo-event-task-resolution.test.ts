@@ -7,7 +7,7 @@ import {
   emptyRepoRoomEventTaskResolution,
   getPullRequestWorkflowRef,
   toGitHubRoutingContext,
-} from "../repo-event-task-resolution.js";
+} from "../github/repo-event-task-resolution.js";
 import type {
   RepoRoomEvent,
   TaskWorkflowArtifactMatch,

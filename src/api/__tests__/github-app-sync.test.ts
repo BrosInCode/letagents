@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { GitHubWebhookPayload } from "../github-app.js";
+import type { GitHubWebhookPayload } from "../github/app.js";
 import {
   createGitHubAppSync,
   toGitHubWebhookId,
   type GitHubAppInstallationSyncInput,
   type GitHubAppRepositorySyncInput,
   type GitHubRepositoryLinkSyncInput,
-} from "../github-app-sync.js";
+} from "../github/app-sync.js";
 
 function createHarness(input?: {
   fallbackInstallations?: Record<string, string | null | undefined>;

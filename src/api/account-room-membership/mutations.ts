@@ -6,7 +6,7 @@ import {
   project_admins,
   rooms,
 } from "../db/schema.js";
-import { isInviteCode } from "../room-routing.js";
+import { isInviteCode } from "../rooms/routing.js";
 import { accountHasRoomAssociation } from "./association.js";
 
 export async function upsertAccountRoomRecent(input: {

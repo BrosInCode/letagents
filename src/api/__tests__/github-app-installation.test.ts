@@ -5,7 +5,7 @@ import {
   buildGitHubAppInstallationUrl,
   buildGitHubAppSetupRedirectPath,
   resolveGitHubAppRoomIntegrationStatus,
-} from "../github-app-installation.js";
+} from "../github/app-installation.js";
 
 test("buildGitHubAppInstallationUrl uses the GitHub app slug and preserves state", () => {
   assert.equal(

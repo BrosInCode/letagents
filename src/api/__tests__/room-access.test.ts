@@ -15,7 +15,7 @@ const {
   requireParticipant,
   resolveGitHubRoomEntryDecision,
   resolveRepoRoomAccessDecision,
-} = await import("../room-access.js");
+} = await import("../rooms/access.js");
 
 function project(id: string, parentRoomId: string | null = null): Project {
   return {

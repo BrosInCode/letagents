@@ -7,8 +7,8 @@ import {
 import {
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
-import { normalizeRoomId } from "../room-routing.js";
+} from "../http/helpers.js";
+import { normalizeRoomId } from "../rooms/routing.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 

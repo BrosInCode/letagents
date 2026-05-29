@@ -7,9 +7,9 @@ import {
   getTasks,
   updateTask,
 } from "../../db.js";
-import { parseLimit, type AuthenticatedRequest } from "../../http-helpers.js";
-import { normalizeRoomId } from "../../room-routing.js";
-import { normalizeTaskActorKey } from "../../task-ownership.js";
+import { parseLimit, type AuthenticatedRequest } from "../../http/helpers.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
+import { normalizeTaskActorKey } from "../../tasks/ownership.js";
 import {
   isDesktopHumanWrite,
   resolveOwnerTokenWorkerWriteIdentity,

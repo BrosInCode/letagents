@@ -7,13 +7,13 @@ import {
   getGitHubAppRepositoryByRoomId,
   type Project,
 } from "../db.js";
-import { getGitHubAppConfig, hasGitHubAppConfig } from "../github-config.js";
+import { getGitHubAppConfig, hasGitHubAppConfig } from "../github/config.js";
 import {
   buildGitHubAppInstallationUrl,
   resolveGitHubAppRoomIntegrationStatus,
-} from "../github-app-installation.js";
-import { normalizeRoomId } from "../room-routing.js";
-import type { AuthenticatedRequest } from "../http-helpers.js";
+} from "../github/app-installation.js";
+import { normalizeRoomId } from "../rooms/routing.js";
+import type { AuthenticatedRequest } from "../http/helpers.js";
 
 export interface GitHubIntegrationRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;

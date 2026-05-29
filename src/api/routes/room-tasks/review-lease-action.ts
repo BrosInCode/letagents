@@ -12,12 +12,12 @@ import {
 } from "../../db.js";
 import {
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
-import { normalizeRoomId } from "../../room-routing.js";
+} from "../../http/helpers.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
-} from "../../task-ownership.js";
+} from "../../tasks/ownership.js";
 import {
   evaluateReviewLeaseRouting,
   leaseMatchesActor,

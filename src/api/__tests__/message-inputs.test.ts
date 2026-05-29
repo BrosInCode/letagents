@@ -7,7 +7,7 @@ import {
   parseOptionalAgentPromptKind,
   parseOptionalReplyToMessageId,
   shouldIncludePromptOnlyMessages,
-} from "../message-inputs.js";
+} from "../messages/inputs.js";
 
 function requestWithQuery(query: Request["query"]): Request {
   return { query } as Request;

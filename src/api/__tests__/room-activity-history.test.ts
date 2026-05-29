@@ -7,7 +7,7 @@ import {
   filterRoomActivityHistoryEntries,
   paginateRoomActivityHistoryEntries,
   sortRoomActivityHistoryEntries,
-} from "../room-activity-history.js";
+} from "../rooms/activity-history.js";
 import type { Project, RoomParticipant, Task } from "../db.js";
 
 const rooms: Project[] = [

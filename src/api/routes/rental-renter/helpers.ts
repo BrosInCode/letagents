@@ -1,5 +1,5 @@
 import type { Response } from "express";
-import type { AuthenticatedRequest } from "../../http-helpers.js";
+import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { PublicListingFilters } from "../../rental/listings.js";
 import { isRentEnabled } from "./validation.js";
 

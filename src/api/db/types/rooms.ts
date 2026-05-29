@@ -1,5 +1,5 @@
-import type { FocusRoomConclusionDetails } from "../../focus-room-conclusion.js";
-import type { FocusActivityScope, FocusGitHubEventRouting, FocusParentVisibility } from "../../focus-room-settings.js";
+import type { FocusRoomConclusionDetails } from "../../focus-rooms/conclusion.js";
+import type { FocusActivityScope, FocusGitHubEventRouting, FocusParentVisibility } from "../../focus-rooms/settings.js";
 
 export type RoomKind = "main" | "focus";
 

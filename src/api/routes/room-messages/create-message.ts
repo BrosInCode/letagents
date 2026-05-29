@@ -3,9 +3,9 @@ import type { Express } from "express";
 import {
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
-import { requireWorkerRequestAgentIdentity } from "../../request-agent-identity.js";
-import { normalizeMessageAttachmentReferences } from "../../message-attachments.js";
+} from "../../http/helpers.js";
+import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
+import { normalizeMessageAttachmentReferences } from "../../messages/attachments.js";
 import {
   hasAgentSessionCredentials,
   isAgentLikeSender,

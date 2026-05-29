@@ -10,7 +10,7 @@ import {
   isAgentIdentityValue,
   normalizeParticipantValue,
   type RoomParticipantUpsertInput,
-} from "../room-participants.js";
+} from "../rooms/participants.js";
 
 const seenAt = "2026-04-20T16:00:00.000Z";
 

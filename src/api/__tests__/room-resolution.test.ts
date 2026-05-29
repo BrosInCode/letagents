@@ -7,7 +7,7 @@ const {
   isReservedRoomId,
   parseFocusRoomLocator,
   resolveCanonicalRoomRequestId,
-} = await import("../room-resolution.js");
+} = await import("../rooms/resolution.js");
 
 test("parseFocusRoomLocator extracts parent room and focus key", () => {
   assert.deepEqual(parseFocusRoomLocator("github.com/owner/repo/focus/task_1"), {

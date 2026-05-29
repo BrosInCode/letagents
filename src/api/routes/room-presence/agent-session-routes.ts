@@ -10,10 +10,10 @@ import {
 import {
   respondWithInternalError,
   type AuthenticatedRequest,
-} from "../../http-helpers.js";
-import { disconnectRoomAgentDeliverySession } from "../../room-agent-delivery.js";
-import { normalizeRoomId } from "../../room-routing.js";
-import { requireWorkerRequestAgentIdentity } from "../../request-agent-identity.js";
+} from "../../http/helpers.js";
+import { disconnectRoomAgentDeliverySession } from "../../rooms/agent-delivery.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
+import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../../shared/agent-identity.js";
 import { pickLocalCodename } from "../../../shared/codenames.js";
 import { normalizeRoomAgentSessionKind } from "../../../shared/agent-presence.js";

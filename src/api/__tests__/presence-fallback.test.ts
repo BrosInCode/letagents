@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildFallbackPresenceFromMessages, buildSyntheticPresenceEntry } from "../presence-fallback.js";
+import { buildFallbackPresenceFromMessages, buildSyntheticPresenceEntry } from "../presence/fallback.js";
 import type { Message } from "../db.js";
 
 function makeMessage(overrides: Partial<Message>): Message {

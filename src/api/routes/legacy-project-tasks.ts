@@ -16,20 +16,20 @@ import {
   parseLimit,
   respondWithBadRequest,
   type AuthenticatedRequest,
-} from "../http-helpers.js";
+} from "../http/helpers.js";
 import {
   requireWorkerRequestAgentIdentity,
   type ResolvedRequestAgentIdentity,
-} from "../request-agent-identity.js";
+} from "../request/agent-identity.js";
 import { validateTaskWorkflowArtifactsInput } from "../repo-workflow.js";
-import { normalizeRoomId } from "../room-routing.js";
+import { normalizeRoomId } from "../rooms/routing.js";
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
   normalizeTaskActorKey,
   requiresTaskOwnershipGuard,
-} from "../task-ownership.js";
-import type { FocusParentBoardWriteIsolationDecision } from "../focus-room-task-write-isolation.js";
+} from "../tasks/ownership.js";
+import type { FocusParentBoardWriteIsolationDecision } from "../focus-rooms/task-write-isolation.js";
 
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
 
