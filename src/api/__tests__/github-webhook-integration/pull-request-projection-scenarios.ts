@@ -108,6 +108,76 @@ webhookIntegrationTest(
 );
 
 webhookIntegrationTest(
+  "duplicate pull_request delivery is persisted once and not projected twice",
+  async (context) => {
+    const { getGitHubRoomEvents, getMessages, getTaskById, port } = context;
+    const room = await createRepoRoom(context);
+    const task = await createAssignedTask(context, room.id, "Duplicate delivery coverage");
+
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/204";
+    await createWorkLeaseForPr({
+      roomId: room.id,
+      taskId: task.id,
+      prUrl: pullRequestUrl,
+      branchRef: "olive/duplicate-delivery",
+    });
+
+    const payload = buildPullRequestPayload({
+      number: 204,
+      title: `${task.id}: duplicate delivery coverage`,
+      body: "exercise duplicate webhook delivery handling",
+      url: pullRequestUrl,
+      branchRef: "olive/duplicate-delivery",
+      sha: "abc204",
+    });
+
+    const firstResult = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-opened-duplicate",
+      eventName: "pull_request",
+      payload,
+    });
+    const secondResult = await postGitHubWebhook({
+      port,
+      deliveryId: "delivery-pr-opened-duplicate",
+      eventName: "pull_request",
+      payload,
+    });
+
+    assert.equal(firstResult.status, "processed");
+    assert.equal(secondResult.status, "processed");
+
+    const updatedTask = await getTaskById(room.id, task.id);
+    assert.equal(updatedTask?.status, "in_review");
+    assert.equal(updatedTask?.pr_url, pullRequestUrl);
+
+    const events = await getGitHubRoomEvents({
+      room_id: room.id,
+      event_type: "pull_request",
+      github_object_id: "204",
+    });
+    assert.equal(events.events.length, 1);
+
+    const messages = (await getMessages(room.id)).messages;
+    assert.equal(
+      messages.filter((message) =>
+        message.sender === "github" &&
+        message.text.includes("PR #204 opened by octocat")
+      ).length,
+      1
+    );
+    assert.equal(
+      messages.filter((message) =>
+        message.sender === "letagents" &&
+        message.text.includes(`${task.id}`) &&
+        message.text.includes("in review")
+      ).length,
+      1
+    );
+  }
+);
+
+webhookIntegrationTest(
   "pull_request_review changes_requested transitions an in_review task to blocked through the real webhook route",
   async (context) => {
     const { getMessages, getTaskById, port } = context;
