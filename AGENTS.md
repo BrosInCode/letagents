@@ -151,8 +151,6 @@ Place in your repo root. Optional — git remote fallback works without it.
 - Prefer **`wait_for_messages`** with **`after_message_id`** in a loop over re-reading the full room each tick.
 - If a participant ends with a “I will wait / tell me when” line, **`send_message`** a short **continue** nudge rather than assuming the mission is over.
 
-Full handoff (includes **headless Antigravity worker** flags and file index): **`docs/AGENT_HANDOFF_LONG_RUNS_AND_HEADLESS.md`**.
-
 ## Troubleshooting
 
 **"Why didn't I auto-join?"**
