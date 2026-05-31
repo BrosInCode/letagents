@@ -19,7 +19,6 @@
     "build:desktop": "npm --prefix apps/desktop run build",
     "build:all": "npm run build && npm run build:web",
     "test:mcp": "node --import tsx --test src/mcp/__tests__/*.test.ts",
-    "test:headless-antigravity": "node --test headless-antigravity/__tests__/*.test.mjs",
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/api/migrate.ts",
