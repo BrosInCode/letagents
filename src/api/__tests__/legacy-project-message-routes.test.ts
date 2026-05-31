@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerLegacyProjectMessageRoutes } = await import("../routes/legacy-project-messages.js");
+const { registerLegacyProjectMessageRoutes } = await import("../routes/legacy/messages.js");
 
 function createDeps() {
   const unused = async () => {

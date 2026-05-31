@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { registerHealthRoutes } = await import("../routes/health.js");
+const { registerHealthRoutes } = await import("../routes/system/health.js");
 
 test("registerHealthRoutes preserves health route order", () => {
   const calls: Array<{ method: "get"; path: string }> = [];

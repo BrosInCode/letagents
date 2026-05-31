@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerAccountRoomRoutes } = await import("../routes/account-rooms.js");
+const { registerAccountRoomRoutes } = await import("../routes/account/rooms.js");
 
 type Handler = (req: Record<string, any>, res: Record<string, any>) => Promise<void>;
 

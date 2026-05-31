@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 const {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
-} = await import("../routes/rental-renter.js");
+} = await import("../routes/rental/renter/index.js");
 
 const { RenterQuotaStateStore } = await import("../rental/renter-quota-state.js");
 

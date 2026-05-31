@@ -235,13 +235,13 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
     };
 
     const { registerRentalProviderRoutes } = await import(
-      "../routes/rental-provider.js"
+      "../routes/rental/provider.js"
     );
     const { registerRentalInternalRoutes } = await import(
-      "../routes/rental-internal.js"
+      "../routes/rental/internal/index.js"
     );
     const { registerRentalRenterRoutes } = await import(
-      "../routes/rental-renter.js"
+      "../routes/rental/renter/index.js"
     );
 
     registerRentalProviderRoutes(app, {

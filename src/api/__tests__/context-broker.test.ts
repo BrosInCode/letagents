@@ -169,7 +169,7 @@ describe("Context Broker internal routes", () => {
     searchCalls = [];
 
     const express = (await import("express")).default;
-    const { registerRentalInternalRoutes } = await import("../routes/rental-internal.js");
+    const { registerRentalInternalRoutes } = await import("../routes/rental/internal/index.js");
     app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -251,7 +251,7 @@ describe("Context Broker internal routes", () => {
   it("maps blocked file responses to 403", async () => {
     readCalls = [];
     const express = (await import("express")).default;
-    const { registerRentalInternalRoutes } = await import("../routes/rental-internal.js");
+    const { registerRentalInternalRoutes } = await import("../routes/rental/internal/index.js");
     const blockedApp = express();
     blockedApp.use(express.json());
     blockedApp.use((req, _res, next) => {

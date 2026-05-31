@@ -16,7 +16,7 @@
  *     is tracked for a follow-up.
  *
  * Part of PR p2.3b (Phase 2, finishes the Claude Code vertical slice).
- * Server contract: see `src/api/routes/rental-internal.ts` + spec §17.7.
+ * Server contract: see `src/api/routes/rental/internal/index.ts` + spec §17.7.
  */
 
 import { createHash } from "node:crypto";

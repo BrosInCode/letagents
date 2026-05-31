@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerGitHubWebhookRoutes } = await import("../routes/github-webhooks.js");
+const { registerGitHubWebhookRoutes } = await import("../routes/github/webhooks.js");
 
 function createDeps() {
   return {

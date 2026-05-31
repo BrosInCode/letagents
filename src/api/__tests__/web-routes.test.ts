@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.LETAGENTS_WEB_MODE = "vue";
-const { normalizeWebMode, registerWebRoutes } = await import("../routes/web.js");
+const { normalizeWebMode, registerWebRoutes } = await import("../routes/web/index.js");
 
 test("normalizeWebMode accepts vue and defaults to Vue", (t) => {
   const originalWarn = console.warn;

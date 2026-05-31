@@ -172,7 +172,7 @@ describe("rental provider route handlers", () => {
     });
 
     // Import and register routes
-    const { registerRentalProviderRoutes } = await import("../routes/rental-provider.js");
+    const { registerRentalProviderRoutes } = await import("../routes/rental/provider.js");
     registerRentalProviderRoutes(app, deps as never);
 
     // Start server
@@ -211,7 +211,7 @@ describe("rental provider route handlers", () => {
     const unauthedApp = express();
     unauthedApp.use(express.json());
     // No auth middleware — sessionAccount will be undefined
-    const { registerRentalProviderRoutes: register } = await import("../routes/rental-provider.js");
+    const { registerRentalProviderRoutes: register } = await import("../routes/rental/provider.js");
     register(unauthedApp, deps as never);
     const srv = await new Promise<http.Server>((resolve) => {
       const s = unauthedApp.listen(0, () => resolve(s));

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomJoinRoutes } = await import("../routes/room-join.js");
+const { registerRoomJoinRoutes } = await import("../routes/rooms/join.js");
 
 function createDeps() {
   const unused = async () => {

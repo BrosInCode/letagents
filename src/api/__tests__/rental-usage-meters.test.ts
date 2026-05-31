@@ -25,7 +25,7 @@ import type {
 } from "../rental/usage-ingest.js";
 
 const { ingestUsage, UsageIngestError } = await import("../rental/usage-ingest.js");
-const { registerRentalInternalRoutes } = await import("../routes/rental-internal.js");
+const { registerRentalInternalRoutes } = await import("../routes/rental/internal/index.js");
 const { rental_usage_meters, rentalUsageMeterSourceEnum } = await import("../db/schema.js");
 
 // ===== Schema =====

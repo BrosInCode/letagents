@@ -22,7 +22,7 @@ const {
   BUDGET_EXTENSION_DENIED,
   BUDGET_EXTENSION_REQUESTED,
 } = await import("../../api/rental/activity-event-types.js");
-const { registerRentalRenterRoutes } = await import("../../api/routes/rental-renter.js");
+const { registerRentalRenterRoutes } = await import("../../api/routes/rental/renter/index.js");
 const { rentalRequestBudgetExtension } = await import("../rental-tools.js");
 
 function makeMcpDeps(result: unknown, captured: Array<{ path: string; options?: RequestInit }>): RentalToolDeps {

@@ -295,7 +295,7 @@ describe("renter patch review routes", () => {
   beforeEach(async () => {
     process.env.LETAGENTS_RENT_ENABLED = "true";
     const express = (await import("express")).default;
-    const { registerRentalRenterRoutes } = await import("../routes/rental-renter.js");
+    const { registerRentalRenterRoutes } = await import("../routes/rental/renter/index.js");
     app = express();
     app.use(express.json());
     app.use((req, _res, next) => {

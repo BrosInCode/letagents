@@ -29,77 +29,77 @@ import {
   toRoomResponse,
 } from "../rooms/formatting.js";
 import { resolveRequestAuth } from "../request/auth.js";
-import { registerAccountRoomRoutes } from "../routes/account-rooms.js";
+import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
-} from "../routes/auth.js";
+} from "../routes/auth/index.js";
 import {
   registerGitHubIntegrationRoutes,
   registerGitHubIntegrationSetupRoute,
-} from "../routes/github-integration.js";
+} from "../routes/github/integration.js";
 import {
   registerGitHubWebhookRoutes,
   type GitHubWebhookRouteDeps,
-} from "../routes/github-webhooks.js";
-import { registerHealthRoutes } from "../routes/health.js";
+} from "../routes/github/webhooks.js";
+import { registerHealthRoutes } from "../routes/system/health.js";
 import {
   registerLegacyProjectRoutes,
   type LegacyProjectRouteDeps,
-} from "../routes/legacy-projects.js";
+} from "../routes/legacy/projects.js";
 import {
   registerLegacyProjectMessageRoutes,
   type LegacyProjectMessageRouteDeps,
-} from "../routes/legacy-project-messages.js";
+} from "../routes/legacy/messages.js";
 import {
   registerLegacyProjectTaskRoutes,
   type LegacyProjectTaskRouteDeps,
-} from "../routes/legacy-project-tasks.js";
-import { registerRentalInternalRoutes } from "../routes/rental-internal.js";
+} from "../routes/legacy/tasks.js";
+import { registerRentalInternalRoutes } from "../routes/rental/internal/index.js";
 import {
   registerRentalProviderRoutes,
-} from "../routes/rental-provider.js";
+} from "../routes/rental/provider.js";
 import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
-} from "../routes/rental-renter.js";
+} from "../routes/rental/renter/index.js";
 import {
   registerRoomEntryRoutes,
   type RoomEntryRouteDeps,
-} from "../routes/room-entry.js";
+} from "../routes/rooms/entry.js";
 import {
   registerRoomEventRoutes,
   type RoomEventRouteDeps,
-} from "../routes/room-events.js";
+} from "../routes/rooms/events.js";
 import {
   registerRoomFocusRoutes,
   type RoomFocusRouteDeps,
-} from "../routes/room-focus.js";
+} from "../routes/rooms/focus.js";
 import {
   registerRoomJoinRoutes,
   type RoomJoinRouteDeps,
-} from "../routes/room-join.js";
+} from "../routes/rooms/join.js";
 import {
   registerRoomMessageRoutes,
   type RoomMessageRouteDeps,
-} from "../routes/room-messages.js";
+} from "../routes/rooms/messages/index.js";
 import {
   registerRoomMetadataRoutes,
   type RoomMetadataRouteDeps,
-} from "../routes/room-metadata.js";
+} from "../routes/rooms/metadata.js";
 import {
   registerRoomPresenceRoutes,
   type RoomPresenceRouteDeps,
-} from "../routes/room-presence.js";
+} from "../routes/rooms/presence/index.js";
 import {
   registerRoomReasoningRoutes,
   type RoomReasoningRouteDeps,
-} from "../routes/room-reasoning.js";
+} from "../routes/rooms/reasoning.js";
 import {
   registerRoomTaskRoutes,
   type RoomTaskRouteDeps,
-} from "../routes/room-tasks.js";
-import { registerWebRoutes } from "../routes/web.js";
+} from "../routes/rooms/tasks/index.js";
+import { registerWebRoutes } from "../routes/web/index.js";
 import {
   createListing,
   updateListing,
