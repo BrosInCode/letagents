@@ -125,7 +125,7 @@ describe("renter session route handlers", () => {
     });
 
     const { registerRentalRenterRoutes } = await import(
-      "../routes/rental-renter.js"
+      "../routes/rental/renter/index.js"
     );
     registerRentalRenterRoutes(app, deps as never);
 
@@ -173,7 +173,7 @@ describe("renter session route handlers", () => {
     const unauthedApp = express();
     unauthedApp.use(express.json());
     const { registerRentalRenterRoutes: register } = await import(
-      "../routes/rental-renter.js"
+      "../routes/rental/renter/index.js"
     );
     register(unauthedApp, deps as never);
     const srv = await new Promise<http.Server>((resolve) => {
@@ -530,7 +530,7 @@ describe("renter session route handlers", () => {
     const unauthedApp = express();
     unauthedApp.use(express.json());
     const { registerRentalRenterRoutes: register } = await import(
-      "../routes/rental-renter.js"
+      "../routes/rental/renter/index.js"
     );
     register(unauthedApp, deps as never);
     const srv = await new Promise<http.Server>((resolve) => {
@@ -597,7 +597,7 @@ describe("provider session route handlers (p1.3 additions)", () => {
     });
 
     const { registerRentalProviderRoutes } = await import(
-      "../routes/rental-provider.js"
+      "../routes/rental/provider.js"
     );
     registerRentalProviderRoutes(app, deps as never);
 

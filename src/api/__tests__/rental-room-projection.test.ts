@@ -312,7 +312,7 @@ describe("rental context route handlers (p1.4)", () => {
     });
 
     // Routes
-    const { isRentEnabled } = await import("../routes/rental-renter.js");
+    const { isRentEnabled } = await import("../routes/rental/renter/index.js");
     type Req = import("express").Request & {
       sessionAccount?: { account_id: string };
     };

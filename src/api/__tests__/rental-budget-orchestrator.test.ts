@@ -28,7 +28,7 @@ const {
   reconcileBudget,
   reserveBudget,
 } = await import("../rental/budget-orchestrator.js");
-const { registerRentalInternalRoutes } = await import("../routes/rental-internal.js");
+const { registerRentalInternalRoutes } = await import("../routes/rental/internal/index.js");
 
 const REFERENCE_NOW = Date.parse("2026-05-11T10:00:00.000Z");
 

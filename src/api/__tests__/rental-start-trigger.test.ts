@@ -26,7 +26,7 @@ const {
   RENTAL_TRIGGER_CONFIDENCES,
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
-} = await import("../routes/rental-renter.js");
+} = await import("../routes/rental/renter/index.js");
 
 const express = (await import("express")).default;
 

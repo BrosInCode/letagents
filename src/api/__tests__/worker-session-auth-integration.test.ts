@@ -16,10 +16,10 @@ if (testDatabaseUrl) {
 const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
-const { registerRoomMessageRoutes } = await import("../routes/room-messages.js");
-const { registerRoomPresenceRoutes } = await import("../routes/room-presence.js");
-const { registerRoomReasoningRoutes } = await import("../routes/room-reasoning.js");
-const { registerRoomTaskRoutes } = await import("../routes/room-tasks.js");
+const { registerRoomMessageRoutes } = await import("../routes/rooms/messages/index.js");
+const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/index.js");
+const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
+const { registerRoomTaskRoutes } = await import("../routes/rooms/tasks/index.js");
 const { buildAgentActorLabel } = await import("../../shared/agent-identity.js");
 const {
   LETAGENTS_AGENT_SESSION_ID_HEADER,

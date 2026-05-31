@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomFocusRoutes } = await import("../routes/room-focus.js");
+const { registerRoomFocusRoutes } = await import("../routes/rooms/focus.js");
 
 function createDeps() {
   const unused = async () => {

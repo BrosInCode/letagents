@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerLegacyProjectTaskRoutes } = await import("../routes/legacy-project-tasks.js");
+const { registerLegacyProjectTaskRoutes } = await import("../routes/legacy/tasks.js");
 
 function createDeps() {
   const unused = async () => {

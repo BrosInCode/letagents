@@ -7,7 +7,7 @@ const {
   isDesktopHumanTaskWriteForTest,
   isCurrentStalePromptAction,
   registerRoomTaskRoutes,
-} = await import("../routes/room-tasks.js");
+} = await import("../routes/rooms/tasks/index.js");
 
 function createDeps() {
   const unused = async () => {

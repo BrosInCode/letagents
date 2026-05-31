@@ -3,10 +3,10 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import type { Project } from "../db.js";
-import type { RoomReasoningRouteDeps, RoomReasoningStore } from "../routes/room-reasoning.js";
+import type { RoomReasoningRouteDeps, RoomReasoningStore } from "../routes/rooms/reasoning.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomReasoningRoutes } = await import("../routes/room-reasoning.js");
+const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
 
 function project(overrides: Partial<Project> = {}): Project {
   return {

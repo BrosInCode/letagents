@@ -268,7 +268,7 @@ describe("GET /api/rental/provider/readiness route", () => {
     });
 
     const { registerRentalProviderRoutes } = await import(
-      "../routes/rental-provider.js"
+      "../routes/rental/provider.js"
     );
     registerRentalProviderRoutes(app, deps as never);
 
@@ -299,7 +299,7 @@ describe("GET /api/rental/provider/readiness route", () => {
     const unauthedApp = express();
     unauthedApp.use(express.json());
     const { registerRentalProviderRoutes } = await import(
-      "../routes/rental-provider.js"
+      "../routes/rental/provider.js"
     );
     registerRentalProviderRoutes(unauthedApp, deps as never);
     const srv = await new Promise<http.Server>((resolve) => {

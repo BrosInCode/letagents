@@ -376,7 +376,7 @@ describe("heartbeat route handler (p1.5)", () => {
       next();
     });
 
-    const { isRentEnabled } = await import("../routes/rental-renter.js");
+    const { isRentEnabled } = await import("../routes/rental/renter/index.js");
     type Req = import("express").Request & {
       sessionAccount?: { account_id: string };
     };

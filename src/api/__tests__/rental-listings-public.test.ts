@@ -25,7 +25,7 @@ import type {
 
 const { clampPageLimit, redactPublicListing } = await import("../rental/listings.js");
 const { buildInMemoryListingsRateLimiter, registerRentalRenterRoutes } = await import(
-  "../routes/rental-renter.js"
+  "../routes/rental/renter/index.js"
 );
 
 // Lazy-imported pieces used to introspect the generated SQL without

@@ -24,7 +24,7 @@ beforeEach(async () => {
   events = [];
 
   const express = (await import("express")).default;
-  const { registerRentalInternalRoutes } = await import("../routes/rental-internal.js");
+  const { registerRentalInternalRoutes } = await import("../routes/rental/internal/index.js");
   app = express();
   app.use(express.json());
   app.use((req, _res, next) => {

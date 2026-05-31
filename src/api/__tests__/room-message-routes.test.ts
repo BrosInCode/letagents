@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomMessageRoutes } = await import("../routes/room-messages.js");
+const { registerRoomMessageRoutes } = await import("../routes/rooms/messages/index.js");
 
 function createDeps() {
   const unused = async () => {

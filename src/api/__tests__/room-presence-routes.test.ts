@@ -7,7 +7,7 @@ const {
   buildRoomActivityHistoryParticipants,
   isSuppressibleDisconnectedPresence,
   registerRoomPresenceRoutes,
-} = await import("../routes/room-presence.js");
+} = await import("../routes/rooms/presence/index.js");
 
 function createDeps() {
   const unused = async () => {

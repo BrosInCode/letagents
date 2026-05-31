@@ -34,7 +34,7 @@
 import type {
   RentalStartTrigger,
   RentalTriggerConfidence,
-} from "../routes/rental-renter.js";
+} from "../routes/rental/renter/index.js";
 
 /**
  * What the desktop adapter / UI ships to the server. Mirrors the

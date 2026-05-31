@@ -200,7 +200,7 @@ describe("POST /api/rental/sessions/:id/refresh-quota", () => {
     });
 
     const { registerRentalInternalRoutes } = await import(
-      "../routes/rental-internal.js"
+      "../routes/rental/internal/index.js"
     );
     const express = (await import("express")).default;
     app = express();

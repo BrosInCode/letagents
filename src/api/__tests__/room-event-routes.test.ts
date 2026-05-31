@@ -4,7 +4,7 @@ import test from "node:test";
 import type { Project } from "../db.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { getGitHubEventLaneRoomId, registerRoomEventRoutes } = await import("../routes/room-events.js");
+const { getGitHubEventLaneRoomId, registerRoomEventRoutes } = await import("../routes/rooms/events.js");
 
 function project(overrides: Partial<Project> = {}): Project {
   return {
