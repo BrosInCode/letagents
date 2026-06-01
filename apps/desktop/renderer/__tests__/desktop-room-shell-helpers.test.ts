@@ -124,10 +124,14 @@ describe("desktop room shell preferences", () => {
       assert.equal(readLiquidGlassEnabled(), false);
     });
 
+    withLocalStorage({ "letagents-desktop:liquid-glass": "on" }, () => {
+      assert.equal(readLiquidGlassEnabled(), true);
+    });
+
     withLocalStorage({}, () => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
-      assert.equal(readLiquidGlassEnabled(), true);
+      assert.equal(readLiquidGlassEnabled(), false);
     });
   });
 
@@ -135,7 +139,7 @@ describe("desktop room shell preferences", () => {
     withThrowingLocalStorage(() => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
-      assert.equal(readLiquidGlassEnabled(), true);
+      assert.equal(readLiquidGlassEnabled(), false);
     });
 
     withNotificationPermission("denied", () => {

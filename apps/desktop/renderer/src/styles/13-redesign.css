@@ -59,27 +59,28 @@ select:focus-visible {
 }
 
 .desktop-shell {
-  grid-template-columns: 284px minmax(0, 1fr);
+  grid-template-columns: 300px minmax(0, 1fr);
   background: var(--theme-shell-background);
 }
 
 .desktop-shell[data-sidebar-mode="rail"] {
-  grid-template-columns: 82px minmax(0, 1fr);
+  grid-template-columns: 84px minmax(0, 1fr);
 }
 
 .app-sidebar {
-  gap: 18px;
-  padding: 16px 12px;
+  gap: 16px;
+  padding: 16px 14px;
   background: var(--glass-subtle);
   border-right: 1px solid var(--theme-sidebar-border);
   box-shadow: var(--theme-sidebar-shadow);
-  backdrop-filter: blur(28px) saturate(1.18);
+  backdrop-filter: none;
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
   background: var(--glass-regular);
   border-right-color: var(--theme-sidebar-border-strong);
   box-shadow: var(--theme-sidebar-shadow-strong);
+  backdrop-filter: none;
 }
 
 .sidebar-brand {
@@ -245,7 +246,7 @@ select:focus-visible {
 }
 
 .app-main {
-  gap: 22px;
+  gap: 20px;
   padding: 24px 28px 28px;
   background: var(--theme-main-background);
 }
@@ -294,21 +295,44 @@ select:focus-visible {
 
 .desktop-room-shell {
   background: var(--theme-room-background);
+  contain: layout paint;
+  isolation: isolate;
+}
+
+.desktop-room-shell > .room-panel-enter-active,
+.desktop-room-shell > .room-panel-leave-active {
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-shell > .room-panel-enter-from,
+.desktop-room-shell > .room-panel-leave-to {
+  transform: none;
 }
 
 .desktop-room-header,
 .desktop-room-control-rail,
 .desktop-room-search-strip {
   border-color: var(--theme-control-border);
-  background: var(--glass-regular);
-  box-shadow: var(--shadow-glass);
-  backdrop-filter: var(--theme-blur-md);
+  background: var(--theme-bg-card);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-header,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-control-rail,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-search-strip {
+  border-color: var(--theme-surface-border);
+  background: var(--theme-bg-card);
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .desktop-room-header {
   flex-wrap: wrap;
-  min-height: 62px;
-  padding: 9px 14px 9px 16px;
+  min-height: 64px;
+  padding: 10px 18px;
+  border-bottom-color: var(--theme-surface-border-strong);
+  z-index: 3;
 }
 
 .desktop-room-heading {
@@ -328,7 +352,9 @@ select:focus-visible {
 }
 
 .desktop-room-control-rail {
-  box-shadow: var(--theme-room-control-shadow);
+  border-bottom-color: var(--theme-surface-border);
+  box-shadow: none;
+  z-index: 2;
 }
 
 .desktop-room-tabs {
@@ -336,7 +362,7 @@ select:focus-visible {
   min-width: 0;
   overflow-x: auto;
   padding: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-lg);
   scrollbar-width: none;
 }
 
@@ -369,7 +395,7 @@ select:focus-visible {
 
 .desktop-room-tab {
   min-height: 31px;
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   font-weight: 760;
 }
 
@@ -377,9 +403,30 @@ select:focus-visible {
   box-shadow: none;
 }
 
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-badge,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tabs,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-search-strip label,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-search-strip button,
+.desktop-room-shell[data-liquid-glass="true"] .room-load-older {
+  border-color: var(--theme-control-border);
+  background: var(--theme-control-background);
+  box-shadow: var(--theme-control-shadow);
+  backdrop-filter: none;
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool:hover,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool[data-active="true"],
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tab[data-active="true"],
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-search-strip button:hover:not(:disabled) {
+  border-color: var(--theme-control-active-border);
+  background: var(--theme-control-active-background);
+  color: var(--theme-control-active-color);
+}
+
 .desktop-room-search-strip {
   grid-template-columns: minmax(220px, 1fr) auto auto;
-  padding: 9px 16px;
+  padding: 10px 18px;
   border-top-color: var(--theme-surface-border);
 }
 
@@ -422,14 +469,50 @@ select:focus-visible {
   box-shadow: var(--focus-ring);
 }
 
+.desktop-room-action-panel,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-action-panel {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--theme-surface-border);
+  background: var(--theme-bg-card);
+  backdrop-filter: none;
+}
+
+.desktop-room-inspector {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  max-height: min(42vh, 420px);
+  padding-right: 6px;
+}
+
+.desktop-room-action-panel .desktop-room-identity-card,
+.desktop-room-action-panel .desktop-room-github-pill,
+.desktop-room-action-panel .desktop-room-property-row,
+.desktop-room-action-panel .desktop-room-link-line,
+.desktop-room-action-panel .desktop-room-inline-note,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-identity-card,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-github-pill,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-property-row,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-link-line,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-inline-note {
+  border-color: var(--theme-surface-border);
+  background: var(--theme-card-background);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
 .room-tab-page {
   padding: 16px 18px 20px;
   background: var(--theme-tab-page-background);
 }
 
+.room-chat-page {
+  padding: 0;
+}
+
 .room-message-list {
   gap: 2px;
-  padding: 18px 24px 24px;
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 22px 34px 24px;
 }
 
 .room-chat-message {
@@ -450,7 +533,7 @@ select:focus-visible {
 
 .room-message-bubble,
 .desktop-room-shell[data-liquid-glass="false"] .room-message-bubble {
-  max-width: 940px;
+  max-width: 920px;
   overflow: visible;
   padding: 12px 14px;
   border: 1px solid var(--theme-message-border);
@@ -477,6 +560,10 @@ select:focus-visible {
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, var(--theme-text-tertiary)) 11%, transparent), transparent 42%),
     var(--theme-message-background-strong);
+}
+
+.room-chat-message[data-owner-kind="github"] .room-message-bubble {
+  max-width: min(100%, 1040px);
 }
 
 .room-chat-message[data-owner-kind="human"] .room-message-bubble,
@@ -745,13 +832,14 @@ code {
 }
 
 .desktop-composer {
-  width: min(980px, calc(100% - 40px));
-  margin: 0 auto 18px;
+  width: min(1100px, calc(100% - 64px));
+  margin: 0 auto 16px;
+  padding: 8px 10px;
   border: 1px solid var(--theme-sidebar-border-strong);
-  border-radius: 18px;
-  background: var(--glass-regular);
-  box-shadow: var(--shadow-glass);
-  backdrop-filter: blur(30px) saturate(1.2);
+  border-radius: var(--radius-lg);
+  background: var(--theme-bg-card);
+  box-shadow: 0 -8px 26px rgba(0, 0, 0, 0.34);
+  backdrop-filter: none;
 }
 
 .desktop-composer-input {
@@ -770,10 +858,10 @@ code {
 
 .desktop-mention-panel,
 .desktop-reasoning-inspector {
-  background: var(--glass-regular);
+  background: var(--theme-bg-elevated);
   border-color: var(--theme-sidebar-border-strong);
-  box-shadow: var(--shadow-glass);
-  backdrop-filter: var(--theme-blur-md);
+  box-shadow: var(--shadow-raised);
+  backdrop-filter: none;
 }
 
 .room-attachment-drop-overlay,
@@ -1040,6 +1128,36 @@ code {
 
 .desktop-github-event {
   background: var(--theme-github-event-background);
+  min-height: 112px;
+  border-color: var(--theme-surface-border-strong);
+  border-left: 3px solid var(--event-accent, var(--theme-info));
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.desktop-github-event::before {
+  display: none;
+}
+
+.desktop-github-event::after {
+  display: none;
+}
+
+.desktop-github-event-icon {
+  border-radius: var(--radius-lg);
+  background: rgba(var(--theme-info-rgb), 0.1);
+  box-shadow: none;
+}
+
+.desktop-github-chip {
+  border-color: var(--theme-status-neutral-border);
+  background: var(--theme-status-neutral-bg);
+}
+
+.desktop-github-event-link {
+  min-height: 30px;
+  box-shadow: none;
 }
 
 .desktop-github-event[data-tone="success"] {

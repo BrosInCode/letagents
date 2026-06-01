@@ -16,9 +16,9 @@ export function readNotificationsEnabled(): boolean {
 
 export function readLiquidGlassEnabled(): boolean {
   try {
-    return window.localStorage.getItem("letagents-desktop:liquid-glass") !== "off";
+    return window.localStorage.getItem("letagents-desktop:liquid-glass") === "on";
   } catch {
-    return true;
+    return false;
   }
 }
 
