@@ -1,53 +1,4 @@
-:root {
-  color-scheme: dark;
-  --bg: #0f100e;
-  --bg-subtle: #151613;
-  --bg-card: #1b1c18;
-  --bg-elevated: #23241f;
-  --bg-inset: #090a09;
-  --text: #fff8ea;
-  --text-secondary: #d1cabe;
-  --text-tertiary: #9a9284;
-  --text-muted: var(--text-tertiary);
-  --border: rgba(245, 242, 234, 0.1);
-  --border-strong: rgba(245, 242, 234, 0.16);
-  --border-accent: rgba(245, 242, 234, 0.24);
-  --green: #6ee78f;
-  --green-dim: rgba(110, 231, 143, 0.13);
-  --amber: #f4bd55;
-  --amber-dim: rgba(244, 189, 85, 0.13);
-  --red: #ff7a72;
-  --red-dim: rgba(255, 122, 114, 0.13);
-  --blue: #82c9ff;
-  --blue-dim: rgba(130, 201, 255, 0.13);
-  --violet: #d6b7ff;
-  --violet-dim: rgba(214, 183, 255, 0.12);
-  --coral: #ff9d7a;
-  --coral-dim: rgba(255, 157, 122, 0.13);
-  --color-surface-1: var(--bg-card);
-  --color-surface-2: rgba(245, 242, 234, 0.07);
-  --color-surface-3: rgba(245, 242, 234, 0.11);
-  --color-border: var(--border);
-  --color-accent: #e8e2d4;
-  --color-danger: var(--red);
-  --color-warning: var(--amber);
-  --color-muted: var(--text-tertiary);
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 8px;
-  --radius-2xl: 8px;
-  --surface-flat: linear-gradient(180deg, rgba(245, 242, 234, 0.035), rgba(245, 242, 234, 0.012)), var(--bg-card);
-  --surface-raised: linear-gradient(180deg, rgba(245, 242, 234, 0.05), rgba(245, 242, 234, 0.018)), var(--bg-elevated);
-  --surface-inset: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent), rgba(8, 9, 8, 0.74);
-  --glass-regular: linear-gradient(145deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.055) 52%, rgba(255, 255, 255, 0.025)), rgba(35, 37, 34, 0.58);
-  --glass-subtle: linear-gradient(145deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.038) 58%, rgba(255, 255, 255, 0.018)), rgba(23, 24, 22, 0.66);
-  --glass-control: linear-gradient(145deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.07) 56%, rgba(255, 255, 255, 0.028)), rgba(41, 42, 38, 0.62);
-  --shadow-raised: 0 18px 44px rgba(0, 0, 0, 0.27), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  --shadow-glass: 0 18px 46px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(255, 255, 255, 0.035);
-  --shadow-soft: 0 10px 26px rgba(0, 0, 0, 0.2);
-  --focus-ring: 0 0 0 3px rgba(130, 201, 255, 0.18);
-  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
+@import "./redesign/theme.css";
 
 *,
 *::before,
@@ -63,9 +14,7 @@ body,
 
 :root,
 body {
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.04), transparent 24%),
-    linear-gradient(180deg, #181915 0%, #10110f 44%, #0a0b0a 100%);
+  background: var(--theme-app-background);
   color: var(--text);
   font-size: 14px;
 }
@@ -88,8 +37,8 @@ select:focus-visible {
 }
 
 ::selection {
-  background: rgba(130, 201, 255, 0.3);
-  color: #ffffff;
+  background: var(--theme-selection-background);
+  color: var(--theme-selection-color);
 }
 
 ::-webkit-scrollbar {
@@ -100,20 +49,18 @@ select:focus-visible {
 ::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: rgba(245, 242, 234, 0.22);
+  background: var(--theme-scrollbar-thumb);
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(245, 242, 234, 0.32);
+  background: var(--theme-scrollbar-thumb-hover);
   background-clip: padding-box;
 }
 
 .desktop-shell {
   grid-template-columns: 284px minmax(0, 1fr);
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.03), transparent 38%),
-    var(--bg);
+  background: var(--theme-shell-background);
 }
 
 .desktop-shell[data-sidebar-mode="rail"] {
@@ -124,15 +71,15 @@ select:focus-visible {
   gap: 18px;
   padding: 16px 12px;
   background: var(--glass-subtle);
-  border-right: 1px solid rgba(245, 242, 234, 0.13);
-  box-shadow: 18px 0 42px rgba(0, 0, 0, 0.16), inset -1px 0 rgba(255, 255, 255, 0.045);
+  border-right: 1px solid var(--theme-sidebar-border);
+  box-shadow: var(--theme-sidebar-shadow);
   backdrop-filter: blur(28px) saturate(1.18);
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
   background: var(--glass-regular);
-  border-right-color: rgba(245, 242, 234, 0.16);
-  box-shadow: 20px 0 48px rgba(0, 0, 0, 0.22), inset -1px 0 rgba(255, 255, 255, 0.06);
+  border-right-color: var(--theme-sidebar-border-strong);
+  box-shadow: var(--theme-sidebar-shadow-strong);
 }
 
 .sidebar-brand {
@@ -153,11 +100,9 @@ select:focus-visible {
 }
 
 .sidebar-brand-mark {
-  background:
-    linear-gradient(145deg, rgba(245, 242, 234, 0.23), rgba(245, 242, 234, 0.07)),
-    rgba(122, 255, 204, 0.08);
-  color: #fff8e8;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.16);
+  background: var(--theme-brand-mark-background);
+  color: var(--theme-brand-mark-color);
+  box-shadow: var(--theme-brand-mark-shadow);
 }
 
 .sidebar-brand h1 {
@@ -226,11 +171,11 @@ select:focus-visible {
 .room-code-form button,
 .desktop-image-viewer-action,
 .rent-refresh-button {
-  border-color: rgba(245, 242, 234, 0.12);
-  background: var(--glass-subtle);
-  color: var(--text-secondary);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(18px) saturate(1.12);
+  border-color: var(--theme-control-border);
+  background: var(--theme-control-background);
+  color: var(--theme-control-color);
+  box-shadow: var(--theme-control-shadow);
+  backdrop-filter: var(--theme-control-backdrop);
 }
 
 .sidebar-cta:hover,
@@ -256,9 +201,9 @@ select:focus-visible {
 .room-code-form button:hover:not(:disabled),
 .desktop-image-viewer-action:hover,
 .rent-refresh-button:not(:disabled):hover {
-  border-color: rgba(245, 242, 234, 0.22);
-  background: var(--glass-control);
-  color: var(--text);
+  border-color: var(--theme-control-border-hover);
+  background: var(--theme-control-background-hover);
+  color: var(--theme-control-color-hover);
   transform: translateY(-1px);
 }
 
@@ -272,12 +217,10 @@ select:focus-visible {
 .settings-filter[data-active="true"],
 .rent-mode-toggle button[data-active="true"],
 .rent-detail-tabs button[data-active="true"] {
-  border-color: rgba(130, 201, 255, 0.42);
-  background:
-    linear-gradient(145deg, rgba(130, 201, 255, 0.2), rgba(255, 255, 255, 0.055) 56%, rgba(255, 255, 255, 0.025)),
-    rgba(27, 41, 43, 0.64);
-  color: #e9f7ff;
-  box-shadow: inset 3px 0 0 rgba(130, 201, 255, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.16), var(--shadow-soft);
+  border-color: var(--theme-control-active-border);
+  background: var(--theme-control-active-background);
+  color: var(--theme-control-active-color);
+  box-shadow: var(--theme-control-active-shadow);
 }
 
 .sidebar-collapse-button,
@@ -293,18 +236,18 @@ select:focus-visible {
 }
 
 .project-room-list::before {
-  background: linear-gradient(180deg, transparent, rgba(245, 242, 234, 0.18) 16%, rgba(245, 242, 234, 0.08) 86%, transparent);
+  background: var(--theme-room-tree-guide);
 }
 
 .room-status-dot {
   background: var(--green);
-  box-shadow: 0 0 0 3px rgba(110, 231, 143, 0.13);
+  box-shadow: var(--theme-room-status-shadow);
 }
 
 .app-main {
   gap: 22px;
   padding: 24px 28px 28px;
-  background: linear-gradient(180deg, rgba(245, 242, 234, 0.018), transparent 28%);
+  background: var(--theme-main-background);
 }
 
 .app-topbar {
@@ -337,31 +280,29 @@ select:focus-visible {
 }
 
 .primary-button {
-  border-color: rgba(245, 242, 234, 0.3);
-  background: linear-gradient(180deg, #f8f0df, #ddd4c2);
-  color: #15140f;
+  border-color: var(--theme-primary-button-border);
+  background: var(--theme-primary-button-background);
+  color: var(--theme-primary-button-color);
   font-weight: 780;
-  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  box-shadow: var(--theme-primary-button-shadow);
 }
 
 .primary-button:hover:not(:disabled) {
-  background: linear-gradient(180deg, #fff7e9, #e7dcc9);
-  color: #11100c;
+  background: var(--theme-primary-button-background-hover);
+  color: var(--theme-primary-button-color-hover);
 }
 
 .desktop-room-shell {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 18%),
-    var(--bg-inset);
+  background: var(--theme-room-background);
 }
 
 .desktop-room-header,
 .desktop-room-control-rail,
 .desktop-room-search-strip {
-  border-color: rgba(245, 242, 234, 0.12);
+  border-color: var(--theme-control-border);
   background: var(--glass-regular);
   box-shadow: var(--shadow-glass);
-  backdrop-filter: blur(28px) saturate(1.18);
+  backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-header {
@@ -387,7 +328,7 @@ select:focus-visible {
 }
 
 .desktop-room-control-rail {
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--theme-room-control-shadow);
 }
 
 .desktop-room-tabs {
@@ -439,7 +380,7 @@ select:focus-visible {
 .desktop-room-search-strip {
   grid-template-columns: minmax(220px, 1fr) auto auto;
   padding: 9px 16px;
-  border-top-color: rgba(245, 242, 234, 0.1);
+  border-top-color: var(--theme-surface-border);
 }
 
 .desktop-room-search-strip label,
@@ -451,10 +392,10 @@ select:focus-visible {
 .rent-create-field input,
 .rent-create-field textarea,
 .rent-create-field select {
-  background: rgba(9, 10, 9, 0.58);
-  border-color: rgba(245, 242, 234, 0.13);
+  background: var(--theme-input-background);
+  border-color: var(--theme-input-border);
   color: var(--text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  box-shadow: var(--theme-input-inset-shadow);
 }
 
 .desktop-room-search-strip input::placeholder,
@@ -465,7 +406,7 @@ select:focus-visible {
 .desktop-new-room-join input::placeholder,
 .rent-create-field input::placeholder,
 .rent-create-field textarea::placeholder {
-  color: rgba(196, 191, 180, 0.52);
+  color: var(--theme-placeholder-color);
 }
 
 .desktop-room-search-strip input:focus,
@@ -477,15 +418,13 @@ select:focus-visible {
 .rent-create-field input:focus,
 .rent-create-field textarea:focus,
 .rent-create-field select:focus {
-  border-color: rgba(130, 201, 255, 0.44);
+  border-color: var(--theme-input-focus-border);
   box-shadow: var(--focus-ring);
 }
 
 .room-tab-page {
   padding: 16px 18px 20px;
-  background:
-    linear-gradient(90deg, rgba(130, 201, 255, 0.025), transparent 18%),
-    var(--bg-inset);
+  background: var(--theme-tab-page-background);
 }
 
 .room-message-list {
@@ -504,7 +443,7 @@ select:focus-visible {
   height: 15px;
   margin-top: 7px;
   box-shadow:
-    inset 0 0 0 2px rgba(13, 13, 12, 0.88),
+    var(--theme-avatar-shell-shadow),
     0 0 0 1px color-mix(in srgb, var(--avatar-color) 70%, transparent),
     0 0 0 5px color-mix(in srgb, var(--avatar-color) 12%, transparent);
 }
@@ -514,13 +453,13 @@ select:focus-visible {
   max-width: 940px;
   overflow: visible;
   padding: 12px 14px;
-  border: 1px solid rgba(245, 242, 234, 0.08);
-  border-left: 3px solid color-mix(in srgb, var(--avatar-color, #8d8679) 56%, transparent);
+  border: 1px solid var(--theme-message-border);
+  border-left: 3px solid color-mix(in srgb, var(--avatar-color, var(--theme-text-tertiary)) 56%, transparent);
   border-radius: var(--radius-lg);
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, #8d8679) 8%, transparent), transparent 36%),
-    rgba(245, 242, 234, 0.028);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.026);
+    linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, var(--theme-text-tertiary)) 8%, transparent), transparent 36%),
+    var(--theme-message-background);
+  box-shadow: var(--theme-message-inset-shadow);
   backdrop-filter: none;
 }
 
@@ -532,22 +471,22 @@ select:focus-visible {
 .room-chat-message.is-system-message .room-message-bubble,
 .desktop-room-shell[data-liquid-glass="false"] .room-chat-message.is-github-message .room-message-bubble,
 .desktop-room-shell[data-liquid-glass="false"] .room-chat-message.is-system-message .room-message-bubble {
-  border: 1px solid rgba(245, 242, 234, 0.1);
-  border-left: 3px solid color-mix(in srgb, var(--avatar-color, #8d8679) 60%, transparent);
+  border: 1px solid var(--theme-message-border-strong);
+  border-left: 3px solid color-mix(in srgb, var(--avatar-color, var(--theme-text-tertiary)) 60%, transparent);
   border-radius: var(--radius-lg);
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, #8d8679) 11%, transparent), transparent 42%),
-    rgba(245, 242, 234, 0.04);
+    linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, var(--theme-text-tertiary)) 11%, transparent), transparent 42%),
+    var(--theme-message-background-strong);
 }
 
 .room-chat-message[data-owner-kind="human"] .room-message-bubble,
 .desktop-room-shell[data-liquid-glass="false"] .room-chat-message[data-owner-kind="human"] .room-message-bubble {
-  background: linear-gradient(90deg, rgba(255, 157, 122, 0.08), transparent 34%), rgba(245, 242, 234, 0.028);
+  background: var(--theme-human-message-background);
 }
 
 .room-chat-message[data-owner-kind="agent"] .room-message-bubble,
 .desktop-room-shell[data-liquid-glass="false"] .room-chat-message[data-owner-kind="agent"] .room-message-bubble {
-  background: linear-gradient(90deg, rgba(130, 201, 255, 0.08), transparent 34%), rgba(245, 242, 234, 0.028);
+  background: var(--theme-agent-message-background);
 }
 
 .room-message-meta {
@@ -565,8 +504,8 @@ select:focus-visible {
 .desktop-board-status-badge,
 .state-pill,
 code {
-  border-color: rgba(245, 242, 234, 0.12);
-  background: rgba(245, 242, 234, 0.06);
+  border-color: var(--theme-status-neutral-border);
+  background: var(--theme-status-neutral-bg);
   color: var(--text-secondary);
 }
 
@@ -616,7 +555,7 @@ code {
 .room-activity-summary,
 .room-activity-group,
 .room-activity-detail-card {
-  border-color: rgba(245, 242, 234, 0.1);
+  border-color: var(--theme-surface-border);
   border-radius: var(--radius-lg);
   background: var(--surface-flat);
   box-shadow: none;
@@ -640,7 +579,7 @@ code {
 .auth-panel,
 .mcp-wizard-card,
 .first-run-card {
-  border-color: rgba(245, 242, 234, 0.14);
+  border-color: var(--theme-surface-border-strong);
 }
 
 .surface-page,
@@ -731,17 +670,17 @@ code {
 .desktop-task-column {
   min-height: 360px;
   padding: 10px;
-  background: linear-gradient(180deg, rgba(245, 242, 234, 0.034), rgba(245, 242, 234, 0.012)), rgba(17, 18, 16, 0.86);
+  background: var(--theme-surface-flat);
 }
 
 .desktop-task-card {
   padding: 12px;
-  background: rgba(245, 242, 234, 0.04);
+  background: var(--theme-card-background);
 }
 
 .desktop-task-card.is-selected {
-  border-color: rgba(130, 201, 255, 0.42);
-  box-shadow: inset 3px 0 0 rgba(130, 201, 255, 0.74);
+  border-color: var(--theme-control-active-border);
+  box-shadow: var(--theme-selected-strip-shadow);
 }
 
 .desktop-task-meta-grid span,
@@ -749,8 +688,8 @@ code {
 .desktop-task-detail-row,
 .desktop-task-detail-link {
   border-radius: var(--radius-md);
-  background: rgba(245, 242, 234, 0.045);
-  border-color: rgba(245, 242, 234, 0.09);
+  background: var(--theme-card-background);
+  border-color: var(--theme-surface-border);
 }
 
 .desktop-board-primary-action,
@@ -758,11 +697,10 @@ code {
 .rent-action-accept,
 .rent-create-primary,
 .room-code-form button {
-  border-color: rgba(130, 201, 255, 0.32);
-  background:
-    linear-gradient(180deg, rgba(158, 219, 255, 0.95), rgba(88, 165, 213, 0.95));
-  color: #07151b;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 10px 24px rgba(0, 0, 0, 0.2);
+  border-color: var(--theme-accent-action-border);
+  background: var(--theme-accent-action-background);
+  color: var(--theme-accent-action-color);
+  box-shadow: var(--theme-accent-action-shadow);
 }
 
 .desktop-board-status-badge[data-status="proposed"],
@@ -771,7 +709,7 @@ code {
 .state-pill[data-state="connected"] {
   color: var(--green);
   background: var(--green-dim);
-  border-color: rgba(110, 231, 143, 0.26);
+  border-color: var(--theme-status-success-border);
 }
 
 .desktop-board-status-badge[data-status="accepted"],
@@ -779,12 +717,12 @@ code {
 .desktop-task-chip[data-kind="review"],
 .desktop-task-pr-link {
   color: var(--blue);
-  border-color: rgba(130, 201, 255, 0.28);
+  border-color: var(--theme-status-info-border);
 }
 
 .desktop-board-status-badge[data-status="assigned"] {
   color: var(--violet);
-  border-color: rgba(214, 183, 255, 0.28);
+  border-color: var(--theme-status-violet-border);
 }
 
 .desktop-board-status-badge[data-status="in_progress"],
@@ -793,7 +731,7 @@ code {
 .state-pill[data-state="starting"] {
   color: var(--amber);
   background: var(--amber-dim);
-  border-color: rgba(244, 189, 85, 0.28);
+  border-color: var(--theme-status-warning-border);
 }
 
 .desktop-board-status-badge[data-status="blocked"],
@@ -803,13 +741,13 @@ code {
 .state-pill[data-state="failed"] {
   color: var(--red);
   background: var(--red-dim);
-  border-color: rgba(255, 122, 114, 0.28);
+  border-color: var(--theme-status-danger-border);
 }
 
 .desktop-composer {
   width: min(980px, calc(100% - 40px));
   margin: 0 auto 18px;
-  border: 1px solid rgba(245, 242, 234, 0.16);
+  border: 1px solid var(--theme-sidebar-border-strong);
   border-radius: 18px;
   background: var(--glass-regular);
   box-shadow: var(--shadow-glass);
@@ -826,16 +764,16 @@ code {
 }
 
 .desktop-composer-send {
-  color: #07151b;
-  background: linear-gradient(180deg, #a9ddff, #73b7df);
+  color: var(--theme-accent-action-color);
+  background: var(--theme-accent-action-background);
 }
 
 .desktop-mention-panel,
 .desktop-reasoning-inspector {
   background: var(--glass-regular);
-  border-color: rgba(245, 242, 234, 0.16);
+  border-color: var(--theme-sidebar-border-strong);
   box-shadow: var(--shadow-glass);
-  backdrop-filter: blur(28px) saturate(1.18);
+  backdrop-filter: var(--theme-blur-md);
 }
 
 .room-attachment-drop-overlay,
@@ -843,7 +781,7 @@ code {
 .desktop-rules-backdrop,
 .desktop-image-viewer-backdrop,
 .desktop-reasoning-inspector-backdrop {
-  background: rgba(7, 8, 7, 0.78);
+  background: var(--theme-scrim-background);
   backdrop-filter: blur(18px) saturate(1.1);
 }
 
@@ -868,7 +806,7 @@ code {
 }
 
 .desktop-image-viewer-stage img {
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--theme-media-shadow);
 }
 
 .desktop-onboarding-shell {
@@ -876,9 +814,7 @@ code {
   min-height: 0;
   overflow-y: auto;
   padding: 22px;
-  background:
-    linear-gradient(135deg, rgba(130, 201, 255, 0.055), transparent 32%),
-    linear-gradient(180deg, #171813 0%, #10110f 54%, #0a0b0a 100%);
+  background: var(--theme-onboarding-background);
 }
 
 .desktop-onboarding-shell .first-run-wizard {
@@ -928,7 +864,7 @@ code {
 .first-run-card .mcp-progress span {
   min-height: 38px;
   border-radius: 999px;
-  background: rgba(245, 242, 234, 0.035);
+  background: var(--theme-progress-background);
 }
 
 .first-run-card .mcp-progress {
@@ -956,14 +892,14 @@ code {
   top: 18px;
   left: calc(50% + 29px);
   width: calc(100% + 22px - 58px);
-  background: linear-gradient(90deg, rgba(245, 242, 234, 0.42), rgba(245, 242, 234, 0.08));
+  background: var(--theme-progress-guide);
 }
 
 .first-run-card .mcp-progress span[data-active="true"] strong,
 .mcp-choice-card[data-selected="true"] .mcp-choice-check,
 .mcp-done-mark {
-  background: linear-gradient(180deg, #f8f0df, #ddd4c2);
-  color: #15140f;
+  background: var(--theme-primary-button-background);
+  color: var(--theme-primary-button-color);
 }
 
 .mcp-choice-card,
@@ -972,7 +908,7 @@ code {
 .room-choice-card,
 .suggested-room-card,
 .setup-check-item {
-  background: rgba(245, 242, 234, 0.04);
+  background: var(--theme-card-background);
 }
 
 .first-run-card .mcp-choice-step {
@@ -1013,18 +949,16 @@ code {
 .mcp-choice-card[data-selected="true"],
 .room-choice-card-primary,
 .suggested-room-card {
-  background:
-    linear-gradient(145deg, rgba(130, 201, 255, 0.1), rgba(245, 242, 234, 0.035) 42%, rgba(245, 242, 234, 0.018)),
-    rgba(245, 242, 234, 0.04);
+  background: var(--theme-onboarding-choice-selected-background);
 }
 
 .mcp-target-mark {
   border-radius: var(--radius-lg);
-  background: rgba(245, 242, 234, 0.08);
+  background: var(--theme-card-background-strong);
 }
 
 .mcp-harness-icon {
-  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.24));
+  filter: var(--theme-icon-drop-shadow);
 }
 
 .settings-room-toolbar {
@@ -1041,14 +975,14 @@ code {
 
 .settings-room-meta span,
 .settings-focus-list span {
-  background: rgba(245, 242, 234, 0.055);
-  border-color: rgba(245, 242, 234, 0.1);
+  background: var(--theme-muted-pill-background);
+  border-color: var(--theme-muted-pill-border);
 }
 
 .rent-mode-toggle {
-  border-color: rgba(245, 242, 234, 0.14);
+  border-color: var(--theme-surface-border-strong);
   background: var(--glass-subtle);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: var(--theme-control-shadow);
 }
 
 .rent-mode-toggle button {
@@ -1056,8 +990,8 @@ code {
 }
 
 .rent-session-banner {
-  background: linear-gradient(145deg, rgba(130, 201, 255, 0.14), rgba(245, 242, 234, 0.03));
-  border-color: rgba(130, 201, 255, 0.28);
+  background: var(--theme-status-info-bg);
+  border-color: var(--theme-status-info-border);
 }
 
 .rent-provider-dashboard,
@@ -1066,7 +1000,7 @@ code {
 }
 
 .rent-provider-count {
-  background: rgba(245, 242, 234, 0.07);
+  background: var(--color-surface-2);
 }
 
 .rent-create-body,
@@ -1077,20 +1011,20 @@ code {
 
 .desktop-new-room-option,
 .desktop-new-room-join {
-  background: rgba(245, 242, 234, 0.045);
-  border-color: rgba(245, 242, 234, 0.1);
+  background: var(--theme-card-background);
+  border-color: var(--theme-surface-border);
 }
 
 .desktop-new-room-option:hover:not(:disabled),
 .desktop-modal-close:hover:not(:disabled),
 .desktop-new-room-join button:hover:not(:disabled) {
-  background: rgba(245, 242, 234, 0.075);
+  background: var(--theme-card-background-strong);
 }
 
 .room-activity-summary,
 .room-activity-group,
 .room-activity-detail-card {
-  background: rgba(245, 242, 234, 0.04);
+  background: var(--theme-card-background);
 }
 
 .room-activity-grid {
@@ -1100,26 +1034,24 @@ code {
 .room-activity-toolbar,
 .room-activity-filter,
 .room-activity-search {
-  border-color: rgba(245, 242, 234, 0.12);
+  border-color: var(--theme-control-border);
   background: var(--glass-subtle);
 }
 
 .desktop-github-event {
-  background:
-    linear-gradient(90deg, rgba(130, 201, 255, 0.075), transparent 46%),
-    rgba(245, 242, 234, 0.04);
+  background: var(--theme-github-event-background);
 }
 
 .desktop-github-event[data-tone="success"] {
-  background: linear-gradient(90deg, rgba(110, 231, 143, 0.09), transparent 46%), rgba(245, 242, 234, 0.04);
+  background: var(--theme-github-event-success-background);
 }
 
 .desktop-github-event[data-tone="warning"] {
-  background: linear-gradient(90deg, rgba(244, 189, 85, 0.1), transparent 46%), rgba(245, 242, 234, 0.04);
+  background: var(--theme-github-event-warning-background);
 }
 
 .desktop-github-event[data-tone="danger"] {
-  background: linear-gradient(90deg, rgba(255, 122, 114, 0.1), transparent 46%), rgba(245, 242, 234, 0.04);
+  background: var(--theme-github-event-danger-background);
 }
 
 @media (max-width: 1240px) {
@@ -1144,7 +1076,7 @@ code {
   .app-sidebar {
     max-height: 34vh;
     border-right: 0;
-    border-bottom: 1px solid rgba(245, 242, 234, 0.13);
+    border-bottom: 1px solid var(--theme-sidebar-border);
   }
 
   .app-main {
@@ -1346,7 +1278,7 @@ code {
   .desktop-rules-backdrop,
   .desktop-image-viewer-backdrop,
   .desktop-reasoning-inspector-backdrop {
-    background: #151612;
+    background: var(--theme-bg-subtle);
     backdrop-filter: none;
   }
 }

@@ -1,0 +1,232 @@
+/*
+  Desktop redesign theme contract.
+
+  To reskin the desktop app, edit this file first. Component-level CSS should
+  consume these semantic tokens and recipes instead of declaring new colors,
+  shadows, radii, or glass treatments inline.
+*/
+
+:root {
+  color-scheme: dark;
+
+  /* Core palette */
+  --theme-bg: #0f100e;
+  --theme-bg-subtle: #151613;
+  --theme-bg-card: #1b1c18;
+  --theme-bg-elevated: #23241f;
+  --theme-bg-inset: #090a09;
+  --theme-text: #fff8ea;
+  --theme-text-secondary: #d1cabe;
+  --theme-text-tertiary: #9a9284;
+  --theme-neutral-rgb: 245, 242, 234;
+  --theme-dark-rgb: 9, 10, 9;
+  --theme-scrim-rgb: 7, 8, 7;
+
+  /* Accent/status palette */
+  --theme-success: #6ee78f;
+  --theme-success-rgb: 110, 231, 143;
+  --theme-warning: #f4bd55;
+  --theme-warning-rgb: 244, 189, 85;
+  --theme-danger: #ff7a72;
+  --theme-danger-rgb: 255, 122, 114;
+  --theme-info: #82c9ff;
+  --theme-info-rgb: 130, 201, 255;
+  --theme-violet: #d6b7ff;
+  --theme-violet-rgb: 214, 183, 255;
+  --theme-coral: #ff9d7a;
+  --theme-coral-rgb: 255, 157, 122;
+
+  /* Radius, depth, and motion recipes */
+  --theme-radius-sm: 4px;
+  --theme-radius-md: 6px;
+  --theme-radius-lg: 8px;
+  --theme-radius-pill: 999px;
+  --theme-blur-sm: blur(18px) saturate(1.12);
+  --theme-blur-md: blur(28px) saturate(1.18);
+  --theme-blur-lg: blur(30px) saturate(1.2);
+  --theme-shadow-soft: 0 10px 26px rgba(0, 0, 0, 0.2);
+  --theme-shadow-raised: 0 18px 44px rgba(0, 0, 0, 0.27), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --theme-shadow-glass: 0 18px 46px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(255, 255, 255, 0.035);
+
+  /* Background recipes */
+  --theme-app-background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.04), transparent 24%),
+    linear-gradient(180deg, #181915 0%, #10110f 44%, #0a0b0a 100%);
+  --theme-onboarding-background:
+    linear-gradient(135deg, rgba(var(--theme-info-rgb), 0.055), transparent 32%),
+    linear-gradient(180deg, #171813 0%, #10110f 54%, #0a0b0a 100%);
+  --theme-shell-background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03), transparent 38%),
+    var(--theme-bg);
+  --theme-main-background: linear-gradient(180deg, rgba(var(--theme-neutral-rgb), 0.018), transparent 28%);
+  --theme-room-background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 18%),
+    var(--theme-bg-inset);
+  --theme-tab-page-background:
+    linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.025), transparent 18%),
+    var(--theme-bg-inset);
+
+  /* Surface recipes */
+  --theme-surface-border: rgba(var(--theme-neutral-rgb), 0.1);
+  --theme-surface-border-strong: rgba(var(--theme-neutral-rgb), 0.14);
+  --theme-surface-flat:
+    linear-gradient(180deg, rgba(var(--theme-neutral-rgb), 0.035), rgba(var(--theme-neutral-rgb), 0.012)),
+    var(--theme-bg-card);
+  --theme-surface-raised:
+    linear-gradient(180deg, rgba(var(--theme-neutral-rgb), 0.05), rgba(var(--theme-neutral-rgb), 0.018)),
+    var(--theme-bg-elevated);
+  --theme-surface-inset:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent),
+    rgba(8, 9, 8, 0.74);
+  --theme-card-background: rgba(var(--theme-neutral-rgb), 0.04);
+  --theme-card-background-strong: rgba(var(--theme-neutral-rgb), 0.06);
+  --theme-card-background-selected:
+    linear-gradient(145deg, rgba(var(--theme-info-rgb), 0.1), rgba(var(--theme-neutral-rgb), 0.035) 42%, rgba(var(--theme-neutral-rgb), 0.018)),
+    rgba(var(--theme-neutral-rgb), 0.04);
+
+  /* Glass/control recipes */
+  --theme-glass-regular:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.055) 52%, rgba(255, 255, 255, 0.025)),
+    rgba(35, 37, 34, 0.58);
+  --theme-glass-subtle:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.038) 58%, rgba(255, 255, 255, 0.018)),
+    rgba(23, 24, 22, 0.66);
+  --theme-glass-control:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.07) 56%, rgba(255, 255, 255, 0.028)),
+    rgba(41, 42, 38, 0.62);
+  --theme-control-border: rgba(var(--theme-neutral-rgb), 0.12);
+  --theme-control-border-hover: rgba(var(--theme-neutral-rgb), 0.22);
+  --theme-control-background: var(--theme-glass-subtle);
+  --theme-control-background-hover: var(--theme-glass-control);
+  --theme-control-color: var(--theme-text-secondary);
+  --theme-control-color-hover: var(--theme-text);
+  --theme-control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --theme-control-backdrop: var(--theme-blur-sm);
+  --theme-control-active-border: rgba(var(--theme-info-rgb), 0.42);
+  --theme-control-active-background:
+    linear-gradient(145deg, rgba(var(--theme-info-rgb), 0.2), rgba(255, 255, 255, 0.055) 56%, rgba(255, 255, 255, 0.025)),
+    rgba(27, 41, 43, 0.64);
+  --theme-control-active-color: #e9f7ff;
+  --theme-control-active-shadow: inset 3px 0 0 rgba(var(--theme-info-rgb), 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.16), var(--theme-shadow-soft);
+  --theme-selected-strip-shadow: inset 3px 0 0 rgba(var(--theme-info-rgb), 0.74);
+
+  /* Form recipes */
+  --theme-input-background: rgba(var(--theme-dark-rgb), 0.58);
+  --theme-input-border: rgba(var(--theme-neutral-rgb), 0.13);
+  --theme-input-focus-border: rgba(var(--theme-info-rgb), 0.44);
+  --theme-placeholder-color: rgba(196, 191, 180, 0.52);
+  --theme-focus-ring: 0 0 0 3px rgba(var(--theme-info-rgb), 0.18);
+  --theme-input-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+
+  /* Button recipes */
+  --theme-primary-button-background: linear-gradient(180deg, #f8f0df, #ddd4c2);
+  --theme-primary-button-background-hover: linear-gradient(180deg, #fff7e9, #e7dcc9);
+  --theme-primary-button-border: rgba(var(--theme-neutral-rgb), 0.3);
+  --theme-primary-button-color: #15140f;
+  --theme-primary-button-color-hover: #11100c;
+  --theme-primary-button-shadow: 0 12px 26px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  --theme-accent-action-background:
+    linear-gradient(180deg, rgba(158, 219, 255, 0.95), rgba(88, 165, 213, 0.95));
+  --theme-accent-action-color: #07151b;
+  --theme-accent-action-border: rgba(var(--theme-info-rgb), 0.32);
+  --theme-accent-action-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 10px 24px rgba(0, 0, 0, 0.2);
+
+  /* Status recipes */
+  --theme-status-neutral-bg: rgba(var(--theme-neutral-rgb), 0.06);
+  --theme-status-neutral-border: rgba(var(--theme-neutral-rgb), 0.12);
+  --theme-status-success-bg: rgba(var(--theme-success-rgb), 0.13);
+  --theme-status-success-border: rgba(var(--theme-success-rgb), 0.26);
+  --theme-status-warning-bg: rgba(var(--theme-warning-rgb), 0.13);
+  --theme-status-warning-border: rgba(var(--theme-warning-rgb), 0.28);
+  --theme-status-danger-bg: rgba(var(--theme-danger-rgb), 0.13);
+  --theme-status-danger-border: rgba(var(--theme-danger-rgb), 0.28);
+  --theme-status-info-bg: rgba(var(--theme-info-rgb), 0.13);
+  --theme-status-info-border: rgba(var(--theme-info-rgb), 0.28);
+  --theme-status-violet-bg: rgba(var(--theme-violet-rgb), 0.12);
+  --theme-status-violet-border: rgba(var(--theme-violet-rgb), 0.28);
+  --theme-scrim-background: rgba(var(--theme-scrim-rgb), 0.78);
+  --theme-selection-background: rgba(var(--theme-info-rgb), 0.3);
+  --theme-selection-color: #ffffff;
+  --theme-scrollbar-thumb: rgba(var(--theme-neutral-rgb), 0.22);
+  --theme-scrollbar-thumb-hover: rgba(var(--theme-neutral-rgb), 0.32);
+  --theme-sidebar-border: rgba(var(--theme-neutral-rgb), 0.13);
+  --theme-sidebar-border-strong: rgba(var(--theme-neutral-rgb), 0.16);
+  --theme-sidebar-shadow: 18px 0 42px rgba(0, 0, 0, 0.16), inset -1px 0 rgba(255, 255, 255, 0.045);
+  --theme-sidebar-shadow-strong: 20px 0 48px rgba(0, 0, 0, 0.22), inset -1px 0 rgba(255, 255, 255, 0.06);
+  --theme-brand-mark-background:
+    linear-gradient(145deg, rgba(var(--theme-neutral-rgb), 0.23), rgba(var(--theme-neutral-rgb), 0.07)),
+    rgba(122, 255, 204, 0.08);
+  --theme-brand-mark-color: #fff8e8;
+  --theme-brand-mark-shadow: inset 0 1px rgba(255, 255, 255, 0.16);
+  --theme-room-tree-guide: linear-gradient(180deg, transparent, rgba(var(--theme-neutral-rgb), 0.18) 16%, rgba(var(--theme-neutral-rgb), 0.08) 86%, transparent);
+  --theme-room-status-shadow: 0 0 0 3px rgba(var(--theme-success-rgb), 0.13);
+  --theme-room-control-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  --theme-avatar-shell-shadow: inset 0 0 0 2px rgba(13, 13, 12, 0.88);
+  --theme-message-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.026);
+  --theme-media-shadow: 0 16px 42px rgba(0, 0, 0, 0.34);
+  --theme-icon-drop-shadow: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.24));
+  --theme-message-background: rgba(var(--theme-neutral-rgb), 0.028);
+  --theme-message-background-strong: rgba(var(--theme-neutral-rgb), 0.04);
+  --theme-message-border: rgba(var(--theme-neutral-rgb), 0.08);
+  --theme-message-border-strong: rgba(var(--theme-neutral-rgb), 0.1);
+  --theme-human-message-background: linear-gradient(90deg, rgba(var(--theme-coral-rgb), 0.08), transparent 34%), var(--theme-message-background);
+  --theme-agent-message-background: linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.08), transparent 34%), var(--theme-message-background);
+  --theme-muted-pill-background: rgba(var(--theme-neutral-rgb), 0.055);
+  --theme-muted-pill-border: rgba(var(--theme-neutral-rgb), 0.1);
+  --theme-progress-background: rgba(var(--theme-neutral-rgb), 0.035);
+  --theme-progress-guide: linear-gradient(90deg, rgba(var(--theme-neutral-rgb), 0.42), rgba(var(--theme-neutral-rgb), 0.08));
+  --theme-github-event-background: linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.075), transparent 46%), var(--theme-card-background);
+  --theme-github-event-success-background: linear-gradient(90deg, rgba(var(--theme-success-rgb), 0.09), transparent 46%), var(--theme-card-background);
+  --theme-github-event-warning-background: linear-gradient(90deg, rgba(var(--theme-warning-rgb), 0.1), transparent 46%), var(--theme-card-background);
+  --theme-github-event-danger-background: linear-gradient(90deg, rgba(var(--theme-danger-rgb), 0.1), transparent 46%), var(--theme-card-background);
+  --theme-onboarding-choice-selected-background: var(--theme-card-background-selected);
+
+  /* Legacy compatibility aliases used across the desktop CSS stack. */
+  --bg: var(--theme-bg);
+  --bg-subtle: var(--theme-bg-subtle);
+  --bg-card: var(--theme-bg-card);
+  --bg-elevated: var(--theme-bg-elevated);
+  --bg-inset: var(--theme-bg-inset);
+  --text: var(--theme-text);
+  --text-secondary: var(--theme-text-secondary);
+  --text-tertiary: var(--theme-text-tertiary);
+  --text-muted: var(--theme-text-tertiary);
+  --border: var(--theme-surface-border);
+  --border-strong: rgba(var(--theme-neutral-rgb), 0.16);
+  --border-accent: rgba(var(--theme-neutral-rgb), 0.24);
+  --green: var(--theme-success);
+  --green-dim: var(--theme-status-success-bg);
+  --amber: var(--theme-warning);
+  --amber-dim: var(--theme-status-warning-bg);
+  --red: var(--theme-danger);
+  --red-dim: var(--theme-status-danger-bg);
+  --blue: var(--theme-info);
+  --blue-dim: var(--theme-status-info-bg);
+  --violet: var(--theme-violet);
+  --violet-dim: var(--theme-status-violet-bg);
+  --coral: var(--theme-coral);
+  --coral-dim: rgba(var(--theme-coral-rgb), 0.13);
+  --color-surface-1: var(--theme-bg-card);
+  --color-surface-2: rgba(var(--theme-neutral-rgb), 0.07);
+  --color-surface-3: rgba(var(--theme-neutral-rgb), 0.11);
+  --color-border: var(--theme-surface-border);
+  --color-accent: #e8e2d4;
+  --color-danger: var(--theme-danger);
+  --color-warning: var(--theme-warning);
+  --color-muted: var(--theme-text-tertiary);
+  --radius-md: var(--theme-radius-md);
+  --radius-lg: var(--theme-radius-lg);
+  --radius-xl: var(--theme-radius-lg);
+  --radius-2xl: var(--theme-radius-lg);
+  --surface-flat: var(--theme-surface-flat);
+  --surface-raised: var(--theme-surface-raised);
+  --surface-inset: var(--theme-surface-inset);
+  --glass-regular: var(--theme-glass-regular);
+  --glass-subtle: var(--theme-glass-subtle);
+  --glass-control: var(--theme-glass-control);
+  --shadow-raised: var(--theme-shadow-raised);
+  --shadow-glass: var(--theme-shadow-glass);
+  --shadow-soft: var(--theme-shadow-soft);
+  --focus-ring: var(--theme-focus-ring);
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
