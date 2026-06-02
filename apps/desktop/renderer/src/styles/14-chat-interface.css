@@ -1711,7 +1711,8 @@ select {
 /* Rent */
 
 .rent-mode-toggle {
-  display: flex;
+  display: inline-flex;
+  align-self: flex-start;
   width: fit-content;
   max-width: 100%;
   gap: 3px;
@@ -1723,13 +1724,16 @@ select {
 }
 
 .rent-mode-toggle button {
+  appearance: none;
   min-height: 32px;
   padding: 0 12px;
   border: 1px solid transparent;
   border-radius: var(--ui-radius-tight);
   background: transparent;
   color: var(--theme-text-tertiary);
+  font: inherit;
   font-weight: 760;
+  cursor: pointer;
 }
 
 .rent-mode-toggle button[data-active="true"] {
@@ -1740,9 +1744,13 @@ select {
 
 .rent-provider-dashboard {
   display: grid;
+  align-content: start;
+  gap: 10px;
 }
 
 .rent-provider-section {
+  display: grid;
+  gap: 10px;
   overflow: hidden;
 }
 
@@ -1750,9 +1758,71 @@ select {
   margin: 10px;
 }
 
-.rent-refresh-button {
+.rent-provider-count {
+  min-height: 24px;
+  padding: 2px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rent-refresh-button,
+.rent-create-secondary,
+.rent-create-primary {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 32px;
   padding: 0 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-chip);
+  background: var(--ui-surface-raised);
+  color: var(--theme-text-secondary);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 760;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.rent-refresh-button:not(:disabled):hover,
+.rent-create-secondary:not(:disabled):hover,
+.rent-create-primary:not(:disabled):hover {
+  border-color: rgba(var(--theme-info-rgb), 0.42);
+  background: var(--ui-surface-hover);
+  color: var(--theme-text);
+}
+
+.rent-start-button,
+.rent-action-accept,
+.rent-create-primary,
+.rent-detail-tabs button[data-active="true"] {
+  border-color: rgba(var(--theme-info-rgb), 0.44);
+  background: var(--ui-surface-selected);
+  color: var(--theme-text);
+}
+
+.rent-action-decline {
+  background: transparent;
+}
+
+.rent-session-banner {
+  border-color: rgba(var(--theme-info-rgb), 0.38);
+  background: rgba(var(--theme-info-rgb), 0.1);
+}
+
+.rent-create-error,
+.rent-detail-error,
+.rent-provider-action-error {
+  margin: 0;
+  color: var(--theme-danger);
+  font-size: 0.84rem;
+}
+
+.rent-provider-action-error {
+  margin-top: 4px;
 }
 
 .rent-create-dialog,
@@ -1773,21 +1843,48 @@ select {
 }
 
 .rent-create-dialog .rent-create-body {
+  display: grid;
   gap: 10px;
 }
 
 .rent-create-dialog .rent-create-row {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rent-create-dialog .rent-create-field {
+  display: grid;
+  gap: 6px;
+  font-size: 0.84rem;
+}
+
+.rent-create-dialog .rent-create-field > span,
+.rent-detail-label,
+.rent-detail-dl dt {
+  margin: 0;
+  color: var(--theme-text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.rent-create-dialog .rent-create-field > span,
+.rent-detail-dl dt {
+  letter-spacing: 0;
 }
 
 .rent-create-dialog .rent-create-field input,
 .rent-create-dialog .rent-create-field textarea,
 .rent-create-dialog .rent-create-field select {
+  appearance: none;
   padding: 10px 12px;
+  font: inherit;
 }
 
 .rent-create-dialog .rent-create-field textarea {
   min-height: 128px;
+  resize: vertical;
 }
 
 .rent-create-dialog .rent-create-footer,
@@ -1797,6 +1894,21 @@ select {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.rent-create-dialog .rent-create-footer {
+  margin-top: 4px;
+}
+
+.rent-detail-dialog .rent-detail-body {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.rent-detail-cancel {
+  margin-right: auto;
+  border-color: rgba(var(--theme-danger-rgb), 0.36);
+  color: var(--theme-danger);
 }
 
 .rent-detail-summary {
@@ -1814,7 +1926,11 @@ select {
 }
 
 .rent-detail-summary > div {
+  display: grid;
+  align-content: start;
+  gap: 4px;
   padding: 10px;
+  font-size: 0.84rem;
 }
 
 .rent-detail-tabs {
@@ -1828,20 +1944,67 @@ select {
 }
 
 .rent-detail-tabs button {
+  appearance: none;
   min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
   border-radius: var(--ui-radius-tight);
+  background: transparent;
+  color: var(--theme-text-tertiary);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.rent-detail-empty {
+  margin: 0;
+  color: var(--theme-text-tertiary);
+  font-size: 0.9rem;
+}
+
+.rent-detail-dl {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  margin: 0;
+}
+
+.rent-detail-dl > div {
+  display: grid;
+  gap: 4px;
+}
+
+.rent-detail-dl dd {
+  margin: 0;
+  color: var(--theme-text);
+  font-variant-numeric: tabular-nums;
 }
 
 .rent-detail-patch {
-  padding: 0;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 0 0 10px;
   overflow: hidden;
 }
 
 .rent-detail-patch pre {
+  max-height: 288px;
+  margin: 0 10px;
+  padding: 10px;
   border: 1px solid var(--ui-line);
   border-radius: var(--ui-radius);
   background: var(--ui-inset);
   color: var(--theme-text-secondary);
+  font-size: 0.78rem;
+  overflow: auto;
+}
+
+.rent-detail-diff-ref {
+  margin: 0 10px;
+  color: var(--theme-text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .rent-detail-checks,
@@ -1849,6 +2012,9 @@ select {
 .rent-detail-dl {
   display: grid;
   gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 .rent-detail-checks li,
@@ -1858,6 +2024,60 @@ select {
   border-radius: var(--ui-radius);
   background: var(--ui-inset);
   padding: 8px;
+}
+
+.rent-detail-checks li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 8px;
+  font-size: 0.82rem;
+}
+
+.rent-detail-checks small {
+  grid-column: 2;
+  color: var(--theme-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.rent-detail-events li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rent-detail-event-meta,
+.rent-detail-events time {
+  color: var(--theme-text-tertiary);
+  font-size: 0.8rem;
+}
+
+.rent-detail-pr-link {
+  width: fit-content;
+  margin: 0 10px;
+  color: var(--theme-info);
+  font-size: 0.84rem;
+}
+
+.rent-detail-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 10px;
+}
+
+.rent-detail-warnings span {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--theme-warning-rgb), 0.3);
+  border-radius: var(--ui-radius-chip);
+  background: rgba(var(--theme-warning-rgb), 0.12);
+  color: var(--theme-warning);
+  font-size: 0.75rem;
+}
+
+.rent-detail-patch-actions {
+  margin: 4px 10px 0;
 }
 
 /* Room setup, details, modals, attachments */

@@ -30,34 +30,3 @@ defineProps<{
   loading: boolean;
 }>();
 </script>
-
-<style scoped>
-.rent-detail-empty {
-  opacity: 0.65;
-  font-size: 0.9rem;
-}
-.rent-detail-events {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.rent-detail-events li {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
-  border-radius: 0.5rem;
-}
-.rent-detail-event-meta {
-  opacity: 0.65;
-  font-size: 0.8rem;
-}
-.rent-detail-events time {
-  font-size: 0.8rem;
-  opacity: 0.65;
-}
-</style>

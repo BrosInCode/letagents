@@ -25,26 +25,3 @@ defineEmits<{
   "update:modelValue": [value: RentSessionDetailTab];
 }>();
 </script>
-
-<style scoped>
-.rent-detail-tabs {
-  display: flex;
-  gap: 0.25rem;
-  padding: 0 1.25rem 0.5rem;
-}
-.rent-detail-tabs button {
-  appearance: none;
-  background: transparent;
-  color: inherit;
-  border: none;
-  padding: 0.4rem 0.85rem;
-  font: inherit;
-  font-size: 0.85rem;
-  border-radius: 999px;
-  cursor: pointer;
-}
-.rent-detail-tabs button[data-active="true"] {
-  background: var(--color-accent, #4f7cff);
-  color: white;
-}
-</style>

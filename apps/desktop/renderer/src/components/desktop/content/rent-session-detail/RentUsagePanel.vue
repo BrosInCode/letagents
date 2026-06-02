@@ -46,31 +46,3 @@ defineProps<{
   usage: DesktopRentalUsageSnapshot | null;
 }>();
 </script>
-
-<style scoped>
-.rent-detail-empty {
-  opacity: 0.65;
-  font-size: 0.9rem;
-}
-.rent-detail-dl {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  gap: 0.75rem 1.25rem;
-  margin: 0;
-}
-.rent-detail-dl > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-.rent-detail-dl dt {
-  opacity: 0.65;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.rent-detail-dl dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-}
-</style>

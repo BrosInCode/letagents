@@ -37,25 +37,3 @@ defineProps<{
   usage: DesktopRentalUsageSnapshot | null;
 }>();
 </script>
-
-<style scoped>
-.rent-detail-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-  gap: 0.75rem;
-  padding: 0 1.25rem 0.75rem;
-}
-.rent-detail-summary > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.85rem;
-}
-.rent-detail-label {
-  opacity: 0.65;
-  margin: 0;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-</style>
