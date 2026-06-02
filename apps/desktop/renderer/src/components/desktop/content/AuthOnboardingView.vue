@@ -1,5 +1,5 @@
 <template>
-  <section class="auth-onboarding surface-page" data-testid="auth-onboarding-view">
+  <DesktopSurfacePage class="auth-onboarding" data-testid="auth-onboarding-view">
     <div class="auth-panel" :data-access-state="access.status" data-testid="auth-access-panel">
       <div class="auth-copy">
         <p class="hero-kicker">Room access</p>
@@ -97,7 +97,7 @@
         <p>{{ step.copy }}</p>
       </article>
     </div>
-  </section>
+  </DesktopSurfacePage>
 </template>
 
 <script setup lang="ts">
@@ -107,6 +107,7 @@ import type {
   DesktopPendingDeviceAuth,
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
+import DesktopSurfacePage from "./ui/DesktopSurfacePage.vue";
 
 const props = defineProps<{
   access: DesktopRoomAccess;

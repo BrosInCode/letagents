@@ -1,20 +1,20 @@
 <template>
-  <section class="settings-page surface-page" data-testid="settings-view">
-    <article class="settings-hero surface-intro">
-      <div>
-        <p class="sidebar-label">Settings</p>
-        <h3>Control the account, rooms, and local setup.</h3>
-        <p>Keep account-connected rooms organized, recover rooms you left, and manage destructive room actions from one place.</p>
-      </div>
-      <div class="settings-hero-actions">
+  <DesktopSurfacePage class="settings-page" data-testid="settings-view">
+    <DesktopSurfaceIntro
+      class="settings-hero"
+      kicker="Settings"
+      title="Control the account, rooms, and local setup."
+      description="Keep account-connected rooms organized, recover rooms you left, and manage destructive room actions from one place."
+    >
+      <template #actions>
         <button class="ghost-button" type="button" data-testid="settings-open-setup" @click="$emit('open-setup')">
           Setup
         </button>
         <button class="primary-button" type="button" :disabled="busy" data-testid="settings-refresh-rooms" @click="$emit('refresh')">
           {{ busy ? "Refreshing" : "Refresh" }}
         </button>
-      </div>
-    </article>
+      </template>
+    </DesktopSurfaceIntro>
 
     <div class="settings-summary-grid" data-testid="settings-summary">
       <article class="settings-summary-card">
@@ -36,7 +36,7 @@
     </div>
 
     <div class="settings-grid">
-      <article class="surface-row settings-card" data-testid="settings-account">
+      <DesktopSurfaceRow class="settings-card" data-testid="settings-account">
         <div class="settings-account-summary">
           <span class="auth-avatar" aria-hidden="true">{{ accountInitials }}</span>
           <div>
@@ -44,7 +44,7 @@
             <p class="surface-subtitle">{{ accountSubtitle }}</p>
           </div>
         </div>
-        <div class="surface-meta settings-actions">
+        <template #meta>
           <span class="state-pill" :data-state="authStatus?.authenticated ? 'connected' : 'offline'">
             {{ authStatus?.authenticated ? "connected" : "signed out" }}
           </span>
@@ -68,32 +68,32 @@
           >
             Connect GitHub
           </button>
-        </div>
-      </article>
+        </template>
+      </DesktopSurfaceRow>
 
-      <article class="surface-row settings-card" data-testid="settings-desktop">
+      <DesktopSurfaceRow class="settings-card" data-testid="settings-desktop">
         <div>
           <p class="surface-title">Desktop runtime</p>
           <p class="surface-subtitle">{{ apiEndpointLabel }}</p>
           <code v-if="appInfo?.workspaceRoot">{{ appInfo.workspaceRoot }}</code>
         </div>
-        <div class="surface-meta">
+        <template #meta>
           <span class="state-pill" data-state="connected">local</span>
           <code>{{ versionLabel }}</code>
-        </div>
-      </article>
+        </template>
+      </DesktopSurfaceRow>
 
-      <article class="surface-row settings-card" data-testid="settings-mcp">
+      <DesktopSurfaceRow class="settings-card" data-testid="settings-mcp">
         <div>
           <p class="surface-title">MCP setup</p>
           <p class="surface-subtitle">{{ mcpSetupLabel }}</p>
         </div>
-        <div class="surface-meta settings-actions">
+        <template #meta>
           <span class="state-pill" :data-state="mcpInstallState?.completed ? 'installed' : 'starting'">
             {{ mcpInstallState?.completed ? "installed" : "needs setup" }}
           </span>
-        </div>
-      </article>
+        </template>
+      </DesktopSurfaceRow>
     </div>
 
     <section class="settings-section" aria-labelledby="settings-rooms-title">
@@ -134,7 +134,7 @@
         {{ feedback.message }}
       </p>
 
-      <div class="surface-list settings-room-list" data-testid="settings-room-list">
+      <DesktopSurfaceList class="settings-room-list" data-testid="settings-room-list">
         <article
           v-for="room in filteredRooms"
           :key="room.roomIdentifier"
@@ -234,12 +234,12 @@
           </footer>
         </article>
 
-        <article v-if="!filteredRooms.length" class="surface-row single-line" data-testid="settings-rooms-empty">
+        <DesktopSurfaceRow v-if="!filteredRooms.length" single-line data-testid="settings-rooms-empty">
           <p class="surface-title">{{ emptyRoomsLabel }}</p>
-        </article>
-      </div>
+        </DesktopSurfaceRow>
+      </DesktopSurfaceList>
     </section>
-  </section>
+  </DesktopSurfacePage>
 </template>
 
 <script setup lang="ts">
@@ -250,6 +250,10 @@ import type {
   DesktopAppInfo,
   DesktopMcpInstallState,
 } from "../../../../../electron/ipc-types";
+import DesktopSurfaceIntro from "./ui/DesktopSurfaceIntro.vue";
+import DesktopSurfaceList from "./ui/DesktopSurfaceList.vue";
+import DesktopSurfacePage from "./ui/DesktopSurfacePage.vue";
+import DesktopSurfaceRow from "./ui/DesktopSurfaceRow.vue";
 
 type SettingsFeedback = {
   message: string;

@@ -1,13 +1,10 @@
 <template>
-  <section class="surface-page" data-testid="rent-an-agent-view">
-    <article class="surface-intro">
-      <p class="sidebar-label">Rent an Agent</p>
-      <h3>Borrow an idle IDE agent when your own quota runs out.</h3>
-      <p>
-        Browse listings from other LetAgents users. When your local IDE agent hits its
-        quota, you can rent a verified agent for a single task while your own session refreshes.
-      </p>
-    </article>
+  <DesktopSurfacePage data-testid="rent-an-agent-view">
+    <DesktopSurfaceIntro
+      kicker="Rent an Agent"
+      title="Borrow an idle IDE agent when your own quota runs out."
+      description="Browse listings from other LetAgents users. When your local IDE agent hits its quota, you can rent a verified agent for a single task while your own session refreshes."
+    />
 
     <div class="rent-mode-toggle" role="tablist" aria-label="Rent an Agent role" data-testid="rent-mode-toggle">
       <button
@@ -30,9 +27,10 @@
       </button>
     </div>
 
-    <article
+    <DesktopSurfaceRow
       v-if="lastCreatedSession && role === 'renter'"
-      class="surface-row single-line rent-session-banner"
+      single-line
+      class="rent-session-banner"
       data-testid="rent-an-agent-session-created"
     >
       <div>
@@ -42,7 +40,7 @@
           {{ lastCreatedSession.status }}
         </p>
       </div>
-      <div class="surface-meta">
+      <template #meta>
         <button
           type="button"
           class="rent-refresh-button"
@@ -59,114 +57,112 @@
         >
           Dismiss
         </button>
-      </div>
-    </article>
+      </template>
+    </DesktopSurfaceRow>
 
     <RentProviderDashboard v-if="role === 'provider'" @open-session="openSessionDetail" />
     <template v-else>
+      <DesktopSurfaceList v-if="state === 'disabled'" data-testid="rent-an-agent-disabled">
+        <DesktopSurfaceRow single-line>
+          <div>
+            <p class="surface-title">Rent an Agent is not enabled in this build.</p>
+            <p class="surface-subtitle">
+              Set <code>LETAGENTS_RENT_ENABLED=1</code> in the desktop environment and restart
+              to try the marketplace.
+            </p>
+          </div>
+          <template #meta>
+            <span class="state-pill" data-state="offline">disabled</span>
+          </template>
+        </DesktopSurfaceRow>
+      </DesktopSurfaceList>
 
-    <div v-if="state === 'disabled'" class="surface-list" data-testid="rent-an-agent-disabled">
-      <article class="surface-row single-line">
-        <div>
-          <p class="surface-title">Rent an Agent is not enabled in this build.</p>
-          <p class="surface-subtitle">
-            Set <code>LETAGENTS_RENT_ENABLED=1</code> in the desktop environment and restart
-            to try the marketplace.
-          </p>
-        </div>
-        <div class="surface-meta">
-          <span class="state-pill" data-state="offline">disabled</span>
-        </div>
-      </article>
-    </div>
+      <DesktopSurfaceList v-else data-testid="rent-an-agent-listings">
+        <DesktopSurfaceRow single-line>
+          <div>
+            <p class="surface-title">Available agents</p>
+            <p class="surface-subtitle">
+              {{ listingsSummary }}
+            </p>
+          </div>
+          <template #meta>
+            <button
+              type="button"
+              class="rent-refresh-button"
+              data-testid="rent-an-agent-refresh"
+              :disabled="state === 'loading'"
+              @click="refresh"
+            >
+              {{ state === "loading" ? "Refreshing..." : "Refresh" }}
+            </button>
+          </template>
+        </DesktopSurfaceRow>
 
-    <div v-else class="surface-list" data-testid="rent-an-agent-listings">
-      <article class="surface-row single-line">
-        <div>
-          <p class="surface-title">Available agents</p>
-          <p class="surface-subtitle">
-            {{ listingsSummary }}
-          </p>
-        </div>
-        <div class="surface-meta">
-          <button
-            type="button"
-            class="rent-refresh-button"
-            data-testid="rent-an-agent-refresh"
-            :disabled="state === 'loading'"
-            @click="refresh"
-          >
-            {{ state === "loading" ? "Refreshing..." : "Refresh" }}
-          </button>
-        </div>
-      </article>
+        <DesktopSurfaceRow
+          v-if="state === 'error'"
+          single-line
+          data-testid="rent-an-agent-error"
+          role="alert"
+        >
+          <div>
+            <p class="surface-title">We couldn't reach the marketplace.</p>
+            <p class="surface-subtitle">{{ errorMessage || "Try Refresh in a moment." }}</p>
+          </div>
+          <template #meta>
+            <span class="state-pill" data-state="failed">error</span>
+          </template>
+        </DesktopSurfaceRow>
 
-      <article
-        v-if="state === 'error'"
-        class="surface-row single-line"
-        data-testid="rent-an-agent-error"
-        role="alert"
-      >
-        <div>
-          <p class="surface-title">We couldn't reach the marketplace.</p>
-          <p class="surface-subtitle">{{ errorMessage || "Try Refresh in a moment." }}</p>
-        </div>
-        <div class="surface-meta">
-          <span class="state-pill" data-state="failed">error</span>
-        </div>
-      </article>
+        <DesktopSurfaceRow
+          v-if="state === 'ready' && listings.length === 0"
+          single-line
+          data-testid="rent-an-agent-empty"
+        >
+          <div>
+            <p class="surface-title">No agents available right now.</p>
+            <p class="surface-subtitle">Check back when a provider goes online.</p>
+          </div>
+        </DesktopSurfaceRow>
 
-      <article
-        v-if="state === 'ready' && listings.length === 0"
-        class="surface-row single-line"
-        data-testid="rent-an-agent-empty"
-      >
-        <div>
-          <p class="surface-title">No agents available right now.</p>
-          <p class="surface-subtitle">Check back when a provider goes online.</p>
-        </div>
-      </article>
+        <DesktopSurfaceRow
+          v-for="listing in listings"
+          :key="listing.id"
+          :data-testid="`rent-an-agent-listing-${listing.id}`"
+        >
+          <div>
+            <p class="surface-title">{{ listing.displayName }}</p>
+            <p class="surface-subtitle">{{ listingSubtitle(listing) }}</p>
+          </div>
+          <template #meta>
+            <span
+              v-for="badge in listing.readinessBadges"
+              :key="badge"
+              class="state-pill"
+              :data-state="badgeState(badge)"
+            >{{ badge }}</span>
+            <span class="state-pill" :data-state="statusState(listing.status)">
+              {{ listing.status }}
+            </span>
+            <button
+              type="button"
+              class="rent-refresh-button rent-start-button"
+              :data-testid="`rent-start-${listing.id}`"
+              :disabled="!canStart(listing)"
+              @click="openSessionModal(listing)"
+            >
+              Start rental
+            </button>
+          </template>
+        </DesktopSurfaceRow>
+      </DesktopSurfaceList>
 
-      <article
-        v-for="listing in listings"
-        :key="listing.id"
-        class="surface-row"
-        :data-testid="`rent-an-agent-listing-${listing.id}`"
-      >
-        <div>
-          <p class="surface-title">{{ listing.displayName }}</p>
-          <p class="surface-subtitle">{{ listingSubtitle(listing) }}</p>
-        </div>
-        <div class="surface-meta">
-          <span
-            v-for="badge in listing.readinessBadges"
-            :key="badge"
-            class="state-pill"
-            :data-state="badgeState(badge)"
-          >{{ badge }}</span>
-          <span class="state-pill" :data-state="statusState(listing.status)">
-            {{ listing.status }}
-          </span>
-          <button
-            type="button"
-            class="rent-refresh-button rent-start-button"
-            :data-testid="`rent-start-${listing.id}`"
-            :disabled="!canStart(listing)"
-            @click="openSessionModal(listing)"
-          >
-            Start rental
-          </button>
-        </div>
-      </article>
-    </div>
-
-    <RentSessionCreateModal
-      :open="sessionModalOpen"
-      :listing="selectedListing"
-      :room-identifier="roomIdentifier"
-      @close="closeSessionModal"
-      @created="onSessionCreated"
-    />
+      <RentSessionCreateModal
+        :open="sessionModalOpen"
+        :listing="selectedListing"
+        :room-identifier="roomIdentifier"
+        @close="closeSessionModal"
+        @created="onSessionCreated"
+      />
     </template>
 
     <RentSessionDetailModal
@@ -175,7 +171,7 @@
       @close="closeSessionDetail"
       @session-updated="onSessionUpdated"
     />
-  </section>
+  </DesktopSurfacePage>
 </template>
 
 <script setup lang="ts">
@@ -184,6 +180,10 @@ import type { DesktopRentalListing, DesktopRentalSession } from "../../../../../
 import RentSessionCreateModal from "./RentSessionCreateModal.vue";
 import RentSessionDetailModal from "./RentSessionDetailModal.vue";
 import RentProviderDashboard from "./RentProviderDashboard.vue";
+import DesktopSurfaceIntro from "./ui/DesktopSurfaceIntro.vue";
+import DesktopSurfaceList from "./ui/DesktopSurfaceList.vue";
+import DesktopSurfacePage from "./ui/DesktopSurfacePage.vue";
+import DesktopSurfaceRow from "./ui/DesktopSurfaceRow.vue";
 
 defineProps<{
   roomIdentifier: string;

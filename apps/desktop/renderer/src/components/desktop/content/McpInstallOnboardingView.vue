@@ -1,5 +1,5 @@
 <template>
-  <section class="mcp-onboarding surface-page" data-testid="mcp-install-onboarding">
+  <DesktopSurfacePage class="mcp-onboarding" data-testid="mcp-install-onboarding">
     <article class="mcp-wizard-card" :data-step="wizardStep" data-testid="mcp-wizard-card">
       <SetupWizardHeader kicker="First setup" :headline="headline" :copy="introCopy" />
 
@@ -34,7 +34,7 @@
 
       <p v-if="feedback" class="mcp-feedback" data-testid="mcp-install-feedback">{{ feedback }}</p>
     </article>
-  </section>
+  </DesktopSurfacePage>
 </template>
 
 <script setup lang="ts">
@@ -51,6 +51,7 @@ import SetupWizardActions from "../setup/SetupWizardActions.vue";
 import SetupWizardHeader from "../setup/SetupWizardHeader.vue";
 import SetupWizardProgress from "../setup/SetupWizardProgress.vue";
 import type { DesktopMcpWizardStep } from "../setup/types";
+import DesktopSurfacePage from "./ui/DesktopSurfacePage.vue";
 
 const props = defineProps<{
   state: DesktopMcpInstallState;

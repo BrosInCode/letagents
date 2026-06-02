@@ -1,11 +1,11 @@
 <template>
   <div class="rent-provider-dashboard" data-testid="rent-provider-dashboard">
-    <article class="surface-row single-line">
+    <DesktopSurfaceRow single-line>
       <div>
         <p class="surface-title">Provider dashboard</p>
         <p class="surface-subtitle">{{ summaryLine }}</p>
       </div>
-      <div class="surface-meta">
+      <template #meta>
         <button
           type="button"
           class="rent-refresh-button"
@@ -15,12 +15,12 @@
         >
           {{ state === "loading" ? "Refreshing..." : "Refresh" }}
         </button>
-      </div>
-    </article>
+      </template>
+    </DesktopSurfaceRow>
 
-    <article
+    <DesktopSurfaceRow
       v-if="state === 'error'"
-      class="surface-row single-line"
+      single-line
       data-testid="rent-provider-error"
       role="alert"
     >
@@ -28,24 +28,24 @@
         <p class="surface-title">Dashboard temporarily unavailable.</p>
         <p class="surface-subtitle">{{ errorMessage || "Try Refresh in a moment." }}</p>
       </div>
-      <div class="surface-meta">
+      <template #meta>
         <span class="state-pill" data-state="failed">error</span>
-      </div>
-    </article>
+      </template>
+    </DesktopSurfaceRow>
 
-    <article
+    <DesktopSurfaceRow
       v-else-if="state === 'disabled'"
-      class="surface-row single-line"
+      single-line
       data-testid="rent-provider-disabled"
     >
       <div>
         <p class="surface-title">Rent an Agent is not enabled in this build.</p>
         <p class="surface-subtitle">Set <code>LETAGENTS_RENT_ENABLED=1</code> and restart.</p>
       </div>
-      <div class="surface-meta">
+      <template #meta>
         <span class="state-pill" data-state="offline">disabled</span>
-      </div>
-    </article>
+      </template>
+    </DesktopSurfaceRow>
 
     <template v-else>
       <section class="rent-provider-section">
@@ -54,18 +54,17 @@
           <span class="rent-provider-count">{{ dashboard.pendingRequests.length }}</span>
         </header>
 
-        <article
+        <DesktopSurfaceRow
           v-if="dashboard.pendingRequests.length === 0"
-          class="surface-row single-line"
+          single-line
           data-testid="rent-provider-no-requests"
         >
           <p class="surface-title">No pending requests.</p>
-        </article>
+        </DesktopSurfaceRow>
 
-        <article
+        <DesktopSurfaceRow
           v-for="request in dashboard.pendingRequests"
           :key="request.id"
-          class="surface-row"
           :data-testid="`rent-provider-request-${request.id}`"
         >
           <div>
@@ -75,7 +74,7 @@
               {{ request.mode }} · {{ request.continuityMode }}
             </p>
           </div>
-          <div class="surface-meta">
+          <template #meta>
             <span class="state-pill" :data-state="requestState(request.status)">
               {{ request.status }}
             </span>
@@ -97,8 +96,8 @@
             >
               {{ actionBusyFor === request.id && actionKind === "accept" ? "Accepting..." : "Accept" }}
             </button>
-          </div>
-        </article>
+          </template>
+        </DesktopSurfaceRow>
       </section>
 
       <section class="rent-provider-section">
@@ -107,18 +106,17 @@
           <span class="rent-provider-count">{{ dashboard.activeSessions.length }}</span>
         </header>
 
-        <article
+        <DesktopSurfaceRow
           v-if="dashboard.activeSessions.length === 0"
-          class="surface-row single-line"
+          single-line
           data-testid="rent-provider-no-active"
         >
           <p class="surface-title">No active rentals.</p>
-        </article>
+        </DesktopSurfaceRow>
 
-        <article
+        <DesktopSurfaceRow
           v-for="session in dashboard.activeSessions"
           :key="session.id"
-          class="surface-row"
           :data-testid="`rent-provider-session-${session.id}`"
         >
           <div>
@@ -131,7 +129,7 @@
               <span v-else>{{ session.lrtUsed }} LRT</span>
             </p>
           </div>
-          <div class="surface-meta">
+          <template #meta>
             <span class="state-pill" :data-state="sessionStateFor(session.status)">
               {{ session.status }}
             </span>
@@ -143,8 +141,8 @@
             >
               Open
             </button>
-          </div>
-        </article>
+          </template>
+        </DesktopSurfaceRow>
       </section>
 
       <section class="rent-provider-section">
@@ -153,21 +151,20 @@
           <span class="rent-provider-count">{{ dashboard.listings.length }}</span>
         </header>
 
-        <article
+        <DesktopSurfaceRow
           v-if="dashboard.listings.length === 0"
-          class="surface-row single-line"
+          single-line
           data-testid="rent-provider-no-listings"
         >
           <p class="surface-title">No listings yet.</p>
           <p class="surface-subtitle">
             Listing CRUD lands in a follow-up slice. For now, create listings via the MCP tools.
           </p>
-        </article>
+        </DesktopSurfaceRow>
 
-        <article
+        <DesktopSurfaceRow
           v-for="listing in dashboard.listings"
           :key="listing.id"
-          class="surface-row"
           :data-testid="`rent-provider-listing-${listing.id}`"
         >
           <div>
@@ -178,12 +175,12 @@
               · {{ listing.activeSessionCount }}/{{ listing.maxConcurrentSessions }} active
             </p>
           </div>
-          <div class="surface-meta">
+          <template #meta>
             <span class="state-pill" :data-state="listingState(listing.status)">
               {{ listing.status }}
             </span>
-          </div>
-        </article>
+          </template>
+        </DesktopSurfaceRow>
       </section>
     </template>
 
@@ -199,6 +196,7 @@ import type {
   DesktopRentalProviderDashboard,
   DesktopRentalSession,
 } from "../../../../../electron/ipc-types";
+import DesktopSurfaceRow from "./ui/DesktopSurfaceRow.vue";
 
 const emit = defineEmits<{
   "open-session": [session: DesktopRentalSession];

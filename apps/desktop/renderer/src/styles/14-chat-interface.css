@@ -924,6 +924,14 @@ code {
   line-height: 1.48;
 }
 
+.surface-intro-actions,
+.settings-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .surface-list,
 .settings-grid,
 .settings-summary-grid,
@@ -2270,6 +2278,7 @@ select {
   }
 
   .topbar-actions,
+  .surface-intro-actions,
   .surface-meta,
   .desktop-activity-row-meta {
     justify-content: flex-start;

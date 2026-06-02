@@ -1,5 +1,5 @@
 <template>
-  <section class="first-run-wizard surface-page" :data-stage="stage" data-testid="first-run-wizard">
+  <DesktopSurfacePage class="first-run-wizard" :data-stage="stage" data-testid="first-run-wizard">
     <article class="mcp-wizard-card first-run-card" data-testid="first-run-card">
       <div class="first-run-hero-row" data-testid="first-run-hero">
         <header class="mcp-wizard-header first-run-header" data-testid="first-run-header">
@@ -121,7 +121,7 @@
 
       <p v-if="feedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
     </article>
-  </section>
+  </DesktopSurfacePage>
 </template>
 
 <script setup lang="ts">
@@ -138,6 +138,7 @@ import McpInstallConfirmStep from "./McpInstallConfirmStep.vue";
 import McpInstallDoneStep from "./McpInstallDoneStep.vue";
 import SetupWizardProgress from "./SetupWizardProgress.vue";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./types";
+import DesktopSurfacePage from "../content/ui/DesktopSurfacePage.vue";
 
 const props = defineProps<{
   stage: FirstRunWizardStage;
