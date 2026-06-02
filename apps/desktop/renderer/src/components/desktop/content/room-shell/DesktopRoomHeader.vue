@@ -3,7 +3,7 @@
     <div class="desktop-room-heading">
       <h3>{{ room.displayName }}</h3>
       <p class="desktop-room-subtitle">
-        {{ room.kind === "focus" ? "A focused thread linked back to the main room." : "The main place for conversation, tasks, and coordination." }}
+        {{ room.kind === "focus" ? "Focused execution thread linked to the main room." : "Coordinate people, agents, tasks, and repo events in one conversation." }}
       </p>
     </div>
 
@@ -31,7 +31,7 @@
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
           </svg>
-          Settings
+          Controls
         </button>
       </div>
 

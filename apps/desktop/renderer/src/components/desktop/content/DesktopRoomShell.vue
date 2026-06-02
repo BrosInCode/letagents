@@ -269,10 +269,10 @@ watchRoomNotifications({
 
 const tabs = computed<RoomTab[]>(() => [
   { id: "chat", label: "Chat", count: visibleMessages.value.length },
-  { id: "board", label: "Board", count: props.tasks.length },
+  { id: "board", label: "Tasks", count: props.tasks.length },
   { id: "activity", label: "Activity", count: visibleParticipantCount.value + props.participantHiddenCount },
   { id: "rooms", label: "Rooms", count: props.focusRooms.length },
-  { id: "rent", label: "Rent an Agent", count: null },
+  { id: "rent", label: "Rent", count: null },
 ]);
 
 function selectTab(tabId: RoomTabId): void {

@@ -16,7 +16,7 @@
       v-model="draft"
       class="desktop-composer-input"
       rows="3"
-      :placeholder="roomIdentifier ? 'Write a message...' : 'Choose a room to start writing'"
+      :placeholder="roomIdentifier ? 'Send context, ask for work, or mention @agent...' : 'Choose a room to start writing'"
       :disabled="!roomIdentifier"
       data-testid="desktop-composer-input"
       @input="handleDraftInput"
@@ -115,7 +115,7 @@ const canSend = computed(() => Boolean(props.roomIdentifier && (draft.value.trim
 const reachableParticipantCount = computed(() =>
   props.participants.filter((participant) => participant.activityState !== "offline").length
 );
-const composerTargetLabel = computed(() => props.roomIdentifier ? "Message the room" : "No room selected");
+const composerTargetLabel = computed(() => props.roomIdentifier ? "Room transmission" : "No room selected");
 const composerPresenceLabel = computed(() => {
   if (!props.roomIdentifier) return "Open a room before sending";
   if (reachableParticipantCount.value === 0) return "No reachable participants";
@@ -124,7 +124,7 @@ const composerPresenceLabel = computed(() => {
 });
 const composerHint = computed(() =>
   props.roomIdentifier
-    ? "Use @ to bring a person or agent into the thread."
+    ? "Use @ to bring a person or agent into the thread. Attach files when context matters."
     : "Select a room from the sidebar to enable chat."
 );
 const mentionOpen = computed({
