@@ -1,0 +1,65 @@
+/*
+  Desktop product system.
+
+  This file is the fast reskin surface for LetAgents Desktop. It deliberately
+  sits after the broader theme contract and before the final IA stylesheet, so
+  a future redesign can change the product skin without editing component
+  templates or feature-specific CSS selectors.
+*/
+
+:root {
+  /* Layout */
+  --chat-rail-width: clamp(292px, 22vw, 344px);
+  --chat-rail-width-collapsed: 76px;
+
+  /* True-black base */
+  --ui-bg: #000000;
+  --ui-base: #020203;
+  --ui-base-alt: #020304;
+  --ui-inset: #010203;
+  --ui-sidebar: #030304;
+
+  /* Surfaces */
+  --ui-panel: #050607;
+  --ui-surface: #05070a;
+  --ui-surface-message: #06080c;
+  --ui-surface-raised: #080a0d;
+  --ui-surface-strong: #090b0f;
+  --ui-surface-hover: #0d1117;
+  --ui-surface-hover-muted: #0c0f14;
+  --ui-surface-selected: #07111a;
+
+  /* Controls */
+  --ui-control: #070809;
+  --ui-control-hover: #0d1015;
+  --ui-cta: #07090c;
+  --ui-cta-hover: #0a0e13;
+  --ui-tab: #060709;
+  --ui-tab-active: #0a1118;
+  --ui-brand-panel: #081018;
+
+  /* Edges and depth */
+  --ui-line: rgba(255, 255, 255, 0.1);
+  --ui-line-strong: rgba(255, 255, 255, 0.16);
+  --ui-line-subtle: rgba(255, 255, 255, 0.03);
+  --ui-radius: 8px;
+  --ui-radius-chip: 7px;
+  --ui-radius-tight: 6px;
+  --ui-focus-ring: 0 0 0 3px rgba(var(--theme-info-rgb), 0.14);
+  --ui-shadow-panel: 0 24px 70px rgba(0, 0, 0, 0.58);
+  --ui-shadow-soft: 0 18px 52px rgba(0, 0, 0, 0.42);
+
+  /* Accent aliases */
+  --chat-edge: var(--ui-line);
+  --chat-edge-strong: var(--ui-line-strong);
+  --chat-panel: var(--ui-panel);
+  --chat-panel-raised: var(--ui-surface-strong);
+  --chat-panel-selected: var(--ui-surface-selected);
+  --chat-blue: var(--theme-info);
+  --chat-green: var(--theme-success);
+  --chat-violet: var(--theme-violet);
+  --chat-coral: var(--theme-coral);
+  --ui-muted: var(--theme-text-tertiary);
+  --ui-brand-text: #e8f7ff;
+  --ui-tab-text-active: #eff9ff;
+}
