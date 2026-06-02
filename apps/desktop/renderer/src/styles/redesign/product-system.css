@@ -1,55 +1,54 @@
 /*
   Desktop product system.
-
-  This file is the fast reskin surface for LetAgents Desktop. It deliberately
-  sits after the broader theme contract and before the final IA stylesheet, so
-  a future redesign can change the product skin without editing component
-  templates or feature-specific CSS selectors.
+  Updates spacing scales (double your whitespace) and translucent panels.
 */
 
 :root {
-  /* Layout */
-  --chat-rail-width: clamp(292px, 22vw, 344px);
-  --chat-rail-width-collapsed: 76px;
+  /* Layout Dimensions & Spacing Gaps (Double your whitespace) */
+  --chat-rail-width: clamp(310px, 24vw, 360px);
+  --chat-rail-width-collapsed: 84px;
+  --ui-page-gap: 24px;
+  --ui-card-padding: 20px;
+  --ui-section-gap: 28px;
 
-  /* True-black base */
-  --ui-bg: #000000;
-  --ui-base: #020203;
-  --ui-base-alt: #020304;
-  --ui-inset: #010203;
-  --ui-sidebar: #030304;
+  /* Translucent Liquid Glass Bases */
+  --ui-bg: transparent;
+  --ui-base: rgba(15, 17, 26, 0.45);
+  --ui-base-alt: rgba(22, 25, 38, 0.55);
+  --ui-inset: rgba(3, 4, 7, 0.5);
+  --ui-sidebar: rgba(10, 11, 18, 0.6);
 
-  /* Surfaces */
-  --ui-panel: #050607;
-  --ui-surface: #05070a;
-  --ui-surface-message: #06080c;
-  --ui-surface-raised: #080a0d;
-  --ui-surface-strong: #090b0f;
-  --ui-surface-hover: #0d1117;
-  --ui-surface-hover-muted: #0c0f14;
-  --ui-surface-selected: #07111a;
+  /* Translucent Surface Hierarchy */
+  --ui-panel: rgba(22, 25, 38, 0.65);
+  --ui-surface: rgba(15, 17, 26, 0.35);
+  --ui-surface-message: rgba(15, 17, 26, 0.2);
+  --ui-surface-raised: rgba(30, 34, 52, 0.45);
+  --ui-surface-strong: rgba(35, 40, 60, 0.55);
+  --ui-surface-hover: rgba(67, 180, 255, 0.08);
+  --ui-surface-hover-muted: rgba(255, 255, 255, 0.03);
+  --ui-surface-selected: rgba(67, 180, 255, 0.12);
 
-  /* Controls */
-  --ui-control: #070809;
-  --ui-control-hover: #0d1015;
-  --ui-cta: #07090c;
-  --ui-cta-hover: #0a0e13;
-  --ui-tab: #060709;
-  --ui-tab-active: #0a1118;
-  --ui-brand-panel: #081018;
+  /* Controls & Action Buttons */
+  --ui-control: rgba(15, 17, 26, 0.4);
+  --ui-control-hover: rgba(30, 34, 52, 0.5);
+  --ui-cta: rgba(10, 11, 18, 0.5);
+  --ui-cta-hover: rgba(15, 17, 26, 0.6);
+  --ui-tab: rgba(10, 11, 18, 0.4);
+  --ui-tab-active: rgba(67, 180, 255, 0.1);
+  --ui-brand-panel: rgba(67, 180, 255, 0.08);
 
-  /* Edges and depth */
-  --ui-line: rgba(255, 255, 255, 0.1);
-  --ui-line-strong: rgba(255, 255, 255, 0.16);
+  /* Skeuomorphic Edges and Depth */
+  --ui-line: rgba(255, 255, 255, 0.08);
+  --ui-line-strong: rgba(255, 255, 255, 0.15);
   --ui-line-subtle: rgba(255, 255, 255, 0.03);
-  --ui-radius: 8px;
-  --ui-radius-chip: 7px;
-  --ui-radius-tight: 6px;
-  --ui-focus-ring: 0 0 0 3px rgba(var(--theme-info-rgb), 0.14);
-  --ui-shadow-panel: 0 24px 70px rgba(0, 0, 0, 0.58);
-  --ui-shadow-soft: 0 18px 52px rgba(0, 0, 0, 0.42);
+  --ui-radius: 12px;
+  --ui-radius-chip: 8px;
+  --ui-radius-tight: 8px;
+  --ui-focus-ring: 0 0 0 3px rgba(var(--theme-info-rgb), 0.2);
+  --ui-shadow-panel: 0 24px 70px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  --ui-shadow-soft: 0 18px 52px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 
-  /* Accent aliases */
+  /* Accent highlights */
   --chat-edge: var(--ui-line);
   --chat-edge-strong: var(--ui-line-strong);
   --chat-panel: var(--ui-panel);
@@ -60,6 +59,6 @@
   --chat-violet: var(--theme-violet);
   --chat-coral: var(--theme-coral);
   --ui-muted: var(--theme-text-tertiary);
-  --ui-brand-text: #e8f7ff;
-  --ui-tab-text-active: #eff9ff;
+  --ui-brand-text: #e0f2fe;
+  --ui-tab-text-active: #f0f9ff;
 }

@@ -3,7 +3,8 @@
 *,
 *::before,
 *::after {
-  letter-spacing: 0 !important;
+  font-family: var(--font-sans);
+  letter-spacing: -0.01em !important;
 }
 
 html,
@@ -68,19 +69,21 @@ select:focus-visible {
 }
 
 .app-sidebar {
-  gap: 16px;
-  padding: 16px 14px;
+  gap: 20px;
+  padding: 20px 18px;
   background: var(--glass-subtle);
   border-right: 1px solid var(--theme-sidebar-border);
   box-shadow: var(--theme-sidebar-shadow);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-lg);
+  -webkit-backdrop-filter: var(--theme-blur-lg);
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
   background: var(--glass-regular);
   border-right-color: var(--theme-sidebar-border-strong);
   box-shadow: var(--theme-sidebar-shadow-strong);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-lg);
+  -webkit-backdrop-filter: var(--theme-blur-lg);
 }
 
 .sidebar-brand {
@@ -107,8 +110,10 @@ select:focus-visible {
 }
 
 .sidebar-brand h1 {
-  font-size: 1rem;
-  font-weight: 820;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .sidebar-brand p {
@@ -177,6 +182,7 @@ select:focus-visible {
   color: var(--theme-control-color);
   box-shadow: var(--theme-control-shadow);
   backdrop-filter: var(--theme-control-backdrop);
+  transition: all 0.25s cubic-bezier(0.2, 0.9, 0.2, 1);
 }
 
 .sidebar-cta:hover,
@@ -205,8 +211,37 @@ select:focus-visible {
   border-color: var(--theme-control-border-hover);
   background: var(--theme-control-background-hover);
   color: var(--theme-control-color-hover);
-  transform: translateY(-1px);
+  transform: translateY(-1.5px) scale(1.015);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
+
+.sidebar-cta:active,
+.pinned-room:active,
+.project-row:active,
+.room-row:active,
+.sidebar-row:active,
+.sidebar-icon-button:active,
+.ghost-button:active,
+.primary-button:active,
+.desktop-room-tool:active,
+.desktop-room-tab:active,
+.desktop-board-segmented button:active,
+.desktop-board-clear-filter:active,
+.desktop-task-detail-button:active,
+.desktop-board-primary-action:active,
+.desktop-task-action:active,
+.room-load-older:active,
+.settings-filter:active,
+.settings-icon-button:active,
+.settings-compact-button:active,
+.room-choice-action:active,
+.room-code-form button:active,
+.desktop-image-viewer-action:active,
+.rent-refresh-button:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+}
+
 
 .pinned-room[data-active="true"],
 .room-row[data-active="true"],
@@ -265,6 +300,9 @@ select:focus-visible {
 .desktop-rules-header h2,
 .github-signin-card > strong,
 .first-run-room-card h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.015em;
   font-size: 1.86rem;
   line-height: 1.08;
   letter-spacing: 0;
@@ -314,8 +352,9 @@ select:focus-visible {
 .desktop-room-search-strip {
   border-color: var(--theme-control-border);
   background: var(--theme-bg-card);
-  box-shadow: none;
-  backdrop-filter: none;
+  box-shadow: var(--theme-shadow-soft);
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-header,
@@ -323,8 +362,9 @@ select:focus-visible {
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-search-strip {
   border-color: var(--theme-surface-border);
   background: var(--theme-bg-card);
-  box-shadow: none;
-  backdrop-filter: none;
+  box-shadow: var(--theme-shadow-glass);
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-header {
@@ -342,8 +382,10 @@ select:focus-visible {
 }
 
 .desktop-room-heading h3 {
-  font-size: 1rem;
-  font-weight: 820;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .desktop-room-subtitle {
@@ -412,7 +454,8 @@ select:focus-visible {
   border-color: var(--theme-control-border);
   background: var(--theme-control-background);
   box-shadow: var(--theme-control-shadow);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool:hover,
@@ -474,7 +517,8 @@ select:focus-visible {
   padding: 12px 18px;
   border-bottom: 1px solid var(--theme-surface-border);
   background: var(--theme-bg-card);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-inspector {
@@ -496,7 +540,8 @@ select:focus-visible {
   border-color: var(--theme-surface-border);
   background: var(--theme-card-background);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .room-tab-page {
@@ -543,7 +588,8 @@ select:focus-visible {
     linear-gradient(90deg, color-mix(in srgb, var(--avatar-color, var(--theme-text-tertiary)) 8%, transparent), transparent 36%),
     var(--theme-message-background);
   box-shadow: var(--theme-message-inset-shadow);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .room-message-bubble::before {
@@ -646,7 +692,8 @@ code {
   border-radius: var(--radius-lg);
   background: var(--surface-flat);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .surface-intro,
@@ -839,7 +886,8 @@ code {
   border-radius: var(--radius-lg);
   background: var(--theme-bg-card);
   box-shadow: 0 -8px 26px rgba(0, 0, 0, 0.34);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-composer-input {
@@ -861,7 +909,8 @@ code {
   background: var(--theme-bg-elevated);
   border-color: var(--theme-sidebar-border-strong);
   box-shadow: var(--shadow-raised);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .room-attachment-drop-overlay,
@@ -1133,7 +1182,8 @@ code {
   border-left: 3px solid var(--event-accent, var(--theme-info));
   border-radius: var(--radius-lg);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-github-event::before {
@@ -1397,6 +1447,7 @@ code {
   .desktop-image-viewer-backdrop,
   .desktop-reasoning-inspector-backdrop {
     background: var(--theme-bg-subtle);
-    backdrop-filter: none;
+    backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
   }
 }

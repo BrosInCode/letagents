@@ -28,19 +28,21 @@ body,
 .app-sidebar {
   display: grid;
   align-content: start;
-  gap: 14px;
-  padding: 14px;
+  gap: 18px;
+  padding: 18px 16px;
   border-right: 1px solid var(--chat-edge);
   background: var(--ui-sidebar);
   box-shadow: inset -1px 0 0 var(--ui-line-subtle);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-lg);
+  -webkit-backdrop-filter: var(--theme-blur-lg);
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
   border-right-color: var(--chat-edge);
   background: var(--ui-sidebar);
   box-shadow: inset -1px 0 0 var(--ui-line-subtle);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-lg);
+  -webkit-backdrop-filter: var(--theme-blur-lg);
 }
 
 .sidebar-topbar {
@@ -83,8 +85,10 @@ body,
 }
 
 .sidebar-brand h1 {
-  font-size: 0.98rem;
-  font-weight: 760;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .sidebar-brand p {
@@ -160,6 +164,7 @@ body,
   border-radius: var(--ui-radius);
   background: transparent;
   box-shadow: none;
+  transition: all 0.22s cubic-bezier(0.2, 0.9, 0.2, 1);
 }
 
 .project-row {
@@ -171,9 +176,16 @@ body,
 .room-row:hover,
 .sidebar-row:hover,
 .sidebar-icon-button:hover {
-  border-color: var(--chat-edge);
-  background: var(--ui-surface-raised);
-  transform: none;
+  border-color: var(--chat-edge-strong);
+  background: var(--ui-surface-hover);
+  transform: scale(1.015) translateY(-0.5px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.project-row:active,
+.room-row:active,
+.sidebar-row:active,
+.sidebar-icon-button:active {
+  transform: scale(0.97);
 }
 
 .project-row[data-active="true"],
@@ -265,8 +277,9 @@ body,
   border-bottom: 1px solid var(--chat-edge);
   border-radius: 0;
   background: var(--ui-base);
-  box-shadow: none;
-  backdrop-filter: none;
+  box-shadow: var(--theme-shadow-soft);
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
   z-index: 6;
 }
 
@@ -274,7 +287,8 @@ body,
   border-color: var(--chat-edge);
   background: var(--ui-base);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-heading {
@@ -283,9 +297,11 @@ body,
 }
 
 .desktop-room-heading h3 {
+  font-family: var(--font-display);
   color: var(--theme-text);
-  font-size: 1.02rem;
-  font-weight: 780;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .desktop-room-subtitle {
@@ -318,7 +334,8 @@ body,
   border-radius: var(--ui-radius);
   background: var(--ui-tab);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-tab {
@@ -355,7 +372,8 @@ body,
   background: var(--ui-tab);
   color: var(--theme-text-secondary);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-tool:hover,
@@ -390,8 +408,9 @@ body,
   border: 1px solid var(--chat-edge-strong);
   border-radius: var(--ui-radius);
   background: var(--ui-panel);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
-  backdrop-filter: none;
+  box-shadow: var(--ui-shadow-panel);
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-control-rail:has(.desktop-room-search-strip):not(:has(.desktop-room-action-panel)) {
@@ -406,7 +425,8 @@ body,
   border-color: var(--chat-edge-strong);
   background: var(--ui-panel);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-search-strip {
@@ -452,7 +472,8 @@ body,
   border-radius: var(--ui-radius);
   background: var(--ui-surface-raised);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-room-property-row:hover {
@@ -524,7 +545,8 @@ body,
   border-radius: var(--ui-radius);
   background: var(--ui-surface);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .room-message-bubble::before {
@@ -569,7 +591,8 @@ body,
     linear-gradient(90deg, color-mix(in srgb, var(--event-accent, var(--chat-blue)) 10%, transparent), transparent 44%),
     var(--ui-surface-message);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-github-event::before,
@@ -614,7 +637,8 @@ code {
   border-radius: var(--ui-radius);
   background: var(--ui-panel);
   box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.42);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-composer:focus-within {
@@ -696,7 +720,8 @@ code {
   border-radius: var(--ui-radius);
   background: var(--ui-panel);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .surface-page,
@@ -753,7 +778,8 @@ code {
   background: var(--ui-base);
   color: var(--theme-text);
   box-shadow: none;
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .app-topbar[data-room-entry="true"] {
@@ -765,9 +791,11 @@ code {
 }
 
 .topbar-title h2 {
+  font-family: var(--font-display);
   color: var(--theme-text);
-  font-size: 1rem;
-  font-weight: 780;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .topbar-spacer {
@@ -2302,7 +2330,8 @@ select {
 .desktop-image-viewer-backdrop,
 .desktop-reasoning-inspector-backdrop {
   background: rgba(0, 0, 0, 0.82);
-  backdrop-filter: none;
+  backdrop-filter: var(--theme-blur-md);
+  -webkit-backdrop-filter: var(--theme-blur-md);
 }
 
 .desktop-onboarding-shell {

@@ -1,28 +1,25 @@
 /*
   Desktop redesign theme contract.
-
-  To reskin the desktop app, edit this file first. Component-level CSS should
-  consume these semantic tokens and recipes instead of declaring new colors,
-  shadows, radii, or glass treatments inline.
+  Redefined with Apple's WWDC 2025 Liquid Glass specifications and Erik D. Kennedy's UI rules.
 */
 
 :root {
   color-scheme: dark;
 
   /* Core palette */
-  --theme-bg: #000000;
-  --theme-bg-subtle: #050506;
-  --theme-bg-card: #08090b;
-  --theme-bg-elevated: #0d0f12;
-  --theme-bg-inset: #000000;
-  --theme-text: #f7f8fb;
-  --theme-text-secondary: #b6bcc7;
-  --theme-text-tertiary: #7d8490;
-  --theme-neutral-rgb: 255, 255, 255;
-  --theme-dark-rgb: 0, 0, 0;
+  --theme-bg: #030407;
+  --theme-bg-subtle: #07090e;
+  --theme-bg-card: rgba(15, 17, 26, 0.45);
+  --theme-bg-elevated: rgba(22, 25, 38, 0.65);
+  --theme-bg-inset: #020204;
+  --theme-text: #f8fafc;
+  --theme-text-secondary: #cbd5e1;
+  --theme-text-tertiary: #94a3b8;
+  --theme-neutral-rgb: 248, 250, 252;
+  --theme-dark-rgb: 3, 4, 7;
   --theme-scrim-rgb: 0, 0, 0;
 
-  /* Accent/status palette */
+  /* Accent/status palette - vibrant HSL variants */
   --theme-success: #36e680;
   --theme-success-rgb: 54, 230, 128;
   --theme-warning: #f6be4f;
@@ -37,137 +34,202 @@
   --theme-coral-rgb: 255, 139, 99;
 
   /* Radius, depth, and motion recipes */
-  --theme-radius-sm: 4px;
-  --theme-radius-md: 6px;
-  --theme-radius-lg: 8px;
+  --theme-radius-sm: 6px;
+  --theme-radius-md: 10px;
+  --theme-radius-lg: 14px;
+  --theme-radius-xl: 18px;
   --theme-radius-pill: 999px;
-  --theme-blur-sm: blur(18px) saturate(1.12);
-  --theme-blur-md: blur(28px) saturate(1.18);
-  --theme-blur-lg: blur(30px) saturate(1.2);
-  --theme-shadow-soft: 0 12px 26px rgba(0, 0, 0, 0.42);
-  --theme-shadow-raised: 0 16px 36px rgba(0, 0, 0, 0.44), inset 0 1px 0 rgba(255, 255, 255, 0.055);
-  --theme-shadow-glass: 0 18px 44px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 
-  /* Background recipes */
-  --theme-app-background: #000000;
-  --theme-onboarding-background:
-    linear-gradient(180deg, rgba(var(--theme-info-rgb), 0.05), transparent 34%),
-    #000000;
-  --theme-shell-background: #000000;
-  --theme-main-background: #000000;
-  --theme-room-background: #000000;
-  --theme-tab-page-background: #000000;
+  /* WWDC 2025 Liquid Glass blurs and lensing effects */
+  --theme-blur-sm: blur(14px) saturate(1.8);
+  --theme-blur-md: blur(24px) saturate(2.1);
+  --theme-blur-lg: blur(34px) saturate(2.4);
 
-  /* Surface recipes */
-  --theme-surface-border: rgba(var(--theme-neutral-rgb), 0.095);
-  --theme-surface-border-strong: rgba(var(--theme-neutral-rgb), 0.15);
-  --theme-surface-flat: #08090b;
-  --theme-surface-raised: #0d0f12;
-  --theme-surface-inset: #030304;
-  --theme-card-background: #0a0c0f;
-  --theme-card-background-strong: #10131a;
+  /* Light comes from the sky - top highlights, realistic drop shadows */
+  --theme-shadow-soft: 
+    0 8px 30px rgba(0, 0, 0, 0.4), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  
+  --theme-shadow-raised: 
+    0 16px 36px rgba(0, 0, 0, 0.5), 
+    0 1px 2px rgba(0, 0, 0, 0.2), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3);
+
+  --theme-shadow-glass: 
+    0 22px 50px rgba(0, 0, 0, 0.55), 
+    0 2px 4px rgba(0, 0, 0, 0.25), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+
+  /* Background recipes with subtle transparency */
+  --theme-app-background: transparent;
+  --theme-onboarding-background: transparent;
+  --theme-shell-background: transparent;
+  --theme-main-background: transparent;
+  --theme-room-background: transparent;
+  --theme-tab-page-background: transparent;
+
+  /* Surface recipes with translucent backdrops */
+  --theme-surface-border: rgba(255, 255, 255, 0.075);
+  --theme-surface-border-strong: rgba(255, 255, 255, 0.14);
+  --theme-surface-flat: rgba(15, 17, 26, 0.4);
+  --theme-surface-raised: rgba(22, 25, 38, 0.55);
+  --theme-surface-inset: rgba(3, 4, 7, 0.6);
+  --theme-card-background: rgba(15, 17, 26, 0.35);
+  --theme-card-background-strong: rgba(22, 25, 38, 0.5);
   --theme-card-background-selected:
-    linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.16), transparent 46%),
-    #0b1016;
+    linear-gradient(135deg, rgba(var(--theme-info-rgb), 0.18) 0%, rgba(var(--theme-info-rgb), 0.04) 100%),
+    rgba(15, 17, 26, 0.55);
 
-  /* Glass/control recipes */
+  /* Liquid Glass materials */
   --theme-glass-regular:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
-    rgba(8, 10, 12, 0.94);
+    linear-gradient(135deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.02) 100%),
+    rgba(10, 11, 18, 0.65);
   --theme-glass-subtle:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.036), rgba(255, 255, 255, 0.012)),
-    rgba(5, 6, 7, 0.96);
+    linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.015) 100%),
+    rgba(7, 8, 13, 0.7);
   --theme-glass-control:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
-    rgba(13, 15, 18, 0.96);
-  --theme-control-border: rgba(var(--theme-neutral-rgb), 0.105);
-  --theme-control-border-hover: rgba(var(--theme-neutral-rgb), 0.18);
+    linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.03) 100%),
+    rgba(22, 25, 38, 0.7);
+
+  /* Control states & animations */
+  --theme-control-border: rgba(255, 255, 255, 0.08);
+  --theme-control-border-hover: rgba(255, 255, 255, 0.18);
   --theme-control-background: var(--theme-glass-subtle);
   --theme-control-background-hover: var(--theme-glass-control);
   --theme-control-color: var(--theme-text-secondary);
   --theme-control-color-hover: var(--theme-text);
-  --theme-control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --theme-control-shadow: 
+    0 2px 8px rgba(0, 0, 0, 0.15), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --theme-control-backdrop: var(--theme-blur-sm);
-  --theme-control-active-border: rgba(var(--theme-info-rgb), 0.52);
+
+  /* Glowing active states */
+  --theme-control-active-border: rgba(var(--theme-info-rgb), 0.45);
   --theme-control-active-background:
-    linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.22), transparent 60%),
-    #07111a;
-  --theme-control-active-color: #eaf7ff;
-  --theme-control-active-shadow: inset 3px 0 0 rgba(var(--theme-info-rgb), 0.86), inset 0 1px 0 rgba(255, 255, 255, 0.07);
-  --theme-selected-strip-shadow: inset 3px 0 0 rgba(var(--theme-info-rgb), 0.86);
+    linear-gradient(135deg, rgba(var(--theme-info-rgb), 0.22) 0%, rgba(var(--theme-info-rgb), 0.04) 100%),
+    rgba(15, 21, 32, 0.75);
+  --theme-control-active-color: #f0f9ff;
+  --theme-control-active-shadow: 
+    0 4px 12px rgba(var(--theme-info-rgb), 0.18), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.15), 
+    inset 3px 0 0 rgba(var(--theme-info-rgb), 0.9);
+  
+  --theme-selected-strip-shadow: inset 3px 0 0 rgba(var(--theme-info-rgb), 0.9);
 
-  /* Form recipes */
-  --theme-input-background: #030405;
-  --theme-input-border: rgba(var(--theme-neutral-rgb), 0.13);
-  --theme-input-focus-border: rgba(var(--theme-info-rgb), 0.58);
-  --theme-placeholder-color: rgba(182, 188, 199, 0.48);
-  --theme-focus-ring: 0 0 0 3px rgba(var(--theme-info-rgb), 0.2);
-  --theme-input-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.028);
+  /* Forms and Inputs */
+  --theme-input-background: rgba(3, 4, 7, 0.75);
+  --theme-input-border: rgba(255, 255, 255, 0.1);
+  --theme-input-focus-border: rgba(var(--theme-info-rgb), 0.5);
+  --theme-placeholder-color: rgba(148, 163, 184, 0.45);
+  --theme-focus-ring: 0 0 0 3px rgba(var(--theme-info-rgb), 0.25);
+  --theme-input-inset-shadow: 
+    inset 0 2px 4px rgba(0, 0, 0, 0.2), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
 
-  /* Button recipes */
-  --theme-primary-button-background: linear-gradient(180deg, #4fbdff, #218ee0);
-  --theme-primary-button-background-hover: linear-gradient(180deg, #6ccdff, #2d9ef0);
-  --theme-primary-button-border: rgba(var(--theme-info-rgb), 0.42);
-  --theme-primary-button-color: #00121f;
-  --theme-primary-button-color-hover: #000c14;
-  --theme-primary-button-shadow: 0 10px 24px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.34);
+  /* Premium Glossy Buttons */
+  --theme-primary-button-background: 
+    linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(180deg, #4fbdff, #0a84e3);
+  --theme-primary-button-background-hover: 
+    linear-gradient(180deg, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(180deg, #6ccdff, #2998ec);
+  --theme-primary-button-border: rgba(var(--theme-info-rgb), 0.5);
+  --theme-primary-button-color: #000c15;
+  --theme-primary-button-color-hover: #00070d;
+  --theme-primary-button-shadow: 
+    0 6px 16px rgba(10, 132, 227, 0.25), 
+    0 1px 2px rgba(0, 0, 0, 0.2), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+
   --theme-accent-action-background:
-    linear-gradient(180deg, rgba(79, 189, 255, 0.96), rgba(33, 142, 224, 0.96));
-  --theme-accent-action-color: #00121f;
-  --theme-accent-action-border: rgba(var(--theme-info-rgb), 0.36);
-  --theme-accent-action-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 10px 22px rgba(0, 0, 0, 0.32);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 50%),
+    linear-gradient(180deg, rgba(79, 189, 255, 0.95), rgba(10, 132, 227, 0.95));
+  --theme-accent-action-color: #000c15;
+  --theme-accent-action-border: rgba(var(--theme-info-rgb), 0.45);
+  --theme-accent-action-shadow: 
+    0 6px 16px rgba(10, 132, 227, 0.25), 
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
 
-  /* Status recipes */
-  --theme-status-neutral-bg: rgba(var(--theme-neutral-rgb), 0.055);
-  --theme-status-neutral-border: rgba(var(--theme-neutral-rgb), 0.12);
-  --theme-status-success-bg: rgba(var(--theme-success-rgb), 0.13);
-  --theme-status-success-border: rgba(var(--theme-success-rgb), 0.26);
-  --theme-status-warning-bg: rgba(var(--theme-warning-rgb), 0.13);
-  --theme-status-warning-border: rgba(var(--theme-warning-rgb), 0.28);
-  --theme-status-danger-bg: rgba(var(--theme-danger-rgb), 0.13);
-  --theme-status-danger-border: rgba(var(--theme-danger-rgb), 0.28);
-  --theme-status-info-bg: rgba(var(--theme-info-rgb), 0.13);
-  --theme-status-info-border: rgba(var(--theme-info-rgb), 0.28);
-  --theme-status-violet-bg: rgba(var(--theme-violet-rgb), 0.12);
-  --theme-status-violet-border: rgba(var(--theme-violet-rgb), 0.28);
-  --theme-scrim-background: rgba(var(--theme-scrim-rgb), 0.86);
-  --theme-selection-background: rgba(var(--theme-info-rgb), 0.3);
+  /* Status Badges with glowing accents */
+  --theme-status-neutral-bg: rgba(255, 255, 255, 0.05);
+  --theme-status-neutral-border: rgba(255, 255, 255, 0.1);
+  
+  --theme-status-success-bg: rgba(54, 230, 128, 0.08);
+  --theme-status-success-border: rgba(54, 230, 128, 0.3);
+  
+  --theme-status-warning-bg: rgba(246, 190, 79, 0.08);
+  --theme-status-warning-border: rgba(246, 190, 79, 0.3);
+  
+  --theme-status-danger-bg: rgba(255, 98, 98, 0.08);
+  --theme-status-danger-border: rgba(255, 98, 98, 0.3);
+  
+  --theme-status-info-bg: rgba(67, 180, 255, 0.08);
+  --theme-status-info-border: rgba(67, 180, 255, 0.3);
+  
+  --theme-status-violet-bg: rgba(169, 140, 255, 0.08);
+  --theme-status-violet-border: rgba(169, 140, 255, 0.3);
+
+  --theme-scrim-background: rgba(var(--theme-scrim-rgb), 0.75);
+  --theme-selection-background: rgba(var(--theme-info-rgb), 0.25);
   --theme-selection-color: #ffffff;
-  --theme-scrollbar-thumb: rgba(var(--theme-neutral-rgb), 0.22);
-  --theme-scrollbar-thumb-hover: rgba(var(--theme-neutral-rgb), 0.32);
-  --theme-sidebar-border: rgba(var(--theme-neutral-rgb), 0.11);
-  --theme-sidebar-border-strong: rgba(var(--theme-neutral-rgb), 0.15);
-  --theme-sidebar-shadow: inset -1px 0 rgba(255, 255, 255, 0.045);
-  --theme-sidebar-shadow-strong: inset -1px 0 rgba(255, 255, 255, 0.06);
+  
+  --theme-scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --theme-scrollbar-thumb-hover: rgba(255, 255, 255, 0.25);
+  
+  --theme-sidebar-border: rgba(255, 255, 255, 0.07);
+  --theme-sidebar-border-strong: rgba(255, 255, 255, 0.12);
+  --theme-sidebar-shadow: inset -1px 0 rgba(255, 255, 255, 0.02);
+  --theme-sidebar-shadow-strong: inset -1px 0 rgba(255, 255, 255, 0.04);
+  
   --theme-brand-mark-background:
-    linear-gradient(145deg, rgba(var(--theme-neutral-rgb), 0.23), rgba(var(--theme-neutral-rgb), 0.07)),
-    rgba(122, 255, 204, 0.08);
-  --theme-brand-mark-color: #f7f8fb;
-  --theme-brand-mark-shadow: inset 0 1px rgba(255, 255, 255, 0.16);
-  --theme-room-tree-guide: linear-gradient(180deg, transparent, rgba(var(--theme-neutral-rgb), 0.18) 16%, rgba(var(--theme-neutral-rgb), 0.08) 86%, transparent);
-  --theme-room-status-shadow: 0 0 0 3px rgba(var(--theme-success-rgb), 0.13);
-  --theme-room-control-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
-  --theme-avatar-shell-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.95);
-  --theme-message-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.026);
-  --theme-media-shadow: 0 16px 42px rgba(0, 0, 0, 0.34);
-  --theme-icon-drop-shadow: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.24));
-  --theme-message-background: #06080b;
-  --theme-message-background-strong: #090c11;
-  --theme-message-border: rgba(var(--theme-neutral-rgb), 0.08);
-  --theme-message-border-strong: rgba(var(--theme-neutral-rgb), 0.1);
-  --theme-human-message-background: linear-gradient(90deg, rgba(var(--theme-coral-rgb), 0.1), transparent 34%), var(--theme-message-background);
-  --theme-agent-message-background: linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.1), transparent 34%), var(--theme-message-background);
-  --theme-muted-pill-background: rgba(var(--theme-neutral-rgb), 0.055);
-  --theme-muted-pill-border: rgba(var(--theme-neutral-rgb), 0.1);
-  --theme-progress-background: rgba(var(--theme-neutral-rgb), 0.035);
-  --theme-progress-guide: linear-gradient(90deg, rgba(var(--theme-neutral-rgb), 0.42), rgba(var(--theme-neutral-rgb), 0.08));
-  --theme-github-event-background: linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.1), transparent 42%), #0a0d12;
-  --theme-github-event-success-background: linear-gradient(90deg, rgba(var(--theme-success-rgb), 0.12), transparent 42%), #0a0d12;
-  --theme-github-event-warning-background: linear-gradient(90deg, rgba(var(--theme-warning-rgb), 0.12), transparent 42%), #0a0d12;
-  --theme-github-event-danger-background: linear-gradient(90deg, rgba(var(--theme-danger-rgb), 0.12), transparent 42%), #0a0d12;
+    linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.03) 100%),
+    rgba(67, 180, 255, 0.12);
+  --theme-brand-mark-color: #f8fafc;
+  --theme-brand-mark-shadow: inset 0 1px rgba(255, 255, 255, 0.15), 0 2px 6px rgba(0, 0, 0, 0.15);
+  
+  --theme-room-tree-guide: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.12) 16%, rgba(255, 255, 255, 0.04) 86%, transparent);
+  --theme-room-status-shadow: 0 0 12px rgba(54, 230, 128, 0.4);
+  --theme-room-control-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  --theme-avatar-shell-shadow: inset 0 0 0 1.5px rgba(0, 0, 0, 0.95);
+  --theme-message-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --theme-media-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
+  --theme-icon-drop-shadow: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3));
+  
+  --theme-message-background: rgba(15, 17, 26, 0.25);
+  --theme-message-background-strong: rgba(22, 25, 38, 0.4);
+  --theme-message-border: rgba(255, 255, 255, 0.05);
+  --theme-message-border-strong: rgba(255, 255, 255, 0.08);
+  
+  --theme-human-message-background: 
+    linear-gradient(90deg, rgba(var(--theme-coral-rgb), 0.08) 0%, rgba(var(--theme-coral-rgb), 0.01) 36%), 
+    var(--theme-message-background);
+  --theme-agent-message-background: 
+    linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.08) 0%, rgba(var(--theme-info-rgb), 0.01) 36%), 
+    var(--theme-message-background);
+  
+  --theme-muted-pill-background: rgba(255, 255, 255, 0.04);
+  --theme-muted-pill-border: rgba(255, 255, 255, 0.06);
+  --theme-progress-background: rgba(255, 255, 255, 0.02);
+  --theme-progress-guide: linear-gradient(90deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.05));
+  
+  --theme-github-event-background: 
+    linear-gradient(90deg, rgba(var(--theme-info-rgb), 0.08) 0%, rgba(var(--theme-info-rgb), 0.01) 42%), 
+    rgba(15, 17, 26, 0.35);
+  --theme-github-event-success-background: 
+    linear-gradient(90deg, rgba(var(--theme-success-rgb), 0.08) 0%, rgba(var(--theme-success-rgb), 0.01) 42%), 
+    rgba(15, 17, 26, 0.35);
+  --theme-github-event-warning-background: 
+    linear-gradient(90deg, rgba(var(--theme-warning-rgb), 0.08) 0%, rgba(var(--theme-warning-rgb), 0.01) 42%), 
+    rgba(15, 17, 26, 0.35);
+  --theme-github-event-danger-background: 
+    linear-gradient(90deg, rgba(var(--theme-danger-rgb), 0.08) 0%, rgba(var(--theme-danger-rgb), 0.01) 42%), 
+    rgba(15, 17, 26, 0.35);
+  
   --theme-onboarding-choice-selected-background: var(--theme-card-background-selected);
 
-  /* Legacy compatibility aliases used across the desktop CSS stack. */
+  /* Legacy compatibility aliases used across the desktop CSS stack */
   --bg: var(--theme-bg);
   --bg-subtle: var(--theme-bg-subtle);
   --bg-card: var(--theme-bg-card);
@@ -193,8 +255,8 @@
   --coral: var(--theme-coral);
   --coral-dim: rgba(var(--theme-coral-rgb), 0.13);
   --color-surface-1: var(--theme-bg-card);
-  --color-surface-2: #10131a;
-  --color-surface-3: #151923;
+  --color-surface-2: rgba(22, 25, 38, 0.4);
+  --color-surface-3: rgba(30, 34, 52, 0.5);
   --color-border: var(--theme-surface-border);
   --color-accent: var(--theme-info);
   --color-danger: var(--theme-danger);
@@ -214,5 +276,5 @@
   --shadow-glass: var(--theme-shadow-glass);
   --shadow-soft: var(--theme-shadow-soft);
   --focus-ring: var(--theme-focus-ring);
-  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
