@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 
 import {
-  addMessage,
+  addMessageWithCreateStatus,
   type Message,
 } from "../db.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
@@ -25,14 +25,18 @@ export async function emitProjectMessage(
     agent_prompt_kind?: AgentPromptKind | null;
     reply_to?: string | null;
     attachments?: NormalizedMessageAttachmentReference[];
+    client_message_id?: string | null;
   }
 ): Promise<Message> {
-  const message = await addMessage(projectId, sender, text, {
+  const { message, created } = await addMessageWithCreateStatus(projectId, sender, text, {
     source: options?.source,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
     reply_to_message_id: options?.reply_to ?? null,
     attachments: options?.attachments,
+    client_message_id: options?.client_message_id ?? null,
   });
-  messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
+  if (created) {
+    messageEvents.emit("message:created", { projectId, message } satisfies MessageCreatedEvent);
+  }
   return message;
 }

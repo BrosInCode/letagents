@@ -30,6 +30,7 @@ export function registerCreateMessageRoute(
       attachments: rawAttachments,
       agent_session_id,
       agent_session_token,
+      client_message_id,
     } = req.body as {
       sender?: string;
       text?: string;
@@ -38,6 +39,7 @@ export function registerCreateMessageRoute(
       attachments?: unknown;
       agent_session_id?: string;
       agent_session_token?: string;
+      client_message_id?: string;
     };
     try {
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
@@ -86,6 +88,7 @@ export function registerCreateMessageRoute(
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
         attachments,
+        ...(typeof client_message_id === "string" ? { client_message_id } : {}),
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId: project.id,

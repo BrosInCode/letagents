@@ -6,8 +6,10 @@ import {
   currentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
+  getLocalChatMessages,
   getTargetRoomId,
   heartbeatRoomPresence,
+  isLocalChatStorageEnabled,
   roomScopedApiCall,
   toAgentReadableMessages,
 } from "../../runtime.js";
@@ -23,6 +25,28 @@ export function registerReadMessagesTool(server: McpServer): void {
     async ({ room_id }) => {
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
+      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
+      if (localRoomId && await isLocalChatStorageEnabled()) {
+        const allMessages: unknown[] = [];
+        let afterCursor: string | undefined;
+        for (;;) {
+          const result = await getLocalChatMessages(localRoomId, {
+            after: afterCursor,
+            include_prompt_only: true,
+          });
+          const msgs = result.messages ?? [];
+          allMessages.push(...msgs);
+          if (!result.has_more || msgs.length === 0) break;
+          const lastMsg = msgs[msgs.length - 1];
+          if (!lastMsg?.id) break;
+          afterCursor = lastMsg.id;
+        }
+        return jsonToolResponse({
+          room_id: localRoomId,
+          messages: toAgentReadableMessages(allMessages),
+        });
+      }
+
       const allMessages: unknown[] = [];
       let afterCursor: string | undefined;
       let roomIdFromResponse: string | undefined;

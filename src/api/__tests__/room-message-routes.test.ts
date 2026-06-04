@@ -229,6 +229,83 @@ test("desktop owner-token messages ignore agent-shaped display labels", async ()
   });
 });
 
+test("desktop local sync forwards client message idempotency key", async () => {
+  let createdMessage: {
+    sender: string;
+    text: string;
+    options?: { source?: string; client_message_id?: string | null };
+  } | null = null;
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get() {},
+    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    emitProjectMessage: async (
+      _projectId: string,
+      sender: string,
+      text: string,
+      options?: { source?: string; client_message_id?: string | null },
+    ) => {
+      createdMessage = { sender, text, options };
+      return { id: "msg_1", sender, text, source: options?.source, timestamp: new Date().toISOString() };
+    },
+    rememberRoomParticipantFromMessage: async () => undefined,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+
+  const res = {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.body = body;
+      return this;
+    },
+  };
+
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages$/");
+  assert.ok(handler);
+  await handler(
+    {
+      params: { 0: "room_1" },
+      body: {
+        sender: "EmmyMay",
+        text: "synced local message",
+        client_message_id: "local-chat:room_1:1",
+      },
+      headers: { "x-letagents-desktop-client": "1" },
+      authKind: "owner_token",
+      sessionAccount: { account_id: "acct_1" },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(createdMessage, {
+    sender: "EmmyMay",
+    text: "synced local message",
+    options: {
+      source: "browser",
+      agent_prompt_kind: null,
+      reply_to: null,
+      attachments: [],
+      client_message_id: "local-chat:room_1:1",
+    },
+  });
+});
+
 test("desktop owner-token streams do not require worker delivery credentials", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {

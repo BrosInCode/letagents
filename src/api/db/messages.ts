@@ -1,4 +1,4 @@
-export { addMessage } from "./messages/create.js";
+export { addMessage, addMessageWithCreateStatus } from "./messages/create.js";
 export {
   getLatestMessages,
   getMessages,

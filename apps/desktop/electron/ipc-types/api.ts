@@ -8,6 +8,8 @@ import type {
   DesktopDroppedAttachmentContent,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
+  DesktopChatStorageSettings,
+  DesktopLocalChatSyncResult,
   DesktopInviteRoomCreation,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
@@ -30,6 +32,9 @@ import type {
 } from "./tasks.js";
 
 export interface DesktopApi {
+  ui: {
+    onOpenSettings: (callback: () => void) => () => void;
+  };
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
   };
@@ -89,6 +94,11 @@ export interface DesktopApi {
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
     openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
+  };
+  chatStorage: {
+    getSettings: () => Promise<DesktopChatStorageSettings>;
+    setMode: (mode: DesktopChatStorageSettings["mode"]) => Promise<DesktopChatStorageSettings>;
+    syncLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
   };
   rental?: DesktopRentalApi;
   auth: {

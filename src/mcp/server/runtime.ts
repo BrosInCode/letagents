@@ -106,5 +106,9 @@ export {
   setStoredAuth,
   setStoredAgentIdentity,
   touchRoomSession,
+  addLocalChatMessage,
+  getLocalChatMessages,
+  isLocalChatStorageEnabled,
+  waitForLocalChatMessages,
   type StoredAgentSessionState,
 } from "../local-state.js";

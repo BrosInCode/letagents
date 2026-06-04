@@ -8,15 +8,10 @@
       data-testid="sidebar-reveal-button"
       @click="$emit('cycle-sidebar')"
     >
-      <svg viewBox="0 0 20 20" aria-hidden="true">
-        <path
-          d="M7 4.5 12.5 10 7 15.5"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="1.8"
-        />
+      <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
+        <path d="M12.5 3.5v13" />
+        <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
       </svg>
     </button>
     <div v-if="activeEntry.type !== 'room'" class="topbar-title">

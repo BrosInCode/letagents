@@ -146,11 +146,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
   const sidebarMode = ref<SidebarMode>("expanded");
-  const collapsedSections = ref({
-    pinned: false,
-    projects: false,
-    system: false,
-  });
+  const roomsCollapsed = ref(false);
   const collapsedProjects = ref<Record<string, boolean>>({});
 
   function findSidebarEntryById(entryId: string): SidebarEntry | null {
@@ -188,18 +184,15 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
           : "expanded";
   }
 
-  function toggleSection(section: "pinned" | "projects" | "system") {
-    collapsedSections.value = {
-      ...collapsedSections.value,
-      [section]: !collapsedSections.value[section],
-    };
-  }
-
   function toggleProject(projectId: string) {
     collapsedProjects.value = {
       ...collapsedProjects.value,
       [projectId]: !collapsedProjects.value[projectId],
     };
+  }
+
+  function toggleRoomsCollapsed(): void {
+    roomsCollapsed.value = !roomsCollapsed.value;
   }
 
   function openRoomSnapshot(
@@ -251,7 +244,6 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   return {
     activeEntry,
     collapsedProjects,
-    collapsedSections,
     currentParentRoom,
     cycleSidebar,
     focusRooms,
@@ -263,6 +255,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     rememberRootRoomSnapshot,
     repoName,
     resolveSelectedRoomIdentifier,
+    roomsCollapsed,
     selectSidebarEntry,
     selectedAccess,
     selectedFocusRooms,
@@ -271,6 +264,6 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     selectedRoomInfo,
     sidebarMode,
     toggleProject,
-    toggleSection,
+    toggleRoomsCollapsed,
   };
 }

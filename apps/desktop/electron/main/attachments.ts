@@ -8,6 +8,7 @@ import type {
   DesktopStagedAttachment,
 } from "../ipc-types.js";
 import { apiFetch, readStoredAuth } from "./auth.js";
+import { isLocalChatStorageEnabled } from "./chat-storage/settings.js";
 import { apiUrl } from "./paths.js";
 import { focusMainWindow, getMainWindow } from "./window.js";
 
@@ -62,6 +63,9 @@ export async function pickAndStageDesktopAttachments(
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before attaching files.");
   }
+  if (await isLocalChatStorageEnabled()) {
+    throw new Error("Attachments are not available while local chat storage is active.");
+  }
 
   focusMainWindow();
   const result = await dialog.showOpenDialog({
@@ -87,6 +91,9 @@ export async function stageDroppedDesktopAttachmentContents(
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before attaching files.");
+  }
+  if (await isLocalChatStorageEnabled()) {
+    throw new Error("Attachments are not available while local chat storage is active.");
   }
 
   const droppedFiles = files
@@ -199,6 +206,7 @@ export async function discardDesktopAttachment(
   uploadId: string,
 ): Promise<void> {
   if (!roomIdentifier.trim() || !uploadId.trim()) return;
+  if (await isLocalChatStorageEnabled()) return;
   await apiFetch(
     `/rooms/${encodeURIComponent(roomIdentifier.trim())}/attachments/uploads/${encodeURIComponent(uploadId.trim())}`,
     {

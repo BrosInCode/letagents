@@ -1,4 +1,3 @@
-.sidebar-brand,
 .sidebar-topbar,
 .sidebar-section,
 .project-list,
@@ -27,7 +26,6 @@
   color: var(--text-tertiary);
 }
 
-.sidebar-brand h1,
 .app-topbar h2,
 .hero-panel h3,
 .surface-intro h3,

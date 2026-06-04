@@ -13,11 +13,13 @@ import type {
   DesktopAuthStartResult,
   DesktopAuthStatus,
   DesktopAppInfo,
+  DesktopChatStorageSettings,
   DiagnosticsSnapshot,
   DesktopFocusRoomInfo,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopInviteRoomCreation,
+  DesktopLocalChatSyncResult,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
@@ -83,7 +85,10 @@ import {
   runDesktopRoomTaskReviewWorkerAction,
   runDesktopRoomTaskWorkerAction,
   sendDesktopRoomMessage,
+  readChatStorageSettings,
   addDesktopRoomTask,
+  setChatStorageMode,
+  syncDesktopLocalChatRoom,
   updateDesktopAccountRoom,
   updateDesktopRoomTask,
   updateDesktopRoomTaskLease,
@@ -321,6 +326,25 @@ export function registerDesktopIpcHandlers(
       roomIdentifier: string,
     ): Promise<DesktopGitHubIntegrationActionResult> =>
       openDesktopGitHubInstall(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:get-settings",
+    async (): Promise<DesktopChatStorageSettings> => readChatStorageSettings(),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:set-mode",
+    async (
+      _event,
+      mode: DesktopChatStorageSettings["mode"],
+    ): Promise<DesktopChatStorageSettings> => setChatStorageMode(mode),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:sync-local-room",
+    async (
+      _event,
+      roomIdentifier: string,
+    ): Promise<DesktopLocalChatSyncResult> =>
+      syncDesktopLocalChatRoom(roomIdentifier),
   );
   // Build the rental API client once at startup. The auth token is
   // resolved on every request via `readStoredAuth()` so sign-in /

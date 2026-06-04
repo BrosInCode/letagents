@@ -11,11 +11,13 @@ import {
   getRememberedRoomPresence,
   getTargetRoomId,
   identityFromAgentSession,
+  isLocalChatStorageEnabled,
   resolveAgentSession,
   roomScopedApiCall,
   syncRoomPresence,
   toAgentReadableMessages,
   touchRoomSession,
+  waitForLocalChatMessages,
 } from "../../runtime.js";
 import { jsonToolResponse } from "./response.js";
 
@@ -45,18 +47,32 @@ export function registerWaitForMessagesTool(server: McpServer): void {
     async ({ room_id, after_message_id, timeout, agent_session_id }) => {
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
+      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
       const identity = await ensureAgentIdentity();
       const agentSession = resolveAgentSession(targetRoomId ?? currentRoom?.room_id ?? null, agent_session_id);
+      const maxPollMs = getPollTimeoutCapMs();
+      const serverTimeout = Math.min(
+        Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
+        maxPollMs
+      );
+      if (localRoomId && await isLocalChatStorageEnabled()) {
+        const result = await waitForLocalChatMessages(localRoomId, {
+          after: after_message_id,
+          timeoutMs: serverTimeout,
+          include_prompt_only: true,
+        });
+        touchRoomSession(localRoomId, getLastMessageId(result));
+        return jsonToolResponse({
+          room_id: localRoomId,
+          messages: toAgentReadableMessages(result.messages),
+        });
+      }
+
       await syncRoomPresence(
         targetRoomId ?? currentRoom?.room_id ?? null,
         identity,
         getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, agentSession ? identityFromAgentSession(agentSession) : identity),
         agentSession
-      );
-      const maxPollMs = getPollTimeoutCapMs();
-      const serverTimeout = Math.min(
-        Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
-        maxPollMs
       );
       const clientTimeout =
         serverTimeout + (serverTimeout > 120_000 ? 120_000 : 5_000);

@@ -6,6 +6,8 @@ import type {
 import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
 import { readStoredAuth } from "./auth.js";
+import { isLocalChatStorageEnabled } from "./chat-storage/settings.js";
+import { getLocalChatMessages } from "./rooms/messages/local-store.js";
 import {
   mapDesktopReasoningSessionPayload,
   mapDesktopReasoningUpdatePayload,
@@ -273,6 +275,46 @@ async function pollDesktopRoomMessages(
   }
 }
 
+async function pollLocalDesktopRoomMessages(
+  stream: NonNullable<typeof activeRoomStream>,
+): Promise<void> {
+  emitRoomStreamEvent({
+    type: "open",
+    roomIdentifier: stream.roomIdentifier,
+  });
+
+  while (isCurrentRoomStream(stream)) {
+    try {
+      const page = await getLocalChatMessages(stream.roomIdentifier, {
+        after: stream.lastMessageId,
+        limit: roomMessageHistoryPageSize,
+      });
+      if (!isCurrentRoomStream(stream)) return;
+      for (const rawMessage of page.messages) {
+        if (!isCurrentRoomStream(stream)) return;
+        stream.lastMessageId = rawMessage.id;
+        emitRoomStreamEvent({
+          type: "message",
+          roomIdentifier: stream.roomIdentifier,
+          message: mapRoomMessagePayload(rawMessage),
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, page.messages.length ? 250 : 1500));
+    } catch (error) {
+      if (!isCurrentRoomStream(stream)) return;
+      emitRoomStreamEvent({
+        type: "error",
+        roomIdentifier: stream.roomIdentifier,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Local room polling disconnected.",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+  }
+}
+
 function parseRoomStreamChunk(roomIdentifier: string, chunk: string): string {
   const frames = chunk.split(/\n\n/);
   const remainder = frames.pop() || "";
@@ -390,6 +432,10 @@ export async function startDesktopRoomStream(
     lastMessageId: afterMessageId || null,
     stopped: false,
   };
+  if (await isLocalChatStorageEnabled()) {
+    void pollLocalDesktopRoomMessages(activeRoomStream);
+    return;
+  }
   void openDesktopRoomStream(activeRoomStream);
   void pollDesktopRoomMessages(activeRoomStream);
 }

@@ -5,10 +5,12 @@ import { classifyPresenceStatusText } from "../../../agent-presence.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   agentSessionCredentials,
+  addLocalChatMessage,
   currentRoom,
   getFallbackProjectId,
   getRememberedRoomPresence,
   getTargetRoomId,
+  isLocalChatStorageEnabled,
   resolveWorkerToolIdentity,
   roomScopedApiCall,
   syncRoomPresence,
@@ -57,6 +59,24 @@ export function registerPostStatusTool(server: McpServer): void {
       });
       const sender = identity.actor_label;
       const statusText = `[status] ${status}`;
+      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
+
+      if (localRoomId && await isLocalChatStorageEnabled()) {
+        const message = await addLocalChatMessage(localRoomId, {
+          sender,
+          text: statusText,
+          source: "agent",
+        });
+        touchCurrentRoom(message.id);
+        return jsonToolResponse({
+          success: true,
+          status_posted: status,
+          sender,
+          agent_identity: toPublicAgentIdentity(identity),
+          message_id: message.id,
+          timestamp: message.timestamp,
+        });
+      }
 
       await syncRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity, {
         status: classifyPresenceStatusText(

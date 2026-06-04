@@ -114,6 +114,19 @@ export interface DesktopRoomMessagesPage {
   hasOlder: boolean;
 }
 
+export interface DesktopChatStorageSettings {
+  mode: "cloud" | "local";
+  databasePath: string;
+  settingsPath: string;
+  savedAt: string;
+}
+
+export interface DesktopLocalChatSyncResult {
+  roomIdentifier: string;
+  syncedCount: number;
+  skippedCount: number;
+}
+
 export type DesktopRoomStreamEvent =
   | {
       type: "open";

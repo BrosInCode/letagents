@@ -3,10 +3,12 @@ import { z } from "zod";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   agentSessionCredentials,
+  addLocalChatMessage,
   currentRoom,
   getFallbackProjectId,
   getRememberedRoomPresence,
   getTargetRoomId,
+  isLocalChatStorageEnabled,
   resolveWorkerToolIdentity,
   roomScopedApiCall,
   syncRoomPresence,
@@ -50,6 +52,21 @@ export function registerSendMessageTool(server: McpServer): void {
         roomId: targetRoomId ?? currentRoom?.room_id ?? null,
         agentSessionId: agent_session_id,
       });
+      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
+      if (localRoomId && await isLocalChatStorageEnabled()) {
+        const message = await addLocalChatMessage(localRoomId, {
+          sender: identity.actor_label,
+          text,
+          reply_to,
+          source: "agent",
+        });
+        touchCurrentRoom(message.id);
+        return jsonToolResponse({
+          ...message,
+          agent_identity: toPublicAgentIdentity(identity),
+        });
+      }
+
       const message = await roomScopedApiCall<Record<string, unknown>>({
         room_id: targetRoomId,
         project_id: targetProjectId,
