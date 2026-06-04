@@ -27,6 +27,12 @@
   --duration-slow: 360ms;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.2, 0.9, 0.2, 1);
+  --scrollbar-size: 10px;
+  --scrollbar-track: color-mix(in srgb, var(--text) 5%, transparent);
+  --scrollbar-thumb: color-mix(in srgb, var(--text) 24%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--text) 38%, transparent);
+  --scroll-fade-size: 24px;
+  --scroll-fade-size-active: 32px;
   font-family: var(--font-sans);
   background:
     radial-gradient(circle at top left, rgba(255, 255, 255, 0.04), transparent 32%),

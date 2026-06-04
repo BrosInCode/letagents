@@ -2,6 +2,15 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi } from "./ipc-types.js";
 
 const api: DesktopApi = {
+  ui: {
+    onOpenSettings: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on("desktop:ui:open-settings", listener);
+      return () => {
+        ipcRenderer.off("desktop:ui:open-settings", listener);
+      };
+    },
+  },
   app: {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
   },
@@ -54,6 +63,12 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-github-integration-status", roomIdentifier),
     openGitHubInstall: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:open-github-install", roomIdentifier),
+  },
+  chatStorage: {
+    getSettings: () => ipcRenderer.invoke("desktop:chat-storage:get-settings"),
+    setMode: (mode) => ipcRenderer.invoke("desktop:chat-storage:set-mode", mode),
+    syncLocalRoom: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
   },
   rental: {
     listListings: (input) => ipcRenderer.invoke("desktop:rental:list-listings", input ?? {}),

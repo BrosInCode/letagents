@@ -344,6 +344,13 @@
       "when": 1779152400000,
       "tag": "0048_rental_patch_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1780516800000,
+      "tag": "0049_messages_client_message_id",
+      "breakpoints": true
     }
   ]
 }

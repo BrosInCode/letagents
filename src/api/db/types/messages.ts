@@ -60,6 +60,7 @@ export interface MessageRow {
   text: string;
   agent_prompt_kind: string | null;
   source: string | null;
+  client_message_id: string | null;
   timestamp: string;
 }
 

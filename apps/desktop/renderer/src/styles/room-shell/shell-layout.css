@@ -41,6 +41,22 @@
   background: rgba(10, 10, 10, 0.94);
 }
 
+.desktop-room-header-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.desktop-room-sidebar-reveal {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  height: 34px;
+  padding: 0;
+}
+
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-header {
   border-color: rgba(255, 255, 255, 0.12);
   background:
@@ -57,6 +73,10 @@
   font-size: 0.96rem;
   line-height: 1.2;
   letter-spacing: 0;
+}
+
+.desktop-room-heading {
+  min-width: 0;
 }
 
 .desktop-room-subtitle {

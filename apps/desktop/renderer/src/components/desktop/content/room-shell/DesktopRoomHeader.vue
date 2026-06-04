@@ -1,10 +1,26 @@
 <template>
   <header class="desktop-room-header" data-testid="desktop-room-header">
-    <div class="desktop-room-heading">
-      <h3>{{ room.displayName }}</h3>
-      <p class="desktop-room-subtitle">
-        {{ room.kind === "focus" ? "A focused thread linked back to the main room." : "The main place for conversation, tasks, and coordination." }}
-      </p>
+    <div class="desktop-room-header-main">
+      <button
+        v-if="sidebarMode === 'hidden'"
+        class="ghost-button sidebar-reveal-button desktop-room-sidebar-reveal"
+        type="button"
+        aria-label="Show sidebar"
+        data-testid="room-sidebar-reveal-button"
+        @click="emit('cycleSidebar')"
+      >
+        <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
+          <path d="M12.5 3.5v13" />
+          <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
+        </svg>
+      </button>
+      <div class="desktop-room-heading">
+        <h3>{{ room.displayName }}</h3>
+        <p class="desktop-room-subtitle">
+          {{ room.kind === "focus" ? "A focused thread linked back to the main room." : "The main place for conversation, tasks, and coordination." }}
+        </p>
+      </div>
     </div>
 
     <div class="desktop-room-header-actions">
@@ -62,9 +78,11 @@
 
 <script setup lang="ts">
 import type { DesktopRoomInfo } from "../../../../../../electron/ipc-types";
+import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
 
 defineProps<{
+  sidebarMode: SidebarMode;
   room: DesktopRoomInfo;
   tabs: RoomTab[];
   activeTab: RoomTabId;
@@ -73,6 +91,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
+  cycleSidebar: [];
   toggleSearch: [];
   toggleActionPanel: [];
   selectTab: [tabId: RoomTabId];

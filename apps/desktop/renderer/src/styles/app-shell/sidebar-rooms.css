@@ -8,7 +8,39 @@
 }
 
 .project-list {
+  position: relative;
   gap: 12px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 2px 8px 0;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scroll-padding-block: 8px var(--scroll-fade-size-active);
+  --scroll-mask-edge: var(--scroll-fade-size);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000,
+    #000 calc(100% - var(--scroll-mask-edge)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000,
+    #000 calc(100% - var(--scroll-mask-edge)),
+    transparent
+  );
+  transition:
+    --scroll-mask-edge var(--duration-normal) var(--ease-out),
+    scrollbar-color var(--duration-fast) var(--ease-out);
+}
+
+.project-list:hover,
+.project-list:focus-within {
+  --scroll-mask-edge: var(--scroll-fade-size-active);
+  scrollbar-color: var(--scrollbar-thumb-hover) var(--scrollbar-track);
 }
 
 .project-group {
@@ -36,6 +68,16 @@
 
 .project-row[data-active="true"] {
   background: rgba(255, 255, 255, 0.07);
+}
+
+.project-group:has(> .project-room-list) > .project-row[data-active="true"] {
+  position: sticky;
+  top: 8px;
+  z-index: 2;
+  background: var(--bg-elevated);
+  box-shadow:
+    0 -18px 0 18px var(--bg),
+    inset 0 0 0 1px var(--border-strong);
 }
 
 .project-row-main {
@@ -100,15 +142,15 @@
 .project-room-list {
   position: relative;
   display: grid;
-  gap: 5px;
-  padding-left: 20px;
+  gap: 3px;
+  padding-left: 18px;
 }
 
 .project-room-list::before {
   content: "";
   position: absolute;
-  top: 8px;
-  bottom: 8px;
+  top: 6px;
+  bottom: 6px;
   left: 8px;
   width: 1px;
   border-radius: 999px;
@@ -158,28 +200,28 @@
 
 .room-focus {
   margin-left: 0;
-  min-height: 44px;
-  padding: 7px 10px 7px 8px;
+  min-height: 38px;
+  padding: 5px 8px 5px 7px;
   border-radius: 12px;
 }
 
 .room-status-dot {
   grid-row: 1 / span 2;
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 999px;
   background: rgba(125, 211, 252, 0.7);
   box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.08);
 }
 
 .room-focus .room-title {
-  font-size: 0.84rem;
-  line-height: 1.2;
+  font-size: 0.78rem;
+  line-height: 1.18;
 }
 
 .room-focus .room-meta {
-  font-size: 0.72rem;
-  line-height: 1.35;
+  font-size: 0.66rem;
+  line-height: 1.25;
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-focus {

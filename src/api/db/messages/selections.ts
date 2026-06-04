@@ -8,6 +8,7 @@ export const messageRowSelection = {
   text: messages.text,
   agent_prompt_kind: messages.agent_prompt_kind,
   source: messages.source,
+  client_message_id: messages.client_message_id,
   timestamp: messages.timestamp,
 };
 

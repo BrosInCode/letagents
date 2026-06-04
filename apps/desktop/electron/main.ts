@@ -2,6 +2,7 @@ import { app, protocol } from "electron";
 
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
+import { configureApplicationMenu } from "./main/menu.js";
 import { attachmentProtocolScheme } from "./main/paths.js";
 import { stopDesktopRoomStream } from "./main/room-stream.js";
 import { createWindow, hasOpenWindows } from "./main/window.js";
@@ -22,6 +23,8 @@ registerDesktopIpcHandlers();
 
 app.whenReady().then(() => {
   protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
+  app.setName("LetAgents");
+  configureApplicationMenu();
   createWindow();
 
   app.on("activate", () => {

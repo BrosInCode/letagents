@@ -57,6 +57,7 @@ export interface RoomMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
+      client_message_id?: string | null;
     }
   ): Promise<Message>;
   rememberRoomParticipantFromMessage(input: {

@@ -1,11 +1,13 @@
 <template>
   <section class="desktop-room-shell" :data-liquid-glass="liquidGlassEnabled" data-testid="desktop-room-shell">
     <DesktopRoomHeader
+      :sidebar-mode="sidebarMode"
       :room="room"
       :tabs="tabs"
       :active-tab="activeTab"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
+      @cycle-sidebar="emit('cycle-sidebar')"
       @toggle-search="toggleSearch"
       @toggle-action-panel="actionPanelOpen = !actionPanelOpen"
       @select-tab="selectTab"
@@ -136,6 +138,7 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
+import type { SidebarMode } from "../types";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RentAnAgentView from "./RentAnAgentView.vue";
@@ -158,6 +161,7 @@ import {
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 
 const props = defineProps<{
+  sidebarMode: SidebarMode;
   room: DesktopRoomInfo;
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
@@ -171,6 +175,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "cycle-sidebar": [];
   "message-sent": [message: DesktopRoomMessage];
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];

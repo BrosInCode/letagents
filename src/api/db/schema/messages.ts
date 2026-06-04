@@ -16,6 +16,7 @@ export const messages = pgTable(
     text: text("text").notNull(),
     agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
+    client_message_id: text("client_message_id"),
     // Rental Room Projection: visibility controls which participants see this message
     visibility: rentalVisibilityEnum("visibility"),
     // Links message to a rental session when sent by/for a rental participant
@@ -26,6 +27,9 @@ export const messages = pgTable(
     pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
     room_idx: index("messages_room_id_idx").on(table.room_id),
     reply_to_idx: index("messages_reply_to_idx").on(table.room_id, table.reply_to_number),
+    client_message_id_idx: uniqueIndex("messages_room_client_message_id_uq")
+      .on(table.room_id, table.client_message_id)
+      .where(sql`${table.client_message_id} IS NOT NULL`),
     auto_prompt_idx: index("messages_auto_prompt_idx")
       .on(table.room_id, table.sender)
       .where(sql`${table.agent_prompt_kind} = 'auto'`),

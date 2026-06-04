@@ -1,6 +1,6 @@
 import { ref, type Ref } from "vue";
 import type { DesktopAccountRoomEntry, DesktopRoomSnapshot } from "../../../electron/ipc-types";
-import type { SidebarEntry } from "../components/desktop/types";
+import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import {
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
@@ -125,6 +125,37 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     }
   }
 
+  async function archiveSidebarRoom(entry: RoomEntry): Promise<void> {
+    if (entry.kind !== "parent" || !entry.roomIdentifier) return;
+    const roomIdentifier = entry.roomIdentifier;
+    const displayName = entry.title || roomIdentifier;
+    const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+    const isAccountRoom = [...options.accountRooms.value, ...options.settingsAccountRooms.value].some(
+      (room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedRoomIdentifier
+    );
+
+    settingsRoomActionBusyKey.value = `archive:${roomIdentifier}`;
+    settingsFeedback.value = { message: `Archiving ${displayName}...`, state: "info" };
+    try {
+      if (isAccountRoom) {
+        await window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { archived: true });
+      }
+      forgetRecentRootRoom(roomIdentifier);
+      await options.refreshAccountRooms();
+      settingsFeedback.value = {
+        message: isAccountRoom ? `${displayName} archived.` : `${displayName} hidden from recent rooms.`,
+        state: "success",
+      };
+    } catch (error) {
+      settingsFeedback.value = {
+        message: error instanceof Error ? error.message : `Could not archive ${displayName}.`,
+        state: "error",
+      };
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
   async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
     const confirmation = window.prompt(
       `Delete ${room.displayName}? This removes the room and its focus rooms for everyone.\n\nType the room identifier to confirm:`,
@@ -180,6 +211,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   }
 
   return {
+    archiveSidebarRoom,
     deleteAccountRoom,
     leaveAccountRoom,
     openAccountRoomFromSettings,

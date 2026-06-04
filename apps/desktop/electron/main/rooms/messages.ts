@@ -1,8 +1,21 @@
 import type {
+  DesktopLocalChatSyncResult,
   DesktopRoomMessagesPage,
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
+import {
+  addLocalChatMessage,
+  claimUnsyncedLocalChatMessages,
+  getLocalChatMessagesBefore,
+  getSyncedCloudMessageId,
+  markLocalChatMessageSynced,
+} from "./messages/local-store.js";
+import {
+  isLocalChatStorageEnabled,
+  readChatStorageSettings,
+  setChatStorageMode,
+} from "../chat-storage/settings.js";
 import { roomMessageHistoryPageSize } from "../paths.js";
 import {
   mapRoomMessagePayload,
@@ -29,6 +42,21 @@ export async function sendDesktopRoomMessage(
   const storedAuth = await readStoredAuth();
   const sender =
     storedAuth.account?.displayName || storedAuth.account?.login || "Desktop";
+  if (await isLocalChatStorageEnabled()) {
+    if (attachments.length > 0) {
+      throw new Error("Local chat storage does not support attachments yet.");
+    }
+    const message = await addLocalChatMessage(trimmedRoomIdentifier, {
+      sender,
+      text: trimmedText,
+      reply_to: replyTo || null,
+      source: "browser",
+    });
+    return {
+      message: mapRoomMessagePayload(message),
+    };
+  }
+
   const message = await apiFetch<RoomMessagePayload>(
     `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/messages`,
     {
@@ -62,6 +90,18 @@ export async function getDesktopRoomMessagesBefore(
     return { messages: [], hasOlder: false };
   }
 
+  if (await isLocalChatStorageEnabled()) {
+    const page = await getLocalChatMessagesBefore(
+      trimmedRoomIdentifier,
+      trimmedBeforeMessageId,
+      { limit },
+    );
+    return {
+      messages: page.messages.map(mapRoomMessagePayload),
+      hasOlder: page.has_more,
+    };
+  }
+
   const page = await apiFetch<{
     messages?: RoomMessagePayload[];
     has_older?: boolean;
@@ -78,5 +118,74 @@ export async function getDesktopRoomMessagesBefore(
       )
       .map(mapRoomMessagePayload),
     hasOlder: Boolean(page.has_older ?? page.has_more),
+  };
+}
+
+export { readChatStorageSettings, setChatStorageMode };
+
+export async function syncDesktopLocalChatRoom(
+  roomIdentifier: string,
+): Promise<DesktopLocalChatSyncResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before syncing local chat.");
+  }
+
+  const localMessages = await claimUnsyncedLocalChatMessages(trimmedRoomIdentifier);
+  const cloudIdsByLocalId = new Map<string, string>();
+  let syncedCount = 0;
+  let skippedCount = 0;
+
+  for (const localMessage of localMessages) {
+    if (localMessage.attachments?.length) {
+      skippedCount += 1;
+      continue;
+    }
+    const replyToCloudId = localMessage.reply_to?.id
+      ? cloudIdsByLocalId.get(localMessage.reply_to.id) ||
+        await getSyncedCloudMessageId({
+          roomId: trimmedRoomIdentifier,
+          localMessageId: localMessage.reply_to.id,
+        })
+      : null;
+    if (localMessage.reply_to?.id && !replyToCloudId) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const cloudMessage = await apiFetch<RoomMessagePayload>(
+      `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-LetAgents-Desktop-Client": "1",
+        },
+        body: JSON.stringify({
+          sender: localMessage.sender,
+          text: localMessage.text,
+          reply_to: replyToCloudId,
+          client_message_id: localMessage.sync_key,
+        }),
+      },
+    );
+
+    if (cloudMessage.id) {
+      cloudIdsByLocalId.set(localMessage.id, cloudMessage.id);
+      await markLocalChatMessageSynced({
+        roomId: trimmedRoomIdentifier,
+        localMessageId: localMessage.id,
+        cloudMessageId: cloudMessage.id,
+      });
+      syncedCount += 1;
+    } else {
+      skippedCount += 1;
+    }
+  }
+
+  return {
+    roomIdentifier: trimmedRoomIdentifier,
+    syncedCount,
+    skippedCount,
   };
 }

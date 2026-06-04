@@ -24,29 +24,69 @@ import type {
 } from "../types.js";
 import { nextRoomScopedNumber, parseScopedId } from "../utils.js";
 import {
+  messageRowSelection,
   messageAttachmentUploadSelection,
   messageReplySelection,
 } from "./selections.js";
 
-export async function addMessage(
+function normalizeClientMessageId(value?: string | null): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, 240) : null;
+}
+
+export interface AddMessageOptions {
+  source?: string;
+  agent_prompt_kind?: AgentPromptKind | null;
+  reply_to_message_id?: string | null;
+  attachments?: NormalizedMessageAttachmentReference[];
+  client_message_id?: string | null;
+}
+
+export interface AddMessageResult {
+  message: Message;
+  created: boolean;
+}
+
+export async function addMessageWithCreateStatus(
   roomId: string,
   sender: string,
   text: string,
-  options?: {
-    source?: string;
-    agent_prompt_kind?: AgentPromptKind | null;
-    reply_to_message_id?: string | null;
-    attachments?: NormalizedMessageAttachmentReference[];
-  },
-): Promise<Message> {
+  options?: AddMessageOptions,
+): Promise<AddMessageResult> {
   const promptKind = options?.agent_prompt_kind ?? null;
   const attachmentRefs = options?.attachments ?? [];
+  const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   return db.transaction(async (tx) => {
     let replyReference: MessageReplyReference | null = null;
     const replyToNumber =
       options?.reply_to_message_id
         ? parseScopedId(options.reply_to_message_id, "msg")
         : null;
+
+    if (clientMessageId) {
+      const [existingMessage] = await tx
+        .select(messageRowSelection)
+        .from(messages)
+        .where(and(eq(messages.room_id, roomId), eq(messages.client_message_id, clientMessageId)))
+        .limit(1);
+
+      if (existingMessage) {
+        let existingReplyReference: MessageReplyReference | null = null;
+        if (existingMessage.reply_to_number) {
+          const [replyTarget] = await tx
+            .select(messageReplySelection)
+            .from(messages)
+            .where(and(eq(messages.room_id, roomId), eq(messages.number, existingMessage.reply_to_number)))
+            .limit(1);
+          existingReplyReference = replyTarget ? toMessageReplyReference(replyTarget) : null;
+        }
+        return {
+          message: toMessageWithReply(existingMessage, existingReplyReference),
+          created: false,
+        };
+      }
+    }
 
     if (options?.reply_to_message_id && !replyToNumber) {
       throw new Error("reply_to must be a valid message id");
@@ -78,10 +118,44 @@ export async function addMessage(
       text,
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
+      client_message_id: clientMessageId,
       timestamp: new Date().toISOString(),
     };
 
-    await tx.insert(messages).values(message);
+    let createdMessage = message;
+    if (clientMessageId) {
+      const [insertedMessage] = await tx
+        .insert(messages)
+        .values(message)
+        .onConflictDoNothing()
+        .returning(messageRowSelection);
+      if (!insertedMessage) {
+        const [existingMessage] = await tx
+          .select(messageRowSelection)
+          .from(messages)
+          .where(and(eq(messages.room_id, roomId), eq(messages.client_message_id, clientMessageId)))
+          .limit(1);
+        if (!existingMessage) {
+          throw new Error("message idempotency conflict could not be resolved");
+        }
+        let existingReplyReference: MessageReplyReference | null = null;
+        if (existingMessage.reply_to_number) {
+          const [replyTarget] = await tx
+            .select(messageReplySelection)
+            .from(messages)
+            .where(and(eq(messages.room_id, roomId), eq(messages.number, existingMessage.reply_to_number)))
+            .limit(1);
+          existingReplyReference = replyTarget ? toMessageReplyReference(replyTarget) : null;
+        }
+        return {
+          message: toMessageWithReply(existingMessage, existingReplyReference),
+          created: false,
+        };
+      }
+      createdMessage = insertedMessage;
+    } else {
+      await tx.insert(messages).values(message);
+    }
     let attachmentRows: MessageAttachmentRow[] = [];
     if (attachmentRefs.length > 0) {
       const uploadIds = attachmentRefs.map((attachment) => attachment.upload_id);
@@ -89,15 +163,15 @@ export async function addMessage(
         .update(message_attachment_uploads)
         .set({
           status: "attached",
-          attached_message_number: message.number,
-          attached_at: message.timestamp,
+          attached_message_number: createdMessage.number,
+          attached_at: createdMessage.timestamp,
         })
         .where(
           and(
             eq(message_attachment_uploads.room_id, roomId),
             inArray(message_attachment_uploads.upload_id, uploadIds),
             eq(message_attachment_uploads.status, "pending"),
-            sql`${message_attachment_uploads.expires_at} > ${message.timestamp}`,
+            sql`${message_attachment_uploads.expires_at} > ${createdMessage.timestamp}`,
           ),
         )
         .returning(messageAttachmentUploadSelection);
@@ -112,7 +186,7 @@ export async function addMessage(
       assertAttachmentTotalByteSize(orderedUploads);
       attachmentRows = orderedUploads.map((attachment, index) => ({
         room_id: roomId,
-        message_number: message.number,
+        message_number: createdMessage.number,
         attachment_number: index + 1,
         upload_id: attachment.upload_id,
         filename: attachment.filename,
@@ -121,13 +195,13 @@ export async function addMessage(
         storage_provider: attachment.storage_provider,
         bucket: attachment.bucket,
         object_key: attachment.object_key,
-        created_at: message.timestamp,
+        created_at: createdMessage.timestamp,
       }));
     }
     if (attachmentRows.length > 0) {
       await tx.insert(message_attachments).values(attachmentRows);
     }
-    if (isPromptOnlyAgentMessage(message.text, promptKind)) {
+    if (isPromptOnlyAgentMessage(createdMessage.text, promptKind)) {
       await tx
         .delete(messages)
         .where(
@@ -136,11 +210,24 @@ export async function addMessage(
             eq(messages.sender, sender),
             eq(messages.agent_prompt_kind, "auto"),
             sql`BTRIM(${messages.text}) = ''`,
-            sql`${messages.number} < ${message.number}`,
+            sql`${messages.number} < ${createdMessage.number}`,
           ),
         );
     }
 
-    return toMessageWithReply(message, replyReference, attachmentRows.map(toMessageAttachment));
+    return {
+      message: toMessageWithReply(createdMessage, replyReference, attachmentRows.map(toMessageAttachment)),
+      created: true,
+    };
   });
+}
+
+export async function addMessage(
+  roomId: string,
+  sender: string,
+  text: string,
+  options?: AddMessageOptions,
+): Promise<Message> {
+  const result = await addMessageWithCreateStatus(roomId, sender, text, options);
+  return result.message;
 }

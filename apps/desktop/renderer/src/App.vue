@@ -30,54 +30,71 @@
     />
   </main>
 
-  <main v-else class="desktop-shell" :data-sidebar-mode="sidebarMode" data-testid="desktop-shell">
+  <main
+    v-else
+    class="desktop-shell"
+    :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
+    data-testid="desktop-shell"
+  >
     <DesktopSidebar
+      v-if="!isSettingsSurface && sidebarMode !== 'hidden'"
       :sidebar-mode="sidebarMode"
       :active-entry="activeEntry"
       :primary-room="currentParentRoom"
       :project-entries="projectEntries"
-      :system-entries="systemEntries"
-      :workers-entry="workersEntry"
       :settings-entry="settingsEntry"
-      :diagnostics-entry="diagnosticsEntry"
-      :collapsed-sections="collapsedSections"
+      :rooms-collapsed="roomsCollapsed"
       :collapsed-projects="collapsedProjects"
       @cycle-sidebar="cycleSidebar"
       @new-room="selectNewRoomEntry"
+      @archive-room="archiveSidebarRoom"
       @select-entry="selectSidebarEntry"
-      @toggle-section="toggleSection"
       @toggle-project="toggleProject"
+      @toggle-rooms-collapsed="toggleRoomsCollapsed"
     />
+    <div
+      v-if="showSidebarPeek"
+      class="sidebar-peek-zone"
+      data-testid="sidebar-peek-zone"
+      @pointerenter="openSidebarPeek"
+    ></div>
+    <Transition name="sidebar-peek">
+      <div
+        v-if="sidebarPeekOpen"
+        class="sidebar-peek-panel"
+        data-testid="sidebar-peek-panel"
+        @pointerleave="closeSidebarPeek"
+      >
+        <DesktopSidebar
+          sidebar-mode="expanded"
+          :active-entry="activeEntry"
+          :primary-room="currentParentRoom"
+          :project-entries="projectEntries"
+          :settings-entry="settingsEntry"
+          :rooms-collapsed="roomsCollapsed"
+          :collapsed-projects="collapsedProjects"
+          @cycle-sidebar="closeSidebarPeek"
+          @new-room="selectNewRoomEntry"
+          @archive-room="archiveSidebarRoom"
+          @select-entry="selectSidebarEntry"
+          @toggle-project="toggleProject"
+          @toggle-rooms-collapsed="toggleRoomsCollapsed"
+        />
+      </div>
+    </Transition>
 
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room'"
+        v-if="activeEntry.type !== 'room' && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
         @cycle-sidebar="cycleSidebar"
-        @show-system="activeEntry = settingsEntry"
+        @show-system="openSettingsSurface"
         @refresh="refresh"
       />
 
-      <McpInstallOnboardingView
-        v-if="showMcpInstaller"
-        :state="mcpInstallState!"
-        :selected-target-ids="selectedMcpTargetIds"
-        :wizard-step="mcpWizardStep"
-        :busy="mcpInstallBusy || loading"
-        :feedback="mcpInstallFeedback"
-        :can-install="setupApiAvailable"
-        @select-target="selectMcpTarget"
-        @select-all-targets="selectAllMcpTargets"
-        @clear-target-selection="clearMcpTargetSelection"
-        @continue="continueMcpOnboarding"
-        @back="goBackMcpOnboarding"
-        @install-targets="installSelectedMcpTargets"
-        @finish="completeMcpOnboarding"
-      />
-
-      <template v-else-if="activeEntry.type === 'room'">
+      <template v-if="activeEntry.type === 'room'">
         <AuthOnboardingView
           v-if="selectedNeedsAccess"
           :access="selectedAccess"
@@ -94,6 +111,7 @@
         <DesktopRoomShell
           v-else
           :key="activeEntry.id"
+          :sidebar-mode="sidebarMode"
           :room="selectedRoomInfo"
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
@@ -108,43 +126,53 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRefreshRoom"
+          @cycle-sidebar="cycleSidebar"
         />
       </template>
 
-      <RepoStatusView
-        v-else-if="activeEntry.id === 'system:repos'"
-        :repo-status="repoStatusValue"
-      />
-
-      <WorkerStatusView
-        v-else-if="activeEntry.id === 'system:workers'"
-        :workers="workers"
-      />
-
       <SettingsView
-        v-else-if="activeEntry.id === 'system:settings'"
+        v-else
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :auth-status="authStatus"
         :busy="loading || authBusy"
+        :chat-storage-busy="chatStorageBusy"
+        :chat-storage-feedback="chatStorageFeedback"
+        :chat-storage-settings="chatStorageSettings"
+        :chat-storage-available="chatStorageAvailable"
+        :diagnostics-notes="diagnostics?.notes || []"
         :feedback="settingsFeedback"
-        :mcp-install-state="mcpInstallState"
+        :initial-pane="settingsPaneForActiveEntry"
+        :mcp-install-busy="mcpInstallBusy || loading"
+        :mcp-install-feedback="mcpInstallFeedback"
+        :mcp-install-state="visibleMcpInstallState"
+        :mcp-wizard-step="mcpWizardStep"
+        :repo-status="repoStatusValue"
         :room-action-busy-key="settingsRoomActionBusyKey"
+        :selected-mcp-target-ids="selectedMcpTargetIds"
+        :selected-room-identifier="selectedRoomIdentifier"
+        :setup-api-available="setupApiAvailable"
+        :workers="workers"
+        @back-mcp="goBackMcpOnboarding"
+        @back-to-app="activeEntry = currentParentRoom"
+        @clear-mcp-target-selection="clearMcpTargetSelection"
+        @continue-mcp="continueMcpOnboarding"
         @delete-room="deleteAccountRoom"
+        @finish-mcp="completeMcpOnboarding"
+        @install-mcp-targets="installSelectedMcpTargets"
         @leave-room="leaveAccountRoom"
         @open-room="openAccountRoomFromSettings"
-        @open-setup="activeEntry = setupEntry"
         @restore-room="restoreAccountRoom"
+        @select-all-mcp-targets="selectAllMcpTargets"
+        @select-mcp-target="selectMcpTarget"
+        @set-chat-storage-mode="setChatStorageMode"
+        @sync-local-chat="syncLocalChat"
         @toggle-pin-room="toggleAccountRoomPin"
         @refresh="refreshSettings"
         @sign-out="signOut"
         @start-auth="startAuthFlow"
       />
 
-      <DiagnosticsView
-        v-else
-        :notes="diagnostics?.notes || []"
-      />
     </section>
 
     <DesktopNewRoomModal
@@ -162,11 +190,12 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
   DesktopAuthStatus,
+  DesktopChatStorageSettings,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopRoomSnapshot,
@@ -179,13 +208,10 @@ import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
-import McpInstallOnboardingView from "./components/desktop/content/McpInstallOnboardingView.vue";
-import DiagnosticsView from "./components/desktop/content/DiagnosticsView.vue";
-import RepoStatusView from "./components/desktop/content/RepoStatusView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
-import WorkerStatusView from "./components/desktop/content/WorkerStatusView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
+import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
@@ -193,13 +219,7 @@ import { useDesktopNavigationState } from "./composables/useDesktopNavigationSta
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
-import {
-  diagnosticsEntry,
-  settingsEntry,
-  setupEntry,
-  systemEntries,
-  workersEntry,
-} from "./domain/desktop-navigation";
+import { settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   readStoredRecentRootRooms,
@@ -219,6 +239,10 @@ const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedR
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
+const chatStorageAvailable = ref(true);
+const chatStorageBusy = ref(false);
+const chatStorageFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const mcpInstallState = ref<DesktopMcpInstallState | null>(null);
 const selectedMcpTargetIds = ref<DesktopMcpInstallTargetId[]>([]);
@@ -230,7 +254,6 @@ const firstRunStage = ref<FirstRunWizardStage>("mcp");
 const {
   activeEntry,
   collapsedProjects,
-  collapsedSections,
   currentParentRoom,
   cycleSidebar,
   focusRooms,
@@ -242,6 +265,7 @@ const {
   rememberRootRoomSnapshot,
   repoName,
   resolveSelectedRoomIdentifier,
+  roomsCollapsed,
   selectSidebarEntry,
   selectedAccess,
   selectedFocusRooms,
@@ -250,7 +274,7 @@ const {
   selectedRoomInfo,
   sidebarMode,
   toggleProject,
-  toggleSection,
+  toggleRoomsCollapsed,
 } = useDesktopNavigationState({
   accountRooms,
   activeEntryStorageKey,
@@ -264,6 +288,33 @@ const {
 });
 
 let unsubscribeRoomStream: (() => void) | null = null;
+let unsubscribeOpenSettings: (() => void) | null = null;
+
+const isSettingsSurface = computed(() => activeEntry.value.type === "system");
+const sidebarPeekOpen = ref(false);
+const showSidebarPeek = computed(() => !isSettingsSurface.value && sidebarMode.value === "hidden");
+
+const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
+  if (activeEntry.value.type !== "system") return "storage:chat";
+  if (activeEntry.value.id === "system:setup") return "system:setup";
+  if (activeEntry.value.id === "system:repos") return "system:runtime";
+  if (activeEntry.value.id === "system:workers") return "system:agents";
+  if (activeEntry.value.id === "system:diagnostics") return "system:diagnostics";
+  return "storage:chat";
+});
+
+function openSettingsSurface(): void {
+  activeEntry.value = settingsEntry;
+}
+
+function openSidebarPeek(): void {
+  if (!showSidebarPeek.value) return;
+  sidebarPeekOpen.value = true;
+}
+
+function closeSidebarPeek(): void {
+  sidebarPeekOpen.value = false;
+}
 
 const {
   clearLiveMetadataRefreshInterval,
@@ -346,6 +397,7 @@ const {
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
 });
 const {
+  archiveSidebarRoom,
   deleteAccountRoom,
   leaveAccountRoom,
   openAccountRoomFromSettings,
@@ -387,7 +439,6 @@ const {
   selectMcpTarget,
   setupApiAvailable,
   showFirstRunGate,
-  showMcpInstaller,
   visibleMcpInstallState,
 } = useDesktopSetupOnboarding({
   activeEntry,
@@ -407,6 +458,115 @@ const {
   setupLoadError,
 });
 
+function getChatStorageBridge(): typeof window.letagentsDesktop.chatStorage | null {
+  const bridge = window.letagentsDesktop.chatStorage;
+  if (!bridge) {
+    chatStorageAvailable.value = false;
+    chatStorageFeedback.value = {
+      state: "error",
+      message: "Restart LetAgents Desktop to enable chat storage controls.",
+    };
+    return null;
+  }
+  chatStorageAvailable.value = true;
+  return bridge;
+}
+
+async function loadChatStorageSettings(): Promise<void> {
+  const bridge = getChatStorageBridge();
+  if (!bridge) return;
+  try {
+    chatStorageSettings.value = await bridge.getSettings();
+  } catch (error) {
+    chatStorageFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Chat storage settings could not be loaded.",
+    };
+  }
+}
+
+async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
+  await window.letagentsDesktop.room.stopStream();
+  selectedSnapshot.value = null;
+  const rootRoomIdentifier = selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier || null;
+  if (rootRoomIdentifier) {
+    const nextRootSnapshot = await window.letagentsDesktop.room.getSnapshot(rootRoomIdentifier);
+    rootRoomSnapshot.value = nextRootSnapshot;
+    selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
+    rememberRootRoomSnapshot(nextRootSnapshot);
+    await refreshSelectedSnapshot(nextRootSnapshot);
+  }
+  if (selectedRoomIdentifier.value) {
+    await syncSelectedRoomStream(selectedRoomIdentifier.value);
+  }
+}
+
+async function setChatStorageMode(mode: DesktopChatStorageSettings["mode"]): Promise<void> {
+  chatStorageBusy.value = true;
+  chatStorageFeedback.value = null;
+  try {
+    const bridge = getChatStorageBridge();
+    if (!bridge) return;
+    chatStorageSettings.value = await bridge.setMode(mode);
+    chatStorageFeedback.value = {
+      state: "success",
+      message:
+        mode === "local"
+          ? "Local chat storage is on. New messages stay on this computer."
+          : "Cloud chat storage is on. Local history remains local until you sync it.",
+    };
+    await refreshActiveRoomAfterChatStorageChange();
+  } catch (error) {
+    chatStorageFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Chat storage mode could not be updated.",
+    };
+  } finally {
+    chatStorageBusy.value = false;
+  }
+}
+
+async function syncLocalChat(): Promise<void> {
+  const roomIdentifier = selectedRoomIdentifier.value || selectedRootRoomIdentifier.value;
+  if (!roomIdentifier) {
+    chatStorageFeedback.value = {
+      state: "error",
+      message: "Open a room before syncing local chat.",
+    };
+    return;
+  }
+  chatStorageBusy.value = true;
+  chatStorageFeedback.value = null;
+  try {
+    const bridge = getChatStorageBridge();
+    if (!bridge) return;
+    const result = await bridge.syncLocalRoom(roomIdentifier);
+    chatStorageFeedback.value = {
+      state: result.skippedCount > 0 ? "info" : "success",
+      message:
+        result.skippedCount > 0
+          ? `Synced ${result.syncedCount} messages. ${result.skippedCount} messages were skipped.`
+          : `Synced ${result.syncedCount} local messages to cloud.`,
+    };
+  } catch (error) {
+    chatStorageFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Local chat could not be synced.",
+    };
+  } finally {
+    chatStorageBusy.value = false;
+  }
+}
+
 watch(
   () => activeEntry.value,
   async (nextEntry, previousEntry) => {
@@ -416,6 +576,12 @@ watch(
     await refreshSelectedSnapshot(rootRoomSnapshot.value);
   }
 );
+
+watch(showSidebarPeek, (enabled) => {
+  if (!enabled) {
+    closeSidebarPeek();
+  }
+});
 
 watch(
   () => selectedRootRoomIdentifier.value,
@@ -453,6 +619,8 @@ watch(
 
 onMounted(() => {
   unsubscribeRoomStream = window.letagentsDesktop.room.onStreamEvent(handleRoomStreamEvent);
+  unsubscribeOpenSettings = window.letagentsDesktop.ui?.onOpenSettings(openSettingsSurface) || null;
+  void loadChatStorageSettings();
   void loadFirstRunSetup();
 });
 
@@ -462,6 +630,8 @@ onBeforeUnmount(() => {
   clearLiveMetadataRefreshInterval();
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
+  unsubscribeOpenSettings?.();
+  unsubscribeOpenSettings = null;
   void window.letagentsDesktop.room.stopStream();
 });
 </script>

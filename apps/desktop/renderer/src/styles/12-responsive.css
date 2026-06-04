@@ -161,7 +161,8 @@
   }
 
   .settings-section-header,
-  .settings-room-header,
+  .settings-room-detail-header,
+  .settings-room-detail-grid,
   .settings-summary-grid {
     grid-template-columns: 1fr;
   }
