@@ -97,6 +97,14 @@ export function registerCreateMessageRoute(
         sessionAccount: req.sessionAccount,
         timestamp: message.timestamp,
       });
+      if (req.sessionAccount && (source === "browser" || source === "agent")) {
+        await deps.rememberAccountRoom({
+          accountId: req.sessionAccount.account_id,
+          roomId: project.id,
+          displayName: project.display_name,
+          source: "open_room",
+        });
+      }
       res.status(201).json({
         ...message,
         room_id: project.id,

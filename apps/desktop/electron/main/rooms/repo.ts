@@ -5,7 +5,7 @@ import type {
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
 } from "../../ipc-types.js";
-import { resolveRoomIdentifierFromPath } from "../../repo-status.js";
+import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
 import { apiFetch } from "../auth.js";
 import { focusMainWindow } from "../window.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
@@ -28,6 +28,7 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
     return {
       canceled: true,
       repoPath: null,
+      repoStatus: null,
       roomIdentifier: null,
       source: null,
       snapshot: null,
@@ -38,9 +39,11 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
 
   const selectedPath = result.filePaths[0];
   const resolved = await resolveRoomIdentifierFromPath(selectedPath);
+  const repoPath = resolved.repoRoot || selectedPath;
   return {
     canceled: false,
-    repoPath: resolved.repoRoot || selectedPath,
+    repoPath,
+    repoStatus: await buildRepoStatus(repoPath),
     roomIdentifier: resolved.roomIdentifier,
     source: resolved.source,
     snapshot: await fetchRoomSnapshot(resolved.roomIdentifier),

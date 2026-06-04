@@ -45,7 +45,7 @@
         </span>
       </button>
       <Transition name="sidebar-reveal">
-        <div v-if="!roomsCollapsed" ref="projectListEl" class="project-list">
+        <div v-if="!roomsCollapsed" class="project-list">
           <article
             v-for="project in projectEntries"
             :key="project.id"
@@ -55,6 +55,7 @@
             <button
               class="project-row"
               :data-active="activeEntry.id === project.parent.id"
+              :data-unread="project.parent.hasUnread"
               type="button"
               :data-testid="`room-parent-${project.parent.id}`"
               @click="$emit('select-entry', project.parent)"
@@ -65,7 +66,15 @@
                   <House />
                 </span>
                 <span class="project-copy">
-                  <span class="project-name">{{ project.roomName }}</span>
+                  <span class="room-title-line">
+                    <span class="project-name">{{ project.roomName }}</span>
+                    <span
+                      v-if="project.parent.hasUnread"
+                      class="room-unread-dot"
+                      aria-label="Unread messages"
+                      title="Unread messages"
+                    ></span>
+                  </span>
                   <small>
                     {{ project.focusRooms.length ? `${project.focusRooms.length} focus ${project.focusRooms.length === 1 ? "room" : "rooms"}` : project.parent.meta }}
                   </small>
@@ -89,14 +98,21 @@
                   :key="focusRoom.id"
                   class="room-row room-focus"
                   :data-active="activeEntry.id === focusRoom.id"
+                  :data-unread="focusRoom.hasUnread"
                   type="button"
                   :data-testid="`focus-room-${focusRoom.id}`"
                   @click="$emit('select-entry', focusRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, focusRoom)"
                 >
-                  <span class="room-status-dot" aria-hidden="true" />
-                  <span class="room-title">{{ focusRoom.title }}</span>
-                  <small class="room-meta">{{ focusRoom.meta }}</small>
+                  <span class="room-title-line">
+                    <span class="room-title">{{ focusRoom.title }}</span>
+                    <span
+                      v-if="focusRoom.hasUnread"
+                      class="room-unread-dot"
+                      aria-label="Unread messages"
+                      title="Unread messages"
+                    ></span>
+                  </span>
                 </button>
               </div>
             </Transition>
@@ -189,7 +205,7 @@
 
 <script setup lang="ts">
 import { Archive, ChevronRight, Copy, House, Plus, Settings } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
 
 const props = defineProps<{
@@ -219,13 +235,10 @@ type RoomContextMenu = {
 };
 
 const roomContextMenu = ref<RoomContextMenu | null>(null);
-const projectListEl = ref<HTMLElement | null>(null);
 
 const totalRoomCount = computed(() =>
   props.projectEntries.reduce((total, project) => total + 1 + project.focusRooms.length, 0)
 );
-
-const firstProjectId = computed(() => props.projectEntries[0]?.id || null);
 
 const contextProject = computed(() => {
   const projectId = roomContextMenu.value?.projectId;
@@ -238,16 +251,6 @@ const canArchiveContextRoom = computed(() => {
   if (!entry || entry.kind !== "parent" || !entry.roomIdentifier) return false;
   return entry.id !== props.primaryRoom.id;
 });
-
-watch(
-  firstProjectId,
-  async (nextProjectId, previousProjectId) => {
-    if (!nextProjectId || !previousProjectId || nextProjectId === previousProjectId) return;
-    await nextTick();
-    projectListEl.value?.scrollTo({ top: 0, behavior: "auto" });
-  },
-  { flush: "post" }
-);
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
   const menuWidth = 228;

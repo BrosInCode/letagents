@@ -19,6 +19,7 @@ function createDeps() {
     shouldIncludePromptOnlyMessages: () => false,
     emitProjectMessage: unused,
     rememberRoomParticipantFromMessage: unused,
+    rememberAccountRoom: async () => undefined,
   };
 }
 

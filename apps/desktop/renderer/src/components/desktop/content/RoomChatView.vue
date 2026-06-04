@@ -16,19 +16,36 @@
       <RoomMessageViewport
         :active-search-message-id="activeSearchMessageId"
         :has-older-messages="hasOlderMessages"
-        :initial-scroll-top="initialScrollTop"
         :loading-older-messages="loadingOlderMessages"
         :messages="messages"
         :room-identifier="roomIdentifier"
+        :room-loading="roomLoading"
         :search-query="searchQuery"
         @load-older="emit('load-older')"
         @open-agent="openAgentModal"
         @open-image="openImageViewer"
         @reply="startReply"
-        @scroll-position="emit('scroll-position', $event)"
       />
 
+      <div
+        v-if="roomLoading"
+        class="desktop-composer desktop-composer-skeleton"
+        data-testid="desktop-composer-loading"
+        aria-label="Loading composer"
+      >
+        <div class="desktop-composer-skeleton-top" aria-hidden="true">
+          <span></span>
+          <span></span>
+        </div>
+        <div class="desktop-composer-skeleton-input" aria-hidden="true"></div>
+        <div class="desktop-composer-skeleton-footer" aria-hidden="true">
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+
       <RoomComposer
+        v-else
         :attaching="attaching"
         :attachment-drafts="attachmentDrafts"
         :attachment-error="attachmentError"
@@ -37,6 +54,7 @@
         :pending-attachment-drafts="pendingAttachmentDrafts"
         :reply-to="replyTo"
         :room-identifier="roomIdentifier"
+        :room-loading="roomLoading"
         :send-error="sendError"
         :sending="sending"
         @clear-reply="replyTo = null"
@@ -78,6 +96,7 @@ import { useRoomImages } from "./room-chat/useRoomImages";
 const props = defineProps<{
   messages: DesktopRoomMessage[];
   roomIdentifier: string | null;
+  roomLoading: boolean;
   sending: boolean;
   sendError: string | null;
   hasOlderMessages: boolean;
@@ -88,7 +107,6 @@ const props = defineProps<{
   tasks: DesktopTaskSummary[];
   searchQuery: string;
   activeSearchMessageId: string | null;
-  initialScrollTop?: number | null;
   initialDraft?: string;
 }>();
 
@@ -98,7 +116,6 @@ const emit = defineEmits<{
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
-  "scroll-position": [scrollTop: number | null];
   "draft-change": [text: string];
 }>();
 

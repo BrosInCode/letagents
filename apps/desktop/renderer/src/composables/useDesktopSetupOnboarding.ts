@@ -4,14 +4,17 @@ import type {
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopRoomSnapshot,
+  RepoStatus,
 } from "../../../electron/ipc-types";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "../components/desktop/setup/types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { setupEntry } from "../domain/desktop-navigation";
 import { defaultMcpTargetSelection, fallbackMcpInstallState } from "../domain/mcp-install";
-import { rootPathLabel } from "../domain/sidebar-rooms";
+import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 
 interface OpenRoomOptions {
+  displayName?: string | null;
+  kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
   meta?: string | null;
 }
@@ -30,6 +33,7 @@ interface DesktopSetupOnboardingOptions {
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
   pinnedRoom: ComputedRef<RoomEntry>;
   refresh: () => Promise<void>;
+  repoStatus: Ref<RepoStatus | null>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
   setupLoadError: Ref<string | null>;
 }
@@ -138,9 +142,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         options.authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
         return;
       }
+      options.repoStatus.value = result.repoStatus;
+      const folderLabel = rootPathLabel(result.repoPath) || result.repoPath || "Selected project folder";
       options.openRoomSnapshot(result.snapshot, {
+        displayName: folderLabel,
+        kind: "project",
         rootPath: result.repoPath,
-        meta: rootPathLabel(result.repoPath) || result.source || null,
+        meta: result.repoStatus?.branch || rootPathLabel(result.repoPath) || result.source || null,
       });
       const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
       options.authFeedback.value = result.warning
@@ -163,7 +171,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.setupLoadError.value = null;
     try {
       const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
-      options.openRoomSnapshot(snapshot, { meta: snapshot.room?.code || "Joined room" });
+      options.openRoomSnapshot(snapshot, {
+        kind: "room",
+        rootPath: null,
+        meta: snapshot.room?.code || "Joined room",
+      });
       options.authFeedback.value = snapshot.access.status === "ready"
         ? "Room selected. Open it when you are ready."
         : snapshot.access.message;

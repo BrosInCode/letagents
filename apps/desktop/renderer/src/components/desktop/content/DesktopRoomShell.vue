@@ -51,6 +51,7 @@
         key="chat"
         :messages="visibleMessages"
         :room-identifier="room.identifier"
+        :room-loading="roomLoading"
         :sending="sendingMessage"
         :send-error="sendError"
         :has-older-messages="hasOlderMessages"
@@ -61,14 +62,12 @@
         :tasks="tasks"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
-        :initial-scroll-top="chatScrollTop"
         :initial-draft="chatDraftText"
         @send-message="sendRoomMessage"
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
         @open-reasoning="openReasoningInspector"
         @open-agent-reasoning-fallback="openAgentReasoningFallback"
-        @scroll-position="chatScrollTop = $event"
         @draft-change="chatDraftText = $event"
       />
 
@@ -162,6 +161,7 @@ import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
+  roomLoading: boolean;
   room: DesktopRoomInfo;
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
@@ -211,7 +211,6 @@ const {
   sendError,
   hasOlderMessages,
   loadingOlderMessages,
-  chatScrollTop,
   chatDraftText,
   ownMessageIds,
   visibleMessages,
@@ -273,10 +272,14 @@ watchRoomNotifications({
 });
 
 const tabs = computed<RoomTab[]>(() => [
-  { id: "chat", label: "Chat", count: visibleMessages.value.length },
-  { id: "board", label: "Board", count: props.tasks.length },
-  { id: "activity", label: "Activity", count: visibleParticipantCount.value + props.participantHiddenCount },
-  { id: "rooms", label: "Rooms", count: props.focusRooms.length },
+  { id: "chat", label: "Chat", count: props.roomLoading ? null : visibleMessages.value.length },
+  { id: "board", label: "Board", count: props.roomLoading ? null : props.tasks.length },
+  {
+    id: "activity",
+    label: "Activity",
+    count: props.roomLoading ? null : visibleParticipantCount.value + props.participantHiddenCount,
+  },
+  { id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
   { id: "rent", label: "Rent an Agent", count: null },
 ]);
 

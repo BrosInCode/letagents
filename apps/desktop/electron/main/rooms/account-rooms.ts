@@ -49,6 +49,14 @@ function mapDesktopAccountFocusRoomEntry(
       typeof payload.last_opened_at === "string"
         ? payload.last_opened_at
         : null,
+    latestMessageId:
+      typeof payload.latest_message_id === "string"
+        ? payload.latest_message_id
+        : null,
+    latestMessageAt:
+      typeof payload.latest_message_at === "string"
+        ? payload.latest_message_at
+        : null,
   };
 }
 
@@ -109,6 +117,14 @@ function mapDesktopAccountRoomEntry(
     lastOpenedAt:
       typeof payload.last_opened_at === "string"
         ? payload.last_opened_at
+        : null,
+    latestMessageId:
+      typeof payload.latest_message_id === "string"
+        ? payload.latest_message_id
+        : null,
+    latestMessageAt:
+      typeof payload.latest_message_at === "string"
+        ? payload.latest_message_at
         : null,
     focusRooms,
   };

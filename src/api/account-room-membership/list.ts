@@ -1,13 +1,16 @@
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import {
   account_room_recents,
+  messages,
   project_admins,
   room_agent_sessions,
   room_participants,
   rooms,
 } from "../db/schema.js";
+import { visibleMessageCondition } from "../db/messages/visibility.js";
+import { formatMessageId } from "../db/utils.js";
 import {
   accountRoomDeleteReason,
   mergeAccountRoomCandidate,
@@ -21,6 +24,11 @@ import type {
   AccountRoomCandidate,
   AccountRoomListEntry,
 } from "./types.js";
+
+type LatestRoomMessage = {
+  latest_message_id: string | null;
+  latest_message_at: string | null;
+};
 
 export async function getAccountRoomsForAccount(
   accountId: string,
@@ -245,7 +253,7 @@ export async function getAccountRoomsForAccount(
     }
   }
 
-  return [...parentCandidates.values()]
+  const visibleParentCandidates = [...parentCandidates.values()]
     .filter((candidate) => options.includeArchived || !candidate.archived)
     .sort((a, b) => {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
@@ -254,9 +262,20 @@ export async function getAccountRoomsForAccount(
       if (aLastOpened !== bLastOpened) return bLastOpened.localeCompare(aLastOpened);
       return a.project.display_name.localeCompare(b.project.display_name);
     })
-    .slice(0, limit)
+    .slice(0, limit);
+
+  const latestMessagesByRoomId = await latestMessagesForRooms([
+    ...visibleParentCandidates.map((candidate) => candidate.project.id),
+    ...visibleParentCandidates.flatMap((candidate) =>
+      (focusRoomsByParentId.get(candidate.project.id) ?? []).map((room) => room.room_id)
+    ),
+  ]);
+
+  return visibleParentCandidates
     .map((candidate) => {
       const deleteReason = accountRoomDeleteReason(candidate);
+      const focusRooms = focusRoomsByParentId.get(candidate.project.id) ?? [];
+      const latestMessage = latestMessagesByRoomId.get(candidate.project.id) ?? nullLatestRoomMessage();
       return {
         room_id: candidate.project.id,
         display_name: candidate.project.display_name,
@@ -270,7 +289,42 @@ export async function getAccountRoomsForAccount(
         delete_reason: deleteReason,
         first_opened_at: candidate.first_opened_at,
         last_opened_at: candidate.last_opened_at,
-        focus_rooms: focusRoomsByParentId.get(candidate.project.id) ?? [],
+        latest_message_id: latestMessage.latest_message_id,
+        latest_message_at: latestMessage.latest_message_at,
+        focus_rooms: focusRooms.map((room) => ({
+          ...room,
+          ...(latestMessagesByRoomId.get(room.room_id) ?? nullLatestRoomMessage()),
+        })),
       };
     });
+}
+
+async function latestMessagesForRooms(roomIds: string[]): Promise<Map<string, LatestRoomMessage>> {
+  const uniqueRoomIds = [...new Set(roomIds.filter(Boolean))];
+  if (!uniqueRoomIds.length) return new Map();
+
+  const rows = await db
+    .select({
+      room_id: messages.room_id,
+      latest_number: sql<number | null>`MAX(${messages.number})::int`,
+      latest_message_at: sql<string | null>`MAX(${messages.timestamp})`,
+    })
+    .from(messages)
+    .where(and(inArray(messages.room_id, uniqueRoomIds), visibleMessageCondition()))
+    .groupBy(messages.room_id);
+
+  return new Map(rows.map((row) => [
+    row.room_id,
+    {
+      latest_message_id: row.latest_number ? formatMessageId(row.latest_number) : null,
+      latest_message_at: row.latest_message_at,
+    },
+  ]));
+}
+
+function nullLatestRoomMessage(): LatestRoomMessage {
+  return {
+    latest_message_id: null,
+    latest_message_at: null,
+  };
 }

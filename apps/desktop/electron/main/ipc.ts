@@ -30,6 +30,7 @@ import type {
   DesktopReasoningSessionDetail,
   DesktopReasoningUpdate,
   DesktopRoomAccess,
+  DesktopRoomLatestMessage,
   DesktopRoomMessage,
   DesktopRepoRoomSelection,
   DesktopSendRoomMessageResult,
@@ -75,6 +76,7 @@ import {
   deleteDesktopAccountRoom,
   fetchRoomSnapshot,
   getDesktopGitHubIntegrationStatus,
+  getDesktopRoomLatestMessages,
   getDesktopReasoningSession,
   getDesktopRoomMessagesBefore,
   leaveDesktopAccountRoom,
@@ -169,6 +171,14 @@ export function registerDesktopIpcHandlers(
       _event,
       roomIdentifier?: string | null,
     ): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-latest-messages",
+    async (
+      _event,
+      roomIdentifiers: string[],
+    ): Promise<DesktopRoomLatestMessage[]> =>
+      getDesktopRoomLatestMessages(Array.isArray(roomIdentifiers) ? roomIdentifiers : []),
   );
   targetIpcMain.handle(
     "desktop:room:get-messages-before",
@@ -429,7 +439,7 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:repos:get-status",
-    async (): Promise<RepoStatus> => buildRepoStatus(workspaceRoot),
+    async (_event, rootPath?: string | null): Promise<RepoStatus> => buildRepoStatus(rootPath || workspaceRoot),
   );
   targetIpcMain.handle(
     "desktop:repos:pick-room",

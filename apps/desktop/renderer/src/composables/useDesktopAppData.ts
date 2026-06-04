@@ -1,4 +1,4 @@
-import { computed, type ComputedRef, type Ref } from "vue";
+import { computed, ref, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -26,9 +26,11 @@ import {
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
-import { normalizeRoomIdentifier } from "../domain/sidebar-rooms";
+import { normalizeRoomIdentifier, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 
 interface RememberRootRoomOptions {
+  displayName?: string | null;
+  kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
   meta?: string | null;
 }
@@ -47,6 +49,7 @@ interface DesktopAppDataOptions {
     snapshot: DesktopRoomSnapshot,
     options?: RememberRootRoomOptions,
   ) => void;
+  recentRootRooms: Ref<RecentRootRoom[]>;
   repoStatus: Ref<RepoStatus | null>;
   resolveSelectedRoomIdentifier: (baseRootSnapshot: DesktopRoomSnapshot | null) => string | null;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -59,6 +62,9 @@ interface DesktopAppDataOptions {
 }
 
 export function useDesktopAppData(options: DesktopAppDataOptions) {
+  let selectedSnapshotRequestId = 0;
+  const selectedSnapshotLoading = ref(false);
+
   async function refresh(): Promise<void> {
     if (options.mcpInstallState.value && !options.mcpInstallState.value.completed) {
       return;
@@ -78,7 +84,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextSettingsAccountRooms,
       ] = await Promise.all([
         window.letagentsDesktop.app.getInfo(),
-        window.letagentsDesktop.repos.getStatus(),
+        window.letagentsDesktop.repos.getStatus(selectedRootPath()),
         window.letagentsDesktop.workers.list(),
         window.letagentsDesktop.room.getSnapshot(options.selectedRootRoomIdentifier.value),
         window.letagentsDesktop.diagnostics.getSnapshot(),
@@ -117,14 +123,40 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     options.settingsAccountRooms.value = nextSettingsAccountRooms || nextAccountRooms || [];
   }
 
+  function selectedRootPath(): string | null {
+    const identifier = normalizeRoomIdentifier(
+      options.selectedRootRoomIdentifier.value || options.rootRoomSnapshot.value?.roomIdentifier
+    );
+    if (!identifier) return null;
+    return options.recentRootRooms.value.find(
+      (room) => normalizeRoomIdentifier(room.identifier) === identifier
+    )?.rootPath || null;
+  }
+
+  function rootPathForRoomIdentifier(roomIdentifier: string | null | undefined): string | null {
+    const identifier = normalizeRoomIdentifier(roomIdentifier);
+    if (!identifier) return null;
+    return options.recentRootRooms.value.find(
+      (room) => normalizeRoomIdentifier(room.identifier) === identifier
+    )?.rootPath || null;
+  }
+
   async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value): Promise<void> {
+    const requestId = ++selectedSnapshotRequestId;
+
     if (!baseRootSnapshot) {
-      options.selectedSnapshot.value = null;
+      if (requestId === selectedSnapshotRequestId) {
+        options.selectedSnapshot.value = null;
+        selectedSnapshotLoading.value = false;
+      }
       return;
     }
 
     if (options.activeEntry.value.type !== "room") {
-      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot);
+      if (requestId === selectedSnapshotRequestId) {
+        options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot);
+        selectedSnapshotLoading.value = false;
+      }
       return;
     }
 
@@ -135,23 +167,51 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       && roomIdentifier
       && normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(baseRootSnapshot.roomIdentifier)
     ) {
-      const nextRootSnapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
-      options.rootRoomSnapshot.value = nextRootSnapshot;
-      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot);
-      options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
-      options.rememberRootRoomSnapshot(nextRootSnapshot);
-      options.activeEntry.value = options.currentParentRoom.value;
+      publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+      try {
+        const [nextRootSnapshot, nextRepoStatus] = await Promise.all([
+          window.letagentsDesktop.room.getSnapshot(roomIdentifier),
+          window.letagentsDesktop.repos.getStatus(rootPathForRoomIdentifier(roomIdentifier)),
+        ]);
+        if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
+        options.repoStatus.value = nextRepoStatus;
+        options.rootRoomSnapshot.value = nextRootSnapshot;
+        options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot);
+        options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
+        options.rememberRootRoomSnapshot(nextRootSnapshot);
+        options.activeEntry.value = options.currentParentRoom.value;
+      } finally {
+        if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
+      }
       return;
     }
     if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
-      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot);
+      if (requestId === selectedSnapshotRequestId) {
+        options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot);
+        selectedSnapshotLoading.value = false;
+      }
       return;
     }
 
-    options.selectedSnapshot.value = mergeRoomSnapshotMessages(
-      options.selectedSnapshot.value,
-      await window.letagentsDesktop.room.getSnapshot(roomIdentifier)
-    );
+    publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+    try {
+      const nextSnapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+      if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
+      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot);
+    } finally {
+      if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
+    }
+  }
+
+  function publishOptimisticSelectedSnapshot(
+    requestId: number,
+    entry: RoomEntry,
+    roomIdentifier: string,
+    baseRootSnapshot: DesktopRoomSnapshot,
+  ): void {
+    if (requestId !== selectedSnapshotRequestId) return;
+    selectedSnapshotLoading.value = true;
+    options.selectedSnapshot.value = createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot);
   }
 
   function upsertSelectedTask(task: DesktopTaskSummary): void {
@@ -236,7 +296,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     try {
       const [nextAppInfo, nextRepoStatus, nextRootRoomSnapshot] = await Promise.all([
         window.letagentsDesktop.app.getInfo(),
-        window.letagentsDesktop.repos.getStatus(),
+        window.letagentsDesktop.repos.getStatus(selectedRootPath()),
         window.letagentsDesktop.room.getSnapshot(options.selectedRootRoomIdentifier.value),
       ]);
       options.appInfo.value = nextAppInfo;
@@ -267,6 +327,55 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     refreshAccountRooms,
     refreshSelectedSnapshot,
     repoStatusValue,
+    selectedSnapshotLoading,
     upsertSelectedTask,
+  };
+}
+
+function createOptimisticSelectedSnapshot(
+  entry: RoomEntry,
+  roomIdentifier: string,
+  baseRootSnapshot: DesktopRoomSnapshot,
+): DesktopRoomSnapshot {
+  const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  const focusRoom = baseRootSnapshot.focusRooms.find((room) =>
+    normalizeRoomIdentifier(room.identifier) === normalizedRoomIdentifier
+    || `room:focus:${room.roomId}` === entry.id
+  );
+  const displayName = focusRoom?.displayName || entry.title || roomIdentifier;
+  const kind: DesktopRoomInfo["kind"] = entry.kind === "focus" ? "focus" : "main";
+
+  return {
+    roomIdentifier,
+    access: {
+      status: "ready",
+      title: "",
+      message: "",
+      roomIdentifier,
+      deviceFlowUrl: null,
+      code: null,
+      httpStatus: null,
+    },
+    room: {
+      identifier: roomIdentifier,
+      code: focusRoom?.code || "",
+      name: displayName,
+      displayName,
+      role: entry.meta.toLowerCase() === "admin" ? "admin" : "participant",
+      authenticated: true,
+      kind,
+      parentRoomId: null,
+      focusKey: null,
+      sourceTaskId: focusRoom?.sourceTaskId || null,
+      focusStatus: focusRoom?.focusStatus || null,
+    },
+    focusRooms: [],
+    tasks: [],
+    participants: [],
+    participantHiddenCount: 0,
+    presence: [],
+    reasoningSessions: [],
+    recentActivity: [],
+    messages: [],
   };
 }

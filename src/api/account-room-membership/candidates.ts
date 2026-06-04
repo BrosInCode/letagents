@@ -132,5 +132,7 @@ export function toAccountRoomListFocusRoom(
     source: focusCandidate?.source ?? null,
     first_opened_at: focusCandidate?.first_opened_at ?? null,
     last_opened_at: focusCandidate?.last_opened_at ?? null,
+    latest_message_id: null,
+    latest_message_at: null,
   };
 }

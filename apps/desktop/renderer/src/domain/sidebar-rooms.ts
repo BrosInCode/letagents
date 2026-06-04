@@ -6,11 +6,14 @@ import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
 
 export type RecentRootRoom = {
   identifier: string;
+  kind: RecentRootRoomKind;
   rootPath: string | null;
   displayName: string;
   meta: string;
   updatedAt: string;
 };
+
+export type RecentRootRoomKind = "project" | "room";
 
 export function normalizeRoomIdentifier(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase();
@@ -37,6 +40,11 @@ export function readStoredRecentRootRooms(storageKey: string): RecentRootRoom[] 
         const identifier = typeof entry.identifier === "string" ? entry.identifier.trim() : "";
         if (!identifier) return null;
         const rootPath = typeof entry.rootPath === "string" && entry.rootPath.trim() ? entry.rootPath.trim() : null;
+        const kind = entry.kind === "project" || entry.kind === "room"
+          ? entry.kind
+          : rootPath
+            ? "project"
+            : "room";
         const displayName = typeof entry.displayName === "string" && entry.displayName.trim()
           ? entry.displayName.trim()
           : identifier;
@@ -44,7 +52,7 @@ export function readStoredRecentRootRooms(storageKey: string): RecentRootRoom[] 
         const updatedAt = typeof entry.updatedAt === "string" && entry.updatedAt.trim()
           ? entry.updatedAt
           : new Date(0).toISOString();
-        return { identifier, rootPath, displayName, meta, updatedAt };
+        return { identifier, kind, rootPath, displayName, meta, updatedAt };
       })
       .filter((entry): entry is RecentRootRoom => Boolean(entry))
       .slice(0, 12);
@@ -64,6 +72,8 @@ export function rememberRecentRootRooms(storageKey: string, rooms: RecentRootRoo
 export function upsertRecentRootRoomSnapshot(input: {
   snapshot: DesktopRoomSnapshot;
   recentRootRooms: readonly RecentRootRoom[];
+  displayName?: string | null;
+  kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
   meta?: string | null;
 }): RecentRootRoom[] {
@@ -71,12 +81,16 @@ export function upsertRecentRootRoomSnapshot(input: {
   if (!identifier?.trim()) return [...input.recentRootRooms];
   const normalizedIdentifier = normalizeRoomIdentifier(identifier);
   if (!normalizedIdentifier) return [...input.recentRootRooms];
+  const aliases = roomSnapshotAliases(input.snapshot);
 
   const rootPath = input.rootPath || null;
+  const kind = input.kind || (rootPath ? "project" : "room");
   const room: RecentRootRoom = {
     identifier,
+    kind,
     rootPath,
-    displayName: input.snapshot.room?.displayName
+    displayName: input.displayName
+      || input.snapshot.room?.displayName
       || input.snapshot.room?.name
       || input.snapshot.roomIdentifier
       || identifier,
@@ -87,9 +101,22 @@ export function upsertRecentRootRoomSnapshot(input: {
   return [
     room,
     ...input.recentRootRooms.filter((entry) =>
-      normalizeRoomIdentifier(entry.identifier) !== normalizedIdentifier
+      !aliases.has(normalizeRoomIdentifier(entry.identifier) || "")
     ),
   ].slice(0, 12);
+}
+
+function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
+  return new Set([
+    snapshot.roomIdentifier,
+    snapshot.access.roomIdentifier,
+    snapshot.access.code,
+    snapshot.room?.identifier,
+    snapshot.room?.name,
+    snapshot.room?.code,
+  ]
+    .map(normalizeRoomIdentifier)
+    .filter((value): value is string => Boolean(value)));
 }
 
 export function buildSidebarProjectGroups(input: {
@@ -110,6 +137,7 @@ export function buildSidebarProjectGroups(input: {
       groups.push(group);
       return;
     }
+    existing.parent = mergeRoomEntry(existing.parent, group.parent);
     existing.focusRooms = mergeRoomEntries(existing.focusRooms, group.focusRooms);
   }
 
@@ -139,14 +167,26 @@ export function buildSidebarProjectGroups(input: {
 
 function mergeRoomEntries(current: RoomEntry[], incoming: RoomEntry[]): RoomEntry[] {
   const entries = [...current];
-  const seen = new Set(entries.map(roomEntryKey));
+  const entryIndexes = new Map(entries.map((entry, index) => [roomEntryKey(entry), index]));
   for (const entry of incoming) {
     const key = roomEntryKey(entry);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const existingIndex = entryIndexes.get(key);
+    if (existingIndex !== undefined) {
+      entries[existingIndex] = mergeRoomEntry(entries[existingIndex], entry);
+      continue;
+    }
+    entryIndexes.set(key, entries.length);
     entries.push(entry);
   }
   return entries;
+}
+
+function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
+  return {
+    ...current,
+    latestMessageId: incoming.latestMessageId || current.latestMessageId,
+    latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
+  };
 }
 
 function roomEntryKey(entry: RoomEntry): string {
@@ -165,6 +205,9 @@ function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][nu
     headline: "Focused work should stay close to the room it came from.",
     description:
       "A focus room gives one thread of work more space, without losing the connection back to the main room.",
+    latestMessageId: null,
+    latestMessageAt: null,
+    hasUnread: false,
   };
 }
 
@@ -192,6 +235,9 @@ function accountFocusRoomToEntry(room: DesktopAccountRoomEntry["focusRooms"][num
     headline: "Focused work should stay close to the room it came from.",
     description:
       "A focus room gives one thread of work more space, without losing the connection back to the main room.",
+    latestMessageId: room.latestMessageId,
+    latestMessageAt: room.latestMessageAt,
+    hasUnread: false,
   };
 }
 
@@ -206,6 +252,9 @@ function recentRootRoomToEntry(room: RecentRootRoom): RoomEntry {
     sectionLabel: "Parent room",
     headline: "Return to this room.",
     description: "Recent project rooms stay available here after you open another room.",
+    latestMessageId: null,
+    latestMessageAt: null,
+    hasUnread: false,
   };
 }
 
@@ -220,6 +269,9 @@ function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
     sectionLabel: "Account room",
     headline: "Open this room from your account history.",
     description: "Rooms from your account are available across devices, with focus rooms grouped underneath.",
+    latestMessageId: room.latestMessageId,
+    latestMessageAt: room.latestMessageAt,
+    hasUnread: false,
   };
 }
 

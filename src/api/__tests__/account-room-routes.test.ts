@@ -120,6 +120,8 @@ test("account room route returns parent rooms with nested focus rooms", async ()
           delete_reason: null,
           first_opened_at: "2026-05-01T10:00:00.000Z",
           last_opened_at: "2026-05-02T10:00:00.000Z",
+          latest_message_id: "msg_14",
+          latest_message_at: "2026-05-02T10:05:00.000Z",
           focus_rooms: [
             {
               room_id: "github.com/owner/repo/focus/task_1",
@@ -133,6 +135,8 @@ test("account room route returns parent rooms with nested focus rooms", async ()
               source: "participant",
               first_opened_at: "2026-05-02T09:00:00.000Z",
               last_opened_at: "2026-05-02T09:30:00.000Z",
+              latest_message_id: "msg_3",
+              latest_message_at: "2026-05-02T09:32:00.000Z",
             },
           ],
         },
@@ -184,6 +188,8 @@ test("account room route returns parent rooms with nested focus rooms", async ()
         delete_reason: null,
         first_opened_at: "2026-05-01T10:00:00.000Z",
         last_opened_at: "2026-05-02T10:00:00.000Z",
+        latest_message_id: "msg_14",
+        latest_message_at: "2026-05-02T10:05:00.000Z",
         focus_rooms: [
           {
             room_id: "github.com/owner/repo/focus/task_1",
@@ -199,6 +205,8 @@ test("account room route returns parent rooms with nested focus rooms", async ()
             source: "participant",
             first_opened_at: "2026-05-02T09:00:00.000Z",
             last_opened_at: "2026-05-02T09:30:00.000Z",
+            latest_message_id: "msg_3",
+            latest_message_at: "2026-05-02T09:32:00.000Z",
           },
         ],
       },

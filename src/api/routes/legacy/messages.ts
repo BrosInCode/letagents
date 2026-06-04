@@ -91,6 +91,12 @@ export interface LegacyProjectMessageRouteDeps {
     sessionAccount?: AuthenticatedRequest["sessionAccount"];
     timestamp?: string;
   }): Promise<void>;
+  rememberAccountRoom(input: {
+    accountId: string;
+    roomId: string;
+    displayName?: string | null;
+    source?: string | null;
+  }): Promise<void>;
 }
 
 export function registerLegacyProjectMessageRoutes(
@@ -176,6 +182,14 @@ export function registerLegacyProjectMessageRoutes(
         sessionAccount: req.sessionAccount,
         timestamp: message.timestamp,
       });
+      if (req.sessionAccount && (source === "browser" || source === "agent")) {
+        await deps.rememberAccountRoom({
+          accountId: req.sessionAccount.account_id,
+          roomId: project.id,
+          displayName: project.display_name,
+          source: "open_room",
+        });
+      }
       res.status(201).json(message);
     } catch (error) {
       respondWithBadRequest(

@@ -67,4 +67,10 @@ export interface RoomMessageRouteDeps {
     sessionAccount?: AuthenticatedRequest["sessionAccount"];
     timestamp?: string;
   }): Promise<void>;
+  rememberAccountRoom(input: {
+    accountId: string;
+    roomId: string;
+    displayName?: string | null;
+    source?: string | null;
+  }): Promise<void>;
 }
