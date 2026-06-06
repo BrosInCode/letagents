@@ -12,8 +12,9 @@ import { systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import {
   buildSidebarProjectGroups,
+  isWorkspaceRoomSnapshot,
   rememberRecentRootRooms,
-  rootPathLabel,
+  rootRoomMeta,
   rootRoomEntryId,
   type RecentRootRoom,
   upsertRecentRootRoomSnapshot,
@@ -97,16 +98,41 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     return selectedRoomInfo.value.identifier || options.selectedSnapshot.value?.roomIdentifier || null;
   });
 
+  const workspaceRoomIdentifier = computed(() => options.appInfo.value?.workspaceRoomIdentifier || null);
+
+  function defaultRootPathForSnapshot(snapshot: DesktopRoomSnapshot): string | null {
+    if (!isWorkspaceRoomSnapshot(snapshot, workspaceRoomIdentifier.value)) return null;
+    return options.repoStatus.value?.rootPath || options.appInfo.value?.workspaceRoot || null;
+  }
+
+  function metadataForRootSnapshot(
+    snapshot: DesktopRoomSnapshot | null | undefined,
+    rootPath: string | null,
+    fallback: string,
+  ): string {
+    return rootRoomMeta({
+      snapshot,
+      workspaceRoomIdentifier: workspaceRoomIdentifier.value,
+      branch: options.repoStatus.value?.branch,
+      rootPath,
+      fallback,
+    });
+  }
+
   function rememberRootRoomSnapshot(
     snapshot: DesktopRoomSnapshot,
     rememberOptions: OpenRoomOptions = {}
   ): void {
-    const rootPath = rememberOptions.rootPath || options.repoStatus.value?.rootPath || options.appInfo.value?.workspaceRoot || null;
+    const hasExplicitRootPath = Object.prototype.hasOwnProperty.call(rememberOptions, "rootPath");
+    const rootPath = hasExplicitRootPath
+      ? rememberOptions.rootPath || null
+      : defaultRootPathForSnapshot(snapshot);
+    const explicitMeta = rememberOptions.meta?.trim() || null;
     const nextRooms = upsertRecentRootRoomSnapshot({
       snapshot,
       recentRootRooms: options.recentRootRooms.value,
       rootPath,
-      meta: rememberOptions.meta || options.repoStatus.value?.branch || snapshot.room?.code || rootPathLabel(rootPath) || "Room",
+      meta: explicitMeta || metadataForRootSnapshot(snapshot, rootPath, "Room"),
     });
     options.recentRootRooms.value = nextRooms;
     rememberRecentRootRooms(options.recentRootRoomsStorageKey, nextRooms);
@@ -118,7 +144,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     kind: "parent",
     roomIdentifier: options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || null,
     title: repoName.value,
-    meta: options.repoStatus.value?.branch || "Parent room",
+    meta: metadataForRootSnapshot(options.rootRoomSnapshot.value, null, "Parent room"),
     sectionLabel: "Parent room",
     headline: "Start here, then branch work into focused rooms when it needs space.",
     description:
