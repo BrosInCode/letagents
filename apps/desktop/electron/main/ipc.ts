@@ -49,7 +49,7 @@ import type {
   RepoStatus,
   WorkerSnapshot,
 } from "../ipc-types.js";
-import { buildRepoStatus } from "../repo-status.js";
+import { buildRepoStatus, resolveRoomIdentifier } from "../repo-status.js";
 import { registerDesktopRentalIpcHandlers } from "../rental-handlers.js";
 import { RentalApiClient } from "../rental/api-client.js";
 import { RenterTriggerRuntime } from "../rental/renter-trigger.js";
@@ -127,6 +127,7 @@ export function registerDesktopIpcHandlers(
         node: process.versions.node,
       },
       workspaceRoot,
+      workspaceRoomIdentifier: await resolveRoomIdentifier(workspaceRoot),
       apiUrl,
     }),
   );

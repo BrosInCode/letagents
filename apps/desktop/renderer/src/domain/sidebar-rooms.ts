@@ -21,6 +21,40 @@ export function rootPathLabel(rootPath: string | null | undefined): string | nul
   return rootPath?.split("/").filter(Boolean).pop() || null;
 }
 
+export function isWorkspaceRoomIdentifier(
+  roomIdentifier: string | null | undefined,
+  workspaceRoomIdentifier: string | null | undefined,
+): boolean {
+  const normalizedRoom = normalizeRoomIdentifier(roomIdentifier);
+  const normalizedWorkspaceRoom = normalizeRoomIdentifier(workspaceRoomIdentifier);
+  return Boolean(normalizedRoom && normalizedWorkspaceRoom && normalizedRoom === normalizedWorkspaceRoom);
+}
+
+export function snapshotRoomIdentifier(snapshot: DesktopRoomSnapshot | null | undefined): string | null {
+  return snapshot?.room?.identifier || snapshot?.roomIdentifier || null;
+}
+
+export function isWorkspaceRoomSnapshot(
+  snapshot: DesktopRoomSnapshot | null | undefined,
+  workspaceRoomIdentifier: string | null | undefined,
+): boolean {
+  return isWorkspaceRoomIdentifier(snapshotRoomIdentifier(snapshot), workspaceRoomIdentifier);
+}
+
+export function rootRoomMeta(input: {
+  branch?: string | null;
+  fallback: string;
+  rootPath?: string | null;
+  snapshot: DesktopRoomSnapshot | null | undefined;
+  workspaceRoomIdentifier?: string | null;
+}): string {
+  const branch = input.branch?.trim();
+  if (branch && isWorkspaceRoomSnapshot(input.snapshot, input.workspaceRoomIdentifier)) {
+    return branch;
+  }
+  return input.snapshot?.room?.code || rootPathLabel(input.rootPath) || input.fallback;
+}
+
 export function rootRoomEntryId(roomIdentifier: string | null | undefined): string {
   return `room:parent:${encodeURIComponent(normalizeRoomIdentifier(roomIdentifier) || "main")}`;
 }

@@ -7,6 +7,7 @@ export interface DesktopAppInfo {
     node: string;
   };
   workspaceRoot: string;
+  workspaceRoomIdentifier: string | null;
   apiUrl: string | null;
 }
 
