@@ -21,12 +21,115 @@ export function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Recor
   };
 }
 
-function toAgentReadableMessage(message: unknown): unknown {
+type AgentReadableMessageRecord = Record<string, unknown>;
+
+type ThreadSummary = {
+  count: number;
+  latestReplyId: string | null;
+};
+
+function isRecord(value: unknown): value is AgentReadableMessageRecord {
+  return Boolean(value && typeof value === "object");
+}
+
+function messageId(record: AgentReadableMessageRecord): string | null {
+  return typeof record.id === "string" && record.id.trim() ? record.id : null;
+}
+
+function replyReference(record: AgentReadableMessageRecord): unknown {
+  return record.reply_to ?? record.replyTo ?? null;
+}
+
+function replyReferenceId(record: AgentReadableMessageRecord): string | null {
+  const reply = replyReference(record);
+  if (typeof reply === "string" && reply.trim()) {
+    return reply;
+  }
+  if (isRecord(reply) && typeof reply.id === "string" && reply.id.trim()) {
+    return reply.id;
+  }
+  return null;
+}
+
+function resolveThreadParentId(
+  record: AgentReadableMessageRecord,
+  recordsById: Map<string, AgentReadableMessageRecord>,
+): string | null {
+  const ownId = messageId(record);
+  const firstReplyId = replyReferenceId(record);
+  if (!firstReplyId) {
+    return ownId;
+  }
+
+  let parentId = firstReplyId;
+  const seen = new Set<string>(ownId ? [ownId] : []);
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = recordsById.get(parentId);
+    const nextParentId = parent ? replyReferenceId(parent) : null;
+    if (!nextParentId) break;
+    parentId = nextParentId;
+  }
+  return parentId;
+}
+
+function buildThreadSummaries(
+  records: AgentReadableMessageRecord[],
+  recordsById: Map<string, AgentReadableMessageRecord>,
+): Map<string, ThreadSummary> {
+  const summaries = new Map<string, ThreadSummary>();
+  for (const record of records) {
+    if (!replyReferenceId(record)) continue;
+    const parentId = resolveThreadParentId(record, recordsById);
+    const id = messageId(record);
+    if (!parentId || !id) continue;
+    const current = summaries.get(parentId) ?? { count: 0, latestReplyId: null };
+    summaries.set(parentId, {
+      count: current.count + 1,
+      latestReplyId: id,
+    });
+  }
+  return summaries;
+}
+
+function withThreadMetadata(
+  record: AgentReadableMessageRecord,
+  recordsById: Map<string, AgentReadableMessageRecord>,
+  summaries: Map<string, ThreadSummary>,
+): AgentReadableMessageRecord {
+  const parentId = resolveThreadParentId(record, recordsById);
+  if (!parentId) {
+    return record;
+  }
+
+  const replyToId = replyReferenceId(record);
+  const summary = summaries.get(parentId) ?? { count: 0, latestReplyId: null };
+  return {
+    ...record,
+    thread_parent_id: parentId,
+    thread_root_id: parentId,
+    thread_reply_to_id: replyToId,
+    thread: {
+      parent_id: parentId,
+      root_message_id: parentId,
+      reply_to_id: replyToId,
+      is_thread_reply: Boolean(replyToId),
+      reply_count_in_result: summary.count,
+      latest_reply_id_in_result: summary.latestReplyId,
+    },
+  };
+}
+
+function toAgentReadableMessage(
+  message: unknown,
+  recordsById: Map<string, AgentReadableMessageRecord>,
+  summaries: Map<string, ThreadSummary>,
+): unknown {
   if (!message || typeof message !== "object") {
     return message;
   }
 
-  const record = message as Record<string, unknown>;
+  const record = withThreadMetadata(message as AgentReadableMessageRecord, recordsById, summaries);
   const kind = normalizeAgentPromptKind(record.agent_prompt_kind);
   const text = typeof record.text === "string" ? record.text : null;
 
@@ -42,8 +145,16 @@ function toAgentReadableMessage(message: unknown): unknown {
   };
 }
 
-export function toAgentReadableMessages(messages: unknown[] | undefined): unknown[] {
-  return (messages ?? []).map((message) => toAgentReadableMessage(message));
+export function toAgentReadableMessages(messages: unknown[] | undefined, contextMessages: unknown[] = []): unknown[] {
+  const records = (messages ?? []).filter(isRecord);
+  const contextRecords = contextMessages.filter(isRecord);
+  const recordsById = new Map<string, AgentReadableMessageRecord>();
+  for (const record of [...contextRecords, ...records]) {
+    const id = messageId(record);
+    if (id) recordsById.set(id, record);
+  }
+  const summaries = buildThreadSummaries(records, recordsById);
+  return (messages ?? []).map((message) => toAgentReadableMessage(message, recordsById, summaries));
 }
 
 export function appendIncludePromptOnly(path: string): string {

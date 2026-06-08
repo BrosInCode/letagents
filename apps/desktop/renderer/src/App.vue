@@ -139,6 +139,8 @@
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
           :workers="workers"
+          :initial-chat-scroll-top="chatScrollTopByRoom[selectedRoomInfo.identifier] ?? null"
+          @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
@@ -275,6 +277,7 @@ const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, rea
 const sidebarWidth = ref(readStoredSidebarWidth());
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
+const chatScrollTopByRoom = ref<Record<string, number>>({});
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
@@ -848,6 +851,13 @@ async function syncLocalChat(): Promise<void> {
 function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]): void {
   handleMessageSent(message);
   markActiveRoomRead();
+}
+
+function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {
+  chatScrollTopByRoom.value = {
+    ...chatScrollTopByRoom.value,
+    [roomIdentifier]: scrollTop,
+  };
 }
 
 watch(

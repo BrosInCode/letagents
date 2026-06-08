@@ -49,7 +49,7 @@ export function buildStartPrompt(input: {
     "Instructions:",
     `1. ${buildJoinInstruction(input.joined_via, input.room_identifier)}`,
     "2. Call register_agent_session with session_kind=\"worker\" and runtime=\"codex\". Keep the returned agent_session_id.",
-    "3. Pass that agent_session_id to wait_for_messages, send_message, post_status, and task tools whenever the tool accepts it.",
+    "3. Pass that agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, and task tools whenever the tool accepts it.",
     "4. Do not start another live session. Join the room inline in this worker only.",
     "5. Read the room and task board before contributing so you have current context.",
     "6. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",

@@ -30,6 +30,7 @@ test("message and status tool registration preserves the public surface", () => 
     "post_status",
     "post_reasoning",
     "send_message",
+    "send_thread_message",
     "read_messages",
     "wait_for_messages",
   ]);
@@ -42,6 +43,7 @@ test("worker-facing message tools keep registered worker-session inputs", () => 
     "post_status",
     "post_reasoning",
     "send_message",
+    "send_thread_message",
     "wait_for_messages",
   ]);
 
@@ -51,4 +53,17 @@ test("worker-facing message tools keep registered worker-session inputs", () => 
 
     assert.ok("agent_session_id" in registration.schema, `${registration.name} should accept agent_session_id`);
   }
+});
+
+test("thread-capable message tools expose thread parent inputs", () => {
+  const registrations = collectMessageToolRegistrations();
+  const sendMessage = registrations.find((registration) => registration.name === "send_message");
+  const sendThreadMessage = registrations.find((registration) => registration.name === "send_thread_message");
+
+  assert.ok(sendMessage, "send_message should be registered");
+  assert.ok(sendThreadMessage, "send_thread_message should be registered");
+  assert.ok("thread_parent_id" in sendMessage.schema, "send_message should accept thread_parent_id");
+  assert.ok("thread_parent_id" in sendThreadMessage.schema, "send_thread_message should require thread_parent_id");
+  assert.match(sendMessage.description, /thread/i);
+  assert.match(sendThreadMessage.description, /thread/i);
 });

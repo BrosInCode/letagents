@@ -17,3 +17,8 @@ export function buildThreadSummaries(messages: readonly DesktopRoomMessage[]): M
   }
   return summaries;
 }
+
+export function threadReplies(messages: readonly DesktopRoomMessage[], parentId: string | null): DesktopRoomMessage[] {
+  if (!parentId) return [];
+  return messages.filter((message) => message.replyTo?.id === parentId);
+}

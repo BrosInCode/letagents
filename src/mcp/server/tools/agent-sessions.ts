@@ -151,7 +151,7 @@ export function registerAgentSessionTools(server: McpServer): void {
                 success: true,
                 agent_session: toPublicAgentSession(session),
                 agent_session_id: session.session_id,
-                use_agent_session_id: "Pass this exact agent_session_id to wait_for_messages, send_message, post_status, and task tools for this specific worker. Do not rely on a shared current session.",
+                use_agent_session_id: "Pass this exact agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, and task tools for this specific worker. Do not rely on a shared current session.",
               },
               null,
               2

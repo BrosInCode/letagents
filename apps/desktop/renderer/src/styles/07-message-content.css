@@ -3,4 +3,5 @@
 @import "./message-content/long-message-reader.css";
 @import "./message-content/github-event-card.css";
 @import "./message-content/message-attachments.css";
+@import "./message-content/thread-panel.css";
 @import "./message-content/thread-search-empty.css";

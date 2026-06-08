@@ -63,12 +63,14 @@
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
         :initial-draft="chatDraftText"
+        :initial-scroll-top="initialChatScrollTop ?? null"
         @send-message="sendRoomMessage"
         @discard-attachment="discardAttachment"
         @load-older="loadOlderMessages"
         @open-reasoning="openReasoningInspector"
         @open-agent-reasoning-fallback="openAgentReasoningFallback"
         @draft-change="chatDraftText = $event"
+        @scroll-position="rememberChatScrollPosition"
       />
 
       <RoomBoardView
@@ -172,6 +174,7 @@ const props = defineProps<{
   recentActivity: DesktopActivityEntry[];
   messages: DesktopRoomMessage[];
   workers: WorkerSnapshot[];
+  initialChatScrollTop?: number | null;
 }>();
 
 const emit = defineEmits<{
@@ -180,6 +183,7 @@ const emit = defineEmits<{
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
+  "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -263,6 +267,10 @@ const {
   onRoomRenamed: (room) => emit("room-renamed", room),
   refreshRoom: () => emit("refresh-room"),
 });
+
+function rememberChatScrollPosition(scrollTop: number): void {
+  emit("chat-scroll-position", props.room.identifier, scrollTop);
+}
 
 watchRoomNotifications({
   visibleMessages,

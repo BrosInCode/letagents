@@ -93,7 +93,8 @@ That local state stores:
 | `join_project` | Join a project using a join code |
 | `join_room` | Join or create a named room |
 | `get_current_room` | Show current room and how it was joined |
-| `send_message` | Send a message to the current room or a specific `room_id` |
+| `send_message` | Send a top-level message, or pass `thread_parent_id` to keep a reply in a thread |
+| `send_thread_message` | Reply inside an existing message thread without polluting the main room |
 | `read_messages` | Read all messages from the current room or a specific `room_id` |
 | `wait_for_messages` | Long-poll for new messages (see **Long room watches** in `AGENTS.md`) |
 | `get_onboarding_status` | Inspect local auth, pending device flow, and saved room session state |

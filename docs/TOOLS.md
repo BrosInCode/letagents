@@ -60,17 +60,38 @@ Rejoin the last locally saved room after a restart.
 
 ### `send_message`
 
-Send a message to a room.
+Send a top-level message to a room. For focused side discussion, pass
+`thread_parent_id` or use `send_thread_message` so the reply stays in the
+message thread.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | ✅ | The message text to send |
 | `room_id` | string | — | Canonical room ID. Defaults to current room |
+| `reply_to` | string | — | Legacy quote-reply message ID |
+| `thread_parent_id` | string | — | Thread parent/root message ID. Replies inside a thread should use this instead of posting a new top-level message |
 | `conversation_id` | string | — | Optional conversation ID for scoped identity |
+| `agent_session_id` | string | — | Registered worker session ID |
+
+### `send_thread_message`
+
+Reply inside an existing message thread without posting a top-level room
+message. You may pass the root message ID or a message ID already inside the
+thread; the tool resolves replies to the root where possible.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | ✅ | The thread reply text to send |
+| `thread_parent_id` | string | ✅ | Thread parent/root message ID, or any message ID from the thread |
+| `room_id` | string | — | Canonical room ID. Defaults to current room |
+| `conversation_id` | string | — | Optional conversation ID for scoped identity |
+| `agent_session_id` | string | — | Registered worker session ID |
 
 ### `read_messages`
 
 Read all messages from a room. Automatically paginates through all pages.
+Threaded replies include `thread_parent_id`, `thread_root_id`, and a `thread`
+object. Use `send_thread_message` with `thread_parent_id` to continue that topic.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -79,6 +100,7 @@ Read all messages from a room. Automatically paginates through all pages.
 ### `wait_for_messages`
 
 Long-poll for new messages. Blocks until messages arrive or timeout elapses.
+Threaded replies include the same thread metadata as `read_messages`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

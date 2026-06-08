@@ -21,6 +21,7 @@
         :highlight-query="searchQuery"
         :search-active="message.id === activeSearchMessageId"
         @reply="$emit('reply', $event)"
+        @open-thread="$emit('open-thread', $event)"
         @scroll-to-message="scrollToMessage"
         @open-image="$emit('open-image', $event)"
         @open-agent="$emit('open-agent', $event)"
@@ -66,7 +67,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
@@ -80,19 +81,23 @@ const props = defineProps<{
   roomIdentifier: string | null;
   roomLoading: boolean;
   searchQuery: string;
+  initialScrollTop?: number | null;
 }>();
 
 const emit = defineEmits<{
   "load-older": [];
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
+  "open-thread": [messageId: string];
   "reply": [message: DesktopRoomMessage];
+  "scroll-position": [scrollTop: number];
 }>();
 
 const messagesElement = ref<HTMLElement | null>(null);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 let isScrolledToBottom = false;
+let hasAppliedInitialScroll = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.messages));
 
@@ -113,6 +118,9 @@ watch(
     }
     if (!oldLastId) {
       if (newMessages.length) {
+        if (restoreInitialScrollPosition()) {
+          return;
+        }
         scrollToBottom("auto");
         return;
       }
@@ -149,12 +157,25 @@ watch(
     unreadCount.value = 0;
     isScrolledFarUp.value = false;
     isScrolledToBottom = false;
-    void nextTick(updateScrollState);
+    hasAppliedInitialScroll = false;
+    void nextTick(() => {
+      if (!restoreInitialScrollPosition()) {
+        scrollToBottom("auto");
+      }
+    });
   },
 );
 
 onMounted(() => {
-  void nextTick(updateScrollState);
+  void nextTick(() => {
+    if (!restoreInitialScrollPosition()) {
+      updateScrollState();
+    }
+  });
+});
+
+onBeforeUnmount(() => {
+  emitScrollPosition();
 });
 
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
@@ -170,6 +191,7 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   isScrolledToBottom = true;
   unreadCount.value = 0;
   isScrolledFarUp.value = false;
+  emitScrollPosition();
 }
 
 function jumpToBottom(): void {
@@ -182,6 +204,7 @@ function jumpToBottom(): void {
   isScrolledToBottom = true;
   unreadCount.value = 0;
   isScrolledFarUp.value = false;
+  emitScrollPosition();
 }
 
 function handleScroll(): void {
@@ -191,6 +214,7 @@ function handleScroll(): void {
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
+  emitScrollPosition();
   if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
     emit("load-older");
   }
@@ -202,6 +226,23 @@ function updateScrollState(): void {
   const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
   isScrolledToBottom = distanceToBottom < 80;
   isScrolledFarUp.value = distanceToBottom > 900;
+}
+
+function restoreInitialScrollPosition(): boolean {
+  if (hasAppliedInitialScroll || !messagesElement.value) return false;
+  const scrollTop = props.initialScrollTop;
+  if (typeof scrollTop !== "number" || !Number.isFinite(scrollTop)) return false;
+  const element = messagesElement.value;
+  element.scrollTop = Math.max(0, Math.min(scrollTop, element.scrollHeight));
+  hasAppliedInitialScroll = true;
+  updateScrollState();
+  emitScrollPosition();
+  return true;
+}
+
+function emitScrollPosition(): void {
+  if (!messagesElement.value) return;
+  emit("scroll-position", messagesElement.value.scrollTop);
 }
 
 function threadCount(messageId: string): number {

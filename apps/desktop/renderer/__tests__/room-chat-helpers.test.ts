@@ -19,7 +19,7 @@ import {
   hasReasoningStreamSurface,
   latestReasoningForAgent,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
-import { buildThreadSummaries } from "../src/components/desktop/content/room-chat/thread-utils";
+import { buildThreadSummaries, threadReplies } from "../src/components/desktop/content/room-chat/thread-utils";
 import { parseGitHubEvent } from "../src/components/desktop/content/desktop-chat-message/github-event";
 import { parseSenderIdentity } from "../src/components/desktop/content/desktop-chat-message/identity";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
@@ -60,6 +60,18 @@ describe("room chat helpers", () => {
     assert.equal(summaries.get("msg_1")?.latest?.id, "msg_3");
     assert.equal(summaries.get("msg_2")?.count, 1);
     assert.equal(summaries.get("msg_2")?.latest?.id, "msg_4");
+  });
+
+  it("filters direct thread replies for a selected parent", () => {
+    const messages = [
+      roomMessage("msg_1", null),
+      roomMessage("msg_2", "msg_1"),
+      roomMessage("msg_3", "msg_1"),
+      roomMessage("msg_4", "msg_2"),
+    ];
+
+    assert.deepEqual(threadReplies(messages, "msg_1").map((message) => message.id), ["msg_2", "msg_3"]);
+    assert.deepEqual(threadReplies(messages, null), []);
   });
 
   it("matches agents to their newest reasoning session and stream fallback", () => {
