@@ -15,6 +15,8 @@ export interface AccountRoomListFocusRoom {
   source: string | null;
   first_opened_at: string | null;
   last_opened_at: string | null;
+  latest_message_id: string | null;
+  latest_message_at: string | null;
 }
 
 export interface AccountRoomListEntry {
@@ -30,6 +32,8 @@ export interface AccountRoomListEntry {
   delete_reason: string | null;
   first_opened_at: string | null;
   last_opened_at: string | null;
+  latest_message_id: string | null;
+  latest_message_at: string | null;
   focus_rooms: AccountRoomListFocusRoom[];
 }
 

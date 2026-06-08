@@ -5,9 +5,11 @@ import {
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
   type RecentRootRoom,
+  type RecentRootRoomKind,
 } from "../domain/sidebar-rooms";
 
 interface OpenRoomOptions {
+  kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
   meta?: string | null;
 }
@@ -50,7 +52,11 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     options.loading.value = true;
     try {
       const snapshot = await window.letagentsDesktop.room.getSnapshot(room.roomIdentifier);
-      options.openRoomSnapshot(snapshot, { meta: room.role === "admin" ? "Admin" : "Account room" });
+      options.openRoomSnapshot(snapshot, {
+        kind: "room",
+        rootPath: null,
+        meta: room.role === "admin" ? "Admin" : "Account room",
+      });
       settingsFeedback.value = null;
     } catch (error) {
       settingsFeedback.value = {

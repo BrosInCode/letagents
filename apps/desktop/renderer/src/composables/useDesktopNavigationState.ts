@@ -12,10 +12,12 @@ import { systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import {
   buildSidebarProjectGroups,
+  normalizeRoomIdentifier,
   rememberRecentRootRooms,
   rootPathLabel,
   rootRoomEntryId,
   type RecentRootRoom,
+  type RecentRootRoomKind,
   upsertRecentRootRoomSnapshot,
 } from "../domain/sidebar-rooms";
 
@@ -32,6 +34,8 @@ interface DesktopNavigationStateOptions {
 }
 
 interface OpenRoomOptions {
+  displayName?: string | null;
+  kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
   meta?: string | null;
 }
@@ -39,8 +43,19 @@ interface OpenRoomOptions {
 export function useDesktopNavigationState(options: DesktopNavigationStateOptions) {
   let activeEntryRestored = false;
 
+  const currentRecentRootRoom = computed(() => {
+    const identifier = normalizeRoomIdentifier(
+      options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value
+    );
+    if (!identifier) return null;
+    return options.recentRootRooms.value.find(
+      (entry) => normalizeRoomIdentifier(entry.identifier) === identifier
+    ) || null;
+  });
+
   const repoName = computed(() => {
-    return options.rootRoomSnapshot.value?.room?.displayName
+    return currentRecentRootRoom.value?.displayName
+      || options.rootRoomSnapshot.value?.room?.displayName
       || options.rootRoomSnapshot.value?.roomIdentifier
       || options.repoStatus.value?.rootPath?.split("/").filter(Boolean).pop()
       || options.appInfo.value?.workspaceRoot?.split("/").filter(Boolean).pop()
@@ -101,16 +116,68 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     snapshot: DesktopRoomSnapshot,
     rememberOptions: OpenRoomOptions = {}
   ): void {
-    const rootPath = rememberOptions.rootPath || options.repoStatus.value?.rootPath || options.appInfo.value?.workspaceRoot || null;
+    const aliases = roomSnapshotAliases(snapshot);
+    const existingRoom = options.recentRootRooms.value.find(
+      (entry) => aliases.has(normalizeRoomIdentifier(entry.identifier) || "")
+    ) || null;
+    const hasRootPathOverride = Object.prototype.hasOwnProperty.call(rememberOptions, "rootPath");
+    const rootPath = hasRootPathOverride
+      ? rememberOptions.rootPath || null
+      : existingRoom
+        ? existingRoom.rootPath
+        : options.repoStatus.value?.rootPath ?? options.appInfo.value?.workspaceRoot ?? null;
+    const hasKindOverride = Object.prototype.hasOwnProperty.call(rememberOptions, "kind");
+    const kind = hasKindOverride
+      ? rememberOptions.kind || "room"
+      : existingRoom?.kind || (rootPath ? "project" : "room");
+    const rootPathMatchesRepoStatus = Boolean(kind === "project" && rootPath && options.repoStatus.value?.rootPath === rootPath);
+    const projectMeta = kind === "project" && rootPathMatchesRepoStatus
+      ? options.repoStatus.value?.branch || rootPathLabel(rootPath)
+      : null;
+    const inheritedBranchMeta = Boolean(
+      existingRoom?.meta
+      && options.repoStatus.value?.branch
+      && existingRoom.meta === options.repoStatus.value.branch
+    );
+    const existingMeta = existingRoom && !inheritedBranchMeta && !rootPathMatchesRepoStatus
+      ? existingRoom.meta
+      : null;
     const nextRooms = upsertRecentRootRoomSnapshot({
       snapshot,
       recentRootRooms: options.recentRootRooms.value,
+      displayName: rememberOptions.displayName || existingRoom?.displayName || null,
+      kind,
       rootPath,
-      meta: rememberOptions.meta || options.repoStatus.value?.branch || snapshot.room?.code || rootPathLabel(rootPath) || "Room",
+      meta: rememberOptions.meta
+        || projectMeta
+        || existingMeta
+        || (inheritedBranchMeta ? snapshot.room?.code : kind === "project" ? rootPathLabel(rootPath) : null)
+        || snapshot.room?.code
+        || "Room",
     });
     options.recentRootRooms.value = nextRooms;
     rememberRecentRootRooms(options.recentRootRoomsStorageKey, nextRooms);
   }
+
+  const currentProjectMeta = computed(() => {
+    if (currentRecentRootRoom.value?.kind !== "project") return null;
+    const rootPath = currentRecentRootRoom.value?.rootPath || null;
+    if (!rootPath || !options.repoStatus.value?.rootPath) return null;
+    if (rootPath !== options.repoStatus.value.rootPath) return null;
+    return options.repoStatus.value.branch || rootPathLabel(rootPath) || "Project folder";
+  });
+
+  const currentParentRoomMeta = computed(() => {
+    const currentMeta = currentRecentRootRoom.value?.meta || null;
+    if (currentProjectMeta.value) return currentProjectMeta.value;
+    if (
+      currentMeta
+      && !(currentRecentRootRoom.value?.kind === "room" && currentMeta === options.repoStatus.value?.branch)
+    ) return currentMeta;
+    return options.rootRoomSnapshot.value?.room?.code
+      || rootPathLabel(currentRecentRootRoom.value?.rootPath)
+      || "Parent room";
+  });
 
   const currentParentRoom = computed<RoomEntry>(() => ({
     id: rootRoomEntryId(options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || repoName.value),
@@ -118,11 +185,14 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     kind: "parent",
     roomIdentifier: options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || null,
     title: repoName.value,
-    meta: options.repoStatus.value?.branch || "Parent room",
+    meta: currentParentRoomMeta.value,
     sectionLabel: "Parent room",
     headline: "Start here, then branch work into focused rooms when it needs space.",
     description:
       "The main room should feel like home base: familiar, recent, and connected to the focused work happening around it.",
+    latestMessageId: options.rootRoomSnapshot.value?.messages.at(-1)?.id || null,
+    latestMessageAt: options.rootRoomSnapshot.value?.messages.at(-1)?.timestamp || null,
+    hasUnread: false,
   }));
 
   const projectEntries = computed<ProjectGroup[]>(() => buildSidebarProjectGroups({
@@ -142,6 +212,9 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     sectionLabel: currentParentRoom.value.sectionLabel,
     headline: currentParentRoom.value.headline,
     description: currentParentRoom.value.description,
+    latestMessageId: currentParentRoom.value.latestMessageId,
+    latestMessageAt: currentParentRoom.value.latestMessageAt,
+    hasUnread: false,
   }));
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
@@ -266,4 +339,17 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     toggleProject,
     toggleRoomsCollapsed,
   };
+}
+
+function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
+  return new Set([
+    snapshot.roomIdentifier,
+    snapshot.access.roomIdentifier,
+    snapshot.access.code,
+    snapshot.room?.identifier,
+    snapshot.room?.name,
+    snapshot.room?.code,
+  ]
+    .map(normalizeRoomIdentifier)
+    .filter((value): value is string => Boolean(value)));
 }

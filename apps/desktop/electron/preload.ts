@@ -23,6 +23,8 @@ const api: DesktopApi = {
     deleteAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier),
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
+    getLatestMessages: (roomIdentifiers: string[]) =>
+      ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     getReasoningSession: (roomIdentifier: string, sessionId: string) =>
@@ -115,7 +117,7 @@ const api: DesktopApi = {
     completeMcpOnboarding: () => ipcRenderer.invoke("desktop:setup:complete-mcp-onboarding"),
   },
   repos: {
-    getStatus: () => ipcRenderer.invoke("desktop:repos:get-status"),
+    getStatus: (rootPath) => ipcRenderer.invoke("desktop:repos:get-status", rootPath || null),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
   },
   workers: {

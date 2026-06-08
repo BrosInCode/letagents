@@ -21,14 +21,37 @@
         :highlight-query="searchQuery"
         :search-active="message.id === activeSearchMessageId"
         @reply="$emit('reply', $event)"
+        @open-thread="$emit('open-thread', $event)"
         @scroll-to-message="scrollToMessage"
         @open-image="$emit('open-image', $event)"
         @open-agent="$emit('open-agent', $event)"
       />
 
-      <article v-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
-        <h3>Open a room to begin</h3>
-        <p>Messages from humans, agents, and GitHub will appear here as the room comes alive.</p>
+      <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
+        <div
+          v-for="index in 4"
+          :key="index"
+          class="room-loading-message"
+          :data-size="index"
+          aria-hidden="true"
+        >
+          <span class="room-loading-avatar"></span>
+          <span class="room-loading-lines">
+            <span></span>
+            <span></span>
+          </span>
+        </div>
+      </div>
+
+      <article v-else-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
+        <h3>{{ roomIdentifier ? "No messages yet" : "Open a room to begin" }}</h3>
+        <p>
+          {{
+            roomIdentifier
+              ? "Messages from humans, agents, and GitHub will appear here."
+              : "Messages from humans, agents, and GitHub will appear here as the room comes alive."
+          }}
+        </p>
       </article>
     </div>
     <button
@@ -53,30 +76,28 @@ import { buildThreadSummaries } from "./thread-utils";
 const props = defineProps<{
   activeSearchMessageId: string | null;
   hasOlderMessages: boolean;
-  initialScrollTop?: number | null;
   loadingOlderMessages: boolean;
   messages: DesktopRoomMessage[];
   roomIdentifier: string | null;
+  roomLoading: boolean;
   searchQuery: string;
+  initialScrollTop?: number | null;
 }>();
 
 const emit = defineEmits<{
   "load-older": [];
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
+  "open-thread": [messageId: string];
   "reply": [message: DesktopRoomMessage];
-  "scroll-position": [scrollTop: number | null];
+  "scroll-position": [scrollTop: number];
 }>();
 
 const messagesElement = ref<HTMLElement | null>(null);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
-let isScrolledToBottom = true;
-let restoredScrollTop: number | null | undefined;
-let initialScrollSettled = false;
-let pendingInitialScrollFrame: number | null = null;
-let pendingInitialScrollToken = 0;
-let componentUnmounted = false;
+let isScrolledToBottom = false;
+let hasAppliedInitialScroll = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.messages));
 
@@ -92,23 +113,25 @@ watch(
 
     if (isPrepend && messagesElement.value) {
       messagesElement.value.scrollTop += messagesElement.value.scrollHeight - previousScrollHeight;
+      updateScrollState();
       return;
     }
     if (!oldLastId) {
-      if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
-        if (isScrolledToBottom) {
-          scheduleInitialScrollToBottom();
+      if (newMessages.length) {
+        if (restoreInitialScrollPosition()) {
+          return;
         }
-      } else {
-        // Scroll restore is handled synchronously in onMounted; no need to
-        // schedule here (messagesElement is not yet available before mount).
+        scrollToBottom("auto");
+        return;
       }
+      updateScrollState();
       return;
     }
     if (newLastId === oldLastId) {
+      updateScrollState();
       return;
     }
-    if (initialScrollSettled && isScrolledToBottom) {
+    if (isScrolledToBottom) {
       scrollToBottom();
       return;
     }
@@ -131,42 +154,36 @@ watch(
 watch(
   () => props.roomIdentifier,
   () => {
-    restoredScrollTop = undefined;
-    initialScrollSettled = false;
     unreadCount.value = 0;
     isScrolledFarUp.value = false;
-    isScrolledToBottom = true;
+    isScrolledToBottom = false;
+    hasAppliedInitialScroll = false;
     void nextTick(() => {
-      if (props.initialScrollTop === null || props.initialScrollTop === undefined) {
-        scheduleInitialScrollToBottom();
-      } else {
-        restoreInitialScrollTop();
+      if (!restoreInitialScrollPosition()) {
+        scrollToBottom("auto");
       }
     });
   },
 );
 
 onMounted(() => {
-  componentUnmounted = false;
-  if (props.initialScrollTop !== null && props.initialScrollTop !== undefined) {
-    // Restore saved scroll position synchronously before the first paint to
-    // avoid a visible flash where the view briefly appears at scrollTop 0.
-    restoreInitialScrollTop();
-  } else {
-    scheduleInitialScrollToBottom();
-  }
+  void nextTick(() => {
+    if (!restoreInitialScrollPosition()) {
+      updateScrollState();
+    }
+  });
 });
 
 onBeforeUnmount(() => {
-  componentUnmounted = true;
-  cancelPendingInitialScroll();
-  if (messagesElement.value) {
-    emit("scroll-position", messagesElement.value.scrollTop);
-  }
+  emitScrollPosition();
 });
 
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   if (!messagesElement.value) return;
+  if (behavior === "auto") {
+    jumpToBottom();
+    return;
+  }
   messagesElement.value.scrollTo({
     top: messagesElement.value.scrollHeight,
     behavior,
@@ -174,67 +191,58 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   isScrolledToBottom = true;
   unreadCount.value = 0;
   isScrolledFarUp.value = false;
-  emit("scroll-position", null);
+  emitScrollPosition();
+}
+
+function jumpToBottom(): void {
+  if (!messagesElement.value) return;
+  const element = messagesElement.value;
+  const previousScrollBehavior = element.style.scrollBehavior;
+  element.style.scrollBehavior = "auto";
+  element.scrollTop = element.scrollHeight;
+  element.style.scrollBehavior = previousScrollBehavior;
+  isScrolledToBottom = true;
+  unreadCount.value = 0;
+  isScrolledFarUp.value = false;
+  emitScrollPosition();
 }
 
 function handleScroll(): void {
   if (!messagesElement.value) return;
   const element = messagesElement.value;
-  const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-  isScrolledToBottom = distanceToBottom < 80;
-  emit("scroll-position", isScrolledToBottom ? null : element.scrollTop);
-  isScrolledFarUp.value = distanceToBottom > 900;
+  updateScrollState();
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
-  if (initialScrollSettled && element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
+  emitScrollPosition();
+  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages) {
     emit("load-older");
   }
 }
 
-function restoreInitialScrollTop(): void {
+function updateScrollState(): void {
   const element = messagesElement.value;
+  if (!element) return;
+  const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+  isScrolledToBottom = distanceToBottom < 80;
+  isScrolledFarUp.value = distanceToBottom > 900;
+}
+
+function restoreInitialScrollPosition(): boolean {
+  if (hasAppliedInitialScroll || !messagesElement.value) return false;
   const scrollTop = props.initialScrollTop;
-  if (!element || scrollTop === null || scrollTop === undefined || restoredScrollTop === scrollTop) {
-    initialScrollSettled = true;
-    return;
-  }
-  restoredScrollTop = scrollTop;
-  // Override CSS `scroll-behavior: smooth` to prevent animated scrolling.
-  // Chromium/Electron honors the CSS property even when JS says "auto".
-  const prev = element.style.scrollBehavior;
-  element.style.scrollBehavior = "auto";
+  if (typeof scrollTop !== "number" || !Number.isFinite(scrollTop)) return false;
+  const element = messagesElement.value;
   element.scrollTop = Math.max(0, Math.min(scrollTop, element.scrollHeight));
-  element.style.scrollBehavior = prev;
-  initialScrollSettled = true;
-  handleScroll();
+  hasAppliedInitialScroll = true;
+  updateScrollState();
+  emitScrollPosition();
+  return true;
 }
 
-function scheduleInitialScrollToBottom(): void {
-  scheduleInitialScroll(() => {
-    scrollToBottom("auto");
-    initialScrollSettled = true;
-  });
-}
-
-function scheduleInitialScroll(callback: () => void): void {
-  cancelPendingInitialScroll();
-  const token = ++pendingInitialScrollToken;
-  void nextTick(() => {
-    if (componentUnmounted || token !== pendingInitialScrollToken) return;
-    pendingInitialScrollFrame = window.requestAnimationFrame(() => {
-      pendingInitialScrollFrame = null;
-      if (componentUnmounted || token !== pendingInitialScrollToken) return;
-      callback();
-    });
-  });
-}
-
-function cancelPendingInitialScroll(): void {
-  pendingInitialScrollToken += 1;
-  if (pendingInitialScrollFrame === null) return;
-  window.cancelAnimationFrame(pendingInitialScrollFrame);
-  pendingInitialScrollFrame = null;
+function emitScrollPosition(): void {
+  if (!messagesElement.value) return;
+  emit("scroll-position", messagesElement.value.scrollTop);
 }
 
 function threadCount(messageId: string): number {

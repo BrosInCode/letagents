@@ -9,6 +9,7 @@
     }"
     :data-owner-kind="ownerKind"
     :data-testid="`room-message-${message.id}`"
+    @contextmenu="openContextMenu"
   >
     <div
       class="room-chat-avatar"
@@ -35,6 +36,18 @@
           </span>
         </div>
         <div class="room-message-meta-tail">
+          <button
+            class="room-message-reply-action room-message-thread-action"
+            type="button"
+            title="Reply in thread"
+            aria-label="Reply in thread"
+            @click="$emit('open-thread', message.id)"
+          >
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H8.25L5 13v-2H4.5A1.5 1.5 0 0 1 3 9.5v-5Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" />
+              <path d="M6 6.25h4M6 8.5h2.75" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+            </svg>
+          </button>
           <button class="room-message-reply-action" type="button" title="Reply" @click="$emit('reply', message)">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M6.5 4.5 2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -81,16 +94,35 @@
         v-if="threadCount > 0"
         class="room-thread-marker"
         type="button"
-        @click="$emit('scroll-to-message', latestThreadMessageId)"
+        @click="$emit('open-thread', message.id)"
       >
-        {{ threadCount === 1 ? "1 reply" : `${threadCount} replies` }}
+        {{ threadCount === 1 ? "View 1 reply" : `View ${threadCount} replies` }}
+      </button>
+    </div>
+
+    <div
+      v-if="contextMenuOpen"
+      class="room-message-context-menu"
+      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
+      role="menu"
+      data-testid="room-message-context-menu"
+      @keydown.down.prevent="focusContextMenuItem(1)"
+      @keydown.up.prevent="focusContextMenuItem(-1)"
+      @pointerdown.stop
+      @contextmenu.prevent.stop
+    >
+      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="openThreadFromContext">
+        <span>Reply in thread</span>
+      </button>
+      <button type="button" role="menuitem" @click="replyFromContext">
+        <span>Quote reply</span>
       </button>
     </div>
   </article>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
@@ -115,13 +147,17 @@ const props = defineProps<{
   searchActive: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   reply: [message: DesktopRoomMessage];
+  "open-thread": [messageId: string];
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
 }>();
 
+const contextMenuOpen = ref(false);
+const contextMenuPosition = ref({ x: 0, y: 0 });
+const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
 const identity = computed(() => parseSenderIdentity(props.message));
 const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
 const ownerAttribution = computed(() => props.message.agentIdentity?.ownerAttribution || identity.value.ownerAttribution);
@@ -149,4 +185,59 @@ const agentModalTarget = computed<AgentModalTarget>(() => ({
   ideLabel: ideLabel.value,
   sender: props.message.sender,
 }));
+
+function openContextMenu(event: MouseEvent): void {
+  if (shouldUseNativeContextMenu(event)) {
+    return;
+  }
+  event.preventDefault();
+  const menuWidth = 180;
+  const menuHeight = 92;
+  contextMenuPosition.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+  };
+  contextMenuOpen.value = true;
+  void nextTick(() => firstContextMenuButton.value?.focus());
+  window.setTimeout(() => {
+    window.addEventListener("pointerdown", closeContextMenu, { once: true });
+    window.addEventListener("keydown", handleContextMenuKeydown);
+  }, 0);
+}
+
+function shouldUseNativeContextMenu(event: MouseEvent): boolean {
+  const target = event.target instanceof Element ? event.target : null;
+  return Boolean(target?.closest("a, button, input, textarea, select, [contenteditable='true']"));
+}
+
+function closeContextMenu(): void {
+  contextMenuOpen.value = false;
+  window.removeEventListener("keydown", handleContextMenuKeydown);
+}
+
+function handleContextMenuKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") closeContextMenu();
+}
+
+function focusContextMenuItem(direction: 1 | -1): void {
+  const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".room-message-context-menu [role='menuitem']"));
+  if (!items.length) return;
+  const currentIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
+  const nextIndex = (currentIndex + direction + items.length) % items.length;
+  items[nextIndex]?.focus();
+}
+
+function openThreadFromContext(): void {
+  closeContextMenu();
+  emit("open-thread", props.message.id);
+}
+
+function replyFromContext(): void {
+  closeContextMenu();
+  emit("reply", props.message);
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleContextMenuKeydown);
+});
 </script>

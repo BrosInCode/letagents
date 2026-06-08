@@ -8,6 +8,9 @@ export type RoomEntry = {
   sectionLabel: string;
   headline: string;
   description: string;
+  latestMessageId: string | null;
+  latestMessageAt: string | null;
+  hasUnread: boolean;
 };
 
 export type SystemEntry = {

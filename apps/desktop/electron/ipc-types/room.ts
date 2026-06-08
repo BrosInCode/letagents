@@ -1,4 +1,5 @@
 import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSummary, DesktopReasoningSession } from "./activity.js";
+import type { RepoStatus } from "./core.js";
 import type { DesktopRentalActivityEvent, DesktopRentalOwnQuotaStatus, DesktopRentalRenterTriggerSignal } from "./rental.js";
 import type { DesktopTaskSummary } from "./tasks.js";
 
@@ -114,6 +115,12 @@ export interface DesktopRoomMessagesPage {
   hasOlder: boolean;
 }
 
+export interface DesktopRoomLatestMessage {
+  roomIdentifier: string;
+  latestMessageId: string | null;
+  latestMessageAt: string | null;
+}
+
 export interface DesktopChatStorageSettings {
   mode: "cloud" | "local";
   databasePath: string;
@@ -199,6 +206,7 @@ export interface DesktopDroppedAttachmentContent {
 export interface DesktopRepoRoomSelection {
   canceled: boolean;
   repoPath: string | null;
+  repoStatus: RepoStatus | null;
   roomIdentifier: string | null;
   source: "configured" | "git_remote" | "local_fallback" | null;
   snapshot: DesktopRoomSnapshot | null;
@@ -225,6 +233,8 @@ export interface DesktopAccountFocusRoomEntry {
   source: string | null;
   firstOpenedAt: string | null;
   lastOpenedAt: string | null;
+  latestMessageId: string | null;
+  latestMessageAt: string | null;
 }
 
 export interface DesktopAccountRoomEntry {
@@ -245,6 +255,8 @@ export interface DesktopAccountRoomEntry {
   deleteReason: string | null;
   firstOpenedAt: string | null;
   lastOpenedAt: string | null;
+  latestMessageId: string | null;
+  latestMessageAt: string | null;
   focusRooms: DesktopAccountFocusRoomEntry[];
 }
 

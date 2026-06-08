@@ -23,6 +23,7 @@ function createDeps() {
     shouldIncludePromptOnlyMessages: () => false,
     emitProjectMessage: unused,
     rememberRoomParticipantFromMessage: unused,
+    rememberAccountRoom: async () => undefined,
   };
 }
 
@@ -112,6 +113,9 @@ test("owner-token message writes require a registered worker session", async () 
 test("desktop owner-token human messages can post as browser activity", async () => {
   let createdMessage: { sender: string; text: string; options?: { source?: string } } | null = null;
   let rememberedSource: string | null | undefined;
+  let rememberedAccountRoom:
+    | { accountId: string; roomId: string; displayName?: string | null; source?: string | null }
+    | null = null;
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get() {},
@@ -131,6 +135,14 @@ test("desktop owner-token human messages can post as browser activity", async ()
     },
     rememberRoomParticipantFromMessage: async (input: { source?: string | null }) => {
       rememberedSource = input.source;
+    },
+    rememberAccountRoom: async (input: {
+      accountId: string;
+      roomId: string;
+      displayName?: string | null;
+      source?: string | null;
+    }) => {
+      rememberedAccountRoom = input;
     },
   };
 
@@ -169,6 +181,12 @@ test("desktop owner-token human messages can post as browser activity", async ()
     options: { source: "browser", agent_prompt_kind: null, reply_to: null, attachments: [] },
   });
   assert.equal(rememberedSource, "browser");
+  assert.deepEqual(rememberedAccountRoom, {
+    accountId: "acct_1",
+    roomId: "room_1",
+    displayName: undefined,
+    source: "open_room",
+  });
 });
 
 test("desktop owner-token messages ignore agent-shaped display labels", async () => {

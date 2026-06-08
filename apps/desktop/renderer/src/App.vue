@@ -34,6 +34,8 @@
     v-else
     class="desktop-shell"
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
+    :data-sidebar-resizing="isSidebarResizing"
+    :style="desktopShellStyle"
     data-testid="desktop-shell"
   >
     <DesktopSidebar
@@ -41,17 +43,31 @@
       :sidebar-mode="sidebarMode"
       :active-entry="activeEntry"
       :primary-room="currentParentRoom"
-      :project-entries="projectEntries"
+      :project-entries="sidebarProjectEntries"
       :settings-entry="settingsEntry"
       :rooms-collapsed="roomsCollapsed"
       :collapsed-projects="collapsedProjects"
       @cycle-sidebar="cycleSidebar"
       @new-room="selectNewRoomEntry"
       @archive-room="archiveSidebarRoom"
-      @select-entry="selectSidebarEntry"
+      @select-entry="handleSidebarEntrySelected"
       @toggle-project="toggleProject"
       @toggle-rooms-collapsed="toggleRoomsCollapsed"
     />
+    <div
+      v-if="showSidebarResizeHandle"
+      class="sidebar-resize-handle"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      :aria-valuemin="sidebarMinWidth"
+      :aria-valuemax="sidebarMaxWidth"
+      :aria-valuenow="sidebarWidth"
+      tabindex="0"
+      data-testid="sidebar-resize-handle"
+      @pointerdown="startSidebarResize"
+      @keydown="handleSidebarResizeKeydown"
+    ></div>
     <div
       v-if="showSidebarPeek"
       class="sidebar-peek-zone"
@@ -69,14 +85,14 @@
           sidebar-mode="expanded"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
-          :project-entries="projectEntries"
+          :project-entries="sidebarProjectEntries"
           :settings-entry="settingsEntry"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
           @cycle-sidebar="closeSidebarPeek"
           @new-room="selectNewRoomEntry"
           @archive-room="archiveSidebarRoom"
-          @select-entry="selectSidebarEntry"
+          @select-entry="handleSidebarEntrySelected"
           @toggle-project="toggleProject"
           @toggle-rooms-collapsed="toggleRoomsCollapsed"
         />
@@ -110,8 +126,9 @@
 
         <DesktopRoomShell
           v-else
-          :key="activeEntry.id"
+          :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
+          :room-loading="selectedSnapshotLoading"
           :room="selectedRoomInfo"
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
@@ -122,7 +139,9 @@
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
           :workers="workers"
-          @message-sent="handleMessageSent"
+          :initial-chat-scroll-top="chatScrollTopByRoom[selectedRoomInfo.identifier] ?? null"
+          @chat-scroll-position="rememberChatScrollPosition"
+          @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRefreshRoom"
@@ -181,7 +200,9 @@
       :busy="newRoomBusy"
       :feedback="newRoomFeedback"
       :feedback-state="newRoomFeedbackState"
+      :project-selection="newRoomProjectSelection"
       @close="closeNewRoomModal"
+      @confirm-project="confirmProjectRoomFromModal"
       @create-invite="createInviteRoom"
       @open-project="openProjectRoomFromModal"
       @join="joinRoomCodeFromModal"
@@ -198,6 +219,7 @@ import type {
   DesktopChatStorageSettings,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DiagnosticsSnapshot,
   RepoStatus,
@@ -210,6 +232,7 @@ import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModa
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
+import type { RoomEntry, SidebarEntry } from "./components/desktop/types";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -222,6 +245,14 @@ import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboardi
 import { settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
+  hasUnreadRoomActivity,
+  markRoomRead,
+  readStoredRoomMessageIds,
+  roomReadKey,
+  seedRoomReadMarker,
+} from "./domain/desktop-room-read-state";
+import {
+  normalizeRoomIdentifier,
   readStoredRecentRootRooms,
 } from "./domain/sidebar-rooms";
 
@@ -235,8 +266,18 @@ const authStatus = ref<DesktopAuthStatus | null>(null);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
+const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
+const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
+const sidebarMinWidth = 260;
+const sidebarMaxWidth = 440;
+const sidebarDefaultWidth = 296;
 const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
+const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
+const sidebarWidth = ref(readStoredSidebarWidth());
+const isSidebarResizing = ref(false);
+const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
+const chatScrollTopByRoom = ref<Record<string, number>>({});
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
@@ -289,10 +330,31 @@ const {
 
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
+let accountRoomsRefreshInterval: number | null = null;
+let sidebarMetadataRefreshInFlight = false;
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const sidebarPeekOpen = ref(false);
 const showSidebarPeek = computed(() => !isSettingsSurface.value && sidebarMode.value === "hidden");
+const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
+const desktopShellStyle = computed(() => ({
+  "--sidebar-width": `${sidebarWidth.value}px`,
+  "--sidebar-min-width": `${sidebarMinWidth}px`,
+  "--sidebar-max-width": `${sidebarMaxWidth}px`,
+}));
+const sidebarProjectEntries = computed(() =>
+  projectEntries.value.map((project) => ({
+    ...project,
+    parent: withRoomUnreadState(project.parent),
+    focusRooms: project.focusRooms.map(withRoomUnreadState),
+  }))
+);
+const selectedRoomRenderKey = computed(() =>
+  selectedSnapshot.value?.room?.identifier
+  || selectedSnapshot.value?.roomIdentifier
+  || selectedRoomInfo.value.identifier
+  || activeEntry.value.id
+);
 
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
   if (activeEntry.value.type !== "system") return "storage:chat";
@@ -314,6 +376,216 @@ function openSidebarPeek(): void {
 
 function closeSidebarPeek(): void {
   sidebarPeekOpen.value = false;
+}
+
+function readStoredSidebarWidth(): number {
+  const parsed = Number(readStoredString(sidebarWidthStorageKey));
+  return clampSidebarWidth(Number.isFinite(parsed) ? parsed : sidebarDefaultWidth);
+}
+
+function clampSidebarWidth(value: number): number {
+  return Math.min(sidebarMaxWidth, Math.max(sidebarMinWidth, Math.round(value)));
+}
+
+function startSidebarResize(event: PointerEvent): void {
+  if (!showSidebarResizeHandle.value) return;
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = sidebarWidth.value;
+  isSidebarResizing.value = true;
+  document.documentElement.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+
+  function handlePointerMove(moveEvent: PointerEvent): void {
+    sidebarWidth.value = clampSidebarWidth(startWidth + moveEvent.clientX - startX);
+  }
+
+  function handlePointerUp(): void {
+    isSidebarResizing.value = false;
+    rememberStoredString(sidebarWidthStorageKey, String(sidebarWidth.value));
+    document.documentElement.style.cursor = "";
+    document.body.style.userSelect = "";
+    window.removeEventListener("pointermove", handlePointerMove);
+    window.removeEventListener("pointerup", handlePointerUp);
+    window.removeEventListener("pointercancel", handlePointerUp);
+  }
+
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", handlePointerUp);
+  window.addEventListener("pointercancel", handlePointerUp);
+}
+
+function handleSidebarResizeKeydown(event: KeyboardEvent): void {
+  const step = event.shiftKey ? 32 : 12;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidth.value - step);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    setSidebarWidth(sidebarWidth.value + step);
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    setSidebarWidth(sidebarMinWidth);
+  } else if (event.key === "End") {
+    event.preventDefault();
+    setSidebarWidth(sidebarMaxWidth);
+  }
+}
+
+function setSidebarWidth(value: number): void {
+  sidebarWidth.value = clampSidebarWidth(value);
+  rememberStoredString(sidebarWidthStorageKey, String(sidebarWidth.value));
+}
+
+async function refreshSidebarRoomMetadata(): Promise<void> {
+  if (showFirstRunGate.value || sidebarMetadataRefreshInFlight) return;
+  sidebarMetadataRefreshInFlight = true;
+  try {
+    await refreshActiveRepoStatus();
+    await refreshAccountRooms().catch(() => undefined);
+    await refreshSidebarLatestMessages();
+  } finally {
+    sidebarMetadataRefreshInFlight = false;
+  }
+}
+
+async function refreshActiveRepoStatus(): Promise<void> {
+  const rootPath = activeProjectRootPath();
+  if (!rootPath) return;
+  const nextRepoStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
+  if (nextRepoStatus) repoStatus.value = nextRepoStatus;
+}
+
+function activeProjectRootPath(): string | null {
+  const identifier = normalizeRoomIdentifier(selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier);
+  if (!identifier) return null;
+  return recentRootRooms.value.find(
+    (room) => normalizeRoomIdentifier(room.identifier) === identifier
+  )?.rootPath || null;
+}
+
+function handleVisibilityChange(): void {
+  if (document.visibilityState !== "visible") return;
+  void refreshSidebarRoomMetadata();
+}
+
+function handleWindowFocus(): void {
+  void refreshSidebarRoomMetadata();
+}
+
+async function refreshSidebarLatestMessages(): Promise<void> {
+  const roomIdentifiers = sidebarRoomIdentifiers();
+  if (!roomIdentifiers.length || !window.letagentsDesktop.room.getLatestMessages) {
+    sidebarLatestMessages.value = {};
+    return;
+  }
+
+  const latestMessages = await window.letagentsDesktop.room.getLatestMessages(roomIdentifiers).catch(() => []);
+  const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = {};
+  for (const latestMessage of latestMessages) {
+    const key = roomReadKey(latestMessage.roomIdentifier);
+    if (!key) continue;
+    nextLatestMessages[key] = latestMessage;
+  }
+  sidebarLatestMessages.value = nextLatestMessages;
+  seedReadMarkersForKnownRooms();
+  markActiveRoomRead();
+}
+
+function sidebarRoomIdentifiers(): string[] {
+  const identifiers = new Set<string>();
+  for (const project of projectEntries.value) {
+    for (const entry of [project.parent, ...project.focusRooms]) {
+      const identifier = entry.roomIdentifier?.trim();
+      if (identifier) identifiers.add(identifier);
+    }
+  }
+  return [...identifiers];
+}
+
+function withRoomUnreadState(entry: RoomEntry): RoomEntry {
+  const latestMessageId = latestMessageIdForEntry(entry);
+  return {
+    ...entry,
+    latestMessageId,
+    latestMessageAt: latestMessageAtForEntry(entry),
+    hasUnread: hasUnreadRoomActivity({
+      activeRoomIdentifier: selectedRoomIdentifier.value,
+      latestMessageId,
+      readMarkers: readRoomMessageIds.value,
+      roomIdentifier: entry.roomIdentifier,
+    }),
+  };
+}
+
+function latestMessageIdForEntry(entry: RoomEntry): string | null {
+  if (selectedSnapshotMatchesEntry(entry)) {
+    return selectedSnapshot.value?.messages.at(-1)?.id || entry.latestMessageId;
+  }
+  return latestMessageForEntry(entry)?.latestMessageId || entry.latestMessageId;
+}
+
+function latestMessageAtForEntry(entry: RoomEntry): string | null {
+  if (selectedSnapshotMatchesEntry(entry)) {
+    return selectedSnapshot.value?.messages.at(-1)?.timestamp || entry.latestMessageAt;
+  }
+  return latestMessageForEntry(entry)?.latestMessageAt || entry.latestMessageAt;
+}
+
+function latestMessageForEntry(entry: RoomEntry): DesktopRoomLatestMessage | null {
+  const key = roomReadKey(entry.roomIdentifier);
+  return key ? sidebarLatestMessages.value[key] || null : null;
+}
+
+function selectedSnapshotMatchesEntry(entry: RoomEntry): boolean {
+  const entryIdentifier = normalizeRoomIdentifier(entry.roomIdentifier);
+  const snapshotIdentifier = normalizeRoomIdentifier(
+    selectedSnapshot.value?.room?.identifier || selectedSnapshot.value?.roomIdentifier
+  );
+  return Boolean(entryIdentifier && snapshotIdentifier && entryIdentifier === snapshotIdentifier);
+}
+
+function handleSidebarEntrySelected(entry: SidebarEntry): void {
+  if (entry.type === "room") {
+    markRoomEntryRead(entry);
+  }
+  selectSidebarEntry(entry);
+}
+
+function seedReadMarkersForKnownRooms(): void {
+  let nextMarkers = readRoomMessageIds.value;
+  let changed = false;
+  for (const project of projectEntries.value) {
+    for (const entry of [project.parent, ...project.focusRooms]) {
+      const result = seedRoomReadMarker(nextMarkers, entry.roomIdentifier, latestMessageIdForEntry(entry));
+      nextMarkers = result.readMarkers;
+      changed = changed || result.changed;
+    }
+  }
+  if (changed) {
+    readRoomMessageIds.value = nextMarkers;
+    rememberRoomMessageIds();
+  }
+}
+
+function markActiveRoomRead(): void {
+  if (activeEntry.value.type !== "room") return;
+  markRoomEntryRead(activeEntry.value);
+}
+
+function markRoomEntryRead(entry: RoomEntry): void {
+  const result = markRoomRead(readRoomMessageIds.value, entry.roomIdentifier, latestMessageIdForEntry(entry));
+  if (!result.changed) return;
+  readRoomMessageIds.value = result.readMarkers;
+  rememberRoomMessageIds();
+}
+
+function rememberRoomMessageIds(): void {
+  try {
+    window.localStorage.setItem(readRoomMessagesStorageKey, JSON.stringify(readRoomMessageIds.value));
+  } catch {
+    // Local persistence should never block message navigation.
+  }
 }
 
 const {
@@ -338,6 +610,7 @@ const {
   refreshAccountRooms,
   refreshSelectedSnapshot,
   repoStatusValue,
+  selectedSnapshotLoading,
   upsertSelectedTask,
 } = useDesktopAppData({
   accountRooms,
@@ -350,6 +623,7 @@ const {
   mcpInstallState,
   reconcileActiveEntry,
   rememberRootRoomSnapshot,
+  recentRootRooms,
   repoStatus,
   resolveSelectedRoomIdentifier,
   rootRoomSnapshot,
@@ -384,6 +658,7 @@ const {
 
 const {
   closeNewRoomModal,
+  confirmProjectRoomFromModal,
   createInviteRoom,
   joinRoomCodeFromModal,
   newRoomBusy,
@@ -391,10 +666,14 @@ const {
   newRoomFeedbackState,
   newRoomJoinCode,
   newRoomModalOpen,
+  newRoomProjectSelection,
   openProjectRoomFromModal,
   selectNewRoomEntry,
 } = useDesktopNewRoomModal({
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
+  setRepoStatus: (status) => {
+    if (status) repoStatus.value = status;
+  },
 });
 const {
   archiveSidebarRoom,
@@ -454,6 +733,7 @@ const {
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   pinnedRoom,
   refresh: () => refresh(),
+  repoStatus,
   selectedMcpTargetIds,
   setupLoadError,
 });
@@ -490,6 +770,7 @@ async function loadChatStorageSettings(): Promise<void> {
 
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
   await window.letagentsDesktop.room.stopStream();
+  await refreshActiveRepoStatus();
   selectedSnapshot.value = null;
   const rootRoomIdentifier = selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier || null;
   if (rootRoomIdentifier) {
@@ -567,14 +848,40 @@ async function syncLocalChat(): Promise<void> {
   }
 }
 
+function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]): void {
+  handleMessageSent(message);
+  markActiveRoomRead();
+}
+
+function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {
+  chatScrollTopByRoom.value = {
+    ...chatScrollTopByRoom.value,
+    [roomIdentifier]: scrollTop,
+  };
+}
+
 watch(
   () => activeEntry.value,
   async (nextEntry, previousEntry) => {
+    const selectedEntryId = nextEntry.id;
     rememberStoredString(activeEntryStorageKey, nextEntry.id);
     if (!rootRoomSnapshot.value) return;
     if (nextEntry.id === previousEntry?.id) return;
     await refreshSelectedSnapshot(rootRoomSnapshot.value);
+    if (activeEntry.value.id !== selectedEntryId) return;
+    markActiveRoomRead();
   }
+);
+
+watch(
+  [() => projectEntries.value, () => loading.value],
+  () => {
+    if (loading.value || !rootRoomSnapshot.value) return;
+    if (!sidebarMetadataRefreshInFlight) {
+      void refreshSidebarLatestMessages();
+    }
+  },
+  { deep: true, immediate: true }
 );
 
 watch(showSidebarPeek, (enabled) => {
@@ -603,6 +910,7 @@ watch(
   () => {
     if (!selectedRoomIdentifier.value) return;
     void syncSelectedRoomStream(selectedRoomIdentifier.value);
+    markActiveRoomRead();
   }
 );
 
@@ -620,6 +928,11 @@ watch(
 onMounted(() => {
   unsubscribeRoomStream = window.letagentsDesktop.room.onStreamEvent(handleRoomStreamEvent);
   unsubscribeOpenSettings = window.letagentsDesktop.ui?.onOpenSettings(openSettingsSurface) || null;
+  accountRoomsRefreshInterval = window.setInterval(() => {
+    void refreshSidebarRoomMetadata();
+  }, 5_000);
+  window.addEventListener("focus", handleWindowFocus);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   void loadChatStorageSettings();
   void loadFirstRunSetup();
 });
@@ -628,6 +941,12 @@ onBeforeUnmount(() => {
   clearAuthPollTimer();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();
+  if (accountRoomsRefreshInterval) {
+    window.clearInterval(accountRoomsRefreshInterval);
+    accountRoomsRefreshInterval = null;
+  }
+  window.removeEventListener("focus", handleWindowFocus);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();

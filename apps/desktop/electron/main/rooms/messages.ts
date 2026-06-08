@@ -1,5 +1,6 @@
 import type {
   DesktopLocalChatSyncResult,
+  DesktopRoomLatestMessage,
   DesktopRoomMessagesPage,
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
@@ -7,6 +8,7 @@ import { apiFetch, readStoredAuth } from "../auth.js";
 import {
   addLocalChatMessage,
   claimUnsyncedLocalChatMessages,
+  getLatestLocalChatMessages,
   getLocalChatMessagesBefore,
   getSyncedCloudMessageId,
   markLocalChatMessageSynced,
@@ -119,6 +121,44 @@ export async function getDesktopRoomMessagesBefore(
       .map(mapRoomMessagePayload),
     hasOlder: Boolean(page.has_older ?? page.has_more),
   };
+}
+
+export async function getDesktopRoomLatestMessages(
+  roomIdentifiers: string[],
+): Promise<DesktopRoomLatestMessage[]> {
+  const identifiers = [
+    ...new Set(
+      roomIdentifiers
+        .map((roomIdentifier) => roomIdentifier.trim())
+        .filter(Boolean),
+    ),
+  ].slice(0, 100);
+  if (!identifiers.length) return [];
+
+  const localChatStorage = await isLocalChatStorageEnabled();
+  const results = await Promise.all(
+    identifiers.map(async (roomIdentifier): Promise<DesktopRoomLatestMessage | null> => {
+      try {
+        const page = localChatStorage
+          ? await getLatestLocalChatMessages(roomIdentifier, { limit: 1 })
+          : await apiFetch<{
+              messages?: RoomMessagePayload[];
+            }>(
+              `/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=1&before=latest`,
+            );
+        const latest = page.messages?.at(-1) || null;
+        return {
+          roomIdentifier,
+          latestMessageId: latest?.id || null,
+          latestMessageAt: latest?.timestamp || null,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return results.filter((result): result is DesktopRoomLatestMessage => Boolean(result));
 }
 
 export { readChatStorageSettings, setChatStorageMode };

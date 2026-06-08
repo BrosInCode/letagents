@@ -64,6 +64,8 @@ function toAccountFocusRoomResponse(room: AccountRoomListFocusRoom): Record<stri
     source: room.source,
     first_opened_at: room.first_opened_at,
     last_opened_at: room.last_opened_at,
+    latest_message_id: room.latest_message_id,
+    latest_message_at: room.latest_message_at,
   };
 }
 
@@ -87,6 +89,8 @@ function toAccountRoomResponse(room: AccountRoomListEntry): Record<string, unkno
     delete_reason: room.delete_reason,
     first_opened_at: room.first_opened_at,
     last_opened_at: room.last_opened_at,
+    latest_message_id: room.latest_message_id,
+    latest_message_at: room.latest_message_at,
     focus_rooms: room.focus_rooms.map(toAccountFocusRoomResponse),
   };
 }

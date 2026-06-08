@@ -178,6 +178,7 @@ export function registerApiRoutes(app: Express): void {
     shouldIncludePromptOnlyMessages,
     emitProjectMessage,
     rememberRoomParticipantFromMessage,
+    rememberAccountRoom: upsertAccountRoomRecent,
   } satisfies LegacyProjectMessageRouteDeps;
 
   const legacyProjectTaskRouteDeps = {
@@ -210,6 +211,7 @@ export function registerApiRoutes(app: Express): void {
     shouldIncludePromptOnlyMessages,
     emitProjectMessage,
     rememberRoomParticipantFromMessage,
+    rememberAccountRoom: upsertAccountRoomRecent,
   } satisfies RoomMessageRouteDeps;
 
   const roomPresenceRouteDeps = {

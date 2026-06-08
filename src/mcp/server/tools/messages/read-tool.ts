@@ -18,7 +18,7 @@ import { jsonToolResponse } from "./response.js";
 export function registerReadMessagesTool(server: McpServer): void {
   server.tool(
     "read_messages",
-    "Read all messages from a Let Agents Chat room. For long-running work, prefer wait_for_messages with after_message_id so you only process new lines and do not treat an empty poll as the end of the mission.",
+    "Read all messages from a Let Agents Chat room. Threaded replies include thread_parent_id/thread.root_message_id; use send_thread_message with that id to continue focused side discussion without polluting the main room. For long-running work, prefer wait_for_messages with after_message_id so you only process new lines and do not treat an empty poll as the end of the mission.",
     {
       room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room."),
     },

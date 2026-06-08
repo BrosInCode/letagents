@@ -16,8 +16,8 @@
       v-model="draft"
       class="desktop-composer-input"
       rows="3"
-      :placeholder="roomIdentifier ? 'Write a message...' : 'Choose a room to start writing'"
-      :disabled="!roomIdentifier"
+      :placeholder="composerPlaceholder"
+      :disabled="roomLoading || !roomIdentifier"
       data-testid="desktop-composer-input"
       @input="handleDraftInput"
       @keydown.down.prevent="moveMentionSelection(1)"
@@ -52,7 +52,7 @@
       <button
         class="desktop-composer-attach"
         type="button"
-        :disabled="sending || !roomIdentifier || attaching"
+        :disabled="roomLoading || sending || !roomIdentifier || attaching"
         :title="attaching ? 'Attaching' : 'Attach files'"
         :aria-label="attaching ? 'Attaching files' : 'Attach files'"
         data-testid="desktop-composer-attach"
@@ -66,7 +66,7 @@
       <button
         class="desktop-composer-send"
         type="submit"
-        :disabled="sending || !canSend"
+        :disabled="roomLoading || sending || !canSend"
         data-testid="desktop-composer-send"
       >
         {{ sending ? "Sending..." : "Send" }}
@@ -94,6 +94,7 @@ const props = defineProps<{
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   replyTo: DesktopRoomMessage | null;
   roomIdentifier: string | null;
+  roomLoading: boolean;
   sendError: string | null;
   sending: boolean;
 }>();
@@ -111,22 +112,30 @@ const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 
-const canSend = computed(() => Boolean(props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0)));
+const canSend = computed(() =>
+  Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
+);
 const reachableParticipantCount = computed(() =>
   props.participants.filter((participant) => participant.activityState !== "offline").length
 );
 const composerTargetLabel = computed(() => props.roomIdentifier ? "Message the room" : "No room selected");
+const composerPlaceholder = computed(() => {
+  if (props.roomLoading) return "Loading room...";
+  return props.roomIdentifier ? "Write a message..." : "Choose a room to start writing";
+});
 const composerPresenceLabel = computed(() => {
+  if (props.roomLoading) return "Loading room";
   if (!props.roomIdentifier) return "Open a room before sending";
   if (reachableParticipantCount.value === 0) return "No reachable participants";
   if (reachableParticipantCount.value === 1) return "1 reachable participant";
   return `${reachableParticipantCount.value} reachable participants`;
 });
-const composerHint = computed(() =>
-  props.roomIdentifier
+const composerHint = computed(() => {
+  if (props.roomLoading) return "Room messages and participants are loading.";
+  return props.roomIdentifier
     ? "Use @ to bring a person or agent into the thread."
-    : "Select a room from the sidebar to enable chat."
-);
+    : "Select a room from the sidebar to enable chat.";
+});
 const mentionOpen = computed({
   get: () => mentionQuery.value !== null && mentionCandidates.value.length > 0,
   set: (value: boolean) => {

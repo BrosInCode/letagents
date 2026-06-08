@@ -22,7 +22,6 @@ export function useDesktopRoomMessages(options: {
   const localMessages = ref<DesktopRoomMessage[]>([]);
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
-  const chatScrollTop = ref<number | null>(null);
   const chatDraftText = ref("");
   const ownMessageIds = new Set<string>();
 
@@ -44,7 +43,11 @@ export function useDesktopRoomMessages(options: {
   watch(
     () => options.room.value.identifier,
     () => {
-      chatScrollTop.value = null;
+      olderMessages.value = [];
+      localMessages.value = [];
+      hasOlderMessages.value = true;
+      loadingOlderMessages.value = false;
+      sendError.value = null;
       chatDraftText.value = "";
     },
   );
@@ -83,6 +86,7 @@ export function useDesktopRoomMessages(options: {
 
   async function loadOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
+    const roomIdentifier = options.room.value.identifier;
     const firstMessageId = visibleMessages.value[0]?.id;
     if (!firstMessageId) {
       hasOlderMessages.value = false;
@@ -92,16 +96,20 @@ export function useDesktopRoomMessages(options: {
     loadingOlderMessages.value = true;
     try {
       const page = await window.letagentsDesktop.room.getMessagesBefore(
-        options.room.value.identifier,
+        roomIdentifier,
         firstMessageId,
         messageHistoryPageSize
       );
+      if (options.room.value.identifier !== roomIdentifier) return;
       olderMessages.value = [...page.messages, ...olderMessages.value];
       hasOlderMessages.value = page.hasOlder;
     } catch {
+      if (options.room.value.identifier !== roomIdentifier) return;
       hasOlderMessages.value = false;
     } finally {
-      loadingOlderMessages.value = false;
+      if (options.room.value.identifier === roomIdentifier) {
+        loadingOlderMessages.value = false;
+      }
     }
   }
 
@@ -110,7 +118,6 @@ export function useDesktopRoomMessages(options: {
     sendError,
     hasOlderMessages,
     loadingOlderMessages,
-    chatScrollTop,
     chatDraftText,
     ownMessageIds,
     visibleMessages,

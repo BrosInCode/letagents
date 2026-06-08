@@ -13,6 +13,7 @@ import type {
   DesktopInviteRoomCreation,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
+  DesktopRoomLatestMessage,
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
@@ -47,6 +48,7 @@ export interface DesktopApi {
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
+    getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
     pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
@@ -115,7 +117,7 @@ export interface DesktopApi {
     completeMcpOnboarding: () => Promise<DesktopMcpInstallState>;
   };
   repos: {
-    getStatus: () => Promise<RepoStatus>;
+    getStatus: (rootPath?: string | null) => Promise<RepoStatus>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
   };
   workers: {

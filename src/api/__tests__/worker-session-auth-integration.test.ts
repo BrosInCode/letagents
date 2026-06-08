@@ -325,6 +325,7 @@ function registerRoutesForRoom(room: { id: string }): RouteHandlers {
       attachments: options?.attachments,
     }),
     rememberRoomParticipantFromMessage: async () => undefined,
+    rememberAccountRoom: async () => undefined,
   } as never);
 
   registerRoomPresenceRoutes(app as never, {
