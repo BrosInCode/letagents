@@ -24,6 +24,7 @@ import {
   sanitizeFallbackId,
   stripStatusPrefix,
 } from "../src/components/desktop/content/room-shell/reasoningFallback";
+import { oldestRoomHistoryCursor } from "../src/components/desktop/content/room-shell/useDesktopRoomMessages";
 import { latestReasoningSessionForTarget } from "../src/domain/reasoning";
 
 describe("desktop room shell helpers", () => {
@@ -67,6 +68,27 @@ describe("desktop room shell helpers", () => {
     ].sort(compareRoomMessages);
 
     assert.deepEqual(sameTime.map((message) => message.id), ["msg_4", "local_1"]);
+  });
+
+  it("uses hidden low-signal check messages as history pagination cursors", () => {
+    const messages = [
+      roomMessage({
+        id: "msg_15",
+        sender: "github",
+        source: "github",
+        text: 'Check "docker" (GitHub Actions) skipped in BrosInCode/letagents https://example.com/check',
+        timestamp: "2026-05-28T00:00:15.000Z",
+      }),
+      roomMessage({
+        id: "msg_16",
+        sender: "github",
+        source: "github",
+        text: 'Check "deploy" (GitHub Actions) skipped in BrosInCode/letagents https://example.com/check',
+        timestamp: "2026-05-28T00:00:16.000Z",
+      }),
+    ];
+
+    assert.equal(oldestRoomHistoryCursor(messages), "msg_15");
   });
 
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {

@@ -7,6 +7,7 @@ import {
   compareRoomMessages,
   mergeRoomMessages,
 } from "./messages";
+import { isLowSignalGitHubCheckMessage } from "../desktop-chat-message/github-event";
 
 const messageHistoryPageSize = 150;
 
@@ -25,8 +26,12 @@ export function useDesktopRoomMessages(options: {
   const chatDraftText = ref("");
   const ownMessageIds = new Set<string>();
 
+  const loadedServerMessages = computed(() => {
+    return mergeRoomMessages([...olderMessages.value, ...options.messages.value], []);
+  });
   const visibleMessages = computed(() => {
-    return mergeRoomMessages([...olderMessages.value, ...options.messages.value], localMessages.value);
+    return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
+      .filter((message) => !isLowSignalGitHubCheckMessage(message));
   });
   const roomMessagesForAgentInsight = computed(() =>
     [...olderMessages.value, ...options.messages.value, ...localMessages.value].sort(compareRoomMessages)
@@ -87,7 +92,7 @@ export function useDesktopRoomMessages(options: {
   async function loadOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
     const roomIdentifier = options.room.value.identifier;
-    const firstMessageId = visibleMessages.value[0]?.id;
+    const firstMessageId = oldestRoomHistoryCursor(loadedServerMessages.value);
     if (!firstMessageId) {
       hasOlderMessages.value = false;
       return;
@@ -126,4 +131,8 @@ export function useDesktopRoomMessages(options: {
     discardAttachment,
     loadOlderMessages,
   };
+}
+
+export function oldestRoomHistoryCursor(messages: readonly DesktopRoomMessage[]): string | null {
+  return [...messages].sort(compareRoomMessages)[0]?.id ?? null;
 }

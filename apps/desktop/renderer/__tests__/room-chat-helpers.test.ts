@@ -20,7 +20,10 @@ import {
   latestReasoningForAgent,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
 import { buildThreadSummaries, threadReplies } from "../src/components/desktop/content/room-chat/thread-utils";
-import { parseGitHubEvent } from "../src/components/desktop/content/desktop-chat-message/github-event";
+import {
+  isLowSignalGitHubCheckMessage,
+  parseGitHubEvent,
+} from "../src/components/desktop/content/desktop-chat-message/github-event";
 import { parseSenderIdentity } from "../src/components/desktop/content/desktop-chat-message/identity";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
 
@@ -115,6 +118,28 @@ describe("room chat helpers", () => {
     assert.equal(event?.statusLabel, "opened");
     assert.equal(event?.taskId, "task_1");
     assert.equal(event?.urlLabel, "Open pull request");
+  });
+
+  it("identifies low-signal GitHub check messages for chat suppression", () => {
+    assert.equal(
+      isLowSignalGitHubCheckMessage({
+        ...roomMessage("github_skipped", null),
+        sender: "github",
+        source: "github",
+        text: 'Check "docker" (GitHub Actions) skipped in BrosInCode/letagents https://example.com/check',
+      }),
+      true
+    );
+    assert.equal(
+      isLowSignalGitHubCheckMessage({
+        ...roomMessage("github_failure", null),
+        sender: "github",
+        source: "github",
+        text: 'Check "integration-tests" (GitHub Actions) failure in BrosInCode/letagents https://example.com/check',
+      }),
+      false
+    );
+    assert.equal(isLowSignalGitHubCheckMessage(roomMessage("msg_1", null)), false);
   });
 
   it("renders desktop message text with escaped markup and search highlights", () => {

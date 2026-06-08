@@ -164,9 +164,13 @@ export function formatRepoCheckRunEventMessage(input: {
   const appLabel = input.checkRun.appName ? ` (${input.checkRun.appName})` : "";
   const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
 
-  if (conclusion === "success") return null;
+  if (isLowSignalCheckRunConclusion(conclusion)) return null;
 
   return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName}${taskSuffix} ${input.checkRun.url}`;
+}
+
+function isLowSignalCheckRunConclusion(conclusion: string | null | undefined): boolean {
+  return ["success", "skipped", "neutral"].includes((conclusion || "").toLowerCase());
 }
 
 export function buildRepoRoomEventArtifactMatches(event: RepoRoomEvent): TaskWorkflowArtifactMatch[] {
