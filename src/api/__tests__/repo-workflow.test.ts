@@ -496,13 +496,33 @@ test("formatRepoPullRequestReviewEventMessage returns null for non-submitted act
 
 // ─── Check run event formatter ───
 
-test("formatRepoCheckRunEventMessage surfaces failures only", () => {
+test("formatRepoCheckRunEventMessage surfaces actionable check conclusions only", () => {
   assert.equal(
     formatRepoCheckRunEventMessage({
       provider: "github",
       action: "completed",
       repositoryFullName: "brosincode/letagents",
       checkRun: { name: "tests", status: "completed", conclusion: "success", url: "https://example.com" },
+    }),
+    null
+  );
+
+  assert.equal(
+    formatRepoCheckRunEventMessage({
+      provider: "github",
+      action: "completed",
+      repositoryFullName: "brosincode/letagents",
+      checkRun: { name: "docker", status: "completed", conclusion: "skipped", url: "https://example.com" },
+    }),
+    null
+  );
+
+  assert.equal(
+    formatRepoCheckRunEventMessage({
+      provider: "github",
+      action: "completed",
+      repositoryFullName: "brosincode/letagents",
+      checkRun: { name: "lint", status: "completed", conclusion: "neutral", url: "https://example.com" },
     }),
     null
   );

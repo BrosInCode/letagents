@@ -1,6 +1,9 @@
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import type { GitHubEventPresentation } from "./types";
 
+const LOW_SIGNAL_CHECK_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
+const CHECK_MESSAGE_PATTERN = /^Check "([^"]+)"(?: \(([^)]+)\))?\s+([a-z_]+)\s+in\s+([^\s]+?)(?:\s+linked to\s+(task_\d+))?$/i;
+
 export function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresentation | null {
   if (message.source !== "github" && message.sender.toLowerCase() !== "github") return null;
   const text = message.text.trim();
@@ -38,7 +41,7 @@ export function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresen
       urlLabel: "Open thread",
     };
   }
-  const checkMatch = /^Check "([^"]+)"(?: \(([^)]+)\))?\s+([a-z_]+)\s+in\s+([^\s]+?)(?:\s+linked to\s+(task_\d+))?$/i.exec(body);
+  const checkMatch = CHECK_MESSAGE_PATTERN.exec(body);
   if (checkMatch) {
     const conclusion = checkMatch[3].trim();
     const conclusionLabel = titleCase(conclusion);
@@ -87,6 +90,15 @@ export function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresen
     url,
     urlLabel: "Open on GitHub",
   };
+}
+
+export function isLowSignalGitHubCheckMessage(message: DesktopRoomMessage): boolean {
+  if (message.source !== "github" && message.sender.toLowerCase() !== "github") return false;
+  const text = message.text.trim();
+  const urlMatch = text.match(/\s(https?:\/\/\S+)$/i);
+  const body = urlMatch ? text.slice(0, urlMatch.index).trim() : text;
+  const checkMatch = CHECK_MESSAGE_PATTERN.exec(body);
+  return Boolean(checkMatch && LOW_SIGNAL_CHECK_CONCLUSIONS.has(checkMatch[3].trim().toLowerCase()));
 }
 
 function summarizeAction(action: string): string | null {
