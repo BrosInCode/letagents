@@ -149,6 +149,7 @@ async function stageDesktopAttachmentBuffer(
     upload_url?: string;
     url?: string;
     method?: string;
+    fields?: Record<string, string>;
     headers?: Record<string, string>;
     attachment?: { upload_id?: string };
   }>(`/rooms/${encodeURIComponent(roomIdentifier)}/attachments/uploads`, {
@@ -167,20 +168,9 @@ async function stageDesktopAttachmentBuffer(
     throw new Error(`${fileName} could not be staged.`);
   }
 
-  const uploadHeaders = new Headers(target.headers || {});
-  if (
-    ![...uploadHeaders.keys()].some(
-      (key) => key.toLowerCase() === "content-type",
-    )
-  ) {
-    uploadHeaders.set("Content-Type", mimeType);
-  }
-  const uploadBody = new Uint8Array(fileBuffer).buffer;
-  const uploadResponse = await fetch(uploadUrl, {
-    method: target.method || "PUT",
-    headers: uploadHeaders,
-    body: uploadBody,
-  });
+  const uploadResponse = target.fields
+    ? await uploadDesktopAttachmentForm(uploadUrl, target.fields, fileBuffer, fileName, mimeType)
+    : await uploadDesktopAttachmentPut(uploadUrl, target, fileBuffer, mimeType);
   if (!uploadResponse.ok) {
     await discardDesktopAttachment(roomIdentifier, uploadId).catch(
       () => undefined,
@@ -199,6 +189,48 @@ async function stageDesktopAttachmentBuffer(
       ? `data:${mimeType};base64,${fileBuffer.toString("base64")}`
       : null,
   };
+}
+
+async function uploadDesktopAttachmentForm(
+  uploadUrl: string,
+  fields: Record<string, string>,
+  fileBuffer: Buffer,
+  fileName: string,
+  mimeType: string,
+): Promise<Response> {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    form.append(key, value);
+  }
+  const fileBytes = new ArrayBuffer(fileBuffer.byteLength);
+  new Uint8Array(fileBytes).set(fileBuffer);
+  form.append("file", new Blob([fileBytes], { type: mimeType }), fileName);
+  return fetch(uploadUrl, {
+    method: "POST",
+    body: form,
+  });
+}
+
+async function uploadDesktopAttachmentPut(
+  uploadUrl: string,
+  target: { method?: string; headers?: Record<string, string> },
+  fileBuffer: Buffer,
+  mimeType: string,
+): Promise<Response> {
+  const uploadHeaders = new Headers(target.headers || {});
+  if (
+    ![...uploadHeaders.keys()].some(
+      (key) => key.toLowerCase() === "content-type",
+    )
+  ) {
+    uploadHeaders.set("Content-Type", mimeType);
+  }
+  const uploadBody = new Uint8Array(fileBuffer).buffer;
+  return fetch(uploadUrl, {
+    method: target.method || "PUT",
+    headers: uploadHeaders,
+    body: uploadBody,
+  });
 }
 
 export async function discardDesktopAttachment(

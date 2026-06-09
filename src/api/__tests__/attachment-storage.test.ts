@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPresignedAttachmentDownload } from "../messages/attachment-storage.js";
+import {
+  createPresignedAttachmentDownload,
+  createPresignedAttachmentUpload,
+} from "../messages/attachment-storage.js";
 
 process.env.ATTACHMENT_S3_BUCKET = "letagents-attachments-test";
 process.env.ATTACHMENT_S3_REGION = "us-east-1";
@@ -33,4 +36,18 @@ test("createPresignedAttachmentDownload sorts canonical query params in byte ord
     "response-content-disposition",
     "response-content-type",
   ]);
+});
+
+test("createPresignedAttachmentUpload signs the exact content length", () => {
+  const target = createPresignedAttachmentUpload({
+    object_key: "rooms/focus_14/uploads/upl_1234567890abcdef/roomsettings.png",
+    filename: "roomsettings.png",
+    content_type: "image/png",
+    byte_size: 1234,
+  });
+
+  assert.equal(target.headers["Content-Type"], "image/png");
+  const url = new URL(target.upload_url);
+  assert.equal(url.searchParams.get("X-Amz-SignedHeaders"), "content-length;content-type;host");
+  assert.ok(url.searchParams.get("X-Amz-Signature"), "expected presigned PUT signature");
 });

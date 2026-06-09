@@ -13,6 +13,7 @@ import {
 import { db } from "../../db/client.js";
 import { system_github_app } from "../../db/schema.js";
 import { buildGitHubAppSetupRedirectPath } from "../../github/app-installation.js";
+import { isGitHubAppSetupState } from "../../github/app-setup-state.js";
 import {
   clearGitHubRepoAccessCacheForLogin,
 } from "../../github/repo-access.js";
@@ -42,6 +43,7 @@ interface PendingDeviceAuth {
 }
 
 const pendingDeviceAuths = new Map<string, PendingDeviceAuth>();
+const MAX_PENDING_DEVICE_AUTHS = 500;
 
 function cleanupExpiredDeviceAuths(): void {
   const now = Date.now();
@@ -69,7 +71,7 @@ export function registerGitHubAppCallbackRoute(app: Express): void {
     }
 
     if (code) {
-      if (!stateValid) {
+      if (!stateValid || !isGitHubAppSetupState(state)) {
         res.status(401).send("<html><body><h2>Error: Invalid State</h2><p>Your session may have expired.</p></body></html>");
         return;
       }
@@ -99,7 +101,7 @@ export function registerGitHubAppCallbackRoute(app: Express): void {
             });
           });
 
-          res.send(`<html><body><h2>GitHub App Created Successfully</h2><p>You can close this window now.</p><script>setTimeout(() => window.location.href='${redirectTo}', 2000)</script></body></html>`);
+          res.redirect(302, redirectTo);
           return;
         } else {
           const err = await response.text();
@@ -148,6 +150,10 @@ export function registerAuthRoutes(app: Express): void {
 
   app.post("/auth/device/start", async (_req, res) => {
     cleanupExpiredDeviceAuths();
+    if (pendingDeviceAuths.size >= MAX_PENDING_DEVICE_AUTHS) {
+      res.status(429).json({ error: "Too many pending device authorization requests" });
+      return;
+    }
 
     try {
       const device = await requestGitHubDeviceCode();

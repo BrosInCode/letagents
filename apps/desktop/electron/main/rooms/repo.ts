@@ -1,4 +1,4 @@
-import { dialog, shell } from "electron";
+import { dialog } from "electron";
 import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
@@ -7,6 +7,7 @@ import type {
 } from "../../ipc-types.js";
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
 import { apiFetch } from "../auth.js";
+import { openAllowedExternalUrl } from "../external-url.js";
 import { focusMainWindow } from "../window.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
 import {
@@ -126,6 +127,6 @@ export async function openDesktopGitHubInstall(
   if (!payload.install_url) {
     return { opened: false, message: "GitHub did not return an install URL." };
   }
-  await shell.openExternal(payload.install_url);
+  await openAllowedExternalUrl(payload.install_url, ["github.com"]);
   return { opened: true, message: "GitHub opened in your browser." };
 }

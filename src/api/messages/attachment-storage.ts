@@ -151,6 +151,7 @@ function presignS3Url(input: {
   method: "DELETE" | "GET" | "PUT";
   objectKey: string;
   expiresSeconds: number;
+  signedHeaders?: Record<string, string>;
   responseContentDisposition?: string;
   responseContentType?: string;
 }): string {
@@ -158,12 +159,26 @@ function presignS3Url(input: {
   const { dateStamp, dateTime } = amzTimestamp(new Date());
   const { url, canonicalUri } = resolveObjectUrl(config, input.objectKey);
   const credentialScope = `${dateStamp}/${config.region}/s3/aws4_request`;
+  const headerEntries = new Map<string, string>([
+    ["host", url.host],
+  ]);
+  for (const [key, value] of Object.entries(input.signedHeaders ?? {})) {
+    const normalizedKey = key.trim().toLowerCase();
+    const normalizedValue = value.trim();
+    if (normalizedKey && normalizedValue) {
+      headerEntries.set(normalizedKey, normalizedValue);
+    }
+  }
+  const sortedHeaderEntries = [...headerEntries.entries()].sort(([left], [right]) =>
+    compareCanonicalQueryPart(left, right)
+  );
+  const signedHeaders = sortedHeaderEntries.map(([key]) => key).join(";");
   const query = new Map<string, string>([
     ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
     ["X-Amz-Credential", `${config.accessKeyId}/${credentialScope}`],
     ["X-Amz-Date", dateTime],
     ["X-Amz-Expires", String(input.expiresSeconds)],
-    ["X-Amz-SignedHeaders", "host"],
+    ["X-Amz-SignedHeaders", signedHeaders],
   ]);
   if (input.responseContentDisposition) {
     query.set("response-content-disposition", input.responseContentDisposition);
@@ -173,13 +188,15 @@ function presignS3Url(input: {
   }
 
   const sortedQuery = buildCanonicalQueryString(query);
-  const canonicalHeaders = `host:${url.host}\n`;
+  const canonicalHeaders = sortedHeaderEntries
+    .map(([key, value]) => `${key}:${value}`)
+    .join("\n") + "\n";
   const canonicalRequest = [
     input.method,
     canonicalUri,
     sortedQuery,
     canonicalHeaders,
-    "host",
+    signedHeaders,
     "UNSIGNED-PAYLOAD",
   ].join("\n");
   const stringToSign = [
@@ -219,6 +236,10 @@ export function createPresignedAttachmentUpload(input: AttachmentObjectDescripto
     method: "PUT",
     objectKey: input.object_key,
     expiresSeconds: config.uploadExpiresSeconds,
+    signedHeaders: {
+      "Content-Length": String(input.byte_size),
+      "Content-Type": input.content_type,
+    },
   });
   return {
     upload_url,

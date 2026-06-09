@@ -26,6 +26,9 @@ const DEFAULT_MAX_FILE_BYTES = 256 * 1024;
 const DEFAULT_MAX_SEARCH_RESULTS = 20;
 const DEFAULT_MAX_SEARCH_FILE_BYTES = 128 * 1024;
 const MAX_SEARCH_RESULTS_CAP = 100;
+const MAX_SEARCH_FILES_SCANNED = 5_000;
+const MAX_SEARCH_TOTAL_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_SEARCH_DIRECTORY_DEPTH = 24;
 
 export interface ContextWorkspaceManifest {
   id: string;
@@ -217,11 +220,14 @@ export async function searchContext(
   const files = await listWorkspaceFiles(ready.workspaceRoot);
   const results: ContextSearchResultItem[] = [];
   const exposuresByPath = new Map<string, { content: string[]; redactions: number; status: SecretScanStatus }>();
+  let totalBytesScanned = 0;
 
   for (const filePath of files) {
     if (results.length >= maxResults) break;
     const stat = await fs.stat(filePath);
     if (stat.size > DEFAULT_MAX_SEARCH_FILE_BYTES) continue;
+    if (totalBytesScanned + stat.size > MAX_SEARCH_TOTAL_FILE_BYTES) break;
+    totalBytesScanned += stat.size;
 
     const relPath = toRepoPath(path.relative(ready.workspaceRoot, filePath));
     if (scanFile(relPath, "").verdict === "blocked") continue;
@@ -362,20 +368,22 @@ async function resolveWorkspaceFile(
 async function listWorkspaceFiles(root: string): Promise<string[]> {
   const files: string[] = [];
 
-  async function walk(dir: string): Promise<void> {
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (files.length >= MAX_SEARCH_FILES_SCANNED || depth > MAX_SEARCH_DIRECTORY_DEPTH) return;
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
+      if (files.length >= MAX_SEARCH_FILES_SCANNED) break;
       const fullPath = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
-        await walk(fullPath);
+        await walk(fullPath, depth + 1);
       } else if (entry.isFile()) {
         files.push(fullPath);
       }
     }
   }
 
-  await walk(root);
+  await walk(root, 0);
   return files;
 }
 

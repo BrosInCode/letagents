@@ -1,10 +1,21 @@
 import type { Express } from "express";
 
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
+import {
+  ALL_ACTIVITY_EVENT_TYPES,
+  type RentalActivityEventType,
+  type RentalActivitySource,
+} from "../../../rental/activity-event-types.js";
 import { isValidTransition } from "../../../rental/session-state-machine.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 import { requireAccountId, requireRentEnabled, requireSessionAccess } from "./helpers.js";
 import { isPlainObject } from "./validation.js";
+
+const KNOWN_ACTIVITY_EVENT_TYPES = new Set<string>(ALL_ACTIVITY_EVENT_TYPES);
+
+function resolveCallerActivitySource(role: string | null): RentalActivitySource {
+  return role === "renter" ? "renter" : "agent";
+}
 
 export function registerActivityLifecycleRoutes(
   app: Express,
@@ -26,12 +37,14 @@ export function registerActivityLifecycleRoutes(
         res.status(400).json({ error: "event_type is required" });
         return;
       }
+      if (!KNOWN_ACTIVITY_EVENT_TYPES.has(body.event_type)) {
+        res.status(400).json({ error: "event_type is not recognized" });
+        return;
+      }
 
       const accountId = (req as AuthenticatedRequest).sessionAccount!.account_id;
       const role = await deps.resolveSessionAccess(sessionId, accountId);
-      const source = (typeof body.source === "string" && body.source.trim())
-        ? body.source.trim()
-        : (role === "provider" ? "agent" : role ?? "agent");
+      const source = resolveCallerActivitySource(role);
 
       try {
         const sess = await deps.getSessionLifecycle(sessionId);
@@ -42,10 +55,10 @@ export function registerActivityLifecycleRoutes(
         const event = await deps.emitActivityEvent({
           sessionId,
           roomId: sess.room_id,
-          eventType: body.event_type as any,
-          source: source as any,
+          eventType: body.event_type as RentalActivityEventType,
+          source,
           payload: isPlainObject(body.payload) ? body.payload : {},
-          verified: typeof body.verified === "boolean" ? body.verified : undefined,
+          verified: false,
         });
         res.status(201).json(event);
       } catch (err) {

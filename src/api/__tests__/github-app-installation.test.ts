@@ -6,6 +6,10 @@ import {
   buildGitHubAppSetupRedirectPath,
   resolveGitHubAppRoomIntegrationStatus,
 } from "../github/app-installation.js";
+import {
+  createGitHubAppSetupState,
+  isGitHubAppSetupState,
+} from "../github/app-setup-state.js";
 
 test("buildGitHubAppInstallationUrl uses the GitHub app slug and preserves state", () => {
   assert.equal(
@@ -15,6 +19,12 @@ test("buildGitHubAppInstallationUrl uses the GitHub app slug and preserves state
     }),
     "https://github.com/apps/letagents/installations/new?state=abc123"
   );
+});
+
+test("GitHub App setup state is namespaced away from normal OAuth login state", () => {
+  const setupState = createGitHubAppSetupState();
+  assert.equal(isGitHubAppSetupState(setupState), true);
+  assert.equal(isGitHubAppSetupState("0123456789abcdef0123456789abcdef"), false);
 });
 
 test("buildGitHubAppSetupRedirectPath preserves the redirect path and appends setup state", () => {
