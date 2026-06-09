@@ -7,6 +7,7 @@
 
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
+import * as path from "path";
 import { promisify } from "util";
 import { and, eq } from "drizzle-orm";
 
@@ -89,16 +90,13 @@ export async function runWorkspaceCommand(
 
   const timeout = normalizeTimeout(input.timeoutMs);
   try {
+    const env = await buildCommandEnvironment(ready.workspaceRoot);
     const result = await execFileAsync(argv.argv[0]!, argv.argv.slice(1), {
       cwd: ready.workspaceRoot,
       timeout,
       maxBuffer: MAX_OUTPUT_BYTES,
       windowsHide: true,
-      env: {
-        PATH: process.env.PATH ?? "",
-        CI: "1",
-        NO_COLOR: "1",
-      },
+      env,
     });
     return {
       success: true,
@@ -129,6 +127,33 @@ export async function runWorkspaceCommand(
       error: error.message ?? "command_failed",
     };
   }
+}
+
+async function buildCommandEnvironment(workspaceRoot: string): Promise<NodeJS.ProcessEnv> {
+  const home = path.join(workspaceRoot, ".letagents-command-home");
+  const tmp = path.join(workspaceRoot, ".letagents-command-tmp");
+  const npmCache = path.join(workspaceRoot, ".letagents-npm-cache");
+  await Promise.all([
+    fs.mkdir(home, { recursive: true }),
+    fs.mkdir(tmp, { recursive: true }),
+    fs.mkdir(npmCache, { recursive: true }),
+  ]);
+
+  return {
+    PATH: process.env.PATH ?? "",
+    CI: "1",
+    NO_COLOR: "1",
+    HOME: home,
+    TMPDIR: tmp,
+    TEMP: tmp,
+    TMP: tmp,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"),
+    npm_config_cache: npmCache,
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_update_notifier: "false",
+  };
 }
 
 function normalizeArgv(argv: unknown): { argv: string[] } | { error: string } {

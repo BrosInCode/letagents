@@ -12,6 +12,7 @@ import {
   buildGitHubAppInstallationUrl,
   resolveGitHubAppRoomIntegrationStatus,
 } from "../../github/app-installation.js";
+import { createGitHubAppSetupState } from "../../github/app-setup-state.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 
@@ -133,7 +134,7 @@ export function registerGitHubIntegrationSetupRoute(
       ]
     });
 
-    const state = crypto.randomBytes(24).toString("hex");
+    const state = createGitHubAppSetupState();
     await createAuthState(state, `/in/${project.id}`);
     const actionPath = `https://github.com/settings/apps/new?state=${state}`;
 

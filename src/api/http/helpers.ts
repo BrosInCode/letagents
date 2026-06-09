@@ -49,7 +49,10 @@ export function parseCookies(header: string | undefined): Record<string, string>
 }
 
 export function setSessionCookie(res: express.Response, token: string): void {
-  const secure = (process.env.LETAGENTS_BASE_URL || "").startsWith("https://");
+  const secure = [
+    process.env.LETAGENTS_BASE_URL,
+    process.env.PUBLIC_API_URL,
+  ].some((value) => value?.startsWith("https://"));
   const cookieParts = [
     `letagents_session=${encodeURIComponent(token)}`,
     "Path=/",

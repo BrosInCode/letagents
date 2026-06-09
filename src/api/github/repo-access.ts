@@ -38,10 +38,17 @@ const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; 
 const repoAccessCache = new Map<string, { allowed: boolean; expiresAt: number }>();
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 
-function getCachedVisibility(roomName: string): GitHubRepoVisibility | null {
+function getCachedVisibility(roomName: string, accessToken?: string): GitHubRepoVisibility | null {
+  if (accessToken) {
+    return null;
+  }
   const cached = repoVisibilityCache.get(roomName);
   if (!cached) return null;
   if (cached.expiresAt <= Date.now()) {
+    repoVisibilityCache.delete(roomName);
+    return null;
+  }
+  if (cached.visibility === "public") {
     repoVisibilityCache.delete(roomName);
     return null;
   }
@@ -49,6 +56,7 @@ function getCachedVisibility(roomName: string): GitHubRepoVisibility | null {
 }
 
 function setCachedVisibility(roomName: string, visibility: GitHubRepoVisibility): void {
+  if (visibility === "public") return;
   repoVisibilityCache.set(roomName, {
     visibility,
     expiresAt: Date.now() + REPO_VISIBILITY_TTL_MS,
@@ -118,7 +126,7 @@ export async function getGitHubRepoVisibility(
   roomName: string,
   accessToken?: string
 ): Promise<GitHubRepoVisibility> {
-  const cached = getCachedVisibility(roomName);
+  const cached = getCachedVisibility(roomName, accessToken);
   if (cached) {
     return cached;
   }

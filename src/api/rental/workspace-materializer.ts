@@ -125,6 +125,26 @@ function validateCommitSha(sha: string): void {
   }
 }
 
+function validateRepoUrl(repoUrl: string): string {
+  const trimmed = repoUrl.trim();
+  if (!trimmed) {
+    throw new Error("repoUrl is required");
+  }
+  if (/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (
+    path.isAbsolute(trimmed) &&
+    (
+      trimmed.startsWith(`${os.tmpdir()}${path.sep}`) ||
+      process.env.LETAGENTS_ALLOW_LOCAL_RENTAL_REPOS === "1"
+    )
+  ) {
+    return trimmed;
+  }
+  throw new Error("repoUrl must be a GitHub HTTPS repository URL");
+}
+
 function validateBranchName(name: string): void {
   if (!SAFE_BRANCH_CHARS.test(name)) {
     throw new Error(
@@ -215,20 +235,28 @@ export async function materializeWorkspace(
 
   // Validate inputs
   validateCommitSha(input.baseCommitSha);
+  const repoUrl = validateRepoUrl(input.repoUrl);
 
   // Ensure workspace root exists
   fs.mkdirSync(workspaceRoot, { recursive: true });
 
   // 1. Bare clone (or reuse cached) — using execFileSync for safety
-  const repoHash = hashString(input.repoUrl);
+  const repoHash = hashString(repoUrl);
   const barePath = path.join(workspaceRoot, ".bare-cache", repoHash);
+  const gitEnv = {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_PROTOCOL_FROM_USER: "0",
+    GIT_ALLOW_PROTOCOL: "https:file",
+  };
 
   if (!fs.existsSync(barePath)) {
-    log(`Cloning bare repo: ${input.repoUrl}`);
+    log(`Cloning bare repo: ${repoUrl}`);
     fs.mkdirSync(path.dirname(barePath), { recursive: true });
-    execFileSync("git", ["clone", "--bare", input.repoUrl, barePath], {
+    execFileSync("git", ["clone", "--bare", repoUrl, barePath], {
       timeout: 120_000,
       stdio: "pipe",
+      env: gitEnv,
     });
   } else {
     log(`Reusing cached bare clone: ${barePath}`);
@@ -237,6 +265,7 @@ export async function materializeWorkspace(
         cwd: barePath,
         timeout: 60_000,
         stdio: "pipe",
+        env: gitEnv,
       });
     } catch {
       log("Warning: fetch failed on cached bare, continuing with stale clone");
@@ -249,10 +278,11 @@ export async function materializeWorkspace(
       cwd: barePath,
       timeout: 10_000,
       stdio: "pipe",
+      env: gitEnv,
     });
   } catch {
     throw new Error(
-      `Base commit ${input.baseCommitSha} not found in repo ${input.repoUrl}`,
+      `Base commit ${input.baseCommitSha} not found in repo ${repoUrl}`,
     );
   }
 
@@ -268,7 +298,7 @@ export async function materializeWorkspace(
     execFileSync(
       "git",
       ["branch", workBranch, input.baseCommitSha],
-      { cwd: barePath, timeout: 10_000, stdio: "pipe" },
+      { cwd: barePath, timeout: 10_000, stdio: "pipe", env: gitEnv },
     );
   } catch {
     log(`Work branch ${workBranch} may already exist, continuing`);
@@ -283,6 +313,7 @@ export async function materializeWorkspace(
       cwd: barePath,
       timeout: 60_000,
       stdio: ["pipe", fs.openSync(path.join(workspacePath, ".archive.tar"), "w"), "pipe"],
+      env: gitEnv,
     },
   );
 

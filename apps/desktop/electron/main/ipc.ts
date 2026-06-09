@@ -1,4 +1,4 @@
-import { ipcMain, shell } from "electron";
+import { ipcMain } from "electron";
 import type { IpcMain } from "electron";
 
 import type {
@@ -108,6 +108,7 @@ import {
   stopDesktopRoomStream,
 } from "./room-stream.js";
 import { apiUrl, workspaceRoot } from "./paths.js";
+import { openAllowedExternalUrl } from "./external-url.js";
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
@@ -396,7 +397,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:auth:open-verification",
     async (_event, url: string): Promise<void> => {
-      await shell.openExternal(url);
+      await openAllowedExternalUrl(url, ["github.com"]);
     },
   );
   targetIpcMain.handle(

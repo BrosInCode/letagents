@@ -66,22 +66,9 @@ export async function stageAttachmentUpload(
     const resolved = resolveAttachmentUploadTarget(target)
     uploadId = resolved.uploadId
 
-    const headers: Record<string, string> = {
-      ...(target.headers || {}),
-    }
-    if (
-      !Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')
-    ) {
-      headers['Content-Type'] =
-        attachment.mime_type || 'application/octet-stream'
-    }
-
-    const uploadRes = await fetch(resolved.uploadUrl, {
-      method: target.method || 'PUT',
-      headers,
-      body: attachment.file,
-      signal,
-    })
+    const uploadRes = target.fields
+      ? await uploadAttachmentForm(resolved.uploadUrl, target.fields, attachment.file, signal)
+      : await uploadAttachmentPut(resolved.uploadUrl, target, attachment.file, attachment.mime_type, signal)
     if (!uploadRes.ok) {
       throw new Error(`Attachment upload failed with HTTP ${uploadRes.status}.`)
     }
@@ -93,6 +80,48 @@ export async function stageAttachmentUpload(
     }
     throw error
   }
+}
+
+async function uploadAttachmentForm(
+  uploadUrl: string,
+  fields: Record<string, string>,
+  file: File,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const form = new FormData()
+  for (const [key, value] of Object.entries(fields)) {
+    form.append(key, value)
+  }
+  form.append('file', file)
+  return fetch(uploadUrl, {
+    method: 'POST',
+    body: form,
+    signal,
+  })
+}
+
+async function uploadAttachmentPut(
+  uploadUrl: string,
+  target: AttachmentUploadTarget,
+  file: File,
+  mimeType: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    ...(target.headers || {}),
+  }
+  if (
+    !Object.keys(headers).some((key) => key.toLowerCase() === 'content-type')
+  ) {
+    headers['Content-Type'] = mimeType || 'application/octet-stream'
+  }
+
+  return fetch(uploadUrl, {
+    method: target.method || 'PUT',
+    headers,
+    body: file,
+    signal,
+  })
 }
 
 export async function discardAttachmentUpload(

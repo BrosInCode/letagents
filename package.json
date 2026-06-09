@@ -42,10 +42,10 @@
   "license": "BUSL-1.1",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "drizzle-orm": "^0.45.1",
+    "drizzle-orm": "^0.45.2",
     "express": "^5.1.0",
     "pg": "^8.20.0",
-    "yaml": "^2.8.2"
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.2",
@@ -55,5 +55,10 @@
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "ws": "^8.20.0"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.12"
+    }
   }
 }

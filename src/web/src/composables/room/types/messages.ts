@@ -40,6 +40,7 @@ export interface AttachmentUploadTarget {
   upload_url?: string
   url?: string
   method?: string
+  fields?: Record<string, string>
   headers?: Record<string, string>
   attachment?: {
     upload_id?: string
