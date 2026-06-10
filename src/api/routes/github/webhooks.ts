@@ -33,6 +33,13 @@ export interface GitHubWebhookRouteDeps {
   ): Promise<WebhookProcessingResult>;
 }
 
+export function shouldSkipDuplicateGitHubWebhookDelivery(input: {
+  duplicate: boolean;
+  delivery: { status: GitHubWebhookDeliveryStatus };
+}): boolean {
+  return input.duplicate && input.delivery.status !== "failed";
+}
+
 export function registerGitHubWebhookRoutes(
   app: Express,
   deps: GitHubWebhookRouteDeps
@@ -79,7 +86,7 @@ export function registerGitHubWebhookRoutes(
       room_id: initialRoomId,
     });
 
-    if (delivery.duplicate) {
+    if (shouldSkipDuplicateGitHubWebhookDelivery(delivery)) {
       res.status(202).json({ ok: true, duplicate: true });
       return;
     }

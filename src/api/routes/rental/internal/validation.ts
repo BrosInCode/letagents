@@ -130,18 +130,22 @@ function finiteNonNegativeField(
 
 export function parseReserve(body: unknown): BudgetReserveInput | { error: string } {
   if (!isPlainObject(body)) return { error: "body must be an object" };
+  const idempotencyKey = normalizeIdempotencyKey(body);
+  if (typeof idempotencyKey === "object") return idempotencyKey;
   const stepCostLrt = finiteNonNegativeField(body, "stepCostLrt");
   if (typeof stepCostLrt !== "number") return stepCostLrt;
-  return { stepCostLrt };
+  return { idempotencyKey, stepCostLrt };
 }
 
 export function parseReconcile(body: unknown): BudgetReconcileInput | { error: string } {
   if (!isPlainObject(body)) return { error: "body must be an object" };
+  const idempotencyKey = normalizeIdempotencyKey(body);
+  if (typeof idempotencyKey === "object") return idempotencyKey;
   const actualCostLrt = finiteNonNegativeField(body, "actualCostLrt");
   if (typeof actualCostLrt !== "number") return actualCostLrt;
   const reservedCostLrt = finiteNonNegativeField(body, "reservedCostLrt");
   if (typeof reservedCostLrt !== "number") return reservedCostLrt;
-  return { actualCostLrt, reservedCostLrt };
+  return { idempotencyKey, actualCostLrt, reservedCostLrt };
 }
 
 export function optionalPositiveInteger(

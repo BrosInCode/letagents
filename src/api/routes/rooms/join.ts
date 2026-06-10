@@ -1,9 +1,6 @@
 import type { Express, Response } from "express";
 
-import {
-  assignProjectAdmin,
-  type Project,
-} from "../../db.js";
+import type { Project } from "../../db.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 
@@ -48,6 +45,10 @@ export interface RoomJoinRouteDeps {
     roomId: string;
     displayName?: string | null;
     source?: string | null;
+  }): Promise<void>;
+  assignInitialProjectAdmin(input: {
+    projectId: string;
+    accountId: string;
   }): Promise<void>;
   toRoomResponse(
     project: Project,
@@ -130,7 +131,10 @@ export function registerRoomJoinRoutes(
       if (deps.isRepoBackedProject(project)) {
         await deps.resolveProjectRole(project, req.sessionAccount);
       } else {
-        await assignProjectAdmin(project.id, req.sessionAccount.account_id);
+        await deps.assignInitialProjectAdmin({
+          projectId: project.id,
+          accountId: req.sessionAccount.account_id,
+        });
       }
     }
 

@@ -173,6 +173,55 @@ describe("acquireLease — happy path", () => {
   });
 });
 
+describe("acquireLease — lane lock", () => {
+  it("runs lease reads and writes through the locked dependency", async () => {
+    const baseDeps = makeDeps({});
+    const order: string[] = [];
+    const lockedDeps: QuotaLeaseOrchestratorDeps = {
+      ...baseDeps,
+      async loadActiveLeasesForLane(lane) {
+        order.push("locked:loadActiveLeasesForLane");
+        return baseDeps.loadActiveLeasesForLane(lane);
+      },
+      async persistSessionLease(sessionId, lease) {
+        order.push("locked:persistSessionLease");
+        await baseDeps.persistSessionLease(sessionId, lease);
+      },
+      async emitLeaseEvent(input) {
+        order.push("locked:emitLeaseEvent");
+        await baseDeps.emitLeaseEvent(input);
+      },
+    };
+    const deps: QuotaLeaseOrchestratorDeps = {
+      ...baseDeps,
+      async withLaneLock(_lane, body) {
+        order.push("lock");
+        return body(lockedDeps);
+      },
+    };
+
+    const result = await acquireLease(
+      {
+        sessionId: "rsess_1",
+        roomId: "room_1",
+        lane: makeLane(),
+        snapshot: makeSnapshot(),
+      },
+      deps,
+    );
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(order, [
+      "lock",
+      "locked:loadActiveLeasesForLane",
+      "locked:persistSessionLease",
+      "locked:emitLeaseEvent",
+    ]);
+    assert.equal(baseDeps.persisted.length, 1);
+    assert.equal(baseDeps.emitted.length, 1);
+  });
+});
+
 describe("acquireLease — lane_locked", () => {
   it("rejects when another session holds an active lease on the same lane", async () => {
     const otherLease = createLease({

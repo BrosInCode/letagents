@@ -99,6 +99,16 @@ describe("SecretFirewall — Path Denylist", () => {
     assert.ok(isPathBlocked(".aws/config"));
   });
 
+  it("blocks files in .gnupg directory", () => {
+    assert.ok(isPathBlocked(".gnupg/private-keys-v1.d/key.gpg"));
+    assert.ok(isPathBlocked("home/.gnupg/pubring.kbx"));
+  });
+
+  it("blocks files in .config/gcloud directory", () => {
+    assert.ok(isPathBlocked(".config/gcloud/application_default_credentials.json"));
+    assert.ok(isPathBlocked("home/.config/gcloud/configurations/config_default"));
+  });
+
   it("blocks service-account*.json wildcard", () => {
     assert.ok(isPathBlocked("service-account.json"));
     assert.ok(isPathBlocked("service_account.json"));

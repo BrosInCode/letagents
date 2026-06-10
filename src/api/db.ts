@@ -21,7 +21,12 @@ export { upsertRoomParticipant, getRoomParticipants, getRoomParticipantsForRooms
 export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
 export { createAuthState, consumeAuthState, upsertAccount, createSession, refreshProviderAccessTokenForAccount, getSessionAccountByToken, deleteSessionByToken, createOwnerToken } from "./db/auth.js";
 export { getOwnerTokenAccountByToken, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, touchRoomAgentSession } from "./db/auth.js";
-export { endRoomAgentSession, assignProjectAdmin, isProjectAdmin } from "./db/auth.js";
+export {
+  endRoomAgentSession,
+  assignProjectAdmin,
+  assignProjectAdminIfRoomHasNoAdmins,
+  isProjectAdmin,
+} from "./db/auth.js";
 export { isValidTransition, getTasksForRooms, createTask, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl } from "./db/tasks.js";
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
