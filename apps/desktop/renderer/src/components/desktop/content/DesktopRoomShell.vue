@@ -8,8 +8,8 @@
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
       @cycle-sidebar="emit('cycle-sidebar')"
-      @toggle-search="toggleSearch"
-      @toggle-action-panel="actionPanelOpen = !actionPanelOpen"
+      @toggle-search="toggleSearchTool"
+      @toggle-action-panel="toggleActionPanel"
       @select-tab="selectTab"
     />
 
@@ -43,6 +43,7 @@
       @export-chat="exportChat"
       @move-search="moveSearch"
       @close-search="closeSearch"
+      @close-action-panel="closeActionPanel"
     />
 
     <Transition name="room-panel" mode="out-in">
@@ -235,7 +236,7 @@ const {
   searchResults,
   activeSearchMessageId,
   searchSummary,
-  toggleSearch,
+  toggleSearch: toggleSearchOpen,
   closeSearch,
   moveSearch,
 } = useDesktopRoomSearch(visibleMessages);
@@ -294,6 +295,25 @@ const tabs = computed<RoomTab[]>(() => [
 function selectTab(tabId: RoomTabId): void {
   activeTab.value = tabId;
   emit("refresh-room");
+}
+
+function toggleSearchTool(): void {
+  if (!searchOpen.value) {
+    actionPanelOpen.value = false;
+  }
+  toggleSearchOpen();
+}
+
+function toggleActionPanel(): void {
+  const nextOpen = !actionPanelOpen.value;
+  actionPanelOpen.value = nextOpen;
+  if (nextOpen) {
+    closeSearch();
+  }
+}
+
+function closeActionPanel(): void {
+  actionPanelOpen.value = false;
 }
 
 function openRules(): void {
