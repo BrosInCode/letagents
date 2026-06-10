@@ -50,7 +50,8 @@
       <RoomChatView
         v-if="activeTab === 'chat'"
         key="chat"
-        :messages="visibleMessages"
+        :messages="timelineMessages"
+        :thread-messages="visibleMessages"
         :room-identifier="room.identifier"
         :room-loading="roomLoading"
         :sending="sendingMessage"
@@ -219,6 +220,7 @@ const {
   chatDraftText,
   ownMessageIds,
   visibleMessages,
+  timelineMessages,
   roomMessagesForAgentInsight,
   sendRoomMessage,
   discardAttachment,
@@ -281,7 +283,7 @@ watchRoomNotifications({
 });
 
 const tabs = computed<RoomTab[]>(() => [
-  { id: "chat", label: "Chat", count: props.roomLoading ? null : visibleMessages.value.length },
+  { id: "chat", label: "Chat", count: props.roomLoading ? null : timelineMessages.value.length },
   { id: "board", label: "Board", count: props.roomLoading ? null : props.tasks.length },
   {
     id: "activity",

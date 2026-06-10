@@ -16,9 +16,11 @@
 
         <RoomMessageViewport
           :active-search-message-id="activeSearchMessageId"
+          :active-thread-parent-id="activeThreadParentId"
           :has-older-messages="hasOlderMessages"
           :loading-older-messages="loadingOlderMessages"
           :messages="messages"
+          :thread-messages="threadMessages"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :search-query="searchQuery"
@@ -27,7 +29,6 @@
           @open-agent="openAgentModal"
           @open-image="openImageViewer"
           @open-thread="openThread"
-          @reply="startReply"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -56,12 +57,11 @@
           :initial-draft="initialDraft"
           :participants="participants"
           :pending-attachment-drafts="pendingAttachmentDrafts"
-          :reply-to="replyTo"
+          :reply-to="null"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
           :sending="sending"
-          @clear-reply="replyTo = null"
           @draft-change="emit('draft-change', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
@@ -84,6 +84,8 @@
         :replies="activeThreadReplies"
         :room-identifier="roomIdentifier"
         :sending="sending"
+        :search-query="searchQuery"
+        :active-search-message-id="activeSearchMessageId"
         @close="closeThread"
         @open-image="openImageViewer"
         @send-thread-message="sendThreadMessage"
@@ -106,13 +108,14 @@ import type { AgentModalTarget } from "./desktop-chat-message/types";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
-import { threadReplies } from "./room-chat/thread-utils";
+import { resolveThreadParent, threadReplies } from "./room-chat/thread-utils";
 import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher";
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
 
 const props = defineProps<{
   messages: DesktopRoomMessage[];
+  threadMessages: DesktopRoomMessage[];
   roomIdentifier: string | null;
   roomLoading: boolean;
   sending: boolean;
@@ -139,19 +142,18 @@ const emit = defineEmits<{
   "scroll-position": [scrollTop: number];
 }>();
 
-const replyTo = ref<DesktopRoomMessage | null>(null);
 const activeThreadParentId = ref<string | null>(null);
 const activeThreadParent = computed(() =>
-  props.messages.find((message) => message.id === activeThreadParentId.value) || null
+  resolveThreadParent(props.threadMessages, activeThreadParentId.value)
 );
-const activeThreadReplies = computed(() => threadReplies(props.messages, activeThreadParent.value?.id || null));
+const activeThreadReplies = computed(() => threadReplies(props.threadMessages, activeThreadParent.value?.id || null));
 
 const {
   activeImageId,
   roomImages,
   openImageViewer,
   shiftImage,
-} = useRoomImages(toRef(props, "messages"));
+} = useRoomImages(toRef(props, "threadMessages"));
 
 const {
   attaching,
@@ -178,10 +180,6 @@ const { openAgentModal } = useAgentReasoningLauncher({
   openFallback: (target) => emit("open-agent-reasoning-fallback", target),
 });
 
-function startReply(message: DesktopRoomMessage): void {
-  replyTo.value = message;
-}
-
 function openThread(messageId: string): void {
   activeThreadParentId.value = messageId;
 }
@@ -201,16 +199,25 @@ function handleComposerSend(
 ): void {
   emit("send-message", text, replyToId, attachments);
   clearAttachmentDrafts();
-  replyTo.value = null;
 }
 
 watch(toRef(props, "roomIdentifier"), () => {
-  replyTo.value = null;
   activeThreadParentId.value = null;
 });
 
 watch(
-  () => props.messages,
+  () => props.activeSearchMessageId,
+  (messageId) => {
+    const searchResult = props.threadMessages.find((message) => message.id === messageId);
+    const threadParentId = searchResult?.replyTo?.id || null;
+    if (threadParentId) {
+      activeThreadParentId.value = threadParentId;
+    }
+  },
+);
+
+watch(
+  () => props.threadMessages,
   () => {
     if (activeThreadParentId.value && !activeThreadParent.value) {
       activeThreadParentId.value = null;

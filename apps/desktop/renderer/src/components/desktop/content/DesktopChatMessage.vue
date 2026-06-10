@@ -48,12 +48,6 @@
               <path d="M6 6.25h4M6 8.5h2.75" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
             </svg>
           </button>
-          <button class="room-message-reply-action" type="button" title="Reply" @click="$emit('reply', message)">
-            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M6.5 4.5 2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M3 8h5.5A4.5 4.5 0 0 1 13 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
           <span class="room-message-provenance" :data-kind="ownerKind">
             {{ ownerKind }}
           </span>
@@ -96,7 +90,7 @@
         type="button"
         @click="$emit('open-thread', message.id)"
       >
-        {{ threadCount === 1 ? "View 1 reply" : `View ${threadCount} replies` }}
+        {{ threadMarkerLabel }}
       </button>
     </div>
 
@@ -113,9 +107,6 @@
     >
       <button ref="firstContextMenuButton" type="button" role="menuitem" @click="openThreadFromContext">
         <span>Reply in thread</span>
-      </button>
-      <button type="button" role="menuitem" @click="replyFromContext">
-        <span>Quote reply</span>
       </button>
     </div>
   </article>
@@ -142,13 +133,12 @@ import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 const props = defineProps<{
   message: DesktopRoomMessage;
   threadCount: number;
-  latestThreadMessageId: string | null;
+  latestThreadMessage: DesktopRoomMessage | null;
   highlightQuery: string;
   searchActive: boolean;
 }>();
 
 const emit = defineEmits<{
-  reply: [message: DesktopRoomMessage];
   "open-thread": [messageId: string];
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
@@ -178,6 +168,12 @@ const replyDisplayName = computed(() =>
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
+const threadMarkerLabel = computed(() => {
+  const base = props.threadCount === 1 ? "View 1 reply" : `View ${props.threadCount} replies`;
+  if (!props.latestThreadMessage) return base;
+  const latestName = parseSenderIdentity(props.latestThreadMessage).displayName;
+  return `${base} · latest ${latestName} ${formatTimestamp(props.latestThreadMessage.timestamp)}`;
+});
 const agentModalTarget = computed<AgentModalTarget>(() => ({
   actorLabel: props.message.actorLabel || props.message.agentIdentity?.actorLabel || props.message.sender,
   displayName: displayName.value,
@@ -192,7 +188,7 @@ function openContextMenu(event: MouseEvent): void {
   }
   event.preventDefault();
   const menuWidth = 180;
-  const menuHeight = 92;
+  const menuHeight = 50;
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -230,11 +226,6 @@ function focusContextMenuItem(direction: 1 | -1): void {
 function openThreadFromContext(): void {
   closeContextMenu();
   emit("open-thread", props.message.id);
-}
-
-function replyFromContext(): void {
-  closeContextMenu();
-  emit("reply", props.message);
 }
 
 onBeforeUnmount(() => {
