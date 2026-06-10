@@ -13,6 +13,7 @@ import {
   PATCH_PROPOSED,
 } from "../../../rental/activity-event-types.js";
 import { PatchProposalError } from "../../../rental/patch-proposal.js";
+import { scanContent } from "../../../rental/secret-firewall.js";
 import { SignedChangeJournalError } from "../../../rental/signed-change-journal.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 import { emitRentalActivity, requireSessionAccess } from "./helpers.js";
@@ -22,6 +23,19 @@ import {
   normalizePatchFiles,
   optionalPositiveInteger,
 } from "./validation.js";
+
+function redactCommandOutput(value: string | undefined): {
+  content: string;
+  redacted: boolean;
+  findings: Array<{ name: string; line?: number; detail: string }>;
+} {
+  const scan = scanContent(value ?? "");
+  return {
+    content: scan.content ?? "[blocked by Secret Firewall]",
+    redacted: scan.verdict !== "passed",
+    findings: scan.findings,
+  };
+}
 
 export function registerPatchCommandRoutes(
   app: Express,
@@ -173,12 +187,28 @@ export function registerPatchCommandRoutes(
         argv: req.body.argv as string[],
         timeoutMs,
       });
+      const stdout = redactCommandOutput(result.stdout);
+      const stderr = redactCommandOutput(result.stderr);
+      const error = redactCommandOutput(result.error);
+      const safeResult = {
+        ...result,
+        stdout: stdout.content,
+        stderr: stderr.content,
+        error: result.error === undefined ? undefined : error.content,
+      };
+      const outputFirewall = {
+        stdout_redacted: stdout.redacted,
+        stderr_redacted: stderr.redacted,
+        error_redacted: error.redacted,
+        findings: [...stdout.findings, ...stderr.findings, ...error.findings],
+      };
       if (result.error?.startsWith("command_blocked:")) {
         await emitRentalActivity(deps, sessionId, COMMAND_BLOCKED, "system", {
           argv: result.argv ?? req.body.argv,
-          error: result.error,
+          error: error.content,
+          secret_firewall: outputFirewall,
         });
-        res.status(403).json(result);
+        res.status(403).json(safeResult);
         return;
       }
       await emitRentalActivity(deps, sessionId, COMMAND_ALLOWED, "system", {
@@ -190,26 +220,29 @@ export function registerPatchCommandRoutes(
       if (result.timedOut) {
         await emitRentalActivity(deps, sessionId, COMMAND_TIMED_OUT, "system", {
           argv: result.argv,
-          error: result.error ?? null,
+          error: result.error === undefined ? null : error.content,
+          secret_firewall: outputFirewall,
         });
       }
       if (result.success) {
         await emitRentalActivity(deps, sessionId, COMMAND_OUTPUT, "tool", {
           argv: result.argv,
           exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
+          stdout: stdout.content,
+          stderr: stderr.content,
+          secret_firewall: outputFirewall,
         });
       } else if (!result.timedOut) {
         await emitRentalActivity(deps, sessionId, COMMAND_OUTPUT, "tool", {
           argv: result.argv,
           exitCode: result.exitCode ?? null,
-          stdout: result.stdout ?? "",
-          stderr: result.stderr ?? "",
-          error: result.error ?? null,
+          stdout: stdout.content,
+          stderr: stderr.content,
+          error: result.error === undefined ? null : error.content,
+          secret_firewall: outputFirewall,
         });
       }
-      res.status(result.success ? 200 : 409).json(result);
+      res.status(result.success ? 200 : 409).json(safeResult);
     },
   );
 }

@@ -19,6 +19,8 @@ function createDeps() {
     isRepoBackedProject: () => false,
     resolveProjectRole: unused,
     rememberHumanRoomParticipant: unused,
+    rememberAccountRoom: unused,
+    assignInitialProjectAdmin: unused,
     toRoomResponse: () => ({}),
   };
 }
@@ -87,5 +89,72 @@ test("join route applies repo access denial before resolving room", async () => 
   assert.deepEqual(response.body, {
     error: "auth_required",
     room_id: "github.com/owner/repo",
+  });
+});
+
+test("non-repo joins initialize first admin without forcing every joiner to admin", async () => {
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+  const app = {
+    post(_path: RegExp, registeredHandler: typeof handler) {
+      handler = registeredHandler;
+    },
+  };
+  const response = {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      this.body = payload;
+      return this;
+    },
+  };
+  const assignedAdmins: Array<{ projectId: string; accountId: string }> = [];
+  const project = {
+    id: "room_non_repo",
+    display_name: "General Room",
+  };
+
+  registerRoomJoinRoutes(app as never, {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    isRepoBackedRoomId: () => false,
+    resolveRoomOrReply: async () => project as never,
+    getProjectAccessRoomId: () => project.id,
+    isRepoBackedProject: () => false,
+    assignInitialProjectAdmin: async (input) => {
+      assignedAdmins.push(input);
+    },
+    resolveProjectRole: async () => "participant",
+    rememberHumanRoomParticipant: async () => {},
+    rememberAccountRoom: async () => {},
+    toRoomResponse: (_project, options) => ({
+      id: project.id,
+      role: options?.role,
+      authenticated: options?.authenticated,
+    }),
+  } as never);
+
+  assert.ok(handler);
+  await handler(
+    {
+      params: { 0: "general" },
+      headers: {},
+      socket: { remoteAddress: "192.0.2.17" },
+      sessionAccount: { account_id: "acct_later_joiner" },
+    },
+    response as never,
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(assignedAdmins, [
+    { projectId: "room_non_repo", accountId: "acct_later_joiner" },
+  ]);
+  assert.deepEqual(response.body, {
+    id: "room_non_repo",
+    role: "participant",
+    authenticated: true,
   });
 });

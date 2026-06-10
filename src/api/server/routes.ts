@@ -1,7 +1,10 @@
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
-import { getProjectById } from "../db.js";
+import {
+  assignProjectAdminIfRoomHasNoAdmins,
+  getProjectById,
+} from "../db.js";
 import { toGitHubWebhookId } from "../github/app-sync.js";
 import {
   getProjectAccessRoomId,
@@ -294,6 +297,8 @@ export function registerApiRoutes(app: Express): void {
     resolveProjectRole,
     rememberHumanRoomParticipant,
     rememberAccountRoom: upsertAccountRoomRecent,
+    assignInitialProjectAdmin: ({ projectId, accountId }) =>
+      assignProjectAdminIfRoomHasNoAdmins(projectId, accountId),
     toRoomResponse,
   } satisfies RoomJoinRouteDeps;
 

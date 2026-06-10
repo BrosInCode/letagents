@@ -75,11 +75,23 @@ function getCachedRepoAccess(roomName: string, login: string): boolean | null {
 }
 
 function setCachedRepoAccess(roomName: string, login: string, allowed: boolean): void {
+  if (!allowed) return;
   const cacheKey = `${roomName.toLowerCase()}::${login.toLowerCase()}`;
   repoAccessCache.set(cacheKey, {
     allowed,
     expiresAt: Date.now() + REPO_ACCESS_TTL_MS,
   });
+}
+
+export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
+  const prefix = `${roomName.toLowerCase()}::`;
+  repoVisibilityCache.delete(roomName);
+  repoVisibilityCache.delete(roomName.toLowerCase());
+  for (const cacheKey of repoAccessCache.keys()) {
+    if (cacheKey.startsWith(prefix)) {
+      repoAccessCache.delete(cacheKey);
+    }
+  }
 }
 
 export function clearGitHubRepoAccessCacheForLogin(login: string): void {

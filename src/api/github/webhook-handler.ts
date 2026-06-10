@@ -17,6 +17,10 @@ import {
   type GitHubWebhookPayload,
 } from "./app.js";
 import {
+  clearGitHubRepoAccessCacheForLogin,
+  clearGitHubRepoAccessCacheForRoom,
+} from "./repo-access.js";
+import {
   createGitHubAppSync,
   toGitHubWebhookId,
 } from "./app-sync.js";
@@ -35,6 +39,20 @@ const {
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
 });
+
+function clearRepoAccessCacheForWebhookPayload(payload: GitHubWebhookPayload): void {
+  if (payload.repository?.full_name) {
+    clearGitHubRepoAccessCacheForRoom(buildGitHubRepoRoomId(payload.repository.full_name));
+  }
+  const memberLogin = (payload as { member?: { login?: unknown } }).member?.login;
+  if (typeof memberLogin === "string" && memberLogin.trim()) {
+    clearGitHubRepoAccessCacheForLogin(memberLogin);
+  }
+  const senderLogin = payload.sender?.login;
+  if (typeof senderLogin === "string" && senderLogin.trim()) {
+    clearGitHubRepoAccessCacheForLogin(senderLogin);
+  }
+}
 
 async function emitGitHubPullRequestEvent(
   project: Project,
@@ -135,6 +153,16 @@ export async function handleGitHubWebhookEvent(
   const roomId = payload.repository?.full_name
     ? buildGitHubRepoRoomId(payload.repository.full_name)
     : null;
+
+  if (
+    eventName === "member"
+    || eventName === "membership"
+    || eventName === "repository"
+    || eventName === "installation"
+    || eventName === "installation_repositories"
+  ) {
+    clearRepoAccessCacheForWebhookPayload(payload);
+  }
 
   if (eventName === "ping") {
     return {

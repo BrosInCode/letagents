@@ -15,6 +15,15 @@ let appendCalls: unknown[];
 let patchCalls: unknown[];
 let commandCalls: unknown[];
 let events: unknown[];
+let commandResult: {
+  success: boolean;
+  argv?: string[];
+  exitCode?: number | null;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  timedOut?: boolean;
+};
 
 beforeEach(async () => {
   process.env.LETAGENTS_RENT_ENABLED = "true";
@@ -22,6 +31,12 @@ beforeEach(async () => {
   patchCalls = [];
   commandCalls = [];
   events = [];
+  commandResult = {
+    success: true,
+    exitCode: 0,
+    stdout: "ok",
+    stderr: "",
+  };
 
   const express = (await import("express")).default;
   const { registerRentalInternalRoutes } = await import("../routes/rental/internal/index.js");
@@ -70,11 +85,8 @@ beforeEach(async () => {
     runWorkspaceCommand: async (sessionId, input) => {
       commandCalls.push({ sessionId, input });
       return {
-        success: true,
-        argv: input.argv,
-        exitCode: 0,
-        stdout: "ok",
-        stderr: "",
+        ...commandResult,
+        argv: commandResult.argv ?? input.argv,
       };
     },
   });
@@ -141,5 +153,83 @@ describe("p5.3 internal patch tool routes", () => {
     assert.equal(json.stdout, "ok");
     assert.equal(commandCalls.length, 1);
     assert.equal(events.length, 4);
+  });
+
+  it("redacts command output before returning it or emitting activity", async () => {
+    const fakeToken = "ghp_" + "A".repeat(36);
+    commandResult = {
+      success: false,
+      exitCode: 1,
+      stdout: `stdout token ${fakeToken}`,
+      stderr: `stderr token ${fakeToken}`,
+      error: `error token ${fakeToken}`,
+    };
+
+    const res = await post("/api/rental/sessions/rsess_1/commands/run", {
+      argv: ["node", "--test", "sample.test.mjs"],
+      timeoutMs: 1000,
+    });
+
+    assert.equal(res.status, 409);
+    const json = (await res.json()) as { stdout: string; stderr: string; error: string };
+    assert.ok(!json.stdout.includes(fakeToken));
+    assert.ok(!json.stderr.includes(fakeToken));
+    assert.ok(!json.error.includes(fakeToken));
+    assert.ok(json.stdout.includes("REDACTED_GITHUB_PAT"));
+    assert.ok(json.stderr.includes("REDACTED_GITHUB_PAT"));
+    assert.ok(json.error.includes("REDACTED_GITHUB_PAT"));
+
+    const outputEvent = events.find(
+      (event) => (event as { eventType?: string }).eventType === "command.output",
+    ) as { payload: Record<string, unknown> } | undefined;
+    assert.ok(outputEvent);
+    assert.ok(!(outputEvent.payload.stdout as string).includes(fakeToken));
+    assert.ok(!(outputEvent.payload.stderr as string).includes(fakeToken));
+    assert.ok(!(outputEvent.payload.error as string).includes(fakeToken));
+    const firewall = outputEvent.payload.secret_firewall as {
+      stdout_redacted: boolean;
+      stderr_redacted: boolean;
+      error_redacted: boolean;
+      findings: unknown[];
+    };
+    assert.equal(firewall.stdout_redacted, true);
+    assert.equal(firewall.stderr_redacted, true);
+    assert.equal(firewall.error_redacted, true);
+    assert.ok(firewall.findings.length >= 3);
+  });
+
+  it("redacts timed-out command errors before emitting activity", async () => {
+    const fakeToken = "ghp_" + "B".repeat(36);
+    commandResult = {
+      success: false,
+      timedOut: true,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      error: `timed out after stderr included ${fakeToken}`,
+    };
+
+    const res = await post("/api/rental/sessions/rsess_1/commands/run", {
+      argv: ["node", "--test", "slow.test.mjs"],
+      timeoutMs: 1000,
+    });
+
+    assert.equal(res.status, 409);
+    const json = (await res.json()) as { error: string };
+    assert.ok(!json.error.includes(fakeToken));
+    assert.ok(json.error.includes("REDACTED_GITHUB_PAT"));
+
+    const timeoutEvent = events.find(
+      (event) => (event as { eventType?: string }).eventType === "command.timed_out",
+    ) as { payload: Record<string, unknown> } | undefined;
+    assert.ok(timeoutEvent);
+    assert.ok(!(timeoutEvent.payload.error as string).includes(fakeToken));
+    assert.ok((timeoutEvent.payload.error as string).includes("REDACTED_GITHUB_PAT"));
+    const firewall = timeoutEvent.payload.secret_firewall as {
+      error_redacted: boolean;
+      findings: unknown[];
+    };
+    assert.equal(firewall.error_redacted, true);
+    assert.ok(firewall.findings.length >= 1);
   });
 });

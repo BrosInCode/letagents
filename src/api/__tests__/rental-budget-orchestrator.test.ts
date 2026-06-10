@@ -61,11 +61,38 @@ function buildDeps(options: {
   let session = options.session === undefined ? makeSession() : options.session;
   const latest = options.latest === undefined ? makeLatestMeter() : options.latest;
   const updates: Array<{ lrtReserved: number; lrtUsed: number; status?: string }> = [];
-  const events: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+  const events: Array<{
+    id: string;
+    sessionId: string;
+    roomId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+  }> = [];
   const lockOrder: string[] = [];
   const deps: BudgetOrchestratorDeps = {
     loadSession: async () => session,
     loadLatestMeter: async () => latest,
+    loadBudgetEventByIdempotency: async (sessionId, eventType, idempotencyKey) => {
+      const event = events.find(
+        (entry) =>
+          entry.sessionId === sessionId
+          && entry.eventType === eventType
+          && entry.payload.idempotency_key === idempotencyKey,
+      );
+      return event
+        ? {
+            id: event.id,
+            session_id: event.sessionId,
+            room_id: event.roomId,
+            event_type: event.eventType,
+            source: "system",
+            verified: true,
+            visibility: "rental_visible",
+            payload: event.payload,
+            created_at: new Date(REFERENCE_NOW),
+          }
+        : null;
+    },
     updateSessionBudget: async (_sessionId, patch) => {
       updates.push(patch);
       if (!session) throw new BudgetOrchestratorError("session not found", "session_not_found", 404);
@@ -79,9 +106,16 @@ function buildDeps(options: {
       return session;
     },
     emitActivity: async (input) => {
-      events.push({ eventType: input.eventType, payload: input.payload });
+      const id = `rev_${events.length + 1}`;
+      events.push({
+        id,
+        sessionId: input.sessionId,
+        roomId: input.roomId,
+        eventType: input.eventType,
+        payload: input.payload,
+      });
       return {
-        id: `rev_${events.length}`,
+        id,
         session_id: input.sessionId,
         room_id: input.roomId,
         event_type: input.eventType,
@@ -108,7 +142,7 @@ describe("budget orchestration service", () => {
 
     const result = await reserveBudget(
       "rsess_1",
-      { stepCostLrt: 2_000, nowMs: REFERENCE_NOW },
+      { idempotencyKey: "reserve-1", stepCostLrt: 2_000, nowMs: REFERENCE_NOW },
       harness.deps,
     );
 
@@ -126,7 +160,7 @@ describe("budget orchestration service", () => {
 
     const result = await reserveBudget(
       "rsess_1",
-      { stepCostLrt: 1, nowMs: REFERENCE_NOW },
+      { idempotencyKey: "reserve-exhausted", stepCostLrt: 1, nowMs: REFERENCE_NOW },
       harness.deps,
     );
 
@@ -145,7 +179,7 @@ describe("budget orchestration service", () => {
 
     const result = await reserveBudget(
       "rsess_1",
-      { stepCostLrt: 5_000, nowMs: REFERENCE_NOW },
+      { idempotencyKey: "reserve-stale", stepCostLrt: 5_000, nowMs: REFERENCE_NOW },
       harness.deps,
     );
 
@@ -162,7 +196,7 @@ describe("budget orchestration service", () => {
 
     const result = await reconcileBudget(
       "rsess_1",
-      { actualCostLrt: 1_000, reservedCostLrt: 500 },
+      { idempotencyKey: "reconcile-1", actualCostLrt: 1_000, reservedCostLrt: 500 },
       harness.deps,
     );
 
@@ -176,6 +210,98 @@ describe("budget orchestration service", () => {
       BUDGET_RECONCILED,
       BUDGET_EXHAUSTED,
     ]);
+  });
+
+  it("reserveBudget replays matching idempotency keys without double-reserving", async () => {
+    const harness = buildDeps();
+    const input = {
+      idempotencyKey: "reserve-retry",
+      stepCostLrt: 2_000,
+      nowMs: REFERENCE_NOW,
+    };
+
+    const first = await reserveBudget("rsess_1", input, harness.deps);
+    const second = await reserveBudget("rsess_1", input, harness.deps);
+
+    assert.equal(first.reservedDelta, 2_000);
+    assert.equal(second.reservedDelta, 2_000);
+    assert.equal(harness.updates.length, 1);
+    assert.equal(harness.events.length, 1);
+    assert.equal(second.event?.id, first.event?.id);
+    assert.equal(harness.session?.lrt_reserved, 2_000);
+  });
+
+  it("reconcileBudget replays matching idempotency keys without double-counting usage", async () => {
+    const harness = buildDeps({
+      session: makeSession({ lrt_used: 5_000, lrt_reserved: 3_000 }),
+    });
+    const input = {
+      idempotencyKey: "reconcile-retry",
+      actualCostLrt: 1_000,
+      reservedCostLrt: 500,
+    };
+
+    const first = await reconcileBudget("rsess_1", input, harness.deps);
+    const second = await reconcileBudget("rsess_1", input, harness.deps);
+
+    assert.equal(first.usedDelta, 1_000);
+    assert.equal(second.usedDelta, 1_000);
+    assert.equal(harness.updates.length, 1);
+    assert.equal(harness.events.length, 1);
+    assert.equal(second.event?.id, first.event?.id);
+    assert.equal(harness.session?.lrt_used, 6_000);
+    assert.equal(harness.session?.lrt_reserved, 2_500);
+  });
+
+  it("rejects reuse of a budget idempotency key for a different request", async () => {
+    const harness = buildDeps();
+    await reserveBudget(
+      "rsess_1",
+      { idempotencyKey: "reserve-conflict", stepCostLrt: 1_000, nowMs: REFERENCE_NOW },
+      harness.deps,
+    );
+
+    await assert.rejects(
+      reserveBudget(
+        "rsess_1",
+        { idempotencyKey: "reserve-conflict", stepCostLrt: 2_000, nowMs: REFERENCE_NOW },
+        harness.deps,
+      ),
+      (err: unknown) =>
+        err instanceof BudgetOrchestratorError
+        && err.code === "idempotency_conflict",
+    );
+    assert.equal(harness.updates.length, 1);
+  });
+
+  it("rejects roomless reserve and reconcile operations before mutating budget state", async () => {
+    const harness = buildDeps({
+      session: makeSession({ room_id: null, lrt_used: 1_000, lrt_reserved: 500 }),
+    });
+
+    await assert.rejects(
+      reserveBudget(
+        "rsess_1",
+        { idempotencyKey: "roomless-reserve", stepCostLrt: 100, nowMs: REFERENCE_NOW },
+        harness.deps,
+      ),
+      (err: unknown) =>
+        err instanceof BudgetOrchestratorError
+        && err.code === "room_not_assigned",
+    );
+    await assert.rejects(
+      reconcileBudget(
+        "rsess_1",
+        { idempotencyKey: "roomless-reconcile", actualCostLrt: 100, reservedCostLrt: 50 },
+        harness.deps,
+      ),
+      (err: unknown) =>
+        err instanceof BudgetOrchestratorError
+        && err.code === "room_not_assigned",
+    );
+
+    assert.equal(harness.updates.length, 0);
+    assert.equal(harness.events.length, 0);
   });
 });
 
@@ -276,10 +402,14 @@ describe("budget internal routes", () => {
   }
 
   it("POST /budget/reserve validates and dispatches to reserveBudget", async () => {
-    const res = await post("/api/rental/sessions/rsess_1/budget/reserve", { stepCostLrt: 123 });
+    const res = await post("/api/rental/sessions/rsess_1/budget/reserve", {
+      idempotencyKey: "route-reserve-1",
+      stepCostLrt: 123,
+    });
     assert.equal(res.status, 201);
     assert.equal(reserveCalls.length, 1);
     assert.equal(reserveCalls[0]!.sessionId, "rsess_1");
+    assert.equal(reserveCalls[0]!.input.idempotencyKey, "route-reserve-1");
     assert.equal(reserveCalls[0]!.input.stepCostLrt, 123);
   });
 
@@ -298,7 +428,10 @@ describe("budget internal routes", () => {
       },
       reservedDelta: 0,
     });
-    const res = await post("/api/rental/sessions/rsess_1/budget/reserve", { stepCostLrt: 1 });
+    const res = await post("/api/rental/sessions/rsess_1/budget/reserve", {
+      idempotencyKey: "route-reserve-denied",
+      stepCostLrt: 1,
+    });
     assert.equal(res.status, 409);
   });
 
@@ -306,10 +439,15 @@ describe("budget internal routes", () => {
     const res = await post("/api/rental/sessions/rsess_1/budget/reconcile", {
       actualCostLrt: 75,
       reservedCostLrt: 100,
+      idempotencyKey: "route-reconcile-1",
     });
     assert.equal(res.status, 200);
     assert.equal(reconcileCalls.length, 1);
-    assert.deepEqual(reconcileCalls[0]!.input, { actualCostLrt: 75, reservedCostLrt: 100 });
+    assert.deepEqual(reconcileCalls[0]!.input, {
+      idempotencyKey: "route-reconcile-1",
+      actualCostLrt: 75,
+      reservedCostLrt: 100,
+    });
   });
 
   it("budget routes reject invalid numeric input and unauthorized sessions", async () => {
@@ -328,7 +466,10 @@ describe("budget internal routes", () => {
     reserveImpl = async () => {
       throw new BudgetOrchestratorError("session not found", "session_not_found", 404);
     };
-    const res = await post("/api/rental/sessions/rsess_missing/budget/reserve", { stepCostLrt: 1 });
+    const res = await post("/api/rental/sessions/rsess_missing/budget/reserve", {
+      idempotencyKey: "route-reserve-missing",
+      stepCostLrt: 1,
+    });
     assert.equal(res.status, 404);
     const json = (await res.json()) as { code: string };
     assert.equal(json.code, "session_not_found");

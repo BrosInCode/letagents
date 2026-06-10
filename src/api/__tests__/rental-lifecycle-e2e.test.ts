@@ -192,13 +192,18 @@ describe("rental lifecycle E2E over MCP tool wrappers and API routes", () => {
             )
             && event.payload.request_id === requestId,
         ),
-      updateSessionBudget: async (sessionId, update) => {
+      incrementSessionBudget: async (sessionId, update) => {
         const session = sessions.get(sessionId);
         if (!session) throw new Error("session_not_found");
-        session.lrt_limit = update.lrtLimit;
+        const previousLrtLimit = session.lrt_limit;
+        session.lrt_limit = (session.lrt_limit ?? 0) + update.additionalLrt;
         session.status = update.status;
         session.updated_at = new Date();
-        return session as never;
+        return {
+          session,
+          previousLrtLimit,
+          newLrtLimit: session.lrt_limit,
+        } as never;
       },
       emitActivityEvent: async (input) => emitActivityEvent(input) as never,
     };

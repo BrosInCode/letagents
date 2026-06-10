@@ -55,6 +55,7 @@ import {
   type QuotaLeaseReason,
   type QuotaLeaseSnapshot,
 } from "./quota-lease.js";
+import type { db as DbClient } from "../db/client.js";
 import { rental_sessions } from "../db/schema.js";
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,14 @@ export interface QuotaLeaseOrchestratorDeps {
   }): Promise<void>;
   /** Inject a clock for deterministic tests. */
   now(): string;
+  /**
+   * Serialize acquire operations for a quota lane. Default DB deps
+   * implement this with a Postgres advisory transaction lock.
+   */
+  withLaneLock?<T>(
+    lane: QuotaLane,
+    body: (locked: QuotaLeaseOrchestratorDeps) => Promise<T>,
+  ): Promise<T>;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +145,16 @@ export interface AcquireLeaseFailure {
 export type AcquireLeaseResult = AcquireLeaseSuccess | AcquireLeaseFailure;
 
 export async function acquireLease(
+  input: AcquireLeaseInput,
+  deps: QuotaLeaseOrchestratorDeps,
+): Promise<AcquireLeaseResult> {
+  if (deps.withLaneLock) {
+    return deps.withLaneLock(input.lane, (locked) => acquireLeaseLocked(input, locked));
+  }
+  return acquireLeaseLocked(input, deps);
+}
+
+async function acquireLeaseLocked(
   input: AcquireLeaseInput,
   deps: QuotaLeaseOrchestratorDeps,
 ): Promise<AcquireLeaseResult> {
@@ -267,61 +286,96 @@ function asQuotaLease(value: unknown): QuotaLease | null {
   return value as unknown as QuotaLease;
 }
 
-async function getDb() {
+type QuotaLeaseExecutor = typeof DbClient;
+
+async function getDb(): Promise<QuotaLeaseExecutor> {
   const mod = await import("../db/client.js");
   return mod.db;
 }
 
+function buildQuotaLeaseDeps(executor: QuotaLeaseExecutor): Omit<
+  QuotaLeaseOrchestratorDeps,
+  "withLaneLock"
+> {
+  return {
+    async loadActiveLeasesForLane(lane) {
+      const { sql } = await import("drizzle-orm");
+      const rows = await executor
+        .select({ quotaLease: rental_sessions.quota_lease })
+        .from(rental_sessions)
+        .where(sql`
+          ${rental_sessions.quota_lease} IS NOT NULL
+          AND ${rental_sessions.quota_lease}->>'releasedAt' IS NULL
+          AND ${rental_sessions.quota_lease}->'lane'->>'provider' = ${lane.provider}
+          AND COALESCE(${rental_sessions.quota_lease}->'lane'->>'model', '') = ${lane.model ?? ""}
+        `);
+      return rows
+        .map((row) => asQuotaLease(row.quotaLease))
+        .filter((lease): lease is QuotaLease => Boolean(lease));
+    },
+    async loadSessionLease(sessionId) {
+      const { eq } = await import("drizzle-orm");
+      const [row] = await executor
+        .select({ quotaLease: rental_sessions.quota_lease })
+        .from(rental_sessions)
+        .where(eq(rental_sessions.id, sessionId));
+      return asQuotaLease(row?.quotaLease);
+    },
+    async persistSessionLease(sessionId, lease) {
+      const { eq } = await import("drizzle-orm");
+      await executor
+        .update(rental_sessions)
+        .set({
+          quota_lease: lease,
+          native_quota_latest_snapshot: lease.snapshot,
+          meter_confidence: lease.snapshot.confidence,
+          updated_at: new Date(),
+        })
+        .where(eq(rental_sessions.id, sessionId));
+    },
+    async emitLeaseEvent(input) {
+      const { emitActivityEvent } = await import("./activity-emitter.js");
+      await emitActivityEvent({
+        sessionId: input.sessionId,
+        roomId: input.roomId,
+        eventType: input.eventType,
+        source: input.source,
+        payload: input.payload,
+      });
+    },
+    now() {
+      return new Date().toISOString();
+    },
+  };
+}
+
 export const defaultQuotaLeaseOrchestratorDeps: QuotaLeaseOrchestratorDeps = {
   async loadActiveLeasesForLane(lane) {
-    const { sql } = await import("drizzle-orm");
-    const db = await getDb();
-    const rows = await db
-      .select({ quotaLease: rental_sessions.quota_lease })
-      .from(rental_sessions)
-      .where(sql`
-        ${rental_sessions.quota_lease} IS NOT NULL
-        AND ${rental_sessions.quota_lease}->>'releasedAt' IS NULL
-        AND ${rental_sessions.quota_lease}->'lane'->>'provider' = ${lane.provider}
-        AND COALESCE(${rental_sessions.quota_lease}->'lane'->>'model', '') = ${lane.model ?? ""}
-      `);
-    return rows
-      .map((row) => asQuotaLease(row.quotaLease))
-      .filter((lease): lease is QuotaLease => Boolean(lease));
+    return buildQuotaLeaseDeps(await getDb()).loadActiveLeasesForLane(lane);
   },
   async loadSessionLease(sessionId) {
-    const { eq } = await import("drizzle-orm");
-    const db = await getDb();
-    const [row] = await db
-      .select({ quotaLease: rental_sessions.quota_lease })
-      .from(rental_sessions)
-      .where(eq(rental_sessions.id, sessionId));
-    return asQuotaLease(row?.quotaLease);
+    return buildQuotaLeaseDeps(await getDb()).loadSessionLease(sessionId);
   },
   async persistSessionLease(sessionId, lease) {
-    const { eq } = await import("drizzle-orm");
-    const db = await getDb();
-    await db
-      .update(rental_sessions)
-      .set({
-        quota_lease: lease,
-        native_quota_latest_snapshot: lease.snapshot,
-        meter_confidence: lease.snapshot.confidence,
-        updated_at: new Date(),
-      })
-      .where(eq(rental_sessions.id, sessionId));
+    return buildQuotaLeaseDeps(await getDb()).persistSessionLease(sessionId, lease);
   },
   async emitLeaseEvent(input) {
-    const { emitActivityEvent } = await import("./activity-emitter.js");
-    await emitActivityEvent({
-      sessionId: input.sessionId,
-      roomId: input.roomId,
-      eventType: input.eventType,
-      source: input.source,
-      payload: input.payload,
-    });
+    return buildQuotaLeaseDeps(await getDb()).emitLeaseEvent(input);
   },
   now() {
     return new Date().toISOString();
+  },
+  async withLaneLock(lane, body) {
+    const { sql } = await import("drizzle-orm");
+    const db = await getDb();
+    const lockKey = `quota_lease:${lane.provider}:${lane.model ?? ""}`;
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+      const txDeps: QuotaLeaseOrchestratorDeps = {
+        ...buildQuotaLeaseDeps(tx as unknown as QuotaLeaseExecutor),
+        withLaneLock: defaultQuotaLeaseOrchestratorDeps.withLaneLock,
+      };
+      return body(txDeps);
+    });
   },
 };

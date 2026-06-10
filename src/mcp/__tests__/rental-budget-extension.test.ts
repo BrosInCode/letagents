@@ -100,10 +100,10 @@ describe("budget extension service", () => {
   function makeDeps(overrides: Partial<BudgetExtensionDeps> = {}): {
     deps: BudgetExtensionDeps;
     events: Array<Parameters<BudgetExtensionDeps["emitActivityEvent"]>[0]>;
-    updates: Array<{ lrtLimit: number; status: string }>;
+    updates: Array<{ additionalLrt: number; status: string }>;
   } {
     const events: Array<Parameters<BudgetExtensionDeps["emitActivityEvent"]>[0]> = [];
-    const updates: Array<{ lrtLimit: number; status: string }> = [];
+    const updates: Array<{ additionalLrt: number; status: string }> = [];
     const deps: BudgetExtensionDeps = {
       now: () => new Date("2026-05-11T22:00:00Z"),
       getSession: async () => baseSession as never,
@@ -122,12 +122,17 @@ describe("budget extension service", () => {
         created_at: new Date("2026-05-11T22:00:00Z"),
       }) as never,
       hasDecision: async () => false,
-      updateSessionBudget: async (_sessionId, update) => {
+      incrementSessionBudget: async (_sessionId, update) => {
         updates.push(update);
+        const newLrtLimit = (baseSession.lrt_limit ?? 0) + update.additionalLrt;
         return {
-          ...baseSession,
-          lrt_limit: update.lrtLimit,
-          status: update.status,
+          session: {
+            ...baseSession,
+            lrt_limit: newLrtLimit,
+            status: update.status,
+          },
+          previousLrtLimit: baseSession.lrt_limit,
+          newLrtLimit,
         } as never;
       },
       emitActivityEvent: async (input) => {
@@ -184,7 +189,7 @@ describe("budget extension service", () => {
       deps,
     );
 
-    assert.equal(updates[0]?.lrtLimit, 1_500);
+    assert.equal(updates[0]?.additionalLrt, 500);
     assert.equal(updates[0]?.status, "active");
     assert.equal(result.session.lrt_limit, 1_500);
     assert.equal(result.decision.event_type, BUDGET_EXTENSION_APPROVED);

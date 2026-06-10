@@ -5,10 +5,11 @@
  * and activity events needed by the internal reserve/reconcile routes.
  */
 
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import {
+  rental_activity_events,
   rental_sessions,
   rental_usage_meters,
 } from "../db/schema.js";
@@ -48,12 +49,14 @@ type LatestMeterRow = Pick<
 >;
 
 export interface BudgetReserveInput {
+  idempotencyKey: string;
   stepCostLrt: number;
   options?: BudgetSentinelOptions;
   nowMs?: number;
 }
 
 export interface BudgetReconcileInput {
+  idempotencyKey: string;
   actualCostLrt: number;
   reservedCostLrt: number;
 }
@@ -89,7 +92,11 @@ export interface BudgetReconcileResult {
 export class BudgetOrchestratorError extends Error {
   constructor(
     message: string,
-    readonly code: "session_not_found" | "invalid_input",
+    readonly code:
+      | "session_not_found"
+      | "invalid_input"
+      | "idempotency_conflict"
+      | "room_not_assigned",
     readonly status: number,
   ) {
     super(message);
@@ -100,6 +107,11 @@ export class BudgetOrchestratorError extends Error {
 export interface BudgetOrchestratorDeps {
   loadSession(sessionId: string): Promise<BudgetSessionRow | null>;
   loadLatestMeter(sessionId: string): Promise<LatestMeterRow | null>;
+  loadBudgetEventByIdempotency(
+    sessionId: string,
+    eventType: typeof BUDGET_RESERVED | typeof BUDGET_RECONCILED,
+    idempotencyKey: string,
+  ): Promise<ActivityEvent | null>;
   updateSessionBudget(
     sessionId: string,
     patch: {
@@ -152,6 +164,21 @@ function buildBudgetDeps(
         .from(rental_usage_meters)
         .where(eq(rental_usage_meters.session_id, sessionId))
         .orderBy(desc(rental_usage_meters.created_at))
+        .limit(1);
+      return row ?? null;
+    },
+    async loadBudgetEventByIdempotency(sessionId, eventType, idempotencyKey) {
+      const [row] = await executor
+        .select()
+        .from(rental_activity_events)
+        .where(
+          and(
+            eq(rental_activity_events.session_id, sessionId),
+            eq(rental_activity_events.event_type, eventType),
+            sql`${rental_activity_events.payload}->>'idempotency_key' = ${idempotencyKey}`,
+          ),
+        )
+        .orderBy(desc(rental_activity_events.created_at))
         .limit(1);
       return row ?? null;
     },
@@ -270,12 +297,17 @@ function summarize(
 }
 
 function reservePayload(
+  idempotencyKey: string,
+  requestedStepCostLrt: number,
   decision: AuthorizeDecision,
   reservedDelta: number,
   session: BudgetSessionSummary,
 ): Record<string, unknown> {
   return {
+    idempotency_key: idempotencyKey,
+    requested_step_cost_lrt: requestedStepCostLrt,
     step_cost_lrt: reservedDelta,
+    reserved_delta: reservedDelta,
     decision,
     lrt_reserved: session.lrtReserved,
     lrt_used: session.lrtUsed,
@@ -297,11 +329,72 @@ function exhaustedPayload(
   };
 }
 
+function requireIdempotencyKey(input: unknown): string {
+  if (typeof input !== "string") {
+    throw new BudgetOrchestratorError("idempotencyKey is required", "invalid_input", 400);
+  }
+  const key = input.trim();
+  if (!key) {
+    throw new BudgetOrchestratorError("idempotencyKey is required", "invalid_input", 400);
+  }
+  return key;
+}
+
+function objectPayload(event: ActivityEvent): Record<string, unknown> {
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return {};
+  }
+  return payload as Record<string, unknown>;
+}
+
+function numberPayload(payload: Record<string, unknown>, field: string): number | null {
+  const value = payload[field];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function assertSameIdempotentNumber(
+  payload: Record<string, unknown>,
+  field: string,
+  expected: number,
+): void {
+  if (numberPayload(payload, field) !== expected) {
+    throw new BudgetOrchestratorError(
+      "idempotency key already used with a different budget request",
+      "idempotency_conflict",
+      409,
+    );
+  }
+}
+
+function decisionPayload(payload: Record<string, unknown>): AuthorizeDecision {
+  const value = payload.decision;
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as AuthorizeDecision;
+  }
+  throw new BudgetOrchestratorError(
+    "stored budget reservation event is missing its decision",
+    "invalid_input",
+    409,
+  );
+}
+
+function requireBudgetActivityRoom(session: BudgetSessionRow): void {
+  if (!session.room_id) {
+    throw new BudgetOrchestratorError(
+      "session room is required for idempotent budget operations",
+      "room_not_assigned",
+      409,
+    );
+  }
+}
+
 export async function reserveBudget(
   sessionId: string,
   input: BudgetReserveInput,
   deps: BudgetOrchestratorDeps = defaultBudgetOrchestratorDeps,
 ): Promise<BudgetReserveResult> {
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey);
   finiteNonNegative(input.stepCostLrt, "stepCostLrt");
 
   return deps.withSessionLock(sessionId, async (locked) => {
@@ -309,7 +402,29 @@ export async function reserveBudget(
     if (!session) {
       throw new BudgetOrchestratorError("session not found", "session_not_found", 404);
     }
+    requireBudgetActivityRoom(session);
     const latestMeter = await locked.loadLatestMeter(sessionId);
+
+    const existing = await locked.loadBudgetEventByIdempotency(
+      sessionId,
+      BUDGET_RESERVED,
+      idempotencyKey,
+    );
+    if (existing) {
+      const payload = objectPayload(existing);
+      assertSameIdempotentNumber(payload, "requested_step_cost_lrt", input.stepCostLrt);
+      return {
+        decision: decisionPayload(payload),
+        reservedDelta:
+          numberPayload(payload, "reserved_delta")
+          ?? numberPayload(payload, "step_cost_lrt")
+          ?? 0,
+        session: summarize(session, latestMeter),
+        event: existing,
+        exhaustedEvent: null,
+      };
+    }
+
     const state = toSentinelState(session, latestMeter);
     const decision = authorize(input.stepCostLrt, state, input.options, input.nowMs ?? Date.now());
 
@@ -370,7 +485,13 @@ export async function reserveBudget(
           sessionId,
           roomId: updated.room_id,
           eventType: BUDGET_RESERVED,
-          payload: reservePayload(decision, reservation.reservedDelta, summary),
+          payload: reservePayload(
+            idempotencyKey,
+            input.stepCostLrt,
+            decision,
+            reservation.reservedDelta,
+            summary,
+          ),
         })
       : null;
 
@@ -389,6 +510,7 @@ export async function reconcileBudget(
   input: BudgetReconcileInput,
   deps: BudgetOrchestratorDeps = defaultBudgetOrchestratorDeps,
 ): Promise<BudgetReconcileResult> {
+  const idempotencyKey = requireIdempotencyKey(input.idempotencyKey);
   finiteNonNegative(input.actualCostLrt, "actualCostLrt");
   finiteNonNegative(input.reservedCostLrt, "reservedCostLrt");
 
@@ -397,7 +519,34 @@ export async function reconcileBudget(
     if (!session) {
       throw new BudgetOrchestratorError("session not found", "session_not_found", 404);
     }
+    requireBudgetActivityRoom(session);
     const latestMeter = await locked.loadLatestMeter(sessionId);
+
+    const existing = await locked.loadBudgetEventByIdempotency(
+      sessionId,
+      BUDGET_RECONCILED,
+      idempotencyKey,
+    );
+    if (existing) {
+      const payload = objectPayload(existing);
+      assertSameIdempotentNumber(payload, "requested_actual_cost_lrt", input.actualCostLrt);
+      assertSameIdempotentNumber(payload, "requested_reserved_cost_lrt", input.reservedCostLrt);
+      return {
+        reservedDelta:
+          numberPayload(payload, "reserved_delta")
+          ?? numberPayload(payload, "reserved_cost_lrt")
+          ?? 0,
+        usedDelta:
+          numberPayload(payload, "used_delta")
+          ?? numberPayload(payload, "actual_cost_lrt")
+          ?? 0,
+        becameExhausted: payload.became_exhausted === true,
+        session: summarize(session, latestMeter),
+        event: existing,
+        exhaustedEvent: null,
+      };
+    }
+
     const state = toSentinelState(session, latestMeter);
     const reconciliation = applyReconciliation(
       input.actualCostLrt,
@@ -417,8 +566,13 @@ export async function reconcileBudget(
           roomId: updated.room_id,
           eventType: BUDGET_RECONCILED,
           payload: {
+            idempotency_key: idempotencyKey,
+            requested_actual_cost_lrt: input.actualCostLrt,
+            requested_reserved_cost_lrt: input.reservedCostLrt,
             actual_cost_lrt: reconciliation.usedDelta,
             reserved_cost_lrt: reconciliation.reservedDelta,
+            used_delta: reconciliation.usedDelta,
+            reserved_delta: reconciliation.reservedDelta,
             lrt_reserved: summary.lrtReserved,
             lrt_used: summary.lrtUsed,
             effective_ceiling: summary.effectiveCeiling,
