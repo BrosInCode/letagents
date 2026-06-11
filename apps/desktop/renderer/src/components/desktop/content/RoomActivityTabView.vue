@@ -90,7 +90,7 @@
               <div>
                 <span>Agent</span>
                 <h3>{{ selectedLiveParticipant.label }}</h3>
-                <p>{{ participantSubtitle(selectedLiveParticipant) }}</p>
+                <p>{{ detailSubtitle(selectedLiveParticipant) }}</p>
               </div>
             </div>
             <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
@@ -98,27 +98,14 @@
             </span>
           </div>
 
-          <div class="desktop-activity-detail-facts">
-            <span>
-              <small>Delivery</small>
-              <strong>{{ connectionLabel(selectedLiveParticipant) }}</strong>
-            </span>
-            <span>
-              <small>Work</small>
-              <strong>{{ selectedLiveParticipant.workLabel || selectedLiveParticipant.status || "idle" }}</strong>
-            </span>
-            <span>
-              <small>Last signal</small>
-              <strong>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</strong>
-            </span>
-            <span>
-              <small>Runtime</small>
-              <strong>{{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}</strong>
-            </span>
+          <div class="desktop-activity-detail-meta">
+            <span>{{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}</span>
+            <span>{{ selectedLiveParticipant.workLabel || selectedLiveParticipant.status || "idle" }}</span>
+            <span>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</span>
           </div>
 
           <section v-if="selectedLiveParticipant.statusText" class="desktop-activity-note">
-            <span>Current status</span>
+            <span>Latest status</span>
             <p>{{ selectedLiveParticipant.statusText }}</p>
           </section>
 
@@ -139,11 +126,7 @@
             </article>
           </section>
 
-          <section class="desktop-activity-detail-section desktop-activity-connection-section">
-            <header>
-              <h4>Connection</h4>
-              <span v-if="selectedLiveParticipant.livenessObservation">session</span>
-            </header>
+          <section class="desktop-activity-connection-section">
             <p v-if="selectedLiveParticipant.livenessObservation" class="desktop-activity-connection-copy">
               {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
               observed this session {{ formatRelativeTime(selectedLiveParticipant.livenessObservation.lastObservedAt) }}.
@@ -336,7 +319,6 @@ const {
   connectionTone,
   formatRelativeTime,
   signalLabel,
-  participantSubtitle,
   reasoningStatus,
   reasoningTitle,
   reasoningSummary,
@@ -350,6 +332,12 @@ function refreshActivity(): void {
 
 function activeSourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {
   return sourceBadges(participant).filter((source) => source.active);
+}
+
+function detailSubtitle(participant: ActivityParticipant): string {
+  if (participant.activityState === "active" || participant.activityState === "away") return "Reachable in chat";
+  if (connectionLabel(participant) === "signal only") return "Work updates available";
+  return "Not reachable in chat";
 }
 
 onMounted(refreshActivity);

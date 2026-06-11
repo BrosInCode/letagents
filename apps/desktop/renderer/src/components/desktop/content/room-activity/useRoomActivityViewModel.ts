@@ -16,7 +16,6 @@ import {
   hasAgentSignal,
   isReachableParticipant,
   isReachablePresence,
-  participantSubtitle,
   signalLabel,
   sourceBadges,
 } from "./signals";
@@ -163,7 +162,6 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
     connectionTone,
     formatRelativeTime,
     signalLabel,
-    participantSubtitle,
     reasoningStatus,
     reasoningTitle,
     reasoningSummary,

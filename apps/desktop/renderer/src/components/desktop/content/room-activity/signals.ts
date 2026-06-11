@@ -79,14 +79,6 @@ export function connectionTone(participant: ActivityParticipant): string {
   return "offline";
 }
 
-export function participantSubtitle(participant: ActivityParticipant): string {
-  if (participant.kind === "human") return "Seen through room messages and tasks.";
-  if (participant.activityState === "active" || participant.activityState === "away") return "Can receive room messages now.";
-  if (hasAgentSignal(participant)) return "Session or work signals are updating, but message delivery is not reachable.";
-  if (participant.activityState === "offline") return "Delivery session is no longer reachable.";
-  return "No current delivery or session signal.";
-}
-
 export function sourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {
   const sources = new Set(participant.sources);
   return [
