@@ -1,7 +1,6 @@
 import type { DesktopAgentPresence } from "../../../../../../electron/ipc-types";
 import { timestampValue } from "../../../../domain/time";
 import { RECENT_SIGNAL_WINDOW_MS } from "./constants";
-import { livenessCapabilityLabel } from "./formatters";
 import type { ActivityParticipant, ActivityState } from "./types";
 
 export function isReachablePresence(presence: DesktopAgentPresence): boolean {
@@ -26,15 +25,6 @@ export function hasAgentSignal(participant: ActivityParticipant): boolean {
   if ((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt)) return true;
   if (participant.activeReasoning.some((session) => isRecentTimestamp(session.updatedAt || session.createdAt))) return true;
   return participant.currentTasks.some((task) => isRecentTimestamp(task.updatedAt));
-}
-
-export function signalLabel(participant: ActivityParticipant): string {
-  if (participant.workLabel) return participant.workLabel;
-  if (participant.livenessObservation && hasRecentLivenessObservation(participant)) {
-    return livenessCapabilityLabel(participant.livenessObservation.livenessCapability);
-  }
-  if (participant.statusText) return "Status";
-  return "Signal";
 }
 
 export function workSignalFrom(
@@ -67,7 +57,7 @@ export function connectionLabel(participant: ActivityParticipant): string {
   if (participant.kind === "human") return "human";
   if (participant.activityState === "active") return "connected";
   if (participant.activityState === "away") return "idle";
-  if (hasAgentSignal(participant)) return "signal only";
+  if (hasAgentSignal(participant)) return "not reachable";
   return "offline";
 }
 

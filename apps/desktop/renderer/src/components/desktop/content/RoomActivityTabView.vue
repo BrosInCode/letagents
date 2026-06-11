@@ -11,7 +11,7 @@
       <article v-if="!liveRosterAgents.length" class="desktop-activity-live-empty">
         <span>Live activity</span>
         <h3>No agents are live right now</h3>
-        <p>Reachable agents and current work signals appear here when they are active in this room.</p>
+        <p>Reachable agents and current work updates appear here when they are active in this room.</p>
         <button type="button" @click="refreshActivity">Refresh</button>
       </article>
 
@@ -51,7 +51,7 @@
             <header>
               <div>
                 <h3>Working</h3>
-                <p>Recent task, status, or reasoning signals without room delivery.</p>
+                <p>Recent work updates from agents that are not reachable in chat.</p>
               </div>
               <strong>{{ workingAgents.length }}</strong>
             </header>
@@ -72,10 +72,9 @@
               </span>
               <span>
                 <strong>{{ agent.label }}</strong>
-                <small>{{ signalLabel(agent) }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
+                <small>{{ agent.statusText || agent.workLabel || "Recent activity" }}</small>
               </span>
               <span class="desktop-activity-row-meta">
-                <span class="desktop-activity-mini-pill">signal only</span>
                 <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} reasoning</span>
                 <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
               </span>
@@ -93,7 +92,11 @@
                 <p>{{ participantSubtitle(selectedLiveParticipant) }}</p>
               </div>
             </div>
-            <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
+            <span
+              v-if="isReachableDelivery(selectedLiveParticipant)"
+              class="state-pill"
+              :data-state="connectionTone(selectedLiveParticipant)"
+            >
               {{ connectionLabel(selectedLiveParticipant) }}
             </span>
           </div>
@@ -101,7 +104,7 @@
           <div class="desktop-activity-detail-facts">
             <span>
               <small>Delivery</small>
-              <strong>{{ connectionLabel(selectedLiveParticipant) }}</strong>
+              <strong>{{ deliveryLabel(selectedLiveParticipant) }}</strong>
             </span>
             <span>
               <small>Work</small>
@@ -335,7 +338,6 @@ const {
   connectionLabel,
   connectionTone,
   formatRelativeTime,
-  signalLabel,
   participantSubtitle,
   reasoningStatus,
   reasoningTitle,
@@ -350,6 +352,14 @@ function refreshActivity(): void {
 
 function activeSourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {
   return sourceBadges(participant).filter((source) => source.active);
+}
+
+function isReachableDelivery(participant: ActivityParticipant): boolean {
+  return participant.activityState === "active" || participant.activityState === "away";
+}
+
+function deliveryLabel(participant: ActivityParticipant): string {
+  return isReachableDelivery(participant) ? connectionLabel(participant) : "not reachable";
 }
 
 onMounted(refreshActivity);
