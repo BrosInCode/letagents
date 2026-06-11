@@ -22,9 +22,10 @@ export function hasRecentLivenessObservation(participant: ActivityParticipant): 
 
 export function hasAgentSignal(participant: ActivityParticipant): boolean {
   if (participant.kind !== "agent") return false;
-  if (participant.currentTasks.length || participant.activeReasoning.length) return true;
   if (participant.livenessObservation && hasRecentLivenessObservation(participant)) return true;
-  return Boolean((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt));
+  if ((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt)) return true;
+  if (participant.activeReasoning.some((session) => isRecentTimestamp(session.updatedAt || session.createdAt))) return true;
+  return participant.currentTasks.some((task) => isRecentTimestamp(task.updatedAt));
 }
 
 export function signalLabel(participant: ActivityParticipant): string {
@@ -70,12 +71,12 @@ export function connectionLabel(participant: ActivityParticipant): string {
   return "offline";
 }
 
-export function participantSubtitle(participant: ActivityParticipant): string {
-  if (participant.kind === "human") return "Seen through room messages and tasks.";
-  if (participant.activityState === "active" || participant.activityState === "away") return "Can receive room messages now.";
-  if (hasAgentSignal(participant)) return "Session or work signals are updating, but message delivery is not reachable.";
-  if (participant.activityState === "offline") return "Delivery session is no longer reachable.";
-  return "No current delivery or session signal.";
+export function connectionTone(participant: ActivityParticipant): string {
+  if (participant.kind === "human") return "human";
+  if (participant.activityState === "active") return "active";
+  if (participant.activityState === "away") return "away";
+  if (hasAgentSignal(participant)) return "signal";
+  return "offline";
 }
 
 export function sourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {

@@ -1,23 +1,85 @@
 .desktop-activity-detail {
   display: grid;
   align-content: start;
-  gap: 14px;
-  flex: 0 0 min(430px, 36vw);
-  min-width: 340px;
+  gap: 12px;
+  flex: 0 0 min(400px, 34vw);
+  min-width: 320px;
   overflow-y: auto;
-  padding: 16px;
+  padding: 18px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
-.desktop-activity-detail-header > div > span,
-.desktop-activity-note > span {
+.desktop-activity-detail-identity {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.desktop-activity-detail-identity > div {
+  min-width: 0;
+}
+
+.desktop-activity-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.8);
+  box-shadow: 0 0 0 4px rgba(148, 163, 184, 0.1);
+}
+
+.desktop-activity-dot[data-state="active"],
+.desktop-activity-dot[data-state="working"],
+.desktop-activity-dot[data-state="reviewing"],
+.desktop-activity-dot[data-state="responding"] {
+  background: #7ddf95;
+  box-shadow: 0 0 0 4px rgba(125, 223, 149, 0.12);
+}
+
+.desktop-activity-dot[data-state="away"] {
+  background: #f3c065;
+  box-shadow: 0 0 0 4px rgba(243, 192, 101, 0.12);
+}
+
+.desktop-activity-dot[data-state="blocked"],
+.desktop-activity-dot[data-state="offline"] {
+  background: #f87171;
+  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.12);
+}
+
+.desktop-activity-dot[data-state="signal"] {
+  background: #a78bfa;
+  box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.12);
+}
+
+.desktop-activity-detail .state-pill[data-state="signal"] {
+  background: rgba(255, 255, 255, 0.065);
+  color: var(--text-secondary);
+}
+
+.desktop-activity-detail h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.desktop-activity-detail-header p {
   color: var(--text-tertiary);
-  font-size: 0.72rem;
-  font-weight: 900;
-  letter-spacing: 0;
-  text-transform: uppercase;
+  font-size: 0.76rem;
+  font-weight: 400;
+  line-height: 1.32;
+}
+
+.desktop-activity-detail-section h4 {
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1.2;
 }
 
 .desktop-activity-detail-stats {
@@ -27,12 +89,9 @@
 }
 
 .desktop-activity-detail-stats article,
-.desktop-activity-note,
 .desktop-activity-task,
-.desktop-activity-reasoning,
-.desktop-activity-source-grid span {
+.desktop-activity-reasoning {
   border: 1px solid rgba(255, 255, 255, 0.045);
-  border-radius: 16px;
   background: rgba(255, 255, 255, 0.04);
 }
 
@@ -53,44 +112,68 @@
   font-size: 0.76rem;
 }
 
-.desktop-activity-note {
-  padding: 12px;
-}
-
-.desktop-activity-note p {
-  margin: 5px 0 0;
-  color: var(--text);
-}
-
 .desktop-activity-detail-section {
   display: grid;
-  gap: 8px;
+  gap: 7px;
 }
 
-.desktop-activity-source-grid {
+.desktop-activity-inspector-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 }
 
-.desktop-activity-source-grid span {
-  min-height: 34px;
-  padding: 8px 10px;
+.desktop-activity-inspector-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.38fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.desktop-activity-inspector-row + .desktop-activity-inspector-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.desktop-activity-inspector-row > span {
   color: var(--text-tertiary);
-  font-size: 0.8rem;
-  font-weight: 800;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.35;
 }
 
-.desktop-activity-source-grid span[data-active="true"] {
-  background: rgba(34, 197, 94, 0.12);
-  color: #86efac;
+.desktop-activity-inspector-row p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.desktop-activity-inspector-row[data-emphasis="true"] p {
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.desktop-activity-detail-header > .state-pill {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  min-width: max-content;
+  min-height: 20px;
+  padding: 0 8px;
+  font-size: 0.64rem;
+  font-weight: 500;
+  line-height: 1;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .desktop-activity-task,
 .desktop-activity-reasoning {
   align-items: flex-start;
   justify-content: space-between;
-  padding: 11px;
+  padding: 10px;
   transition:
     border-color 160ms ease,
     background 160ms ease;
@@ -106,7 +189,7 @@
 .desktop-activity-reasoning strong {
   min-width: 0;
   color: var(--text);
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   line-height: 1.3;
 }
 

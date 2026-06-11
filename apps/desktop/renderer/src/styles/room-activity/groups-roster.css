@@ -3,10 +3,15 @@
   min-height: 0;
 }
 
+.desktop-activity-layout[data-empty="true"] {
+  display: grid;
+  align-items: start;
+}
+
 .desktop-activity-groups {
   display: grid;
   align-content: start;
-  gap: 12px;
+  gap: 10px;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -19,13 +24,13 @@
 
 .desktop-activity-group,
 .desktop-activity-detail {
-  border-radius: 22px;
+  border-radius: 18px;
 }
 
 .desktop-activity-group {
   display: grid;
-  gap: 8px;
-  padding: 14px;
+  gap: 6px;
+  padding: 10px;
 }
 
 .desktop-activity-group header,
@@ -47,7 +52,7 @@
 
 .desktop-activity-group header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .desktop-activity-group h3,
@@ -60,7 +65,8 @@
 .desktop-activity-group p,
 .desktop-activity-detail-header p {
   margin: 3px 0 0;
-  font-size: 0.88rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 .desktop-activity-group header > strong,
@@ -76,10 +82,10 @@
 
 .desktop-activity-roster-item {
   width: 100%;
-  min-height: 76px;
-  padding: 12px;
+  min-height: 56px;
+  padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: 18px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.035);
   color: inherit;
   text-align: left;
@@ -103,18 +109,16 @@
 
 .desktop-activity-roster-item[data-selected="true"] {
   border-color: rgba(196, 181, 253, 0.28);
-  box-shadow:
-    inset 3px 0 0 rgba(196, 181, 253, 0.72),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .desktop-activity-avatar {
   display: inline-grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 11px;
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
   font-size: 0.82rem;
@@ -122,8 +126,12 @@
 }
 
 .desktop-activity-avatar svg {
-  width: 19px;
-  height: 19px;
+  width: 17px;
+  height: 17px;
+}
+
+.desktop-activity-roster-item > span:not(.desktop-activity-avatar):not(.desktop-activity-row-meta) {
+  min-width: 0;
 }
 
 .desktop-activity-avatar[data-state="active"],
@@ -147,41 +155,118 @@
 
 .desktop-activity-roster-item strong {
   display: block;
+  overflow: hidden;
   color: var(--text);
   font-size: 0.96rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-activity-roster-item small,
 .desktop-activity-row-meta small {
+  display: block;
+  overflow: hidden;
   color: var(--text-tertiary);
   font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-activity-row-meta {
   display: grid;
   justify-items: end;
-  gap: 6px;
+  gap: 4px;
   margin-left: auto;
   max-width: 42%;
+}
+
+.desktop-activity-row-meta .state-pill {
+  min-width: max-content;
+  min-height: 23px;
+  padding: 0 8px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .desktop-activity-mini-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 26px;
-  padding: 0 10px;
+  flex: 0 0 auto;
+  min-height: 23px;
+  padding: 0 8px;
   border-radius: 999px;
   background: rgba(139, 124, 246, 0.15);
   color: #c4b5fd;
   font-size: 0.76rem;
   font-weight: 800;
+  line-height: 1;
   white-space: nowrap;
 }
 
 .desktop-activity-empty {
-  padding: 14px;
-  border-radius: 16px;
+  padding: 12px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-activity-live-empty {
+  display: grid;
+  gap: 8px;
+  width: min(520px, 100%);
+  margin: clamp(18px, 6vh, 56px) auto 0;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.032);
+}
+
+.desktop-activity-live-empty span {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.desktop-activity-live-empty h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+
+.desktop-activity-live-empty p {
+  max-width: 420px;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.desktop-activity-live-empty button {
+  justify-self: start;
+  min-height: 30px;
+  margin-top: 4px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.desktop-activity-live-empty button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .desktop-activity-groups::-webkit-scrollbar,

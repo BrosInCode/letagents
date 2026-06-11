@@ -1,4 +1,3 @@
-.desktop-room-shell[data-liquid-glass="true"] .desktop-activity-stat,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-activity-toolbar,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-activity-group,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-activity-detail {
@@ -14,10 +13,8 @@
 
 .desktop-room-shell[data-liquid-glass="true"] .desktop-activity-roster-item,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-activity-detail-stats article,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-activity-note,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-activity-task,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-activity-reasoning,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-activity-source-grid span {
+.desktop-room-shell[data-liquid-glass="true"] .desktop-activity-reasoning {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.052);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
