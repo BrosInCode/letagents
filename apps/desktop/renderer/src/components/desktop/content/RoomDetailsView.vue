@@ -826,6 +826,30 @@ function errorMessage(error: unknown, fallback: string): string {
   overscroll-behavior: contain;
 }
 
+@keyframes focus-room-surface-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.995);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes focus-room-feedback-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .focus-room-manager::-webkit-scrollbar {
   width: var(--scrollbar-size);
   height: var(--scrollbar-size);
@@ -876,6 +900,7 @@ function errorMessage(error: unknown, fallback: string): string {
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+  animation: focus-room-surface-in 240ms var(--ease-out) both;
 }
 
 .focus-room-kicker,
@@ -938,6 +963,39 @@ function errorMessage(error: unknown, fallback: string): string {
   height: 36px;
   border-radius: 12px;
   cursor: pointer;
+  transition:
+    transform 150ms var(--ease-out),
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    color 150ms var(--ease-out);
+}
+
+.focus-room-icon-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.focus-room-icon-button:hover svg {
+  transform: rotate(18deg);
+}
+
+.focus-room-icon-button:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.focus-room-icon-button:focus-visible,
+.focus-room-tabs button:focus-visible,
+.focus-room-row:focus-visible,
+.focus-room-primary:focus-visible,
+.focus-room-secondary:focus-visible,
+.focus-room-create button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.075);
+}
+
+.focus-room-icon-button svg {
+  transition: transform 180ms var(--ease-out);
 }
 
 .focus-room-toolbar {
@@ -945,6 +1003,7 @@ function errorMessage(error: unknown, fallback: string): string {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  animation: focus-room-surface-in 260ms var(--ease-out) 35ms both;
 }
 
 .focus-room-search {
@@ -960,6 +1019,18 @@ function errorMessage(error: unknown, fallback: string): string {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-tertiary);
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out),
+    color 150ms var(--ease-out);
+}
+
+.focus-room-search:focus-within {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.055);
 }
 
 .focus-room-search input,
@@ -991,6 +1062,9 @@ function errorMessage(error: unknown, fallback: string): string {
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.024);
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out);
 }
 
 .focus-room-tabs button {
@@ -1007,6 +1081,7 @@ function errorMessage(error: unknown, fallback: string): string {
   font-weight: 850;
   cursor: pointer;
   transition:
+    transform 150ms var(--ease-out),
     border-color 150ms var(--ease-out),
     background 150ms var(--ease-out),
     color 150ms var(--ease-out);
@@ -1020,7 +1095,16 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-tabs button:hover {
+  transform: translateY(-1px);
   color: var(--text-secondary);
+}
+
+.focus-room-tabs button[data-active="true"]:hover {
+  color: var(--text);
+}
+
+.focus-room-tabs button:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .focus-room-tab-label {
@@ -1037,11 +1121,16 @@ function errorMessage(error: unknown, fallback: string): string {
   font-variant-numeric: tabular-nums;
   line-height: 1;
   text-align: center;
+  transition:
+    background 150ms var(--ease-out),
+    color 150ms var(--ease-out),
+    transform 150ms var(--ease-out);
 }
 
 .focus-room-tabs button[data-active="true"] .focus-room-tab-count {
   background: rgba(147, 197, 253, 0.18);
   color: #bfdbfe;
+  transform: scale(1.03);
 }
 
 .focus-room-create {
@@ -1055,6 +1144,17 @@ function errorMessage(error: unknown, fallback: string): string {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.035);
   color: var(--text-tertiary);
+  animation: focus-room-surface-in 260ms var(--ease-out) 55ms both;
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.focus-room-create:focus-within {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.055);
 }
 
 .focus-room-create button,
@@ -1065,6 +1165,13 @@ function errorMessage(error: unknown, fallback: string): string {
   border-radius: 999px;
   font-weight: 700;
   cursor: pointer;
+  transition:
+    transform 150ms var(--ease-out),
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out),
+    opacity 150ms var(--ease-out);
 }
 
 .focus-room-primary {
@@ -1076,8 +1183,34 @@ function errorMessage(error: unknown, fallback: string): string {
   color: #0a0a0b;
 }
 
+.focus-room-primary:not(:disabled):hover,
+.focus-room-create button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.focus-room-primary:not(:disabled):hover svg {
+  transform: translateX(2px);
+}
+
+.focus-room-primary svg {
+  transition: transform 150ms var(--ease-out);
+}
+
 .focus-room-secondary {
   justify-self: start;
+}
+
+.focus-room-secondary:not(:disabled):hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.focus-room-primary:not(:disabled):active,
+.focus-room-secondary:not(:disabled):active,
+.focus-room-create button:not(:disabled):active {
+  transform: translateY(0) scale(0.98);
 }
 
 .focus-room-primary.wide {
@@ -1105,6 +1238,18 @@ function errorMessage(error: unknown, fallback: string): string {
   border: 1px solid var(--border);
   border-radius: 22px;
   background: rgba(16, 16, 16, 0.72);
+  animation: focus-room-surface-in 280ms var(--ease-out) 65ms both;
+  transition:
+    border-color 180ms var(--ease-out),
+    background 180ms var(--ease-out),
+    box-shadow 180ms var(--ease-out);
+}
+
+.focus-room-list-pane:hover,
+.focus-room-detail:hover,
+.focus-room-current:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(18, 18, 18, 0.78);
 }
 
 .focus-room-list-pane {
@@ -1128,9 +1273,16 @@ function errorMessage(error: unknown, fallback: string): string {
   color: inherit;
   text-align: left;
   cursor: pointer;
+  transform-origin: center;
+  transition:
+    transform 150ms var(--ease-out),
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
 }
 
 .focus-room-row:hover {
+  transform: translateY(-1px);
   background: rgba(255, 255, 255, 0.035);
   border-color: var(--border);
 }
@@ -1138,6 +1290,11 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-row[data-selected="true"] {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 3px 0 0 rgba(147, 197, 253, 0.45);
+}
+
+.focus-room-row:active {
+  transform: translateY(0) scale(0.995);
 }
 
 .focus-room-dot {
@@ -1146,6 +1303,15 @@ function errorMessage(error: unknown, fallback: string): string {
   border-radius: 999px;
   background: #8b5cf6;
   box-shadow: 0 0 0 6px rgba(139, 92, 246, 0.12);
+  transition:
+    background 180ms var(--ease-out),
+    box-shadow 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
+}
+
+.focus-room-row:hover .focus-room-dot,
+.focus-room-title-line:hover .focus-room-dot {
+  transform: scale(1.12);
 }
 
 .focus-room-dot[data-state="active"] {
@@ -1167,6 +1333,14 @@ function errorMessage(error: unknown, fallback: string): string {
   background: rgba(255, 255, 255, 0.07);
   color: #f4f4f5;
   font-weight: 750;
+  transition:
+    background 150ms var(--ease-out),
+    transform 150ms var(--ease-out);
+}
+
+.focus-room-row:hover .focus-room-task-mark {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .focus-room-row-copy,
@@ -1182,6 +1356,11 @@ function errorMessage(error: unknown, fallback: string): string {
   white-space: nowrap;
   font-size: 0.98rem;
   line-height: 1.22;
+  transition: color 150ms var(--ease-out);
+}
+
+.focus-room-row:hover .focus-room-row-copy strong {
+  color: var(--text);
 }
 
 .focus-room-row-copy span {
@@ -1207,6 +1386,15 @@ function errorMessage(error: unknown, fallback: string): string {
   font-weight: 750;
   text-transform: capitalize;
   white-space: nowrap;
+  transition:
+    background 150ms var(--ease-out),
+    color 150ms var(--ease-out),
+    transform 150ms var(--ease-out);
+}
+
+.focus-room-row:hover .focus-room-state,
+.focus-room-title-line:hover .focus-room-state {
+  transform: translateY(-1px);
 }
 
 .focus-room-state[data-state="active"] {
@@ -1323,6 +1511,17 @@ function errorMessage(error: unknown, fallback: string): string {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.05);
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.focus-room-form input:focus,
+.focus-room-form textarea:focus {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.065);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.055);
 }
 
 .focus-room-form textarea {
@@ -1346,6 +1545,7 @@ function errorMessage(error: unknown, fallback: string): string {
   display: grid;
   gap: 6px;
   padding: 28px 18px;
+  animation: focus-room-surface-in 220ms var(--ease-out) both;
 }
 
 .focus-room-empty h3 {
@@ -1365,6 +1565,11 @@ function errorMessage(error: unknown, fallback: string): string {
   border-radius: 12px;
   color: var(--text-secondary);
   background: rgba(255, 255, 255, 0.04);
+  animation: focus-room-feedback-in 180ms var(--ease-out) both;
+  transition:
+    border-color 150ms var(--ease-out),
+    color 150ms var(--ease-out),
+    background 150ms var(--ease-out);
 }
 
 .focus-room-feedback[data-state="success"] {
@@ -1415,6 +1620,36 @@ function errorMessage(error: unknown, fallback: string): string {
   .focus-room-facts,
   .focus-room-select-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-room-manager *,
+  .focus-room-manager *::before,
+  .focus-room-manager *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .focus-room-icon-button:hover,
+  .focus-room-icon-button:hover svg,
+  .focus-room-tabs button:hover,
+  .focus-room-tabs button:active,
+  .focus-room-tab-count,
+  .focus-room-primary:not(:disabled):hover,
+  .focus-room-primary:not(:disabled):hover svg,
+  .focus-room-secondary:not(:disabled):hover,
+  .focus-room-create button:not(:disabled):hover,
+  .focus-room-row:hover,
+  .focus-room-row:active,
+  .focus-room-row:hover .focus-room-dot,
+  .focus-room-title-line:hover .focus-room-dot,
+  .focus-room-row:hover .focus-room-task-mark,
+  .focus-room-row:hover .focus-room-state,
+  .focus-room-title-line:hover .focus-room-state {
+    transform: none;
   }
 }
 </style>

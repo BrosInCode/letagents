@@ -90,6 +90,7 @@ function handleChange(event: Event): void {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: color 150ms var(--ease-out);
 }
 
 .desktop-select-control {
@@ -118,10 +119,24 @@ function handleChange(event: Event): void {
   font: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out),
+    color 150ms var(--ease-out);
 }
 
 .desktop-select-control select:not(:disabled) {
   cursor: pointer;
+}
+
+.desktop-select-field:has(select:not(:disabled)):hover .desktop-select-label {
+  color: var(--text-secondary);
+}
+
+.desktop-select-control select:not(:disabled):hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .desktop-select-control select:disabled {
@@ -134,6 +149,10 @@ function handleChange(event: Event): void {
   box-shadow: 0 0 0 3px var(--desktop-select-focus-ring);
 }
 
+.desktop-select-field:focus-within .desktop-select-label {
+  color: var(--text-secondary);
+}
+
 .desktop-select-caret {
   position: absolute;
   top: 50%;
@@ -142,5 +161,28 @@ function handleChange(event: Event): void {
   opacity: 0.88;
   pointer-events: none;
   transform: translateY(-50%);
+  transition:
+    color 150ms var(--ease-out),
+    opacity 150ms var(--ease-out),
+    transform 150ms var(--ease-out);
+}
+
+.desktop-select-field:hover .desktop-select-caret,
+.desktop-select-field:focus-within .desktop-select-caret {
+  opacity: 1;
+  transform: translateY(-50%) translateY(-1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-select-field *,
+  .desktop-select-field *::before,
+  .desktop-select-field *::after {
+    transition-duration: 1ms !important;
+  }
+
+  .desktop-select-field:hover .desktop-select-caret,
+  .desktop-select-field:focus-within .desktop-select-caret {
+    transform: translateY(-50%);
+  }
 }
 </style>
