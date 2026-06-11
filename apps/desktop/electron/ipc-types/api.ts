@@ -25,6 +25,7 @@ import type {
   DesktopReasoningSessionDetail,
 } from "./activity.js";
 import type {
+  DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
@@ -66,7 +67,7 @@ export interface DesktopApi {
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>
     ) => Promise<DesktopSendRoomMessageResult>;
-    addTask: (roomIdentifier: string, title: string) => Promise<DesktopTaskMutationResult>;
+    addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (
       roomIdentifier: string,
       taskId: string,

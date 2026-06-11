@@ -4,6 +4,7 @@ export type TaskAction = {
   id: string;
   label: string;
   tone: "primary" | "neutral" | "danger";
+  targetStatus?: string;
   run: (task: DesktopTaskSummary) => Promise<DesktopTaskSummary>;
 };
 

@@ -46,8 +46,8 @@ const api: DesktopApi = {
     },
     sendMessage: (roomIdentifier: string, text: string, replyTo?: string | null, attachments?: Array<{ upload_id: string }>) =>
       ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? []),
-    addTask: (roomIdentifier: string, title: string) =>
-      ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, title),
+    addTask: (roomIdentifier: string, input) =>
+      ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>
       ipcRenderer.invoke("desktop:room:update-task", roomIdentifier, taskId, updates),
     updateTaskLease: (roomIdentifier: string, taskId: string, input) =>

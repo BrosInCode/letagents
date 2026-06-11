@@ -41,6 +41,7 @@ import type {
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
   DesktopStagedAttachment,
+  DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
@@ -251,9 +252,9 @@ export function registerDesktopIpcHandlers(
     async (
       _event,
       roomIdentifier: string,
-      title: string,
+      input: DesktopTaskCreateInput,
     ): Promise<DesktopTaskMutationResult> =>
-      addDesktopRoomTask(roomIdentifier, title),
+      addDesktopRoomTask(roomIdentifier, input),
   );
   targetIpcMain.handle(
     "desktop:room:update-task",
