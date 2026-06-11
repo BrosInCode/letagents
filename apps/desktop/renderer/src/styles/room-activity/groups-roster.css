@@ -180,9 +180,20 @@
   max-width: 42%;
 }
 
+.desktop-activity-row-meta .state-pill {
+  min-width: max-content;
+  min-height: 23px;
+  padding: 0 8px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .desktop-activity-mini-pill {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   min-height: 23px;
   padding: 0 8px;
   border-radius: 999px;
@@ -190,6 +201,7 @@
   color: #c4b5fd;
   font-size: 0.76rem;
   font-weight: 800;
+  line-height: 1;
   white-space: nowrap;
 }
 

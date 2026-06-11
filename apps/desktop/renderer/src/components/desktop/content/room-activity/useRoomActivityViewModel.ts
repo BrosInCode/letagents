@@ -17,6 +17,7 @@ import {
   isReachableParticipant,
   isReachablePresence,
   participantSubtitle,
+  signalLabel,
   sourceBadges,
 } from "./signals";
 import { initials, livenessCapabilityLabel, taskStatusLabel } from "./formatters";
@@ -161,6 +162,7 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
     connectionLabel,
     connectionTone,
     formatRelativeTime,
+    signalLabel,
     participantSubtitle,
     reasoningStatus,
     reasoningTitle,
