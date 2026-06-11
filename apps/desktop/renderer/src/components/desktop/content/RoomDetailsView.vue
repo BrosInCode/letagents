@@ -1293,6 +1293,18 @@ function errorMessage(error: unknown, fallback: string): string {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.focus-room-form select {
+  appearance: none;
+  overflow: hidden;
+  padding-right: 42px;
+  background-image: url("data:image/svg+xml,%3Csvg width='16' height='16' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='m6 9 6 6 6-6' stroke='%23f4f4f5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 16px 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .focus-room-form textarea {
   min-height: 96px;
   padding: 11px 12px;
