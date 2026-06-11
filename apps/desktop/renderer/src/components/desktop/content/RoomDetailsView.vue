@@ -55,30 +55,24 @@
           <span v-if="settingsChanged">Unsaved</span>
         </div>
         <div class="focus-room-select-grid">
-          <label>
-            <span>Visibility</span>
-            <select v-model="settingsDraft.parent_visibility" :disabled="savingSettings">
-              <option v-for="option in parentVisibilityOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>Scope</span>
-            <select v-model="settingsDraft.activity_scope" :disabled="savingSettings">
-              <option v-for="option in activityScopeOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>GitHub</span>
-            <select v-model="settingsDraft.github_event_routing" :disabled="savingSettings">
-              <option v-for="option in githubRoutingOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
+          <DesktopSelectField
+            v-model="settingsDraft.parent_visibility"
+            label="Visibility"
+            :options="parentVisibilityOptions"
+            :disabled="savingSettings"
+          />
+          <DesktopSelectField
+            v-model="settingsDraft.activity_scope"
+            label="Scope"
+            :options="activityScopeOptions"
+            :disabled="savingSettings"
+          />
+          <DesktopSelectField
+            v-model="settingsDraft.github_event_routing"
+            label="GitHub"
+            :options="githubRoutingOptions"
+            :disabled="savingSettings"
+          />
         </div>
         <button class="focus-room-secondary" type="submit" :disabled="!settingsChanged || savingSettings">
           {{ savingSettings ? "Saving..." : "Save changes" }}
@@ -110,32 +104,24 @@
             <span>Next owner</span>
             <input v-model="closeoutDetails.next_owner" type="text" placeholder="Owner" :disabled="sharingResult" />
           </label>
-          <label>
-            <span>Review</span>
-            <select v-model="closeoutDetails.review_state" :disabled="sharingResult">
-              <option value="reviewed">Reviewed</option>
-              <option value="needs_review">Needs review</option>
-              <option value="not_required">Not required</option>
-            </select>
-          </label>
-          <label>
-            <span>Blockers</span>
-            <select v-model="closeoutDetails.blocker_state" :disabled="sharingResult">
-              <option value="none">None</option>
-              <option value="resolved">Resolved</option>
-              <option value="blocked">Blocked</option>
-            </select>
-          </label>
-          <label>
-            <span>Parent task</span>
-            <select v-model="closeoutDetails.parent_task_next" :disabled="sharingResult">
-              <option value="keep_open">Keep open</option>
-              <option value="move_to_review">Move to review</option>
-              <option value="mark_blocked">Mark blocked</option>
-              <option value="mark_done">Mark done</option>
-              <option value="follow_up">Follow-up</option>
-            </select>
-          </label>
+          <DesktopSelectField
+            v-model="closeoutDetails.review_state"
+            label="Review"
+            :options="reviewStateOptions"
+            :disabled="sharingResult"
+          />
+          <DesktopSelectField
+            v-model="closeoutDetails.blocker_state"
+            label="Blockers"
+            :options="blockerStateOptions"
+            :disabled="sharingResult"
+          />
+          <DesktopSelectField
+            v-model="closeoutDetails.parent_task_next"
+            label="Parent task"
+            :options="parentTaskNextOptions"
+            :disabled="sharingResult"
+          />
         </div>
 
         <button class="focus-room-primary" type="submit" :disabled="!canShareResult || sharingResult">
@@ -304,30 +290,24 @@
                 <span v-if="settingsChanged">Unsaved</span>
               </div>
               <div class="focus-room-select-grid single">
-                <label>
-                  <span>Parent updates</span>
-                  <select v-model="settingsDraft.parent_visibility" :disabled="savingSettings">
-                    <option v-for="option in parentVisibilityOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  <span>Activity scope</span>
-                  <select v-model="settingsDraft.activity_scope" :disabled="savingSettings">
-                    <option v-for="option in activityScopeOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  <span>GitHub routing</span>
-                  <select v-model="settingsDraft.github_event_routing" :disabled="savingSettings">
-                    <option v-for="option in githubRoutingOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </label>
+                <DesktopSelectField
+                  v-model="settingsDraft.parent_visibility"
+                  label="Parent updates"
+                  :options="parentVisibilityOptions"
+                  :disabled="savingSettings"
+                />
+                <DesktopSelectField
+                  v-model="settingsDraft.activity_scope"
+                  label="Activity scope"
+                  :options="activityScopeOptions"
+                  :disabled="savingSettings"
+                />
+                <DesktopSelectField
+                  v-model="settingsDraft.github_event_routing"
+                  label="GitHub routing"
+                  :options="githubRoutingOptions"
+                  :disabled="savingSettings"
+                />
               </div>
               <button class="focus-room-secondary" type="submit" :disabled="!settingsChanged || savingSettings">
                 {{ savingSettings ? "Saving..." : "Save routing" }}
@@ -400,12 +380,16 @@
 <script setup lang="ts">
 import { ArrowRight, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, reactive, ref, watch } from "vue";
+import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import type {
   DesktopFocusActivityScope,
+  DesktopFocusRoomBlockerState,
   DesktopFocusGitHubEventRouting,
   DesktopFocusParentVisibility,
   DesktopFocusRoomConclusionDetails,
   DesktopFocusRoomInfo,
+  DesktopFocusRoomParentTaskNextAction,
+  DesktopFocusRoomReviewState,
   DesktopFocusRoomSettings,
   DesktopRoomInfo,
   DesktopTaskSummary,
@@ -444,6 +428,26 @@ const githubRoutingOptions: Array<Option<DesktopFocusGitHubEventRouting>> = [
   { value: "task_only", label: "Only task mentions" },
   { value: "all_parent_repo", label: "All repo activity" },
   { value: "off", label: "Off" },
+];
+
+const reviewStateOptions: Array<Option<DesktopFocusRoomReviewState>> = [
+  { value: "reviewed", label: "Reviewed" },
+  { value: "needs_review", label: "Needs review" },
+  { value: "not_required", label: "Not required" },
+];
+
+const blockerStateOptions: Array<Option<DesktopFocusRoomBlockerState>> = [
+  { value: "none", label: "None" },
+  { value: "resolved", label: "Resolved" },
+  { value: "blocked", label: "Blocked" },
+];
+
+const parentTaskNextOptions: Array<Option<DesktopFocusRoomParentTaskNextAction>> = [
+  { value: "keep_open", label: "Keep open" },
+  { value: "move_to_review", label: "Move to review" },
+  { value: "mark_blocked", label: "Mark blocked" },
+  { value: "mark_done", label: "Mark done" },
+  { value: "follow_up", label: "Follow-up" },
 ];
 
 const props = defineProps<{
@@ -961,8 +965,7 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-search input,
 .focus-room-create input,
 .focus-room-form input,
-.focus-room-form textarea,
-.focus-room-form select {
+.focus-room-form textarea {
   width: 100%;
   min-width: 0;
   border: 0;
@@ -1218,7 +1221,6 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-facts div,
-.focus-room-select-grid label,
 .focus-room-closeout-grid label {
   display: grid;
   gap: 5px;
@@ -1226,7 +1228,6 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-facts dt,
-.focus-room-form label > span,
 .focus-room-section-heading span {
   color: var(--text-tertiary);
   font-size: 0.78rem;
@@ -1284,25 +1285,12 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-form input,
-.focus-room-form textarea,
-.focus-room-form select {
+.focus-room-form textarea {
   min-height: 38px;
   padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.05);
-}
-
-.focus-room-form select {
-  appearance: none;
-  overflow: hidden;
-  padding-right: 42px;
-  background-image: url("data:image/svg+xml,%3Csvg width='16' height='16' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='m6 9 6 6 6-6' stroke='%23f4f4f5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 14px center;
-  background-size: 16px 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .focus-room-form textarea {
