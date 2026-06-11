@@ -72,8 +72,8 @@
 .desktop-activity-toolbar {
   justify-content: flex-start;
   width: fit-content;
-  min-height: 44px;
-  padding: 7px;
+  min-height: 36px;
+  padding: 4px;
   border-radius: 999px;
 }
 
@@ -83,12 +83,13 @@
 }
 
 .desktop-activity-switcher button {
-  min-height: 34px;
-  padding: 0 15px;
+  min-height: 28px;
+  padding: 0 12px;
   border: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--text-secondary);
+  font-size: 0.84rem;
   font-weight: 800;
   cursor: pointer;
   transition:
