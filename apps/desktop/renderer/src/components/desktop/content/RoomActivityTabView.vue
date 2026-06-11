@@ -88,25 +88,40 @@
             <div class="desktop-activity-detail-identity">
               <span class="desktop-activity-dot" :data-state="connectionTone(selectedLiveParticipant)" aria-hidden="true"></span>
               <div>
-                <span>Agent</span>
                 <h3>{{ selectedLiveParticipant.label }}</h3>
-                <p>{{ detailSubtitle(selectedLiveParticipant) }}</p>
+                <p>
+                  {{ detailSubtitle(selectedLiveParticipant) }}
+                  <span aria-hidden="true">·</span>
+                  {{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}
+                  <span aria-hidden="true">·</span>
+                  {{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}
+                </p>
               </div>
             </div>
             <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
-              {{ connectionLabel(selectedLiveParticipant) }}
+              {{ connectionDisplayLabel(selectedLiveParticipant) }}
             </span>
           </div>
 
-          <div class="desktop-activity-detail-meta">
-            <span>{{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}</span>
-            <span>{{ selectedLiveParticipant.workLabel || selectedLiveParticipant.status || "idle" }}</span>
-            <span>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</span>
-          </div>
+          <section class="desktop-activity-inspector-list">
+            <article v-if="selectedLiveParticipant.statusText" class="desktop-activity-inspector-row" data-emphasis="true">
+              <span>Latest status</span>
+              <p>{{ selectedLiveParticipant.statusText }}</p>
+            </article>
 
-          <section v-if="selectedLiveParticipant.statusText" class="desktop-activity-note">
-            <span>Latest status</span>
-            <p>{{ selectedLiveParticipant.statusText }}</p>
+            <article class="desktop-activity-inspector-row">
+              <span>Session</span>
+              <p v-if="selectedLiveParticipant.livenessObservation">
+                {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
+                observed {{ formatRelativeTime(selectedLiveParticipant.livenessObservation.lastObservedAt) }}
+              </p>
+              <p v-else>Room presence only</p>
+            </article>
+
+            <article v-if="activeSourceBadges(selectedLiveParticipant).length" class="desktop-activity-inspector-row">
+              <span>Sources</span>
+              <p>{{ sourceSummary(selectedLiveParticipant) }}</p>
+            </article>
           </section>
 
           <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
@@ -124,24 +139,6 @@
                 </span>
               </div>
             </article>
-          </section>
-
-          <section class="desktop-activity-connection-section">
-            <p v-if="selectedLiveParticipant.livenessObservation" class="desktop-activity-connection-copy">
-              {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
-              observed this session {{ formatRelativeTime(selectedLiveParticipant.livenessObservation.lastObservedAt) }}.
-            </p>
-            <p v-else class="desktop-activity-muted">
-              Room presence only.
-            </p>
-            <div v-if="activeSourceBadges(selectedLiveParticipant).length" class="desktop-activity-source-row">
-              <span
-                v-for="source in activeSourceBadges(selectedLiveParticipant)"
-                :key="source.label"
-              >
-                {{ source.label }}
-              </span>
-            </div>
           </section>
 
           <section v-if="selectedLiveParticipant.currentTasks.length" class="desktop-activity-detail-section">
@@ -332,6 +329,15 @@ function refreshActivity(): void {
 
 function activeSourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {
   return sourceBadges(participant).filter((source) => source.active);
+}
+
+function sourceSummary(participant: ActivityParticipant): string {
+  return activeSourceBadges(participant).map((source) => source.label).join(", ");
+}
+
+function connectionDisplayLabel(participant: ActivityParticipant): string {
+  const label = connectionLabel(participant);
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function detailSubtitle(participant: ActivityParticipant): string {
