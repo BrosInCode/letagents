@@ -98,6 +98,7 @@
         :messages="visibleMessages"
         :workers="workers"
         @open-reasoning="openReasoningInspector"
+        @refresh-room="emit('refresh-room')"
       />
 
       <RoomDetailsView

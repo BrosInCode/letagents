@@ -22,9 +22,10 @@ export function hasRecentLivenessObservation(participant: ActivityParticipant): 
 
 export function hasAgentSignal(participant: ActivityParticipant): boolean {
   if (participant.kind !== "agent") return false;
-  if (participant.currentTasks.length || participant.activeReasoning.length) return true;
   if (participant.livenessObservation && hasRecentLivenessObservation(participant)) return true;
-  return Boolean((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt));
+  if ((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt)) return true;
+  if (participant.activeReasoning.some((session) => isRecentTimestamp(session.updatedAt || session.createdAt))) return true;
+  return participant.currentTasks.some((task) => isRecentTimestamp(task.updatedAt));
 }
 
 export function signalLabel(participant: ActivityParticipant): string {
@@ -67,6 +68,14 @@ export function connectionLabel(participant: ActivityParticipant): string {
   if (participant.activityState === "active") return "connected";
   if (participant.activityState === "away") return "idle";
   if (hasAgentSignal(participant)) return "signal only";
+  return "offline";
+}
+
+export function connectionTone(participant: ActivityParticipant): string {
+  if (participant.kind === "human") return "human";
+  if (participant.activityState === "active") return "active";
+  if (participant.activityState === "away") return "away";
+  if (hasAgentSignal(participant)) return "signal";
   return "offline";
 }
 

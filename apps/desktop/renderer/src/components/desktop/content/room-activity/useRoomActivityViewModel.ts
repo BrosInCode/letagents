@@ -12,6 +12,7 @@ import {
 } from "./participantBuilders";
 import {
   connectionLabel,
+  connectionTone,
   hasAgentSignal,
   isReachableParticipant,
   isReachablePresence,
@@ -159,6 +160,7 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
     selectedHistoryEntry,
     initials,
     connectionLabel,
+    connectionTone,
     formatRelativeTime,
     signalLabel,
     participantSubtitle,

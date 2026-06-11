@@ -86,14 +86,14 @@
       <aside v-if="selectedLiveParticipant" class="desktop-activity-detail" data-kind="agent">
         <div class="desktop-activity-detail-header">
           <div class="desktop-activity-detail-identity">
-            <span class="desktop-activity-dot" :data-state="selectedLiveParticipant.activityState || selectedLiveParticipant.workState || 'offline'" aria-hidden="true"></span>
+            <span class="desktop-activity-dot" :data-state="connectionTone(selectedLiveParticipant)" aria-hidden="true"></span>
             <div>
               <span>Agent</span>
               <h3>{{ selectedLiveParticipant.label }}</h3>
               <p>{{ participantSubtitle(selectedLiveParticipant) }}</p>
             </div>
           </div>
-          <span class="state-pill" :data-state="selectedLiveParticipant.activityState || 'offline'">
+          <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
             {{ connectionLabel(selectedLiveParticipant) }}
           </span>
         </div>
@@ -290,6 +290,7 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -314,6 +315,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "open-reasoning": [sessionId: string];
+  "refresh-room": [];
 }>();
 
 const {
@@ -327,6 +329,7 @@ const {
   selectedHistoryEntry,
   initials,
   connectionLabel,
+  connectionTone,
   formatRelativeTime,
   signalLabel,
   participantSubtitle,
@@ -337,4 +340,8 @@ const {
   sourceBadges,
   taskStatusLabel,
 } = useRoomActivityViewModel(props);
+
+onMounted(() => {
+  emit("refresh-room");
+});
 </script>

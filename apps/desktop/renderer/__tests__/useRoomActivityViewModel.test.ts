@@ -21,6 +21,8 @@ function createProps(overrides: Partial<RoomActivityViewModelInput> = {}): RoomA
 
 describe("useRoomActivityViewModel", () => {
   it("groups reachable workers and exposes the selected live participant", async () => {
+    const recentIso = new Date(Date.now() - 60_000).toISOString();
+    const staleIso = new Date(Date.now() - 60 * 60_000).toISOString();
     const props = reactive(createProps({
       participants: [
         {
@@ -71,7 +73,24 @@ describe("useRoomActivityViewModel", () => {
           activityState: "offline",
           status: "working",
           statusText: "running the smoke tests",
-          lastHeartbeatAt: "2026-05-28T03:04:00.000Z",
+          lastHeartbeatAt: recentIso,
+          roomId: "room-1",
+          livenessObservation: null,
+        },
+        {
+          agentSessionId: "session-3",
+          actorLabel: "agent:stale",
+          displayName: "Stale Agent",
+          ownerLabel: "team",
+          ideLabel: "Codex",
+          runtime: "codex",
+          sessionKind: "worker",
+          sourceFlags: ["presence"],
+          freshness: "stale",
+          activityState: "offline",
+          status: "working",
+          statusText: "old status",
+          lastHeartbeatAt: staleIso,
           roomId: "room-1",
           livenessObservation: null,
         },
@@ -120,7 +139,24 @@ describe("useRoomActivityViewModel", () => {
           activeLocks: [],
           stalePromptState: null,
           createdAt: null,
-          updatedAt: "2026-05-28T03:04:00.000Z",
+          updatedAt: recentIso,
+        },
+        {
+          id: "task-3",
+          title: "Old task",
+          description: null,
+          status: "in_progress",
+          assignee: "agent:stale",
+          assigneeAgentKey: null,
+          createdBy: null,
+          prUrl: null,
+          workflowArtifacts: [],
+          workflowRefs: [],
+          activeLeases: [],
+          activeLocks: [],
+          stalePromptState: null,
+          createdAt: null,
+          updatedAt: staleIso,
         },
       ],
     } as Partial<RoomActivityViewModelInput>));
@@ -134,6 +170,7 @@ describe("useRoomActivityViewModel", () => {
     assert.equal(model.selectedLiveParticipant.value?.label, "Review Agent");
     assert.equal(model.connectionLabel(model.selectedLiveParticipant.value!), "connected");
     assert.equal(model.workingAgents.value[0]?.label, "Build Agent");
+    assert.equal(model.liveRosterAgents.value.some((agent) => agent.label === "Stale Agent"), false);
   });
 
   it("keeps selected live and history rows pointed at visible entries", async () => {
