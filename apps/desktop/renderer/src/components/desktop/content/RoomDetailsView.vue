@@ -203,7 +203,7 @@
             </button>
 
             <article v-if="!visibleFocusRooms.length" class="focus-room-empty" data-testid="room-focus-empty">
-              <h3>{{ activeTab === "concluded" ? "No shared results" : "No open focus rooms" }}</h3>
+              <h3>{{ activeTab === "concluded" ? "No closed focus rooms" : "No open focus rooms" }}</h3>
               <p>{{ searchQuery ? "No rooms match this search." : "No matching records in this room." }}</p>
             </article>
           </template>
@@ -559,7 +559,7 @@ const canShareResult = computed(() => {
 
 const tabs = computed(() => [
   { id: "open" as const, label: "Open", count: openFocusRooms.value.length },
-  { id: "concluded" as const, label: "Shared", count: concludedFocusRooms.value.length },
+  { id: "concluded" as const, label: "Closed", count: concludedFocusRooms.value.length },
   { id: "tasks" as const, label: "Tasks", count: candidateTasks.value.length },
 ]);
 
@@ -601,7 +601,7 @@ const headerMeta = computed(() => {
       props.room.sourceTaskId || props.room.focusKey || props.room.identifier,
     ].filter(Boolean).join(" · ");
   }
-  return `${openFocusRooms.value.length} open · ${concludedFocusRooms.value.length} shared · ${candidateTasks.value.length} task candidates`;
+  return `${openFocusRooms.value.length} open · ${concludedFocusRooms.value.length} closed · ${candidateTasks.value.length} task candidates`;
 });
 
 watch(
