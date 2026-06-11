@@ -55,6 +55,11 @@ export interface DesktopTaskMutationResult {
   task: DesktopTaskSummary;
 }
 
+export interface DesktopTaskCreateInput {
+  title: string;
+  description?: string | null;
+}
+
 export interface DesktopTaskLeaseActionInput {
   action: "release" | "handoff";
   lease_id?: string | null;

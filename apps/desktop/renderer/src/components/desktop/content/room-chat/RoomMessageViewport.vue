@@ -105,6 +105,7 @@ interface ThreadActivityNotice {
 }
 
 const props = defineProps<{
+  active: boolean;
   activeSearchMessageId: string | null;
   activeThreadParentId: string | null;
   hasOlderMessages: boolean;
@@ -132,6 +133,7 @@ const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
 const dismissedThreadActivityKeys = ref<string[]>([]);
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
+let shouldRestoreInitialScroll = hasInitialScrollPosition();
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const timelineMessageIds = computed(() => new Set(props.messages.map((message) => message.id)));
@@ -156,6 +158,7 @@ watch(
 
     await nextTick();
 
+    if (!props.active) return;
     if (isPrepend && messagesElement.value) {
       messagesElement.value.scrollTop += messagesElement.value.scrollHeight - previousScrollHeight;
       updateScrollState();
@@ -223,8 +226,28 @@ watch(
 watch(
   () => props.activeSearchMessageId,
   (messageId) => {
+    if (!props.active) return;
     if (messageId) {
       void nextTick(() => scrollToMessage(messageId));
+    }
+  },
+);
+
+watch(
+  () => props.active,
+  async (active) => {
+    if (!active) {
+      updateScrollState();
+      emitScrollPosition();
+      return;
+    }
+    await nextTick();
+    if (isScrolledToBottom) {
+      scrollToBottom("auto");
+      return;
+    }
+    if (!restoreInitialScrollPosition()) {
+      updateScrollState();
     }
   },
 );
@@ -238,11 +261,20 @@ watch(
     isScrolledFarUp.value = false;
     isScrolledToBottom = false;
     hasAppliedInitialScroll = false;
+    shouldRestoreInitialScroll = hasInitialScrollPosition();
     void nextTick(() => {
       if (!restoreInitialScrollPosition()) {
         scrollToBottom("auto");
       }
     });
+  },
+);
+
+watch(
+  () => props.initialScrollTop,
+  () => {
+    if (hasAppliedInitialScroll) return;
+    shouldRestoreInitialScroll = hasInitialScrollPosition();
   },
 );
 
@@ -260,6 +292,7 @@ onBeforeUnmount(() => {
 
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   if (!messagesElement.value) return;
+  shouldRestoreInitialScroll = false;
   if (behavior === "auto") {
     jumpToBottom();
     return;
@@ -289,6 +322,8 @@ function jumpToBottom(): void {
 
 function handleScroll(): void {
   if (!messagesElement.value) return;
+  if (!props.active) return;
+  shouldRestoreInitialScroll = false;
   const element = messagesElement.value;
   updateScrollState();
   if (isScrolledToBottom) {
@@ -309,15 +344,21 @@ function updateScrollState(): void {
 }
 
 function restoreInitialScrollPosition(): boolean {
-  if (hasAppliedInitialScroll || !messagesElement.value) return false;
+  if (hasAppliedInitialScroll || !shouldRestoreInitialScroll || !messagesElement.value) return false;
   const scrollTop = props.initialScrollTop;
   if (typeof scrollTop !== "number" || !Number.isFinite(scrollTop)) return false;
   const element = messagesElement.value;
   element.scrollTop = Math.max(0, Math.min(scrollTop, element.scrollHeight));
   hasAppliedInitialScroll = true;
+  shouldRestoreInitialScroll = false;
   updateScrollState();
   emitScrollPosition();
   return true;
+}
+
+function hasInitialScrollPosition(): boolean {
+  const scrollTop = props.initialScrollTop;
+  return typeof scrollTop === "number" && Number.isFinite(scrollTop);
 }
 
 function emitScrollPosition(): void {
