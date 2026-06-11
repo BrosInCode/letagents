@@ -36,6 +36,24 @@
   .desktop-task-detail-panel {
     position: static;
   }
+
+  .room-activity-page {
+    overflow-y: auto;
+  }
+
+  .desktop-activity-layout {
+    flex-direction: column;
+  }
+
+  .desktop-activity-groups,
+  .desktop-activity-detail {
+    overflow: visible;
+  }
+
+  .desktop-activity-detail {
+    flex-basis: auto;
+    min-width: 0;
+  }
 }
 
 @media (max-width: 1060px) {

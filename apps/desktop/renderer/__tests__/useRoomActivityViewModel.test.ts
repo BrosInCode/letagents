@@ -58,6 +58,23 @@ describe("useRoomActivityViewModel", () => {
           roomId: "room-1",
           livenessObservation: null,
         },
+        {
+          agentSessionId: "session-2",
+          actorLabel: "agent:builder",
+          displayName: "Build Agent",
+          ownerLabel: "team",
+          ideLabel: "Codex",
+          runtime: "codex",
+          sessionKind: "worker",
+          sourceFlags: ["presence"],
+          freshness: "stale",
+          activityState: "offline",
+          status: "working",
+          statusText: "running the smoke tests",
+          lastHeartbeatAt: "2026-05-28T03:04:00.000Z",
+          roomId: "room-1",
+          livenessObservation: null,
+        },
       ],
       messages: [
         {
@@ -88,6 +105,23 @@ describe("useRoomActivityViewModel", () => {
           createdAt: null,
           updatedAt: "2026-05-28T03:05:00.000Z",
         },
+        {
+          id: "task-2",
+          title: "Run smoke tests",
+          description: null,
+          status: "in_progress",
+          assignee: "agent:builder",
+          assigneeAgentKey: null,
+          createdBy: null,
+          prUrl: null,
+          workflowArtifacts: [],
+          workflowRefs: [],
+          activeLeases: [],
+          activeLocks: [],
+          stalePromptState: null,
+          createdAt: null,
+          updatedAt: "2026-05-28T03:04:00.000Z",
+        },
       ],
     } as Partial<RoomActivityViewModelInput>));
 
@@ -95,13 +129,11 @@ describe("useRoomActivityViewModel", () => {
     await nextTick();
 
     assert.equal(model.reachableAgents.value.length, 1);
-    assert.equal(model.agentSignalAgents.value.length, 1);
+    assert.equal(model.workingAgents.value.length, 1);
+    assert.equal(model.liveRosterAgents.value.length, 2);
     assert.equal(model.selectedLiveParticipant.value?.label, "Review Agent");
     assert.equal(model.connectionLabel(model.selectedLiveParticipant.value!), "connected");
-    assert.equal(
-      model.summaryCards.value.find((card) => card.label === "Reachable agents")?.value,
-      1,
-    );
+    assert.equal(model.workingAgents.value[0]?.label, "Build Agent");
   });
 
   it("keeps selected live and history rows pointed at visible entries", async () => {

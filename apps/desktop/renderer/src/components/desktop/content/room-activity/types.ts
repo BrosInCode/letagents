@@ -11,14 +11,6 @@ import type {
 export type ActivityState = "active" | "away" | "offline";
 export type ParticipantKind = "agent" | "human";
 export type ActivityIcon = "radio" | "pulse" | "power" | "user" | "brain" | "clock" | "task";
-export type ActivityTone = "reachable" | "signal" | "offline" | "human" | "reasoning" | "history" | "task";
-
-export interface ActivitySummaryCard {
-  value: number;
-  label: string;
-  icon: ActivityIcon;
-  tone: ActivityTone;
-}
 
 export interface ActivityParticipant {
   key: string;

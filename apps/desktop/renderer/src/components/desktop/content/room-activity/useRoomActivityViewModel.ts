@@ -9,14 +9,10 @@ import { formatRelativeTime, timestampValue } from "../../../../domain/time";
 import {
   activityEntryForAgent,
   buildAgentParticipant,
-  buildHumanParticipant,
 } from "./participantBuilders";
-import { activityIconPath } from "./icons";
 import {
   connectionLabel,
   hasAgentSignal,
-  hasDeliverySignal,
-  hasRecentLivenessObservation,
   isReachableParticipant,
   isReachablePresence,
   participantSubtitle,
@@ -27,7 +23,6 @@ import { initials, livenessCapabilityLabel, taskStatusLabel } from "./formatters
 import { isHumanMessage } from "./matching";
 import type {
   ActivityParticipant,
-  ActivitySummaryCard,
   RoomActivityViewModelInput,
 } from "./types";
 
@@ -103,13 +98,7 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
       }));
     }
 
-    return [
-      ...[...agents.values()].sort(compareActivityParticipants),
-      ...props.participants
-        .filter((participant) => participant.kind === "human" && !participant.hiddenAt)
-        .map((participant) => buildHumanParticipant(participant, props.messages, props.tasks))
-        .sort(compareActivityParticipants),
-    ];
+    return [...agents.values()].sort(compareActivityParticipants);
   });
 
   const reachableAgents = computed(() =>
@@ -117,64 +106,29 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
       participant.kind === "agent" && (participant.activityState === "active" || participant.activityState === "away")
     )
   );
-  const disconnectedAgents = computed(() =>
-    liveParticipants.value.filter((participant) =>
-      participant.kind === "agent"
-      && participant.activityState === "offline"
-      && hasDeliverySignal(participant)
-      && !hasAgentSignal(participant)
-    )
-  );
-  const agentSignalAgents = computed(() =>
+  const workingAgents = computed(() =>
     liveParticipants.value
-      .filter((participant) => participant.kind === "agent" && hasAgentSignal(participant))
+      .filter((participant) => participant.kind === "agent" && hasAgentSignal(participant) && !isReachableParticipant(participant))
       .sort(compareSignalParticipants)
   );
-  const humans = computed(() => liveParticipants.value.filter((participant) => participant.kind === "human"));
-  const visibleLiveParticipants = computed(() => {
+  const liveRosterAgents = computed(() => {
     const participants = new Map<string, ActivityParticipant>();
     for (const participant of [
       ...reachableAgents.value,
-      ...agentSignalAgents.value,
-      ...disconnectedAgents.value,
-      ...humans.value,
+      ...workingAgents.value,
     ]) {
       participants.set(participant.key, participant);
     }
     return [...participants.values()];
   });
   const selectedLiveParticipant = computed(() =>
-    visibleLiveParticipants.value.find((participant) => participant.key === selectedLiveKey.value) || visibleLiveParticipants.value[0] || null
+    liveRosterAgents.value.find((participant) => participant.key === selectedLiveKey.value) || liveRosterAgents.value[0] || null
   );
   const selectedHistoryEntry = computed(() =>
     props.recentActivity.find((entry) => entry.id === selectedHistoryKey.value) || props.recentActivity[0] || null
   );
 
-  const activeReasoningSessions = computed(() =>
-    liveParticipants.value.flatMap((participant) => participant.activeReasoning)
-  );
-  const liveClearedCount = computed(() => props.liveClearedCount || 0);
-  const summaryCards = computed<ActivitySummaryCard[]>(() => activeView.value === "live"
-    ? [
-        { value: reachableAgents.value.length, label: "Reachable agents", icon: "radio", tone: "reachable" },
-        { value: agentSignalAgents.value.length, label: "Agent signals", icon: "pulse", tone: "signal" },
-        { value: disconnectedAgents.value.length, label: "Disconnected", icon: "power", tone: "offline" },
-        { value: humans.value.length, label: "Humans seen", icon: "user", tone: "human" },
-        { value: activeReasoningSessions.value.length, label: "Reasoning streams", icon: "brain", tone: "reasoning" },
-      ]
-    : [
-        { value: props.recentActivity.filter((entry) => entry.participantKind === "agent").length, label: "Agents in history", icon: "clock", tone: "history" },
-        { value: props.recentActivity.filter((entry) => entry.participantKind === "human").length, label: "Humans in history", icon: "user", tone: "human" },
-        { value: props.recentActivity.reduce((total, entry) => total + entry.currentTasks.length, 0), label: "Open tasks linked", icon: "task", tone: "task" },
-        { value: props.recentActivity.reduce((total, entry) => total + entry.completedTasks.length, 0), label: "Completed tasks", icon: "task", tone: "reachable" },
-      ]);
-  const toolbarNote = computed(() => activeView.value === "live"
-    ? liveClearedCount.value > 0
-      ? `${liveClearedCount.value} cleared from the live roster.`
-      : "Desktop separates message reachability from worker status, tasks, reasoning, and session liveness."
-    : "History is the shared web-compatible room record.");
-
-  watch(visibleLiveParticipants, (next) => {
+  watch(liveRosterAgents, (next) => {
     if (!next.length) {
       selectedLiveKey.value = null;
       return;
@@ -198,22 +152,15 @@ export function useRoomActivityViewModel(props: RoomActivityViewModelInput) {
     activeView,
     selectedLiveKey,
     selectedHistoryKey,
-    summaryCards,
-    toolbarNote,
     reachableAgents,
-    agentSignalAgents,
-    disconnectedAgents,
-    humans,
+    workingAgents,
+    liveRosterAgents,
     selectedLiveParticipant,
     selectedHistoryEntry,
-    liveClearedCount,
-    activityIconPath,
     initials,
     connectionLabel,
     formatRelativeTime,
     signalLabel,
-    hasRecentLivenessObservation,
-    isReachableParticipant,
     participantSubtitle,
     reasoningStatus,
     reasoningTitle,

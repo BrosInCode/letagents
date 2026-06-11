@@ -1,39 +1,19 @@
 <template>
   <section class="room-tab-page room-activity-page" data-testid="room-activity-tab-view">
-    <div class="desktop-activity-summary">
-      <article v-for="card in summaryCards" :key="card.label" class="desktop-activity-stat" :data-tone="card.tone">
-        <span class="desktop-activity-stat-top">
-          <span class="desktop-activity-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none">
-              <path :d="activityIconPath(card.icon)" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </span>
-          <strong>{{ card.value }}</strong>
-        </span>
-        <span>{{ card.label }}</span>
-      </article>
-    </div>
-
     <div class="desktop-activity-toolbar">
       <div class="desktop-activity-switcher" role="tablist" aria-label="Activity view">
         <button type="button" :data-active="activeView === 'live'" @click="activeView = 'live'">Live</button>
         <button type="button" :data-active="activeView === 'history'" @click="activeView = 'history'">History</button>
       </div>
-      <span>{{ toolbarNote }}</span>
     </div>
 
     <div v-if="activeView === 'live'" class="desktop-activity-layout">
       <div class="desktop-activity-groups">
         <section class="desktop-activity-group">
           <header>
-            <span class="desktop-activity-header-icon" data-tone="reachable" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path :d="activityIconPath('radio')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
             <div>
-              <h3>Reachable agents</h3>
-              <p>Delivery-backed worker sessions that can receive room messages now.</p>
+              <h3>Reachable now</h3>
+              <p>Worker sessions that can receive room messages.</p>
             </div>
             <strong>{{ reachableAgents.length }}</strong>
           </header>
@@ -50,7 +30,7 @@
             <span class="desktop-activity-avatar" :data-state="agent.activityState || 'offline'">{{ initials(agent.label) }}</span>
             <span>
               <strong>{{ agent.label }}</strong>
-              <small>{{ agent.ownerLabel || agent.runtime || "Agent" }}<template v-if="agent.ideLabel"> · {{ agent.ideLabel }}</template></small>
+              <small>{{ agent.statusText || agent.workLabel || agent.runtime || "Ready for room messages" }}</small>
             </span>
             <span class="desktop-activity-row-meta">
               <span class="state-pill" :data-state="agent.activityState || 'offline'">{{ connectionLabel(agent) }}</span>
@@ -63,24 +43,19 @@
 
         <section class="desktop-activity-group">
           <header>
-            <span class="desktop-activity-header-icon" data-tone="signal" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path :d="activityIconPath('pulse')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
             <div>
-              <h3>Agent signals</h3>
-              <p>Status, leases, reasoning, and host liveness from worker sessions.</p>
+              <h3>Working</h3>
+              <p>Recent task, status, or reasoning signals without room delivery.</p>
             </div>
-            <strong>{{ agentSignalAgents.length }}</strong>
+            <strong>{{ workingAgents.length }}</strong>
           </header>
 
           <button
-            v-for="agent in agentSignalAgents"
+            v-for="agent in workingAgents"
             :key="agent.key"
             class="desktop-activity-roster-item"
             :data-selected="selectedLiveParticipant?.key === agent.key"
-            :data-state="agent.workState || (hasRecentLivenessObservation(agent) ? 'active' : agent.activityState || 'offline')"
+            :data-state="agent.workState || 'working'"
             type="button"
             @click="selectedLiveKey = agent.key"
           >
@@ -94,131 +69,54 @@
               <small>{{ signalLabel(agent) }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
             </span>
             <span class="desktop-activity-row-meta">
-              <span v-if="!isReachableParticipant(agent)" class="desktop-activity-mini-pill">signal only</span>
+              <span class="desktop-activity-mini-pill">signal only</span>
               <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} reasoning</span>
               <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
             </span>
           </button>
 
-          <article v-if="!agentSignalAgents.length" class="desktop-activity-empty">No active agent signals are exposed yet.</article>
+          <article v-if="!workingAgents.length" class="desktop-activity-empty">No working agent signals right now.</article>
         </section>
 
-        <section class="desktop-activity-group">
-          <header>
-            <span class="desktop-activity-header-icon" data-tone="offline" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path :d="activityIconPath('power')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <div>
-              <h3>Recently disconnected</h3>
-              <p>Worker sessions that were recently known but are no longer reachable.</p>
-            </div>
-            <strong>{{ disconnectedAgents.length }}</strong>
-          </header>
-
-          <button
-            v-for="agent in disconnectedAgents"
-            :key="agent.key"
-            class="desktop-activity-roster-item"
-            :data-selected="selectedLiveParticipant?.key === agent.key"
-            data-state="offline"
-            type="button"
-            @click="selectedLiveKey = agent.key"
-          >
-            <span class="desktop-activity-avatar" data-state="offline">{{ initials(agent.label) }}</span>
-            <span>
-              <strong>{{ agent.label }}</strong>
-              <small>{{ agent.ownerLabel || "Agent" }}</small>
-            </span>
-            <span class="desktop-activity-row-meta">
-              <span class="state-pill" data-state="offline">offline</span>
-              <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
-            </span>
-          </button>
-
-          <article v-if="!disconnectedAgents.length" class="desktop-activity-empty">
-            {{ liveClearedCount > 0 ? "Disconnected agents were cleared from the live roster." : "No recently disconnected agents." }}
-          </article>
-        </section>
-
-        <section class="desktop-activity-group">
-          <header>
-            <span class="desktop-activity-header-icon" data-tone="human" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path :d="activityIconPath('user')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <div>
-              <h3>Humans seen in room</h3>
-              <p>Human participants currently active in the room.</p>
-            </div>
-            <strong>{{ humans.length }}</strong>
-          </header>
-
-          <button
-            v-for="human in humans"
-            :key="human.key"
-            class="desktop-activity-roster-item"
-            :data-selected="selectedLiveParticipant?.key === human.key"
-            data-state="human"
-            type="button"
-            @click="selectedLiveKey = human.key"
-          >
-            <span class="desktop-activity-avatar" data-state="human">{{ initials(human.label) }}</span>
-            <span>
-              <strong>{{ human.label }}</strong>
-              <small>Human participant</small>
-            </span>
-            <span class="desktop-activity-row-meta">
-              <span class="state-pill" data-state="human">human</span>
-              <small>{{ formatRelativeTime(human.lastSeenAt) }}</small>
-            </span>
-          </button>
-
-          <article v-if="!humans.length" class="desktop-activity-empty">No human room activity has been seen yet.</article>
-        </section>
+        <article v-if="!liveRosterAgents.length" class="desktop-activity-empty" data-empty="page">
+          No live agent sessions or work signals right now.
+        </article>
       </div>
 
-      <aside v-if="selectedLiveParticipant" class="desktop-activity-detail" :data-kind="selectedLiveParticipant.kind">
+      <aside v-if="selectedLiveParticipant" class="desktop-activity-detail" data-kind="agent">
         <div class="desktop-activity-detail-header">
-          <div>
-            <span>{{ selectedLiveParticipant.kind === "agent" ? "Agent status" : "Human activity" }}</span>
-            <h3>{{ selectedLiveParticipant.label }}</h3>
-            <p>{{ participantSubtitle(selectedLiveParticipant) }}</p>
+          <div class="desktop-activity-detail-identity">
+            <span class="desktop-activity-dot" :data-state="selectedLiveParticipant.activityState || selectedLiveParticipant.workState || 'offline'" aria-hidden="true"></span>
+            <div>
+              <span>Agent</span>
+              <h3>{{ selectedLiveParticipant.label }}</h3>
+              <p>{{ participantSubtitle(selectedLiveParticipant) }}</p>
+            </div>
           </div>
           <span class="state-pill" :data-state="selectedLiveParticipant.activityState || 'offline'">
             {{ connectionLabel(selectedLiveParticipant) }}
           </span>
         </div>
 
-        <div class="desktop-activity-detail-stats">
-          <article>
-            <strong>{{ selectedLiveParticipant.messageCount }}</strong>
-            <span>Messages</span>
-          </article>
-          <article>
-            <strong>{{ selectedLiveParticipant.currentTasks.length }}</strong>
-            <span>Open tasks</span>
-          </article>
-          <article>
-            <strong>{{ selectedLiveParticipant.reasoningCount }}</strong>
-            <span>Reasoning</span>
-          </article>
-          <article>
-            <strong>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</strong>
-            <span>Last signal</span>
-          </article>
+        <div class="desktop-activity-detail-facts">
+          <span>Delivery</span>
+          <strong>{{ connectionLabel(selectedLiveParticipant) }}</strong>
+          <span>Work</span>
+          <strong>{{ selectedLiveParticipant.workLabel || selectedLiveParticipant.status || "idle" }}</strong>
+          <span>Last signal</span>
+          <strong>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</strong>
+          <span>Runtime</span>
+          <strong>{{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}</strong>
         </div>
 
         <section v-if="selectedLiveParticipant.statusText" class="desktop-activity-note">
-          <span>Status</span>
+          <span>Current status</span>
           <p>{{ selectedLiveParticipant.statusText }}</p>
         </section>
 
         <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
           <header>
-            <h4>Reasoning snapshot</h4>
+            <h4>Reasoning</h4>
             <span>{{ reasoningStatus(selectedLiveParticipant.latestReasoning) }}</span>
           </header>
           <article class="desktop-activity-reasoning">
@@ -235,8 +133,8 @@
 
         <section class="desktop-activity-detail-section">
           <header>
-            <h4>Session liveness</h4>
-            <span>{{ selectedLiveParticipant.livenessObservation ? "Enriched" : "Basic" }}</span>
+            <h4>Connection detail</h4>
+            <span>{{ selectedLiveParticipant.livenessObservation ? "session" : "room" }}</span>
           </header>
           <article v-if="selectedLiveParticipant.livenessObservation" class="desktop-activity-note">
             <span>{{ livenessCapabilityLabel(selectedLiveParticipant.livenessObservation.livenessCapability) }}</span>
@@ -246,7 +144,7 @@
             </p>
           </article>
           <p v-else class="desktop-activity-muted">
-            Standard room presence only. LetAgents Desktop can enrich this when the agent host reports session activity.
+            Standard room presence only.
           </p>
           <div class="desktop-activity-source-grid">
             <span
@@ -293,11 +191,6 @@
       <div class="desktop-activity-groups">
         <section class="desktop-activity-group">
           <header>
-            <span class="desktop-activity-header-icon" data-tone="history" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path :d="activityIconPath('clock')" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
             <div>
               <h3>Room history</h3>
               <p>Participants ordered by their latest room-family activity.</p>
@@ -427,22 +320,15 @@ const {
   activeView,
   selectedLiveKey,
   selectedHistoryKey,
-  summaryCards,
-  toolbarNote,
   reachableAgents,
-  agentSignalAgents,
-  disconnectedAgents,
-  humans,
+  workingAgents,
+  liveRosterAgents,
   selectedLiveParticipant,
   selectedHistoryEntry,
-  liveClearedCount,
-  activityIconPath,
   initials,
   connectionLabel,
   formatRelativeTime,
   signalLabel,
-  hasRecentLivenessObservation,
-  isReachableParticipant,
   participantSubtitle,
   reasoningStatus,
   reasoningTitle,
