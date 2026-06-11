@@ -1,5 +1,5 @@
 <template>
-  <section class="focus-room-manager" data-testid="room-details-view">
+  <section class="room-tab-page focus-room-manager" data-testid="room-details-view">
     <header class="focus-room-header">
       <div>
         <p class="focus-room-kicker">{{ room.kind === "focus" ? "Focus room" : "Rooms" }}</p>
@@ -1186,7 +1186,6 @@ function errorMessage(error: unknown, fallback: string): string {
   display: grid;
   align-content: start;
   padding: 10px;
-  overflow: hidden;
 }
 
 .focus-room-list-set,
@@ -1388,7 +1387,6 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-detail {
   display: grid;
   align-content: start;
-  overflow: hidden;
   padding: 22px;
 }
 
