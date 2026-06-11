@@ -1,9 +1,7 @@
 
 @media (max-width: 1240px) {
   .room-activity-grid,
-  .desktop-board-content,
-  .desktop-board-filters,
-  .desktop-task-board,
+  .desktop-board-toolbar,
   .stats-grid,
   .action-grid,
   .auth-panel,
@@ -53,6 +51,10 @@
   .desktop-activity-detail {
     flex-basis: auto;
     min-width: 0;
+  }
+
+  .desktop-task-board {
+    grid-auto-columns: minmax(270px, 304px);
   }
 }
 
@@ -126,25 +128,14 @@
     width: calc(100% - 20px);
   }
 
-  .desktop-composer-identity,
   .desktop-composer-footer {
     align-items: flex-start;
-  }
-
-  .desktop-composer-identity {
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .desktop-composer-shortcut {
-    text-align: left;
   }
 
   .desktop-composer-footer {
     flex-wrap: wrap;
   }
 
-  .desktop-composer-hint,
   .desktop-composer-error {
     flex: 1 1 100%;
     white-space: normal;
@@ -154,32 +145,69 @@
     padding: 12px;
   }
 
-  .desktop-board-add-form,
-  .desktop-board-task-header {
+  .desktop-board-header,
+  .desktop-board-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .desktop-board-search {
+    flex-basis: auto;
+    max-width: none;
+  }
+
+  .desktop-board-filter-groups {
+    justify-content: stretch;
+  }
+
+  .desktop-board-segmented {
+    overflow-x: auto;
+  }
+
+  .desktop-board-primary-action {
+    width: 100%;
+  }
+
+  .desktop-board-add-button {
+    justify-self: stretch;
+  }
+
+  .desktop-task-card-header {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .desktop-board-add-button {
-    width: 100%;
-  }
-
-  .desktop-board-task-card {
-    padding: 10px;
-  }
-
-  .desktop-board-authority-grid {
+  .desktop-task-detail-grid {
     grid-template-columns: 1fr;
   }
 
-  .desktop-board-task-actions,
-  .desktop-board-review-assign {
+  .desktop-task-actions,
+  .desktop-task-review-assign {
     align-items: stretch;
   }
 
-  .desktop-board-action-button,
-  .desktop-board-review-assign select {
+  .desktop-task-action,
+  .desktop-task-review-assign select {
     flex: 1 1 100%;
+  }
+
+  .desktop-task-board {
+    grid-auto-columns: minmax(252px, 86vw);
+  }
+
+  .desktop-task-modal-backdrop {
+    padding: 16px;
+  }
+
+  .desktop-task-modal {
+    width: calc(100vw - 32px);
+    max-height: calc(100vh - 32px);
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  .desktop-task-create-actions {
+    flex-direction: column-reverse;
   }
 
   .settings-section-header,

@@ -18,6 +18,7 @@
           :active-search-message-id="activeSearchMessageId"
           :active-thread-parent-id="activeThreadParentId"
           :has-older-messages="hasOlderMessages"
+          :active="active"
           :loading-older-messages="loadingOlderMessages"
           :messages="messages"
           :thread-messages="threadMessages"
@@ -114,6 +115,7 @@ import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
 
 const props = defineProps<{
+  active: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
   roomIdentifier: string | null;

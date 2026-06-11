@@ -46,37 +46,37 @@
       @close-action-panel="closeActionPanel"
     />
 
-    <Transition name="room-panel" mode="out-in">
-      <RoomChatView
-        v-if="activeTab === 'chat'"
-        key="chat"
-        :messages="timelineMessages"
-        :thread-messages="visibleMessages"
-        :room-identifier="room.identifier"
-        :room-loading="roomLoading"
-        :sending="sendingMessage"
-        :send-error="sendError"
-        :has-older-messages="hasOlderMessages"
-        :loading-older-messages="loadingOlderMessages"
-        :participants="participants"
-        :presence="presence"
-        :reasoning-sessions="reasoningSessions"
-        :tasks="tasks"
-        :search-query="searchQuery"
-        :active-search-message-id="activeSearchMessageId"
-        :initial-draft="chatDraftText"
-        :initial-scroll-top="initialChatScrollTop ?? null"
-        @send-message="sendRoomMessage"
-        @discard-attachment="discardAttachment"
-        @load-older="loadOlderMessages"
-        @open-reasoning="openReasoningInspector"
-        @open-agent-reasoning-fallback="openAgentReasoningFallback"
-        @draft-change="chatDraftText = $event"
-        @scroll-position="rememberChatScrollPosition"
-      />
+    <RoomChatView
+      v-show="activeTab === 'chat'"
+      :active="activeTab === 'chat'"
+      :messages="timelineMessages"
+      :thread-messages="visibleMessages"
+      :room-identifier="room.identifier"
+      :room-loading="roomLoading"
+      :sending="sendingMessage"
+      :send-error="sendError"
+      :has-older-messages="hasOlderMessages"
+      :loading-older-messages="loadingOlderMessages"
+      :participants="participants"
+      :presence="presence"
+      :reasoning-sessions="reasoningSessions"
+      :tasks="tasks"
+      :search-query="searchQuery"
+      :active-search-message-id="activeSearchMessageId"
+      :initial-draft="chatDraftText"
+      :initial-scroll-top="initialChatScrollTop ?? null"
+      @send-message="sendRoomMessage"
+      @discard-attachment="discardAttachment"
+      @load-older="loadOlderMessages"
+      @open-reasoning="openReasoningInspector"
+      @open-agent-reasoning-fallback="openAgentReasoningFallback"
+      @draft-change="chatDraftText = $event"
+      @scroll-position="rememberChatScrollPosition"
+    />
 
+    <Transition name="room-panel" mode="out-in">
       <RoomBoardView
-        v-else-if="activeTab === 'board'"
+        v-if="activeTab === 'board'"
         key="board"
         :room-identifier="room.identifier"
         :tasks="tasks"
@@ -109,7 +109,7 @@
       />
 
       <RentAnAgentView
-        v-else
+        v-else-if="activeTab === 'rent'"
         key="rent"
         :room-identifier="room.identifier"
       />
@@ -296,8 +296,8 @@ const tabs = computed<RoomTab[]>(() => [
 ]);
 
 function selectTab(tabId: RoomTabId): void {
+  if (activeTab.value === tabId) return;
   activeTab.value = tabId;
-  emit("refresh-room");
 }
 
 function toggleSearchTool(): void {

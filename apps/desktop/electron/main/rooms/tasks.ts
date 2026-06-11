@@ -1,4 +1,5 @@
 import type {
+  DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
@@ -55,10 +56,11 @@ function withDesktopHumanTaskBody<T extends object>(
 
 export async function addDesktopRoomTask(
   roomIdentifier: string,
-  title: string,
+  input: DesktopTaskCreateInput,
 ): Promise<DesktopTaskMutationResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
-  const trimmedTitle = title.trim();
+  const trimmedTitle = input.title.trim();
+  const trimmedDescription = input.description?.trim() || null;
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before adding a task.");
   if (!trimmedTitle) throw new Error("Task title is required.");
@@ -71,7 +73,11 @@ export async function addDesktopRoomTask(
         "X-LetAgents-Desktop-Client": "1",
       },
       body: JSON.stringify(
-        withDesktopHumanTaskBody({ title: trimmedTitle, created_by: "human" }),
+        withDesktopHumanTaskBody({
+          title: trimmedTitle,
+          description: trimmedDescription,
+          created_by: "human",
+        }),
       ),
     },
   );

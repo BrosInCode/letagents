@@ -1,5 +1,10 @@
 import { computed, ref } from "vue";
-import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../../electron/ipc-types";
+import type {
+  DesktopAgentPresence,
+  DesktopTaskCreateInput,
+  DesktopTaskSummary,
+  WorkerSnapshot,
+} from "../../../../../../electron/ipc-types";
 import { sortTasks } from "../../../../domain/tasks";
 import { normalizeRoom, readableStatus } from "./formatters";
 import { parseReviewCandidateValue, reviewAssignmentCandidates as getReviewAssignmentCandidates } from "./review-candidates";
@@ -24,7 +29,6 @@ export function useRoomBoardController(
   props: RoomBoardControllerProps,
   emit: RoomBoardEmit
 ) {
-  const newTaskTitle = ref("");
   const busyAction = ref<string | null>(null);
   const errorMessage = ref<string | null>(null);
   const selectedReviewerByTask = ref<Record<string, string>>({});
@@ -54,12 +58,14 @@ export function useRoomBoardController(
       }));
   });
 
-  async function addTask(): Promise<void> {
-    const title = newTaskTitle.value.trim();
-    if (!title) return;
-    await runBoardMutation("add", async () => {
-      const result = await window.letagentsDesktop.room.addTask(props.roomIdentifier, title);
-      newTaskTitle.value = "";
+  async function addTask(input: DesktopTaskCreateInput): Promise<boolean> {
+    const title = input.title.trim();
+    if (!title) return false;
+    return runBoardMutation("add", async () => {
+      const result = await window.letagentsDesktop.room.addTask(props.roomIdentifier, {
+        title,
+        description: input.description?.trim() || null,
+      });
       return result.task;
     });
   }
@@ -90,13 +96,13 @@ export function useRoomBoardController(
 
     if (task.status === "proposed") {
       actions.push(statusAction("accept", "Accept", "primary", "accepted"));
-      actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
+      if (!work) actions.push(statusAction("delete", "Delete", "danger", "cancelled", false));
     }
     if (task.status === "accepted") {
       if (worker && !work) {
         actions.push(workerAction("claim", "Claim", "primary"));
       }
-      actions.push(statusAction("cancel", "Cancel", "danger", "cancelled"));
+      if (!work) actions.push(statusAction("delete", "Delete", "danger", "cancelled", false));
     }
     if (task.status === "assigned" && workerOwnsTask) {
       actions.push(workerAction("start", "Start", "primary"));
@@ -199,25 +205,34 @@ export function useRoomBoardController(
     });
   }
 
-  async function runBoardMutation(id: string, mutation: () => Promise<DesktopTaskSummary>): Promise<void> {
+  async function runBoardMutation(id: string, mutation: () => Promise<DesktopTaskSummary>): Promise<boolean> {
     busyAction.value = id;
     errorMessage.value = null;
     try {
       const task = await mutation();
       emit("task-updated", task);
       emit("refresh-room");
+      return true;
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : "Task update failed.";
+      return false;
     } finally {
       busyAction.value = null;
     }
   }
 
-  function statusAction(id: string, label: string, tone: TaskAction["tone"], status: string): TaskAction {
+  function statusAction(
+    id: string,
+    label: string,
+    tone: TaskAction["tone"],
+    status: string,
+    draggable = true
+  ): TaskAction {
     return {
       id,
       label,
       tone,
+      targetStatus: draggable ? status : undefined,
       run: async (task) => (await window.letagentsDesktop.room.updateTask(props.roomIdentifier, task.id, { status })).task,
     };
   }
@@ -227,10 +242,18 @@ export function useRoomBoardController(
     label: string,
     tone: TaskAction["tone"]
   ): TaskAction {
+    const targetStatusByAction: Record<typeof action, string> = {
+      claim: "assigned",
+      start: "in_progress",
+      block: "blocked",
+      resume: "in_progress",
+      submit_review: "in_review",
+    };
     return {
       id: action,
       label,
       tone,
+      targetStatus: targetStatusByAction[action],
       run: async (task) => (await window.letagentsDesktop.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
     };
   }
@@ -247,7 +270,6 @@ export function useRoomBoardController(
     collapsedGroups,
     errorMessage,
     groupedTasks,
-    newTaskTitle,
     reviewAssignmentCandidates,
     runTaskAction,
     selectedReviewerByTask,

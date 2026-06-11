@@ -1,19 +1,49 @@
 .desktop-task-card {
   display: grid;
-  gap: 12px;
-  padding: 13px;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  cursor: pointer;
   animation: room-panel-in 180ms var(--ease-out);
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    transform 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.desktop-task-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(18, 18, 20, 0.78);
+}
+
+.desktop-task-card[data-draggable="true"] {
+  cursor: grab;
+}
+
+.desktop-task-card[data-draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.desktop-task-card:focus-visible {
+  outline: 2px solid rgba(147, 197, 253, 0.45);
+  outline-offset: 2px;
 }
 
 .desktop-task-card.is-selected {
   border-color: rgba(147, 197, 253, 0.32);
+  background:
+    linear-gradient(145deg, rgba(147, 197, 253, 0.075), transparent 56%),
+    rgba(14, 14, 16, 0.84);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 0 0 1px rgba(147, 197, 253, 0.08);
 }
 
 .desktop-task-card-header,
-.desktop-task-meta-grid {
+.desktop-task-meta-grid,
+.desktop-task-card-meta {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -24,9 +54,12 @@
 }
 
 .desktop-task-card h4 {
+  flex: 1;
+  min-width: min(100%, 8rem);
   margin: 0;
   color: var(--text);
-  font-size: 0.96rem;
+  font-size: 0.9rem;
+  font-weight: 850;
   line-height: 1.32;
   overflow-wrap: anywhere;
 }
@@ -56,12 +89,56 @@
   font-weight: 850;
 }
 
-.desktop-task-description {
-  margin: -3px 0 0;
-  color: var(--text-secondary);
-  font-size: 0.8rem;
+.desktop-task-status-badge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 0.62rem;
+  font-weight: 900;
   line-height: 1.45;
-  overflow-wrap: anywhere;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.desktop-task-status-badge[data-status="proposed"] { color: #a1a1aa; border-color: rgba(161, 161, 170, 0.38); }
+.desktop-task-status-badge[data-status="accepted"] { color: #60a5fa; border-color: rgba(96, 165, 250, 0.38); }
+.desktop-task-status-badge[data-status="assigned"] { color: #c084fc; border-color: rgba(192, 132, 252, 0.38); }
+.desktop-task-status-badge[data-status="in_progress"] { color: #fbbf24; border-color: rgba(251, 191, 36, 0.38); }
+.desktop-task-status-badge[data-status="blocked"] { color: #f87171; border-color: rgba(248, 113, 113, 0.38); }
+.desktop-task-status-badge[data-status="in_review"] { color: #38bdf8; border-color: rgba(56, 189, 248, 0.38); }
+.desktop-task-status-badge[data-status="merged"] { color: #34d399; border-color: rgba(52, 211, 153, 0.38); }
+.desktop-task-status-badge[data-status="done"] { color: #22c55e; border-color: rgba(34, 197, 94, 0.38); }
+.desktop-task-status-badge[data-status="cancelled"] { color: #64748b; border-color: rgba(100, 116, 139, 0.38); }
+
+.desktop-task-card-meta {
+  flex-wrap: wrap;
+}
+
+.desktop-task-card-meta span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+}
+
+.desktop-task-card-meta small {
+  color: var(--text-tertiary);
+  font-size: 0.64rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.desktop-task-card-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.73rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-task-meta-grid {
@@ -127,6 +204,13 @@
   color: #bae6fd;
 }
 
+.desktop-task-chip[data-kind="work"],
+.desktop-task-chip[data-kind="lease"] {
+  border-color: rgba(52, 211, 153, 0.24);
+  background: rgba(52, 211, 153, 0.075);
+  color: #bbf7d0;
+}
+
 .desktop-task-chip[data-kind="lock"] {
   border-color: rgba(248, 113, 113, 0.28);
   background: rgba(248, 113, 113, 0.08);
@@ -143,6 +227,16 @@
   border-color: rgba(148, 163, 184, 0.28);
   background: rgba(148, 163, 184, 0.08);
   color: #cbd5e1;
+}
+
+.desktop-task-link-chip {
+  color: #bfdbfe;
+  text-decoration: none;
+}
+
+.desktop-task-link-chip:hover {
+  border-color: rgba(147, 197, 253, 0.3);
+  background: rgba(147, 197, 253, 0.09);
 }
 
 .desktop-task-actions {
