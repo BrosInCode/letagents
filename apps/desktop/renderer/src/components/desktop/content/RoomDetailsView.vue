@@ -983,29 +983,44 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-tabs {
-  display: inline-flex;
-  gap: 8px;
-  padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.024);
 }
 
 .focus-room-tabs button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  min-height: 32px;
-  padding: 0 14px;
-  border-radius: 10px;
-  color: var(--text-secondary);
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 22px;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-weight: 850;
   cursor: pointer;
+  transition:
+    border-color 150ms var(--ease-out),
+    background 150ms var(--ease-out),
+    color 150ms var(--ease-out);
 }
 
 .focus-room-tabs button[data-active="true"] {
-  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.12);
   color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.focus-room-tabs button:hover {
+  color: var(--text-secondary);
 }
 
 .focus-room-tab-label {
@@ -1013,10 +1028,20 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-tab-count {
-  color: var(--text-tertiary);
-  font-size: 0.78rem;
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  text-align: center;
+}
+
+.focus-room-tabs button[data-active="true"] .focus-room-tab-count {
+  background: rgba(147, 197, 253, 0.18);
+  color: #bfdbfe;
 }
 
 .focus-room-create {
