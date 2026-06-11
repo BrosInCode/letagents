@@ -99,91 +99,93 @@
           </div>
 
           <div class="desktop-activity-detail-facts">
-            <span>Delivery</span>
-            <strong>{{ connectionLabel(selectedLiveParticipant) }}</strong>
-            <span>Work</span>
-            <strong>{{ selectedLiveParticipant.workLabel || selectedLiveParticipant.status || "idle" }}</strong>
-            <span>Last signal</span>
-            <strong>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</strong>
-            <span>Runtime</span>
-            <strong>{{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}</strong>
+            <span>
+              <small>Delivery</small>
+              <strong>{{ connectionLabel(selectedLiveParticipant) }}</strong>
+            </span>
+            <span>
+              <small>Work</small>
+              <strong>{{ selectedLiveParticipant.workLabel || selectedLiveParticipant.status || "idle" }}</strong>
+            </span>
+            <span>
+              <small>Last signal</small>
+              <strong>{{ formatRelativeTime(selectedLiveParticipant.lastSeenAt) }}</strong>
+            </span>
+            <span>
+              <small>Runtime</small>
+              <strong>{{ selectedLiveParticipant.runtime || selectedLiveParticipant.ideLabel || "agent" }}</strong>
+            </span>
           </div>
 
-        <section v-if="selectedLiveParticipant.statusText" class="desktop-activity-note">
-          <span>Current status</span>
-          <p>{{ selectedLiveParticipant.statusText }}</p>
-        </section>
+          <section v-if="selectedLiveParticipant.statusText" class="desktop-activity-note">
+            <span>Current status</span>
+            <p>{{ selectedLiveParticipant.statusText }}</p>
+          </section>
 
-        <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
-          <header>
-            <h4>Reasoning</h4>
-            <span>{{ reasoningStatus(selectedLiveParticipant.latestReasoning) }}</span>
-          </header>
-          <article class="desktop-activity-reasoning">
-            <strong>{{ reasoningTitle(selectedLiveParticipant.latestReasoning) }}</strong>
-            <p>{{ reasoningSummary(selectedLiveParticipant.latestReasoning) }}</p>
-            <div v-if="selectedLiveParticipant.latestReasoningFields.length" class="desktop-agent-modal-fields">
-              <span v-for="field in selectedLiveParticipant.latestReasoningFields" :key="field.label">
-                <small>{{ field.label }}</small>
-                <strong>{{ field.value }}</strong>
-              </span>
-            </div>
-          </article>
-        </section>
+          <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
+            <header>
+              <h4>Reasoning</h4>
+              <span>{{ reasoningStatus(selectedLiveParticipant.latestReasoning) }}</span>
+            </header>
+            <article class="desktop-activity-reasoning">
+              <strong>{{ reasoningTitle(selectedLiveParticipant.latestReasoning) }}</strong>
+              <p>{{ reasoningSummary(selectedLiveParticipant.latestReasoning) }}</p>
+              <div v-if="selectedLiveParticipant.latestReasoningFields.length" class="desktop-agent-modal-fields">
+                <span v-for="field in selectedLiveParticipant.latestReasoningFields" :key="field.label">
+                  <small>{{ field.label }}</small>
+                  <strong>{{ field.value }}</strong>
+                </span>
+              </div>
+            </article>
+          </section>
 
-        <section class="desktop-activity-detail-section">
-          <header>
-            <h4>Connection detail</h4>
-            <span>{{ selectedLiveParticipant.livenessObservation ? "session" : "room" }}</span>
-          </header>
-          <article v-if="selectedLiveParticipant.livenessObservation" class="desktop-activity-note">
-            <span>{{ livenessCapabilityLabel(selectedLiveParticipant.livenessObservation.livenessCapability) }}</span>
-            <p>
+          <section class="desktop-activity-detail-section desktop-activity-connection-section">
+            <header>
+              <h4>Connection</h4>
+              <span v-if="selectedLiveParticipant.livenessObservation">session</span>
+            </header>
+            <p v-if="selectedLiveParticipant.livenessObservation" class="desktop-activity-connection-copy">
               {{ selectedLiveParticipant.livenessObservation.hostLabel || selectedLiveParticipant.livenessObservation.hostKind || "Agent host" }}
               observed this session {{ formatRelativeTime(selectedLiveParticipant.livenessObservation.lastObservedAt) }}.
             </p>
-          </article>
-          <p v-else class="desktop-activity-muted">
-            Standard room presence only.
-          </p>
-          <div class="desktop-activity-source-grid">
-            <span
-              v-for="source in sourceBadges(selectedLiveParticipant)"
-              :key="source.label"
-              :data-active="source.active"
-            >
-              {{ source.label }}
-            </span>
-          </div>
-        </section>
+            <p v-else class="desktop-activity-muted">
+              Room presence only.
+            </p>
+            <div v-if="activeSourceBadges(selectedLiveParticipant).length" class="desktop-activity-source-row">
+              <span
+                v-for="source in activeSourceBadges(selectedLiveParticipant)"
+                :key="source.label"
+              >
+                {{ source.label }}
+              </span>
+            </div>
+          </section>
 
-        <section class="desktop-activity-detail-section">
-          <header>
-            <h4>Current work</h4>
-            <span>{{ selectedLiveParticipant.currentTasks.length }}</span>
-          </header>
-          <article v-for="task in selectedLiveParticipant.currentTasks" :key="task.id" class="desktop-activity-task">
-            <strong>{{ task.title }}</strong>
-            <span>{{ taskStatusLabel(task.status) }}</span>
-          </article>
-          <p v-if="!selectedLiveParticipant.currentTasks.length" class="desktop-activity-muted">No open tasks linked to this participant.</p>
-        </section>
+          <section v-if="selectedLiveParticipant.currentTasks.length" class="desktop-activity-detail-section">
+            <header>
+              <h4>Current work</h4>
+              <span>{{ selectedLiveParticipant.currentTasks.length }}</span>
+            </header>
+            <article v-for="task in selectedLiveParticipant.currentTasks" :key="task.id" class="desktop-activity-task">
+              <strong>{{ task.title }}</strong>
+              <span>{{ taskStatusLabel(task.status) }}</span>
+            </article>
+          </section>
 
-        <section class="desktop-activity-detail-section">
-          <header>
-            <h4>Live reasoning</h4>
-            <span>{{ selectedLiveParticipant.activeReasoning.length }}</span>
-          </header>
-          <article v-for="session in selectedLiveParticipant.activeReasoning" :key="session.id" class="desktop-activity-reasoning">
-            <strong>{{ reasoningTitle(session) }}</strong>
-            <p>{{ reasoningSummary(session) }}</p>
-            <span>{{ reasoningStatus(session) }} · {{ formatRelativeTime(session.updatedAt || session.createdAt) }}</span>
-            <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
-              Open reasoning
-            </button>
-          </article>
-          <p v-if="!selectedLiveParticipant.activeReasoning.length" class="desktop-activity-muted">No active reasoning stream exposed right now.</p>
-        </section>
+          <section v-if="selectedLiveParticipant.activeReasoning.length" class="desktop-activity-detail-section">
+            <header>
+              <h4>Live reasoning</h4>
+              <span>{{ selectedLiveParticipant.activeReasoning.length }}</span>
+            </header>
+            <article v-for="session in selectedLiveParticipant.activeReasoning" :key="session.id" class="desktop-activity-reasoning">
+              <strong>{{ reasoningTitle(session) }}</strong>
+              <p>{{ reasoningSummary(session) }}</p>
+              <span>{{ reasoningStatus(session) }} · {{ formatRelativeTime(session.updatedAt || session.createdAt) }}</span>
+              <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
+                Open reasoning
+              </button>
+            </article>
+          </section>
       </aside>
       </template>
     </div>
@@ -301,6 +303,7 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
+import type { ActivityParticipant } from "./room-activity/types";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
 
 const props = defineProps<{
@@ -337,13 +340,16 @@ const {
   reasoningStatus,
   reasoningTitle,
   reasoningSummary,
-  livenessCapabilityLabel,
   sourceBadges,
   taskStatusLabel,
 } = useRoomActivityViewModel(props);
 
 function refreshActivity(): void {
   emit("refresh-room");
+}
+
+function activeSourceBadges(participant: ActivityParticipant): Array<{ label: string; active: boolean }> {
+  return sourceBadges(participant).filter((source) => source.active);
 }
 
 onMounted(refreshActivity);

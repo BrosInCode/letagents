@@ -69,6 +69,10 @@
   gap: 12px;
 }
 
+.room-activity-page {
+  padding-top: 18px;
+}
+
 .desktop-activity-toolbar {
   justify-content: flex-start;
   width: fit-content;

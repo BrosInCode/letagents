@@ -30,7 +30,7 @@
 .desktop-activity-group {
   display: grid;
   gap: 6px;
-  padding: 12px;
+  padding: 10px;
 }
 
 .desktop-activity-group header,
@@ -65,7 +65,8 @@
 .desktop-activity-group p,
 .desktop-activity-detail-header p {
   margin: 3px 0 0;
-  font-size: 0.84rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 .desktop-activity-group header > strong,
@@ -81,10 +82,10 @@
 
 .desktop-activity-roster-item {
   width: 100%;
-  min-height: 62px;
-  padding: 10px;
+  min-height: 56px;
+  padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.035);
   color: inherit;
   text-align: left;
@@ -115,9 +116,9 @@
   display: inline-grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 11px;
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
   font-size: 0.82rem;
@@ -174,7 +175,7 @@
 .desktop-activity-row-meta {
   display: grid;
   justify-items: end;
-  gap: 6px;
+  gap: 4px;
   margin-left: auto;
   max-width: 42%;
 }
@@ -182,8 +183,8 @@
 .desktop-activity-mini-pill {
   display: inline-flex;
   align-items: center;
-  min-height: 26px;
-  padding: 0 10px;
+  min-height: 23px;
+  padding: 0 8px;
   border-radius: 999px;
   background: rgba(139, 124, 246, 0.15);
   color: #c4b5fd;
@@ -202,7 +203,7 @@
   display: grid;
   gap: 8px;
   width: min(520px, 100%);
-  margin: clamp(24px, 7vh, 72px) auto 0;
+  margin: clamp(18px, 6vh, 56px) auto 0;
   padding: 18px;
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 18px;
