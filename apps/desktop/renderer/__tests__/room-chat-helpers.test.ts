@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { ref } from "vue";
 
 import type {
   DesktopAgentPresence,
@@ -19,13 +20,20 @@ import {
   hasReasoningStreamSurface,
   latestReasoningForAgent,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
-import { buildThreadSummaries, threadReplies } from "../src/components/desktop/content/room-chat/thread-utils";
+import {
+  buildThreadSummaries,
+  recentThreadActivities,
+  resolveThreadParent,
+  roomTimelineMessages,
+  threadReplies,
+} from "../src/components/desktop/content/room-chat/thread-utils";
 import {
   isLowSignalGitHubCheckMessage,
   parseGitHubEvent,
 } from "../src/components/desktop/content/desktop-chat-message/github-event";
 import { parseSenderIdentity } from "../src/components/desktop/content/desktop-chat-message/identity";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
+import { useDesktopRoomSearch } from "../src/components/desktop/content/room-shell/useDesktopRoomSearch";
 
 describe("room chat helpers", () => {
   it("builds image attachment ids and data URLs consistently", () => {
@@ -63,6 +71,7 @@ describe("room chat helpers", () => {
     assert.equal(summaries.get("msg_1")?.latest?.id, "msg_3");
     assert.equal(summaries.get("msg_2")?.count, 1);
     assert.equal(summaries.get("msg_2")?.latest?.id, "msg_4");
+    assert.deepEqual(roomTimelineMessages(messages).map((message) => message.id), ["msg_1"]);
   });
 
   it("filters direct thread replies for a selected parent", () => {
@@ -75,6 +84,35 @@ describe("room chat helpers", () => {
 
     assert.deepEqual(threadReplies(messages, "msg_1").map((message) => message.id), ["msg_2", "msg_3"]);
     assert.deepEqual(threadReplies(messages, null), []);
+  });
+
+  it("resolves thread parents from reply snapshots and ranks recent thread activity", () => {
+    const messages = [
+      roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z"),
+      roomMessage("msg_4", "msg_3", "2026-05-28T00:04:00.000Z"),
+      roomMessage("msg_5", "msg_1", "2026-05-28T00:05:00.000Z"),
+    ];
+
+    assert.deepEqual(resolveThreadParent(messages, "msg_1")?.text, "msg_1");
+    assert.equal(resolveThreadParent(messages, "missing"), null);
+
+    const activities = recentThreadActivities(messages);
+
+    assert.deepEqual(activities.map((activity) => activity.parent.id), ["msg_1", "msg_3"]);
+    assert.deepEqual(activities.map((activity) => activity.latest.id), ["msg_5", "msg_4"]);
+    assert.equal(activities[0]?.count, 2);
+  });
+
+  it("searches thread replies even when they are hidden from the room timeline", () => {
+    const messages = [
+      roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z"),
+    ];
+    const search = useDesktopRoomSearch(ref(messages));
+
+    search.searchQuery.value = "msg_2";
+
+    assert.equal(search.searchResults.value.length, 1);
+    assert.equal(search.activeSearchMessageId.value, "msg_2");
   });
 
   it("matches agents to their newest reasoning session and stream fallback", () => {
@@ -150,7 +188,11 @@ describe("room chat helpers", () => {
   });
 });
 
-function roomMessage(id: string, replyToId: string | null): DesktopRoomMessage {
+function roomMessage(
+  id: string,
+  replyToId: string | null,
+  timestamp = "2026-05-28T00:00:00.000Z",
+): DesktopRoomMessage {
   return {
     id,
     sender: "Emmy",
@@ -158,7 +200,7 @@ function roomMessage(id: string, replyToId: string | null): DesktopRoomMessage {
     attachments: [],
     agentPromptKind: null,
     source: "user",
-    timestamp: "2026-05-28T00:00:00.000Z",
+    timestamp,
     actorLabel: null,
     agentIdentity: null,
     replyTo: replyToId

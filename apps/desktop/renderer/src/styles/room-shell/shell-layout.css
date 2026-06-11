@@ -1,7 +1,6 @@
 .desktop-room-shell,
 .room-tab-page,
-.room-activity-grid,
-.desktop-room-heading {
+.room-activity-grid {
   display: grid;
   gap: 12px;
 }
@@ -30,6 +29,8 @@
 }
 
 .desktop-room-header {
+  position: relative;
+  z-index: 30;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -68,23 +69,47 @@
   backdrop-filter: blur(20px) saturate(1.2);
 }
 
-.desktop-room-heading h3 {
+.desktop-room-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
   margin: 0;
-  font-size: 0.96rem;
-  line-height: 1.2;
+  color: var(--text);
+  font-size: 1.28rem;
+  font-weight: 950;
+  line-height: 1;
   letter-spacing: 0;
 }
 
+.desktop-room-title > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .desktop-room-heading {
+  display: flex;
+  align-items: center;
   min-width: 0;
 }
 
-.desktop-room-subtitle {
-  margin: 2px 0 0;
-  max-width: 720px;
-  color: var(--text-secondary);
-  font-size: 0.74rem;
-  line-height: 1.35;
+.desktop-room-provider-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  min-width: 23px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.desktop-room-provider-icon svg {
+  width: 14px;
+  height: 14px;
 }
 
 .desktop-room-header-actions {
@@ -95,24 +120,22 @@
   min-width: 0;
 }
 
-.desktop-room-tools {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.desktop-room-overflow {
+  position: relative;
+  z-index: 2;
+  display: inline-grid;
+  place-items: center;
 }
 
-.desktop-room-tool {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
+.desktop-room-overflow-button {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
   min-height: 30px;
-  padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.035);
   color: var(--text-secondary);
-  font-size: 0.74rem;
-  font-weight: 850;
   transition:
     background var(--duration-fast) var(--ease-out),
     border-color var(--duration-fast) var(--ease-out),
@@ -120,7 +143,7 @@
     transform var(--duration-fast) var(--ease-out);
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-badge,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-tabs {
   border-color: rgba(255, 255, 255, 0.13);
@@ -133,26 +156,116 @@
   backdrop-filter: blur(16px) saturate(1.18);
 }
 
-.desktop-room-tool svg {
+.desktop-room-overflow-button svg {
   width: 14px;
   height: 14px;
 }
 
-.desktop-room-tool:hover,
-.desktop-room-tool[data-active="true"] {
+.desktop-room-overflow-button:hover,
+.desktop-room-overflow-button[data-active="true"] {
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool:hover,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool[data-active="true"],
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button:hover,
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button[data-active="true"],
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-tab[data-active="true"] {
   border-color: rgba(255, 255, 255, 0.23);
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.19), rgba(255, 255, 255, 0.06) 54%, rgba(255, 255, 255, 0.026)),
     rgba(255, 255, 255, 0.075);
+  color: var(--text);
+}
+
+.desktop-room-overflow-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 90;
+  display: grid;
+  gap: 4px;
+  min-width: 176px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgb(18, 18, 18);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: none;
+  transform-origin: top right;
+  will-change: opacity, transform;
+}
+
+.desktop-room-overflow-pop-enter-active,
+.desktop-room-overflow-pop-leave-active {
+  transition:
+    opacity 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.desktop-room-overflow-pop-enter-from,
+.desktop-room-overflow-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.desktop-room-overflow-pop-enter-to,
+.desktop-room-overflow-pop-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.desktop-room-overflow-pop-enter-active .desktop-room-menu-item,
+.desktop-room-overflow-pop-leave-active .desktop-room-menu-item {
+  transition:
+    opacity 110ms var(--ease-out),
+    transform 110ms var(--ease-out);
+}
+
+.desktop-room-overflow-pop-enter-from .desktop-room-menu-item,
+.desktop-room-overflow-pop-leave-to .desktop-room-menu-item {
+  opacity: 0;
+  transform: translateY(-3px);
+}
+
+.desktop-room-overflow-pop-enter-active .desktop-room-menu-item:nth-child(2) {
+  transition-delay: 18ms;
+}
+
+.desktop-room-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  appearance: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-align: left;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-menu-item svg {
+  width: 15px;
+  height: 15px;
+}
+
+.desktop-room-menu-item:hover,
+.desktop-room-menu-item:focus-visible,
+.desktop-room-menu-item[data-active="true"] {
+  background: rgba(255, 255, 255, 0.08);
   color: var(--text);
 }
 
@@ -208,6 +321,13 @@
     box-shadow var(--duration-fast) var(--ease-out);
 }
 
+.desktop-room-tab-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-tertiary);
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
 .desktop-room-tab small {
   color: var(--text-tertiary);
   font-size: 0.72rem;
@@ -215,6 +335,11 @@
 }
 
 .desktop-room-tab:hover {
+  color: var(--text);
+}
+
+.desktop-room-tab:hover .desktop-room-tab-icon,
+.desktop-room-tab[data-active="true"] .desktop-room-tab-icon {
   color: var(--text);
 }
 

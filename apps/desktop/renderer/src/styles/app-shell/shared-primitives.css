@@ -107,6 +107,7 @@
 .action-card:active,
 .ghost-button:active,
 .primary-button:active,
+.desktop-room-overflow-button:active,
 .desktop-room-tab:active {
   transform: translateY(0) scale(0.985);
 }

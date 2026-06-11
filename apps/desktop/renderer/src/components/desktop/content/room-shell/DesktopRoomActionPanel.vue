@@ -1,6 +1,18 @@
 <template>
-  <Transition name="room-panel">
-    <section v-if="open" class="desktop-room-action-panel" data-testid="desktop-room-action-panel">
+  <section class="desktop-room-action-panel" data-testid="desktop-room-action-panel">
+    <div class="desktop-room-action-panel-topbar">
+      <p class="desktop-room-action-kicker">Room settings</p>
+      <button
+        class="desktop-room-action-panel-close"
+        type="button"
+        aria-label="Close room settings"
+        @click="$emit('close')"
+      >
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
       <div class="desktop-room-inspector">
         <form class="desktop-room-identity-card" data-testid="desktop-room-rename-card" @submit.prevent="submitRename">
           <div class="desktop-room-inspector-header">
@@ -135,8 +147,7 @@
           </div>
         </div>
       </div>
-    </section>
-  </Transition>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -144,7 +155,6 @@ import { computed, ref, watch } from "vue";
 import type { DesktopGitHubIntegrationStatus, DesktopRoomInfo } from "../../../../../../electron/ipc-types";
 
 const props = defineProps<{
-  open: boolean;
   room: DesktopRoomInfo;
   roomUrl: string;
   copied: boolean;
@@ -170,6 +180,7 @@ const emit = defineEmits<{
   "refresh-github": [];
   "install-github": [];
   "export-chat": [];
+  close: [];
 }>();
 
 const renameDraft = ref(props.room.displayName);

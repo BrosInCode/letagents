@@ -7,7 +7,7 @@
 
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .desktop-room-shell[data-liquid-glass="true"] .desktop-room-header,
-  .desktop-room-shell[data-liquid-glass="true"] .desktop-room-tool,
+  .desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button,
   .desktop-room-shell[data-liquid-glass="true"] .desktop-room-badge,
   .desktop-room-shell[data-liquid-glass="true"] .desktop-room-tabs,
   .desktop-room-shell[data-liquid-glass="true"] .desktop-room-control-rail,

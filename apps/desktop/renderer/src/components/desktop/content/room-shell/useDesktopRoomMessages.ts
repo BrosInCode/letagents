@@ -8,6 +8,7 @@ import {
   mergeRoomMessages,
 } from "./messages";
 import { isLowSignalGitHubCheckMessage } from "../desktop-chat-message/github-event";
+import { roomTimelineMessages } from "../room-chat/thread-utils";
 
 const messageHistoryPageSize = 150;
 
@@ -33,6 +34,7 @@ export function useDesktopRoomMessages(options: {
     return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
       .filter((message) => !isLowSignalGitHubCheckMessage(message));
   });
+  const timelineMessages = computed(() => roomTimelineMessages(visibleMessages.value));
   const roomMessagesForAgentInsight = computed(() =>
     [...olderMessages.value, ...options.messages.value, ...localMessages.value].sort(compareRoomMessages)
   );
@@ -126,6 +128,7 @@ export function useDesktopRoomMessages(options: {
     chatDraftText,
     ownMessageIds,
     visibleMessages,
+    timelineMessages,
     roomMessagesForAgentInsight,
     sendRoomMessage,
     discardAttachment,

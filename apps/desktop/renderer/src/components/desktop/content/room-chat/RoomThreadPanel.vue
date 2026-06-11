@@ -41,6 +41,7 @@
         v-for="reply in replies"
         :key="reply.id"
         class="room-thread-reply"
+        :class="{ 'is-search-active': reply.id === activeSearchMessageId }"
         :data-testid="`room-thread-reply-${reply.id}`"
       >
         <div class="room-thread-meta">
@@ -51,7 +52,7 @@
         <DesktopLongMessageContent
           v-else
           :text="reply.text || 'No message body.'"
-          :html="renderMessageText(reply.text || 'No message body.', '')"
+          :html="renderMessageText(reply.text || 'No message body.', searchQuery)"
           :message-id="`${reply.id}-thread-reply`"
         />
         <DesktopMessageAttachments
@@ -100,6 +101,8 @@ const props = defineProps<{
   replies: DesktopRoomMessage[];
   roomIdentifier: string | null;
   sending: boolean;
+  searchQuery: string;
+  activeSearchMessageId: string | null;
 }>();
 
 const emit = defineEmits<{

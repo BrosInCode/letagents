@@ -322,6 +322,84 @@
   background: transparent;
 }
 
+.room-thread-activity-pill {
+  position: absolute;
+  right: 30px;
+  bottom: 58px;
+  z-index: 3;
+  display: flex;
+  align-items: stretch;
+  max-width: min(360px, calc(100% - 60px));
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.092), rgba(255, 255, 255, 0.032) 56%, rgba(255, 255, 255, 0.014)),
+    rgba(16, 16, 16, 0.9);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 14px 38px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px) saturate(1.15);
+}
+
+.room-thread-activity-open,
+.room-thread-activity-dismiss {
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.room-thread-activity-open {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 9px 12px;
+  background: transparent;
+  text-align: left;
+}
+
+.room-thread-activity-open span,
+.room-thread-activity-open small {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-thread-activity-open strong {
+  overflow: hidden;
+  color: #ffffff;
+  font-size: 0.82rem;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-thread-activity-open:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.room-thread-activity-dismiss {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  min-width: 34px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-tertiary);
+}
+
+.room-thread-activity-dismiss:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.room-thread-activity-dismiss svg {
+  width: 14px;
+  height: 14px;
+}
+
 .room-new-messages-pill {
   position: absolute;
   right: 30px;
