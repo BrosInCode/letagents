@@ -984,7 +984,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 .focus-room-tabs {
   display: inline-flex;
-  gap: 4px;
+  gap: 8px;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 14px;
