@@ -1,5 +1,6 @@
 export * from "./rooms/account-rooms.js";
 export * from "./rooms/diagnostics.js";
+export * from "./rooms/focus-rooms.js";
 export * from "./rooms/invite-room.js";
 export * from "./rooms/messages.js";
 export * from "./rooms/reasoning.js";

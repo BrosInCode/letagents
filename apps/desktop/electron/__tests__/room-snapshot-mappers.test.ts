@@ -23,8 +23,23 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
         name: null,
         display_name: "Focus Room",
         code: "ABCD-1234",
+        parent_room_id: "parent_room",
+        focus_key: "task_1",
         source_task_id: "task_1",
         focus_status: "active",
+        focus_settings: {
+          parent_visibility: "major_activity",
+          activity_scope: "task_only",
+          github_event_routing: "off",
+        },
+        conclusion_summary: "Ready for review",
+        conclusion_details: {
+          artifact: "PR #1",
+          review_state: "needs_review",
+          blocker_state: "none",
+          parent_task_next: "move_to_review",
+          next_owner: "EmmyMay",
+        },
         created_at: "2026-05-12T09:00:00.000Z",
       }],
     },
@@ -128,6 +143,11 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
   const snapshot = mapSnapshotData(data);
 
   assert.equal(snapshot.focusRooms[0]?.displayName, "Focus Room");
+  assert.equal(snapshot.focusRooms[0]?.parentRoomId, "parent_room");
+  assert.equal(snapshot.focusRooms[0]?.focusSettings?.parent_visibility, "major_activity");
+  assert.equal(snapshot.focusRooms[0]?.focusSettings?.github_event_routing, "off");
+  assert.equal(snapshot.focusRooms[0]?.conclusionSummary, "Ready for review");
+  assert.equal(snapshot.focusRooms[0]?.conclusionDetails?.parent_task_next, "move_to_review");
   assert.equal(snapshot.participantHiddenCount, 2);
   assert.equal(snapshot.participants[0]?.agentKey, "owner/cloud");
   assert.equal(snapshot.presence[0]?.livenessObservation, null);

@@ -58,6 +58,14 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:run-task-worker-action", roomIdentifier, taskId, input),
     runTaskReviewWorkerAction: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:run-task-review-worker-action", roomIdentifier, taskId, input),
+    createTaskFocusRoom: (roomIdentifier: string, taskId: string) =>
+      ipcRenderer.invoke("desktop:room:create-task-focus-room", roomIdentifier, taskId),
+    createAdHocFocusRoom: (roomIdentifier: string, title: string) =>
+      ipcRenderer.invoke("desktop:room:create-ad-hoc-focus-room", roomIdentifier, title),
+    updateFocusRoomSettings: (roomIdentifier: string, focusKey: string, settings) =>
+      ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
+    concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details) =>
+      ipcRenderer.invoke("desktop:room:conclude-focus-room", roomIdentifier, focusKey, summary, details),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),

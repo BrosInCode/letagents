@@ -1,4 +1,12 @@
-import type { DesktopRoomAccess, DesktopRoomInfo } from "../../ipc-types.js";
+import type {
+  DesktopFocusActivityScope,
+  DesktopFocusGitHubEventRouting,
+  DesktopFocusParentVisibility,
+  DesktopFocusRoomConclusionDetails,
+  DesktopFocusRoomSettings,
+  DesktopRoomAccess,
+  DesktopRoomInfo,
+} from "../../ipc-types.js";
 import { apiFetch } from "../auth.js";
 
 export type RoomInfoPayload = {
@@ -13,6 +21,13 @@ export type RoomInfoPayload = {
   focus_key?: string | null;
   source_task_id?: string | null;
   focus_status?: "active" | "concluded" | null;
+  focus_parent_visibility?: DesktopFocusParentVisibility | null;
+  focus_activity_scope?: DesktopFocusActivityScope | null;
+  focus_github_event_routing?: DesktopFocusGitHubEventRouting | null;
+  focus_settings?: Partial<DesktopFocusRoomSettings> | null;
+  concluded_at?: string | null;
+  conclusion_summary?: string | null;
+  conclusion_details?: Partial<DesktopFocusRoomConclusionDetails> | null;
 };
 
 const joinedRoomInfoCache = new Map<string, RoomInfoPayload>();
@@ -75,6 +90,7 @@ export function mapDesktopRoomInfoPayload(
   payload: RoomInfoPayload,
 ): DesktopRoomInfo {
   const canonicalIdentifier = payload.room_id || requestedRoomIdentifier;
+  const focusSettings = normalizeRoomFocusSettings(payload);
   return {
     identifier: canonicalIdentifier,
     code: payload.code || "",
@@ -87,9 +103,87 @@ export function mapDesktopRoomInfoPayload(
     focusKey: payload.focus_key || null,
     sourceTaskId: payload.source_task_id || null,
     focusStatus: payload.focus_status || null,
+    focusParentVisibility: focusSettings?.parent_visibility || null,
+    focusActivityScope: focusSettings?.activity_scope || null,
+    focusGitHubEventRouting: focusSettings?.github_event_routing || null,
+    focusSettings,
+    concludedAt: payload.concluded_at || null,
+    conclusionSummary: payload.conclusion_summary || null,
+    conclusionDetails: normalizeRoomConclusionDetails(payload.conclusion_details),
   };
 }
 
 export function clearJoinedRoomInfoCache(): void {
   joinedRoomInfoCache.clear();
+}
+
+function normalizeRoomFocusSettings(payload: RoomInfoPayload): DesktopFocusRoomSettings | null {
+  if (payload.kind !== "focus") return null;
+  return {
+    parent_visibility:
+      normalizeParentVisibility(payload.focus_settings?.parent_visibility)
+      || normalizeParentVisibility(payload.focus_parent_visibility)
+      || "summary_only",
+    activity_scope:
+      normalizeActivityScope(payload.focus_settings?.activity_scope)
+      || normalizeActivityScope(payload.focus_activity_scope)
+      || "task_and_branch",
+    github_event_routing:
+      normalizeGitHubEventRouting(payload.focus_settings?.github_event_routing)
+      || normalizeGitHubEventRouting(payload.focus_github_event_routing)
+      || "task_and_branch",
+  };
+}
+
+function normalizeParentVisibility(value: unknown): DesktopFocusParentVisibility | null {
+  return value === "summary_only"
+    || value === "major_activity"
+    || value === "all_activity"
+    || value === "silent"
+    ? value
+    : null;
+}
+
+function normalizeActivityScope(value: unknown): DesktopFocusActivityScope | null {
+  return value === "task_and_branch" || value === "task_only" || value === "room"
+    ? value
+    : null;
+}
+
+function normalizeGitHubEventRouting(value: unknown): DesktopFocusGitHubEventRouting | null {
+  return value === "task_and_branch"
+    || value === "focus_owned_only"
+    || value === "task_only"
+    || value === "all_parent_repo"
+    || value === "off"
+    ? value
+    : null;
+}
+
+function normalizeRoomConclusionDetails(value: RoomInfoPayload["conclusion_details"]): DesktopFocusRoomConclusionDetails | null {
+  if (!value) return null;
+  return {
+    artifact: value.artifact || "",
+    review_state:
+      value.review_state === "reviewed"
+      || value.review_state === "needs_review"
+      || value.review_state === "not_required"
+        ? value.review_state
+        : "needs_review",
+    blocker_state:
+      value.blocker_state === "none"
+      || value.blocker_state === "resolved"
+      || value.blocker_state === "blocked"
+        ? value.blocker_state
+        : "none",
+    parent_task_next:
+      value.parent_task_next === "keep_open"
+      || value.parent_task_next === "move_to_review"
+      || value.parent_task_next === "mark_blocked"
+      || value.parent_task_next === "mark_done"
+      || value.parent_task_next === "follow_up"
+        ? value.parent_task_next
+        : "keep_open",
+    next_owner: value.next_owner || "",
+  };
 }

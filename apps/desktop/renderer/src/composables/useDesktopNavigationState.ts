@@ -80,6 +80,13 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
         focusKey: null,
         sourceTaskId: null,
         focusStatus: null,
+        focusParentVisibility: null,
+        focusActivityScope: null,
+        focusGitHubEventRouting: null,
+        focusSettings: null,
+        concludedAt: null,
+        conclusionSummary: null,
+        conclusionDetails: null,
       };
     }
     return options.selectedSnapshot.value.room;

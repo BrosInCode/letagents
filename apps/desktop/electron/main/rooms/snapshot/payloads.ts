@@ -8,8 +8,41 @@ export interface FocusRoomsResponse {
     name: string | null;
     display_name: string;
     code: string | null;
+    kind?: "main" | "focus";
+    attachments_enabled?: boolean;
+    parent_room_id?: string | null;
+    focus_key?: string | null;
     source_task_id: string | null;
     focus_status: "active" | "concluded" | null;
+    focus_parent_visibility?: "summary_only" | "major_activity" | "all_activity" | "silent" | null;
+    focus_activity_scope?: "task_and_branch" | "task_only" | "room" | null;
+    focus_github_event_routing?:
+      | "task_and_branch"
+      | "focus_owned_only"
+      | "task_only"
+      | "all_parent_repo"
+      | "off"
+      | null;
+    focus_settings?: {
+      parent_visibility?: "summary_only" | "major_activity" | "all_activity" | "silent" | null;
+      activity_scope?: "task_and_branch" | "task_only" | "room" | null;
+      github_event_routing?:
+        | "task_and_branch"
+        | "focus_owned_only"
+        | "task_only"
+        | "all_parent_repo"
+        | "off"
+        | null;
+    } | null;
+    concluded_at?: string | null;
+    conclusion_summary?: string | null;
+    conclusion_details?: {
+      artifact?: string | null;
+      review_state?: "reviewed" | "needs_review" | "not_required" | null;
+      blocker_state?: "none" | "resolved" | "blocked" | null;
+      parent_task_next?: "keep_open" | "move_to_review" | "mark_blocked" | "mark_done" | "follow_up" | null;
+      next_owner?: string | null;
+    } | null;
     created_at: string;
   }>;
 }

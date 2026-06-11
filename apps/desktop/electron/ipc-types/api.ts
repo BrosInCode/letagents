@@ -6,6 +6,9 @@ import type {
   DesktopAccountRoomEntry,
   DesktopAccountRoomListOptions,
   DesktopDroppedAttachmentContent,
+  DesktopFocusRoomConclusionDetails,
+  DesktopFocusRoomMutationResult,
+  DesktopFocusRoomSettingsPatch,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopChatStorageSettings,
@@ -93,6 +96,25 @@ export interface DesktopApi {
       taskId: string,
       input: DesktopTaskReviewWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
+    createTaskFocusRoom: (
+      roomIdentifier: string,
+      taskId: string
+    ) => Promise<DesktopFocusRoomMutationResult>;
+    createAdHocFocusRoom: (
+      roomIdentifier: string,
+      title: string
+    ) => Promise<DesktopFocusRoomMutationResult>;
+    updateFocusRoomSettings: (
+      roomIdentifier: string,
+      focusKey: string,
+      settings: DesktopFocusRoomSettingsPatch
+    ) => Promise<DesktopFocusRoomMutationResult>;
+    concludeFocusRoom: (
+      roomIdentifier: string,
+      focusKey: string,
+      summary: string,
+      details: DesktopFocusRoomConclusionDetails | null
+    ) => Promise<DesktopFocusRoomMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
