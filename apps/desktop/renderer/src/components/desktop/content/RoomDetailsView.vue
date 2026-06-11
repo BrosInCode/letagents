@@ -147,20 +147,15 @@
           />
         </label>
 
-        <div class="focus-room-tabs" role="tablist" aria-label="Room manager view">
-          <button
-            v-for="tab in tabs"
-            :key="tab.id"
-            type="button"
-            role="tab"
-            :aria-selected="activeTab === tab.id"
-            :data-active="activeTab === tab.id"
-            @click="activeTab = tab.id"
-          >
-            <span class="focus-room-tab-label">{{ tab.label }}</span>
-            <span class="focus-room-tab-count">{{ tab.count }}</span>
-          </button>
-        </div>
+        <DesktopSegmentedControl
+          class="focus-room-tabs"
+          :model-value="activeTab"
+          :options="tabOptions"
+          label="Room manager view"
+          mode="tabs"
+          size="large"
+          @update:model-value="setActiveTab"
+        />
       </div>
 
       <form class="focus-room-create" data-testid="create-ad-hoc-focus-room" @submit.prevent="createAdHocFocusRoom">
@@ -179,194 +174,202 @@
 
       <div class="focus-room-layout">
         <main class="focus-room-list-pane" data-testid="focus-room-list">
-          <template v-if="activeTab !== 'tasks'">
-            <button
-              v-for="focusRoom in visibleFocusRooms"
-              :key="focusRoom.roomId"
-              class="focus-room-row"
-              type="button"
-              :data-selected="selectedFocusRoom?.roomId === focusRoom.roomId"
-              :data-testid="`room-focus-${focusRoom.roomId}`"
-              @click="selectFocusRoom(focusRoom.roomId)"
-            >
-              <span class="focus-room-dot" :data-state="focusRoom.focusStatus || 'active'"></span>
-              <span class="focus-room-row-copy">
-                <strong>{{ focusRoom.displayName }}</strong>
-                <span>{{ focusRoom.sourceTaskId || focusRoom.code || focusRoom.identifier }}</span>
-              </span>
-              <span class="focus-room-row-meta">
-                <span class="focus-room-state" :data-state="focusRoom.focusStatus || 'active'">
-                  {{ statusLabel(focusRoom.focusStatus || "active") }}
-                </span>
-                <small>{{ formatDate(focusRoom.createdAt) }}</small>
-              </span>
-            </button>
+          <Transition name="focus-room-filter" mode="out-in">
+            <div v-if="activeTab !== 'tasks'" :key="`focus-${activeTab}`" class="focus-room-list-set">
+              <TransitionGroup name="focus-room-row-motion" tag="div" class="focus-room-row-list">
+                <button
+                  v-for="focusRoom in visibleFocusRooms"
+                  :key="focusRoom.roomId"
+                  class="focus-room-row"
+                  type="button"
+                  :data-selected="selectedFocusRoom?.roomId === focusRoom.roomId"
+                  :data-testid="`room-focus-${focusRoom.roomId}`"
+                  @click="selectFocusRoom(focusRoom.roomId)"
+                >
+                  <span class="focus-room-dot" :data-state="focusRoom.focusStatus || 'active'"></span>
+                  <span class="focus-room-row-copy">
+                    <strong>{{ focusRoom.displayName }}</strong>
+                    <span>{{ focusRoom.sourceTaskId || focusRoom.code || focusRoom.identifier }}</span>
+                  </span>
+                  <span class="focus-room-row-meta">
+                    <span class="focus-room-state" :data-state="focusRoom.focusStatus || 'active'">
+                      {{ statusLabel(focusRoom.focusStatus || "active") }}
+                    </span>
+                    <small>{{ formatDate(focusRoom.createdAt) }}</small>
+                  </span>
+                </button>
+              </TransitionGroup>
 
-            <article v-if="!visibleFocusRooms.length" class="focus-room-empty" data-testid="room-focus-empty">
-              <h3>{{ activeTab === "concluded" ? "No closed focus rooms" : "No open focus rooms" }}</h3>
-              <p>{{ searchQuery ? "No rooms match this search." : "No matching records in this room." }}</p>
-            </article>
-          </template>
+              <article v-if="!visibleFocusRooms.length" class="focus-room-empty" data-testid="room-focus-empty">
+                <h3>{{ activeTab === "concluded" ? "No closed focus rooms" : "No open focus rooms" }}</h3>
+                <p>{{ searchQuery ? "No rooms match this search." : "No matching records in this room." }}</p>
+              </article>
+            </div>
 
-          <template v-else>
-            <button
-              v-for="task in visibleTasks"
-              :key="task.id"
-              class="focus-room-row task-row"
-              type="button"
-              :data-selected="selectedTask?.id === task.id"
-              :data-testid="`room-task-${task.id}`"
-              @click="selectTask(task.id)"
-            >
-              <span class="focus-room-task-mark">{{ taskInitial(task.title) }}</span>
-              <span class="focus-room-row-copy">
-                <strong>{{ task.title }}</strong>
-                <span>{{ task.assignee || task.description || task.id }}</span>
-              </span>
-              <span class="focus-room-row-meta">
-                <span class="focus-room-state">{{ statusLabel(task.status) }}</span>
-                <small>{{ focusRoomByTaskId.get(task.id) ? "Has room" : task.id }}</small>
-              </span>
-            </button>
+            <div v-else key="tasks" class="focus-room-list-set">
+              <TransitionGroup name="focus-room-row-motion" tag="div" class="focus-room-row-list">
+                <button
+                  v-for="task in visibleTasks"
+                  :key="task.id"
+                  class="focus-room-row task-row"
+                  type="button"
+                  :data-selected="selectedTask?.id === task.id"
+                  :data-testid="`room-task-${task.id}`"
+                  @click="selectTask(task.id)"
+                >
+                  <span class="focus-room-task-mark">{{ taskInitial(task.title) }}</span>
+                  <span class="focus-room-row-copy">
+                    <strong>{{ task.title }}</strong>
+                    <span>{{ task.assignee || task.description || task.id }}</span>
+                  </span>
+                  <span class="focus-room-row-meta">
+                    <span class="focus-room-state">{{ statusLabel(task.status) }}</span>
+                    <small>{{ focusRoomByTaskId.get(task.id) ? "Has room" : task.id }}</small>
+                  </span>
+                </button>
+              </TransitionGroup>
 
-            <article v-if="!visibleTasks.length" class="focus-room-empty" data-testid="room-tasks-empty">
-              <h3>No matching tasks</h3>
-              <p>{{ searchQuery ? "No tasks match this search." : "Open tasks will appear here." }}</p>
-            </article>
-          </template>
+              <article v-if="!visibleTasks.length" class="focus-room-empty" data-testid="room-tasks-empty">
+                <h3>No matching tasks</h3>
+                <p>{{ searchQuery ? "No tasks match this search." : "Open tasks will appear here." }}</p>
+              </article>
+            </div>
+          </Transition>
         </main>
 
         <aside id="focus-room-detail-panel" class="focus-room-detail" data-testid="focus-room-detail-panel">
-          <template v-if="selectedFocusRoom">
-            <div class="focus-room-detail-header">
-              <div>
-                <p class="focus-room-kicker">Focus room</p>
-                <h3>{{ selectedFocusRoom.displayName }}</h3>
+          <Transition name="focus-room-detail-motion" mode="out-in">
+            <div v-if="selectedFocusRoom" :key="`focus-${selectedFocusRoom.roomId}`" class="focus-room-detail-content">
+              <div class="focus-room-detail-header">
+                <div>
+                  <p class="focus-room-kicker">Focus room</p>
+                  <h3>{{ selectedFocusRoom.displayName }}</h3>
+                </div>
+                <span class="focus-room-state" :data-state="selectedFocusRoom.focusStatus || 'active'">
+                  {{ statusLabel(selectedFocusRoom.focusStatus || "active") }}
+                </span>
               </div>
-              <span class="focus-room-state" :data-state="selectedFocusRoom.focusStatus || 'active'">
-                {{ statusLabel(selectedFocusRoom.focusStatus || "active") }}
-              </span>
-            </div>
 
-            <dl class="focus-room-facts">
-              <div>
-                <dt>Source</dt>
-                <dd>{{ selectedFocusRoom.sourceTaskId || "Ad-hoc" }}</dd>
-              </div>
-              <div>
-                <dt>Room</dt>
-                <dd>{{ selectedFocusRoom.code || selectedFocusRoom.identifier }}</dd>
-              </div>
-              <div>
-                <dt>Created</dt>
-                <dd>{{ formatDate(selectedFocusRoom.createdAt) }}</dd>
-              </div>
-              <div>
-                <dt>Updates</dt>
-                <dd>{{ parentVisibilityLabel(selectedFocusRoomSettings.parent_visibility) }}</dd>
-              </div>
-              <div>
-                <dt>Scope</dt>
-                <dd>{{ activityScopeLabel(selectedFocusRoomSettings.activity_scope) }}</dd>
-              </div>
-              <div>
-                <dt>GitHub</dt>
-                <dd>{{ githubRoutingLabel(selectedFocusRoomSettings.github_event_routing) }}</dd>
-              </div>
-            </dl>
+              <dl class="focus-room-facts">
+                <div>
+                  <dt>Source</dt>
+                  <dd>{{ selectedFocusRoom.sourceTaskId || "Ad-hoc" }}</dd>
+                </div>
+                <div>
+                  <dt>Room</dt>
+                  <dd>{{ selectedFocusRoom.code || selectedFocusRoom.identifier }}</dd>
+                </div>
+                <div>
+                  <dt>Created</dt>
+                  <dd>{{ formatDate(selectedFocusRoom.createdAt) }}</dd>
+                </div>
+                <div>
+                  <dt>Updates</dt>
+                  <dd>{{ parentVisibilityLabel(selectedFocusRoomSettings.parent_visibility) }}</dd>
+                </div>
+                <div>
+                  <dt>Scope</dt>
+                  <dd>{{ activityScopeLabel(selectedFocusRoomSettings.activity_scope) }}</dd>
+                </div>
+                <div>
+                  <dt>GitHub</dt>
+                  <dd>{{ githubRoutingLabel(selectedFocusRoomSettings.github_event_routing) }}</dd>
+                </div>
+              </dl>
 
-            <section class="focus-room-outcome">
-              <h4>Result</h4>
-              <p>{{ selectedFocusRoom.conclusionSummary || "No result shared yet." }}</p>
-            </section>
+              <section class="focus-room-outcome">
+                <h4>Result</h4>
+                <p>{{ selectedFocusRoom.conclusionSummary || "No result shared yet." }}</p>
+              </section>
 
-            <form
-              v-if="selectedFocusRoom.focusStatus !== 'concluded' && selectedFocusKey"
-              class="focus-room-form compact"
-              @submit.prevent="saveSettings"
-            >
-              <div class="focus-room-section-heading">
-                <h4>Routing</h4>
-                <span v-if="settingsChanged">Unsaved</span>
-              </div>
-              <div class="focus-room-select-grid single">
-                <DesktopSelectField
-                  v-model="settingsDraft.parent_visibility"
-                  label="Parent updates"
-                  :options="parentVisibilityOptions"
-                  :disabled="savingSettings"
-                />
-                <DesktopSelectField
-                  v-model="settingsDraft.activity_scope"
-                  label="Activity scope"
-                  :options="activityScopeOptions"
-                  :disabled="savingSettings"
-                />
-                <DesktopSelectField
-                  v-model="settingsDraft.github_event_routing"
-                  label="GitHub routing"
-                  :options="githubRoutingOptions"
-                  :disabled="savingSettings"
-                />
-              </div>
-              <button class="focus-room-secondary" type="submit" :disabled="!settingsChanged || savingSettings">
-                {{ savingSettings ? "Saving..." : "Save routing" }}
+              <form
+                v-if="selectedFocusRoom.focusStatus !== 'concluded' && selectedFocusKey"
+                class="focus-room-form compact"
+                @submit.prevent="saveSettings"
+              >
+                <div class="focus-room-section-heading">
+                  <h4>Routing</h4>
+                  <span v-if="settingsChanged">Unsaved</span>
+                </div>
+                <div class="focus-room-select-grid single">
+                  <DesktopSelectField
+                    v-model="settingsDraft.parent_visibility"
+                    label="Parent updates"
+                    :options="parentVisibilityOptions"
+                    :disabled="savingSettings"
+                  />
+                  <DesktopSelectField
+                    v-model="settingsDraft.activity_scope"
+                    label="Activity scope"
+                    :options="activityScopeOptions"
+                    :disabled="savingSettings"
+                  />
+                  <DesktopSelectField
+                    v-model="settingsDraft.github_event_routing"
+                    label="GitHub routing"
+                    :options="githubRoutingOptions"
+                    :disabled="savingSettings"
+                  />
+                </div>
+                <button class="focus-room-secondary" type="submit" :disabled="!settingsChanged || savingSettings">
+                  {{ savingSettings ? "Saving..." : "Save routing" }}
+                </button>
+              </form>
+
+              <button class="focus-room-primary wide" type="button" @click="openFocusRoom(selectedFocusRoom.identifier)">
+                Open room
+                <ArrowRight :size="15" aria-hidden="true" />
               </button>
-            </form>
-
-            <button class="focus-room-primary wide" type="button" @click="openFocusRoom(selectedFocusRoom.identifier)">
-              Open room
-              <ArrowRight :size="15" aria-hidden="true" />
-            </button>
-          </template>
-
-          <template v-else-if="selectedTask">
-            <div class="focus-room-detail-header">
-              <div>
-                <p class="focus-room-kicker">Task</p>
-                <h3>{{ selectedTask.title }}</h3>
-              </div>
-              <span class="focus-room-state">{{ statusLabel(selectedTask.status) }}</span>
             </div>
 
-            <dl class="focus-room-facts">
-              <div>
-                <dt>Task id</dt>
-                <dd>{{ selectedTask.id }}</dd>
+            <div v-else-if="selectedTask" :key="`task-${selectedTask.id}`" class="focus-room-detail-content">
+              <div class="focus-room-detail-header">
+                <div>
+                  <p class="focus-room-kicker">Task</p>
+                  <h3>{{ selectedTask.title }}</h3>
+                </div>
+                <span class="focus-room-state">{{ statusLabel(selectedTask.status) }}</span>
               </div>
-              <div>
-                <dt>Assignee</dt>
-                <dd>{{ selectedTask.assignee || "Unassigned" }}</dd>
-              </div>
-              <div>
-                <dt>Focus room</dt>
-                <dd>{{ currentTaskFocusRoom?.displayName || "Not opened" }}</dd>
-              </div>
-              <div>
-                <dt>Updated</dt>
-                <dd>{{ formatDate(selectedTask.updatedAt) }}</dd>
-              </div>
-            </dl>
 
-            <p v-if="selectedTask.description" class="focus-room-task-description">
-              {{ selectedTask.description }}
-            </p>
+              <dl class="focus-room-facts">
+                <div>
+                  <dt>Task id</dt>
+                  <dd>{{ selectedTask.id }}</dd>
+                </div>
+                <div>
+                  <dt>Assignee</dt>
+                  <dd>{{ selectedTask.assignee || "Unassigned" }}</dd>
+                </div>
+                <div>
+                  <dt>Focus room</dt>
+                  <dd>{{ currentTaskFocusRoom?.displayName || "Not opened" }}</dd>
+                </div>
+                <div>
+                  <dt>Updated</dt>
+                  <dd>{{ formatDate(selectedTask.updatedAt) }}</dd>
+                </div>
+              </dl>
 
-            <button
-              class="focus-room-primary wide"
-              type="button"
-              :disabled="creatingTaskFocus"
-              @click="openOrCreateTaskFocusRoom(selectedTask)"
-            >
-              {{ currentTaskFocusRoom ? "Open focus room" : creatingTaskFocus ? "Opening..." : "Create focus room" }}
-              <ArrowRight :size="15" aria-hidden="true" />
-            </button>
-          </template>
+              <p v-if="selectedTask.description" class="focus-room-task-description">
+                {{ selectedTask.description }}
+              </p>
 
-          <article v-else class="focus-room-empty detail-empty">
-            <h3>No selection</h3>
-            <p>Nothing selected.</p>
-          </article>
+              <button
+                class="focus-room-primary wide"
+                type="button"
+                :disabled="creatingTaskFocus"
+                @click="openOrCreateTaskFocusRoom(selectedTask)"
+              >
+                {{ currentTaskFocusRoom ? "Open focus room" : creatingTaskFocus ? "Opening..." : "Create focus room" }}
+                <ArrowRight :size="15" aria-hidden="true" />
+              </button>
+            </div>
+
+            <article v-else key="empty" class="focus-room-empty detail-empty">
+              <h3>No selection</h3>
+              <p>Nothing selected.</p>
+            </article>
+          </Transition>
         </aside>
       </div>
     </template>
@@ -380,6 +383,7 @@
 <script setup lang="ts">
 import { ArrowRight, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, reactive, ref, watch } from "vue";
+import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import type {
   DesktopFocusActivityScope,
@@ -557,7 +561,7 @@ const canShareResult = computed(() => {
   return Boolean(closeoutDetails.artifact.trim() && closeoutDetails.next_owner.trim());
 });
 
-const tabs = computed(() => [
+const tabOptions = computed(() => [
   { id: "open" as const, label: "Open", count: openFocusRooms.value.length },
   { id: "concluded" as const, label: "Closed", count: concludedFocusRooms.value.length },
   { id: "tasks" as const, label: "Tasks", count: candidateTasks.value.length },
@@ -668,6 +672,10 @@ function selectFocusRoom(roomId: string): void {
 function selectTask(taskId: string): void {
   selectedTaskId.value = taskId;
   selectedFocusRoomId.value = null;
+}
+
+function setActiveTab(tab: string): void {
+  activeTab.value = tab as FocusRoomTab;
 }
 
 function openFocusRoom(roomIdentifier: string): void {
@@ -948,7 +956,6 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-icon-button,
 .focus-room-primary,
 .focus-room-secondary,
-.focus-room-tabs button,
 .focus-room-create button {
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.05);
@@ -985,7 +992,6 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-icon-button:focus-visible,
-.focus-room-tabs button:focus-visible,
 .focus-room-row:focus-visible,
 .focus-room-primary:focus-visible,
 .focus-room-secondary:focus-visible,
@@ -1054,83 +1060,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 .focus-room-tabs {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 12px;
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.024);
-  transition:
-    border-color 150ms var(--ease-out),
-    background 150ms var(--ease-out);
-}
-
-.focus-room-tabs button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 0 22px;
-  border: 1px solid transparent;
-  border-radius: 16px;
-  background: transparent;
-  color: var(--text-tertiary);
-  font-weight: 850;
-  cursor: pointer;
-  transition:
-    transform 150ms var(--ease-out),
-    border-color 150ms var(--ease-out),
-    background 150ms var(--ease-out),
-    color 150ms var(--ease-out);
-}
-
-.focus-room-tabs button[data-active="true"] {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.12);
-  color: var(--text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-
-.focus-room-tabs button:hover {
-  transform: translateY(-1px);
-  color: var(--text-secondary);
-}
-
-.focus-room-tabs button[data-active="true"]:hover {
-  color: var(--text);
-}
-
-.focus-room-tabs button:active {
-  transform: translateY(0) scale(0.98);
-}
-
-.focus-room-tab-label {
-  line-height: 1;
-}
-
-.focus-room-tab-count {
-  min-width: 22px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text-secondary);
-  font-size: 0.72rem;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  text-align: center;
-  transition:
-    background 150ms var(--ease-out),
-    color 150ms var(--ease-out),
-    transform 150ms var(--ease-out);
-}
-
-.focus-room-tabs button[data-active="true"] .focus-room-tab-count {
-  background: rgba(147, 197, 253, 0.18);
-  color: #bfdbfe;
-  transform: scale(1.03);
+  flex: 0 0 auto;
 }
 
 .focus-room-create {
@@ -1255,8 +1185,56 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-list-pane {
   display: grid;
   align-content: start;
-  gap: 8px;
   padding: 10px;
+  overflow: hidden;
+}
+
+.focus-room-list-set,
+.focus-room-row-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.focus-room-row-list {
+  position: relative;
+}
+
+.focus-room-filter-enter-active,
+.focus-room-filter-leave-active {
+  transition:
+    opacity 170ms var(--ease-out),
+    transform 170ms var(--ease-out);
+}
+
+.focus-room-filter-enter-from,
+.focus-room-filter-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.992);
+}
+
+.focus-room-row-motion-enter-active,
+.focus-room-row-motion-leave-active {
+  transition:
+    opacity 170ms var(--ease-out),
+    transform 170ms var(--ease-out);
+}
+
+.focus-room-row-motion-move {
+  transition: transform 190ms var(--ease-out);
+}
+
+.focus-room-row-motion-enter-from,
+.focus-room-row-motion-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.992);
+}
+
+.focus-room-row-motion-leave-active {
+  position: absolute;
+  right: 0;
+  left: 0;
 }
 
 .focus-room-row {
@@ -1410,8 +1388,32 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-detail {
   display: grid;
   align-content: start;
-  gap: 18px;
+  overflow: hidden;
   padding: 22px;
+}
+
+.focus-room-detail-content {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  min-width: 0;
+}
+
+.focus-room-detail-motion-enter-active,
+.focus-room-detail-motion-leave-active {
+  transition:
+    opacity 170ms var(--ease-out),
+    transform 170ms var(--ease-out);
+}
+
+.focus-room-detail-motion-enter-from {
+  opacity: 0;
+  transform: translateX(10px) scale(0.992);
+}
+
+.focus-room-detail-motion-leave-to {
+  opacity: 0;
+  transform: translateX(-8px) scale(0.992);
 }
 
 .focus-room-detail-header,
@@ -1608,13 +1610,9 @@ function errorMessage(error: unknown, fallback: string): string {
     min-width: 0;
   }
 
-  .focus-room-tabs,
-  .focus-room-tabs button {
+  .focus-room-tabs {
     width: 100%;
-  }
-
-  .focus-room-tabs button {
-    justify-content: center;
+    overflow-x: auto;
   }
 
   .focus-room-facts,
@@ -1635,9 +1633,6 @@ function errorMessage(error: unknown, fallback: string): string {
 
   .focus-room-icon-button:hover,
   .focus-room-icon-button:hover svg,
-  .focus-room-tabs button:hover,
-  .focus-room-tabs button:active,
-  .focus-room-tab-count,
   .focus-room-primary:not(:disabled):hover,
   .focus-room-primary:not(:disabled):hover svg,
   .focus-room-secondary:not(:disabled):hover,
