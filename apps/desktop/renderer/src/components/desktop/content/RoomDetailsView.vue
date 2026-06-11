@@ -157,8 +157,8 @@
             :data-active="activeTab === tab.id"
             @click="activeTab = tab.id"
           >
-            {{ tab.label }}
-            <span>{{ tab.count }}</span>
+            <span class="focus-room-tab-label">{{ tab.label }}</span>
+            <span class="focus-room-tab-count">{{ tab.count }}</span>
           </button>
         </div>
       </div>
@@ -994,9 +994,10 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-tabs button {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 10px;
   min-height: 32px;
-  padding: 0 12px;
+  padding: 0 14px;
   border-radius: 10px;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1007,9 +1008,15 @@ function errorMessage(error: unknown, fallback: string): string {
   color: var(--text);
 }
 
-.focus-room-tabs span {
+.focus-room-tab-label {
+  line-height: 1;
+}
+
+.focus-room-tab-count {
   color: var(--text-tertiary);
   font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .focus-room-create {
