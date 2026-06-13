@@ -17,6 +17,7 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
+const archiveFocusRoom = dbModule?.archiveFocusRoom;
 const concludeFocusRoom = dbModule?.concludeFocusRoom;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createTask = dbModule?.createTask;
@@ -238,6 +239,52 @@ test(
     assert.equal(updated?.focus_parent_visibility, "major_activity");
     assert.equal(updated?.focus_activity_scope, "task_only");
     assert.equal(updated?.focus_github_event_routing, "off");
+  }
+);
+
+test(
+  "archiveFocusRoom hides focus rooms and is idempotent",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed focus room tests" : false,
+  },
+  async () => {
+    if (
+      !archiveFocusRoom ||
+      !createProjectWithName ||
+      !createTask ||
+      !createFocusRoomForTask ||
+      !getFocusRoomByKey ||
+      !getFocusRoomsForParent
+    ) {
+      throw new Error("DB-backed focus room tests require TEST_DB_URL");
+    }
+
+    const parent = await createProjectWithName("focus-archive-db");
+    const task = await createTask(parent.id, "Archive Focus Room", "FoxSage");
+    const focus = await createFocusRoomForTask(parent.id, task.id);
+    assert.ok(focus);
+
+    const archived = await archiveFocusRoom(parent.id, task.id);
+    assert.ok(archived);
+    assert.equal(archived.archived, true);
+    assert.equal(archived.room.id, focus.room.id);
+    assert.ok(archived.room.focus_archived_at);
+
+    const defaultFocusRooms = await getFocusRoomsForParent(parent.id);
+    assert.equal(defaultFocusRooms.length, 0);
+    assert.equal(await getFocusRoomByKey(parent.id, task.id), undefined);
+
+    const archivedByKey = await getFocusRoomByKey(parent.id, task.id, {
+      includeArchived: true,
+    });
+    assert.equal(archivedByKey?.id, focus.room.id);
+
+    const repeated = await archiveFocusRoom(parent.id, task.id);
+    assert.ok(repeated);
+    assert.equal(repeated.archived, false);
+    assert.equal(repeated.room.id, focus.room.id);
+    assert.equal(repeated.room.focus_archived_at, archived.room.focus_archived_at);
   }
 );
 

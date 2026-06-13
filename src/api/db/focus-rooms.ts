@@ -131,7 +131,10 @@ export async function archiveFocusRoom(
 ): Promise<{ room: Project; archived: boolean } | null> {
   const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey);
   if (!focusRoom) {
-    return null;
+    const archivedFocusRoom = await getFocusRoomByKey(parentRoomId, focusKey, {
+      includeArchived: true,
+    });
+    return archivedFocusRoom ? { room: archivedFocusRoom, archived: false } : null;
   }
 
   const [updated] = await db
@@ -149,7 +152,9 @@ export async function archiveFocusRoom(
     return { room: toProject(updated), archived: true };
   }
 
-  const current = await getFocusRoomByKey(parentRoomId, focusKey);
+  const current = await getFocusRoomByKey(parentRoomId, focusKey, {
+    includeArchived: true,
+  });
   return current ? { room: current, archived: false } : null;
 }
 
