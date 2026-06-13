@@ -1,6 +1,7 @@
 import type { Express, Response } from "express";
 
 import {
+  archiveFocusRoom,
   assignProjectAdmin,
   concludeFocusRoom,
   createFocusRoomFromIntent,
@@ -55,6 +56,11 @@ export interface RoomFocusRouteDeps {
     options?: { allowCreate: boolean }
   ): Promise<Project | null>;
   requireParticipant(
+    req: AuthenticatedRequest,
+    res: Response,
+    project: Project
+  ): Promise<boolean>;
+  requireAdmin(
     req: AuthenticatedRequest,
     res: Response,
     project: Project
@@ -246,6 +252,34 @@ export function registerRoomFocusRoutes(
         "Focus Room could not be opened."
       );
     }
+  });
+
+  app.delete(/^\/rooms\/(.+)\/focus\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const focusKey = decodeURIComponent((req.params as Record<string, string>)[1] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+
+    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: false });
+    if (!project) return;
+
+    if (!(await deps.requireAdmin(req, res, project))) return;
+
+    const result = await archiveFocusRoom(project.id, focusKey);
+    if (!result) {
+      res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
+      return;
+    }
+
+    const role = await deps.resolveProjectRole(result.room, req.sessionAccount);
+    res.json({
+      room_id: project.id,
+      focus_key: focusKey,
+      archived: result.archived,
+      focus_room: deps.toRoomResponse(result.room, {
+        role,
+        authenticated: Boolean(req.sessionAccount),
+      }),
+    });
   });
 
   app.post(/^\/rooms\/(.+)\/focus\/([^/]+)\/conclude$/, async (req: AuthenticatedRequest, res) => {

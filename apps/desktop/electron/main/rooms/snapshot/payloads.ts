@@ -34,6 +34,7 @@ export interface FocusRoomsResponse {
         | "off"
         | null;
     } | null;
+    focus_archived_at?: string | null;
     concluded_at?: string | null;
     conclusion_summary?: string | null;
     conclusion_details?: {

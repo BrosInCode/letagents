@@ -45,6 +45,7 @@ export interface AccountRoomProject {
   focus_key: string | null;
   source_task_id: string | null;
   focus_status: FocusRoomStatus | null;
+  focus_archived_at: string | null;
   created_at: string;
 }
 

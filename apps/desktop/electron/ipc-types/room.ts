@@ -29,6 +29,7 @@ export interface DesktopRoomInfo {
   focusActivityScope: DesktopFocusActivityScope | null;
   focusGitHubEventRouting: DesktopFocusGitHubEventRouting | null;
   focusSettings: DesktopFocusRoomSettings | null;
+  focusArchivedAt: string | null;
   concludedAt: string | null;
   conclusionSummary: string | null;
   conclusionDetails: DesktopFocusRoomConclusionDetails | null;
@@ -90,6 +91,7 @@ export interface DesktopFocusRoomInfo {
   focusActivityScope: DesktopFocusActivityScope | null;
   focusGitHubEventRouting: DesktopFocusGitHubEventRouting | null;
   focusSettings: DesktopFocusRoomSettings | null;
+  focusArchivedAt: string | null;
   concludedAt: string | null;
   conclusionSummary: string | null;
   conclusionDetails: DesktopFocusRoomConclusionDetails | null;

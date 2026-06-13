@@ -25,6 +25,7 @@ export type RoomInfoPayload = {
   focus_activity_scope?: DesktopFocusActivityScope | null;
   focus_github_event_routing?: DesktopFocusGitHubEventRouting | null;
   focus_settings?: Partial<DesktopFocusRoomSettings> | null;
+  focus_archived_at?: string | null;
   concluded_at?: string | null;
   conclusion_summary?: string | null;
   conclusion_details?: Partial<DesktopFocusRoomConclusionDetails> | null;
@@ -107,6 +108,7 @@ export function mapDesktopRoomInfoPayload(
     focusActivityScope: focusSettings?.activity_scope || null,
     focusGitHubEventRouting: focusSettings?.github_event_routing || null,
     focusSettings,
+    focusArchivedAt: payload.focus_archived_at || null,
     concludedAt: payload.concluded_at || null,
     conclusionSummary: payload.conclusion_summary || null,
     conclusionDetails: normalizeRoomConclusionDetails(payload.conclusion_details),

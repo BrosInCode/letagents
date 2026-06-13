@@ -62,6 +62,9 @@ export async function getAccountRoomsForAccount(
 
   for (const row of adminRows) {
     const project = toAccountRoomProject(row);
+    if (project.kind === "focus" && project.focus_archived_at) {
+      continue;
+    }
     addCandidate(normalizeAccountRoomCandidate(project, {
       role: "admin",
       source: "admin",
@@ -92,6 +95,9 @@ export async function getAccountRoomsForAccount(
 
     for (const row of participantRows) {
       const project = toAccountRoomProject(row);
+      if (project.kind === "focus" && project.focus_archived_at) {
+        continue;
+      }
       addCandidate(normalizeAccountRoomCandidate(project, {
         role: "participant",
         source: "participant",
@@ -114,6 +120,9 @@ export async function getAccountRoomsForAccount(
 
   for (const row of agentSessionRows) {
     const project = toAccountRoomProject(row);
+    if (project.kind === "focus" && project.focus_archived_at) {
+      continue;
+    }
     addCandidate(normalizeAccountRoomCandidate(project, {
       role: "participant",
       source: "agent",
@@ -142,6 +151,9 @@ export async function getAccountRoomsForAccount(
       ...toAccountRoomProject(row),
       display_name: row.recent_display_name || row.display_name,
     };
+    if (project.kind === "focus" && project.focus_archived_at) {
+      continue;
+    }
     addCandidate(normalizeAccountRoomCandidate(project, {
       role: "participant",
       source: row.source || "recent",
@@ -227,7 +239,11 @@ export async function getAccountRoomsForAccount(
     const focusRows = await db
       .select(roomSelectColumns)
       .from(rooms)
-      .where(and(eq(rooms.kind, "focus"), inArray(rooms.parent_room_id, [...parentRoomIds])))
+      .where(and(
+        eq(rooms.kind, "focus"),
+        inArray(rooms.parent_room_id, [...parentRoomIds]),
+        sql`${rooms.focus_archived_at} IS NULL`
+      ))
       .orderBy(asc(rooms.created_at));
 
     for (const row of focusRows) {

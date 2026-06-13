@@ -84,6 +84,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
         focusActivityScope: null,
         focusGitHubEventRouting: null,
         focusSettings: null,
+        focusArchivedAt: null,
         concludedAt: null,
         conclusionSummary: null,
         conclusionDetails: null,

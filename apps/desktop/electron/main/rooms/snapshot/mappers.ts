@@ -63,6 +63,7 @@ export function mapDesktopFocusRoomPayload(focusRoom: DesktopFocusRoomPayload): 
     focusActivityScope: settings.activity_scope,
     focusGitHubEventRouting: settings.github_event_routing,
     focusSettings: settings,
+    focusArchivedAt: focusRoom.focus_archived_at || null,
     concludedAt: focusRoom.concluded_at || null,
     conclusionSummary: focusRoom.conclusion_summary || null,
     conclusionDetails: normalizeConclusionDetails(focusRoom.conclusion_details),

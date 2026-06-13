@@ -185,6 +185,7 @@
                   :data-selected="selectedFocusRoom?.roomId === focusRoom.roomId"
                   :data-testid="`room-focus-${focusRoom.roomId}`"
                   @click="selectFocusRoom(focusRoom.roomId)"
+                  @contextmenu.prevent.stop="openFocusRoomContextMenu($event, focusRoom)"
                 >
                   <span class="focus-room-dot" :data-state="focusRoom.focusStatus || 'active'"></span>
                   <span class="focus-room-row-copy">
@@ -237,7 +238,12 @@
           </Transition>
         </main>
 
-        <aside id="focus-room-detail-panel" class="focus-room-detail" data-testid="focus-room-detail-panel">
+        <aside
+          id="focus-room-detail-panel"
+          class="focus-room-detail"
+          data-testid="focus-room-detail-panel"
+          @contextmenu.prevent.stop="selectedFocusRoom && openFocusRoomContextMenu($event, selectedFocusRoom)"
+        >
           <Transition name="focus-room-detail-motion" mode="out-in">
             <div v-if="selectedFocusRoom" :key="`focus-${selectedFocusRoom.roomId}`" class="focus-room-detail-content">
               <div class="focus-room-detail-header">
@@ -320,6 +326,37 @@
                 Open room
                 <ArrowRight :size="15" aria-hidden="true" />
               </button>
+
+              <div class="focus-room-actions">
+                <button
+                  class="focus-room-secondary"
+                  type="button"
+                  @click="copyFocusRoomUrl(selectedFocusRoom)"
+                >
+                  <Copy :size="15" aria-hidden="true" />
+                  Copy URL
+                </button>
+                <button
+                  v-if="selectedFocusRoom.focusStatus !== 'concluded'"
+                  class="focus-room-secondary"
+                  type="button"
+                  :disabled="closingFocusKey === focusKeyFor(selectedFocusRoom)"
+                  @click="closeFocusRoom(selectedFocusRoom)"
+                >
+                  <CheckCircle2 :size="15" aria-hidden="true" />
+                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Closing..." : "Close" }}
+                </button>
+                <button
+                  v-if="canArchiveFocusRooms"
+                  class="focus-room-danger"
+                  type="button"
+                  :disabled="archivingFocusKey === focusKeyFor(selectedFocusRoom)"
+                  @click="archiveFocusRoom(selectedFocusRoom)"
+                >
+                  <Archive :size="15" aria-hidden="true" />
+                  {{ archivingFocusKey === focusKeyFor(selectedFocusRoom) ? "Archiving..." : "Archive" }}
+                </button>
+              </div>
             </div>
 
             <div v-else-if="selectedTask" :key="`task-${selectedTask.id}`" class="focus-room-detail-content">
@@ -374,17 +411,61 @@
       </div>
     </template>
 
-    <p v-if="actionFeedback" class="focus-room-feedback" :data-state="actionFeedbackState">
-      {{ actionFeedback }}
-    </p>
+    <Teleport to="body">
+      <Transition name="focus-room-toast">
+        <p
+          v-if="actionFeedback"
+          class="focus-room-toast"
+          :data-state="actionFeedbackState"
+          role="status"
+          aria-live="polite"
+        >
+          {{ actionFeedback }}
+        </p>
+      </Transition>
+    </Teleport>
+
+    <div
+      v-if="focusRoomContextMenu"
+      class="focus-room-context-menu"
+      role="menu"
+      :style="{ left: `${focusRoomContextMenu.x}px`, top: `${focusRoomContextMenu.y}px` }"
+      data-testid="focus-room-context-menu"
+      @click.stop
+      @contextmenu.prevent
+    >
+      <p class="focus-room-context-title">{{ focusRoomContextMenu.room.displayName }}</p>
+      <button type="button" role="menuitem" @click="openContextFocusRoom">
+        <ExternalLink :size="15" aria-hidden="true" />
+        Open room
+      </button>
+      <button type="button" role="menuitem" @click="copyContextFocusRoomUrl">
+        <Copy :size="15" aria-hidden="true" />
+        Copy URL
+      </button>
+      <button
+        v-if="focusRoomContextMenu.room.focusStatus !== 'concluded'"
+        type="button"
+        role="menuitem"
+        @click="closeContextFocusRoom"
+      >
+        <CheckCircle2 :size="15" aria-hidden="true" />
+        Close room
+      </button>
+      <button v-if="canArchiveFocusRooms" type="button" role="menuitem" class="danger" @click="archiveContextFocusRoom">
+        <Archive :size="15" aria-hidden="true" />
+        Archive room
+      </button>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ArrowRight, Plus, RefreshCw, Search } from "@lucide/vue";
-import { computed, reactive, ref, watch } from "vue";
+import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
+import { encodeRoomPathIdentifier } from "./room-shell/messages";
 import type {
   DesktopFocusActivityScope,
   DesktopFocusRoomBlockerState,
@@ -401,6 +482,11 @@ import type {
 
 type FocusRoomTab = "open" | "concluded" | "tasks";
 type FeedbackState = "info" | "error" | "success";
+type FocusRoomContextMenu = {
+  room: DesktopFocusRoomInfo;
+  x: number;
+  y: number;
+};
 
 interface Option<T extends string> {
   value: T;
@@ -474,8 +560,12 @@ const creatingAdHoc = ref(false);
 const creatingTaskFocus = ref(false);
 const savingSettings = ref(false);
 const sharingResult = ref(false);
+const archivingFocusKey = ref<string | null>(null);
+const closingFocusKey = ref<string | null>(null);
 const actionFeedback = ref<string | null>(null);
 const actionFeedbackState = ref<FeedbackState>("info");
+const focusRoomContextMenu = ref<FocusRoomContextMenu | null>(null);
+let feedbackTimer: number | null = null;
 const resultSummary = ref("");
 const settingsDraft = reactive<DesktopFocusRoomSettings>({ ...DEFAULT_SETTINGS });
 const closeoutDetails = reactive<DesktopFocusRoomConclusionDetails>({
@@ -560,6 +650,8 @@ const canShareResult = computed(() => {
   if (!props.room.sourceTaskId) return true;
   return Boolean(closeoutDetails.artifact.trim() && closeoutDetails.next_owner.trim());
 });
+
+const canArchiveFocusRooms = computed(() => props.room.role === "admin");
 
 const tabOptions = computed(() => [
   { id: "open" as const, label: "Open", count: openFocusRooms.value.length },
@@ -682,6 +774,74 @@ function openFocusRoom(roomIdentifier: string): void {
   emit("open-focus-room", roomIdentifier);
 }
 
+function focusKeyFor(focusRoom: DesktopFocusRoomInfo | null): string | null {
+  return focusRoom?.focusKey || focusRoom?.sourceTaskId || null;
+}
+
+function focusRoomUrl(focusRoom: DesktopFocusRoomInfo): string {
+  const focusKey = focusRoom.focusKey || focusRoom.sourceTaskId;
+  const parentRoomId =
+    focusRoom.parentRoomId ||
+    (props.room.kind === "focus" ? props.room.parentRoomId : props.room.identifier);
+  if (parentRoomId && focusKey) {
+    return `https://letagents.chat/in/${encodeRoomPathIdentifier(parentRoomId)}/focus/${
+      encodeURIComponent(focusKey)
+    }`;
+  }
+  const roomIdentifier = focusRoom.roomId || focusRoom.identifier;
+  return `https://letagents.chat/in/${encodeRoomPathIdentifier(roomIdentifier)}`;
+}
+
+async function copyFocusRoomUrl(focusRoom: DesktopFocusRoomInfo): Promise<void> {
+  try {
+    if (!navigator.clipboard?.writeText) {
+      throw new Error("Clipboard is unavailable.");
+    }
+    await navigator.clipboard.writeText(focusRoomUrl(focusRoom));
+    setFeedback("Room URL copied.", "success");
+  } catch {
+    setFeedback("Room URL could not be copied.", "error");
+  }
+}
+
+function openFocusRoomContextMenu(event: MouseEvent, focusRoom: DesktopFocusRoomInfo): void {
+  const menuWidth = 224;
+  const menuHeight = focusRoom.focusStatus === "concluded" ? 184 : 224;
+  focusRoomContextMenu.value = {
+    room: focusRoom,
+    x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+    y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10)),
+  };
+}
+
+function closeFocusRoomContextMenu(): void {
+  focusRoomContextMenu.value = null;
+}
+
+function openContextFocusRoom(): void {
+  const focusRoom = focusRoomContextMenu.value?.room;
+  closeFocusRoomContextMenu();
+  if (focusRoom) openFocusRoom(focusRoom.identifier);
+}
+
+async function copyContextFocusRoomUrl(): Promise<void> {
+  const focusRoom = focusRoomContextMenu.value?.room;
+  closeFocusRoomContextMenu();
+  if (focusRoom) await copyFocusRoomUrl(focusRoom);
+}
+
+async function closeContextFocusRoom(): Promise<void> {
+  const focusRoom = focusRoomContextMenu.value?.room;
+  closeFocusRoomContextMenu();
+  if (focusRoom) await closeFocusRoom(focusRoom);
+}
+
+async function archiveContextFocusRoom(): Promise<void> {
+  const focusRoom = focusRoomContextMenu.value?.room;
+  closeFocusRoomContextMenu();
+  if (focusRoom) await archiveFocusRoom(focusRoom);
+}
+
 async function createAdHocFocusRoom(): Promise<void> {
   const title = adHocTitle.value.trim();
   if (!title || creatingAdHoc.value) return;
@@ -740,6 +900,71 @@ async function saveSettings(): Promise<void> {
     setFeedback(errorMessage(error, "Routing could not be saved."), "error");
   } finally {
     savingSettings.value = false;
+  }
+}
+
+async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
+  const focusKey = focusKeyFor(focusRoom);
+  const parentRoomId = focusRoom.parentRoomId || props.room.identifier;
+  if (!focusKey || !parentRoomId || closingFocusKey.value) return;
+
+  const summary = window.prompt(
+    `Close ${focusRoom.displayName} with a short result summary:`,
+    focusRoom.conclusionSummary || "Closed manually.",
+  )?.trim();
+  if (!summary) return;
+
+  closingFocusKey.value = focusKey;
+  setFeedback(null);
+  try {
+    await window.letagentsDesktop.room.concludeFocusRoom(
+      parentRoomId,
+      focusKey,
+      summary,
+      focusRoom.sourceTaskId
+        ? {
+            artifact: "Manual close",
+            review_state: "not_required",
+            blocker_state: "none",
+            parent_task_next: "keep_open",
+            next_owner: "Unassigned",
+          }
+        : null,
+    );
+    activeTab.value = "concluded";
+    selectedFocusRoomId.value = focusRoom.roomId;
+    emit("refresh-room");
+    setFeedback("Focus room closed.", "success");
+  } catch (error) {
+    setFeedback(errorMessage(error, "Focus room could not be closed."), "error");
+  } finally {
+    closingFocusKey.value = null;
+  }
+}
+
+async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
+  const focusKey = focusKeyFor(focusRoom);
+  const parentRoomId = focusRoom.parentRoomId || props.room.identifier;
+  if (!focusKey || !parentRoomId || archivingFocusKey.value) return;
+
+  const confirmed = window.confirm(
+    `Archive ${focusRoom.displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
+  );
+  if (!confirmed) return;
+
+  archivingFocusKey.value = focusKey;
+  setFeedback(null);
+  try {
+    await window.letagentsDesktop.room.archiveFocusRoom(parentRoomId, focusKey);
+    if (selectedFocusRoomId.value === focusRoom.roomId) {
+      selectedFocusRoomId.value = null;
+    }
+    emit("refresh-room");
+    setFeedback("Focus room archived.", "success");
+  } catch (error) {
+    setFeedback(errorMessage(error, "Focus room could not be archived."), "error");
+  } finally {
+    archivingFocusKey.value = null;
   }
 }
 
@@ -808,13 +1033,41 @@ function taskInitial(title: string): string {
 }
 
 function setFeedback(message: string | null, state: FeedbackState = "info"): void {
+  if (feedbackTimer !== null) {
+    window.clearTimeout(feedbackTimer);
+    feedbackTimer = null;
+  }
   actionFeedback.value = message;
   actionFeedbackState.value = state;
+  if (message) {
+    feedbackTimer = window.setTimeout(() => {
+      actionFeedback.value = null;
+      feedbackTimer = null;
+    }, 2400);
+  }
 }
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
+
+function handleGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") closeFocusRoomContextMenu();
+}
+
+onMounted(() => {
+  window.addEventListener("click", closeFocusRoomContextMenu);
+  window.addEventListener("keydown", handleGlobalKeydown);
+});
+
+onBeforeUnmount(() => {
+  if (feedbackTimer !== null) {
+    window.clearTimeout(feedbackTimer);
+    feedbackTimer = null;
+  }
+  window.removeEventListener("click", closeFocusRoomContextMenu);
+  window.removeEventListener("keydown", handleGlobalKeydown);
+});
 </script>
 
 <style scoped>
@@ -956,6 +1209,7 @@ function errorMessage(error: unknown, fallback: string): string {
 .focus-room-icon-button,
 .focus-room-primary,
 .focus-room-secondary,
+.focus-room-danger,
 .focus-room-create button {
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.05);
@@ -1089,7 +1343,8 @@ function errorMessage(error: unknown, fallback: string): string {
 
 .focus-room-create button,
 .focus-room-primary,
-.focus-room-secondary {
+.focus-room-secondary,
+.focus-room-danger {
   min-height: 32px;
   padding: 0 13px;
   border-radius: 999px;
@@ -1113,6 +1368,14 @@ function errorMessage(error: unknown, fallback: string): string {
   color: #0a0a0b;
 }
 
+.focus-room-secondary,
+.focus-room-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
 .focus-room-primary:not(:disabled):hover,
 .focus-room-create button:not(:disabled):hover {
   transform: translateY(-1px);
@@ -1131,14 +1394,27 @@ function errorMessage(error: unknown, fallback: string): string {
   justify-self: start;
 }
 
-.focus-room-secondary:not(:disabled):hover {
+.focus-room-danger {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.08);
+  border-color: rgba(248, 113, 113, 0.16);
+}
+
+.focus-room-secondary:not(:disabled):hover,
+.focus-room-danger:not(:disabled):hover {
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.08);
 }
 
+.focus-room-danger:not(:disabled):hover {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(248, 113, 113, 0.12);
+}
+
 .focus-room-primary:not(:disabled):active,
 .focus-room-secondary:not(:disabled):active,
+.focus-room-danger:not(:disabled):active,
 .focus-room-create button:not(:disabled):active {
   transform: translateY(0) scale(0.98);
 }
@@ -1150,6 +1426,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 .focus-room-primary:disabled,
 .focus-room-secondary:disabled,
+.focus-room-danger:disabled,
 .focus-room-create button:disabled {
   cursor: default;
   opacity: 0.48;
@@ -1397,6 +1674,20 @@ function errorMessage(error: unknown, fallback: string): string {
   min-width: 0;
 }
 
+.focus-room-actions {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.focus-room-actions .focus-room-secondary,
+.focus-room-actions .focus-room-danger {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 14px;
+  justify-self: stretch;
+}
+
 .focus-room-detail-motion-enter-active,
 .focus-room-detail-motion-leave-active {
   transition:
@@ -1558,28 +1849,120 @@ function errorMessage(error: unknown, fallback: string): string {
   padding: 0;
 }
 
-.focus-room-feedback {
+.focus-room-toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  z-index: 120;
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  max-width: min(420px, calc(100vw - 32px));
   margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.04);
-  animation: focus-room-feedback-in 180ms var(--ease-out) both;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(24, 24, 24, 0.92);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  transform: translateX(-50%);
+  pointer-events: none;
+  backdrop-filter: blur(18px);
+}
+
+.focus-room-toast[data-state="success"] {
+  border-color: rgba(52, 211, 153, 0.2);
+  color: #a7f3d0;
+}
+
+.focus-room-toast[data-state="error"] {
+  border-color: rgba(248, 113, 113, 0.28);
+  color: #fecaca;
+}
+
+.focus-room-toast-enter-active,
+.focus-room-toast-leave-active {
   transition:
-    border-color 150ms var(--ease-out),
-    color 150ms var(--ease-out),
-    background 150ms var(--ease-out);
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
 }
 
-.focus-room-feedback[data-state="success"] {
-  border-color: rgba(34, 197, 94, 0.22);
-  color: #86efac;
+.focus-room-toast-enter-from,
+.focus-room-toast-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -14px) scale(0.98);
 }
 
-.focus-room-feedback[data-state="error"] {
-  border-color: rgba(248, 113, 113, 0.26);
+.focus-room-context-menu {
+  position: fixed;
+  z-index: 80;
+  width: 224px;
+  padding: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 14px;
+  background: rgba(22, 22, 22, 0.96);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(18px);
+  animation: focus-room-feedback-in 120ms var(--ease-out) both;
+}
+
+.focus-room-context-title {
+  margin: 0 0 5px;
+  padding: 7px 9px 5px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 750;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focus-room-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 130ms var(--ease-out),
+    color 130ms var(--ease-out),
+    transform 130ms var(--ease-out);
+}
+
+.focus-room-context-menu button:hover {
+  background: rgba(255, 255, 255, 0.075);
+  transform: translateY(-1px);
+}
+
+.focus-room-context-menu button:active {
+  transform: translateY(0) scale(0.99);
+}
+
+.focus-room-context-menu button.danger {
   color: #fca5a5;
+}
+
+.focus-room-context-menu button.danger:hover {
+  background: rgba(248, 113, 113, 0.11);
 }
 
 @media (max-width: 1180px) {
@@ -1634,6 +2017,7 @@ function errorMessage(error: unknown, fallback: string): string {
   .focus-room-primary:not(:disabled):hover,
   .focus-room-primary:not(:disabled):hover svg,
   .focus-room-secondary:not(:disabled):hover,
+  .focus-room-danger:not(:disabled):hover,
   .focus-room-create button:not(:disabled):hover,
   .focus-room-row:hover,
   .focus-room-row:active,
@@ -1641,7 +2025,9 @@ function errorMessage(error: unknown, fallback: string): string {
   .focus-room-title-line:hover .focus-room-dot,
   .focus-room-row:hover .focus-room-task-mark,
   .focus-room-row:hover .focus-room-state,
-  .focus-room-title-line:hover .focus-room-state {
+  .focus-room-title-line:hover .focus-room-state,
+  .focus-room-context-menu button:hover,
+  .focus-room-context-menu button:active {
     transform: none;
   }
 }

@@ -372,6 +372,7 @@ function createOptimisticSelectedSnapshot(
       focusActivityScope: focusRoom?.focusActivityScope || null,
       focusGitHubEventRouting: focusRoom?.focusGitHubEventRouting || null,
       focusSettings: focusRoom?.focusSettings || null,
+      focusArchivedAt: focusRoom?.focusArchivedAt || null,
       concludedAt: focusRoom?.concludedAt || null,
       conclusionSummary: focusRoom?.conclusionSummary || null,
       conclusionDetails: focusRoom?.conclusionDetails || null,

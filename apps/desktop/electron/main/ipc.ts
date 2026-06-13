@@ -93,6 +93,7 @@ import {
   sendDesktopRoomMessage,
   readChatStorageSettings,
   addDesktopRoomTask,
+  archiveDesktopFocusRoom,
   concludeDesktopFocusRoom,
   createDesktopAdHocFocusRoom,
   createDesktopTaskFocusRoom,
@@ -355,6 +356,15 @@ export function registerDesktopIpcHandlers(
       details: DesktopFocusRoomConclusionDetails | null,
     ): Promise<DesktopFocusRoomMutationResult> =>
       concludeDesktopFocusRoom(roomIdentifier, focusKey, summary, details),
+  );
+  targetIpcMain.handle(
+    "desktop:room:archive-focus-room",
+    async (
+      _event,
+      roomIdentifier: string,
+      focusKey: string,
+    ): Promise<DesktopFocusRoomMutationResult> =>
+      archiveDesktopFocusRoom(roomIdentifier, focusKey),
   );
   targetIpcMain.handle(
     "desktop:room:rename",

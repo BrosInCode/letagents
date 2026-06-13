@@ -132,3 +132,23 @@ export async function concludeDesktopFocusRoom(
   );
   return mapDesktopFocusRoomMutationResult(data);
 }
+
+export async function archiveDesktopFocusRoom(
+  roomIdentifier: string,
+  focusKey: string,
+): Promise<DesktopFocusRoomMutationResult> {
+  const trimmedRoomIdentifier = requireRoomIdentifier(roomIdentifier, "archiving a Focus Room");
+  const trimmedFocusKey = focusKey.trim();
+  if (!trimmedFocusKey) throw new Error("Focus key is required.");
+
+  const data = await apiFetch<FocusRoomResponse>(
+    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/focus/${encodeURIComponent(trimmedFocusKey)}`,
+    {
+      method: "DELETE",
+      headers: {
+        "X-LetAgents-Desktop-Client": "1",
+      },
+    },
+  );
+  return mapDesktopFocusRoomMutationResult(data);
+}

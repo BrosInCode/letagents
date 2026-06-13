@@ -115,6 +115,10 @@ export interface DesktopApi {
       summary: string,
       details: DesktopFocusRoomConclusionDetails | null
     ) => Promise<DesktopFocusRoomMutationResult>;
+    archiveFocusRoom: (
+      roomIdentifier: string,
+      focusKey: string
+    ) => Promise<DesktopFocusRoomMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;

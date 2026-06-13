@@ -9,7 +9,7 @@ export type { TaskLeaseKind, TaskLeaseStatus, TaskLockScope, TaskLockReason, Coo
 export type { TaskLock, StaleTaskPromptMute, CoordinationEvent, TaskOwnershipState, TaskWorkLeaseActionConflict, GitHubRoomEvent, TaskGitHubArtifactStatus } from "./db/types.js";
 export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCreateCanonicalRoom, getProjectByName, getAllProjects, getProjectByCode, getRoomAlias } from "./db/rooms.js";
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
-export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
+export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, archiveFocusRoom, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
 export { getGitHubRepositoryLinkById, upsertGitHubRepositoryLink, migrateGitHubRepositoryCanonicalRoom, upsertGitHubAppInstallation, markGitHubAppInstallationUninstalled, setGitHubAppInstallationSuspended, upsertGitHubAppRepository, markGitHubAppRepositoryRemoved } from "./db/github/index.js";
 export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, getGitHubRoomEvents } from "./db/github/index.js";
 export { getTasksGitHubArtifactStatus } from "./db/github/index.js";

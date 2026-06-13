@@ -66,6 +66,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
     concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details) =>
       ipcRenderer.invoke("desktop:room:conclude-focus-room", roomIdentifier, focusKey, summary, details),
+    archiveFocusRoom: (roomIdentifier: string, focusKey: string) =>
+      ipcRenderer.invoke("desktop:room:archive-focus-room", roomIdentifier, focusKey),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),

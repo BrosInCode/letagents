@@ -28,6 +28,7 @@ export const rooms = pgTable(
     focus_parent_visibility: text("focus_parent_visibility").$type<FocusParentVisibility>(),
     focus_activity_scope: text("focus_activity_scope").$type<FocusActivityScope>(),
     focus_github_event_routing: text("focus_github_event_routing").$type<FocusGitHubEventRouting>(),
+    focus_archived_at: timestamp("focus_archived_at", { mode: "string", withTimezone: true }),
     concluded_at: timestamp("concluded_at", { mode: "string", withTimezone: true }),
     conclusion_summary: text("conclusion_summary"),
     conclusion_details: jsonb("conclusion_details").$type<FocusRoomConclusionDetails>(),
@@ -41,10 +42,10 @@ export const rooms = pgTable(
     ),
     parent_focus_key_idx: uniqueIndex("rooms_parent_focus_key_idx")
       .on(table.parent_room_id, table.focus_key)
-      .where(sql`${table.kind} = 'focus'`),
+      .where(sql`${table.kind} = 'focus' AND ${table.focus_archived_at} IS NULL`),
     active_focus_task_idx: uniqueIndex("rooms_active_focus_task_idx")
       .on(table.parent_room_id, table.source_task_id)
-      .where(sql`${table.kind} = 'focus' AND ${table.focus_status} = 'active'`),
+      .where(sql`${table.kind} = 'focus' AND ${table.focus_status} = 'active' AND ${table.focus_archived_at} IS NULL`),
     kind_check: check("rooms_kind_check", sql`${table.kind} IN ('main', 'focus')`),
     focus_status_check: check(
       "rooms_focus_status_check",
