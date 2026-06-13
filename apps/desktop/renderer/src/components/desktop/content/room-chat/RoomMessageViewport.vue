@@ -24,6 +24,7 @@
         @scroll-to-message="scrollToMessage"
         @open-image="$emit('open-image', $event)"
         @open-agent="$emit('open-agent', $event)"
+        @open-github-event="$emit('open-github-event', $event)"
       />
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
@@ -124,6 +125,7 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "scroll-position": [scrollTop: number];
+  "open-github-event": [url: string];
 }>();
 
 const messagesElement = ref<HTMLElement | null>(null);

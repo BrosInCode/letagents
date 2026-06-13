@@ -36,6 +36,8 @@ export function materializeCheckRunEvent(
       conclusion: payload.check_run.conclusion,
       app_name: payload.check_run.app?.name ?? null,
       suite_id: payload.check_run.check_suite?.id ?? null,
+      head_branch: payload.check_run.check_suite?.head_branch ?? null,
+      head_sha: payload.check_run.head_sha ?? payload.check_run.check_suite?.head_sha ?? null,
     },
     roomEvent: {
       ...base,

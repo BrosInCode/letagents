@@ -43,9 +43,19 @@
       </div>
       <strong>{{ event.headline }}</strong>
       <p v-if="event.detail">{{ event.detail }}</p>
-      <a v-if="event.url" class="desktop-github-event-link" :href="event.url" target="_blank" rel="noopener noreferrer">
-        {{ event.urlLabel }}
-      </a>
+      <div class="desktop-github-event-actions">
+        <a v-if="event.url" class="desktop-github-event-link" :href="event.url" target="_blank" rel="noopener noreferrer">
+          {{ event.urlLabel }}
+        </a>
+        <button
+          v-if="event.url"
+          type="button"
+          class="desktop-github-event-link is-secondary"
+          @click="$emit('open-event', event.url)"
+        >
+          View in Events
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -55,5 +65,9 @@ import type { GitHubEventPresentation } from "./types";
 
 defineProps<{
   event: GitHubEventPresentation;
+}>();
+
+defineEmits<{
+  "open-event": [url: string];
 }>();
 </script>

@@ -15,6 +15,8 @@ export function buildCheckRunPayload(input: {
   suiteId: number;
   conclusion?: string;
   url?: string;
+  branchRef?: string;
+  sha?: string;
 }) {
   return {
     action: "completed",
@@ -26,8 +28,13 @@ export function buildCheckRunPayload(input: {
       status: "completed",
       conclusion: input.conclusion ?? "failure",
       html_url: input.url ?? `https://github.com/BrosInCode/letagents/actions/runs/${input.id}`,
+      head_sha: input.sha ?? "abc123def456",
       app: { name: "GitHub Actions" },
-      check_suite: { id: input.suiteId },
+      check_suite: {
+        id: input.suiteId,
+        head_branch: input.branchRef ?? "codex/default-branch",
+        head_sha: input.sha ?? "abc123def456",
+      },
     },
   };
 }

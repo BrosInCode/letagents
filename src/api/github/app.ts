@@ -86,9 +86,12 @@ export interface GitHubWebhookPayload {
     status: string;
     conclusion: string | null;
     html_url: string;
+    head_sha?: string | null;
     app?: { name: string };
     check_suite?: {
       id?: number | string;
+      head_branch?: string | null;
+      head_sha?: string | null;
     } | null;
   };
   changes?: {

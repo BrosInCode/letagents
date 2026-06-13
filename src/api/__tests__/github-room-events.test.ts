@@ -28,6 +28,10 @@ test("materializeGitHubWebhookEvent maps pull_request_review into a persisted ro
         title: "task_7: add review handling",
         body: "Review body fallback",
         html_url: "https://github.com/BrosInCode/letagents/pull/42",
+        head: {
+          ref: "codex/review-context",
+          sha: "abc123def456",
+        },
       },
       review: {
         id: 9001,
@@ -49,6 +53,8 @@ test("materializeGitHubWebhookEvent maps pull_request_review into a persisted ro
   assert.deepEqual(event?.metadata, {
     body: "Looks good",
     dismissed_by_login: null,
+    head_ref: "codex/review-context",
+    head_sha: "abc123def456",
     pull_request_author_login: null,
   });
   assert.equal(event?.roomEvent?.kind, "pull_request_review");
@@ -122,6 +128,8 @@ test("materializeGitHubWebhookEvent maps dismissed review to original reviewer",
   assert.deepEqual(event?.metadata, {
     body: "Old blocker",
     dismissed_by_login: "maintainer",
+    head_ref: null,
+    head_sha: null,
     pull_request_author_login: "author",
   });
   assert.equal(event?.roomEvent?.kind, "pull_request_review");
@@ -129,6 +137,50 @@ test("materializeGitHubWebhookEvent maps dismissed review to original reviewer",
     event?.roomEvent?.kind === "pull_request_review" ? event.roomEvent.review.state : null,
     "dismissed"
   );
+});
+
+test("materializeGitHubWebhookEvent maps check_run branch metadata", () => {
+  const event = materializeGitHubWebhookEvent(
+    "check_run",
+    {
+      action: "completed",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "github-actions[bot]" },
+      check_run: {
+        id: 77,
+        name: "deploy",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/BrosInCode/letagents/actions/runs/77",
+        head_sha: "def456abc123",
+        app: { name: "GitHub Actions" },
+        check_suite: {
+          id: 99,
+          head_branch: "codex/check-run-context",
+          head_sha: "def456abc123",
+        },
+      },
+    },
+    "delivery-check-run-1"
+  );
+
+  assert.ok(event);
+  assert.equal(event?.event_type, "check_run");
+  assert.equal(event?.state, "failure");
+  assert.deepEqual(event?.metadata, {
+    status: "completed",
+    conclusion: "failure",
+    app_name: "GitHub Actions",
+    suite_id: 99,
+    head_branch: "codex/check-run-context",
+    head_sha: "def456abc123",
+  });
+  assert.equal(event?.roomEvent?.kind, "check_run");
 });
 
 test("materializeGitHubWebhookEvent maps pull_request into a persisted room event", () => {

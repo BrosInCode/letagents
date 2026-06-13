@@ -115,9 +115,9 @@
       </div>
     </section>
 
-    <section v-if="taskWorkflowRefs.length" class="desktop-task-detail-section">
+    <section v-if="taskWorkflowRefs.length || hasGitHubEventRefs" class="desktop-task-detail-section">
       <h4>External links</h4>
-      <div class="desktop-task-detail-list">
+      <div v-if="taskWorkflowRefs.length" class="desktop-task-detail-list">
         <a
           v-for="ref in taskWorkflowRefs"
           :key="ref.url"
@@ -130,6 +130,14 @@
           <span>{{ ref.label }}</span>
         </a>
       </div>
+      <button
+        v-if="hasGitHubEventRefs"
+        type="button"
+        class="desktop-task-detail-button desktop-task-events-link"
+        @click="$emit('view-events', task.id)"
+      >
+        View events
+      </button>
     </section>
 
     <section v-if="actions.length" class="desktop-task-detail-section">
@@ -180,6 +188,7 @@ const emit = defineEmits<{
   "assign-review": [];
   "run-action": [action: TaskAction];
   "update:selected-reviewer": [value: string];
+  "view-events": [taskId: string];
 }>();
 
 const showAuthority = computed(() => shouldShowAuthority(props.task));
@@ -189,6 +198,11 @@ const reviewAuthorityState = computed(() => reviewPanelState(props.task));
 const taskWorkLease = computed(() => workLease(props.task));
 const taskSecondaryLeases = computed(() => secondaryLeases(props.task));
 const taskWorkflowRefs = computed(() => workflowRefs(props.task));
+const hasGitHubEventRefs = computed(() =>
+  Boolean(props.task.prUrl)
+  || props.task.workflowArtifacts.some((artifact) => artifact.provider === "github")
+  || taskWorkflowRefs.value.some((ref) => ref.provider === "github")
+);
 const reviewerSummary = computed(() => {
   const summary = reviewSummary(props.task);
   return summary === "Not claimed" ? "Unassigned" : summary;

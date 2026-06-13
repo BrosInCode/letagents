@@ -159,6 +159,47 @@ export interface DesktopGitHubIntegrationActionResult {
   message: string;
 }
 
+export type DesktopGitHubRoomEventType =
+  | "pull_request"
+  | "pull_request_review"
+  | "issue"
+  | "issue_comment"
+  | "check_run"
+  | "repository"
+  | "installation"
+  | "installation_repositories";
+
+export interface DesktopGitHubRoomEvent {
+  id: string;
+  eventType: DesktopGitHubRoomEventType;
+  action: string;
+  githubObjectId: string | null;
+  githubObjectUrl: string | null;
+  title: string | null;
+  state: string | null;
+  actorLogin: string | null;
+  metadata: Record<string, unknown>;
+  linkedTaskId: string | null;
+  createdAt: string;
+}
+
+export interface DesktopGitHubEventsQuery {
+  limit?: number;
+  after?: string | null;
+  eventType?: DesktopGitHubRoomEventType | null;
+  objectId?: string | null;
+  actor?: string | null;
+  since?: string | null;
+  until?: string | null;
+}
+
+export interface DesktopGitHubEventsPage {
+  roomIdentifier: string;
+  githubRoomIdentifier: string | null;
+  events: DesktopGitHubRoomEvent[];
+  hasMore: boolean;
+}
+
 export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
   access: DesktopRoomAccess;
@@ -171,6 +212,7 @@ export interface DesktopRoomSnapshot {
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   messages: DesktopRoomMessage[];
+  githubEvents: DesktopGitHubEventsPage | null;
 }
 
 export interface DesktopSendRoomMessageResult {
@@ -215,6 +257,11 @@ export type DesktopRoomStreamEvent =
       type: "task_update";
       roomIdentifier: string;
       task: DesktopTaskSummary;
+    }
+  | {
+      type: "github_event";
+      roomIdentifier: string;
+      event: DesktopGitHubRoomEvent;
     }
   | {
       type: "reasoning_update";

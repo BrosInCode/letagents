@@ -245,6 +245,7 @@ function roomSnapshot(
     reasoningSessions: [],
     recentActivity: [],
     messages: [],
+    githubEvents: null,
   };
 }
 

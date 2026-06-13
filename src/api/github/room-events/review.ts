@@ -44,6 +44,8 @@ export function materializePullRequestReviewEvent(
       body: payload.review.body ?? null,
       dismissed_by_login: action === "dismissed" ? actorLogin : null,
       pull_request_author_login: pullRequest.authorLogin ?? null,
+      head_ref: payload.pull_request.head?.ref ?? null,
+      head_sha: payload.pull_request.head?.sha ?? null,
     },
     roomEvent: {
       ...base,

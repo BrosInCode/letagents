@@ -33,6 +33,7 @@ import {
 } from "../src/components/desktop/content/desktop-chat-message/github-event";
 import { parseSenderIdentity } from "../src/components/desktop/content/desktop-chat-message/identity";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
+import { renderDesktopMarkdown } from "../src/components/desktop/content/formatting/markdown";
 import { useDesktopRoomSearch } from "../src/components/desktop/content/room-shell/useDesktopRoomSearch";
 
 describe("room chat helpers", () => {
@@ -184,6 +185,16 @@ describe("room chat helpers", () => {
     assert.equal(
       renderMessageText("Hello <script> @Noether **ship** https://example.com", "ship"),
       'Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>',
+    );
+  });
+
+  it("renders reusable block markdown for GitHub event bodies", () => {
+    assert.equal(
+      renderDesktopMarkdown('## Summary\n- **Ship** `events`\n- See https://example.com/?q=a&b=c\n\n<script>', {
+        block: true,
+        mentions: false,
+      }),
+      '<h2>Summary</h2><ul><li><strong>Ship</strong> <code>events</code></li><li>See <a href="https://example.com/?q=a&amp;b=c" target="_blank" rel="noopener noreferrer">https://example.com/?q=a&amp;b=c</a></li></ul><p>&lt;script&gt;</p>',
     );
   });
 });

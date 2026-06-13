@@ -67,7 +67,11 @@
           <span class="room-message-reply-text">{{ replyPreviewText }}</span>
         </button>
 
-        <DesktopGitHubEventCard v-if="githubEvent" :event="githubEvent" />
+        <DesktopGitHubEventCard
+          v-if="githubEvent"
+          :event="githubEvent"
+          @open-event="$emit('open-github-event', $event)"
+        />
 
         <DesktopLongMessageContent
           v-else
@@ -143,6 +147,7 @@ const emit = defineEmits<{
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
+  "open-github-event": [url: string];
 }>();
 
 const contextMenuOpen = ref(false);

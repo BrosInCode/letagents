@@ -1,4 +1,6 @@
 import type {
+  DesktopGitHubEventsPage,
+  DesktopGitHubRoomEvent,
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopRoomSnapshot,
@@ -76,6 +78,26 @@ export function appendSnapshotMessage(
   };
 }
 
+export function upsertSnapshotGitHubEvent(
+  snapshot: DesktopRoomSnapshot | null,
+  event: DesktopGitHubRoomEvent
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  const currentPage = snapshot.githubEvents || {
+    roomIdentifier: snapshot.roomIdentifier || snapshot.room?.identifier || "",
+    githubRoomIdentifier: null,
+    events: [],
+    hasMore: false,
+  };
+  return {
+    ...snapshot,
+    githubEvents: {
+      ...currentPage,
+      events: mergeDesktopGitHubEvents(currentPage.events, [event]),
+    },
+  };
+}
+
 export function mergeRoomSnapshotMessages(
   current: DesktopRoomSnapshot | null,
   incoming: DesktopRoomSnapshot
@@ -85,11 +107,13 @@ export function mergeRoomSnapshotMessages(
     return {
       ...current,
       messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
+      githubEvents: mergeDesktopGitHubEventsPage(current.githubEvents, incoming.githubEvents),
     };
   }
   return {
     ...incoming,
     messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
+    githubEvents: mergeDesktopGitHubEventsPage(current.githubEvents, incoming.githubEvents),
   };
 }
 
@@ -123,10 +147,42 @@ export function mergeDesktopRoomMessages(
   return [...byId.values()].sort(compareDesktopRoomMessages);
 }
 
+export function mergeDesktopGitHubEventsPage(
+  current: DesktopGitHubEventsPage | null,
+  incoming: DesktopGitHubEventsPage | null,
+): DesktopGitHubEventsPage | null {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  return {
+    ...incoming,
+    events: mergeDesktopGitHubEvents(current.events, incoming.events),
+    hasMore: incoming.hasMore,
+  };
+}
+
+export function mergeDesktopGitHubEvents(
+  current: readonly DesktopGitHubRoomEvent[],
+  incoming: readonly DesktopGitHubRoomEvent[],
+): DesktopGitHubRoomEvent[] {
+  const byId = new Map<string, DesktopGitHubRoomEvent>();
+  for (const event of current) byId.set(event.id, event);
+  for (const event of incoming) byId.set(event.id, event);
+  return [...byId.values()].sort(compareDesktopGitHubEvents);
+}
+
 export function shouldRefreshMetadataForMessage(message: DesktopRoomMessage): boolean {
   const source = (message.source || "").toLowerCase();
   const sender = (message.sender || "").toLowerCase();
   return source === "agent" || source === "browser" || source === "github" || sender === "letagents" || sender === "github";
+}
+
+function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: DesktopGitHubRoomEvent): number {
+  const leftTime = Date.parse(left.createdAt || "");
+  const rightTime = Date.parse(right.createdAt || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return right.id.localeCompare(left.id);
 }
 
 function shouldPreserveCurrentRoomSnapshot(

@@ -23,6 +23,7 @@ import {
   shouldRefreshMetadataForMessage,
   snapshotMatchesRoom,
   upsertSnapshotReasoningSession,
+  upsertSnapshotGitHubEvent,
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
@@ -240,6 +241,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    if (event.type === "github_event") {
+      options.selectedSnapshot.value = upsertSnapshotGitHubEvent(options.selectedSnapshot.value, event.event);
+      options.scheduleLiveMetadataRefresh();
+      return;
+    }
+
     if (event.type === "reasoning_update") {
       options.selectedSnapshot.value = upsertSnapshotReasoningSession(options.selectedSnapshot.value, event.session);
       options.scheduleLiveMetadataRefresh();
@@ -385,5 +392,6 @@ function createOptimisticSelectedSnapshot(
     reasoningSessions: [],
     recentActivity: [],
     messages: [],
+    githubEvents: null,
   };
 }

@@ -138,6 +138,8 @@
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
+          :github-events="selectedSnapshot?.githubEvents || null"
+          :repo-status="repoStatusValue"
           :workers="workers"
           :initial-chat-scroll-top="chatScrollTopByRoom[selectedRoomInfo.identifier] ?? null"
           @chat-scroll-position="rememberChatScrollPosition"

@@ -7,11 +7,13 @@ import type {
   DesktopFocusRoomInfo,
   DesktopFocusRoomConclusionDetails,
   DesktopFocusRoomSettings,
+  DesktopGitHubEventsPage,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopTaskSummary,
 } from "../../../ipc-types.js";
+import { mapGitHubEventsPayload } from "../events.js";
 import { mapRoomMessagePayload } from "../messages/mappers.js";
 import { mapDesktopReasoningSessionPayload } from "../reasoning/mappers.js";
 import { mapDesktopTaskSummaryPayload } from "../tasks/mappers.js";
@@ -38,7 +40,14 @@ export function mapSnapshotData(data: RoomSnapshotData) {
     reasoningSessions: mapReasoningSessions(data.reasoningData),
     recentActivity: mapRecentActivity(data.activityHistoryData),
     messages: mapMessages(data.messagesData),
+    githubEvents: mapGitHubEvents(data.githubEventsData),
   };
+}
+
+function mapGitHubEvents(
+  data: RoomSnapshotData["githubEventsData"],
+): DesktopGitHubEventsPage | null {
+  return data ? mapGitHubEventsPayload(data.room_id || "", data) : null;
 }
 
 function mapFocusRooms(data: FocusRoomsResponse): DesktopFocusRoomInfo[] {
