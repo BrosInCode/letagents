@@ -31,19 +31,14 @@
             placeholder="Search tasks by title, id, owner"
           />
         </label>
-        <div class="desktop-board-filter-groups" aria-label="Board view filters">
-          <div class="desktop-board-segmented">
-            <button
-              v-for="filter in boardFilters"
-              :key="filter.id"
-              type="button"
-              :aria-pressed="activeFilter === filter.id"
-              @click="activeFilter = filter.id"
-            >
-              {{ filter.label }}
-              <span>{{ filterCount(filter.id) }}</span>
-            </button>
-          </div>
+        <div class="desktop-board-filter-groups">
+          <DesktopSegmentedControl
+            class="desktop-board-segmented"
+            :model-value="activeFilter"
+            :options="boardFilterOptions"
+            label="Board view filters"
+            @update:model-value="setActiveFilter"
+          />
         </div>
       </div>
     </div>
@@ -218,6 +213,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
+import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import RoomBoardTaskCard from "./room-board/RoomBoardTaskCard.vue";
 import RoomBoardTaskInspector from "./room-board/RoomBoardTaskInspector.vue";
 import { normalizeActor, normalizeRoom, readableStatus } from "./room-board/formatters";
@@ -272,6 +268,13 @@ const boardFilters: Array<{ id: BoardFilter; label: string }> = [
   { id: "needs-review", label: "Needs review" },
   { id: "closed", label: "Closed" },
 ];
+
+const boardFilterOptions = computed(() =>
+  boardFilters.map((filter) => ({
+    ...filter,
+    count: filterCount(filter.id),
+  }))
+);
 
 const localWorker = computed(() =>
   props.workers.find((worker) =>
@@ -420,6 +423,10 @@ function clearFilters(): void {
   searchQuery.value = "";
   activeFilter.value = "open";
   closeTaskModal();
+}
+
+function setActiveFilter(filter: string): void {
+  activeFilter.value = filter as BoardFilter;
 }
 
 function filterCount(filter: BoardFilter): number {

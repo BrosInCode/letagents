@@ -45,6 +45,7 @@ export function toRoomResponse(
     focus_activity_scope: focusSettings?.activity_scope ?? null,
     focus_github_event_routing: focusSettings?.github_event_routing ?? null,
     focus_settings: focusSettings,
+    focus_archived_at: project.focus_archived_at,
     concluded_at: project.concluded_at,
     conclusion_summary: project.conclusion_summary,
     conclusion_details: project.conclusion_details,

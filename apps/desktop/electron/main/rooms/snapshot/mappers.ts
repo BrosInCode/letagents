@@ -1,7 +1,12 @@
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopFocusActivityScope,
+  DesktopFocusGitHubEventRouting,
+  DesktopFocusParentVisibility,
   DesktopFocusRoomInfo,
+  DesktopFocusRoomConclusionDetails,
+  DesktopFocusRoomSettings,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -21,6 +26,8 @@ import type {
   RoomSnapshotData,
 } from "./payloads.js";
 
+export type DesktopFocusRoomPayload = NonNullable<FocusRoomsResponse["focus_rooms"]>[number];
+
 export function mapSnapshotData(data: RoomSnapshotData) {
   return {
     focusRooms: mapFocusRooms(data.focusRoomsData),
@@ -35,15 +42,103 @@ export function mapSnapshotData(data: RoomSnapshotData) {
 }
 
 function mapFocusRooms(data: FocusRoomsResponse): DesktopFocusRoomInfo[] {
-  return (data.focus_rooms || []).map((focusRoom) => ({
+  return (data.focus_rooms || []).map(mapDesktopFocusRoomPayload);
+}
+
+export function mapDesktopFocusRoomPayload(focusRoom: DesktopFocusRoomPayload): DesktopFocusRoomInfo {
+  const settings = normalizeFocusRoomSettings(focusRoom);
+  return {
     roomId: focusRoom.room_id,
     identifier: focusRoom.room_id,
+    name: focusRoom.name || null,
     displayName: focusRoom.display_name,
     code: focusRoom.code || null,
+    kind: "focus",
+    attachmentsEnabled: focusRoom.attachments_enabled ?? true,
+    parentRoomId: focusRoom.parent_room_id || null,
+    focusKey: focusRoom.focus_key || null,
     sourceTaskId: focusRoom.source_task_id || null,
     focusStatus: focusRoom.focus_status || null,
+    focusParentVisibility: settings.parent_visibility,
+    focusActivityScope: settings.activity_scope,
+    focusGitHubEventRouting: settings.github_event_routing,
+    focusSettings: settings,
+    focusArchivedAt: focusRoom.focus_archived_at || null,
+    concludedAt: focusRoom.concluded_at || null,
+    conclusionSummary: focusRoom.conclusion_summary || null,
+    conclusionDetails: normalizeConclusionDetails(focusRoom.conclusion_details),
     createdAt: focusRoom.created_at,
-  }));
+  };
+}
+
+function normalizeFocusRoomSettings(focusRoom: DesktopFocusRoomPayload): DesktopFocusRoomSettings {
+  return {
+    parent_visibility:
+      normalizeParentVisibility(focusRoom.focus_settings?.parent_visibility)
+      || normalizeParentVisibility(focusRoom.focus_parent_visibility)
+      || "summary_only",
+    activity_scope:
+      normalizeActivityScope(focusRoom.focus_settings?.activity_scope)
+      || normalizeActivityScope(focusRoom.focus_activity_scope)
+      || "task_and_branch",
+    github_event_routing:
+      normalizeGitHubEventRouting(focusRoom.focus_settings?.github_event_routing)
+      || normalizeGitHubEventRouting(focusRoom.focus_github_event_routing)
+      || "task_and_branch",
+  };
+}
+
+function normalizeParentVisibility(value: unknown): DesktopFocusParentVisibility | null {
+  return value === "summary_only"
+    || value === "major_activity"
+    || value === "all_activity"
+    || value === "silent"
+    ? value
+    : null;
+}
+
+function normalizeActivityScope(value: unknown): DesktopFocusActivityScope | null {
+  return value === "task_and_branch" || value === "task_only" || value === "room"
+    ? value
+    : null;
+}
+
+function normalizeGitHubEventRouting(value: unknown): DesktopFocusGitHubEventRouting | null {
+  return value === "task_and_branch"
+    || value === "focus_owned_only"
+    || value === "task_only"
+    || value === "all_parent_repo"
+    || value === "off"
+    ? value
+    : null;
+}
+
+function normalizeConclusionDetails(value: DesktopFocusRoomPayload["conclusion_details"]): DesktopFocusRoomConclusionDetails | null {
+  if (!value) return null;
+  return {
+    artifact: value.artifact || "",
+    review_state:
+      value.review_state === "reviewed"
+      || value.review_state === "needs_review"
+      || value.review_state === "not_required"
+        ? value.review_state
+        : "needs_review",
+    blocker_state:
+      value.blocker_state === "none"
+      || value.blocker_state === "resolved"
+      || value.blocker_state === "blocked"
+        ? value.blocker_state
+        : "none",
+    parent_task_next:
+      value.parent_task_next === "keep_open"
+      || value.parent_task_next === "move_to_review"
+      || value.parent_task_next === "mark_blocked"
+      || value.parent_task_next === "mark_done"
+      || value.parent_task_next === "follow_up"
+        ? value.parent_task_next
+        : "keep_open",
+    next_owner: value.next_owner || "",
+  };
 }
 
 function mapTasks(

@@ -104,8 +104,11 @@
       <RoomDetailsView
         v-else-if="activeTab === 'rooms'"
         key="rooms"
+        :room="room"
         :focus-rooms="focusRooms"
         :tasks="tasks"
+        @open-focus-room="emit('open-focus-room', $event)"
+        @refresh-room="emit('refresh-room')"
       />
 
       <RentAnAgentView
@@ -186,6 +189,7 @@ const emit = defineEmits<{
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
+  "open-focus-room": [roomIdentifier: string];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
 }>();
 

@@ -145,6 +145,7 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRefreshRoom"
+          @open-focus-room="openFocusRoomFromRoomsTab"
           @cycle-sidebar="cycleSidebar"
         />
       </template>
@@ -550,6 +551,34 @@ function handleSidebarEntrySelected(entry: SidebarEntry): void {
     markRoomEntryRead(entry);
   }
   selectSidebarEntry(entry);
+}
+
+function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
+  const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!normalizedIdentifier) return;
+  const existingFocusRoom = projectEntries.value
+    .flatMap((project) => project.focusRooms)
+    .find((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === normalizedIdentifier);
+  if (existingFocusRoom) {
+    handleSidebarEntrySelected(existingFocusRoom);
+    return;
+  }
+
+  const fallbackEntry: RoomEntry = {
+    id: `room:focus:${normalizedIdentifier}`,
+    type: "room",
+    kind: "focus",
+    roomIdentifier,
+    title: roomIdentifier,
+    meta: "Focus room",
+    sectionLabel: "Focus room",
+    headline: "Focused work",
+    description: "Open this focus room.",
+    latestMessageId: null,
+    latestMessageAt: null,
+    hasUnread: false,
+  };
+  handleSidebarEntrySelected(fallbackEntry);
 }
 
 function seedReadMarkersForKnownRooms(): void {

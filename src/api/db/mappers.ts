@@ -21,6 +21,7 @@ export function toProject(row: typeof rooms.$inferSelect): Project {
     focus_parent_visibility: row.focus_parent_visibility,
     focus_activity_scope: row.focus_activity_scope,
     focus_github_event_routing: row.focus_github_event_routing,
+    focus_archived_at: row.focus_archived_at,
     concluded_at: row.concluded_at,
     conclusion_summary: row.conclusion_summary,
     conclusion_details: row.conclusion_details ?? null,

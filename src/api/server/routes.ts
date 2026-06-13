@@ -236,6 +236,7 @@ export function registerApiRoutes(app: Express): void {
   const roomFocusRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
+    requireAdmin,
     requireParticipant,
     resolveProjectRole,
     toRoomResponse,

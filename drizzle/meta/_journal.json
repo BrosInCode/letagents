@@ -351,6 +351,13 @@
       "when": 1780516800000,
       "tag": "0049_messages_client_message_id",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1781208000000,
+      "tag": "0050_focus_room_archives",
+      "breakpoints": true
     }
   ]
 }

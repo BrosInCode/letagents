@@ -36,6 +36,9 @@ import type {
   DesktopSendRoomMessageResult,
   DesktopParticipantSummary,
   DesktopDroppedAttachmentContent,
+  DesktopFocusRoomConclusionDetails,
+  DesktopFocusRoomMutationResult,
+  DesktopFocusRoomSettingsPatch,
   DesktopRoomInfo,
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
@@ -90,9 +93,14 @@ import {
   sendDesktopRoomMessage,
   readChatStorageSettings,
   addDesktopRoomTask,
+  archiveDesktopFocusRoom,
+  concludeDesktopFocusRoom,
+  createDesktopAdHocFocusRoom,
+  createDesktopTaskFocusRoom,
   setChatStorageMode,
   syncDesktopLocalChatRoom,
   updateDesktopAccountRoom,
+  updateDesktopFocusRoomSettings,
   updateDesktopRoomTask,
   updateDesktopRoomTaskLease,
   updateDesktopRoomTaskReviewLease,
@@ -309,6 +317,54 @@ export function registerDesktopIpcHandlers(
       input: DesktopTaskReviewWorkerActionInput,
     ): Promise<DesktopTaskMutationResult> =>
       runDesktopRoomTaskReviewWorkerAction(roomIdentifier, taskId, input),
+  );
+  targetIpcMain.handle(
+    "desktop:room:create-task-focus-room",
+    async (
+      _event,
+      roomIdentifier: string,
+      taskId: string,
+    ): Promise<DesktopFocusRoomMutationResult> =>
+      createDesktopTaskFocusRoom(roomIdentifier, taskId),
+  );
+  targetIpcMain.handle(
+    "desktop:room:create-ad-hoc-focus-room",
+    async (
+      _event,
+      roomIdentifier: string,
+      title: string,
+    ): Promise<DesktopFocusRoomMutationResult> =>
+      createDesktopAdHocFocusRoom(roomIdentifier, title),
+  );
+  targetIpcMain.handle(
+    "desktop:room:update-focus-room-settings",
+    async (
+      _event,
+      roomIdentifier: string,
+      focusKey: string,
+      settings: DesktopFocusRoomSettingsPatch,
+    ): Promise<DesktopFocusRoomMutationResult> =>
+      updateDesktopFocusRoomSettings(roomIdentifier, focusKey, settings),
+  );
+  targetIpcMain.handle(
+    "desktop:room:conclude-focus-room",
+    async (
+      _event,
+      roomIdentifier: string,
+      focusKey: string,
+      summary: string,
+      details: DesktopFocusRoomConclusionDetails | null,
+    ): Promise<DesktopFocusRoomMutationResult> =>
+      concludeDesktopFocusRoom(roomIdentifier, focusKey, summary, details),
+  );
+  targetIpcMain.handle(
+    "desktop:room:archive-focus-room",
+    async (
+      _event,
+      roomIdentifier: string,
+      focusKey: string,
+    ): Promise<DesktopFocusRoomMutationResult> =>
+      archiveDesktopFocusRoom(roomIdentifier, focusKey),
   );
   targetIpcMain.handle(
     "desktop:room:rename",

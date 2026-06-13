@@ -18,6 +18,7 @@ export const roomSelectColumns = {
   focus_key: rooms.focus_key,
   source_task_id: rooms.source_task_id,
   focus_status: rooms.focus_status,
+  focus_archived_at: rooms.focus_archived_at,
   created_at: rooms.created_at,
 };
 
@@ -30,6 +31,7 @@ export function toAccountRoomProject(row: AccountRoomProjectRow): AccountRoomPro
     focus_key: row.focus_key,
     source_task_id: row.source_task_id,
     focus_status: row.focus_status as FocusRoomStatus | null,
+    focus_archived_at: row.focus_archived_at,
     created_at: row.created_at,
   };
 }

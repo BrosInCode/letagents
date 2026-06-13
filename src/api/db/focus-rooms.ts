@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 
 import { DEFAULT_FOCUS_ROOM_SETTINGS, type FocusRoomSettingsPatch } from "../focus-rooms/settings.js";
 import type { FocusRoomConclusionDetails } from "../focus-rooms/conclusion.js";
@@ -60,11 +60,22 @@ export function buildAdHocFocusKey(intentTitle: string): string {
   return `focus-${slug || "room"}-${suffix}`;
 }
 
-export async function getFocusRoomsForParent(parentRoomId: string): Promise<Project[]> {
+export async function getFocusRoomsForParent(
+  parentRoomId: string,
+  options: { includeArchived?: boolean } = {}
+): Promise<Project[]> {
+  const conditions = [
+    eq(rooms.parent_room_id, parentRoomId),
+    eq(rooms.kind, "focus"),
+  ];
+  if (!options.includeArchived) {
+    conditions.push(isNull(rooms.focus_archived_at));
+  }
+
   const rows = await db
     .select()
     .from(rooms)
-    .where(and(eq(rooms.parent_room_id, parentRoomId), eq(rooms.kind, "focus")))
+    .where(and(...conditions))
     .orderBy(asc(rooms.created_at));
 
   return rows.map(toProject);
@@ -82,7 +93,8 @@ export async function getActiveFocusRoomForTask(
         eq(rooms.parent_room_id, parentRoomId),
         eq(rooms.source_task_id, taskId),
         eq(rooms.kind, "focus"),
-        eq(rooms.focus_status, "active")
+        eq(rooms.focus_status, "active"),
+        isNull(rooms.focus_archived_at)
       )
     )
     .limit(1);
@@ -92,21 +104,58 @@ export async function getActiveFocusRoomForTask(
 
 export async function getFocusRoomByKey(
   parentRoomId: string,
-  focusKey: string
+  focusKey: string,
+  options: { includeArchived?: boolean } = {}
 ): Promise<Project | undefined> {
+  const conditions = [
+    eq(rooms.parent_room_id, parentRoomId),
+    eq(rooms.focus_key, focusKey),
+    eq(rooms.kind, "focus"),
+  ];
+  if (!options.includeArchived) {
+    conditions.push(isNull(rooms.focus_archived_at));
+  }
+
   const [focusRoom] = await db
     .select()
     .from(rooms)
-    .where(
-      and(
-        eq(rooms.parent_room_id, parentRoomId),
-        eq(rooms.focus_key, focusKey),
-        eq(rooms.kind, "focus")
-      )
-    )
+    .where(and(...conditions))
     .limit(1);
 
   return focusRoom ? toProject(focusRoom) : undefined;
+}
+
+export async function archiveFocusRoom(
+  parentRoomId: string,
+  focusKey: string
+): Promise<{ room: Project; archived: boolean } | null> {
+  const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey);
+  if (!focusRoom) {
+    const archivedFocusRoom = await getFocusRoomByKey(parentRoomId, focusKey, {
+      includeArchived: true,
+    });
+    return archivedFocusRoom ? { room: archivedFocusRoom, archived: false } : null;
+  }
+
+  const [updated] = await db
+    .update(rooms)
+    .set({ focus_archived_at: new Date().toISOString() })
+    .where(
+      and(
+        eq(rooms.id, focusRoom.id),
+        isNull(rooms.focus_archived_at)
+      )
+    )
+    .returning();
+
+  if (updated) {
+    return { room: toProject(updated), archived: true };
+  }
+
+  const current = await getFocusRoomByKey(parentRoomId, focusKey, {
+    includeArchived: true,
+  });
+  return current ? { room: current, archived: false } : null;
 }
 
 export async function concludeFocusRoom(
@@ -183,7 +232,8 @@ export async function updateFocusRoomSettings(
       and(
         eq(rooms.parent_room_id, parentRoomId),
         eq(rooms.focus_key, focusKey),
-        eq(rooms.kind, "focus")
+        eq(rooms.kind, "focus"),
+        isNull(rooms.focus_archived_at)
       )
     )
     .returning();

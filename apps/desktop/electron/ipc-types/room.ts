@@ -25,16 +25,83 @@ export interface DesktopRoomInfo {
   focusKey: string | null;
   sourceTaskId: string | null;
   focusStatus: "active" | "concluded" | null;
+  focusParentVisibility: DesktopFocusParentVisibility | null;
+  focusActivityScope: DesktopFocusActivityScope | null;
+  focusGitHubEventRouting: DesktopFocusGitHubEventRouting | null;
+  focusSettings: DesktopFocusRoomSettings | null;
+  focusArchivedAt: string | null;
+  concludedAt: string | null;
+  conclusionSummary: string | null;
+  conclusionDetails: DesktopFocusRoomConclusionDetails | null;
+}
+
+export type DesktopFocusParentVisibility =
+  | "summary_only"
+  | "major_activity"
+  | "all_activity"
+  | "silent";
+
+export type DesktopFocusActivityScope = "task_and_branch" | "task_only" | "room";
+
+export type DesktopFocusGitHubEventRouting =
+  | "task_and_branch"
+  | "focus_owned_only"
+  | "task_only"
+  | "all_parent_repo"
+  | "off";
+
+export interface DesktopFocusRoomSettings {
+  parent_visibility: DesktopFocusParentVisibility;
+  activity_scope: DesktopFocusActivityScope;
+  github_event_routing: DesktopFocusGitHubEventRouting;
+}
+
+export type DesktopFocusRoomSettingsPatch = Partial<DesktopFocusRoomSettings>;
+
+export type DesktopFocusRoomReviewState = "reviewed" | "needs_review" | "not_required";
+export type DesktopFocusRoomBlockerState = "none" | "resolved" | "blocked";
+export type DesktopFocusRoomParentTaskNextAction =
+  | "keep_open"
+  | "move_to_review"
+  | "mark_blocked"
+  | "mark_done"
+  | "follow_up";
+
+export interface DesktopFocusRoomConclusionDetails {
+  artifact: string;
+  review_state: DesktopFocusRoomReviewState;
+  blocker_state: DesktopFocusRoomBlockerState;
+  parent_task_next: DesktopFocusRoomParentTaskNextAction;
+  next_owner: string;
 }
 
 export interface DesktopFocusRoomInfo {
   roomId: string;
   identifier: string;
+  name: string | null;
   displayName: string;
   code: string | null;
+  kind: "focus";
+  attachmentsEnabled: boolean;
+  parentRoomId: string | null;
+  focusKey: string | null;
   sourceTaskId: string | null;
   focusStatus: "active" | "concluded" | null;
+  focusParentVisibility: DesktopFocusParentVisibility | null;
+  focusActivityScope: DesktopFocusActivityScope | null;
+  focusGitHubEventRouting: DesktopFocusGitHubEventRouting | null;
+  focusSettings: DesktopFocusRoomSettings | null;
+  focusArchivedAt: string | null;
+  concludedAt: string | null;
+  conclusionSummary: string | null;
+  conclusionDetails: DesktopFocusRoomConclusionDetails | null;
   createdAt: string;
+}
+
+export interface DesktopFocusRoomMutationResult {
+  focusRoom: DesktopFocusRoomInfo;
+  created?: boolean;
+  parentMessagePosted?: boolean;
 }
 
 export interface DesktopRoomMessageReply {
