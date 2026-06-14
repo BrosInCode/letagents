@@ -8,6 +8,7 @@
       'is-search-active': searchActive,
     }"
     :data-owner-kind="ownerKind"
+    :data-message-id="message.id"
     :data-testid="`room-message-${message.id}`"
     @contextmenu="openContextMenu"
   >

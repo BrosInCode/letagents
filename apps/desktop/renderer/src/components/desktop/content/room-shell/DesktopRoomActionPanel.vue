@@ -107,6 +107,28 @@
             </span>
           </button>
 
+          <button
+            v-if="githubEventsAvailable"
+            class="desktop-room-property-row"
+            type="button"
+            data-testid="desktop-room-github-events-card"
+            @click="$emit('toggle-github-events-visible')"
+          >
+            <span class="desktop-room-action-icon is-blue" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M4 12h3l2-5 4 10 2-5h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M7 4h10M7 20h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span class="desktop-room-property-copy">
+              <strong>GitHub events</strong>
+              <small>{{ githubEventsVisible ? "Show the Events tab for this room." : "Hide the Events tab for this room." }}</small>
+            </span>
+            <span class="desktop-room-toggle" :data-active="githubEventsVisible">
+              <span />
+            </span>
+          </button>
+
           <button class="desktop-room-property-row" type="button" data-testid="desktop-room-export-card" @click="$emit('export-chat')">
             <span class="desktop-room-action-icon is-slate" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -168,6 +190,8 @@ const props = defineProps<{
   githubLoading: boolean;
   githubBusy: boolean;
   githubError: string | null;
+  githubEventsAvailable: boolean;
+  githubEventsVisible: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -176,6 +200,7 @@ const emit = defineEmits<{
   "toggle-sound": [];
   "toggle-notifications": [];
   "toggle-liquid-glass": [];
+  "toggle-github-events-visible": [];
   "rename-room": [displayName: string];
   "refresh-github": [];
   "install-github": [];

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { ref } from "vue";
 
 import type {
   DesktopReasoningSession,
+  DesktopRoomInfo,
   DesktopRoomMessage,
 } from "../../electron/ipc-types";
 import {
@@ -12,10 +14,12 @@ import {
   mergeRoomMessages,
 } from "../src/components/desktop/content/room-shell/messages";
 import {
+  readGitHubEventsVisible,
   readLiquidGlassEnabled,
   readNotificationPermission,
   readNotificationsEnabled,
   readSoundEnabled,
+  rememberGitHubEventsVisible,
 } from "../src/components/desktop/content/room-shell/preferences";
 import {
   buildAgentFallbackReasoningSession,
@@ -24,7 +28,10 @@ import {
   sanitizeFallbackId,
   stripStatusPrefix,
 } from "../src/components/desktop/content/room-shell/reasoningFallback";
-import { oldestRoomHistoryCursor } from "../src/components/desktop/content/room-shell/useDesktopRoomMessages";
+import {
+  oldestRoomHistoryCursor,
+  useDesktopRoomMessages,
+} from "../src/components/desktop/content/room-shell/useDesktopRoomMessages";
 import { latestReasoningSessionForTarget } from "../src/domain/reasoning";
 
 describe("desktop room shell helpers", () => {
@@ -91,6 +98,31 @@ describe("desktop room shell helpers", () => {
     assert.equal(oldestRoomHistoryCursor(messages), "msg_15");
   });
 
+  it("filters GitHub chat event messages when room GitHub events are hidden", () => {
+    const githubEventsVisible = ref(true);
+    const messages = ref([
+      roomMessage({ id: "msg_1", text: "hello" }),
+      roomMessage({
+        id: "msg_2",
+        sender: "github",
+        source: "github",
+        text: "PR #558 opened in BrosInCode/letagents: Polish desktop focus room manager https://github.com/BrosInCode/letagents/pull/558",
+      }),
+    ]);
+    const { visibleMessages } = useDesktopRoomMessages({
+      room: ref(roomInfo()),
+      messages,
+      githubEventsVisible,
+      playRoomSound: () => undefined,
+      onMessageSent: () => undefined,
+    });
+
+    assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1", "msg_2"]);
+
+    githubEventsVisible.value = false;
+    assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
+  });
+
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {
     const target = {
       actorLabel: "Agent Smith | Codex",
@@ -140,16 +172,36 @@ describe("desktop room shell preferences", () => {
       "letagents-desktop:sound": "off",
       "letagents-desktop:notifications": "on",
       "letagents-desktop:liquid-glass": "off",
+      "letagents-desktop:github-events-visible": JSON.stringify({
+        "github.com/brosincode/letagents": false,
+      }),
     }, () => {
       assert.equal(readSoundEnabled(), false);
       assert.equal(readNotificationsEnabled(), true);
       assert.equal(readLiquidGlassEnabled(), false);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), true);
     });
 
     withLocalStorage({}, () => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
       assert.equal(readLiquidGlassEnabled(), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
+    });
+  });
+
+  it("persists GitHub events visibility per normalized room", () => {
+    const entries: Record<string, string> = {};
+    withMutableLocalStorage(entries, () => {
+      rememberGitHubEventsVisible("GitHub.com/BrosInCode/LetAgents", false);
+      assert.equal(readGitHubEventsVisible("github.com/brosincode/letagents"), false);
+      assert.deepEqual(JSON.parse(entries["letagents-desktop:github-events-visible"]), {
+        "github.com/brosincode/letagents": false,
+      });
+
+      rememberGitHubEventsVisible("github.com/BrosInCode/letagents", true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
     });
   });
 
@@ -158,6 +210,7 @@ describe("desktop room shell preferences", () => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
       assert.equal(readLiquidGlassEnabled(), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
     });
 
     withNotificationPermission("denied", () => {
@@ -209,11 +262,49 @@ function reasoningSession(id: string, actorLabel: string, updatedAt: string): De
   };
 }
 
+function roomInfo(overrides: Partial<DesktopRoomInfo> = {}): DesktopRoomInfo {
+  return {
+    identifier: "github.com/BrosInCode/letagents",
+    code: "ROOM",
+    name: "github.com/BrosInCode/letagents",
+    displayName: "letagents",
+    role: "Admin",
+    authenticated: true,
+    kind: "main",
+    parentRoomId: null,
+    focusKey: null,
+    sourceTaskId: null,
+    focusStatus: null,
+    focusParentVisibility: null,
+    focusActivityScope: null,
+    focusGitHubEventRouting: null,
+    focusSettings: null,
+    focusArchivedAt: null,
+    concludedAt: null,
+    conclusionSummary: null,
+    conclusionDetails: null,
+    ...overrides,
+  };
+}
+
 function withLocalStorage(entries: Record<string, string>, callback: () => void): void {
   withWindow({
     localStorage: {
       getItem(key: string): string | null {
         return entries[key] ?? null;
+      },
+    },
+  }, callback);
+}
+
+function withMutableLocalStorage(entries: Record<string, string>, callback: () => void): void {
+  withWindow({
+    localStorage: {
+      getItem(key: string): string | null {
+        return entries[key] ?? null;
+      },
+      setItem(key: string, value: string): void {
+        entries[key] = value;
       },
     },
   }, callback);

@@ -105,6 +105,11 @@ interface ThreadActivityNotice {
   preview: string;
 }
 
+interface ScrollAnchor {
+  messageId: string;
+  offsetTop: number;
+}
+
 const props = defineProps<{
   active: boolean;
   activeSearchMessageId: string | null;
@@ -135,6 +140,7 @@ const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
+let shouldJumpToLatestOnActivate = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
@@ -143,16 +149,40 @@ watch(
   () => props.messages,
   async (newMessages, oldMessages) => {
     const previousScrollHeight = messagesElement.value?.scrollHeight || 0;
+    const oldFirstId = oldMessages?.[0]?.id;
     const oldLastId = oldMessages?.[oldMessages.length - 1]?.id;
+    const oldLastMessage = oldMessages?.[oldMessages.length - 1] || null;
+    const newLastMessage = newMessages[newMessages.length - 1] || null;
     const newLastId = newMessages[newMessages.length - 1]?.id;
-    const isPrepend = Boolean(oldLastId && newLastId === oldLastId && newMessages[0]?.id !== oldMessages?.[0]?.id);
+    const oldFirstIndexInNew = oldFirstId
+      ? newMessages.findIndex((message) => message.id === oldFirstId)
+      : -1;
+    const isPrepend = oldFirstIndexInNew > 0;
+    const isNewLatestMessage = Boolean(
+      oldLastMessage &&
+      newLastMessage &&
+      newLastMessage.id !== oldLastMessage.id &&
+      compareRoomMessages(newLastMessage, oldLastMessage) > 0
+    );
+    const prependAnchor = isPrepend ? captureScrollAnchor() : null;
 
     await nextTick();
 
-    if (!props.active) return;
+    if (!props.active) {
+      if (isNewLatestMessage && isScrolledToBottom) {
+        shouldJumpToLatestOnActivate = true;
+      }
+      return;
+    }
     if (isPrepend && messagesElement.value) {
-      messagesElement.value.scrollTop += messagesElement.value.scrollHeight - previousScrollHeight;
-      updateScrollState();
+      if (!restoreScrollAnchor(prependAnchor)) {
+        setInstantScrollTop(
+          messagesElement.value,
+          messagesElement.value.scrollTop + messagesElement.value.scrollHeight - previousScrollHeight,
+        );
+        updateScrollState();
+        emitScrollPosition();
+      }
       return;
     }
     if (!oldLastId) {
@@ -171,7 +201,7 @@ watch(
       return;
     }
     if (isScrolledToBottom) {
-      scrollToBottom();
+      scrollToBottom("auto");
       return;
     }
     if (newLastId) {
@@ -228,12 +258,12 @@ watch(
   () => props.active,
   async (active) => {
     if (!active) {
-      updateScrollState();
       emitScrollPosition();
       return;
     }
     await nextTick();
-    if (isScrolledToBottom) {
+    if (shouldJumpToLatestOnActivate) {
+      shouldJumpToLatestOnActivate = false;
       scrollToBottom("auto");
       return;
     }
@@ -252,6 +282,7 @@ watch(
     isScrolledToBottom = false;
     hasAppliedInitialScroll = false;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
+    shouldJumpToLatestOnActivate = false;
     void nextTick(() => {
       if (!restoreInitialScrollPosition()) {
         scrollToBottom("auto");
@@ -337,8 +368,15 @@ function restoreInitialScrollPosition(): boolean {
   if (hasAppliedInitialScroll || !shouldRestoreInitialScroll || !messagesElement.value) return false;
   const scrollTop = props.initialScrollTop;
   if (typeof scrollTop !== "number" || !Number.isFinite(scrollTop)) return false;
+  if (!props.messages.length) return false;
   const element = messagesElement.value;
-  element.scrollTop = Math.max(0, Math.min(scrollTop, element.scrollHeight));
+  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+  if (scrollTop > maxScrollTop + 24) {
+    hasAppliedInitialScroll = true;
+    shouldRestoreInitialScroll = false;
+    return false;
+  }
+  setInstantScrollTop(element, Math.max(0, Math.min(scrollTop, maxScrollTop)));
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   updateScrollState();
@@ -354,6 +392,43 @@ function hasInitialScrollPosition(): boolean {
 function emitScrollPosition(): void {
   if (!messagesElement.value) return;
   emit("scroll-position", messagesElement.value.scrollTop);
+}
+
+function captureScrollAnchor(): ScrollAnchor | null {
+  const element = messagesElement.value;
+  if (!element) return null;
+  const viewportTop = element.getBoundingClientRect().top;
+  const messageElements = [...element.querySelectorAll<HTMLElement>("[data-message-id]")];
+  const anchorElement = messageElements.find((messageElement) =>
+    messageElement.getBoundingClientRect().bottom > viewportTop
+  );
+  const messageId = anchorElement?.dataset.messageId;
+  if (!anchorElement || !messageId) return null;
+  return {
+    messageId,
+    offsetTop: anchorElement.getBoundingClientRect().top - viewportTop,
+  };
+}
+
+function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
+  const element = messagesElement.value;
+  if (!element || !anchor) return false;
+  const anchorElement = [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
+    .find((messageElement) => messageElement.dataset.messageId === anchor.messageId);
+  if (!anchorElement) return false;
+  const viewportTop = element.getBoundingClientRect().top;
+  const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;
+  setInstantScrollTop(element, element.scrollTop + nextOffsetTop - anchor.offsetTop);
+  updateScrollState();
+  emitScrollPosition();
+  return true;
+}
+
+function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
+  const previousScrollBehavior = element.style.scrollBehavior;
+  element.style.scrollBehavior = "auto";
+  element.scrollTop = scrollTop;
+  element.style.scrollBehavior = previousScrollBehavior;
 }
 
 function threadCount(messageId: string): number {
