@@ -138,6 +138,8 @@
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :messages="selectedSnapshot?.messages || []"
+          :github-events="selectedSnapshot?.githubEvents || null"
+          :repo-status="repoStatusValue"
           :workers="workers"
           :initial-chat-scroll-top="chatScrollTopByRoom[selectedRoomInfo.identifier] ?? null"
           @chat-scroll-position="rememberChatScrollPosition"
@@ -333,6 +335,8 @@ let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
 let sidebarMetadataRefreshInFlight = false;
+let repoStatusRefreshInFlight = false;
+let repoStatusRefreshTimer: number | null = null;
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const sidebarPeekOpen = ref(false);
@@ -442,7 +446,6 @@ async function refreshSidebarRoomMetadata(): Promise<void> {
   if (showFirstRunGate.value || sidebarMetadataRefreshInFlight) return;
   sidebarMetadataRefreshInFlight = true;
   try {
-    await refreshActiveRepoStatus();
     await refreshAccountRooms().catch(() => undefined);
     await refreshSidebarLatestMessages();
   } finally {
@@ -451,10 +454,16 @@ async function refreshSidebarRoomMetadata(): Promise<void> {
 }
 
 async function refreshActiveRepoStatus(): Promise<void> {
+  if (showFirstRunGate.value || repoStatusRefreshInFlight) return;
   const rootPath = activeProjectRootPath();
   if (!rootPath) return;
-  const nextRepoStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
-  if (nextRepoStatus) repoStatus.value = nextRepoStatus;
+  repoStatusRefreshInFlight = true;
+  try {
+    const nextRepoStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
+    if (nextRepoStatus) repoStatus.value = nextRepoStatus;
+  } finally {
+    repoStatusRefreshInFlight = false;
+  }
 }
 
 function activeProjectRootPath(): string | null {
@@ -465,13 +474,28 @@ function activeProjectRootPath(): string | null {
   )?.rootPath || null;
 }
 
-function handleVisibilityChange(): void {
-  if (document.visibilityState !== "visible") return;
+function scheduleFocusedRepoStatusRefresh(delayMs = 150): void {
+  if (repoStatusRefreshTimer !== null) {
+    window.clearTimeout(repoStatusRefreshTimer);
+  }
+  repoStatusRefreshTimer = window.setTimeout(() => {
+    repoStatusRefreshTimer = null;
+    void refreshActiveRepoStatus();
+  }, delayMs);
+}
+
+function refreshForegroundData(): void {
+  scheduleFocusedRepoStatusRefresh();
   void refreshSidebarRoomMetadata();
 }
 
+function handleVisibilityChange(): void {
+  if (document.visibilityState !== "visible") return;
+  refreshForegroundData();
+}
+
 function handleWindowFocus(): void {
-  void refreshSidebarRoomMetadata();
+  refreshForegroundData();
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
@@ -973,6 +997,10 @@ onBeforeUnmount(() => {
   if (accountRoomsRefreshInterval) {
     window.clearInterval(accountRoomsRefreshInterval);
     accountRoomsRefreshInterval = null;
+  }
+  if (repoStatusRefreshTimer !== null) {
+    window.clearTimeout(repoStatusRefreshTimer);
+    repoStatusRefreshTimer = null;
   }
   window.removeEventListener("focus", handleWindowFocus);
   document.removeEventListener("visibilitychange", handleVisibilityChange);

@@ -9,6 +9,8 @@ import type {
   DesktopFocusRoomConclusionDetails,
   DesktopFocusRoomMutationResult,
   DesktopFocusRoomSettingsPatch,
+  DesktopGitHubEventsPage,
+  DesktopGitHubEventsQuery,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopChatStorageSettings,
@@ -121,6 +123,10 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    getGitHubEvents: (
+      roomIdentifier: string,
+      query?: DesktopGitHubEventsQuery,
+    ) => Promise<DesktopGitHubEventsPage>;
     getGitHubIntegrationStatus: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationStatus>;
     openGitHubInstall: (roomIdentifier: string) => Promise<DesktopGitHubIntegrationActionResult>;
   };

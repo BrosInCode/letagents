@@ -1,4 +1,5 @@
 import type { DesktopReasoningSession } from "../../../ipc-types.js";
+import type { GitHubEventsResponse } from "../events.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import type { DesktopTaskSummaryPayload } from "../tasks/mappers.js";
 
@@ -187,4 +188,5 @@ export interface RoomSnapshotData {
   reasoningData: ReasoningResponse;
   activityHistoryData: ActivityHistoryResponse;
   messagesData: MessagesResponse;
+  githubEventsData: GitHubEventsResponse | null;
 }

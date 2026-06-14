@@ -2,7 +2,6 @@
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
     <div class="desktop-composer-identity">
       <span>{{ composerTargetLabel }}</span>
-      <span class="desktop-composer-shortcut">{{ composerPresenceLabel }}</span>
     </div>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
@@ -115,20 +114,10 @@ const activeMentionIndex = ref(0);
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
 );
-const reachableParticipantCount = computed(() =>
-  props.participants.filter((participant) => participant.activityState !== "offline").length
-);
 const composerTargetLabel = computed(() => props.roomIdentifier ? "Message the room" : "No room selected");
 const composerPlaceholder = computed(() => {
   if (props.roomLoading) return "Loading room...";
   return props.roomIdentifier ? "Write a message..." : "Choose a room to start writing";
-});
-const composerPresenceLabel = computed(() => {
-  if (props.roomLoading) return "Loading room";
-  if (!props.roomIdentifier) return "Open a room before sending";
-  if (reachableParticipantCount.value === 0) return "No reachable participants";
-  if (reachableParticipantCount.value === 1) return "1 reachable participant";
-  return `${reachableParticipantCount.value} reachable participants`;
 });
 const composerHint = computed(() => {
   if (props.roomLoading) return "Room messages and participants are loading.";

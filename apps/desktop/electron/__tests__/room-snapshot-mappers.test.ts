@@ -12,6 +12,7 @@ const emptySnapshotData: RoomSnapshotData = {
   reasoningData: { sessions: [], reasoning_sessions: [] },
   activityHistoryData: { entries: [] },
   messagesData: { messages: [] },
+  githubEventsData: null,
 };
 
 test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => {
@@ -138,6 +139,39 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
         },
       ],
     },
+    githubEventsData: {
+      room_id: "room_1",
+      github_room_id: "github.com/BrosInCode/letagents",
+      has_more: true,
+      events: [
+        {
+          id: "evt_older",
+          event_type: "pull_request_review",
+          action: "submitted",
+          github_object_id: "434",
+          github_object_url: "https://github.com/BrosInCode/letagents/pull/434#pullrequestreview-1",
+          title: "Review requested changes",
+          state: "changes_requested",
+          actor_login: "RepoMorrow",
+          metadata: { pull_request: { head_ref: "codex/desktop-events" } },
+          linked_task_id: "task_1",
+          created_at: "2026-05-12T10:55:00.000Z",
+        },
+        {
+          id: "evt_newer",
+          event_type: "check_run",
+          action: "completed",
+          github_object_id: "check_1",
+          github_object_url: "https://github.com/BrosInCode/letagents/actions/runs/1",
+          title: "deploy",
+          state: "failure",
+          actor_login: "github-actions",
+          metadata: { app_name: "GitHub Actions", head_branch: "codex/desktop-events" },
+          linked_task_id: "task_1",
+          created_at: "2026-05-12T11:05:00.000Z",
+        },
+      ],
+    },
   };
 
   const snapshot = mapSnapshotData(data);
@@ -157,4 +191,12 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
   ]);
   assert.equal(snapshot.recentActivity[0]?.currentTasks[0]?.workflowRefs[0]?.label, "#1");
   assert.deepEqual(snapshot.messages.map((message) => message.id), ["msg_1", "msg_2"]);
+  assert.equal(snapshot.githubEvents?.githubRoomIdentifier, "github.com/BrosInCode/letagents");
+  assert.equal(snapshot.githubEvents?.hasMore, true);
+  assert.deepEqual(snapshot.githubEvents?.events.map((event) => event.id), ["evt_newer", "evt_older"]);
+  assert.equal(snapshot.githubEvents?.events[0]?.eventType, "check_run");
+  assert.deepEqual(snapshot.githubEvents?.events[0]?.metadata, {
+    app_name: "GitHub Actions",
+    head_branch: "codex/desktop-events",
+  });
 });

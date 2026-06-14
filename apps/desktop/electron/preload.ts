@@ -71,6 +71,8 @@ const api: DesktopApi = {
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
+    getGitHubEvents: (roomIdentifier: string, query = {}) =>
+      ipcRenderer.invoke("desktop:room:get-github-events", roomIdentifier, query),
     getGitHubIntegrationStatus: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:get-github-integration-status", roomIdentifier),
     openGitHubInstall: (roomIdentifier: string) =>

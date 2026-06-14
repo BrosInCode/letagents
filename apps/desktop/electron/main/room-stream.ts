@@ -11,6 +11,7 @@ import { getLocalChatMessages } from "./rooms/messages/local-store.js";
 import {
   mapDesktopReasoningSessionPayload,
   mapDesktopReasoningUpdatePayload,
+  mapGitHubRoomEventPayload,
   mapDesktopTaskSummaryPayload,
   mapRoomMessagePayload,
 } from "./rooms.js";
@@ -113,6 +114,18 @@ function handleRoomStreamFrame(
         type: "task_update",
         roomIdentifier: eventRoomIdentifier,
         task,
+      });
+    }
+    return;
+  }
+
+  if (eventName === "github_event") {
+    const event = mapGitHubRoomEventPayload(payload);
+    if (event) {
+      emitRoomStreamEvent({
+        type: "github_event",
+        roomIdentifier: eventRoomIdentifier,
+        event,
       });
     }
     return;

@@ -99,6 +99,12 @@
   line-height: 1.45;
 }
 
+.desktop-github-event-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .desktop-github-event-link {
   display: inline-flex;
   align-items: center;
@@ -114,10 +120,16 @@
   font-weight: 820;
   text-decoration: none;
   box-shadow: none;
+  cursor: pointer;
 }
 
 .desktop-github-event-link:hover {
   filter: brightness(1.08);
+}
+
+.desktop-github-event-link.is-secondary {
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-secondary);
 }
 
 .desktop-github-event[data-tone="violet"] {

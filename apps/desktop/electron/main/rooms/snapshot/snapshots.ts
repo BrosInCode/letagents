@@ -18,6 +18,7 @@ const emptySnapshotCollections = {
   reasoningSessions: [],
   recentActivity: [],
   messages: [],
+  githubEvents: null,
 };
 
 export function createMissingRoomSnapshot(): DesktopRoomSnapshot {

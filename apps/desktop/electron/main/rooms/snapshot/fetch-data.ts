@@ -1,6 +1,7 @@
 import { apiFetch } from "../../auth.js";
 import { isLocalChatStorageEnabled } from "../../chat-storage/settings.js";
 import { roomMessageHistoryPageSize } from "../../paths.js";
+import type { GitHubEventsResponse } from "../events.js";
 import { getLatestLocalChatMessages } from "../messages/local-store.js";
 import type {
   ActivityHistoryResponse,
@@ -24,6 +25,7 @@ export async function fetchRoomSnapshotData(
     reasoningData,
     activityHistoryData,
     messagesData,
+    githubEventsData,
   ] = await Promise.all([
     apiFetch<FocusRoomsResponse>(
       `/rooms/${encodeURIComponent(roomIdentifier)}/focus-rooms`,
@@ -50,6 +52,9 @@ export async function fetchRoomSnapshotData(
       : apiFetch<MessagesResponse>(
           `/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
         ).catch(() => ({ messages: [] })),
+    apiFetch<GitHubEventsResponse>(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/events?limit=100`,
+    ).catch(() => null),
   ]);
 
   return {
@@ -60,5 +65,6 @@ export async function fetchRoomSnapshotData(
     reasoningData,
     activityHistoryData,
     messagesData,
+    githubEventsData,
   };
 }

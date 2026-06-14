@@ -16,6 +16,8 @@ import type {
   DesktopChatStorageSettings,
   DiagnosticsSnapshot,
   DesktopFocusRoomInfo,
+  DesktopGitHubEventsPage,
+  DesktopGitHubEventsQuery,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopInviteRoomCreation,
@@ -79,6 +81,7 @@ import {
   createDesktopInviteRoom,
   deleteDesktopAccountRoom,
   fetchRoomSnapshot,
+  getDesktopGitHubEvents,
   getDesktopGitHubIntegrationStatus,
   getDesktopRoomLatestMessages,
   getDesktopReasoningSession,
@@ -378,6 +381,15 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:room:create-invite-room",
     async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-github-events",
+    async (
+      _event,
+      roomIdentifier: string,
+      query?: DesktopGitHubEventsQuery,
+    ): Promise<DesktopGitHubEventsPage> =>
+      getDesktopGitHubEvents(roomIdentifier, query),
   );
   targetIpcMain.handle(
     "desktop:room:get-github-integration-status",

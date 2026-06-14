@@ -110,6 +110,14 @@
               stroke-linejoin="round"
             />
             <path
+              v-else-if="tab.id === 'events'"
+              d="M2.5 8h2.25l1.5-3.5 3 7 1.25-3.5h3M11.5 3.5h2v2"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
               v-else-if="tab.id === 'board'"
               d="M3.25 3.5h9.5M4.25 6h2.5v6h-2.5V6Zm5 0h2.5v3.75h-2.5V6Z"
               stroke="currentColor"

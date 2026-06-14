@@ -135,6 +135,7 @@
           @assign-review="assignModalReview"
           @run-action="runModalTaskAction"
           @update:selected-reviewer="setModalReviewer"
+          @view-events="emit('view-events', $event)"
         />
       </div>
     </div>
@@ -211,7 +212,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import RoomBoardTaskCard from "./room-board/RoomBoardTaskCard.vue";
@@ -226,11 +227,14 @@ const props = defineProps<{
   tasks: DesktopTaskSummary[];
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
+  selectedTaskId?: string | null;
 }>();
 
 const emit = defineEmits<{
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
+  "update:selected-task-id": [taskId: string | null];
+  "view-events": [taskId: string];
 }>();
 
 const {
@@ -256,7 +260,7 @@ const searchQuery = ref("");
 const activeFilter = ref<BoardFilter>("open");
 const draggedTaskId = ref<string | null>(null);
 const dragOverStatus = ref<string | null>(null);
-const selectedTaskId = ref<string | null>(null);
+const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
 const isCreateTaskModalOpen = ref(false);
 const createTaskTitle = ref("");
 const createTaskDescription = ref("");
@@ -298,7 +302,8 @@ const visibleGroups = computed<TaskGroup[]>(() =>
 const visibleTasks = computed(() => visibleGroups.value.flatMap((group) => group.tasks));
 const visibleTaskCount = computed(() => visibleTasks.value.length);
 const modalTask = computed(() =>
-  visibleTasks.value.find((task) => task.id === selectedTaskId.value)
+  visibleTasks.value.find((task) => task.id === localSelectedTaskId.value)
+  || props.tasks.find((task) => task.id === localSelectedTaskId.value)
   || null
 );
 const modalTaskActions = computed(() => modalTask.value ? actionsFor(modalTask.value) : []);
@@ -311,12 +316,18 @@ const canCreateTask = computed(() =>
   Boolean(createTaskTitle.value.trim() || createTaskDescription.value.trim())
 );
 
+watch(() => props.selectedTaskId || null, (taskId) => {
+  localSelectedTaskId.value = taskId;
+});
+
 function openTaskModal(taskId: string): void {
-  selectedTaskId.value = taskId;
+  localSelectedTaskId.value = taskId;
+  emit("update:selected-task-id", taskId);
 }
 
 function closeTaskModal(): void {
-  selectedTaskId.value = null;
+  localSelectedTaskId.value = null;
+  emit("update:selected-task-id", null);
 }
 
 function openCreateTaskModal(): void {

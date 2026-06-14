@@ -18,7 +18,11 @@
           <strong>{{ parentDisplayName }}</strong>
           <time :datetime="parent.timestamp">{{ parentTime }}</time>
         </div>
-        <DesktopGitHubEventCard v-if="parentGitHubEvent" :event="parentGitHubEvent" />
+        <DesktopGitHubEventCard
+          v-if="parentGitHubEvent"
+          :event="parentGitHubEvent"
+          @open-event="$emit('open-github-event', $event)"
+        />
         <DesktopLongMessageContent
           v-else
           :text="parent.text || 'No message body.'"
@@ -48,7 +52,11 @@
           <strong>{{ displayName(reply) }}</strong>
           <time :datetime="reply.timestamp">{{ formatTimestamp(reply.timestamp) }}</time>
         </div>
-        <DesktopGitHubEventCard v-if="githubEvent(reply)" :event="githubEvent(reply)!" />
+        <DesktopGitHubEventCard
+          v-if="githubEvent(reply)"
+          :event="githubEvent(reply)!"
+          @open-event="$emit('open-github-event', $event)"
+        />
         <DesktopLongMessageContent
           v-else
           :text="reply.text || 'No message body.'"
@@ -109,6 +117,7 @@ const emit = defineEmits<{
   close: [];
   "open-image": [imageId: string];
   "send-thread-message": [text: string, parentId: string];
+  "open-github-event": [url: string];
 }>();
 
 const draft = ref("");

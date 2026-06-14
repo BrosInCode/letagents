@@ -30,6 +30,7 @@
           @open-agent="openAgentModal"
           @open-image="openImageViewer"
           @open-thread="openThread"
+          @open-github-event="emit('open-github-event', $event)"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -89,6 +90,7 @@
         :active-search-message-id="activeSearchMessageId"
         @close="closeThread"
         @open-image="openImageViewer"
+        @open-github-event="emit('open-github-event', $event)"
         @send-thread-message="sendThreadMessage"
       />
     </div>
@@ -142,6 +144,7 @@ const emit = defineEmits<{
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
+  "open-github-event": [url: string];
 }>();
 
 const activeThreadParentId = ref<string | null>(null);
