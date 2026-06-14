@@ -88,7 +88,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
@@ -141,6 +141,9 @@ let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 let shouldJumpToLatestOnActivate = false;
+let shouldRestoreKeepAliveScroll = false;
+let lastKnownScrollAnchor: ScrollAnchor | null = null;
+let lastKnownScrollTop: number | null = null;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
@@ -264,7 +267,12 @@ watch(
     await nextTick();
     if (shouldJumpToLatestOnActivate) {
       shouldJumpToLatestOnActivate = false;
+      shouldRestoreKeepAliveScroll = false;
       scrollToBottom("auto");
+      return;
+    }
+    if (shouldRestoreKeepAliveScroll && restoreKnownScrollPosition()) {
+      shouldRestoreKeepAliveScroll = false;
       return;
     }
     if (!restoreInitialScrollPosition()) {
@@ -283,6 +291,7 @@ watch(
     hasAppliedInitialScroll = false;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
     shouldJumpToLatestOnActivate = false;
+    shouldRestoreKeepAliveScroll = false;
     void nextTick(() => {
       if (!restoreInitialScrollPosition()) {
         scrollToBottom("auto");
@@ -307,7 +316,23 @@ onMounted(() => {
   });
 });
 
+onDeactivated(() => {
+  rememberScrollAnchor();
+  shouldRestoreKeepAliveScroll = true;
+  emitScrollPosition();
+});
+
+onActivated(() => {
+  void nextTick(() => {
+    if (!props.active) return;
+    if (restoreKnownScrollPosition()) {
+      shouldRestoreKeepAliveScroll = false;
+    }
+  });
+});
+
 onBeforeUnmount(() => {
+  rememberScrollAnchor();
   emitScrollPosition();
 });
 
@@ -347,6 +372,7 @@ function handleScroll(): void {
   shouldRestoreInitialScroll = false;
   const element = messagesElement.value;
   updateScrollState();
+  rememberScrollAnchor();
   if (isScrolledToBottom) {
     unreadCount.value = 0;
   }
@@ -390,13 +416,41 @@ function hasInitialScrollPosition(): boolean {
 }
 
 function emitScrollPosition(): void {
-  if (!messagesElement.value) return;
-  emit("scroll-position", messagesElement.value.scrollTop);
+  const element = messagesElement.value;
+  if (!element) return;
+  lastKnownScrollTop = element.scrollTop;
+  if (props.active && element.isConnected && element.clientHeight > 0) {
+    lastKnownScrollAnchor = captureScrollAnchor();
+  }
+  emit("scroll-position", element.scrollTop);
+}
+
+function rememberScrollAnchor(): void {
+  const element = messagesElement.value;
+  if (!element) return;
+  const nextAnchor = captureScrollAnchor();
+  if (nextAnchor) {
+    lastKnownScrollAnchor = nextAnchor;
+  }
+  lastKnownScrollTop = element.scrollTop;
+}
+
+function restoreKnownScrollPosition(): boolean {
+  const element = messagesElement.value;
+  if (!element || !isMeasurableScrollViewport(element)) return false;
+  if (restoreScrollAnchor(lastKnownScrollAnchor)) {
+    return true;
+  }
+  if (lastKnownScrollTop === null) return false;
+  setInstantScrollTop(element, lastKnownScrollTop);
+  updateScrollState();
+  emitScrollPosition();
+  return true;
 }
 
 function captureScrollAnchor(): ScrollAnchor | null {
   const element = messagesElement.value;
-  if (!element) return null;
+  if (!element || !isMeasurableScrollViewport(element)) return null;
   const viewportTop = element.getBoundingClientRect().top;
   const messageElements = [...element.querySelectorAll<HTMLElement>("[data-message-id]")];
   const anchorElement = messageElements.find((messageElement) =>
@@ -412,7 +466,7 @@ function captureScrollAnchor(): ScrollAnchor | null {
 
 function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   const element = messagesElement.value;
-  if (!element || !anchor) return false;
+  if (!element || !anchor || !isMeasurableScrollViewport(element)) return false;
   const anchorElement = [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
     .find((messageElement) => messageElement.dataset.messageId === anchor.messageId);
   if (!anchorElement) return false;
@@ -422,6 +476,10 @@ function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   updateScrollState();
   emitScrollPosition();
   return true;
+}
+
+function isMeasurableScrollViewport(element: HTMLElement): boolean {
+  return element.isConnected && element.clientHeight > 0 && element.getClientRects().length > 0;
 }
 
 function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
