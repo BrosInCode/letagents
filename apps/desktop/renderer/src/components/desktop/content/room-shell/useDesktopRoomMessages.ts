@@ -7,7 +7,10 @@ import {
   compareRoomMessages,
   mergeRoomMessages,
 } from "./messages";
-import { isLowSignalGitHubCheckMessage } from "../desktop-chat-message/github-event";
+import {
+  isGitHubRoomMessage,
+  isLowSignalGitHubCheckMessage,
+} from "../desktop-chat-message/github-event";
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 
 const messageHistoryPageSize = 150;
@@ -15,6 +18,7 @@ const messageHistoryPageSize = 150;
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
   messages: Readonly<Ref<readonly DesktopRoomMessage[]>>;
+  githubEventsVisible: Readonly<Ref<boolean>>;
   playRoomSound(kind: "send" | "notification"): void;
   onMessageSent(message: DesktopRoomMessage): void;
 }) {
@@ -32,7 +36,10 @@ export function useDesktopRoomMessages(options: {
   });
   const visibleMessages = computed(() => {
     return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
-      .filter((message) => !isLowSignalGitHubCheckMessage(message));
+      .filter((message) =>
+        !isLowSignalGitHubCheckMessage(message)
+        && (options.githubEventsVisible.value || !isGitHubRoomMessage(message))
+      );
   });
   const timelineMessages = computed(() => roomTimelineMessages(visibleMessages.value));
   const roomMessagesForAgentInsight = computed(() =>

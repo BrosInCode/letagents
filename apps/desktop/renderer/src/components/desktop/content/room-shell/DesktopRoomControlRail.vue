@@ -18,11 +18,14 @@
           :github-loading="githubLoading"
           :github-busy="githubBusy"
           :github-error="githubError"
+          :github-events-available="githubEventsAvailable"
+          :github-events-visible="githubEventsVisible"
           @copy-room-link="emit('copyRoomLink')"
           @open-rules="emit('openRules')"
           @toggle-sound="emit('toggleSound')"
           @toggle-notifications="emit('toggleNotifications')"
           @toggle-liquid-glass="emit('toggleLiquidGlass')"
+          @toggle-github-events-visible="emit('toggleGithubEventsVisible')"
           @rename-room="emit('renameRoom', $event)"
           @refresh-github="emit('refreshGithub')"
           @install-github="emit('installGithub')"
@@ -81,6 +84,8 @@ const props = defineProps<{
   githubLoading: boolean;
   githubBusy: boolean;
   githubError: string | null;
+  githubEventsAvailable: boolean;
+  githubEventsVisible: boolean;
   searchSummary: string;
   searchResultsCount: number;
 }>();
@@ -91,6 +96,7 @@ const emit = defineEmits<{
   toggleSound: [];
   toggleNotifications: [];
   toggleLiquidGlass: [];
+  toggleGithubEventsVisible: [];
   renameRoom: [displayName: string];
   refreshGithub: [];
   installGithub: [];

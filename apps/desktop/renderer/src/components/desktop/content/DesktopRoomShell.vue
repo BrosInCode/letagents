@@ -30,6 +30,8 @@
       :github-loading="githubLoading"
       :github-busy="githubBusy"
       :github-error="githubError"
+      :github-events-available="githubEventsAvailable"
+      :github-events-visible="githubEventsVisible"
       :search-summary="searchSummary"
       :search-results-count="searchResults.length"
       @copy-room-link="copyRoomLink"
@@ -37,6 +39,7 @@
       @toggle-sound="toggleSound"
       @toggle-notifications="toggleNotifications"
       @toggle-liquid-glass="toggleLiquidGlass"
+      @toggle-github-events-visible="toggleGitHubEventsVisible"
       @rename-room="renameRoom"
       @refresh-github="refreshGitHubIntegration"
       @install-github="installGitHubIntegration"
@@ -189,6 +192,10 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import { encodeRoomPathIdentifier } from "./room-shell/messages";
+import {
+  readGitHubEventsVisible,
+  rememberGitHubEventsVisible,
+} from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
@@ -243,6 +250,7 @@ const eventsTaskFilterId = ref<string | null>(null);
 const eventsSelectedEventId = ref<string | null>(null);
 const eventsLoadedOlderWithoutMatches = ref(false);
 const boardSelectedTaskId = ref<string | null>(null);
+const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 let githubEventsRefreshTimer: number | null = null;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
 const isRepoBackedRoom = computed(() =>
@@ -278,6 +286,7 @@ const {
 } = useDesktopRoomMessages({
   room: roomRef,
   messages: messagesRef,
+  githubEventsVisible,
   playRoomSound,
   onMessageSent: (message) => emit("message-sent", message),
 });
@@ -328,12 +337,14 @@ const githubRepository = computed(() =>
   || null
 );
 
-const showEventsTab = computed(() =>
+const githubEventsAvailable = computed(() =>
   isRepoBackedRoom.value
   || Boolean(githubStatus.value?.connected)
   || Boolean(eventsPage.value?.events.length)
   || props.messages.some(shouldRefreshEventsForMessage)
 );
+
+const showEventsTab = computed(() => githubEventsVisible.value && githubEventsAvailable.value);
 
 watch(() => props.githubEvents, (nextPage) => {
   if (!nextPage) {
@@ -352,6 +363,7 @@ watch(() => props.room.identifier, () => {
   boardSelectedTaskId.value = null;
   eventsError.value = null;
   eventsLoadedOlderWithoutMatches.value = false;
+  githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
 });
 
 watch(showEventsTab, (visible) => {
@@ -361,13 +373,14 @@ watch(showEventsTab, (visible) => {
 });
 
 watch(activeTab, (tab) => {
-  if (tab === "events" && !eventsPage.value && !eventsLoading.value) {
+  if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
     void refreshGitHubEvents().catch(() => undefined);
   }
 });
 
 watch(() => props.messages.at(-1)?.id || null, () => {
   const latestMessage = props.messages.at(-1);
+  if (!showEventsTab.value) return;
   if (!latestMessage || !shouldRefreshEventsForMessage(latestMessage)) return;
   scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
 });
@@ -410,7 +423,7 @@ function selectTab(tabId: RoomTabId): void {
 }
 
 async function refreshGitHubEvents(): Promise<void> {
-  if (!window.letagentsDesktop?.room?.getGitHubEvents) return;
+  if (!showEventsTab.value || !window.letagentsDesktop?.room?.getGitHubEvents) return;
   eventsLoading.value = true;
   eventsError.value = null;
   try {
@@ -424,7 +437,7 @@ async function refreshGitHubEvents(): Promise<void> {
 }
 
 async function loadOlderGitHubEvents(): Promise<void> {
-  if (!window.letagentsDesktop?.room?.getGitHubEvents || eventsLoadingOlder.value) return;
+  if (!showEventsTab.value || !window.letagentsDesktop?.room?.getGitHubEvents || eventsLoadingOlder.value) return;
   const after = eventsPage.value?.events.at(-1)?.id || null;
   if (!after) return;
   eventsLoadingOlder.value = true;
@@ -446,6 +459,7 @@ async function loadOlderGitHubEvents(): Promise<void> {
 }
 
 function openEventsForTask(taskId: string): void {
+  if (!showEventsTab.value) return;
   eventsTaskFilterId.value = taskId;
   eventsSelectedEventId.value = null;
   activeTab.value = "events";
@@ -457,6 +471,7 @@ function openBoardTaskFromEvents(taskId: string): void {
 }
 
 async function openGitHubEventFromChat(url: string): Promise<void> {
+  if (!showEventsTab.value) return;
   eventsTaskFilterId.value = null;
   activeTab.value = "events";
   const firstMatch = findEventByUrl(url);
@@ -477,6 +492,22 @@ function scheduleGitHubEventsRefresh(delayMs: number): void {
     githubEventsRefreshTimer = null;
     void refreshGitHubEvents().catch(() => undefined);
   }, delayMs);
+}
+
+function toggleGitHubEventsVisible(): void {
+  githubEventsVisible.value = !githubEventsVisible.value;
+  rememberGitHubEventsVisible(props.room.identifier, githubEventsVisible.value);
+  if (githubEventsVisible.value) return;
+  eventsTaskFilterId.value = null;
+  eventsSelectedEventId.value = null;
+  eventsLoadedOlderWithoutMatches.value = false;
+  if (activeTab.value === "events") {
+    activeTab.value = "chat";
+  }
+  if (githubEventsRefreshTimer !== null) {
+    window.clearTimeout(githubEventsRefreshTimer);
+    githubEventsRefreshTimer = null;
+  }
 }
 
 function shouldRefreshEventsForMessage(message: DesktopRoomMessage): boolean {

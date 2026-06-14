@@ -93,12 +93,16 @@ export function parseGitHubEvent(message: DesktopRoomMessage): GitHubEventPresen
 }
 
 export function isLowSignalGitHubCheckMessage(message: DesktopRoomMessage): boolean {
-  if (message.source !== "github" && message.sender.toLowerCase() !== "github") return false;
+  if (!isGitHubRoomMessage(message)) return false;
   const text = message.text.trim();
   const urlMatch = text.match(/\s(https?:\/\/\S+)$/i);
   const body = urlMatch ? text.slice(0, urlMatch.index).trim() : text;
   const checkMatch = CHECK_MESSAGE_PATTERN.exec(body);
   return Boolean(checkMatch && LOW_SIGNAL_CHECK_CONCLUSIONS.has(checkMatch[3].trim().toLowerCase()));
+}
+
+export function isGitHubRoomMessage(message: DesktopRoomMessage): boolean {
+  return message.source === "github" || message.sender.toLowerCase() === "github";
 }
 
 function summarizeAction(action: string): string | null {

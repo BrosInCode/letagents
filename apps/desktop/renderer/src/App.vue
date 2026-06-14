@@ -110,22 +110,22 @@
         @refresh="refresh"
       />
 
-      <template v-if="activeEntry.type === 'room'">
-        <AuthOnboardingView
-          v-if="selectedNeedsAccess"
-          :access="selectedAccess"
-          :auth-status="authStatus"
-          :busy="authBusy || loading"
-          :feedback="authFeedback"
-          @start-auth="startAuthFlow"
-          @open-verification="openVerification"
-          @poll-auth="pollAuthFlow"
-          @refresh-room="refresh"
-          @sign-out="signOut"
-        />
+      <AuthOnboardingView
+        v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        :access="selectedAccess"
+        :auth-status="authStatus"
+        :busy="authBusy || loading"
+        :feedback="authFeedback"
+        @start-auth="startAuthFlow"
+        @open-verification="openVerification"
+        @poll-auth="pollAuthFlow"
+        @refresh-room="refresh"
+        @sign-out="signOut"
+      />
 
+      <KeepAlive :max="1">
         <DesktopRoomShell
-          v-else
+          v-if="activeEntry.type === 'room' && !selectedNeedsAccess"
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
@@ -150,10 +150,10 @@
           @open-focus-room="openFocusRoomFromRoomsTab"
           @cycle-sidebar="cycleSidebar"
         />
-      </template>
+      </KeepAlive>
 
       <SettingsView
-        v-else
+        v-if="activeEntry.type !== 'room'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :auth-status="authStatus"
