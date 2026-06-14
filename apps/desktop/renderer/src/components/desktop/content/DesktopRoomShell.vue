@@ -244,9 +244,6 @@ const eventsSelectedEventId = ref<string | null>(null);
 const eventsLoadedOlderWithoutMatches = ref(false);
 const boardSelectedTaskId = ref<string | null>(null);
 let githubEventsRefreshTimer: number | null = null;
-const visibleParticipantCount = computed(() =>
-  props.participants.filter((participant) => !participant.hiddenAt).length
-);
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
 const isRepoBackedRoom = computed(() =>
   [props.room.identifier, props.room.name, props.room.displayName]
@@ -394,18 +391,14 @@ watchRoomNotifications({
 });
 
 const tabs = computed<RoomTab[]>(() => [
-  { id: "chat", label: "Chat", count: props.roomLoading ? null : timelineMessages.value.length },
+  { id: "chat", label: "Chat", count: null },
   ...(showEventsTab.value ? [{
     id: "events" as const,
     label: "Events",
-    count: props.roomLoading ? null : eventsPage.value?.events.length || 0,
+    count: null,
   }] : []),
-  { id: "board", label: "Board", count: props.roomLoading ? null : props.tasks.length },
-  {
-    id: "activity",
-    label: "Activity",
-    count: props.roomLoading ? null : visibleParticipantCount.value + props.participantHiddenCount,
-  },
+  { id: "board", label: "Board", count: null },
+  { id: "activity", label: "Activity", count: null },
   { id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
   { id: "rent", label: "Rent an Agent", count: null },
 ]);
