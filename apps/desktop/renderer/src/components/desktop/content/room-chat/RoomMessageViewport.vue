@@ -95,7 +95,7 @@ import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
-import { buildThreadSummaries, recentThreadActivities } from "./thread-utils";
+import { buildThreadSummaries } from "./thread-utils";
 
 interface ThreadActivityNotice {
   parentId: string;
@@ -132,23 +132,12 @@ const messagesElement = ref<HTMLElement | null>(null);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
-const dismissedThreadActivityKeys = ref<string[]>([]);
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
-const timelineMessageIds = computed(() => new Set(props.messages.map((message) => message.id)));
-const fallbackThreadActivityNotice = computed(() => {
-  const activity = recentThreadActivities(props.threadMessages, props.threadMessages.length)
-    .filter((item) => item.parent.id !== props.activeThreadParentId)
-    .find((item) =>
-      !timelineMessageIds.value.has(item.parent.id) &&
-      !dismissedThreadActivityKeys.value.includes(threadActivityKey(item.parent.id, item.latest.id))
-    );
-  return activity ? buildThreadActivityNotice(activity.latest, "Recent thread activity") : null;
-});
-const visibleThreadActivityNotice = computed(() => threadActivityNotice.value || fallbackThreadActivityNotice.value);
+const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
 
 watch(
   () => props.messages,
@@ -259,7 +248,6 @@ watch(
   () => {
     unreadCount.value = 0;
     threadActivityNotice.value = null;
-    dismissedThreadActivityKeys.value = [];
     isScrolledFarUp.value = false;
     isScrolledToBottom = false;
     hasAppliedInitialScroll = false;
@@ -396,10 +384,6 @@ function scrollToMessage(messageId: string | null): void {
 function dismissThreadActivityNotice(notice: ThreadActivityNotice | null = visibleThreadActivityNotice.value): void {
   if (!notice) return;
   threadActivityNotice.value = null;
-  const key = threadActivityKey(notice.parentId, notice.replyId);
-  if (!dismissedThreadActivityKeys.value.includes(key)) {
-    dismissedThreadActivityKeys.value = [...dismissedThreadActivityKeys.value, key];
-  }
 }
 
 function buildThreadActivityNotice(reply: DesktopRoomMessage, label = "Thread reply"): ThreadActivityNotice | null {
@@ -435,7 +419,4 @@ function isNewerThan(message: DesktopRoomMessage, previous: DesktopRoomMessage |
   return !previous || compareRoomMessages(message, previous) > 0;
 }
 
-function threadActivityKey(parentId: string, replyId: string): string {
-  return `${parentId}:${replyId}`;
-}
 </script>
