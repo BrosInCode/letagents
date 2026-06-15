@@ -35,11 +35,13 @@ export function useDesktopRoomMessages(options: {
     return mergeRoomMessages([...olderMessages.value, ...options.messages.value], []);
   });
   const visibleMessages = computed(() => {
-    return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
-      .filter((message) =>
-        !isLowSignalGitHubCheckMessage(message)
-        && (options.githubEventsVisible.value || !isGitHubRoomMessage(message))
-      );
+    const displayableMessages = mergeRoomMessages(loadedServerMessages.value, localMessages.value)
+      .filter((message) => !isLowSignalGitHubCheckMessage(message));
+    const visibleMessages = displayableMessages
+      .filter((message) => options.githubEventsVisible.value || !isGitHubRoomMessage(message));
+    return visibleMessages.length || options.githubEventsVisible.value
+      ? visibleMessages
+      : displayableMessages;
   });
   const timelineMessages = computed(() => roomTimelineMessages(visibleMessages.value));
   const roomMessagesForAgentInsight = computed(() =>

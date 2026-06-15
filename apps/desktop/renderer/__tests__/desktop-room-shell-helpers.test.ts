@@ -123,6 +123,34 @@ describe("desktop room shell helpers", () => {
     assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
   });
 
+  it("keeps meaningful GitHub messages visible instead of showing an empty chat", () => {
+    const githubEventsVisible = ref(false);
+    const messages = ref([
+      roomMessage({
+        id: "msg_1",
+        sender: "github",
+        source: "github",
+        text: "PR #558 opened in BrosInCode/letagents: Polish desktop focus room manager https://github.com/BrosInCode/letagents/pull/558",
+      }),
+      roomMessage({
+        id: "msg_2",
+        sender: "github",
+        source: "github",
+        text: 'Check "deploy" (GitHub Actions) skipped in BrosInCode/letagents linked to task_174 https://github.com/BrosInCode/letagents/actions/runs/1',
+      }),
+      roomMessage({ id: "msg_3", source: "agent", text: "[status] pushed follow-up changes" }),
+    ]);
+    const { visibleMessages } = useDesktopRoomMessages({
+      room: ref(roomInfo()),
+      messages,
+      githubEventsVisible,
+      playRoomSound: () => undefined,
+      onMessageSent: () => undefined,
+    });
+
+    assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
+  });
+
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {
     const target = {
       actorLabel: "Agent Smith | Codex",
