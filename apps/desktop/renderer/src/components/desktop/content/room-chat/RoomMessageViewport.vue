@@ -2,7 +2,7 @@
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
       <button
-        v-if="threadMessages.length && hasOlderMessages"
+        v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
         class="room-load-older"
         type="button"
         :disabled="loadingOlderMessages"

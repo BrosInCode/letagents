@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 
 import type {
   DesktopReasoningSession,
@@ -152,6 +152,58 @@ describe("desktop room shell helpers", () => {
 
     assert.deepEqual(visibleMessages.value.map((message) => message.id), []);
     assert.equal(hasFilteredRoomActivity.value, true);
+  });
+
+  it("auto-loads older history when the latest page only has filtered activity", async () => {
+    const githubEventsVisible = ref(false);
+    const messages = ref([
+      roomMessage({
+        id: "msg_20",
+        sender: "github",
+        source: "github",
+        text: "PR #558 opened in BrosInCode/letagents: Polish desktop focus room manager https://github.com/BrosInCode/letagents/pull/558",
+      }),
+      roomMessage({ id: "msg_21", source: "agent", text: "[status] pushed follow-up changes" }),
+    ]);
+    const calls: Array<{ roomIdentifier: string; beforeMessageId: string; limit: number }> = [];
+
+    await withWindowAsync({
+      letagentsDesktop: {
+        room: {
+          async getMessagesBefore(roomIdentifier: string, beforeMessageId: string, limit: number) {
+            calls.push({ roomIdentifier, beforeMessageId, limit });
+            return {
+              messages: [
+                roomMessage({
+                  id: "msg_1",
+                  text: "older human chat",
+                  timestamp: "2026-05-27T23:00:00.000Z",
+                }),
+              ],
+              hasOlder: false,
+            };
+          },
+        },
+      },
+    }, async () => {
+      const { hasFilteredRoomActivity, visibleMessages } = useDesktopRoomMessages({
+        room: ref(roomInfo()),
+        messages,
+        githubEventsVisible,
+        playRoomSound: () => undefined,
+        onMessageSent: () => undefined,
+      });
+
+      await flushPromises();
+
+      assert.deepEqual(calls, [{
+        roomIdentifier: "github.com/BrosInCode/letagents",
+        beforeMessageId: "msg_20",
+        limit: 150,
+      }]);
+      assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
+      assert.equal(hasFilteredRoomActivity.value, false);
+    });
   });
 
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {
@@ -470,6 +522,25 @@ function withWindow(value: object, callback: () => void): void {
   } finally {
     restoreGlobalProperty("window", previous);
   }
+}
+
+async function withWindowAsync(value: object, callback: () => Promise<void>): Promise<void> {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value,
+  });
+  try {
+    await callback();
+  } finally {
+    restoreGlobalProperty("window", previous);
+  }
+}
+
+async function flushPromises(): Promise<void> {
+  await nextTick();
+  await Promise.resolve();
+  await nextTick();
 }
 
 function withNotificationPermission(permission: NotificationPermission | null, callback: () => void): void {

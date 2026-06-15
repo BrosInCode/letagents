@@ -15,6 +15,7 @@ import {
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 
 const messageHistoryPageSize = 150;
+const maxAutoHistoryBackfillPages = 5;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -30,6 +31,7 @@ export function useDesktopRoomMessages(options: {
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
   const chatDraftText = ref("");
+  const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
 
   const loadedServerMessages = computed(() => {
@@ -59,6 +61,7 @@ export function useDesktopRoomMessages(options: {
   watch(
     () => options.messages.value.map((message) => message.id).join("|"),
     () => {
+      autoHistoryBackfillCount.value = 0;
       const serverIds = new Set(options.messages.value.map((message) => message.id));
       localMessages.value = localMessages.value.filter((message) => !serverIds.has(message.id));
     }
@@ -73,7 +76,25 @@ export function useDesktopRoomMessages(options: {
       loadingOlderMessages.value = false;
       sendError.value = null;
       chatDraftText.value = "";
+      autoHistoryBackfillCount.value = 0;
     },
+  );
+
+  watch(
+    [
+      () => visibleMessages.value.length,
+      () => hasFilteredRoomActivity.value,
+      () => hasOlderMessages.value,
+      () => loadingOlderMessages.value,
+      () => options.room.value.identifier,
+    ],
+    ([visibleCount, hasFilteredActivity, hasOlder, loading, roomIdentifier]) => {
+      if (visibleCount > 0 || !hasFilteredActivity || !hasOlder || loading || !roomIdentifier) return;
+      if (autoHistoryBackfillCount.value >= maxAutoHistoryBackfillPages) return;
+      autoHistoryBackfillCount.value += 1;
+      void loadOlderMessages();
+    },
+    { immediate: true },
   );
 
   async function sendRoomMessage(
@@ -110,6 +131,10 @@ export function useDesktopRoomMessages(options: {
 
   async function loadOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
+    if (typeof window === "undefined" || !window.letagentsDesktop?.room?.getMessagesBefore) {
+      hasOlderMessages.value = false;
+      return;
+    }
     const roomIdentifier = options.room.value.identifier;
     const firstMessageId = oldestRoomHistoryCursor(loadedServerMessages.value);
     if (!firstMessageId) {
