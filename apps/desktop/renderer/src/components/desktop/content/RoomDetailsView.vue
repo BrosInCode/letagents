@@ -1080,9 +1080,6 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 26px 32px 32px;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-  scrollbar-gutter: auto;
-  scrollbar-width: thin;
   color: var(--text);
   overscroll-behavior: contain;
 }
@@ -1109,40 +1106,6 @@ onBeforeUnmount(() => {
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-.focus-room-manager::-webkit-scrollbar {
-  width: var(--scrollbar-size);
-  height: var(--scrollbar-size);
-}
-
-.focus-room-manager::-webkit-scrollbar-track,
-.focus-room-manager::-webkit-scrollbar-track-piece {
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-
-.focus-room-manager::-webkit-scrollbar-button {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-.focus-room-manager::-webkit-scrollbar-thumb {
-  min-height: 44px;
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background-clip: padding-box;
-  background-color: var(--scrollbar-thumb);
-}
-
-.focus-room-manager::-webkit-scrollbar-thumb:hover {
-  background-color: var(--scrollbar-thumb-hover);
-}
-
-.focus-room-manager::-webkit-scrollbar-corner {
-  background: transparent;
 }
 
 .focus-room-header,
