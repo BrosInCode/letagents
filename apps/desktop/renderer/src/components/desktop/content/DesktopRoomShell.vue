@@ -73,6 +73,8 @@
       @load-older="loadOlderMessages"
       @open-reasoning="openReasoningInspector"
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
+      @open-agent-detail="openAgentDetail"
+      @open-add-agent="openAddAgentModal"
       @draft-change="chatDraftText = $event"
       @open-github-event="openGitHubEventFromChat"
       @scroll-position="rememberChatScrollPosition"
@@ -130,6 +132,8 @@
         :messages="visibleMessages"
         :workers="workers"
         @open-reasoning="openReasoningInspector"
+        @open-add-agent="openAddAgentModal"
+        @open-agent-detail="openAgentDetail"
         @refresh-room="emit('refresh-room')"
       />
 
@@ -161,6 +165,25 @@
       :session="selectedReasoningSessionForInspector"
       @close="closeReasoningInspector"
     />
+
+    <DesktopAgentDetailModal
+      :open="Boolean(selectedAgentDetailTarget)"
+      :room-identifier="room.identifier"
+      :target="selectedAgentDetailTarget"
+      :reasoning-sessions="reasoningSessions"
+      @close="selectedAgentDetailTarget = null"
+      @open-add-agent="openAddAgentModalFromDetail"
+      @open-reasoning="openReasoningFromAgentDetail"
+    />
+
+    <AddAgentModal
+      :open="addAgentModalOpen"
+      :room-identifier="room.identifier"
+      :room-display-name="room.displayName"
+      :repo-root-path="repoStatus.rootPath || null"
+      @close="addAgentModalOpen = false"
+      @choose-repo="openAgentRepoPicker"
+    />
   </section>
 </template>
 
@@ -181,6 +204,8 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import type { SidebarMode } from "../types";
+import AddAgentModal from "./AddAgentModal.vue";
+import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RentAnAgentView from "./RentAnAgentView.vue";
@@ -199,6 +224,7 @@ import {
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
+import type { AgentModalTarget } from "./desktop-chat-message/types";
 import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
@@ -222,6 +248,7 @@ const props = defineProps<{
   githubEvents: DesktopGitHubEventsPage | null;
   repoStatus: RepoStatus;
   workers: WorkerSnapshot[];
+  openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
 }>();
 
@@ -233,6 +260,8 @@ const emit = defineEmits<{
   "refresh-room": [];
   "open-focus-room": [roomIdentifier: string];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
+  "choose-repo": [];
+  "add-agent-open-request-consumed": [];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -240,6 +269,8 @@ const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
 const activeTab = ref<RoomTabId>("chat");
 const actionPanelOpen = ref(false);
+const addAgentModalOpen = ref(false);
+const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const roomLinkCopied = ref(false);
 const eventsPage = ref<DesktopGitHubEventsPage | null>(props.githubEvents);
@@ -365,6 +396,12 @@ watch(() => props.room.identifier, () => {
   eventsLoadedOlderWithoutMatches.value = false;
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
 });
+
+watch(() => props.openAddAgentRequested, (requested) => {
+  if (!requested) return;
+  addAgentModalOpen.value = true;
+  emit("add-agent-open-request-consumed");
+}, { immediate: true });
 
 watch(showEventsTab, (visible) => {
   if (!visible && activeTab.value === "events") {
@@ -571,6 +608,29 @@ function closeActionPanel(): void {
 function openRules(): void {
   rulesOpen.value = true;
   actionPanelOpen.value = false;
+}
+
+function openAddAgentModal(): void {
+  addAgentModalOpen.value = true;
+}
+
+function openAgentDetail(target: AgentModalTarget): void {
+  selectedAgentDetailTarget.value = target;
+}
+
+function openAddAgentModalFromDetail(): void {
+  selectedAgentDetailTarget.value = null;
+  addAgentModalOpen.value = true;
+}
+
+function openReasoningFromAgentDetail(sessionId: string): void {
+  selectedAgentDetailTarget.value = null;
+  openReasoningInspector(sessionId);
+}
+
+function openAgentRepoPicker(): void {
+  addAgentModalOpen.value = false;
+  emit("choose-repo");
 }
 
 async function copyRoomLink(): Promise<void> {

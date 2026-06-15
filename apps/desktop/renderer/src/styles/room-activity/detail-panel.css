@@ -62,6 +62,37 @@
   color: var(--text-secondary);
 }
 
+.desktop-activity-detail-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.desktop-activity-detail-actions button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 650;
+  white-space: nowrap;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.desktop-activity-detail-actions button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--text);
+}
+
 .desktop-activity-detail h3 {
   margin: 0;
   font-size: 1.05rem;
@@ -156,7 +187,8 @@
   line-height: 1.4;
 }
 
-.desktop-activity-detail-header > .state-pill {
+.desktop-activity-detail-header > .state-pill,
+.desktop-activity-detail-actions > .state-pill {
   flex: 0 0 auto;
   align-self: flex-start;
   min-width: max-content;

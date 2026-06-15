@@ -29,10 +29,10 @@ export function buildAgentFallbackReasoningSession(
     : "This view will update when the agent publishes its first reasoning update.";
 
   return {
-    id: `pending-agent-reasoning:${sanitizeFallbackId(actorLabel)}`,
+    id: `pending-agent-reasoning:${sanitizeFallbackId(target.agentSessionId || target.agentKey || actorLabel)}`,
     roomId: roomIdentifier,
     actorLabel,
-    agentKey: null,
+    agentKey: target.agentKey ?? null,
     taskId: null,
     title: "Waiting for live reasoning",
     status,
@@ -90,6 +90,8 @@ function messageKeys(message: DesktopRoomMessage): string[] {
     message.actorLabel,
     message.agentIdentity?.actorLabel,
     message.agentIdentity?.displayName,
+    message.agentIdentity?.agentKey,
+    message.agentIdentity?.agentSessionId,
     displayNameFromActor(message.sender),
   ].map(normalizeAgentKey).filter(Boolean);
 }

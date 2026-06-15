@@ -1,4 +1,4 @@
-import { BrowserWindow } from "electron";
+import { app, BrowserWindow } from "electron";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -39,6 +39,7 @@ export function createWindow(): void {
       preload: join(electronMainDir, "preload.js"),
     },
   });
+  installSmokeCheck(mainWindow);
 
   if (devServerUrl) {
     void mainWindow.loadURL(devServerUrl);
@@ -51,4 +52,272 @@ export function createWindow(): void {
   }
 
   void mainWindow.loadFile(rendererDistPath);
+}
+
+function installSmokeCheck(window: BrowserWindow): void {
+  if (process.env.LETAGENTS_DESKTOP_SMOKE_CHECK !== "1") {
+    return;
+  }
+
+  if (process.env.LETAGENTS_DESKTOP_SMOKE_DEBUG === "1") {
+    window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+      console.log(`LETAGENTS_DESKTOP_CONSOLE ${level} ${sourceId}:${line} ${message}`);
+    });
+  }
+
+  window.webContents.once("did-fail-load", (_event, errorCode, errorDescription) => {
+    console.error(`LETAGENTS_DESKTOP_SMOKE failed-load ${errorCode}: ${errorDescription}`);
+    app.exit(1);
+  });
+
+  window.webContents.once("did-finish-load", () => {
+    void window.webContents.executeJavaScript(
+      `(async () => {
+        const api = window.letagentsDesktop;
+        const result = {
+          appInfo: typeof api?.app?.getInfo === "function",
+          roomSnapshot: typeof api?.room?.getSnapshot === "function",
+          workerProviders: typeof api?.workers?.listAgentProviders === "function",
+          managedSessions: typeof api?.workers?.listManagedAgentSessions === "function",
+          managedStart: typeof api?.workers?.startManagedAgent === "function",
+          managedStop: typeof api?.workers?.stopManagedAgent === "function",
+          desktopShell: false,
+          addAgentButton: false,
+          addAgentModal: false,
+          addAgentModalLayout: false,
+          addAgentRoomLabel: false,
+          codexProvider: false,
+          codexMissingRuntime: false,
+          codexInstallConfirmation: false,
+          managedSessionCodename: false,
+          setupConfirmationClears: false,
+          setupConfirmationClearsOnClose: false,
+          deliveryControls: false,
+          externalProviderInstruction: false,
+          externalJoinPrompt: false,
+          bridgeOnlyRepoCopy: false,
+          agentSenderButton: false,
+          agentDetailModal: false,
+          agentDetailModalLayout: false,
+          localSessionPill: false,
+          localStopControl: false,
+          stopTurnKeepsLocalSession: false,
+          agentInspectionStatus: false,
+          activityAgentControls: false,
+          publishedReasoning: false
+        };
+
+        const waitFor = (label, predicate, timeoutMs = 12000) => new Promise((resolve, reject) => {
+          const startedAt = Date.now();
+          const tick = () => {
+            const value = predicate();
+            if (value) {
+              resolve(value);
+              return;
+            }
+            if (Date.now() - startedAt > timeoutMs) {
+              reject(new Error(
+                "Timed out waiting for desktop smoke UI state: " + label + ". " +
+                "body=" + document.body.textContent.slice(0, 500)
+              ));
+              return;
+            }
+            setTimeout(tick, 100);
+          };
+          tick();
+        });
+
+        const rectFor = (element) => {
+          const rect = element?.getBoundingClientRect();
+          return rect
+            ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }
+            : null;
+        };
+        const rectInsideViewport = (element) => {
+          const rect = rectFor(element);
+          return Boolean(rect &&
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.left >= 0 &&
+            rect.top >= 0 &&
+            rect.right <= window.innerWidth &&
+            rect.bottom <= window.innerHeight);
+        };
+        const rectsDoNotOverlap = (leftElement, rightElement) => {
+          const left = rectFor(leftElement);
+          const right = rectFor(rightElement);
+          if (!left || !right) return false;
+          return left.right <= right.left || right.right <= left.left || left.bottom <= right.top || right.bottom <= left.top;
+        };
+
+        await waitFor("desktop shell", () => document.querySelector('[data-testid="desktop-shell"]'));
+        result.desktopShell = true;
+
+        const addAgentButton = await waitFor("composer add-agent button", () => document.querySelector('[data-testid="desktop-composer-add-agent"]'));
+        result.addAgentButton = true;
+        addAgentButton.click();
+
+        await waitFor("add-agent modal", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        result.addAgentModal = true;
+        result.addAgentRoomLabel = (document.querySelector('[data-testid="desktop-add-agent-room-label"]')?.textContent || "")
+          .includes("Smoke Room");
+        result.addAgentModalLayout = (() => {
+          const modal = document.querySelector('[data-testid="desktop-add-agent-modal"]');
+          const providers = modal?.querySelector(".desktop-add-agent-providers");
+          const status = modal?.querySelector(".desktop-add-agent-status");
+          const primary = modal?.querySelector(".desktop-add-agent-primary");
+          return rectInsideViewport(modal) &&
+            rectInsideViewport(providers) &&
+            rectInsideViewport(status) &&
+            (!primary || rectInsideViewport(primary)) &&
+            rectsDoNotOverlap(providers, status);
+        })();
+
+        await waitFor("codex provider", () => document.querySelector('[data-testid="desktop-add-agent-provider-codex"]'));
+        result.codexProvider = true;
+        const modalText = () => document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "";
+        await waitFor("codex missing runtime", () =>
+          modalText().includes("Codex is not installed.") &&
+          modalText().includes("Install Codex")
+        );
+        result.codexMissingRuntime = true;
+        await waitFor("managed session codename", () =>
+          modalText().includes("MapleRidge") &&
+          modalText().includes("Desktop events")
+        );
+        result.managedSessionCodename = true;
+        result.deliveryControls = modalText().includes("MCP loop") && modalText().includes("Desktop events");
+
+        const installCodexButton = Array.from(document.querySelectorAll('[data-testid="desktop-add-agent-modal"] button'))
+          .find((button) => button.textContent?.trim() === "Install Codex");
+        installCodexButton?.click();
+        await waitFor("codex install confirmation", () =>
+          modalText().includes("Confirm install Codex") &&
+          modalText().includes("official Codex CLI runtime")
+        );
+        result.codexInstallConfirmation = true;
+
+        const antigravityProvider = document.querySelector('[data-testid="desktop-add-agent-provider-antigravity"]');
+        if (antigravityProvider) {
+          antigravityProvider.click();
+          await waitFor("antigravity instruction", () => modalText().includes("Open Antigravity"));
+          result.externalProviderInstruction = modalText().includes(
+            "Open Antigravity, then ask it to join this room through the installed MCP bridge."
+          );
+          result.externalJoinPrompt = modalText().includes("CLI prompt") &&
+            modalText().includes("Call join_room") &&
+            modalText().includes("set_agent_name") &&
+            modalText().includes("register_agent_session") &&
+            modalText().includes('"agent_session_id":"<returned agent_session_id>"') &&
+            modalText().includes("get_board") &&
+            modalText().includes("wait_for_messages") &&
+            modalText().includes('"timeout":30000') &&
+            modalText().includes("empty wait result just means continue waiting") &&
+            modalText().includes('"runtime":"antigravity"') &&
+            modalText().includes("Examples: MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor") &&
+            modalText().includes("Do not call yourself Antigravity, Antigravity 1, Antigravity 2");
+          result.bridgeOnlyRepoCopy = modalText().includes("Handled by provider app");
+          result.setupConfirmationClears = !modalText().includes("Confirm install Codex");
+        }
+
+        const codexProviderAgain = document.querySelector('[data-testid="desktop-add-agent-provider-codex"]');
+        codexProviderAgain?.click();
+        await waitFor("codex install action after provider switch", () =>
+          modalText().includes("Codex is not installed.") &&
+          modalText().includes("Install Codex") &&
+          !modalText().includes("Confirm install Codex")
+        );
+        const installCodexButtonAgain = Array.from(document.querySelectorAll('[data-testid="desktop-add-agent-modal"] button'))
+          .find((button) => button.textContent?.trim() === "Install Codex");
+        installCodexButtonAgain?.click();
+        await waitFor("codex install confirmation before close", () => modalText().includes("Confirm install Codex"));
+
+        const addAgentModal = document.querySelector('[data-testid="desktop-add-agent-modal"]');
+        const addAgentClose = addAgentModal?.querySelector('button.desktop-modal-close[aria-label="Close add agent dialog"]');
+        addAgentClose?.click();
+        await waitFor("add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        addAgentButton.click();
+        await waitFor("add-agent modal reopened", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+        await waitFor("codex install confirmation cleared on close", () =>
+          (document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Install Codex") &&
+          !(document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Confirm install Codex")
+        );
+        result.setupConfirmationClearsOnClose = true;
+        document.querySelector('[data-testid="desktop-add-agent-modal"] button.desktop-modal-close[aria-label="Close add agent dialog"]')?.click();
+        await waitFor("reopened add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
+
+        const agentSender = await waitFor(
+          "agent sender button",
+          () => document.querySelector('[data-testid="room-message-msg_smoke_codex"] .room-message-author-button')
+        );
+        result.agentSenderButton = true;
+        agentSender.click();
+
+        await waitFor("agent detail modal", () => document.querySelector('[data-testid="desktop-agent-detail-modal"]'));
+        result.agentDetailModal = true;
+        result.agentDetailModalLayout = (() => {
+          const modal = document.querySelector('[data-testid="desktop-agent-detail-modal"]');
+          const panels = Array.from(modal?.querySelectorAll(".desktop-agent-detail-panel") || []);
+          const stopButton = modal?.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]');
+          return rectInsideViewport(modal) &&
+            panels.length === 2 &&
+            panels.every(rectInsideViewport) &&
+            rectsDoNotOverlap(panels[0], panels[1]) &&
+            rectInsideViewport(stopButton);
+        })();
+        const detailText = () => document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
+        await waitFor("local supervised session", () =>
+          detailText().includes("Supervised worker") &&
+          detailText().includes("MapleRidge") &&
+          detailText().includes("Local")
+        );
+        result.localSessionPill = true;
+        await waitFor("local stop control", () =>
+          document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')
+        );
+        result.localStopControl = true;
+        document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')?.click();
+        await waitFor("stop turn keeps local session", () =>
+          detailText().includes("Supervised worker") &&
+          detailText().includes("MapleRidge") &&
+          document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')
+        );
+        result.stopTurnKeepsLocalSession = true;
+        await waitFor("agent inspection status", () =>
+          detailText().includes("App-server offline") || detailText().includes("Public transcript preview")
+        );
+        result.agentInspectionStatus = true;
+        result.publishedReasoning = detailText().includes("Smoke reasoning stream") &&
+          detailText().includes("Verifying the published reasoning panel.");
+
+        const detailClose = document.querySelector(
+          '[data-testid="desktop-agent-detail-modal"] button.desktop-modal-close[aria-label="Close agent detail dialog"]'
+        );
+        detailClose?.click();
+        await waitFor("agent detail modal closed", () => !document.querySelector('[data-testid="desktop-agent-detail-modal"]'));
+
+        const activityTab = await waitFor("activity tab", () => document.querySelector('[data-testid="desktop-room-tab-activity"]'));
+        activityTab.click();
+        const activityControls = await waitFor(
+          "activity agent controls",
+          () => document.querySelector('[data-testid="desktop-activity-open-agent-controls"]')
+        );
+        activityControls.click();
+        await waitFor("activity agent detail modal", () =>
+          document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent?.includes("MapleRidge")
+        );
+        result.activityAgentControls = true;
+
+        return result;
+      })()`,
+      true,
+    ).then((result: Record<string, boolean>) => {
+      console.log(`LETAGENTS_DESKTOP_SMOKE ${JSON.stringify(result)}`);
+      app.exit(Object.values(result).every(Boolean) ? 0 : 1);
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`LETAGENTS_DESKTOP_SMOKE failed: ${message}`);
+      app.exit(1);
+    });
+  });
 }

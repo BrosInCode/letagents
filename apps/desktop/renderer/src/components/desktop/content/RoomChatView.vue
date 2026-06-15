@@ -65,6 +65,7 @@
           :send-error="sendError"
           :sending="sending"
           @draft-change="emit('draft-change', $event)"
+          @open-add-agent="emit('open-add-agent')"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @send-message="handleComposerSend"
@@ -142,6 +143,8 @@ const emit = defineEmits<{
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
+  "open-agent-detail": [target: AgentModalTarget];
+  "open-add-agent": [];
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
@@ -183,6 +186,7 @@ const { openAgentModal } = useAgentReasoningLauncher({
   reasoningSessions: () => props.reasoningSessions,
   openReasoning: (sessionId) => emit("open-reasoning", sessionId),
   openFallback: (target) => emit("open-agent-reasoning-fallback", target),
+  openAgentDetail: (target) => emit("open-agent-detail", target),
 });
 
 function openThread(messageId: string): void {

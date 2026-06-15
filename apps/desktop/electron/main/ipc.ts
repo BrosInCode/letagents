@@ -4,6 +4,17 @@ import type { IpcMain } from "electron";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopAgentProvider,
+  DesktopAgentProviderId,
+  DesktopAgentProviderPreflight,
+  DesktopAgentProviderPreflightInput,
+  DesktopAgentProviderSetupInput,
+  DesktopAgentProviderSetupResult,
+  DesktopManagedAgentInspectResult,
+  DesktopManagedAgentSession,
+  DesktopManagedAgentStartInput,
+  DesktopManagedAgentStartResult,
+  DesktopManagedAgentStopInput,
   DesktopAccountFocusRoomEntry,
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
@@ -77,6 +88,17 @@ import {
   installLetAgentsMcpServers,
   refreshInstalledLetAgentsMcpServerAuth,
 } from "./mcp-setup.js";
+import {
+  listDesktopAgentProviders,
+  runDesktopAgentProviderPreflight,
+  runDesktopAgentProviderSetup,
+} from "./agents/providers.js";
+import {
+  inspectDesktopManagedAgentSession,
+  listDesktopManagedAgentSessions,
+  startDesktopManagedAgent,
+  stopDesktopManagedAgent,
+} from "./agents/codex-supervisor.js";
 import {
   buildDiagnosticsSnapshot,
   buildWorkerSnapshots,
@@ -531,6 +553,60 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:workers:list",
     async (): Promise<WorkerSnapshot[]> => buildWorkerSnapshots(),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:list-managed-agent-sessions",
+    async (
+      _event,
+      roomIdentifier?: string | null,
+    ): Promise<DesktopManagedAgentSession[]> =>
+      listDesktopManagedAgentSessions(roomIdentifier ?? null),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:start-managed-agent",
+    async (
+      _event,
+      input: DesktopManagedAgentStartInput,
+    ): Promise<DesktopManagedAgentStartResult> => startDesktopManagedAgent(input),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:stop-managed-agent",
+    async (
+      _event,
+      input?: DesktopManagedAgentStopInput,
+    ): Promise<DesktopManagedAgentSession | null> =>
+      stopDesktopManagedAgent(input ?? {}),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:inspect-managed-agent",
+    async (
+      _event,
+      sessionId?: string | null,
+      roomIdentifier?: string | null,
+    ): Promise<DesktopManagedAgentInspectResult | null> =>
+      inspectDesktopManagedAgentSession(sessionId ?? null, roomIdentifier ?? null),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:list-agent-providers",
+    async (): Promise<DesktopAgentProvider[]> => listDesktopAgentProviders(),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:run-agent-provider-preflight",
+    async (
+      _event,
+      providerId: DesktopAgentProviderId,
+      input?: DesktopAgentProviderPreflightInput,
+    ): Promise<DesktopAgentProviderPreflight> =>
+      runDesktopAgentProviderPreflight(providerId, input ?? {}),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:run-agent-provider-setup",
+    async (
+      _event,
+      providerId: DesktopAgentProviderId,
+      input: DesktopAgentProviderSetupInput,
+    ): Promise<DesktopAgentProviderSetupResult> =>
+      runDesktopAgentProviderSetup(providerId, input),
   );
   targetIpcMain.handle(
     "desktop:diagnostics:get-snapshot",

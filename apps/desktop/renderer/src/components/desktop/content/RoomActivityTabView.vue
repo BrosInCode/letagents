@@ -5,6 +5,14 @@
         <button type="button" :data-active="activeView === 'live'" @click="activeView = 'live'">Live</button>
         <button type="button" :data-active="activeView === 'history'" @click="activeView = 'history'">History</button>
       </div>
+      <button
+        class="desktop-activity-add-agent"
+        type="button"
+        data-testid="desktop-activity-add-agent"
+        @click="emit('open-add-agent')"
+      >
+        Add agent
+      </button>
     </div>
 
     <div v-if="activeView === 'live'" class="desktop-activity-layout" :data-empty="!liveRosterAgents.length">
@@ -12,7 +20,10 @@
         <span>Live activity</span>
         <h3>No agents are live right now</h3>
         <p>Reachable agents and current work signals appear here when they are active in this room.</p>
-        <button type="button" @click="refreshActivity">Refresh</button>
+        <div class="desktop-activity-empty-actions">
+          <button type="button" @click="emit('open-add-agent')">Add agent</button>
+          <button type="button" @click="refreshActivity">Refresh</button>
+        </div>
       </article>
 
       <template v-else>
@@ -98,9 +109,18 @@
                 </p>
               </div>
             </div>
-            <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
-              {{ connectionDisplayLabel(selectedLiveParticipant) }}
-            </span>
+            <div class="desktop-activity-detail-actions">
+              <span class="state-pill" :data-state="connectionTone(selectedLiveParticipant)">
+                {{ connectionDisplayLabel(selectedLiveParticipant) }}
+              </span>
+              <button
+                type="button"
+                data-testid="desktop-activity-open-agent-controls"
+                @click="emit('open-agent-detail', activityParticipantToAgentTarget(selectedLiveParticipant))"
+              >
+                Open controls
+              </button>
+            </div>
           </div>
 
           <section class="desktop-activity-inspector-list">
@@ -284,7 +304,9 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import type { ActivityParticipant } from "./room-activity/types";
+import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
+import type { AgentModalTarget } from "./desktop-chat-message/types";
 
 const props = defineProps<{
   recentActivity: DesktopActivityEntry[];
@@ -299,6 +321,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "open-reasoning": [sessionId: string];
+  "open-add-agent": [];
+  "open-agent-detail": [target: AgentModalTarget];
   "refresh-room": [];
 }>();
 

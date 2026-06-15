@@ -186,6 +186,8 @@ const agentModalTarget = computed<AgentModalTarget>(() => ({
   ownerAttribution: ownerAttribution.value,
   ideLabel: ideLabel.value,
   sender: props.message.sender,
+  agentKey: props.message.agentIdentity?.agentKey || null,
+  agentSessionId: props.message.agentIdentity?.agentSessionId || null,
 }));
 
 function openContextMenu(event: MouseEvent): void {

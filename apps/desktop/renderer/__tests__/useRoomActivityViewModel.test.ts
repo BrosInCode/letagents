@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { nextTick, reactive } from "vue";
 
+import { activityParticipantToAgentTarget } from "../src/components/desktop/content/room-activity/agentTarget";
 import { useRoomActivityViewModel } from "../src/components/desktop/content/room-activity/useRoomActivityViewModel";
 import type { RoomActivityViewModelInput } from "../src/components/desktop/content/room-activity/useRoomActivityViewModel";
 
@@ -103,7 +104,16 @@ describe("useRoomActivityViewModel", () => {
           actorLabel: "agent:reviewer",
           timestamp: "2026-05-28T03:05:00.000Z",
           source: "mcp",
-          agentIdentity: { actorLabel: "agent:reviewer" },
+          agentIdentity: {
+            name: null,
+            displayName: null,
+            ownerLabel: null,
+            ownerAttribution: null,
+            ideLabel: null,
+            actorLabel: "agent:reviewer",
+            agentKey: null,
+            agentSessionId: null,
+          },
         },
       ],
       tasks: [
@@ -171,6 +181,47 @@ describe("useRoomActivityViewModel", () => {
     assert.equal(model.connectionLabel(model.selectedLiveParticipant.value!), "connected");
     assert.equal(model.workingAgents.value[0]?.label, "Build Agent");
     assert.equal(model.liveRosterAgents.value.some((agent) => agent.label === "Stale Agent"), false);
+  });
+
+  it("maps a live activity participant to the shared agent detail modal target", async () => {
+    const props = reactive(createProps({
+      presence: [
+        {
+          agentSessionId: "session-1",
+          agentKey: "codex/maple-ridge",
+          actorLabel: "MapleRidge",
+          displayName: "MapleRidge",
+          ownerLabel: "Local desktop",
+          ideLabel: "Codex",
+          runtime: "codex",
+          sessionKind: "worker",
+          sourceFlags: ["delivery"],
+          freshness: "active",
+          activityState: "active",
+          status: "working",
+          statusText: "editing",
+          lastHeartbeatAt: "2026-05-28T03:05:00.000Z",
+          roomId: "room-1",
+          livenessObservation: null,
+        },
+      ],
+    } as Partial<RoomActivityViewModelInput>));
+
+    const model = useRoomActivityViewModel(props);
+    await nextTick();
+
+    assert.deepEqual(
+      activityParticipantToAgentTarget(model.selectedLiveParticipant.value!),
+      {
+        actorLabel: "MapleRidge",
+        displayName: "MapleRidge",
+        ownerAttribution: "Local desktop's agent",
+        ideLabel: "Codex",
+        sender: "MapleRidge",
+        agentKey: "codex/maple-ridge",
+        agentSessionId: "session-1",
+      },
+    );
   });
 
   it("keeps selected live and history rows pointed at visible entries", async () => {

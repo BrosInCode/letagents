@@ -1,5 +1,18 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopAppInfo, DiagnosticsSnapshot, RepoStatus, WorkerSnapshot } from "./core.js";
+import type {
+  DesktopAgentProvider,
+  DesktopAgentProviderId,
+  DesktopAgentProviderPreflight,
+  DesktopAgentProviderPreflightInput,
+  DesktopAgentProviderSetupInput,
+  DesktopAgentProviderSetupResult,
+  DesktopManagedAgentInspectResult,
+  DesktopManagedAgentSession,
+  DesktopManagedAgentStartInput,
+  DesktopManagedAgentStartResult,
+  DesktopManagedAgentStopInput,
+} from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
 import type {
   DesktopAccountRoomActionResult,
@@ -155,6 +168,22 @@ export interface DesktopApi {
   };
   workers: {
     list: () => Promise<WorkerSnapshot[]>;
+    listManagedAgentSessions: (roomIdentifier?: string | null) => Promise<DesktopManagedAgentSession[]>;
+    startManagedAgent: (input: DesktopManagedAgentStartInput) => Promise<DesktopManagedAgentStartResult>;
+    stopManagedAgent: (input?: DesktopManagedAgentStopInput) => Promise<DesktopManagedAgentSession | null>;
+    inspectManagedAgent: (
+      sessionId?: string | null,
+      roomIdentifier?: string | null
+    ) => Promise<DesktopManagedAgentInspectResult | null>;
+    listAgentProviders: () => Promise<DesktopAgentProvider[]>;
+    runAgentProviderPreflight: (
+      providerId: DesktopAgentProviderId,
+      input?: DesktopAgentProviderPreflightInput
+    ) => Promise<DesktopAgentProviderPreflight>;
+    runAgentProviderSetup: (
+      providerId: DesktopAgentProviderId,
+      input: DesktopAgentProviderSetupInput
+    ) => Promise<DesktopAgentProviderSetupResult>;
   };
   diagnostics: {
     getSnapshot: () => Promise<DiagnosticsSnapshot>;

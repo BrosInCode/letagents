@@ -3,6 +3,7 @@ import { resolveRoomIdentifier } from "../../repo-status.js";
 import { DesktopApiError } from "../auth.js";
 import { workspaceRoot } from "../paths.js";
 import { getJoinedRoomInfo } from "./room-info.js";
+import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import { fetchRoomSnapshotData } from "./snapshot/fetch-data.js";
 import {
   createApiErrorRoomSnapshot,
@@ -14,6 +15,10 @@ import {
 export async function fetchRoomSnapshot(
   requestedRoomIdentifier?: string | null,
 ): Promise<DesktopRoomSnapshot> {
+  if (isDesktopSmokeCheck()) {
+    return desktopSmokeRoomSnapshot();
+  }
+
   const roomIdentifier =
     requestedRoomIdentifier?.trim() ||
     (await resolveRoomIdentifier(workspaceRoot));

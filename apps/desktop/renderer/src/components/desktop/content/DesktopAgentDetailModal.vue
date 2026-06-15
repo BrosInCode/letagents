@@ -1,0 +1,451 @@
+<template>
+  <Teleport to="body">
+    <div
+      v-if="open && target"
+      class="desktop-agent-detail-backdrop"
+      data-testid="desktop-agent-detail-modal"
+      @click.self="emit('close')"
+    >
+      <section
+        ref="dialogElement"
+        class="desktop-agent-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        :aria-labelledby="titleId"
+        tabindex="-1"
+        @keydown.esc.prevent="emit('close')"
+      >
+        <header class="desktop-agent-detail-header">
+          <div>
+            <span>Agent</span>
+            <h3 :id="titleId">{{ target.displayName }}</h3>
+            <p>{{ identityLine }}</p>
+          </div>
+          <div class="desktop-agent-detail-header-actions">
+            <span
+              v-if="matchingManagedSessions.length"
+              class="desktop-agent-detail-local-pill"
+            >
+              Local
+            </span>
+            <button
+              class="desktop-modal-close"
+              type="button"
+              aria-label="Close agent detail dialog"
+              @click="emit('close')"
+            >
+              <X aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+
+        <div class="desktop-agent-detail-body">
+          <section class="desktop-agent-detail-panel">
+            <header>
+              <span>Supervised worker</span>
+              <button
+                type="button"
+                :disabled="loadingManagedSessions"
+                @click="() => loadManagedSessions()"
+              >
+                {{ loadingManagedSessions ? "Refreshing..." : "Refresh" }}
+              </button>
+            </header>
+
+            <div v-if="matchingManagedSessions.length" class="desktop-agent-detail-session-list">
+              <article
+                v-for="session in matchingManagedSessions"
+                :key="session.id"
+                class="desktop-agent-detail-session"
+                data-testid="desktop-agent-detail-managed-session"
+                :data-state="session.status"
+              >
+                <div>
+                  <strong>{{ managedAgentSessionStatusLabel(session) }}</strong>
+                  <small>{{ managedAgentSessionDisplayName(session) }}</small>
+                </div>
+                <p>{{ session.repoRootPath }}</p>
+                <div class="desktop-agent-detail-session-inspection">
+                  <span>{{ inspectionStatusLabel(session.id) }}</span>
+                  <button
+                    type="button"
+                    :disabled="Boolean(inspectingSessionIds[session.id])"
+                    @click="inspectManagedSession(session.id)"
+                  >
+                    {{ inspectingSessionIds[session.id] ? "Refreshing..." : "Refresh" }}
+                  </button>
+                </div>
+                <ul
+                  v-if="sessionRecentItems(session.id).length"
+                  class="desktop-agent-detail-recent-items"
+                  data-testid="desktop-agent-detail-recent-items"
+                  aria-label="Public transcript preview"
+                >
+                  <li v-for="(item, index) in sessionRecentItems(session.id)" :key="`${session.id}-${index}`">
+                    <span>{{ itemTypeLabel(item) }}</span>
+                    <p>{{ itemText(item) }}</p>
+                  </li>
+                </ul>
+                <button
+                  type="button"
+                  class="desktop-agent-detail-stop-button"
+                  data-testid="desktop-agent-detail-stop-managed-agent"
+                  :disabled="!session.canStop || stoppingSessionId === session.id"
+                  @click="stopManagedSession(session.id)"
+                >
+                  {{ stoppingSessionId === session.id ? "Stopping..." : "Stop turn" }}
+                </button>
+              </article>
+            </div>
+
+            <div v-else class="desktop-agent-detail-empty">
+              <strong>No local supervised session matched this agent.</strong>
+              <p>External agents still appear here through their published room activity.</p>
+              <button type="button" @click="emit('open-add-agent')">Add agent</button>
+            </div>
+
+            <p v-if="managedSessionError" class="desktop-agent-detail-error">{{ managedSessionError }}</p>
+          </section>
+
+          <section class="desktop-agent-detail-panel">
+            <header>
+              <span>Published reasoning</span>
+              <button
+                v-if="latestReasoning"
+                type="button"
+                @click="emit('open-reasoning', latestReasoning.id)"
+              >
+                Open stream
+              </button>
+            </header>
+
+            <article v-if="latestReasoning" class="desktop-agent-detail-reasoning">
+              <strong>{{ reasoningTitle(latestReasoning) }}</strong>
+              <p>{{ reasoningSummary(latestReasoning) }}</p>
+              <dl v-if="reasoningRows.length">
+                <div v-for="row in reasoningRows" :key="row.label">
+                  <dt>{{ row.label }}</dt>
+                  <dd>{{ row.value }}</dd>
+                </div>
+              </dl>
+              <small>{{ reasoningStatus(latestReasoning) }} - {{ formatTimestamp(latestReasoning.updatedAt || latestReasoning.createdAt) }}</small>
+            </article>
+
+            <div v-else class="desktop-agent-detail-empty">
+              <strong>No published reasoning stream yet.</strong>
+              <p>When this agent exposes readable progress, the latest summary appears here.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  </Teleport>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { X } from "@lucide/vue";
+import type {
+  DesktopManagedAgentInspectResult,
+  DesktopManagedAgentSession,
+  DesktopReasoningSession,
+} from "../../../../../electron/ipc-types";
+import {
+  latestReasoningSessionForTarget,
+  reasoningFieldRows,
+  reasoningStatus,
+  reasoningSummary,
+  reasoningTitle,
+} from "../../../domain/reasoning";
+import {
+  isVisibleManagedAgentSession,
+  managedAgentSessionMatchesTarget,
+  managedAgentSessionDisplayName,
+  managedAgentSessionStatusLabel,
+  managedAgentStopResultNeedsAttention,
+  managedAgentStopResultMessage,
+} from "../../../domain/managed-agents";
+import type { AgentModalTarget } from "./desktop-chat-message/types";
+
+const props = defineProps<{
+  open: boolean;
+  roomIdentifier: string;
+  target: AgentModalTarget | null;
+  reasoningSessions: DesktopReasoningSession[];
+}>();
+
+const emit = defineEmits<{
+  close: [];
+  "open-add-agent": [];
+  "open-reasoning": [sessionId: string];
+}>();
+
+const dialogElement = ref<HTMLElement | null>(null);
+const managedSessions = ref<DesktopManagedAgentSession[]>([]);
+const loadingManagedSessions = ref(false);
+const stoppingSessionId = ref<string | null>(null);
+const managedSessionError = ref<string | null>(null);
+const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectResult>>({});
+const inspectingSessionIds = ref<Record<string, boolean>>({});
+let refreshTimer: number | null = null;
+let modalStateVersion = 0;
+
+const titleId = computed(() =>
+  `desktop-agent-detail-${sanitizeId(props.target?.actorLabel || props.target?.sender || "agent")}`
+);
+
+const identityLine = computed(() => {
+  const target = props.target;
+  if (!target) return "Agent";
+  return [
+    target.ownerAttribution,
+    target.ideLabel,
+    target.actorLabel && target.actorLabel !== target.sender ? target.actorLabel : null,
+  ].filter(Boolean).join(" - ") || target.sender;
+});
+
+const latestReasoning = computed(() =>
+  props.target ? latestReasoningSessionForTarget(props.target, props.reasoningSessions) : null
+);
+
+const reasoningRows = computed(() =>
+  latestReasoning.value ? reasoningFieldRows(latestReasoning.value) : []
+);
+
+const matchingManagedSessions = computed(() => {
+  const activeSessions = managedSessions.value.filter(isVisibleManagedAgentSession);
+  if (!props.target) return [];
+
+  return activeSessions.filter((session) => managedAgentSessionMatchesTarget(session, props.target!));
+});
+const targetInspectionKey = computed(() => [
+  props.target?.agentSessionId,
+  props.target?.agentKey,
+  props.target?.actorLabel,
+  props.target?.displayName,
+  props.target?.sender,
+].filter(Boolean).join("|"));
+
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) {
+      resetTransientState();
+      return;
+    }
+    modalStateVersion += 1;
+    clearTransientState();
+    void nextTick(() => dialogElement.value?.focus());
+    void loadManagedSessions();
+    startRefreshTimer();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.roomIdentifier,
+  () => {
+    if (props.open) {
+      modalStateVersion += 1;
+      clearTransientState();
+      managedSessions.value = [];
+      void loadManagedSessions();
+    }
+  },
+);
+
+watch(
+  targetInspectionKey,
+  () => {
+    if (props.open) {
+      modalStateVersion += 1;
+      clearTransientState();
+      void loadManagedSessions({ quiet: true });
+    }
+  },
+);
+
+onBeforeUnmount(() => {
+  stopRefreshTimer();
+});
+
+function startRefreshTimer(): void {
+  stopRefreshTimer();
+  refreshTimer = window.setInterval(() => {
+    void loadManagedSessions({ quiet: true });
+  }, 4_000);
+}
+
+function stopRefreshTimer(): void {
+  if (refreshTimer !== null) {
+    window.clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+function clearTransientState(): void {
+  loadingManagedSessions.value = false;
+  stoppingSessionId.value = null;
+  managedSessionError.value = null;
+  managedSessionInspections.value = {};
+  inspectingSessionIds.value = {};
+}
+
+function resetTransientState(): void {
+  modalStateVersion += 1;
+  stopRefreshTimer();
+  clearTransientState();
+  managedSessions.value = [];
+}
+
+function isCurrentModalState(version: number): boolean {
+  return props.open && version === modalStateVersion;
+}
+
+async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
+  if (!props.open) return;
+  const requestVersion = modalStateVersion;
+  if (!options.quiet) {
+    loadingManagedSessions.value = true;
+  }
+  managedSessionError.value = null;
+  try {
+    const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
+    if (!isCurrentModalState(requestVersion)) return;
+    managedSessions.value = sessions;
+    await inspectMatchingManagedSessions({ quiet: options.quiet, version: requestVersion });
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    managedSessionError.value = error instanceof Error ? error.message : "Could not load local agent sessions.";
+  } finally {
+    if (isCurrentModalState(requestVersion) && !options.quiet) {
+      loadingManagedSessions.value = false;
+    }
+  }
+}
+
+async function inspectMatchingManagedSessions(options: { quiet?: boolean; version?: number } = {}): Promise<void> {
+  const requestVersion = options.version ?? modalStateVersion;
+  if (!isCurrentModalState(requestVersion)) return;
+  await Promise.all(matchingManagedSessions.value.map((session) =>
+    inspectManagedSession(session.id, { quiet: options.quiet, version: requestVersion })
+  ));
+}
+
+async function inspectManagedSession(
+  sessionId: string,
+  options: { quiet?: boolean; version?: number } = {},
+): Promise<void> {
+  const requestVersion = options.version ?? modalStateVersion;
+  if (!isCurrentModalState(requestVersion)) return;
+  if (inspectingSessionIds.value[sessionId]) return;
+  if (!options.quiet) {
+    managedSessionError.value = null;
+  }
+  inspectingSessionIds.value = {
+    ...inspectingSessionIds.value,
+    [sessionId]: true,
+  };
+  try {
+    const inspected = await window.letagentsDesktop.workers.inspectManagedAgent(sessionId, props.roomIdentifier);
+    if (!isCurrentModalState(requestVersion)) return;
+    if (!inspected) {
+      return;
+    }
+    managedSessionInspections.value = {
+      ...managedSessionInspections.value,
+      [sessionId]: inspected,
+    };
+    managedSessions.value = [
+      inspected.session,
+      ...managedSessions.value.filter((session) => session.id !== inspected.session.id),
+    ];
+  } catch (error) {
+    if (isCurrentModalState(requestVersion) && !options.quiet) {
+      managedSessionError.value = error instanceof Error ? error.message : "Could not inspect this agent.";
+    }
+  } finally {
+    if (!isCurrentModalState(requestVersion)) return;
+    const { [sessionId]: _ignored, ...remaining } = inspectingSessionIds.value;
+    inspectingSessionIds.value = remaining;
+  }
+}
+
+async function stopManagedSession(sessionId: string): Promise<void> {
+  if (stoppingSessionId.value) return;
+  const requestVersion = modalStateVersion;
+  stoppingSessionId.value = sessionId;
+  managedSessionError.value = null;
+  try {
+    const stopped = await window.letagentsDesktop.workers.stopManagedAgent({
+      sessionId,
+      stopMode: "turn",
+    });
+    if (!isCurrentModalState(requestVersion)) return;
+    const stopResultMessage = stopped && managedAgentStopResultNeedsAttention(stopped)
+      ? managedAgentStopResultMessage(stopped)
+      : null;
+    if (stopped) {
+      managedSessions.value = [
+        stopped,
+        ...managedSessions.value.filter((session) => session.id !== stopped.id),
+      ];
+    }
+    await loadManagedSessions({ quiet: true });
+    if (stopResultMessage && !managedSessionError.value) {
+      managedSessionError.value = stopResultMessage;
+    }
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    managedSessionError.value = error instanceof Error ? error.message : "Could not stop this agent turn.";
+  } finally {
+    if (isCurrentModalState(requestVersion)) {
+      stoppingSessionId.value = null;
+    }
+  }
+}
+
+function inspectionStatusLabel(sessionId: string): string {
+  if (inspectingSessionIds.value[sessionId]) {
+    return "Refreshing transcript preview";
+  }
+  const inspected = managedSessionInspections.value[sessionId];
+  if (!inspected) {
+    return "Transcript preview not loaded";
+  }
+  return inspected.serverReachable ? "Public transcript preview" : "App-server offline";
+}
+
+function sessionRecentItems(sessionId: string): Array<Record<string, unknown>> {
+  return managedSessionInspections.value[sessionId]?.recentItems ?? [];
+}
+
+function itemTypeLabel(item: Record<string, unknown>): string {
+  const type = String(item.type || "item");
+  if (type === "agentMessage") return "Agent message";
+  if (type === "userMessage") return "Room event";
+  return type.replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+function itemText(item: Record<string, unknown>): string {
+  const text = typeof item.text === "string" ? item.text.trim() : "";
+  if (text) return text;
+  const phase = typeof item.phase === "string" ? item.phase.trim() : "";
+  return phase || "No text payload";
+}
+
+function formatTimestamp(value: string | null | undefined): string {
+  const parsed = new Date(String(value || ""));
+  if (Number.isNaN(parsed.getTime())) return "unknown";
+  return parsed.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function sanitizeId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "agent";
+}
+</script>

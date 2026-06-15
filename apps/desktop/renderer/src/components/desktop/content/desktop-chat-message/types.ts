@@ -10,6 +10,8 @@ export interface AgentModalTarget {
   ownerAttribution: string | null;
   ideLabel: string | null;
   sender: string;
+  agentKey: string | null;
+  agentSessionId: string | null;
 }
 
 export interface GitHubEventPresentation {

@@ -7,6 +7,8 @@ export interface ReasoningAgentTarget {
   displayName: string;
   ideLabel?: string | null;
   sender: string;
+  agentKey?: string | null;
+  agentSessionId?: string | null;
 }
 
 export function latestReasoningSessionForTarget(
@@ -26,6 +28,8 @@ export function latestReasoningSessionForTarget(
 export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[] {
   return [
     target.actorLabel,
+    target.agentKey,
+    target.agentSessionId,
     target.sender,
     target.displayName,
     actorDisplayNameKey(target.actorLabel),

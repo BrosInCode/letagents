@@ -19,6 +19,7 @@ import {
   setChatStorageMode,
 } from "../chat-storage/settings.js";
 import { roomMessageHistoryPageSize } from "../paths.js";
+import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import {
   mapRoomMessagePayload,
   type RoomMessagePayload,
@@ -126,6 +127,16 @@ export async function getDesktopRoomMessagesBefore(
 export async function getDesktopRoomLatestMessages(
   roomIdentifiers: string[],
 ): Promise<DesktopRoomLatestMessage[]> {
+  if (isDesktopSmokeCheck()) {
+    const snapshot = desktopSmokeRoomSnapshot();
+    const latest = snapshot.messages.at(-1) || null;
+    return roomIdentifiers.filter(Boolean).map((roomIdentifier) => ({
+      roomIdentifier,
+      latestMessageId: latest?.id || null,
+      latestMessageAt: latest?.timestamp || null,
+    }));
+  }
+
   const identifiers = [
     ...new Set(
       roomIdentifiers

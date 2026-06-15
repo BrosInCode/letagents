@@ -5,6 +5,7 @@ import type {
   DesktopAccountRoomListOptions,
 } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
+import { desktopSmokeAccountRooms, isDesktopSmokeCheck } from "../smoke.js";
 
 function mapDesktopAccountFocusRoomEntry(
   payload: Record<string, unknown>,
@@ -160,6 +161,10 @@ function mapDesktopAccountRoomActionResult(
 export async function listDesktopAccountRooms(
   options: DesktopAccountRoomListOptions = {},
 ): Promise<DesktopAccountRoomEntry[]> {
+  if (isDesktopSmokeCheck()) {
+    return desktopSmokeAccountRooms().filter((room) => options.includeArchived || !room.archived);
+  }
+
   const params = new URLSearchParams();
   params.set("limit", String(Math.max(1, Math.min(options.limit ?? 50, 100))));
   if (options.includeArchived) {

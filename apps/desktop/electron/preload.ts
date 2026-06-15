@@ -136,6 +136,19 @@ const api: DesktopApi = {
   },
   workers: {
     list: () => ipcRenderer.invoke("desktop:workers:list"),
+    listManagedAgentSessions: (roomIdentifier) =>
+      ipcRenderer.invoke("desktop:workers:list-managed-agent-sessions", roomIdentifier || null),
+    startManagedAgent: (input) =>
+      ipcRenderer.invoke("desktop:workers:start-managed-agent", input),
+    stopManagedAgent: (input = {}) =>
+      ipcRenderer.invoke("desktop:workers:stop-managed-agent", input),
+    inspectManagedAgent: (sessionId = null, roomIdentifier = null) =>
+      ipcRenderer.invoke("desktop:workers:inspect-managed-agent", sessionId, roomIdentifier),
+    listAgentProviders: () => ipcRenderer.invoke("desktop:workers:list-agent-providers"),
+    runAgentProviderPreflight: (providerId, input = {}) =>
+      ipcRenderer.invoke("desktop:workers:run-agent-provider-preflight", providerId, input),
+    runAgentProviderSetup: (providerId, input) =>
+      ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
   diagnostics: {
     getSnapshot: () => ipcRenderer.invoke("desktop:diagnostics:get-snapshot"),

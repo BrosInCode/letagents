@@ -3,11 +3,11 @@ import {
   buildWorkerSnapshots as buildLocalWorkerSnapshots,
   readLetAgentsLocalState,
 } from "../../board-task-actions.js";
-import { apiUrl, letagentsLocalStatePath } from "../paths.js";
+import { apiUrl, getLetAgentsLocalStatePath } from "../paths.js";
 
 export function buildWorkerSnapshots(): WorkerSnapshot[] {
   return buildLocalWorkerSnapshots(
-    readLetAgentsLocalState(letagentsLocalStatePath),
+    readLetAgentsLocalState(getLetAgentsLocalStatePath()),
   );
 }
 

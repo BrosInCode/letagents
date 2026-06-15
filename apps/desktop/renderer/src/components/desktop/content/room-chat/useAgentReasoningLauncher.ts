@@ -14,10 +14,16 @@ interface AgentReasoningLauncherOptions {
   reasoningSessions: () => DesktopReasoningSession[];
   openReasoning: (sessionId: string) => void;
   openFallback: (target: AgentModalTarget) => void;
+  openAgentDetail?: (target: AgentModalTarget) => void;
 }
 
 export function useAgentReasoningLauncher(options: AgentReasoningLauncherOptions) {
   function openAgentModal(target: AgentModalTarget): void {
+    if (options.openAgentDetail) {
+      options.openAgentDetail(target);
+      return;
+    }
+
     const session = latestReasoningForAgent(target, options.reasoningSessions());
     if (session) {
       options.openReasoning(session.id);
@@ -55,6 +61,7 @@ export function hasReasoningStreamSurface(
       presence.actorLabel,
       presence.displayName,
       presence.agentKey,
+      presence.agentSessionId,
     ].map(normalizeAgentKey).filter(Boolean);
     if (!presenceKeys.some((key) => keys.includes(key))) return false;
 

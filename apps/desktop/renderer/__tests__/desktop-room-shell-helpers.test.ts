@@ -164,6 +164,51 @@ describe("desktop room shell helpers", () => {
     assert.equal(stripStatusPrefix("[status] checking integration"), "checking integration");
     assert.equal(inferAgentFallbackStatus("blocked waiting for tests"), "blocked");
   });
+
+  it("matches renamed agents through session and agent keys instead of generated labels", () => {
+    const target = {
+      actorLabel: null,
+      displayName: "MapleRidge",
+      ideLabel: "Codex",
+      sender: "codex",
+      agentKey: "codex/maple-ridge",
+      agentSessionId: "session_local_codex",
+    };
+    const keyedSession = {
+      ...reasoningSession("reasoning_keyed", "Different Label", "2026-05-28T02:00:00.000Z"),
+      agentKey: "codex/maple-ridge",
+    };
+    const messages = [
+      roomMessage({
+        id: "msg_local",
+        sender: "Different Label",
+        source: "agent",
+        text: "[status] building the Codex bridge",
+        timestamp: "2026-05-28T03:00:00.000Z",
+        agentIdentity: {
+          name: "MapleRidge",
+          displayName: "MapleRidge",
+          ownerLabel: "Local desktop",
+          ownerAttribution: "Local desktop's agent",
+          ideLabel: "Codex",
+          actorLabel: "Different Label",
+          agentKey: "codex/maple-ridge",
+          agentSessionId: "session_local_codex",
+        },
+      }),
+    ];
+    const fallback = buildAgentFallbackReasoningSession(
+      target,
+      "github.com/BrosInCode/letagents",
+      messages,
+    );
+
+    assert.equal(latestReasoningSessionForTarget(target, [keyedSession])?.id, "reasoning_keyed");
+    assert.equal(latestMessageForAgent(target, messages)?.id, "msg_local");
+    assert.equal(fallback.agentKey, "codex/maple-ridge");
+    assert.equal(fallback.id, "pending-agent-reasoning:session_local_codex");
+    assert.equal(fallback.status, "working");
+  });
 });
 
 describe("desktop room shell preferences", () => {
