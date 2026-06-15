@@ -22,6 +22,7 @@
           :loading-older-messages="loadingOlderMessages"
           :messages="messages"
           :thread-messages="threadMessages"
+          :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :search-query="searchQuery"
@@ -122,6 +123,7 @@ const props = defineProps<{
   active: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sending: boolean;

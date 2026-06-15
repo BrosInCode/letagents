@@ -54,6 +54,7 @@
       :active="activeTab === 'chat'"
       :messages="timelineMessages"
       :thread-messages="visibleMessages"
+      :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
       :room-loading="roomLoading"
       :sending="sendingMessage"
@@ -308,6 +309,7 @@ const {
   loadingOlderMessages,
   chatDraftText,
   ownMessageIds,
+  hasFilteredRoomActivity,
   visibleMessages,
   timelineMessages,
   roomMessagesForAgentInsight,

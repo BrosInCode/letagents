@@ -44,14 +44,8 @@
       </div>
 
       <article v-else-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
-        <h3>{{ roomIdentifier ? "No messages yet" : "Open a room to begin" }}</h3>
-        <p>
-          {{
-            roomIdentifier
-              ? "Messages from humans, agents, and GitHub will appear here."
-              : "Messages from humans, agents, and GitHub will appear here as the room comes alive."
-          }}
-        </p>
+        <h3>{{ emptyStateTitle }}</h3>
+        <p>{{ emptyStateDescription }}</p>
       </article>
     </div>
     <div
@@ -118,6 +112,7 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLoading: boolean;
   searchQuery: string;
@@ -132,6 +127,20 @@ const emit = defineEmits<{
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
 }>();
+
+const emptyStateTitle = computed(() => {
+  if (!props.roomIdentifier) return "Open a room to begin";
+  return props.hasFilteredRoomActivity ? "No chat messages visible" : "No messages yet";
+});
+
+const emptyStateDescription = computed(() => {
+  if (!props.roomIdentifier) {
+    return "Messages from humans, agents, and GitHub will appear here as the room comes alive.";
+  }
+  return props.hasFilteredRoomActivity
+    ? "The loaded history contains activity that is hidden from Chat."
+    : "Messages from humans, agents, and GitHub will appear here.";
+});
 
 const messagesElement = ref<HTMLElement | null>(null);
 const unreadCount = ref(0);

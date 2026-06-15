@@ -5,6 +5,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   compareRoomMessages,
+  isHiddenChatMessage,
   mergeRoomMessages,
 } from "./messages";
 import {
@@ -35,13 +36,20 @@ export function useDesktopRoomMessages(options: {
     return mergeRoomMessages([...olderMessages.value, ...options.messages.value], []);
   });
   const visibleMessages = computed(() => {
-    const displayableMessages = mergeRoomMessages(loadedServerMessages.value, localMessages.value)
-      .filter((message) => !isLowSignalGitHubCheckMessage(message));
-    const visibleMessages = displayableMessages
-      .filter((message) => options.githubEventsVisible.value || !isGitHubRoomMessage(message));
-    return visibleMessages.length || options.githubEventsVisible.value
-      ? visibleMessages
-      : displayableMessages;
+    return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
+      .filter((message) =>
+        !isLowSignalGitHubCheckMessage(message)
+        && (options.githubEventsVisible.value || !isGitHubRoomMessage(message))
+      );
+  });
+  const hasFilteredRoomActivity = computed(() => {
+    if (visibleMessages.value.length) return false;
+    return [...olderMessages.value, ...options.messages.value, ...localMessages.value]
+      .some((message) =>
+        isUserFacingFilteredMessage(message)
+        || isLowSignalGitHubCheckMessage(message)
+        || (!options.githubEventsVisible.value && isGitHubRoomMessage(message))
+      );
   });
   const timelineMessages = computed(() => roomTimelineMessages(visibleMessages.value));
   const roomMessagesForAgentInsight = computed(() =>
@@ -136,6 +144,7 @@ export function useDesktopRoomMessages(options: {
     loadingOlderMessages,
     chatDraftText,
     ownMessageIds,
+    hasFilteredRoomActivity,
     visibleMessages,
     timelineMessages,
     roomMessagesForAgentInsight,
@@ -147,4 +156,8 @@ export function useDesktopRoomMessages(options: {
 
 export function oldestRoomHistoryCursor(messages: readonly DesktopRoomMessage[]): string | null {
   return [...messages].sort(compareRoomMessages)[0]?.id ?? null;
+}
+
+function isUserFacingFilteredMessage(message: DesktopRoomMessage): boolean {
+  return isHiddenChatMessage(message) && !(message.agentPromptKind === "auto" && !message.text.trim());
 }

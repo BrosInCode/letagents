@@ -109,7 +109,7 @@ describe("desktop room shell helpers", () => {
         text: "PR #558 opened in BrosInCode/letagents: Polish desktop focus room manager https://github.com/BrosInCode/letagents/pull/558",
       }),
     ]);
-    const { visibleMessages } = useDesktopRoomMessages({
+    const { hasFilteredRoomActivity, visibleMessages } = useDesktopRoomMessages({
       room: ref(roomInfo()),
       messages,
       githubEventsVisible,
@@ -118,12 +118,14 @@ describe("desktop room shell helpers", () => {
     });
 
     assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1", "msg_2"]);
+    assert.equal(hasFilteredRoomActivity.value, false);
 
     githubEventsVisible.value = false;
     assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
+    assert.equal(hasFilteredRoomActivity.value, false);
   });
 
-  it("keeps meaningful GitHub messages visible instead of showing an empty chat", () => {
+  it("reports filtered room activity instead of leaking hidden GitHub events into chat", () => {
     const githubEventsVisible = ref(false);
     const messages = ref([
       roomMessage({
@@ -140,7 +142,7 @@ describe("desktop room shell helpers", () => {
       }),
       roomMessage({ id: "msg_3", source: "agent", text: "[status] pushed follow-up changes" }),
     ]);
-    const { visibleMessages } = useDesktopRoomMessages({
+    const { hasFilteredRoomActivity, visibleMessages } = useDesktopRoomMessages({
       room: ref(roomInfo()),
       messages,
       githubEventsVisible,
@@ -148,7 +150,8 @@ describe("desktop room shell helpers", () => {
       onMessageSent: () => undefined,
     });
 
-    assert.deepEqual(visibleMessages.value.map((message) => message.id), ["msg_1"]);
+    assert.deepEqual(visibleMessages.value.map((message) => message.id), []);
+    assert.equal(hasFilteredRoomActivity.value, true);
   });
 
   it("matches reasoning fallback targets and builds pending sessions from latest agent activity", () => {
