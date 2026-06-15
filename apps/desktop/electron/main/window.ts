@@ -85,6 +85,7 @@ function installSmokeCheck(window: BrowserWindow): void {
           addAgentButton: false,
           addAgentModal: false,
           addAgentModalLayout: false,
+          addAgentModalScroll: false,
           addAgentRoomLabel: false,
           codexProvider: false,
           codexMissingRuntime: false,
@@ -187,6 +188,21 @@ function installSmokeCheck(window: BrowserWindow): void {
         );
         result.managedSessionCodename = true;
         result.deliveryControls = modalText().includes("MCP loop") && modalText().includes("Desktop events");
+        result.addAgentModalScroll = (() => {
+          const dialog = document.querySelector(".desktop-add-agent-modal");
+          const status = dialog?.querySelector(".desktop-add-agent-status");
+          if (!(dialog instanceof HTMLElement) || !(status instanceof HTMLElement)) return false;
+          const previousHeight = dialog.style.height;
+          const previousScrollTop = status.scrollTop;
+          dialog.style.height = "360px";
+          status.scrollTop = 0;
+          const overflows = status.scrollHeight > status.clientHeight + 1;
+          status.scrollTop = status.scrollHeight;
+          const scrolled = status.scrollTop > 0;
+          status.scrollTop = previousScrollTop;
+          dialog.style.height = previousHeight;
+          return overflows && scrolled && rectInsideViewport(status);
+        })();
 
         const installCodexButton = Array.from(document.querySelectorAll('[data-testid="desktop-add-agent-modal"] button'))
           .find((button) => button.textContent?.trim() === "Install Codex");

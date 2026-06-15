@@ -88,8 +88,10 @@
 }
 
 .desktop-add-agent-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(880px, calc(100vw - 44px));
-  max-height: min(760px, calc(100vh - 44px));
+  height: min(760px, calc(100vh - 44px));
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: var(--radius-lg);
@@ -184,14 +186,16 @@
   display: grid;
   grid-template-columns: minmax(210px, 280px) minmax(0, 1fr);
   gap: 0;
-  min-height: 420px;
-  max-height: calc(min(760px, calc(100vh - 44px)) - 82px);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .desktop-add-agent-providers,
 .desktop-add-agent-status {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .desktop-add-agent-providers {
@@ -893,7 +897,7 @@
 
   .desktop-add-agent-modal {
     width: 100%;
-    max-height: calc(100vh - 24px);
+    height: calc(100vh - 24px);
   }
 
   .desktop-add-agent-header,
@@ -904,8 +908,8 @@
 
   .desktop-add-agent-body {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     min-height: 0;
-    max-height: calc(100vh - 112px);
   }
 
   .desktop-add-agent-providers {
