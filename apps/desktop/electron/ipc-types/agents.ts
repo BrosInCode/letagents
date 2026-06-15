@@ -41,7 +41,6 @@ export interface DesktopAgentProvider {
 export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
   repoRootPath?: string | null;
-  runtimeCommand?: string | null;
 }
 
 export interface DesktopAgentProviderPreflight {
@@ -60,7 +59,6 @@ export interface DesktopAgentProviderSetupInput {
   confirmed?: boolean;
   roomIdentifier?: string | null;
   repoRootPath?: string | null;
-  runtimeCommand?: string | null;
 }
 
 export interface DesktopAgentProviderSetupResult {
@@ -111,7 +109,6 @@ export interface DesktopManagedAgentStartInput {
   roomDisplayName?: string | null;
   repoRootPath: string;
   deliveryMode?: DesktopManagedAgentDeliveryMode;
-  runtimeCommand?: string | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
 }

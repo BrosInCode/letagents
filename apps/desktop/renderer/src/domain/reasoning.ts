@@ -28,7 +28,7 @@ export function latestReasoningSessionForTarget(
 export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[] {
   return [
     target.actorLabel,
-    target.agentKey,
+    specificAgentKey(target.agentKey),
     target.agentSessionId,
     target.sender,
     target.displayName,
@@ -40,7 +40,7 @@ export function reasoningSessionAgentKeys(session: DesktopReasoningSession): str
   return [
     session.actorLabel,
     actorDisplayNameKey(session.actorLabel),
-    session.agentKey,
+    specificAgentKey(session.agentKey),
   ].map(normalizeAgentKey).filter(Boolean);
 }
 
@@ -90,4 +90,12 @@ export function reasoningStatus(session: DesktopReasoningSession): string {
 
 function actorDisplayNameKey(actorLabel: string | null | undefined): string | null {
   return actorLabel ? displayNameFromActor(actorLabel) : null;
+}
+
+function specificAgentKey(value: string | null | undefined): string {
+  const normalized = normalizeAgentKey(value);
+  if (!normalized || !/[/:]/.test(normalized)) {
+    return "";
+  }
+  return normalized;
 }

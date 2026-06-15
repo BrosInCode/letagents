@@ -14,6 +14,7 @@
         aria-labelledby="desktop-add-agent-title"
         tabindex="-1"
         @keydown.esc.prevent="emit('close')"
+        @keydown.tab="handleDialogTab"
       >
         <header class="desktop-add-agent-header">
           <div>
@@ -261,6 +262,11 @@ import {
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
+import {
+  currentFocusableElement,
+  restoreFocus,
+  trapFocusInDialog,
+} from "./modal-focus";
 
 const props = defineProps<{
   open: boolean;
@@ -290,6 +296,7 @@ const setupMessage = ref<string | null>(null);
 const managedSessions = ref<DesktopManagedAgentSession[]>([]);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
 const dialogElement = ref<HTMLElement | null>(null);
+let previousFocusElement: HTMLElement | null = null;
 let preflightRequestId = 0;
 let modalStateVersion = 0;
 
@@ -361,11 +368,14 @@ watch(
   () => props.open,
   (open) => {
     if (open) {
+      previousFocusElement = currentFocusableElement();
       void loadProviders();
       void loadManagedSessions();
       void nextTick(() => dialogElement.value?.focus());
     } else {
       resetTransientState();
+      restoreFocus(previousFocusElement);
+      previousFocusElement = null;
     }
   },
   { immediate: true },
@@ -488,6 +498,12 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   selectedProviderId.value = providerId;
   preflight.value = null;
   preflightRequestId += 1;
+  loadingPreflight.value = false;
+  setupBusy.value = false;
+  startingAgent.value = false;
+  stoppingSessionId.value = null;
+  copyingAuthCommand.value = false;
+  copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
   setupMessage.value = null;
 }
@@ -509,6 +525,10 @@ function resetTransientState(): void {
 
 function isCurrentModalState(version: number): boolean {
   return props.open && version === modalStateVersion;
+}
+
+function handleDialogTab(event: KeyboardEvent): void {
+  trapFocusInDialog(event, dialogElement.value);
 }
 
 async function runPreflight(): Promise<void> {

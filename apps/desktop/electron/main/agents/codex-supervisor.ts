@@ -308,11 +308,10 @@ export async function startDesktopManagedAgent(
     throw new Error("Choose a local repository before starting Codex.");
   }
   const cwd = resolve(repoRootPath);
-  const codexBin = input.runtimeCommand?.trim() || process.env.LETAGENTS_CODEX_BIN || "codex";
+  const codexBin = process.env.LETAGENTS_CODEX_BIN || "codex";
   const preflight = await runDesktopAgentProviderPreflight("codex", {
     roomIdentifier,
     repoRootPath: cwd,
-    runtimeCommand: codexBin,
   });
   if (!preflight.canStart) {
     throw new Error(preflight.detail || preflight.message);

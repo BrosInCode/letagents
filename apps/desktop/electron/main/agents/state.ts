@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -113,10 +114,18 @@ export function readAgentLocalState(): SharedLetAgentsState {
 
 function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState): void {
   const tempPath = `${statePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  let tempFd: number | null = null;
   try {
-    writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+    tempFd = openSync(tempPath, "w", 0o600);
+    writeFileSync(tempFd, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+    closeSync(tempFd);
+    tempFd = null;
     renameSync(tempPath, statePath);
+    chmodSync(statePath, 0o600);
   } finally {
+    if (tempFd !== null) {
+      closeSync(tempFd);
+    }
     rmSync(tempPath, { force: true });
   }
 }

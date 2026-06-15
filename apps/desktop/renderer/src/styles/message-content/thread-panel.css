@@ -147,6 +147,32 @@
   white-space: nowrap;
 }
 
+.room-thread-author-button {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 760;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.room-thread-author-button:hover {
+  color: #93c5fd;
+}
+
+.room-thread-author-button:focus-visible {
+  outline: 2px solid rgba(147, 197, 253, 0.62);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
 .room-thread-meta time {
   flex: 0 0 auto;
   color: var(--text-tertiary);

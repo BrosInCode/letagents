@@ -14,6 +14,7 @@
         :aria-labelledby="titleId"
         tabindex="-1"
         @keydown.esc.prevent="emit('close')"
+        @keydown.tab="handleDialogTab"
       >
         <header class="desktop-agent-detail-header">
           <div>
@@ -166,6 +167,11 @@ import {
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import {
+  currentFocusableElement,
+  restoreFocus,
+  trapFocusInDialog,
+} from "./modal-focus";
 
 const props = defineProps<{
   open: boolean;
@@ -189,6 +195,7 @@ const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectR
 const inspectingSessionIds = ref<Record<string, boolean>>({});
 let refreshTimer: number | null = null;
 let modalStateVersion = 0;
+let previousFocusElement: HTMLElement | null = null;
 
 const titleId = computed(() =>
   `desktop-agent-detail-${sanitizeId(props.target?.actorLabel || props.target?.sender || "agent")}`
@@ -231,8 +238,11 @@ watch(
   (open) => {
     if (!open) {
       resetTransientState();
+      restoreFocus(previousFocusElement);
+      previousFocusElement = null;
       return;
     }
+    previousFocusElement = currentFocusableElement();
     modalStateVersion += 1;
     clearTransientState();
     void nextTick(() => dialogElement.value?.focus());
@@ -300,6 +310,10 @@ function resetTransientState(): void {
 
 function isCurrentModalState(version: number): boolean {
   return props.open && version === modalStateVersion;
+}
+
+function handleDialogTab(event: KeyboardEvent): void {
+  trapFocusInDialog(event, dialogElement.value);
 }
 
 async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {

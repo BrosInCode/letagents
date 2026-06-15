@@ -209,6 +209,69 @@ describe("desktop room shell helpers", () => {
     assert.equal(fallback.id, "pending-agent-reasoning:session_local_codex");
     assert.equal(fallback.status, "working");
   });
+
+  it("does not cross-match multiple Codex workers through generic provider keys", () => {
+    const target = {
+      actorLabel: "MapleRidge",
+      displayName: "MapleRidge",
+      ideLabel: "Codex",
+      sender: "MapleRidge",
+      agentKey: "codex",
+      agentSessionId: "session_maple",
+    };
+    const mapleSession = {
+      ...reasoningSession("reasoning_maple", "MapleRidge", "2026-05-28T02:00:00.000Z"),
+      agentKey: "codex",
+    };
+    const cedarSession = {
+      ...reasoningSession("reasoning_cedar", "CedarVista", "2026-05-28T03:00:00.000Z"),
+      agentKey: "codex",
+    };
+    const messages = [
+      roomMessage({
+        id: "msg_cedar",
+        sender: "CedarVista",
+        actorLabel: "CedarVista",
+        source: "agent",
+        text: "[status] newer but different worker",
+        timestamp: "2026-05-28T03:00:00.000Z",
+        agentIdentity: {
+          name: "CedarVista",
+          displayName: "CedarVista",
+          ownerLabel: "Local desktop",
+          ownerAttribution: "Local desktop's agent",
+          ideLabel: "Codex",
+          actorLabel: "CedarVista",
+          agentKey: "codex",
+          agentSessionId: "session_cedar",
+        },
+      }),
+      roomMessage({
+        id: "msg_maple",
+        sender: "MapleRidge",
+        actorLabel: "MapleRidge",
+        source: "agent",
+        text: "[status] older matching worker",
+        timestamp: "2026-05-28T02:00:00.000Z",
+        agentIdentity: {
+          name: "MapleRidge",
+          displayName: "MapleRidge",
+          ownerLabel: "Local desktop",
+          ownerAttribution: "Local desktop's agent",
+          ideLabel: "Codex",
+          actorLabel: "MapleRidge",
+          agentKey: "codex",
+          agentSessionId: "session_maple",
+        },
+      }),
+    ];
+
+    assert.equal(
+      latestReasoningSessionForTarget(target, [mapleSession, cedarSession])?.id,
+      "reasoning_maple",
+    );
+    assert.equal(latestMessageForAgent(target, messages)?.id, "msg_maple");
+  });
 });
 
 describe("desktop room shell preferences", () => {

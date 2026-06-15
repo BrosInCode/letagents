@@ -904,6 +904,7 @@
 
   .desktop-add-agent-body {
     grid-template-columns: 1fr;
+    min-height: 0;
     max-height: calc(100vh - 112px);
   }
 

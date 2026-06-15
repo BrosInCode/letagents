@@ -91,6 +91,7 @@
         :active-search-message-id="activeSearchMessageId"
         @close="closeThread"
         @open-image="openImageViewer"
+        @open-agent="openAgentModal"
         @open-github-event="emit('open-github-event', $event)"
         @send-thread-message="sendThreadMessage"
       />

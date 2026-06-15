@@ -156,7 +156,7 @@ async function codexPreflight(
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = input.runtimeCommand?.trim() || provider.runtimeCommand || "codex";
+  const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
   const versionResult = await execFileWithTimeout(command, ["--version"]);
   if (commandMissing(versionResult)) {
     return {

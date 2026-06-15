@@ -6,6 +6,8 @@ function getWebSocketCtor(): typeof WebSocket {
   return ctor;
 }
 
+const DEFAULT_RPC_REQUEST_TIMEOUT_MS = 30_000;
+
 interface RpcResultEnvelope {
   id?: number;
   method?: string;
@@ -56,12 +58,14 @@ export class CodexRpcClient {
     {
       resolve: (value: unknown) => void;
       reject: (error: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
     }
   >();
 
   constructor(
     private readonly serverUrl: string,
     private readonly onNotification?: (notification: RpcNotification) => void,
+    private readonly requestTimeoutMs = DEFAULT_RPC_REQUEST_TIMEOUT_MS,
   ) {}
 
   async connect(): Promise<void> {
@@ -89,6 +93,7 @@ export class CodexRpcClient {
       ws.onclose = () => {
         rejectConnect(new Error(`WebSocket closed connecting to ${this.serverUrl}`));
         for (const pending of this.pending.values()) {
+          clearTimeout(pending.timeout);
           pending.reject(new Error("WebSocket closed"));
         }
         this.pending.clear();
@@ -114,14 +119,30 @@ export class CodexRpcClient {
     }
 
     return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Codex app-server request timed out: ${method}`));
+        this.close();
+      }, this.requestTimeoutMs);
       this.pending.set(id, {
-        resolve: (value) => resolve(value as T),
-        reject,
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value as T);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+        timeout,
       });
       try {
         this.send(payload);
       } catch (error) {
+        const pending = this.pending.get(id);
         this.pending.delete(id);
+        if (pending) {
+          clearTimeout(pending.timeout);
+        }
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
