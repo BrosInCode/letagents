@@ -4,11 +4,11 @@
 }
 
 .first-run-card {
-  min-height: min(860px, calc(100vh - 96px));
+  min-height: min(660px, calc(100vh - 56px));
   align-content: start;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
-  gap: clamp(22px, 2.4vw, 32px);
-  padding: clamp(40px, 4.7vw, 72px);
+  gap: clamp(14px, 1.6vw, 18px);
+  padding: clamp(24px, 3.2vw, 40px);
 }
 
 .first-run-stage {
@@ -24,12 +24,13 @@
 
 .first-run-card .mcp-wizard-header h1 {
   max-width: 920px;
-  font-size: clamp(4rem, 7.4vw, 7.4rem);
-  letter-spacing: -0.09em;
+  font-size: 3.75rem;
+  letter-spacing: 0;
+  line-height: 1;
 }
 
 .first-run-header {
-  gap: clamp(18px, 2.6vw, 34px);
+  gap: clamp(14px, 2vw, 24px);
 }
 
 .first-run-card .mcp-wizard-header > p:not(.hero-kicker) {
@@ -38,11 +39,11 @@
 }
 
 .first-run-card .mcp-progress {
-  grid-template-columns: repeat(3, 168px);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   justify-content: center;
-  gap: clamp(56px, 7vw, 104px);
-  width: min(900px, 100%);
-  margin: -2px auto 2px;
+  gap: 22px;
+  width: min(700px, 100%);
+  margin: 0 auto;
 }
 
 .first-run-card .mcp-progress span {
@@ -50,24 +51,25 @@
   display: grid;
   grid-auto-flow: row;
   justify-items: center;
-  gap: 12px;
-  min-height: 76px;
+  gap: 6px;
+  min-height: 50px;
   padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--text-tertiary);
   font-size: 1rem;
-  letter-spacing: -0.035em;
+  letter-spacing: 0;
   box-shadow: none;
 }
 
 .first-run-card .mcp-progress span:not(:last-child)::after {
   content: "";
   position: absolute;
-  top: 23px;
-  left: calc(50% + 34px);
-  width: calc(100% + clamp(56px, 7vw, 104px) - 68px);
+  top: 16px;
+  left: calc(50% + 26px);
+  right: calc(-50% - 10px);
+  width: auto;
   height: 2px;
   border-radius: 999px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.11));
@@ -78,15 +80,15 @@
   z-index: 1;
   display: inline-grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
+  width: 34px;
+  height: 34px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background:
     radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.14), transparent 36%),
     rgba(255, 255, 255, 0.08);
   color: inherit;
-  font-size: 1.08rem;
+  font-size: 1rem;
   font-weight: 900;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
 }
@@ -94,7 +96,7 @@
 .first-run-card .mcp-progress span small {
   display: block;
   color: inherit;
-  font-size: 1rem;
+  font-size: 0.86rem;
   font-weight: 850;
 }
 
@@ -124,13 +126,25 @@
 .first-run-card .mcp-choice-step {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
-  gap: 18px;
+  gap: 12px;
 }
 
 .first-run-card .mcp-choice-card {
-  min-height: 150px;
-  padding: 24px 28px;
-  gap: 16px 18px;
+  position: relative;
+  min-height: 116px;
+  padding: 16px 18px;
+  gap: 14px 16px;
+}
+
+.first-run-card .mcp-target-mark {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+}
+
+.first-run-card .mcp-harness-icon {
+  width: 40px;
+  height: 40px;
 }
 
 .first-run-card .mcp-target-main strong {
@@ -144,7 +158,7 @@
 .first-run-card .mcp-wizard-actions {
   align-items: center;
   justify-content: flex-end;
-  padding-top: 4px;
+  padding-top: 0;
 }
 
 .first-run-card .mcp-wizard-actions .primary-button,

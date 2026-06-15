@@ -45,6 +45,7 @@
           key="room"
           :room-name="roomName"
           :room-identifier="roomIdentifier"
+          :github-connected="Boolean(authStatus?.authenticated)"
           :busy="busy"
           @pick-repo="$emit('pick-repo')"
           @join-room-code="$emit('join-room-code', $event)"
@@ -97,6 +98,17 @@
         </button>
 
         <button
+          v-if="stage === 'github' && !authStatus?.authenticated"
+          class="ghost-button"
+          type="button"
+          :disabled="busy"
+          data-testid="first-run-skip-github"
+          @click="$emit('continue-to-room')"
+        >
+          Skip for now
+        </button>
+
+        <button
           v-else-if="stage === 'github'"
           class="primary-button"
           type="button"
@@ -108,14 +120,14 @@
         </button>
 
         <button
-          v-else
+          v-else-if="stage === 'room'"
           class="primary-button"
           type="button"
-          :disabled="busy"
+          :disabled="busy || !roomIdentifier"
           data-testid="first-run-open-room"
           @click="$emit('finish')"
         >
-          Open room
+          {{ roomIdentifier ? "Open room" : "Choose a room" }}
         </button>
       </div>
 
@@ -190,7 +202,7 @@ const installButtonLabel = computed(() => {
 });
 
 const headline = computed(() => {
-  if (props.stage === "github") return "Let agents work on your repo in a room.";
+  if (props.stage === "github") return "Connect GitHub for private rooms.";
   if (props.stage === "room") return "Choose where agents should work.";
   if (props.mcpWizardStep === "install") return `Add LetAgents to ${selectedTargetLabel.value}.`;
   if (props.mcpWizardStep === "done") return `${selectedTargetLabel.value} ${selectedMcpTargets.value.length === 1 ? "is" : "are"} ready.`;
@@ -199,7 +211,7 @@ const headline = computed(() => {
 
 const copy = computed(() => {
   if (props.stage === "github") {
-    return "Connect GitHub so LetAgents can find your repositories, confirm access, and open the right shared place for agent work.";
+    return "Connect now for private repos and repo discovery, or skip and join a public or invite room.";
   }
   if (props.stage === "room") {
     return "Open a room for a repository, or join one someone has already shared with you.";
@@ -215,7 +227,7 @@ const copy = computed(() => {
 
 const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [
   { id: "mcp", step: "1", label: "Agent app", complete: props.stage !== "mcp" },
-  { id: "github", step: "2", label: "GitHub", complete: props.stage === "room" },
+  { id: "github", step: "2", label: "Access", complete: props.stage === "room" },
   { id: "room", step: "3", label: "Room", complete: false },
 ]);
 

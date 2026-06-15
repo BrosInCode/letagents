@@ -64,9 +64,14 @@ type DeviceAuthPollResponse = {
 };
 
 let authAuthorizedHandler: (() => void) | null = null;
+let authInvalidatedHandler: (() => void) | null = null;
 
 export function setAuthAuthorizedHandler(handler: () => void): void {
   authAuthorizedHandler = handler;
+}
+
+export function setAuthInvalidatedHandler(handler: () => void): void {
+  authInvalidatedHandler = handler;
 }
 
 export class DesktopApiError extends Error {
@@ -240,6 +245,7 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
       oauthTokenExpiresAt: null,
       account: null,
     });
+    authInvalidatedHandler?.();
     return buildAuthStatus({
       storedAuth: await readStoredAuth(),
       error: "Your saved sign-in expired. Connect again to open private rooms.",

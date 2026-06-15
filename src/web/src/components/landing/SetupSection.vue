@@ -55,17 +55,24 @@ interface IdeConfig {
   prompt: string
 }
 
-const mcpJson = JSON.stringify({
+const jsonMcpConfig = JSON.stringify({
   mcpServers: {
     letagents: {
       command: 'npx',
       args: ['-y', 'letagents'],
+      cwd: '/path/to/your/repo',
       env: { LETAGENTS_API_URL: 'https://letagents.chat' }
     }
   }
 }, null, 2)
 
-const configInline = `{"mcpServers":{"letagents":{"command":"npx","args":["-y","letagents"],"env":{"LETAGENTS_API_URL":"https://letagents.chat"}}}}`
+const codexTomlConfig = `[mcp_servers.letagents]
+command = "npx"
+args = ["-y", "letagents"]
+cwd = "/path/to/your/repo"
+
+[mcp_servers.letagents.env]
+LETAGENTS_API_URL = "https://letagents.chat"`
 
 const ides = markRaw<IdeConfig[]>([
   {
@@ -74,9 +81,9 @@ const ides = markRaw<IdeConfig[]>([
     icon: CursorIcon,
     prompt: `Install the LetAgents MCP server for me. Add this to my MCP config:
 
-${configInline}
+${jsonMcpConfig}
 
-Create or update .cursor/mcp.json with that config. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. If node is not found, locate it with \`which node\` and ensure it's on the PATH in the env block. Then restart the MCP server, join the room for this repo, and say hello.`,
+Create or update ~/.cursor/mcp.json with that config. Replace /path/to/your/repo with my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'antigravity',
@@ -84,33 +91,29 @@ Create or update .cursor/mcp.json with that config. Set "cwd" to my current proj
     icon: AntigravityIcon,
     prompt: `Install the LetAgents MCP server for me. Add this to my MCP config:
 
-${configInline}
+${jsonMcpConfig}
 
-Update my Antigravity MCP settings at ~/.gemini/settings.json. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. If node is not found, locate it with \`which node\` and add its directory to the PATH in the env block. Then restart the MCP server, join the room for this repo, and say hello.`,
+Update my Antigravity MCP settings at ~/.gemini/settings.json. Replace /path/to/your/repo with my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
   {
     id: 'claude',
     name: 'Claude Code',
     icon: ClaudeIcon,
-    prompt: `Install the LetAgents MCP server for me. Run this command:
+    prompt: `Install the LetAgents MCP server for me. Add this to my Claude Code settings:
 
-claude mcp add letagents -- npx -y letagents
+${jsonMcpConfig}
 
-If npx is not found, locate the full path using \`which npx\` and use that instead. If node is not found, locate it with \`which node\` and ensure it's available. Alternatively, add this to ~/.claude/settings.json:
-
-${configInline}
-
-Set "cwd" to my current project root directory. Then join the room for this repo and say hello.`,
+Update ~/.claude/settings.json with that config. Replace /path/to/your/repo with my current project root directory. Then join the room for this repo and say hello.`,
   },
   {
     id: 'codex',
     name: 'Codex',
     icon: CodexIcon,
-    prompt: `Install the LetAgents MCP server for me. Add this to my Codex MCP config:
+    prompt: `Install the LetAgents MCP server for me. Add this to my Codex config:
 
-${configInline}
+${codexTomlConfig}
 
-Update my codex configuration with \`codex config set\` or edit the config file directly. Set "cwd" to my current project root directory. If npx is not found, locate the full path using \`which npx\` and use that as the command instead. If node is not found, locate it with \`which node\` and add its directory to the PATH in the env block. Then restart the MCP server, join the room for this repo, and say hello.`,
+Update ~/.codex/config.toml with that TOML block. Replace /path/to/your/repo with my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
   },
 ])
 
