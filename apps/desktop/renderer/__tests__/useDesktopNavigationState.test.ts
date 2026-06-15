@@ -3,12 +3,16 @@ import { describe, it } from "node:test";
 import { ref } from "vue";
 
 import type {
+  DesktopAccountRoomEntry,
   DesktopAppInfo,
   DesktopRoomSnapshot,
   RepoStatus,
 } from "../../electron/ipc-types";
 import { useDesktopNavigationState } from "../src/composables/useDesktopNavigationState";
-import type { RecentRootRoom } from "../src/domain/sidebar-rooms";
+import {
+  resolveAccountRoomAliasIdentifier,
+  type RecentRootRoom,
+} from "../src/domain/sidebar-rooms";
 
 describe("useDesktopNavigationState", () => {
   it("does not let temporary rooms inherit the active repo branch label", () => {
@@ -200,12 +204,83 @@ describe("useDesktopNavigationState", () => {
       assert.equal(state.currentParentRoom.value.meta, "Temporary room");
     });
   });
+
+  it("replaces a recovered display-name alias with the canonical room id", () => {
+    withLocalStorage(() => {
+      const recentRootRooms = ref<RecentRootRoom[]>([{
+        identifier: "sky-lake",
+        kind: "project",
+        rootPath: "/Users/emmy/Projects/letagents",
+        displayName: "sky-lake",
+        meta: "codex/ui-polishing",
+        updatedAt: "2026-06-07T00:00:00.000Z",
+      }]);
+      const state = useDesktopNavigationState({
+        accountRooms: ref([]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms,
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus>({
+          rootPath: "/Users/emmy/Projects/letagents",
+          branch: "staging",
+          worktrees: [],
+        }),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(null),
+        selectedRootRoomIdentifier: ref<string | null>("sky-lake"),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      state.openRoomSnapshot(roomSnapshot("github.com/BrosInCode/letagents", {
+        displayName: "sky-lake",
+      }), {
+        aliasIdentifiers: ["sky-lake"],
+      });
+
+      assert.equal(recentRootRooms.value.length, 1);
+      assert.equal(recentRootRooms.value[0].identifier, "github.com/BrosInCode/letagents");
+      assert.equal(recentRootRooms.value[0].displayName, "sky-lake");
+      assert.equal(recentRootRooms.value[0].kind, "project");
+      assert.equal(recentRootRooms.value[0].rootPath, "/Users/emmy/Projects/letagents");
+      assert.equal(state.currentParentRoom.value.roomIdentifier, "github.com/BrosInCode/letagents");
+    });
+  });
+
+  it("resolves unique account room display-name aliases to canonical ids", () => {
+    const rooms: DesktopAccountRoomEntry[] = [
+      accountRoom("github.com/BrosInCode/letagents", "sky-lake"),
+      accountRoom("room_other", "other-room"),
+    ];
+
+    assert.equal(
+      resolveAccountRoomAliasIdentifier("sky-lake", rooms),
+      "github.com/BrosInCode/letagents",
+    );
+    assert.equal(resolveAccountRoomAliasIdentifier("other-room", rooms), "room_other");
+    assert.equal(resolveAccountRoomAliasIdentifier("github.com/BrosInCode/letagents", rooms), null);
+  });
+
+  it("does not resolve ambiguous account room display-name aliases", () => {
+    const rooms: DesktopAccountRoomEntry[] = [
+      accountRoom("room_one", "shared-name"),
+      accountRoom("room_two", "shared-name"),
+    ];
+
+    assert.equal(resolveAccountRoomAliasIdentifier("shared-name", rooms), null);
+  });
 });
 
 function roomSnapshot(
   identifier: string,
-  options: { accessCode?: string; roomCode?: string } = {},
+  options: { accessCode?: string; roomCode?: string; displayName?: string } = {},
 ): DesktopRoomSnapshot {
+  const displayName = options.displayName || identifier;
   return {
     roomIdentifier: identifier,
     access: {
@@ -221,7 +296,7 @@ function roomSnapshot(
       identifier,
       code: options.roomCode || "JOIN-1234",
       name: identifier,
-      displayName: identifier,
+      displayName,
       role: "admin",
       authenticated: true,
       kind: "main",
@@ -246,6 +321,31 @@ function roomSnapshot(
     recentActivity: [],
     messages: [],
     githubEvents: null,
+  };
+}
+
+function accountRoom(roomIdentifier: string, displayName: string): DesktopAccountRoomEntry {
+  return {
+    roomIdentifier,
+    displayName,
+    name: roomIdentifier,
+    kind: "main",
+    parentRoomId: null,
+    focusKey: null,
+    sourceTaskId: null,
+    focusStatus: null,
+    role: "admin",
+    source: null,
+    pinned: false,
+    archived: false,
+    canLeave: true,
+    canDelete: false,
+    deleteReason: null,
+    firstOpenedAt: null,
+    lastOpenedAt: null,
+    latestMessageId: null,
+    latestMessageAt: null,
+    focusRooms: [],
   };
 }
 
