@@ -104,6 +104,9 @@ interface ScrollAnchor {
   offsetTop: number;
 }
 
+const maxAutoViewportBackfillPages = 5;
+const viewportFillSlack = 32;
+
 const props = defineProps<{
   active: boolean;
   activeSearchMessageId: string | null;
@@ -146,6 +149,7 @@ const messagesElement = ref<HTMLElement | null>(null);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
+const autoViewportBackfillCount = ref(0);
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
@@ -153,6 +157,7 @@ let shouldJumpToLatestOnActivate = false;
 let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
+let autoViewportBackfillFrame: number | null = null;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
@@ -291,6 +296,21 @@ watch(
 );
 
 watch(
+  [
+    () => props.active,
+    () => props.roomLoading,
+    () => props.hasOlderMessages,
+    () => props.loadingOlderMessages,
+    () => props.messages.length,
+    () => props.threadMessages.length,
+    () => props.hasFilteredRoomActivity,
+    () => props.roomIdentifier,
+  ],
+  () => scheduleAutoFillViewport(),
+  { immediate: true, flush: "post" },
+);
+
+watch(
   () => props.roomIdentifier,
   () => {
     unreadCount.value = 0;
@@ -301,6 +321,8 @@ watch(
     shouldRestoreInitialScroll = hasInitialScrollPosition();
     shouldJumpToLatestOnActivate = false;
     shouldRestoreKeepAliveScroll = false;
+    autoViewportBackfillCount.value = 0;
+    cancelAutoFillViewport();
     void nextTick(() => {
       if (!restoreInitialScrollPosition()) {
         scrollToBottom("auto");
@@ -322,6 +344,7 @@ onMounted(() => {
     if (!restoreInitialScrollPosition()) {
       updateScrollState();
     }
+    scheduleAutoFillViewport();
   });
 });
 
@@ -341,9 +364,56 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  cancelAutoFillViewport();
   rememberScrollAnchor();
   emitScrollPosition();
 });
+
+function scheduleAutoFillViewport(): void {
+  cancelAutoFillViewport();
+  if (!canAutoFillViewport()) return;
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    void nextTick(() => maybeAutoFillViewport());
+    return;
+  }
+  autoViewportBackfillFrame = window.requestAnimationFrame(() => {
+    autoViewportBackfillFrame = null;
+    void nextTick(() => maybeAutoFillViewport());
+  });
+}
+
+function cancelAutoFillViewport(): void {
+  if (autoViewportBackfillFrame === null) return;
+  if (typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(autoViewportBackfillFrame);
+  }
+  autoViewportBackfillFrame = null;
+}
+
+function canAutoFillViewport(): boolean {
+  return Boolean(
+    props.active
+    && props.roomIdentifier
+    && !props.roomLoading
+    && props.hasOlderMessages
+    && !props.loadingOlderMessages
+    && autoViewportBackfillCount.value < maxAutoViewportBackfillPages
+  );
+}
+
+function maybeAutoFillViewport(): void {
+  if (!canAutoFillViewport()) return;
+  const element = messagesElement.value;
+  if (!element || !isMeasurableScrollViewport(element)) return;
+  const hasLoadedTimelineActivity = props.messages.length > 0
+    || props.threadMessages.length > 0
+    || props.hasFilteredRoomActivity;
+  if (!hasLoadedTimelineActivity) return;
+  if (element.scrollHeight > element.clientHeight + viewportFillSlack) return;
+
+  autoViewportBackfillCount.value += 1;
+  emit("load-older");
+}
 
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   if (!messagesElement.value) return;

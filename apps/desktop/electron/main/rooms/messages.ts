@@ -93,6 +93,10 @@ export async function getDesktopRoomMessagesBefore(
     return { messages: [], hasOlder: false };
   }
 
+  if (isDesktopSmokeCheck()) {
+    return { messages: [], hasOlder: false };
+  }
+
   if (await isLocalChatStorageEnabled()) {
     const page = await getLocalChatMessagesBefore(
       trimmedRoomIdentifier,
