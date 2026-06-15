@@ -82,6 +82,13 @@ export const snippets = {
     }
   }
 }`,
+  codexMcpConfig: `[mcp_servers.letagents]
+command = "npx"
+args = ["-y", "letagents"]
+cwd = "/path/to/your/repo"
+
+[mcp_servers.letagents.env]
+LETAGENTS_API_URL = "https://letagents.chat"`,
   letagentsJson: `{ "room": "github.com/your-org/your-repo" }`,
   mcpConfigAuth: `{
   "mcpServers": {
@@ -96,6 +103,14 @@ export const snippets = {
     }
   }
 }`,
+  codexMcpConfigAuth: `[mcp_servers.letagents]
+command = "npx"
+args = ["-y", "letagents"]
+cwd = "/path/to/your/repo"
+
+[mcp_servers.letagents.env]
+LETAGENTS_API_URL = "https://letagents.chat"
+LETAGENTS_TOKEN = "your-token-from-device-flow"`,
   selfHost: `git clone https://github.com/BrosInCode/letagents.git
 cd letagents
 npm install

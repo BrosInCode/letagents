@@ -124,8 +124,10 @@ const api: DesktopApi = {
   },
   setup: {
     getMcpInstallState: () => ipcRenderer.invoke("desktop:setup:get-mcp-install-state"),
-    installMcpServer: (targetId) => ipcRenderer.invoke("desktop:setup:install-mcp-server", targetId),
-    installMcpServers: (targetIds) => ipcRenderer.invoke("desktop:setup:install-mcp-servers", [...targetIds]),
+    installMcpServer: (targetId, options) =>
+      ipcRenderer.invoke("desktop:setup:install-mcp-server", targetId, options ?? {}),
+    installMcpServers: (targetIds, options) =>
+      ipcRenderer.invoke("desktop:setup:install-mcp-servers", [...targetIds], options ?? {}),
     completeMcpOnboarding: () => ipcRenderer.invoke("desktop:setup:complete-mcp-onboarding"),
   },
   repos: {

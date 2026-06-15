@@ -42,6 +42,7 @@
     </ol>
 
     <CodeBlock label="mcp config with auth (json)">{{ snippets.mcpConfigAuth }}</CodeBlock>
+    <CodeBlock label="codex config with auth (toml)">{{ snippets.codexMcpConfigAuth }}</CodeBlock>
 
     <h3>Web UI login</h3>
     <p>

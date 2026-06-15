@@ -8,6 +8,8 @@
       :data-selected="selectedTargetIds.includes(target.id)"
       :data-status="target.status"
       :data-testid="`mcp-target-${target.id}`"
+      :aria-label="targetAriaLabel(target)"
+      :aria-pressed="selectedTargetIds.includes(target.id)"
       @click="$emit('select-target', target.id)"
     >
       <span class="mcp-target-mark" aria-hidden="true">
@@ -57,5 +59,9 @@ function statusLabel(status: DesktopMcpInstallTarget["status"]): string {
   if (status === "installed") return "Ready";
   if (status === "needs_attention") return "Repair";
   return "Not installed";
+}
+
+function targetAriaLabel(target: DesktopMcpInstallTarget): string {
+  return `${target.name}. ${target.description} Status: ${statusLabel(target.status)}.`;
 }
 </script>

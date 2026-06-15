@@ -23,6 +23,7 @@ import type {
   DesktopInviteRoomCreation,
   DesktopLocalChatSyncResult,
   DesktopMcpInstallManyResult,
+  DesktopMcpInstallOptions,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
   DesktopMcpInstallTarget,
@@ -66,6 +67,7 @@ import {
   pollDeviceAuthFlow,
   readStoredAuth,
   setAuthAuthorizedHandler,
+  setAuthInvalidatedHandler,
   startDeviceAuthFlow,
 } from "./auth.js";
 import {
@@ -73,6 +75,7 @@ import {
   completeMcpOnboarding,
   installLetAgentsMcpServer,
   installLetAgentsMcpServers,
+  refreshInstalledLetAgentsMcpServerAuth,
 } from "./mcp-setup.js";
 import {
   buildDiagnosticsSnapshot,
@@ -125,7 +128,14 @@ import { openAllowedExternalUrl } from "./external-url.js";
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
 ): void {
-  setAuthAuthorizedHandler(clearJoinedRoomInfoCache);
+  setAuthAuthorizedHandler(() => {
+    clearJoinedRoomInfoCache();
+    void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
+  });
+  setAuthInvalidatedHandler(() => {
+    clearJoinedRoomInfoCache();
+    void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
+  });
   const renterTriggerRuntime = new RenterTriggerRuntime({
     getRoomIdentifier: getActiveRoomIdentifier,
     emitRoomStreamEvent,
@@ -474,6 +484,7 @@ export function registerDesktopIpcHandlers(
     async (): Promise<DesktopAuthStatus> => {
       clearJoinedRoomInfoCache();
       await clearStoredAuth();
+      await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
       return getDesktopAuthStatus();
     },
   );
@@ -488,8 +499,9 @@ export function registerDesktopIpcHandlers(
     async (
       _event,
       targetId: DesktopMcpInstallTargetId,
+      options?: DesktopMcpInstallOptions,
     ): Promise<DesktopMcpInstallResult> => {
-      return installLetAgentsMcpServer(targetId);
+      return installLetAgentsMcpServer(targetId, options ?? {});
     },
   );
   targetIpcMain.handle(
@@ -497,8 +509,9 @@ export function registerDesktopIpcHandlers(
     async (
       _event,
       targetIds: DesktopMcpInstallTargetId[],
+      options?: DesktopMcpInstallOptions,
     ): Promise<DesktopMcpInstallManyResult> => {
-      return installLetAgentsMcpServers(targetIds);
+      return installLetAgentsMcpServers(targetIds, options ?? {});
     },
   );
   targetIpcMain.handle(

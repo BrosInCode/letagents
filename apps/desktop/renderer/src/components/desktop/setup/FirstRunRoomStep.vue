@@ -93,6 +93,7 @@ import { computed, ref } from "vue";
 const props = defineProps<{
   roomName: string;
   roomIdentifier: string | null;
+  githubConnected: boolean;
   busy: boolean;
 }>();
 
@@ -113,18 +114,23 @@ function submitRoomCode(): void {
   emit("join-room-code", value);
 }
 
-const checklist = [
+const checklist = computed(() => [
   {
     title: "MCP installed",
     copy: "Your chosen agent app can load LetAgents.",
   },
-  {
-    title: "GitHub connected",
-    copy: "LetAgents can confirm access and find repositories you can work in.",
-  },
+  props.githubConnected
+    ? {
+        title: "GitHub connected",
+        copy: "LetAgents can confirm access and find repositories you can work in.",
+      }
+    : {
+        title: "GitHub optional",
+        copy: "Public and invite rooms work now; connect GitHub later for private repos.",
+      },
   {
     title: "Choose the room",
     copy: "Open a repo room now, or join another room with an invite code later.",
   },
-];
+]);
 </script>

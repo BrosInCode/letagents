@@ -792,7 +792,7 @@ const {
 });
 
 function getChatStorageBridge(): typeof window.letagentsDesktop.chatStorage | null {
-  const bridge = window.letagentsDesktop.chatStorage;
+  const bridge = window.letagentsDesktop?.chatStorage;
   if (!bridge) {
     chatStorageAvailable.value = false;
     chatStorageFeedback.value = {
@@ -979,8 +979,8 @@ watch(
 );
 
 onMounted(() => {
-  unsubscribeRoomStream = window.letagentsDesktop.room.onStreamEvent(handleRoomStreamEvent);
-  unsubscribeOpenSettings = window.letagentsDesktop.ui?.onOpenSettings(openSettingsSurface) || null;
+  unsubscribeRoomStream = window.letagentsDesktop?.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
+  unsubscribeOpenSettings = window.letagentsDesktop?.ui?.onOpenSettings(openSettingsSurface) || null;
   accountRoomsRefreshInterval = window.setInterval(() => {
     void refreshSidebarRoomMetadata();
   }, 5_000);
@@ -1008,6 +1008,6 @@ onBeforeUnmount(() => {
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();
   unsubscribeOpenSettings = null;
-  void window.letagentsDesktop.room.stopStream();
+  void window.letagentsDesktop?.room?.stopStream?.();
 });
 </script>
