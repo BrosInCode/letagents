@@ -10,11 +10,16 @@ process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
 const {
   bindCodexLiveSessionToWorker,
   getCurrentCodexLiveSession,
+  getOrCreateDesktopHostId,
+  getStoredAgentIdentity,
+  getStoredAgentSession,
   listDesktopManagedCodexLiveSessions,
   listCodexDisplayNamesForRoom,
   listStoredCodexLiveSessions,
   managedAgentDeliveryMode,
+  saveAgentSession,
   saveCodexLiveSession,
+  saveStoredAgentIdentity,
   toPublicManagedAgentSession,
 } = await import("../main/agents/state.js");
 const {
@@ -31,6 +36,7 @@ const {
   codexSessionStatusAfterTurnInterrupt,
   codexSessionStatusAfterStopAttempt,
   deriveCodexLiveSessionStatus,
+  finalPublicAgentMessageText,
   isActiveCodexTurnStatus,
   parseStartupObservationMs,
   shouldShutdownManagedAgentOnStop,
@@ -39,6 +45,7 @@ const {
 const { suggestLetAgentsCodename } = await import("../main/agents/codenames.js");
 const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
 const {
+  codexAppServerLaunchArgs,
   launchCodexAppServer,
   waitForLaunchedCodexAppServer,
 } = await import("../main/agents/codex-app-server.js");
@@ -111,6 +118,58 @@ function taskSummary(
     ...overrides,
   };
 }
+
+test("desktop managed worker identity and session state are persisted for room surfaces", () => {
+  resetState();
+
+  const hostId = getOrCreateDesktopHostId();
+  const identity = saveStoredAgentIdentity({
+    name: "cedar-vista",
+    display_name: "CedarVista",
+    owner_label: "EmmyMay",
+    owner_attribution: "EmmyMay's agent",
+    ide_label: "Codex",
+    actor_label: "CedarVista | EmmyMay's agent | Codex",
+    canonical_key: "EmmyMay/cedar-vista",
+    runtime_key: "desktop-codex",
+    source: "api",
+    resolved_at: "2026-06-14T12:00:00.000Z",
+  });
+  const session = saveAgentSession({
+    session_id: "worker_desktop",
+    session_token: "token_desktop",
+    room_id: "room_1",
+    session_kind: "worker",
+    runtime: "codex:LOCAL_CODEX_ROOM_test",
+    host_id: hostId,
+    host_kind: "macos",
+    host_label: "LetAgents Desktop",
+    liveness_capability: "desktop_supervised_codex_app_server",
+    tool_bridge_id: `${hostId}:codex:desktop`,
+    actor_label: identity.actor_label,
+    agent_key: identity.canonical_key,
+    agent_instance_id: "desktop-codex:LOCAL_CODEX_ROOM_test",
+    display_name: identity.display_name,
+    owner_label: identity.owner_label,
+    ide_label: "Codex",
+    created_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    last_seen_at: "2026-06-14T12:00:00.000Z",
+    ended_at: null,
+  });
+
+  assert.equal(getOrCreateDesktopHostId(), hostId);
+  assert.deepEqual(getStoredAgentIdentity(), identity);
+  assert.deepEqual(getStoredAgentSession("worker_desktop"), session);
+
+  const publicSession = toPublicManagedAgentSession(liveSession({
+    agent_session_id: "worker_desktop",
+    display_name: "CedarVista",
+  }));
+  assert.equal(publicSession.agentSessionId, "worker_desktop");
+  assert.equal(publicSession.actorLabel, "CedarVista | EmmyMay's agent | Codex");
+  assert.equal(publicSession.agentKey, "EmmyMay/cedar-vista");
+});
 
 test("managed Codex state binds a live desktop session to the registered worker identity", () => {
   resetState({
@@ -590,19 +649,12 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.match(pollingPrompt, /claim it with claim_task using the registered agent_session_id before entering the wait loop/);
   assert.match(pollingPrompt, /get_onboarding_status/);
   assert.match(eventPrompt, /Do not call wait_for_messages/);
-  assert.match(eventPrompt, /set_agent_name/);
-  assert.match(eventPrompt, /post_reasoning/);
-  assert.match(eventPrompt, /public reasoning summary/);
-  assert.match(eventPrompt, /Suggested codename: CedarVista/);
-  assert.match(eventPrompt, /runtime="codex:LOCAL_CODEX_ROOM_test"/);
-  assert.match(eventPrompt, /MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor/);
-  assert.match(eventPrompt, /Treat this as your room identity/);
-  assert.match(eventPrompt, /Call set_agent_name with that chosen codename before posting status or registering/);
-  assert.match(eventPrompt, /Never call yourself Codex, Codex 1, Codex 2, or any numbered provider label/);
-  assert.match(eventPrompt, /Do not finish bootstrap as available until register_agent_session succeeds/);
-  assert.match(eventPrompt, /Call read_messages once, then call get_board once/);
-  assert.match(eventPrompt, /claim it with claim_task using the registered agent_session_id before posting availability/);
-  assert.match(eventPrompt, /get_onboarding_status/);
+  assert.match(eventPrompt, /already registered this room worker as CedarVista/);
+  assert.match(eventPrompt, /Do not call LetAgents MCP room tools during bootstrap/);
+  assert.match(eventPrompt, /NO_ROOM_REPLY/);
+  assert.doesNotMatch(eventPrompt, /set_agent_name/);
+  assert.doesNotMatch(eventPrompt, /register_agent_session/);
+  assert.doesNotMatch(eventPrompt, /get_onboarding_status/);
   assert.match(eventPrompt, /desktop app will send room events/);
 });
 
@@ -611,7 +663,7 @@ test("Codex start prompts JSON-escape unusual room names", () => {
     roomIdentifier: 'github.com/example/repo "staging"',
     joinedVia: "join_room",
     cwd: "/tmp/repo",
-    deliveryMode: "desktop_events",
+    deliveryMode: "mcp_polling",
     stopPhrase: "/stop-codex-room",
     token: "LOCAL_CODEX_ROOM_test",
     suggestedDisplayName: "MapleRidge",
@@ -648,8 +700,9 @@ test("desktop-delivered event prompts include stop handling without resuming MCP
 
   assert.match(prompt, /exactly equals "\/stop-codex-room"/);
   assert.match(prompt, /LOCAL_CODEX_ROOM_test_DONE/);
-  assert.match(prompt, /Do not call wait_for_messages/);
-  assert.match(prompt, /post_reasoning/);
+  assert.match(prompt, /do not call wait_for_messages/);
+  assert.match(prompt, /Do not call LetAgents MCP room tools/);
+  assert.match(prompt, /desktop should publish as you/);
   assert.match(prompt, /Do not include hidden chain-of-thought/);
 });
 
@@ -753,8 +806,7 @@ test("desktop-delivered event prompts keep reply follow-up in the room thread", 
   });
 
   assert.match(prompt, /Reply to: msg_parent from MapleRidge/);
-  assert.match(prompt, /send_thread_message with the Reply to id/);
-  assert.match(prompt, /unless the response is room-wide/);
+  assert.match(prompt, /desktop will keep it in the same thread/);
 });
 
 test("desktop-delivered task prompts include assignment and workflow context", () => {
@@ -825,8 +877,8 @@ test("desktop-delivered task prompts include assignment and workflow context", (
   assert.match(prompt, /Stale prompt: worker idle for 120000ms/);
   assert.match(prompt, /assigned or leased to you/);
   assert.match(prompt, /assigned or leased to another worker, finish quietly/);
-  assert.match(prompt, /do not post duplicate status noise/);
-  assert.match(prompt, /Do not call wait_for_messages/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+  assert.match(prompt, /do not call wait_for_messages/);
 });
 
 test("desktop event routing suppresses a renamed worker's own messages by stable identity", () => {
@@ -1125,6 +1177,18 @@ test("Codex inspection summaries expose only public transcript items", () => {
   assert.doesNotMatch(JSON.stringify(summaries), /private|tool details/);
 });
 
+test("Codex final reply extraction ignores private phases", () => {
+  assert.equal(finalPublicAgentMessageText([
+    { type: "agentMessage", phase: "thinking", text: "private thinking should not appear" },
+    { type: "toolCall", text: "tool details should not appear" },
+    { type: "agentMessage", phase: "commentary", text: "I am checking this." },
+    { type: "agentMessage", phase: "final", text: "Done, I fixed it." },
+  ]), "Done, I fixed it.");
+  assert.equal(finalPublicAgentMessageText([
+    { type: "agentMessage", phase: "thinking", text: "private thinking should not appear" },
+  ]), null);
+});
+
 test("CodexRpcClient initializes app-server using the documented wire shape", async () => {
   const originalWebSocket = globalThis.WebSocket;
   const sentMessages: Array<Record<string, unknown>> = [];
@@ -1306,6 +1370,23 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
     assert.fail("Expected a spawn error from the missing Codex binary.");
   }
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
+});
+
+test("Codex app-server launcher trusts the selected managed worktree", () => {
+  assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500"), [
+    "app-server",
+    "--listen",
+    "ws://127.0.0.1:4500",
+  ]);
+  assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500", {
+    trustedProjectPath: "/tmp/room-worktree",
+  }), [
+    "app-server",
+    "-c",
+    'projects."/tmp/room-worktree".trust_level="trusted"',
+    "--listen",
+    "ws://127.0.0.1:4500",
+  ]);
 });
 
 test("Codex app-server readiness wait fails on early launched-process errors", async () => {

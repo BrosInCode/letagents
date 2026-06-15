@@ -14,6 +14,10 @@ export interface CodexAppServerLaunch {
   exited: Promise<CodexAppServerExit>;
 }
 
+interface CodexAppServerLaunchOptions {
+  trustedProjectPath?: string | null;
+}
+
 function readyUrlFromServerUrl(serverUrl: string): string {
   const url = new URL(serverUrl);
   url.protocol = url.protocol === "wss:" ? "https:" : "http:";
@@ -130,8 +134,28 @@ function childExitPromise(child: ChildProcess): Promise<CodexAppServerExit> {
   });
 }
 
-export function launchCodexAppServer(serverUrl: string, codexBin: string): CodexAppServerLaunch {
-  const child = spawn(codexBin, ["app-server", "--listen", serverUrl], {
+export function codexAppServerLaunchArgs(
+  serverUrl: string,
+  options: CodexAppServerLaunchOptions = {},
+): string[] {
+  const args = ["app-server"];
+  const trustedProjectPath = options.trustedProjectPath?.trim();
+  if (trustedProjectPath) {
+    args.push(
+      "-c",
+      `projects.${JSON.stringify(trustedProjectPath)}.trust_level="trusted"`,
+    );
+  }
+  args.push("--listen", serverUrl);
+  return args;
+}
+
+export function launchCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+): CodexAppServerLaunch {
+  const child = spawn(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
     detached: true,
     stdio: "ignore",
   });

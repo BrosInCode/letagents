@@ -139,6 +139,7 @@ import {
   stageDroppedDesktopAttachmentContents,
 } from "./attachments.js";
 import {
+  deliverDesktopRoomMessageToManagedAgents,
   emitRoomStreamEvent,
   getActiveRoomIdentifier,
   startDesktopRoomStream,
@@ -287,8 +288,11 @@ export function registerDesktopIpcHandlers(
       text: string,
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
-    ): Promise<DesktopSendRoomMessageResult> =>
-      sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? []),
+    ): Promise<DesktopSendRoomMessageResult> => {
+      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? []);
+      deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message);
+      return result;
+    },
   );
   targetIpcMain.handle(
     "desktop:room:add-task",

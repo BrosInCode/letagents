@@ -99,6 +99,32 @@ export function summarizeItems(items: ThreadReadTurnItem[] | undefined): Array<R
   return publicItems.slice(-6);
 }
 
+export function finalPublicAgentMessageText(
+  items: ThreadReadTurnItem[] | undefined,
+): string | null {
+  let fallback: string | null = null;
+  let final: string | null = null;
+  for (const item of items ?? []) {
+    if (item.type !== "agentMessage") {
+      continue;
+    }
+    const phase = String(item.phase ?? "").trim().toLowerCase();
+    if (INTERNAL_ITEM_TYPE_PATTERN.test(phase)) {
+      continue;
+    }
+    const text = String(item.text ?? "").trim();
+    if (!text) {
+      continue;
+    }
+    fallback = text;
+    if (phase === "final") {
+      final = text;
+    }
+  }
+
+  return final ?? fallback;
+}
+
 export function deriveCodexLiveSessionStatus(
   currentStatus: DesktopManagedAgentSessionStatus,
   serverReachable: boolean,

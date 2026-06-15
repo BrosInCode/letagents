@@ -57,13 +57,29 @@ export interface DesktopCodexLiveSessionState {
 }
 
 interface SharedLetAgentsState {
+  agent_identity?: StoredAgentIdentityState;
+  agent_identities?: Record<string, StoredAgentIdentityState>;
+  local_host_id?: string;
   agent_sessions?: Record<string, StoredAgentSessionState>;
   current_agent_session_ids?: Record<string, string>;
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, DesktopCodexLiveSessionState>;
 }
 
-interface StoredAgentSessionState {
+export interface StoredAgentIdentityState {
+  name: string;
+  display_name: string;
+  owner_label: string;
+  owner_attribution?: string | null;
+  ide_label?: string | null;
+  actor_label: string;
+  canonical_key?: string | null;
+  runtime_key?: string | null;
+  source?: "api" | "local" | string;
+  resolved_at: string;
+}
+
+export interface StoredAgentSessionState {
   session_id: string;
   session_token?: string;
   room_id: string;
@@ -180,6 +196,95 @@ function updateAgentLocalState(
     writeLocalStateUnlocked(statePath, updated);
     return updated;
   });
+}
+
+export function getStoredAgentIdentity(): StoredAgentIdentityState | null {
+  return readAgentLocalState().agent_identity ?? null;
+}
+
+export function saveStoredAgentIdentity(identity: StoredAgentIdentityState): StoredAgentIdentityState {
+  updateAgentLocalState((state) => {
+    state.agent_identity = identity;
+    if (identity.runtime_key) {
+      state.agent_identities = state.agent_identities ?? {};
+      state.agent_identities[identity.runtime_key] = identity;
+    }
+    return state;
+  });
+  return identity;
+}
+
+export function getOrCreateDesktopHostId(): string {
+  const existing = readAgentLocalState().local_host_id;
+  if (typeof existing === "string" && existing.trim()) {
+    return existing;
+  }
+
+  const hostId = `host_${randomBytes(16).toString("hex")}`;
+  let resolvedHostId = hostId;
+  updateAgentLocalState((state) => {
+    if (typeof state.local_host_id === "string" && state.local_host_id.trim()) {
+      resolvedHostId = state.local_host_id;
+      return state;
+    }
+    state.local_host_id = hostId;
+    return state;
+  });
+  return resolvedHostId;
+}
+
+export function getStoredAgentSession(sessionId: string | null | undefined): StoredAgentSessionState | null {
+  const trimmed = String(sessionId ?? "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  return readAgentLocalState().agent_sessions?.[trimmed] ?? null;
+}
+
+export function saveAgentSession(session: StoredAgentSessionState): StoredAgentSessionState {
+  updateAgentLocalState((state) => {
+    state.agent_sessions = state.agent_sessions ?? {};
+    state.agent_sessions[session.session_id] = session;
+    if (session.session_kind === "worker") {
+      state.current_agent_session_ids = state.current_agent_session_ids ?? {};
+      state.current_agent_session_ids[session.room_id] = session.session_id;
+    }
+    return state;
+  });
+  return session;
+}
+
+export function markAgentSessionEnded(
+  sessionId: string | null | undefined,
+  endedAt = new Date().toISOString(),
+): StoredAgentSessionState | null {
+  const trimmed = String(sessionId ?? "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let endedSession: StoredAgentSessionState | null = null;
+  updateAgentLocalState((state) => {
+    const existing = state.agent_sessions?.[trimmed];
+    if (!existing) {
+      return state;
+    }
+    endedSession = {
+      ...existing,
+      ended_at: endedAt,
+      updated_at: endedAt,
+      last_seen_at: existing.last_seen_at || endedAt,
+    };
+    state.agent_sessions = state.agent_sessions ?? {};
+    state.agent_sessions[trimmed] = endedSession;
+    for (const [roomId, currentSessionId] of Object.entries(state.current_agent_session_ids ?? {})) {
+      if (currentSessionId === trimmed) {
+        delete state.current_agent_session_ids?.[roomId];
+      }
+    }
+    return state;
+  });
+  return endedSession;
 }
 
 function normalizeRoomId(value: string | null | undefined): string {

@@ -5,6 +5,8 @@ import type {
 } from "../../ipc-types.js";
 import type { DesktopCodexLiveSessionState } from "./state.js";
 
+export const DESKTOP_EVENTS_NO_ROOM_REPLY = "NO_ROOM_REPLY";
+
 export function buildDesktopEventPrompt(
   session: DesktopCodexLiveSessionState,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
@@ -25,15 +27,14 @@ export function buildDesktopEventPrompt(
     eventBody,
     "",
     "Instructions:",
-    `- If this is a room message whose text exactly equals ${JSON.stringify(session.stop_phrase)}, stop this local worker: reply in the room with exactly ${session.token}_DONE, then finish.`,
+    `- If this is a room message whose text exactly equals ${JSON.stringify(session.stop_phrase)}, stop this local worker: finish with exactly ${session.token}_DONE.`,
     "- Decide whether this event requires action from you.",
-    "- If action is useful, use LetAgents MCP room tools with your registered agent_session_id when accepted.",
-    "- If this message is a reply, keep follow-up in the same thread by using send_thread_message with the Reply to id unless the response is room-wide.",
-    "- When action is useful, call post_reasoning with your registered agent_session_id and concise public progress summaries at the start/end or when blocked. Do not include hidden chain-of-thought.",
+    "- The desktop app owns the LetAgents room connection for this worker. Do not call LetAgents MCP room tools and do not call wait_for_messages.",
+    "- If action is useful, do the local work in this Codex thread and make your final answer the public room reply the desktop should publish as you.",
+    "- If this message is a reply, write the final answer as the reply text; the desktop will keep it in the same thread.",
     "- For task_update events, act only when the task is unclaimed and appropriate for you, assigned or leased to you, needs your review, or contains a blocker that you can resolve. If it is assigned or leased to another worker, finish quietly.",
-    "- If a task_update only reflects your own recent status, lease, or workflow artifact change, do not post duplicate status noise.",
-    "- If no action is needed, finish without posting noise.",
-    "- Do not call wait_for_messages; the desktop app will deliver future events.",
+    `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
+    "- Do not include hidden chain-of-thought in the final answer.",
   ].join("\n");
 }
 

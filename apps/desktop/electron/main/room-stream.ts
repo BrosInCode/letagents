@@ -1,5 +1,6 @@
 import type {
   DesktopRentalActivityEvent,
+  DesktopRoomMessage,
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
 } from "../ipc-types.js";
@@ -57,6 +58,21 @@ export function emitRoomStreamEvent(
   } catch {
     // Agent delivery must not break the human room stream.
   }
+}
+
+export function deliverDesktopRoomMessageToManagedAgents(
+  roomIdentifier: string,
+  message: DesktopRoomMessage,
+): void {
+  const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(roomIdentifier, message.id);
+  if (!shouldDeliverToManagedAgents) {
+    return;
+  }
+  dispatchRoomStreamEventToManagedAgents({
+    type: "message",
+    roomIdentifier,
+    message,
+  });
 }
 
 function shouldDeliverManagedMessageEvent(

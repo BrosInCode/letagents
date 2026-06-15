@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { DesktopCodexJoinedVia } from "./state.js";
 import type { DesktopManagedAgentDeliveryMode } from "../../ipc-types.js";
 import { LETAGENTS_CODENAME_EXAMPLES } from "./codenames.js";
+import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
 
 export const DEFAULT_CODEX_STOP_PHRASE = "/stop-codex-room";
 
@@ -61,24 +62,18 @@ export function buildCodexStartPrompt(input: {
       deadlineInstruction,
       "",
       "Bootstrap instructions:",
-      `1. ${buildJoinInstruction(input.joinedVia, input.roomIdentifier)}`,
-      "2. Call read_messages once, then call get_board once so you know the current participants and active work.",
-      ...codenameInstructionLines(input.suggestedDisplayName),
-      `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`codex:${input.token}`)}, and the same chosen display_name. Keep the returned agent_session_id.`,
-      "7. Do not finish bootstrap as available until register_agent_session succeeds. If LetAgents MCP auth is required, call get_onboarding_status and finish with a short public setup-needed note instead of claiming availability.",
-      "8. If get_board shows accepted unassigned work that is appropriate for you, claim it with claim_task using the registered agent_session_id before posting availability.",
-      "9. Post a short status that you are available for desktop-delivered room events, or that you claimed a specific task.",
-      "10. Call post_reasoning with the registered agent_session_id, status=\"idle\" or status=\"working\", and a concise public summary. This is readable progress for the desktop UI, not hidden chain-of-thought.",
-      "11. Do not call wait_for_messages. The LetAgents desktop app will send room events into this same Codex thread as future turns.",
-      "12. After registration, the short status update, and the public reasoning summary, finish this bootstrap turn unless you claimed work that should be handled immediately.",
+      `1. The LetAgents desktop app has already registered this room worker as ${input.suggestedDisplayName}.`,
+      "2. Do not call LetAgents MCP room tools during bootstrap. This app-server surface may not expose them.",
+      "3. Do not call wait_for_messages. The desktop app will send room events into this same Codex thread as future turns.",
+      `4. Finish this bootstrap turn with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
       "",
       "Future event turns:",
       "- When the desktop sends a room event, decide whether action is needed.",
-      "- If action is useful, use the LetAgents MCP tools with the registered agent_session_id when accepted.",
-      "- When you start meaningful work, become blocked, or finish useful work, call post_reasoning with the registered agent_session_id and a concise public summary/status for the desktop agent detail modal.",
+      "- If action is useful, do the local work and make your final answer the public room reply the desktop should publish as you.",
+      `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
       "- Be concise, avoid duplicate responses, and do not narrate hidden chain-of-thought.",
       `- Stop immediately if a future room message text exactly equals: ${input.stopPhrase}`,
-      `- When stopping, reply in the room with exactly: ${input.token}_DONE`,
+      `- When stopping, finish with exactly: ${input.token}_DONE`,
     ].join("\n");
   }
 

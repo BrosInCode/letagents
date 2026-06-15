@@ -29,6 +29,14 @@ export function isVisibleManagedAgentSession(
   return session.canStop;
 }
 
+export function isDeliverableManagedAgentSession(
+  session: DesktopManagedAgentSession,
+): boolean {
+  return isVisibleManagedAgentSession(session) &&
+    Boolean(session.agentSessionId) &&
+    session.status !== "starting";
+}
+
 export function normalizeManagedAgentRoomIdentifier(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
 }
@@ -301,7 +309,7 @@ function visibleManagedAgentSessionsForRoom(
 ): DesktopManagedAgentSession[] {
   return sessions.filter((session) =>
     managedAgentSessionMatchesRoom(session, roomIdentifier)
-    && isVisibleManagedAgentSession(session)
+    && isDeliverableManagedAgentSession(session)
   );
 }
 

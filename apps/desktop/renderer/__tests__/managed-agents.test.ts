@@ -17,6 +17,7 @@ import {
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
   isAgentSetupConfirmationActive,
+  isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
   managedAgentSessionMatchesRoom,
@@ -159,6 +160,21 @@ test("isVisibleManagedAgentSession keeps idle desktop-event workers visible", ()
   assert.equal(isVisibleManagedAgentSession(session({
     status: "failed",
     canStop: true,
+  })), false);
+});
+
+test("isDeliverableManagedAgentSession requires a registered room worker", () => {
+  assert.equal(isDeliverableManagedAgentSession(session({
+    status: "running",
+    agentSessionId: "agent_1",
+  })), true);
+  assert.equal(isDeliverableManagedAgentSession(session({
+    status: "running",
+    agentSessionId: null,
+  })), false);
+  assert.equal(isDeliverableManagedAgentSession(session({
+    status: "starting",
+    agentSessionId: "agent_1",
   })), false);
 });
 
@@ -509,4 +525,16 @@ test("managed desktop agent merges with existing room identities instead of dupl
   assert.equal(presenceEntries[0].activityState, "active");
   assert.equal(presenceEntries[0].sourceFlags.includes("delivery"), true);
   assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
+});
+
+test("unregistered managed desktop agents do not become mentionable or reachable", () => {
+  const unregistered = session({
+    status: "starting",
+    agentSessionId: null,
+    displayName: "CloudForge",
+    actorLabel: "CloudForge",
+  });
+
+  assert.deepEqual(mergeDesktopManagedAgentParticipants([], [unregistered], "room_1"), []);
+  assert.deepEqual(mergeDesktopManagedAgentPresence([], [unregistered], "room_1"), []);
 });
