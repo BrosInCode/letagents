@@ -54,6 +54,7 @@ import {
   getCurrentCodexLiveSession,
   getStoredCodexLiveSession,
   listCodexDisplayNamesForRoom,
+  listDesktopManagedCodexLiveSessions,
   listStoredCodexLiveSessions,
   managedAgentDeliveryMode,
   saveCodexLiveSession,
@@ -290,7 +291,7 @@ async function waitForWorkerStartup(
 export function listDesktopManagedAgentSessions(
   roomIdentifier?: string | null,
 ): DesktopManagedAgentSession[] {
-  return listStoredCodexLiveSessions(roomIdentifier)
+  return listDesktopManagedCodexLiveSessions(roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session))
     .map(toPublicManagedAgentSession);
 }
@@ -389,6 +390,7 @@ export async function startDesktopManagedAgent(
       stop_phrase: stopPhrase,
       max_minutes: maxMinutes,
       delivery_mode: deliveryMode,
+      desktop_managed: true,
       deadline_utc: deadline.utc,
       token,
       thread_id: threadId,

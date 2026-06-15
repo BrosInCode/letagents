@@ -117,6 +117,7 @@ function seedDesktopSmokeAgentState(now: string): void {
           stop_phrase: "/stop-codex-room",
           max_minutes: 0,
           delivery_mode: "desktop_events",
+          desktop_managed: true,
           deadline_utc: null,
           token: "LOCAL_CODEX_ROOM_smoke",
           thread_id: "thread_smoke_codex",

@@ -39,6 +39,7 @@ export interface DesktopCodexLiveSessionState {
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
+  desktop_managed?: boolean;
   deadline_utc?: string | null;
   token: string;
   thread_id: string;
@@ -229,6 +230,14 @@ export function listStoredCodexLiveSessions(roomId?: string | null): DesktopCode
       normalizeRoomId(session.room_identifier) === normalizedRoom
     )
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+}
+
+export function isDesktopManagedCodexLiveSession(session: DesktopCodexLiveSessionState): boolean {
+  return session.desktop_managed === true || Boolean(session.delivery_mode);
+}
+
+export function listDesktopManagedCodexLiveSessions(roomId?: string | null): DesktopCodexLiveSessionState[] {
+  return listStoredCodexLiveSessions(roomId).filter(isDesktopManagedCodexLiveSession);
 }
 
 export function listCodexDisplayNamesForRoom(roomId: string): string[] {

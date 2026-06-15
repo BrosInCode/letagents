@@ -10,6 +10,7 @@ process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
 const {
   bindCodexLiveSessionToWorker,
   getCurrentCodexLiveSession,
+  listDesktopManagedCodexLiveSessions,
   listCodexDisplayNamesForRoom,
   listStoredCodexLiveSessions,
   managedAgentDeliveryMode,
@@ -446,6 +447,33 @@ test("managed Codex session listing is scoped by room and sorted by latest updat
     ["newer", "older"],
   );
   assert.equal(getCurrentCodexLiveSession("ROOM_1")?.session_id, "newer");
+});
+
+test("desktop managed session listing ignores legacy MCP live sessions", () => {
+  resetState();
+  saveCodexLiveSession(liveSession({
+    session_id: "legacy_mcp",
+    delivery_mode: undefined,
+    desktop_managed: undefined,
+    display_name: "OldMcpWorker",
+    updated_at: "2026-06-14T12:10:00.000Z",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: "desktop_mcp",
+    delivery_mode: "mcp_polling",
+    desktop_managed: true,
+    display_name: "MapleRidge",
+    updated_at: "2026-06-14T12:20:00.000Z",
+  }));
+
+  assert.deepEqual(
+    listStoredCodexLiveSessions("room_1").map((session) => session.session_id),
+    ["desktop_mcp", "legacy_mcp"],
+  );
+  assert.deepEqual(
+    listDesktopManagedCodexLiveSessions("room_1").map((session) => session.session_id),
+    ["desktop_mcp"],
+  );
 });
 
 test("managed Codex rooms can hold multiple distinct supervised workers", () => {
