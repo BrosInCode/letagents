@@ -10,7 +10,7 @@ import type {
 } from "./codex-rpc-client.js";
 
 export const STARTUP_POLL_INTERVAL_MS = 500;
-const DEFAULT_STARTUP_OBSERVATION_MS = 8_000;
+const DEFAULT_STARTUP_OBSERVATION_MS = 90_000;
 const MAX_PUBLIC_ITEM_TEXT_LENGTH = 420;
 const INTERNAL_ITEM_TYPE_PATTERN = /(reason|thought|think|chain|tool|exec|patch|diff|command|event|system|debug|log|trace|plan)/i;
 
@@ -136,6 +136,15 @@ export function deriveCodexLiveSessionStatus(
 
 export function isTerminalCodexSessionStatus(status: DesktopManagedAgentSessionStatus): boolean {
   return status === "completed" || status === "interrupted" || status === "failed";
+}
+
+export function codexSessionStatusAfterInspectFailure(
+  currentStatus: DesktopManagedAgentSessionStatus,
+): DesktopManagedAgentSessionStatus {
+  if (currentStatus === "starting" || isTerminalCodexSessionStatus(currentStatus)) {
+    return currentStatus;
+  }
+  return "unknown";
 }
 
 export function codexSessionStatusAfterTurnInterrupt(

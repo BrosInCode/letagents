@@ -37,6 +37,7 @@ import {
   deriveCodexLiveSessionStatus,
   extractThreadStatus,
   extractTurnStatus,
+  codexSessionStatusAfterInspectFailure,
   codexSessionStatusAfterTurnInterrupt,
   codexSessionStatusAfterStopAttempt,
   isLikelyMaterializingError,
@@ -207,16 +208,17 @@ function markCodexStartupRegistered(
 
 function markCodexStartupRegistrationFailed(
   session: DesktopCodexLiveSessionState,
+  reason = session.last_error || CODEX_WORKER_REGISTRATION_ERROR,
 ): DesktopCodexLiveSessionState {
   return updateCodexLiveSession(session.session_id, (current) => ({
     ...current,
     status: "failed",
-    last_error: CODEX_WORKER_REGISTRATION_ERROR,
+    last_error: reason,
     updated_at: new Date().toISOString(),
   })) ?? {
     ...session,
     status: "failed",
-    last_error: CODEX_WORKER_REGISTRATION_ERROR,
+    last_error: reason,
     updated_at: new Date().toISOString(),
   };
 }
@@ -237,15 +239,13 @@ async function waitForWorkerStartup(
     }
 
     latest = getStoredCodexLiveSession(session.session_id) ?? latest;
-    if (!inspected.serverReachable || latest.status === "unknown") {
-      const reason = !inspected.serverReachable
-        ? "app-server became unreachable during startup"
-        : "worker status became unknown during startup";
+    if (!inspected.serverReachable) {
+      const reason = "app-server became unreachable during startup";
       const failed =
         updateCodexLiveSession(session.session_id, (current) => ({
           ...current,
           status: "failed",
-          last_error: reason,
+          last_error: current.last_error || reason,
           updated_at: new Date().toISOString(),
         })) ?? latest;
       throw new Error(`Codex worker exited during startup: ${failed.last_error ?? reason}`);
@@ -508,14 +508,10 @@ export async function inspectDesktopManagedAgentSession(
     const updated =
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
-        status: "unknown",
+        status: codexSessionStatusAfterInspectFailure(current.status),
         last_error: error instanceof Error ? error.message : String(error),
         updated_at: new Date().toISOString(),
       })) ?? session;
-    if (updated.launched_server) {
-      killOwnedAppServer(updated);
-      clearSessionMonitor(updated.session_id);
-    }
 
     const bound = bindCodexLiveSessionToWorker(updated);
     return {

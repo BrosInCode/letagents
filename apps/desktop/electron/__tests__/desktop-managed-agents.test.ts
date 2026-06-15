@@ -27,10 +27,12 @@ const { buildCodexStartPrompt } = await import("../main/agents/codex-start-promp
 const { buildDesktopEventPrompt } = await import("../main/agents/codex-event-prompt.js");
 const { codexInstallCommand } = await import("../main/agents/codex-install.js");
 const {
+  codexSessionStatusAfterInspectFailure,
   codexSessionStatusAfterTurnInterrupt,
   codexSessionStatusAfterStopAttempt,
   deriveCodexLiveSessionStatus,
   isActiveCodexTurnStatus,
+  parseStartupObservationMs,
   shouldShutdownManagedAgentOnStop,
   summarizeItems,
 } = await import("../main/agents/codex-session-status.js");
@@ -1059,6 +1061,24 @@ test("failed stop interrupts do not report desktop-event workers as cleanly reus
   assert.equal(codexSessionStatusAfterStopAttempt("desktop_events", true, true, false), "interrupted");
   assert.equal(codexSessionStatusAfterStopAttempt("mcp_polling", true, false, false), "unknown");
   assert.equal(codexSessionStatusAfterStopAttempt("mcp_polling", false, false, false), "interrupted");
+});
+
+test("startup inspection failures keep Codex bootstrap in the starting state", () => {
+  assert.equal(codexSessionStatusAfterInspectFailure("starting"), "starting");
+  assert.equal(codexSessionStatusAfterInspectFailure("running"), "unknown");
+  assert.equal(codexSessionStatusAfterInspectFailure("completed"), "completed");
+
+  const previous = process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS;
+  delete process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS;
+  try {
+    assert.equal(parseStartupObservationMs(), 90_000);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS;
+    } else {
+      process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS = previous;
+    }
+  }
 });
 
 test("managed Codex stop modes distinguish stopping a turn from shutting down the worker", () => {
