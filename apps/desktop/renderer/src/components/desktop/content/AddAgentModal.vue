@@ -234,7 +234,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { X } from "@lucide/vue";
 import type {
   DesktopAgentProvider,
@@ -273,11 +273,14 @@ const props = defineProps<{
   roomIdentifier: string;
   roomDisplayName: string | null;
   repoRootPath: string | null;
+  managedSessions: DesktopManagedAgentSession[];
 }>();
 
 const emit = defineEmits<{
   close: [];
   "choose-repo": [];
+  "managed-sessions-updated": [sessions: DesktopManagedAgentSession[]];
+  "managed-session-started": [session: DesktopManagedAgentSession];
 }>();
 
 const providers = ref<DesktopAgentProvider[]>([]);
@@ -293,19 +296,19 @@ const copyingExternalPrompt = ref(false);
 const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
 const loadError = ref<string | null>(null);
 const setupMessage = ref<string | null>(null);
-const managedSessions = ref<DesktopManagedAgentSession[]>([]);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
 const dialogElement = ref<HTMLElement | null>(null);
 let previousFocusElement: HTMLElement | null = null;
 let preflightRequestId = 0;
 let modalStateVersion = 0;
+let managedSessionRefreshTimer: number | null = null;
 
 const selectedProvider = computed(() =>
   providers.value.find((provider) => provider.id === selectedProviderId.value) || null
 );
 
 const activeManagedSessions = computed(() =>
-  managedSessions.value.filter((session) =>
+  props.managedSessions.filter((session) =>
     session.providerId === selectedProviderId.value
     && managedAgentSessionMatchesRoom(session, props.roomIdentifier)
     && isVisibleManagedAgentSession(session)
@@ -371,9 +374,11 @@ watch(
       previousFocusElement = currentFocusableElement();
       void loadProviders();
       void loadManagedSessions();
+      startManagedSessionRefreshTimer();
       void nextTick(() => dialogElement.value?.focus());
     } else {
       resetTransientState();
+      stopManagedSessionRefreshTimer();
       restoreFocus(previousFocusElement);
       previousFocusElement = null;
     }
@@ -391,16 +396,22 @@ watch(
   },
 );
 
-async function loadManagedSessions(): Promise<void> {
+onBeforeUnmount(() => {
+  stopManagedSessionRefreshTimer();
+});
+
+async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
   if (!props.open) return;
   const requestVersion = modalStateVersion;
   try {
     const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
-    managedSessions.value = sessions;
+    emit("managed-sessions-updated", sessions);
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = error instanceof Error ? error.message : "Could not load managed agent sessions.";
+    if (!options.quiet) {
+      setupMessage.value = error instanceof Error ? error.message : "Could not load managed agent sessions.";
+    }
   }
 }
 
@@ -438,6 +449,7 @@ async function startManagedAgent(): Promise<void> {
   const requestVersion = modalStateVersion;
   startingAgent.value = true;
   setupMessage.value = null;
+  startManagedSessionRefreshTimer(1_000);
   try {
     const result = await window.letagentsDesktop.workers.startManagedAgent({
       providerId: selectedProviderId.value,
@@ -448,10 +460,8 @@ async function startManagedAgent(): Promise<void> {
     });
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
-    managedSessions.value = [
-      result.session,
-      ...managedSessions.value.filter((session) => session.id !== result.session.id),
-    ];
+    upsertManagedSession(result.session);
+    emit("managed-session-started", result.session);
     await loadManagedSessions();
     await runPreflight();
   } catch (error) {
@@ -460,6 +470,7 @@ async function startManagedAgent(): Promise<void> {
   } finally {
     if (isCurrentModalState(requestVersion)) {
       startingAgent.value = false;
+      startManagedSessionRefreshTimer();
     }
   }
 }
@@ -477,10 +488,7 @@ async function stopManagedAgent(sessionId: string): Promise<void> {
     if (!isCurrentModalState(requestVersion)) return;
     if (session) {
       setupMessage.value = managedAgentStopResultMessage(session);
-      managedSessions.value = [
-        session,
-        ...managedSessions.value.filter((entry) => entry.id !== session.id),
-      ];
+      upsertManagedSession(session);
     }
     await loadManagedSessions();
   } catch (error) {
@@ -521,6 +529,27 @@ function resetTransientState(): void {
   setupConfirmation.value = null;
   setupMessage.value = null;
   loadError.value = null;
+}
+
+function upsertManagedSession(session: DesktopManagedAgentSession): void {
+  emit("managed-sessions-updated", [
+    session,
+    ...props.managedSessions.filter((entry) => entry.id !== session.id),
+  ]);
+}
+
+function startManagedSessionRefreshTimer(intervalMs = 4_000): void {
+  stopManagedSessionRefreshTimer();
+  managedSessionRefreshTimer = window.setInterval(() => {
+    void loadManagedSessions({ quiet: true });
+  }, intervalMs);
+}
+
+function stopManagedSessionRefreshTimer(): void {
+  if (managedSessionRefreshTimer !== null) {
+    window.clearInterval(managedSessionRefreshTimer);
+    managedSessionRefreshTimer = null;
+  }
 }
 
 function isCurrentModalState(version: number): boolean {

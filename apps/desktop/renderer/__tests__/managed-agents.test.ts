@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  DesktopAgentPresence,
   DesktopAgentProvider,
   DesktopAgentProviderPreflight,
   DesktopManagedAgentSession,
+  DesktopParticipantSummary,
 } from "../../electron/ipc-types";
 import {
   agentSetupActionButtonLabel,
@@ -23,6 +25,8 @@ import {
   managedAgentSessionStatusLabel,
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
+  mergeDesktopManagedAgentParticipants,
+  mergeDesktopManagedAgentPresence,
   normalizeManagedAgentRoomIdentifier,
 } from "../src/domain/managed-agents";
 
@@ -79,6 +83,53 @@ function session(
     startedAt: "2026-06-14T12:00:00.000Z",
     updatedAt: "2026-06-14T12:00:00.000Z",
     lastError: null,
+    ...overrides,
+  };
+}
+
+function participant(
+  overrides: Partial<DesktopParticipantSummary> = {},
+): DesktopParticipantSummary {
+  return {
+    participantKey: "agent:existing",
+    kind: "agent",
+    displayName: "MapleRidge",
+    actorLabel: "MapleRidge",
+    agentKey: "desktop/codex/maple",
+    githubLogin: null,
+    ownerLabel: "Local desktop",
+    ideLabel: "Codex",
+    hiddenAt: null,
+    activityState: "away",
+    lastSeenAt: "2026-06-14T12:00:00.000Z",
+    lastRoomActivityAt: "2026-06-14T12:00:00.000Z",
+    lastLiveHeartbeatAt: null,
+    sourceFlags: ["messages"],
+    ...overrides,
+  };
+}
+
+function presence(
+  overrides: Partial<DesktopAgentPresence> = {},
+): DesktopAgentPresence {
+  return {
+    roomId: "room_1",
+    actorLabel: "MapleRidge",
+    agentKey: "desktop/codex/maple",
+    agentInstanceId: null,
+    agentSessionId: "agent_1",
+    sessionKind: "worker",
+    runtime: "codex",
+    displayName: "MapleRidge",
+    ownerLabel: "Local desktop",
+    ideLabel: "Codex",
+    status: "idle",
+    statusText: null,
+    lastHeartbeatAt: "2026-06-14T11:59:00.000Z",
+    freshness: "stale",
+    activityState: "offline",
+    sourceFlags: ["presence"],
+    livenessObservation: null,
     ...overrides,
   };
 }
@@ -393,4 +444,69 @@ test("managedAgentSessionMatchesTarget uses stable identity before display names
     displayName: "MapleRidge",
     ideLabel: "Antigravity",
   }), false);
+});
+
+test("managed desktop agents become mentionable room participants", () => {
+  const participants = mergeDesktopManagedAgentParticipants([], [
+    session({
+      deliveryMode: "desktop_events",
+      displayName: "SummitGrove",
+      actorLabel: "SummitGrove",
+      agentSessionId: "agent_summit",
+      roomIdentifier: "github.com/BrosInCode/letagents",
+      updatedAt: "2026-06-15T09:30:00.000Z",
+    }),
+  ], "github.com/brosincode/letagents");
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].kind, "agent");
+  assert.equal(participants[0].displayName, "SummitGrove");
+  assert.equal(participants[0].activityState, "active");
+  assert.deepEqual(participants[0].sourceFlags, ["delivery", "presence"]);
+});
+
+test("managed desktop agents become reachable activity presence", () => {
+  const presenceEntries = mergeDesktopManagedAgentPresence([], [
+    session({
+      deliveryMode: "desktop_events",
+      displayName: "SummitGrove",
+      actorLabel: "SummitGrove",
+      agentSessionId: "agent_summit",
+      roomIdentifier: "github.com/BrosInCode/letagents",
+      updatedAt: "2026-06-15T09:30:00.000Z",
+    }),
+  ], "github.com/brosincode/letagents");
+
+  assert.equal(presenceEntries.length, 1);
+  assert.equal(presenceEntries[0].actorLabel, "SummitGrove");
+  assert.equal(presenceEntries[0].sessionKind, "worker");
+  assert.equal(presenceEntries[0].freshness, "active");
+  assert.equal(presenceEntries[0].activityState, "active");
+  assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
+  assert.deepEqual(presenceEntries[0].sourceFlags, ["delivery", "presence"]);
+});
+
+test("managed desktop agent merges with existing room identities instead of duplicating them", () => {
+  const managedSession = session({
+    displayName: "MapleRidge",
+    actorLabel: "MapleRidge",
+    agentSessionId: "agent_1",
+    agentKey: "desktop/codex/maple",
+    updatedAt: "2026-06-15T09:30:00.000Z",
+  });
+
+  const participants = mergeDesktopManagedAgentParticipants([
+    participant(),
+  ], [managedSession], "room_1");
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].sourceFlags.includes("messages"), true);
+
+  const presenceEntries = mergeDesktopManagedAgentPresence([
+    presence(),
+  ], [managedSession], "room_1");
+  assert.equal(presenceEntries.length, 1);
+  assert.equal(presenceEntries[0].freshness, "active");
+  assert.equal(presenceEntries[0].activityState, "active");
+  assert.equal(presenceEntries[0].sourceFlags.includes("delivery"), true);
+  assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
 });

@@ -1,9 +1,11 @@
 import type {
+  DesktopAgentPresence,
   DesktopAgentProvider,
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
   DesktopManagedAgentSession,
+  DesktopParticipantSummary,
 } from "../../../electron/ipc-types";
 import { normalizeAgentKey } from "./agents";
 
@@ -256,4 +258,236 @@ export function managedAgentSessionDisplayName(
   }
 
   return "Local agent";
+}
+
+export function mergeDesktopManagedAgentParticipants(
+  participants: readonly DesktopParticipantSummary[],
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+): DesktopParticipantSummary[] {
+  const merged = [...participants];
+  for (const session of visibleManagedAgentSessionsForRoom(sessions, roomIdentifier)) {
+    if (merged.some((participant) => participantMatchesManagedAgentSession(participant, session))) {
+      continue;
+    }
+    merged.push(desktopManagedAgentSessionToParticipant(session));
+  }
+  return merged;
+}
+
+export function mergeDesktopManagedAgentPresence(
+  presenceEntries: readonly DesktopAgentPresence[],
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+): DesktopAgentPresence[] {
+  const merged = [...presenceEntries];
+  for (const session of visibleManagedAgentSessionsForRoom(sessions, roomIdentifier)) {
+    const syntheticPresence = desktopManagedAgentSessionToPresence(session);
+    const existingIndex = merged.findIndex((presence) =>
+      presenceMatchesManagedAgentSession(presence, session)
+    );
+    if (existingIndex === -1) {
+      merged.push(syntheticPresence);
+      continue;
+    }
+    merged[existingIndex] = mergeManagedAgentPresenceEntry(merged[existingIndex], syntheticPresence);
+  }
+  return merged;
+}
+
+function visibleManagedAgentSessionsForRoom(
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+): DesktopManagedAgentSession[] {
+  return sessions.filter((session) =>
+    managedAgentSessionMatchesRoom(session, roomIdentifier)
+    && isVisibleManagedAgentSession(session)
+  );
+}
+
+function desktopManagedAgentSessionToParticipant(
+  session: DesktopManagedAgentSession,
+): DesktopParticipantSummary {
+  const displayName = managedAgentSessionDisplayName(session);
+  const actorLabel = managedAgentSessionActorLabel(session);
+  const timestamp = managedAgentSessionTimestamp(session);
+  const activityState = managedAgentSessionActivityState(session);
+  return {
+    participantKey: `desktop-managed-agent:${managedAgentSessionStableKey(session)}`,
+    kind: "agent",
+    displayName,
+    actorLabel,
+    agentKey: session.agentKey || managedAgentSessionAgentKey(session),
+    githubLogin: null,
+    ownerLabel: session.ownerLabel || "Local desktop",
+    ideLabel: session.ideLabel || managedAgentSessionIdeLabel(session),
+    hiddenAt: null,
+    activityState,
+    lastSeenAt: timestamp,
+    lastRoomActivityAt: timestamp,
+    lastLiveHeartbeatAt: timestamp,
+    sourceFlags: ["delivery", "presence"],
+  };
+}
+
+function desktopManagedAgentSessionToPresence(
+  session: DesktopManagedAgentSession,
+): DesktopAgentPresence {
+  const displayName = managedAgentSessionDisplayName(session);
+  const actorLabel = managedAgentSessionActorLabel(session);
+  const timestamp = managedAgentSessionTimestamp(session);
+  const sessionId = session.agentSessionId || session.id;
+  return {
+    roomId: session.roomIdentifier,
+    actorLabel,
+    agentKey: session.agentKey || managedAgentSessionAgentKey(session),
+    agentInstanceId: null,
+    agentSessionId: session.agentSessionId,
+    sessionKind: "worker",
+    runtime: session.runtime || session.providerId,
+    displayName,
+    ownerLabel: session.ownerLabel || "Local desktop",
+    ideLabel: session.ideLabel || managedAgentSessionIdeLabel(session),
+    status: managedAgentPresenceStatus(session),
+    statusText: managedAgentSessionStatusLabel(session),
+    lastHeartbeatAt: timestamp,
+    freshness: "active",
+    activityState: managedAgentSessionActivityState(session),
+    sourceFlags: ["delivery", "presence"],
+    livenessObservation: {
+      roomId: session.roomIdentifier,
+      agentSessionId: sessionId,
+      source: "desktop_managed_agent",
+      hostId: session.id,
+      hostKind: "desktop",
+      hostLabel: "This desktop",
+      livenessCapability: session.deliveryMode === "desktop_events" ? "desktop events" : "mcp loop",
+      toolBridgeId: `desktop:${session.providerId}:${session.id}`,
+      lastObservedAt: timestamp,
+      lastToolCallAt: null,
+      detail: session.repoRootPath,
+      createdAt: session.startedAt || timestamp,
+      updatedAt: timestamp,
+    },
+  };
+}
+
+function mergeManagedAgentPresenceEntry(
+  existing: DesktopAgentPresence,
+  managed: DesktopAgentPresence,
+): DesktopAgentPresence {
+  const sourceFlags = Array.from(new Set([...existing.sourceFlags, ...managed.sourceFlags]));
+  return {
+    ...existing,
+    agentKey: existing.agentKey || managed.agentKey,
+    agentSessionId: existing.agentSessionId || managed.agentSessionId,
+    displayName: existing.displayName || managed.displayName,
+    ownerLabel: existing.ownerLabel || managed.ownerLabel,
+    ideLabel: existing.ideLabel || managed.ideLabel,
+    runtime: existing.runtime || managed.runtime,
+    status: existing.status === "idle" && managed.status !== "idle" ? managed.status : existing.status,
+    statusText: existing.statusText || managed.statusText,
+    lastHeartbeatAt: latestTimestampString(existing.lastHeartbeatAt, managed.lastHeartbeatAt),
+    freshness: "active",
+    activityState: existing.activityState === "offline" ? managed.activityState : existing.activityState,
+    sourceFlags,
+    livenessObservation: existing.livenessObservation || managed.livenessObservation,
+  };
+}
+
+function participantMatchesManagedAgentSession(
+  participant: DesktopParticipantSummary,
+  session: DesktopManagedAgentSession,
+): boolean {
+  if (participant.kind !== "agent") return false;
+  if (sameNormalized(participant.actorLabel, session.actorLabel)) return true;
+  if (sameSpecificAgentKey(participant.agentKey, session.agentKey)) return true;
+  if (!sameNormalized(participant.displayName, managedAgentSessionDisplayName(session))) return false;
+  return Boolean(
+    sameNormalized(participant.ideLabel, session.ideLabel)
+    || sameNormalized(participant.ideLabel, managedAgentSessionIdeLabel(session))
+    || sameNormalized(participant.ownerLabel, session.ownerLabel)
+  );
+}
+
+function presenceMatchesManagedAgentSession(
+  presence: DesktopAgentPresence,
+  session: DesktopManagedAgentSession,
+): boolean {
+  if (presence.agentSessionId && session.agentSessionId && presence.agentSessionId === session.agentSessionId) {
+    return true;
+  }
+  if (sameNormalized(presence.actorLabel, session.actorLabel)) return true;
+  if (sameSpecificAgentKey(presence.agentKey, session.agentKey)) return true;
+  if (!sameNormalized(presence.displayName, managedAgentSessionDisplayName(session))) return false;
+  return Boolean(
+    sameNormalized(presence.ideLabel, session.ideLabel)
+    || sameNormalized(presence.ideLabel, managedAgentSessionIdeLabel(session))
+    || sameNormalized(presence.ownerLabel, session.ownerLabel)
+  );
+}
+
+function managedAgentSessionActorLabel(session: DesktopManagedAgentSession): string {
+  return session.actorLabel?.trim() || session.displayName?.trim() || managedAgentSessionDisplayName(session);
+}
+
+function managedAgentSessionAgentKey(session: DesktopManagedAgentSession): string {
+  const runtimeKey = normalizeAgentKey(session.runtime || session.providerId) || "agent";
+  return `desktop/${runtimeKey}/${managedAgentSessionStableKey(session)}`;
+}
+
+function managedAgentSessionIdeLabel(session: Pick<DesktopManagedAgentSession, "providerId" | "runtime">): string {
+  if (session.providerId === "codex") return "Codex";
+  return session.runtime || session.providerId;
+}
+
+function managedAgentPresenceStatus(
+  session: Pick<DesktopManagedAgentSession, "deliveryMode" | "status">,
+): DesktopAgentPresence["status"] {
+  if (session.status === "unknown") return "blocked";
+  if (session.status === "completed" && session.deliveryMode === "desktop_events") return "idle";
+  if (session.status === "completed") return "idle";
+  return "working";
+}
+
+function managedAgentSessionActivityState(
+  session: Pick<DesktopManagedAgentSession, "deliveryMode" | "status">,
+): DesktopAgentPresence["activityState"] {
+  return managedAgentPresenceStatus(session) === "idle" ? "away" : "active";
+}
+
+function managedAgentSessionTimestamp(
+  session: Pick<DesktopManagedAgentSession, "startedAt" | "updatedAt">,
+): string {
+  return session.updatedAt || session.startedAt || new Date(0).toISOString();
+}
+
+function managedAgentSessionStableKey(session: DesktopManagedAgentSession): string {
+  return normalizeAgentKey(
+    session.agentSessionId
+    || session.agentKey
+    || session.actorLabel
+    || session.displayName
+    || session.id,
+  ) || session.id;
+}
+
+function sameNormalized(left: string | null | undefined, right: string | null | undefined): boolean {
+  const leftKey = normalizeAgentKey(left);
+  const rightKey = normalizeAgentKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function sameSpecificAgentKey(left: string | null | undefined, right: string | null | undefined): boolean {
+  const leftKey = specificAgentKey(left);
+  const rightKey = specificAgentKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function latestTimestampString(left: string | null | undefined, right: string | null | undefined): string {
+  const leftTime = Date.parse(String(left || ""));
+  const rightTime = Date.parse(String(right || ""));
+  if (Number.isNaN(leftTime)) return right || left || new Date(0).toISOString();
+  if (Number.isNaN(rightTime)) return left || right || new Date(0).toISOString();
+  return rightTime > leftTime ? String(right) : String(left);
 }
