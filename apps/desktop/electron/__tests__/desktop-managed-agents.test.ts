@@ -30,7 +30,10 @@ const {
   shouldDeliverRoomStreamEventToSession,
 } = await import("../main/agents/codex-event-routing.js");
 const { buildCodexStartPrompt } = await import("../main/agents/codex-start-prompt.js");
-const { buildDesktopEventPrompt } = await import("../main/agents/codex-event-prompt.js");
+const {
+  buildDesktopEventPrompt,
+  desktopEventPublicReplyText,
+} = await import("../main/agents/codex-event-prompt.js");
 const { codexInstallCommand } = await import("../main/agents/codex-install.js");
 const {
   codexSessionStatusAfterInspectFailure,
@@ -909,6 +912,15 @@ test("desktop-delivered event prompts include stop handling without resuming MCP
   assert.match(prompt, /Do not call LetAgents MCP room tools/);
   assert.match(prompt, /desktop should publish as you/);
   assert.match(prompt, /Do not include hidden chain-of-thought/);
+});
+
+test("desktop event public replies suppress internal stop markers", () => {
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "LOCAL_CODEX_ROOM_test_DONE"), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", " LOCAL_CODEX_ROOM_test_DONE\n"), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "NO_ROOM_REPLY"), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", ""), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "OTHER_CODEX_ROOM_DONE"), "OTHER_CODEX_ROOM_DONE");
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Done publicly."), "Done publicly.");
 });
 
 test("desktop event routing treats only the exact room stop phrase as a worker stop", () => {

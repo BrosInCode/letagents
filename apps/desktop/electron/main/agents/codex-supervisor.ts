@@ -34,7 +34,7 @@ import {
 } from "./codex-event-routing.js";
 import {
   buildDesktopEventPrompt,
-  DESKTOP_EVENTS_NO_ROOM_REPLY,
+  desktopEventPublicReplyText,
 } from "./codex-event-prompt.js";
 import {
   CodexRpcClient,
@@ -1219,14 +1219,6 @@ function stopSessionAfterRoomStopPhrase(sessionId: string): void {
   clearSessionMonitor(updated.session_id);
 }
 
-function publicReplyText(value: string | null | undefined): string | null {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed || trimmed === DESKTOP_EVENTS_NO_ROOM_REPLY) {
-    return null;
-  }
-  return trimmed;
-}
-
 function replyTargetForEvent(event: ManagedRoomEvent): string | null {
   if (event.type !== "message") {
     return null;
@@ -1319,7 +1311,7 @@ async function publishDesktopManagedAgentReply(input: {
   event: ManagedRoomEvent;
   text: string | null;
 }): Promise<void> {
-  const text = publicReplyText(input.text);
+  const text = desktopEventPublicReplyText(input.session.token, input.text);
   if (!text) {
     return;
   }

@@ -7,6 +7,20 @@ import type { DesktopCodexLiveSessionState } from "./state.js";
 
 export const DESKTOP_EVENTS_NO_ROOM_REPLY = "NO_ROOM_REPLY";
 
+export function desktopEventPublicReplyText(
+  sessionToken: string | null | undefined,
+  value: string | null | undefined,
+): string | null {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed === DESKTOP_EVENTS_NO_ROOM_REPLY) {
+    return null;
+  }
+  if (sessionToken && trimmed === `${sessionToken}_DONE`) {
+    return null;
+  }
+  return trimmed;
+}
+
 export function buildDesktopEventPrompt(
   session: DesktopCodexLiveSessionState,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
