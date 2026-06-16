@@ -10,6 +10,7 @@ import type {
   DesktopRoomMessageAttachment,
 } from "../../electron/ipc-types";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
+import { isIdleReasoningSession } from "../src/domain/reasoning";
 import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
   attachmentHref,
@@ -131,6 +132,21 @@ describe("room chat helpers", () => {
     assert.equal(latestReasoningForAgent(target, [oldSession, newSession])?.id, "reasoning_new");
     assert.equal(hasReasoningStreamSurface(target, []), true);
     assert.equal(hasReasoningStreamSurface({ ...target, ideLabel: null }, [presenceEntry()]), true);
+  });
+
+  it("detects idle reasoning sessions before offering turn stops", () => {
+    assert.equal(isIdleReasoningSession(reasoningSession("reasoning_working", "2026-05-28T02:00:00.000Z")), false);
+    assert.equal(isIdleReasoningSession({
+      ...reasoningSession("reasoning_idle", "2026-05-28T02:01:00.000Z"),
+      status: "idle",
+    }), true);
+    assert.equal(isIdleReasoningSession({
+      ...reasoningSession("reasoning_payload_idle", "2026-05-28T02:02:00.000Z"),
+      latestPayload: {
+        summary: "Waiting for the next room event.",
+        status: "idle",
+      },
+    }), true);
   });
 
   it("parses desktop chat sender identity labels", () => {

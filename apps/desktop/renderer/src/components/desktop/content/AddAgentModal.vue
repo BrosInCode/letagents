@@ -154,7 +154,7 @@
                     :disabled="!canStopManagedAgentTurn(session) || Boolean(stoppingSessionId)"
                     @click="stopManagedAgent(session.id, 'turn')"
                   >
-                    {{ stoppingSessionId === session.id && stoppingSessionMode === "turn" ? "Stopping..." : "Stop turn" }}
+                    {{ stoppingSessionId === session.id && stoppingSessionMode === "turn" ? "Checking..." : "Stop turn" }}
                   </button>
                   <button
                     type="button"
@@ -494,7 +494,7 @@ async function stopManagedAgent(sessionId: string, stopMode: "turn" | "worker"):
   stoppingSessionMode.value = stopMode;
   setupMessage.value = stopMode === "worker"
     ? "Stopping local agent..."
-    : "Stopping current turn...";
+    : "Checking current turn...";
   try {
     const session = await window.letagentsDesktop.workers.stopManagedAgent({
       sessionId,

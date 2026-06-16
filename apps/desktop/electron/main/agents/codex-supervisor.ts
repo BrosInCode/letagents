@@ -741,6 +741,22 @@ function statusAfterDesktopEventCompletedTurn(
   };
 }
 
+function isIdleCodexThreadStatus(status: string | null | undefined): boolean {
+  const normalized = String(status ?? "").trim().toLowerCase().replace(/[_-]+/g, " ");
+  return normalized === "idle" ||
+    normalized === "waiting" ||
+    normalized === "waiting for event" ||
+    normalized === "completed" ||
+    normalized === "complete";
+}
+
+function isCompletedOrIdleCodexTurnStatus(status: string | null | undefined): boolean {
+  const normalized = String(status ?? "").trim().toLowerCase().replace(/[_-]+/g, " ");
+  return normalized === "completed" ||
+    normalized === "complete" ||
+    normalized === "idle";
+}
+
 function statusAfterNoActiveTurnToStop(
   session: DesktopCodexLiveSessionState,
 ): DesktopCodexLiveSessionState {
@@ -1072,7 +1088,8 @@ export async function inspectDesktopManagedAgentSession(
     const recentItems = summarizeItems(turn?.items ?? turn?.output);
     const updated =
       updateCodexLiveSession(session.session_id, (current) =>
-        managedAgentDeliveryMode(current) === "desktop_events" && turnStatus === "completed"
+        managedAgentDeliveryMode(current) === "desktop_events" &&
+          (isCompletedOrIdleCodexTurnStatus(turnStatus) || (!turnStatus && isIdleCodexThreadStatus(threadStatus)))
           ? statusAfterDesktopEventCompletedTurn(current)
           : {
             ...current,
@@ -1089,7 +1106,9 @@ export async function inspectDesktopManagedAgentSession(
       recentItems: turn?.items ?? turn?.output,
     });
 
-    if (isTerminalCodexSessionStatus(bound.status)) {
+    const idleDesktopEventSession =
+      managedAgentDeliveryMode(bound) === "desktop_events" && bound.status === "completed";
+    if (isTerminalCodexSessionStatus(bound.status) && !idleDesktopEventSession) {
       killOwnedAppServer(bound);
       clearSessionMonitor(bound.session_id);
     }
@@ -1443,12 +1462,7 @@ async function waitForDesktopEventTurnCompletion(
     }
 
     if (turnStatus === "completed") {
-      updateCodexLiveSession(sessionId, (current) => ({
-        ...current,
-        status: "running",
-        last_error: null,
-        updated_at: new Date().toISOString(),
-      }));
+      updateCodexLiveSession(sessionId, statusAfterDesktopEventCompletedTurn);
       return finalPublicAgentMessageText(turn?.items ?? turn?.output);
     }
 

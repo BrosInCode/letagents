@@ -88,6 +88,26 @@ export function reasoningStatus(session: DesktopReasoningSession): string {
     : "Active";
 }
 
+export function isIdleReasoningSession(session: DesktopReasoningSession | null | undefined): boolean {
+  if (!session) {
+    return false;
+  }
+  if (session.closedAt) {
+    return true;
+  }
+
+  const normalized = String(session.latestPayload?.status || session.status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+  return normalized === "idle" ||
+    normalized === "waiting" ||
+    normalized === "waiting for event" ||
+    normalized === "completed" ||
+    normalized === "complete" ||
+    normalized === "done";
+}
+
 function actorDisplayNameKey(actorLabel: string | null | undefined): string | null {
   return actorLabel ? displayNameFromActor(actorLabel) : null;
 }

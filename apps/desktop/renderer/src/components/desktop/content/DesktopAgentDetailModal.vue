@@ -47,8 +47,8 @@
                   type="button"
                   class="desktop-agent-detail-icon-button desktop-agent-detail-icon-button-stop"
                   data-testid="desktop-agent-detail-stop-managed-agent"
-                  :disabled="!canStopManagedAgentTurn(primaryManagedSession) || Boolean(stoppingSessionId)"
-                  :title="isStoppingPrimarySession('turn') ? 'Stopping turn' : 'Stop turn'"
+                  :disabled="!canStopPrimaryManagedSessionTurn || Boolean(stoppingSessionId)"
+                  :title="stopTurnTitle"
                   aria-label="Stop turn"
                   @click="primaryManagedSession ? stopManagedSession(primaryManagedSession.id, 'turn') : undefined"
                 >
@@ -185,6 +185,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import {
   latestReasoningSessionForTarget,
+  isIdleReasoningSession,
   reasoningFieldRows,
   reasoningStatus,
   reasoningSummary,
@@ -266,6 +267,16 @@ const primaryManagedSession = computed(() =>
 const isPrimaryAgentRunning = computed(() =>
   matchingManagedSessions.value.some((session) => session.status === "running" || session.status === "starting")
 );
+const latestReasoningIsIdle = computed(() => isIdleReasoningSession(latestReasoning.value));
+const canStopPrimaryManagedSessionTurn = computed(() =>
+  canStopManagedAgentTurn(primaryManagedSession.value) && !latestReasoningIsIdle.value
+);
+const stopTurnTitle = computed(() => {
+  if (latestReasoningIsIdle.value) {
+    return "No active turn to stop";
+  }
+  return isStoppingPrimarySession("turn") ? "Checking turn" : "Stop active turn";
+});
 const targetInspectionKey = computed(() => [
   props.target?.agentSessionId,
   props.target?.agentKey,
@@ -438,12 +449,17 @@ function isStoppingPrimarySession(mode: "turn" | "worker"): boolean {
 
 async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"): Promise<void> {
   if (stoppingSessionId.value) return;
+  if (stopMode === "turn" && primaryManagedSession.value?.id === sessionId && !canStopPrimaryManagedSessionTurn.value) {
+    stopStatusMessage.value = "No current turn is running.";
+    managedSessionError.value = null;
+    return;
+  }
   const requestVersion = modalStateVersion;
   stoppingSessionId.value = sessionId;
   stoppingSessionMode.value = stopMode;
   stopStatusMessage.value = stopMode === "worker"
     ? "Stopping local agent..."
-    : "Stopping current turn...";
+    : "Checking current turn...";
   managedSessionError.value = null;
   try {
     const stopped = await window.letagentsDesktop.workers.stopManagedAgent({
@@ -468,7 +484,7 @@ async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"
       ? "Local agent stopped."
       : stopped?.status === "completed"
         ? "No current turn is running."
-        : "Current turn stopped.";
+        : "Active turn stopped.";
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
     managedSessionError.value = error instanceof Error
@@ -489,7 +505,7 @@ function inspectionStatusLabel(sessionId: string): string {
   if (stoppingSessionId.value === sessionId) {
     return stoppingSessionMode.value === "worker"
       ? "Stopping local agent"
-      : "Stopping current turn";
+      : "Checking current turn";
   }
   if (inspectingSessionIds.value[sessionId]) {
     return "Refreshing transcript preview";
