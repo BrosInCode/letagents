@@ -36,10 +36,16 @@ import {
 } from "./codex-event-prompt.js";
 import {
   CodexRpcClient,
+  type RpcNotification,
   type ThreadReadResult,
   type ThreadStartResult,
   type TurnStartResult,
 } from "./codex-rpc-client.js";
+import {
+  summarizeCodexRuntimeNotification,
+  summarizeCodexRuntimeSnapshot,
+  type CodexRuntimeReasoningSummary,
+} from "./codex-runtime-reasoning.js";
 import { DEFAULT_CODEX_DELIVERY_MODE } from "./defaults.js";
 import {
   deriveCodexLiveSessionStatus,
@@ -85,10 +91,14 @@ import {
 const SESSION_MONITOR_INTERVAL_MS = 30_000;
 const DESKTOP_EVENT_TURN_POLL_INTERVAL_MS = 1_000;
 const DESKTOP_EVENT_TURN_TIMEOUT_MS = 5 * 60_000;
+const CODEX_RUNTIME_REASONING_THROTTLE_MS = 750;
+const CODEX_RUNTIME_REASONING_REPEAT_MS = 30_000;
 
 const spawnedServerPids = new Set<number>();
 const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const desktopEventQueues = new Map<string, Promise<void>>();
+const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
+const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
   "Codex did not get a LetAgents room worker identity. Sign into LetAgents Desktop, then try starting the agent again.";
@@ -121,6 +131,10 @@ type AgentSessionCreateResponse = {
   updated_at?: string | null;
   last_seen_at?: string | null;
   ended_at?: string | null;
+};
+
+type ReasoningSessionCreateResponse = {
+  session?: { id?: string };
 };
 
 function normalizeAgentIdentityName(displayName: string): string {
@@ -336,6 +350,160 @@ async function disconnectDesktopManagedCodexWorker(
   }
 }
 
+function reasoningRoomPath(session: DesktopCodexLiveSessionState): string {
+  return `/rooms/${encodeURIComponent(session.room_identifier || session.room_id)}/reasoning-sessions`;
+}
+
+function reasoningSignature(
+  session: DesktopCodexLiveSessionState,
+  summary: CodexRuntimeReasoningSummary,
+): string {
+  return [
+    session.session_id,
+    summary.status,
+    summary.summary,
+    summary.checking,
+    summary.next_action,
+  ].join("\n");
+}
+
+function shouldPostCodexRuntimeReasoning(
+  session: DesktopCodexLiveSessionState,
+  summary: CodexRuntimeReasoningSummary,
+): boolean {
+  const signature = reasoningSignature(session, summary);
+  const previous = codexRuntimeReasoningLastPost.get(session.session_id);
+  const now = Date.now();
+  if (
+    previous?.signature === signature &&
+    now - previous.postedAt < CODEX_RUNTIME_REASONING_REPEAT_MS
+  ) {
+    return false;
+  }
+  if (previous && now - previous.postedAt < CODEX_RUNTIME_REASONING_THROTTLE_MS) {
+    return false;
+  }
+  codexRuntimeReasoningLastPost.set(session.session_id, { signature, postedAt: now });
+  return true;
+}
+
+async function publishCodexRuntimeReasoningSummary(
+  session: DesktopCodexLiveSessionState,
+  summary: CodexRuntimeReasoningSummary,
+): Promise<void> {
+  const workerSession = getStoredAgentSession(session.agent_session_id);
+  if (!workerSession?.session_id || !workerSession.session_token) {
+    return;
+  }
+
+  if (!shouldPostCodexRuntimeReasoning(session, summary)) {
+    return;
+  }
+
+  const actorLabel = normalizeDisplayText(
+    workerSession.actor_label || workerSession.display_name,
+    session.display_name || "Codex",
+  );
+  const body = {
+    actor_label: actorLabel,
+    agent_key: workerSession.agent_key ?? null,
+    agent_session_id: workerSession.session_id,
+    agent_session_token: workerSession.session_token,
+    summary: summary.summary,
+    goal: "Stream Codex runtime progress for this LetAgents room.",
+    checking: summary.checking,
+    next_action: summary.next_action,
+    status: summary.status,
+  };
+
+  const roomPath = reasoningRoomPath(session);
+  if (session.reasoning_session_id) {
+    try {
+      await apiFetch<Record<string, unknown>>(
+        `${roomPath}/${encodeURIComponent(session.reasoning_session_id)}/updates`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      return;
+    } catch {
+      updateCodexLiveSession(session.session_id, (current) => ({
+        ...current,
+        reasoning_session_id: null,
+        updated_at: new Date().toISOString(),
+      }));
+    }
+  }
+
+  const created = await apiFetch<ReasoningSessionCreateResponse>(roomPath, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const reasoningSessionId = created.session?.id;
+  if (reasoningSessionId) {
+    updateCodexLiveSession(session.session_id, (current) => ({
+      ...current,
+      reasoning_session_id: reasoningSessionId,
+      updated_at: new Date().toISOString(),
+    }));
+  }
+}
+
+function queueCodexRuntimeReasoningSummary(
+  session: DesktopCodexLiveSessionState,
+  summary: CodexRuntimeReasoningSummary,
+): void {
+  const previous = codexRuntimeReasoningPostQueues.get(session.session_id) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const latest = getStoredCodexLiveSession(session.session_id) ?? session;
+      await publishCodexRuntimeReasoningSummary(latest, summary);
+    })
+    .catch(() => {
+      // Reasoning publication is best-effort UI state.
+    });
+  codexRuntimeReasoningPostQueues.set(session.session_id, next);
+  void next.finally(() => {
+    if (codexRuntimeReasoningPostQueues.get(session.session_id) === next) {
+      codexRuntimeReasoningPostQueues.delete(session.session_id);
+    }
+  });
+}
+
+function publishCodexRuntimeNotification(
+  sessionId: string | null | undefined,
+  notification: RpcNotification,
+): void {
+  const session = sessionId ? getStoredCodexLiveSession(sessionId) : null;
+  if (!session) {
+    return;
+  }
+  queueCodexRuntimeReasoningSummary(
+    session,
+    summarizeCodexRuntimeNotification(notification),
+  );
+}
+
+function publishCodexRuntimeSnapshot(
+  session: DesktopCodexLiveSessionState,
+  input: Parameters<typeof summarizeCodexRuntimeSnapshot>[0],
+): void {
+  const summary = summarizeCodexRuntimeSnapshot(input);
+  if (!summary) {
+    return;
+  }
+  queueCodexRuntimeReasoningSummary(session, summary);
+}
+
+function clearCodexRuntimeReasoningState(sessionId: string): void {
+  codexRuntimeReasoningLastPost.delete(sessionId);
+  codexRuntimeReasoningPostQueues.delete(sessionId);
+}
+
 function registerProcessCleanup(): void {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
@@ -350,6 +518,8 @@ function registerProcessCleanup(): void {
       terminateSpawnedProcess(pid);
     }
     spawnedServerPids.clear();
+    codexRuntimeReasoningLastPost.clear();
+    codexRuntimeReasoningPostQueues.clear();
   };
 
   process.on("exit", cleanup);
@@ -373,6 +543,7 @@ function forgetLaunchedAppServer(pid: number): void {
 }
 
 function killOwnedAppServer(session: DesktopCodexLiveSessionState): void {
+  clearCodexRuntimeReasoningState(session.session_id);
   if (!session.launched_server || !session.server_pid) {
     return;
   }
@@ -388,6 +559,7 @@ function clearSessionMonitor(sessionId: string): void {
   }
   clearInterval(timer);
   sessionMonitorTimers.delete(sessionId);
+  clearCodexRuntimeReasoningState(sessionId);
 }
 
 function scheduleOwnedSessionMonitor(session: DesktopCodexLiveSessionState): void {
@@ -627,6 +799,7 @@ export async function startDesktopManagedAgent(
   let serverPid: number | null = null;
   let startupSucceeded = false;
   let client: CodexRpcClient | null = null;
+  let runtimeNotificationSessionId: string | null = null;
 
   try {
     if (launchedServer) {
@@ -643,7 +816,9 @@ export async function startDesktopManagedAgent(
       }
     }
 
-    client = new CodexRpcClient(serverUrl);
+    client = new CodexRpcClient(serverUrl, (notification) => {
+      publishCodexRuntimeNotification(runtimeNotificationSessionId, notification);
+    });
     await client.connect();
 
     const threadStart = await client.request<ThreadStartResult>("thread/start", {});
@@ -706,6 +881,14 @@ export async function startDesktopManagedAgent(
       started_at: now,
       updated_at: now,
     });
+    runtimeNotificationSessionId = session.session_id;
+
+    queueCodexRuntimeReasoningSummary(session, {
+      summary: "Codex worker is starting and joining the room.",
+      status: "working",
+      checking: "Desktop supervisor started a Codex app-server turn.",
+      next_action: "Waiting for Codex to publish room progress.",
+    });
 
     try {
       const verifiedSession = bindCodexLiveSessionToWorker(await waitForWorkerStartup(session, deliveryMode));
@@ -765,7 +948,9 @@ export async function inspectDesktopManagedAgentSession(
     };
   }
 
-  const client = new CodexRpcClient(session.server_url);
+  const client = new CodexRpcClient(session.server_url, (notification) => {
+    publishCodexRuntimeNotification(session.session_id, notification);
+  });
   try {
     await client.connect();
     let read: ThreadReadResult | null = null;
@@ -798,6 +983,11 @@ export async function inspectDesktopManagedAgentSession(
       ) ?? session;
 
     const bound = bindCodexLiveSessionToWorker(updated);
+    publishCodexRuntimeSnapshot(bound, {
+      threadStatus,
+      turnStatus,
+      recentItems: turn?.items ?? turn?.output,
+    });
 
     if (isTerminalCodexSessionStatus(bound.status)) {
       killOwnedAppServer(bound);
@@ -957,7 +1147,9 @@ async function deliverDesktopEventTurn(
     return;
   }
 
-  const client = new CodexRpcClient(session.server_url);
+  const client = new CodexRpcClient(session.server_url, (notification) => {
+    publishCodexRuntimeNotification(session.session_id, notification);
+  });
   try {
     await client.connect();
     const idleSession = await waitForCurrentTurnToIdle(client, session.session_id);
@@ -979,13 +1171,25 @@ async function deliverDesktopEventTurn(
       throw new Error("Codex app-server did not return a turn id for room event.");
     }
 
-    updateCodexLiveSession(idleSession.session_id, (current) => ({
+    const activeSession = updateCodexLiveSession(idleSession.session_id, (current) => ({
       ...current,
       turn_id: turnId,
       status: "running",
       last_error: null,
       updated_at: new Date().toISOString(),
-    }));
+    })) ?? {
+      ...idleSession,
+      turn_id: turnId,
+      status: "running",
+      last_error: null,
+      updated_at: new Date().toISOString(),
+    };
+    queueCodexRuntimeReasoningSummary(activeSession, {
+      summary: "Codex worker received a room event.",
+      status: "working",
+      checking: "Desktop supervisor delivered the room event into Codex.",
+      next_action: "Streaming Codex runtime progress for this turn.",
+    });
     const replyText = await waitForDesktopEventTurnCompletion(client, idleSession.session_id, turnId);
     const latest = getStoredCodexLiveSession(idleSession.session_id) ?? idleSession;
     await publishDesktopManagedAgentReply({
@@ -1037,7 +1241,13 @@ async function waitForCurrentTurnToIdle(
 
     const turns = read?.thread?.turns ?? [];
     const turn = turns.find((candidate) => candidate.id === session.turn_id);
+    const threadStatus = extractThreadStatus(read?.thread);
     const turnStatus = extractTurnStatus(turn);
+    publishCodexRuntimeSnapshot(session, {
+      threadStatus,
+      turnStatus,
+      recentItems: turn?.items ?? turn?.output,
+    });
     if (!isActiveCodexTurnStatus(turnStatus)) {
       return session;
     }
@@ -1114,7 +1324,13 @@ async function waitForDesktopEventTurnCompletion(
     }
 
     const turn = (read?.thread?.turns ?? []).find((candidate) => candidate.id === turnId);
+    const threadStatus = extractThreadStatus(read?.thread);
     const turnStatus = extractTurnStatus(turn);
+    publishCodexRuntimeSnapshot(session, {
+      threadStatus,
+      turnStatus,
+      recentItems: turn?.items ?? turn?.output,
+    });
     if (!turnStatus || isActiveCodexTurnStatus(turnStatus)) {
       continue;
     }
