@@ -181,7 +181,7 @@
       :open="addAgentModalOpen"
       :room-identifier="room.identifier"
       :room-display-name="room.displayName"
-      :repo-root-path="repoStatus.rootPath || null"
+      :repo-root-path="managedAgentRepoRootPath"
       :managed-sessions="managedAgentSessions"
       @close="addAgentModalOpen = false"
       @choose-repo="openAgentRepoPicker"
@@ -212,6 +212,7 @@ import {
   managedAgentSessionMatchesRoom,
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
+  preferredManagedAgentRepoRootPath,
 } from "../../../domain/managed-agents";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
@@ -394,6 +395,7 @@ const roomManagedAgentSessions = computed(() =>
     managedAgentSessionMatchesRoom(session, props.room.identifier)
   )
 );
+const managedAgentRepoRootPath = computed(() => preferredManagedAgentRepoRootPath(props.repoStatus));
 const roomParticipants = computed(() =>
   mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier)
 );

@@ -29,6 +29,7 @@ import {
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
   normalizeManagedAgentRoomIdentifier,
+  preferredManagedAgentRepoRootPath,
 } from "../src/domain/managed-agents";
 
 function provider(
@@ -144,6 +145,21 @@ test("hasDesktopManagedRuntime identifies providers the desktop can supervise di
     runtimeCommand: null,
     mcpTargetId: "claude-code",
   })), false);
+});
+
+test("preferredManagedAgentRepoRootPath defaults local agents to the main checkout", () => {
+  assert.equal(preferredManagedAgentRepoRootPath({
+    rootPath: "/repo-feature-worktree",
+    mainRootPath: "/repo-main-checkout",
+  }), "/repo-main-checkout");
+  assert.equal(preferredManagedAgentRepoRootPath({
+    rootPath: "/repo-feature-worktree",
+    mainRootPath: null,
+  }), "/repo-feature-worktree");
+  assert.equal(preferredManagedAgentRepoRootPath({
+    rootPath: " ",
+    mainRootPath: " ",
+  }), null);
 });
 
 test("isVisibleManagedAgentSession keeps idle desktop-event workers visible", () => {

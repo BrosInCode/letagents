@@ -6,6 +6,7 @@ import type {
   DesktopAgentProviderSetupAction,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
+  RepoStatus,
 } from "../../../electron/ipc-types";
 import { normalizeAgentKey } from "./agents";
 
@@ -18,6 +19,17 @@ export function hasDesktopManagedRuntime(
   provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
 ): boolean {
   return Boolean(provider?.capabilities.includes("desktop_managed_runtime"));
+}
+
+export function preferredManagedAgentRepoRootPath(
+  repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath"> | null | undefined,
+): string | null {
+  const mainRootPath = String(repoStatus?.mainRootPath ?? "").trim();
+  if (mainRootPath) {
+    return mainRootPath;
+  }
+  const rootPath = String(repoStatus?.rootPath ?? "").trim();
+  return rootPath || null;
 }
 
 export function isVisibleManagedAgentSession(
