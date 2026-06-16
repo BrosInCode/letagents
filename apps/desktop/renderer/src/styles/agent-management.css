@@ -658,8 +658,12 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
-  margin-left: 4px;
+  gap: 2px;
+  margin-left: 2px;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
 }
 
 .desktop-agent-detail-status-pulse {
@@ -740,22 +744,32 @@
 .desktop-agent-detail-icon-button {
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  min-height: 34px;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
+  border-color: transparent;
+  border-radius: 6px;
+  background: transparent;
 }
 
 .desktop-agent-detail-icon-button svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: 2.4;
+  width: 15px;
+  height: 15px;
+  stroke-width: 2.2;
+}
+
+.desktop-agent-detail-icon-button:hover:not(:disabled) {
+  transform: none;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 
 .desktop-agent-detail-icon-button-stop:hover:not(:disabled) {
-  border-color: rgba(248, 113, 113, 0.42);
-  background: rgba(248, 113, 113, 0.1);
-  color: #fecaca;
+  border-color: transparent;
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
 }
 
 .desktop-agent-detail-session button:disabled,
