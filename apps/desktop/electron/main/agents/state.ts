@@ -106,6 +106,8 @@ interface BindCodexLiveSessionOptions {
   allowStaleSingleCandidate?: boolean;
 }
 
+const CODEX_WORKER_BINDING_GRACE_MS = 2 * 60_000;
+
 function sleepSync(ms: number): void {
   if (ms > 0) {
     Atomics.wait(STATE_LOCK_SLEEP_BUFFER, 0, 0, ms);
@@ -200,6 +202,14 @@ function updateAgentLocalState(
 
 export function getStoredAgentIdentity(): StoredAgentIdentityState | null {
   return readAgentLocalState().agent_identity ?? null;
+}
+
+export function getStoredAgentIdentityForRuntimeKey(runtimeKey: string): StoredAgentIdentityState | null {
+  const trimmed = runtimeKey.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return readAgentLocalState().agent_identities?.[trimmed] ?? null;
 }
 
 export function saveStoredAgentIdentity(identity: StoredAgentIdentityState): StoredAgentIdentityState {
@@ -342,7 +352,9 @@ export function isDesktopManagedCodexLiveSession(session: DesktopCodexLiveSessio
 }
 
 export function listDesktopManagedCodexLiveSessions(roomId?: string | null): DesktopCodexLiveSessionState[] {
-  return listStoredCodexLiveSessions(roomId).filter(isDesktopManagedCodexLiveSession);
+  return dedupeDesktopManagedCodexLiveSessions(
+    listStoredCodexLiveSessions(roomId).filter(isDesktopManagedCodexLiveSession),
+  );
 }
 
 export function listCodexDisplayNamesForRoom(roomId: string): string[] {
@@ -390,6 +402,68 @@ function sessionTimestamp(value: string | null | undefined): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+function normalizedSessionText(value: string | null | undefined): string {
+  return String(value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function sameSessionText(left: string | null | undefined, right: string | null | undefined): boolean {
+  const leftKey = normalizedSessionText(left);
+  const rightKey = normalizedSessionText(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function workerHasExactLiveSessionMarker(
+  worker: StoredAgentSessionState,
+  session: DesktopCodexLiveSessionState,
+): boolean {
+  const token = String(session.token ?? "").trim();
+  if (!token) {
+    return false;
+  }
+  const runtimeMarker = `codex:${token}`;
+  const instanceMarker = `desktop-codex:${token}`;
+  return String(worker.runtime ?? "").trim() === runtimeMarker ||
+    String(worker.agent_instance_id ?? "").trim() === instanceMarker ||
+    String(worker.tool_bridge_id ?? "").includes(runtimeMarker) ||
+    String(worker.tool_bridge_id ?? "").includes(instanceMarker);
+}
+
+function workerLabelMatchesLiveSession(
+  worker: StoredAgentSessionState,
+  session: DesktopCodexLiveSessionState,
+): boolean {
+  const displayName = normalizedSessionText(session.display_name);
+  if (!displayName) {
+    return true;
+  }
+  return sameSessionText(worker.display_name, session.display_name) ||
+    sameSessionText(worker.actor_label, session.display_name);
+}
+
+function workerStartedNearLiveSession(
+  worker: StoredAgentSessionState,
+  session: DesktopCodexLiveSessionState,
+): boolean {
+  const startedAt = sessionTimestamp(session.started_at);
+  const createdAt = sessionTimestamp(worker.created_at);
+  if (!startedAt || !createdAt) {
+    return false;
+  }
+  return createdAt >= startedAt - 1_000 &&
+    createdAt <= startedAt + CODEX_WORKER_BINDING_GRACE_MS;
+}
+
+function workerCanBindToLiveSession(
+  worker: StoredAgentSessionState,
+  session: DesktopCodexLiveSessionState,
+): boolean {
+  if (workerHasExactLiveSessionMarker(worker, session)) {
+    return true;
+  }
+  return workerStartedNearLiveSession(worker, session) &&
+    workerLabelMatchesLiveSession(worker, session);
+}
+
 function codexWorkerSessionsForRoom(
   state: SharedLetAgentsState,
   roomId: string,
@@ -421,32 +495,128 @@ function codexWorkerSessionForLiveSession(
 
   if (session.agent_session_id) {
     const bound = state.agent_sessions?.[session.agent_session_id] ?? null;
-    if (bound && candidates.some((candidate) => candidate.session_id === bound.session_id)) {
+    if (
+      bound &&
+      candidates.some((candidate) => candidate.session_id === bound.session_id) &&
+      workerCanBindToLiveSession(bound, session)
+    ) {
       return bound;
     }
   }
 
-  const runtimeMarker = `codex:${session.token}`;
   const exactRuntimeMatches = candidates.filter((candidate) =>
-    String(candidate.runtime ?? "").trim() === runtimeMarker
+    workerHasExactLiveSessionMarker(candidate, session)
   );
   if (exactRuntimeMatches.length === 1) {
     return exactRuntimeMatches[0] ?? null;
   }
 
-  const startedAt = sessionTimestamp(session.started_at);
-  const afterLiveSessionStart = candidates.filter((candidate) =>
-    startedAt > 0 &&
-    sessionTimestamp(candidate.created_at) >= startedAt - 1_000
+  const plausibleStartupMatches = candidates.filter((candidate) =>
+    workerStartedNearLiveSession(candidate, session) &&
+    workerLabelMatchesLiveSession(candidate, session)
   );
-  if (afterLiveSessionStart.length === 1) {
-    return afterLiveSessionStart[0] ?? null;
+  if (plausibleStartupMatches.length === 1) {
+    return plausibleStartupMatches[0] ?? null;
   }
 
   const allowStaleSingleCandidate = options.allowStaleSingleCandidate === true;
-  return allowStaleSingleCandidate && afterLiveSessionStart.length === 0 && candidates.length === 1
-    ? candidates[0] ?? null
+  const staleLabelMatches = candidates.filter((candidate) =>
+    workerLabelMatchesLiveSession(candidate, session)
+  );
+  return allowStaleSingleCandidate && plausibleStartupMatches.length === 0 && staleLabelMatches.length === 1
+    ? staleLabelMatches[0] ?? null
     : null;
+}
+
+function persistedWorkerSessionIsInvalid(
+  state: SharedLetAgentsState,
+  session: DesktopCodexLiveSessionState,
+): boolean {
+  if (!session.agent_session_id) {
+    return false;
+  }
+  const persisted = state.agent_sessions?.[session.agent_session_id];
+  if (!persisted || persisted.ended_at) {
+    return true;
+  }
+  if (
+    persisted.session_kind !== "worker" ||
+    !isCodexAgentSession(persisted) ||
+    normalizeRoomId(persisted.room_id) !== normalizeRoomId(session.room_id)
+  ) {
+    return true;
+  }
+  return !workerCanBindToLiveSession(persisted, session);
+}
+
+function desktopManagedSessionDedupeKey(session: DesktopCodexLiveSessionState): string {
+  const agentSessionId = String(session.agent_session_id ?? "").trim();
+  if (agentSessionId) {
+    return `worker:${agentSessionId}`;
+  }
+
+  const displayName = normalizedSessionText(session.display_name);
+  if (displayName) {
+    return [
+      "display",
+      normalizeRoomId(session.room_identifier || session.room_id),
+      displayName,
+      normalizedSessionText(session.cwd),
+      managedAgentDeliveryMode(session),
+    ].join(":");
+  }
+
+  return `session:${session.session_id}`;
+}
+
+function statusSortWeight(status: DesktopManagedAgentSessionStatus): number {
+  switch (status) {
+    case "running":
+      return 5;
+    case "starting":
+      return 4;
+    case "completed":
+      return 3;
+    case "unknown":
+      return 2;
+    case "failed":
+    case "interrupted":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function betterDesktopManagedSession(
+  current: DesktopCodexLiveSessionState,
+  next: DesktopCodexLiveSessionState,
+): DesktopCodexLiveSessionState {
+  const currentTime = sessionTimestamp(current.updated_at);
+  const nextTime = sessionTimestamp(next.updated_at);
+  if (currentTime !== nextTime) {
+    return nextTime > currentTime ? next : current;
+  }
+
+  const currentWeight = statusSortWeight(current.status);
+  const nextWeight = statusSortWeight(next.status);
+  if (currentWeight !== nextWeight) {
+    return nextWeight > currentWeight ? next : current;
+  }
+
+  return next.session_id > current.session_id ? next : current;
+}
+
+function dedupeDesktopManagedCodexLiveSessions(
+  sessions: DesktopCodexLiveSessionState[],
+): DesktopCodexLiveSessionState[] {
+  const byKey = new Map<string, DesktopCodexLiveSessionState>();
+  for (const session of sessions) {
+    const key = desktopManagedSessionDedupeKey(session);
+    const existing = byKey.get(key);
+    byKey.set(key, existing ? betterDesktopManagedSession(existing, session) : session);
+  }
+  return Array.from(byKey.values())
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
 export function bindCodexLiveSessionToWorker(
@@ -455,7 +625,20 @@ export function bindCodexLiveSessionToWorker(
 ): DesktopCodexLiveSessionState {
   const state = readAgentLocalState();
   const workerSession = codexWorkerSessionForLiveSession(state, session, options);
-  if (!workerSession || workerSession.session_id === session.agent_session_id) {
+  if (!workerSession) {
+    if (persistedWorkerSessionIsInvalid(state, session)) {
+      return updateCodexLiveSession(session.session_id, (current) => ({
+        ...current,
+        agent_session_id: null,
+        updated_at: new Date().toISOString(),
+      })) ?? {
+        ...session,
+        agent_session_id: null,
+      };
+    }
+    return session;
+  }
+  if (workerSession.session_id === session.agent_session_id) {
     return session;
   }
 
@@ -541,7 +724,11 @@ export function toPublicManagedAgentSession(
   const persistedWorker = session.agent_session_id
     ? state.agent_sessions?.[session.agent_session_id] ?? null
     : null;
-  const persistedWorkerActive = Boolean(persistedWorker && !persistedWorker.ended_at);
+  const persistedWorkerActive = Boolean(
+    persistedWorker &&
+    !persistedWorker.ended_at &&
+    workerCanBindToLiveSession(persistedWorker, session),
+  );
   const activeWorkerSessionId = workerSession?.session_id ?? (persistedWorkerActive ? session.agent_session_id ?? null : null);
   const displayName = publicDisplayNameForCodexSession(session, workerSession);
   return {

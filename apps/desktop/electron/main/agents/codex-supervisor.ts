@@ -72,6 +72,7 @@ import {
   getCurrentCodexLiveSession,
   getOrCreateDesktopHostId,
   getStoredAgentIdentity,
+  getStoredAgentIdentityForRuntimeKey,
   getStoredAgentSession,
   getStoredCodexLiveSession,
   listCodexDisplayNamesForRoom,
@@ -176,8 +177,19 @@ function isUsableAgentIdentity(identity: StoredAgentIdentityState | null): ident
 }
 
 async function ensureDesktopManagedCodexIdentity(displayName: string): Promise<StoredAgentIdentityState> {
+  const requestedName = normalizeAgentIdentityName(displayName);
+  const requestedDisplayName = normalizeDisplayText(displayName, "Codex");
+  const runtimeKey = `desktop-codex:${requestedName}`;
+  const existingForName = getStoredAgentIdentityForRuntimeKey(runtimeKey);
+  if (isUsableAgentIdentity(existingForName)) {
+    return existingForName;
+  }
+
   const existing = getStoredAgentIdentity();
-  if (isUsableAgentIdentity(existing)) {
+  if (
+    isUsableAgentIdentity(existing) &&
+    normalizeAgentIdentityName(existing.display_name) === requestedName
+  ) {
     return existing;
   }
 
@@ -186,7 +198,6 @@ async function ensureDesktopManagedCodexIdentity(displayName: string): Promise<S
     throw new Error("Sign into LetAgents Desktop before starting a supervised Codex agent.");
   }
 
-  const name = normalizeAgentIdentityName(displayName);
   const ownerLabel = normalizeDisplayText(
     storedAuth.account?.displayName || storedAuth.account?.login,
     "Desktop",
@@ -195,8 +206,8 @@ async function ensureDesktopManagedCodexIdentity(displayName: string): Promise<S
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      name,
-      display_name: displayName,
+      name: requestedName,
+      display_name: requestedDisplayName,
       owner_label: ownerLabel,
     }),
   });
@@ -205,11 +216,11 @@ async function ensureDesktopManagedCodexIdentity(displayName: string): Promise<S
     throw new Error("LetAgents did not return a usable agent identity for the desktop worker.");
   }
 
-  const resolvedDisplayName = normalizeDisplayText(registered.display_name, displayName);
+  const resolvedDisplayName = normalizeDisplayText(registered.display_name, requestedDisplayName);
   const resolvedOwnerLabel = normalizeDisplayText(registered.owner_label, ownerLabel);
   const now = new Date().toISOString();
   return saveStoredAgentIdentity({
-    name: normalizeDisplayText(registered.name, name),
+    name: normalizeDisplayText(registered.name, requestedName),
     display_name: resolvedDisplayName,
     owner_label: resolvedOwnerLabel,
     owner_attribution: formatOwnerAttribution(resolvedOwnerLabel),
@@ -220,7 +231,7 @@ async function ensureDesktopManagedCodexIdentity(displayName: string): Promise<S
       ideLabel: "Codex",
     }),
     canonical_key: canonicalKey,
-    runtime_key: "desktop-codex",
+    runtime_key: runtimeKey,
     source: "api",
     resolved_at: now,
   });
@@ -1143,7 +1154,7 @@ export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamE
     return;
   }
 
-  const sessions = listStoredCodexLiveSessions(event.roomIdentifier)
+  const sessions = listDesktopManagedCodexLiveSessions(event.roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session))
     .filter((session) => shouldDeliverRoomStreamEventToSession(session, event));
 

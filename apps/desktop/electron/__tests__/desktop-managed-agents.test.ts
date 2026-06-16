@@ -12,6 +12,7 @@ const {
   getCurrentCodexLiveSession,
   getOrCreateDesktopHostId,
   getStoredAgentIdentity,
+  getStoredAgentIdentityForRuntimeKey,
   getStoredAgentSession,
   listDesktopManagedCodexLiveSessions,
   listCodexDisplayNamesForRoom,
@@ -217,6 +218,39 @@ test("desktop managed worker identity and session state are persisted for room s
   assert.equal(publicSession.agentKey, "EmmyMay/cedar-vista");
 });
 
+test("desktop managed identities can be stored per generated Codex display name", () => {
+  resetState();
+
+  const quartz = saveStoredAgentIdentity({
+    name: "quartz-vista",
+    display_name: "QuartzVista",
+    owner_label: "EmmyMay",
+    owner_attribution: "EmmyMay's agent",
+    ide_label: "Codex",
+    actor_label: "QuartzVista | EmmyMay's agent | Codex",
+    canonical_key: "EmmyMay/quartz-vista",
+    runtime_key: "desktop-codex:quartz-vista",
+    source: "api",
+    resolved_at: "2026-06-14T12:00:00.000Z",
+  });
+  const lumen = saveStoredAgentIdentity({
+    name: "lumen-vale",
+    display_name: "LumenVale",
+    owner_label: "EmmyMay",
+    owner_attribution: "EmmyMay's agent",
+    ide_label: "Codex",
+    actor_label: "LumenVale | EmmyMay's agent | Codex",
+    canonical_key: "EmmyMay/lumen-vale",
+    runtime_key: "desktop-codex:lumen-vale",
+    source: "api",
+    resolved_at: "2026-06-14T12:05:00.000Z",
+  });
+
+  assert.deepEqual(getStoredAgentIdentity(), lumen);
+  assert.deepEqual(getStoredAgentIdentityForRuntimeKey("desktop-codex:quartz-vista"), quartz);
+  assert.deepEqual(getStoredAgentIdentityForRuntimeKey("desktop-codex:lumen-vale"), lumen);
+});
+
 test("managed Codex state binds a live desktop session to the registered worker identity", () => {
   resetState({
     agent_sessions: {
@@ -410,6 +444,41 @@ test("managed Codex startup binding rejects stale single-worker fallback", () =>
   );
 });
 
+test("managed Codex binding clears a persisted worker link that belongs to another desktop agent", () => {
+  const session = liveSession({
+    session_id: "local_old_lumen",
+    display_name: "LumenVale",
+    token: "LOCAL_CODEX_ROOM_lumen",
+    agent_session_id: "worker_quartz",
+    started_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:01:00.000Z",
+  });
+  resetState({
+    agent_sessions: {
+      worker_quartz: {
+        session_id: "worker_quartz",
+        room_id: "room_1",
+        session_kind: "worker",
+        runtime: "codex:LOCAL_CODEX_ROOM_quartz",
+        actor_label: "QuartzVista",
+        agent_key: "codex/quartz-vista",
+        display_name: "QuartzVista",
+        owner_label: "Local desktop",
+        ide_label: "Codex",
+        created_at: "2026-06-14T20:00:00.000Z",
+        updated_at: "2026-06-14T20:01:00.000Z",
+      },
+    },
+  });
+
+  const bound = bindCodexLiveSessionToWorker(saveCodexLiveSession(session));
+  const publicSession = toPublicManagedAgentSession(bound);
+
+  assert.equal(bound.agent_session_id, null);
+  assert.equal(publicSession.agentSessionId, null);
+  assert.equal(publicSession.displayName, "LumenVale");
+});
+
 test("managed Codex public state does not expose inactive worker identities", () => {
   resetState({
     agent_sessions: {
@@ -596,6 +665,59 @@ test("desktop managed session listing ignores legacy MCP live sessions", () => {
   assert.deepEqual(
     listDesktopManagedCodexLiveSessions("room_1").map((session) => session.session_id),
     ["desktop_mcp"],
+  );
+});
+
+test("desktop managed session listing collapses duplicate records for the same worker", () => {
+  resetState();
+  saveCodexLiveSession(liveSession({
+    session_id: "quartz_waiting",
+    agent_session_id: "worker_quartz",
+    display_name: "QuartzVista",
+    status: "completed",
+    updated_at: "2026-06-14T12:10:00.000Z",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: "quartz_running",
+    agent_session_id: "worker_quartz",
+    display_name: "QuartzVista",
+    status: "running",
+    updated_at: "2026-06-14T12:20:00.000Z",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: "cedar_running",
+    agent_session_id: "worker_cedar",
+    display_name: "CedarVista",
+    status: "running",
+    updated_at: "2026-06-14T12:15:00.000Z",
+  }));
+
+  assert.deepEqual(
+    listDesktopManagedCodexLiveSessions("room_1").map((session) => session.session_id),
+    ["quartz_running", "cedar_running"],
+  );
+});
+
+test("desktop managed session listing collapses duplicate name records before worker binding", () => {
+  resetState();
+  saveCodexLiveSession(liveSession({
+    session_id: "lumen_waiting",
+    agent_session_id: null,
+    display_name: "LumenVale",
+    status: "completed",
+    updated_at: "2026-06-14T12:10:00.000Z",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: "lumen_running",
+    agent_session_id: null,
+    display_name: "LumenVale",
+    status: "running",
+    updated_at: "2026-06-14T12:20:00.000Z",
+  }));
+
+  assert.deepEqual(
+    listDesktopManagedCodexLiveSessions("room_1").map((session) => session.session_id),
+    ["lumen_running"],
   );
 });
 
