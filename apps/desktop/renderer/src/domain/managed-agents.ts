@@ -34,7 +34,10 @@ export function isDeliverableManagedAgentSession(
 ): boolean {
   return isVisibleManagedAgentSession(session) &&
     Boolean(session.agentSessionId) &&
-    session.status !== "starting";
+    (
+      session.status === "running" ||
+      (session.deliveryMode === "desktop_events" && session.status === "completed")
+    );
 }
 
 export function normalizeManagedAgentRoomIdentifier(value: string | null | undefined): string {

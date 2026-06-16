@@ -176,6 +176,16 @@ test("isDeliverableManagedAgentSession requires a registered room worker", () =>
     status: "starting",
     agentSessionId: "agent_1",
   })), false);
+  assert.equal(isDeliverableManagedAgentSession(session({
+    status: "unknown",
+    agentSessionId: "agent_1",
+  })), false);
+  assert.equal(isDeliverableManagedAgentSession(session({
+    deliveryMode: "desktop_events",
+    status: "completed",
+    agentSessionId: "agent_1",
+    canStop: true,
+  })), true);
 });
 
 test("isExternalMcpProviderReady distinguishes bridge-only providers from desktop-supervised providers", () => {
@@ -527,14 +537,22 @@ test("managed desktop agent merges with existing room identities instead of dupl
   assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
 });
 
-test("unregistered managed desktop agents do not become mentionable or reachable", () => {
+test("unregistered or unknown managed desktop agents do not become mentionable or reachable", () => {
   const unregistered = session({
     status: "starting",
     agentSessionId: null,
     displayName: "CloudForge",
     actorLabel: "CloudForge",
   });
+  const unknown = session({
+    status: "unknown",
+    agentSessionId: "agent_cloudforge",
+    displayName: "CloudForge",
+    actorLabel: "CloudForge",
+  });
 
   assert.deepEqual(mergeDesktopManagedAgentParticipants([], [unregistered], "room_1"), []);
   assert.deepEqual(mergeDesktopManagedAgentPresence([], [unregistered], "room_1"), []);
+  assert.deepEqual(mergeDesktopManagedAgentParticipants([], [unknown], "room_1"), []);
+  assert.deepEqual(mergeDesktopManagedAgentPresence([], [unknown], "room_1"), []);
 });
