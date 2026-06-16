@@ -148,13 +148,23 @@
                 <span>{{ session.deliveryMode === "desktop_events" ? "Desktop events" : "MCP loop" }}</span>
                 <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
                 <small>{{ managedAgentSessionStatusLabel(session) }} - {{ session.repoRootPath }}</small>
-                <button
-                  type="button"
-                  :disabled="!session.canStop || stoppingSessionId === session.id"
-                  @click="stopManagedAgent(session.id)"
-                >
-                  {{ stoppingSessionId === session.id ? "Stopping..." : "Stop turn" }}
-                </button>
+                <div class="desktop-add-agent-managed-session-actions">
+                  <button
+                    type="button"
+                    :disabled="!session.canStop || Boolean(stoppingSessionId)"
+                    @click="stopManagedAgent(session.id, 'turn')"
+                  >
+                    {{ stoppingSessionId === session.id && stoppingSessionMode === "turn" ? "Stopping..." : "Stop turn" }}
+                  </button>
+                  <button
+                    type="button"
+                    class="desktop-add-agent-managed-session-danger"
+                    :disabled="!session.canStop || Boolean(stoppingSessionId)"
+                    @click="stopManagedAgent(session.id, 'worker')"
+                  >
+                    {{ stoppingSessionId === session.id && stoppingSessionMode === "worker" ? "Stopping..." : "Stop agent" }}
+                  </button>
+                </div>
               </article>
             </section>
 
@@ -291,6 +301,7 @@ const loadingPreflight = ref(false);
 const setupBusy = ref(false);
 const startingAgent = ref(false);
 const stoppingSessionId = ref<string | null>(null);
+const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
 const copyingAuthCommand = ref(false);
 const copyingExternalPrompt = ref(false);
 const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
@@ -475,15 +486,18 @@ async function startManagedAgent(): Promise<void> {
   }
 }
 
-async function stopManagedAgent(sessionId: string): Promise<void> {
+async function stopManagedAgent(sessionId: string, stopMode: "turn" | "worker"): Promise<void> {
   if (stoppingSessionId.value) return;
   const requestVersion = modalStateVersion;
   stoppingSessionId.value = sessionId;
-  setupMessage.value = null;
+  stoppingSessionMode.value = stopMode;
+  setupMessage.value = stopMode === "worker"
+    ? "Stopping local agent..."
+    : "Stopping current turn...";
   try {
     const session = await window.letagentsDesktop.workers.stopManagedAgent({
       sessionId,
-      stopMode: "turn",
+      stopMode,
     });
     if (!isCurrentModalState(requestVersion)) return;
     if (session) {
@@ -497,6 +511,7 @@ async function stopManagedAgent(sessionId: string): Promise<void> {
   } finally {
     if (isCurrentModalState(requestVersion)) {
       stoppingSessionId.value = null;
+      stoppingSessionMode.value = null;
     }
   }
 }
@@ -510,6 +525,7 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   setupBusy.value = false;
   startingAgent.value = false;
   stoppingSessionId.value = null;
+  stoppingSessionMode.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
@@ -524,6 +540,7 @@ function resetTransientState(): void {
   setupBusy.value = false;
   startingAgent.value = false;
   stoppingSessionId.value = null;
+  stoppingSessionMode.value = null;
   copyingAuthCommand.value = false;
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;

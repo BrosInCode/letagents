@@ -47,12 +47,23 @@
                   type="button"
                   class="desktop-agent-detail-icon-button desktop-agent-detail-icon-button-stop"
                   data-testid="desktop-agent-detail-stop-managed-agent"
-                  :disabled="!primaryManagedSession || !primaryManagedSession.canStop || stoppingSessionId === primaryManagedSession.id"
-                  :title="stoppingSessionId === primaryManagedSession?.id ? 'Stopping turn' : 'Stop turn'"
+                  :disabled="!primaryManagedSession || !primaryManagedSession.canStop || Boolean(stoppingSessionId)"
+                  :title="isStoppingPrimarySession('turn') ? 'Stopping turn' : 'Stop turn'"
                   aria-label="Stop turn"
-                  @click="primaryManagedSession ? stopManagedSession(primaryManagedSession.id) : undefined"
+                  @click="primaryManagedSession ? stopManagedSession(primaryManagedSession.id, 'turn') : undefined"
                 >
                   <Square :size="14" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  class="desktop-agent-detail-icon-button desktop-agent-detail-icon-button-kill"
+                  data-testid="desktop-agent-detail-stop-local-agent"
+                  :disabled="!primaryManagedSession || !primaryManagedSession.canStop || Boolean(stoppingSessionId)"
+                  :title="isStoppingPrimarySession('worker') ? 'Stopping agent' : 'Stop local agent'"
+                  aria-label="Stop local agent"
+                  @click="primaryManagedSession ? stopManagedSession(primaryManagedSession.id, 'worker') : undefined"
+                >
+                  <Power :size="14" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -125,6 +136,7 @@
               <button type="button" @click="emit('open-add-agent')">Add agent</button>
             </div>
 
+            <p v-if="stopStatusMessage" class="desktop-agent-detail-feedback">{{ stopStatusMessage }}</p>
             <p v-if="managedSessionError" class="desktop-agent-detail-error">{{ managedSessionError }}</p>
           </section>
 
@@ -165,7 +177,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { RefreshCw, Square, X } from "@lucide/vue";
+import { Power, RefreshCw, Square, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentSession,
@@ -210,6 +222,8 @@ const dialogElement = ref<HTMLElement | null>(null);
 const managedSessions = ref<DesktopManagedAgentSession[]>([]);
 const loadingManagedSessions = ref(false);
 const stoppingSessionId = ref<string | null>(null);
+const stoppingSessionMode = ref<"turn" | "worker" | null>(null);
+const stopStatusMessage = ref<string | null>(null);
 const managedSessionError = ref<string | null>(null);
 const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectResult>>({});
 const inspectingSessionIds = ref<Record<string, boolean>>({});
@@ -322,6 +336,8 @@ function stopRefreshTimer(): void {
 function clearTransientState(): void {
   loadingManagedSessions.value = false;
   stoppingSessionId.value = null;
+  stoppingSessionMode.value = null;
+  stopStatusMessage.value = null;
   managedSessionError.value = null;
   managedSessionInspections.value = {};
   inspectingSessionIds.value = {};
@@ -411,15 +427,27 @@ async function inspectManagedSession(
   }
 }
 
-async function stopManagedSession(sessionId: string): Promise<void> {
+function isStoppingPrimarySession(mode: "turn" | "worker"): boolean {
+  return Boolean(
+    primaryManagedSession.value &&
+    stoppingSessionId.value === primaryManagedSession.value.id &&
+    stoppingSessionMode.value === mode
+  );
+}
+
+async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"): Promise<void> {
   if (stoppingSessionId.value) return;
   const requestVersion = modalStateVersion;
   stoppingSessionId.value = sessionId;
+  stoppingSessionMode.value = stopMode;
+  stopStatusMessage.value = stopMode === "worker"
+    ? "Stopping local agent..."
+    : "Stopping current turn...";
   managedSessionError.value = null;
   try {
     const stopped = await window.letagentsDesktop.workers.stopManagedAgent({
       sessionId,
-      stopMode: "turn",
+      stopMode,
     });
     if (!isCurrentModalState(requestVersion)) return;
     const stopResultMessage = stopped && managedAgentStopResultNeedsAttention(stopped)
@@ -435,17 +463,31 @@ async function stopManagedSession(sessionId: string): Promise<void> {
     if (stopResultMessage && !managedSessionError.value) {
       managedSessionError.value = stopResultMessage;
     }
+    stopStatusMessage.value = stopMode === "worker"
+      ? "Local agent stopped."
+      : "Current turn stopped.";
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
-    managedSessionError.value = error instanceof Error ? error.message : "Could not stop this agent turn.";
+    managedSessionError.value = error instanceof Error
+      ? error.message
+      : stopMode === "worker"
+        ? "Could not stop this local agent."
+        : "Could not stop this agent turn.";
+    stopStatusMessage.value = null;
   } finally {
     if (isCurrentModalState(requestVersion)) {
       stoppingSessionId.value = null;
+      stoppingSessionMode.value = null;
     }
   }
 }
 
 function inspectionStatusLabel(sessionId: string): string {
+  if (stoppingSessionId.value === sessionId) {
+    return stoppingSessionMode.value === "worker"
+      ? "Stopping local agent"
+      : "Stopping current turn";
+  }
   if (inspectingSessionIds.value[sessionId]) {
     return "Refreshing transcript preview";
   }

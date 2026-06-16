@@ -1453,13 +1453,39 @@ export async function stopDesktopManagedAgent(
   }
 
   if (isSmokeManagedCodexSession(session)) {
+    if (shouldShutdownManagedAgentOnStop(input)) {
+      const updated =
+        updateCodexLiveSession(session.session_id, (current) => ({
+          ...current,
+          status: "interrupted",
+          last_error: null,
+          updated_at: new Date().toISOString(),
+        })) ?? session;
+      killOwnedAppServer(updated);
+      clearSessionMonitor(updated.session_id);
+      return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
+    }
     const updated =
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
         status: "running",
         last_error: null,
         updated_at: new Date().toISOString(),
+    })) ?? session;
+    return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
+  }
+
+  const shutdownServer = shouldShutdownManagedAgentOnStop(input);
+  if (shutdownServer) {
+    const updated =
+      updateCodexLiveSession(session.session_id, (current) => ({
+        ...current,
+        status: "interrupted",
+        last_error: null,
+        updated_at: new Date().toISOString(),
       })) ?? session;
+    killOwnedAppServer(updated);
+    clearSessionMonitor(updated.session_id);
     return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
   }
 
@@ -1485,7 +1511,6 @@ export async function stopDesktopManagedAgent(
     }
   }
 
-  const shutdownServer = shouldShutdownManagedAgentOnStop(input);
   const ownedServerExited = !serverReachable && ownedCodexAppServerExited(session);
   const updated =
     updateCodexLiveSession(session.session_id, (current) => ({

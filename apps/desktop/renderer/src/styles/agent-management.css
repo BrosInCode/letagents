@@ -507,9 +507,16 @@
   white-space: nowrap;
 }
 
-.desktop-add-agent-managed-session button {
+.desktop-add-agent-managed-session-actions {
   grid-column: 2;
   grid-row: 1 / span 3;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.desktop-add-agent-managed-session button {
   min-height: 28px;
   padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -524,6 +531,12 @@
 .desktop-add-agent-managed-session button:hover:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.18);
   color: var(--text);
+}
+
+.desktop-add-agent-managed-session-danger:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
 }
 
 .desktop-add-agent-managed-session button:disabled {
@@ -616,6 +629,7 @@
 .desktop-agent-detail-session p,
 .desktop-agent-detail-reasoning p,
 .desktop-agent-detail-empty p,
+.desktop-agent-detail-feedback,
 .desktop-agent-detail-error {
   margin: 0;
 }
@@ -768,6 +782,12 @@
   border: 0;
   background: rgba(248, 113, 113, 0.12);
   color: #fca5a5;
+}
+
+.desktop-agent-detail-header .desktop-agent-detail-icon-button-kill:hover:not(:disabled) {
+  border: 0;
+  background: rgba(239, 68, 68, 0.16);
+  color: #fecaca;
 }
 
 .desktop-agent-detail-session button:disabled,
@@ -975,6 +995,12 @@
 .desktop-agent-detail-error {
   margin-top: 10px;
   color: #fca5a5;
+  font-size: 0.78rem;
+}
+
+.desktop-agent-detail-feedback {
+  margin-top: 10px;
+  color: var(--text-secondary);
   font-size: 0.78rem;
 }
 
