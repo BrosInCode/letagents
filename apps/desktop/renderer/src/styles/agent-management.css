@@ -658,12 +658,8 @@
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
-  margin-left: 2px;
-  padding: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.035);
+  gap: 4px;
+  margin-left: 1px;
 }
 
 .desktop-agent-detail-status-pulse {
@@ -744,9 +740,9 @@
 .desktop-agent-detail-icon-button {
   display: inline-grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  min-height: 28px;
+  width: 27px;
+  height: 27px;
+  min-height: 27px;
   padding: 0;
   border-color: transparent;
   border-radius: 6px;
