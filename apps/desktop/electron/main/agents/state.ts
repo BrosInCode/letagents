@@ -542,6 +542,7 @@ export function toPublicManagedAgentSession(
     ? state.agent_sessions?.[session.agent_session_id] ?? null
     : null;
   const persistedWorkerActive = Boolean(persistedWorker && !persistedWorker.ended_at);
+  const activeWorkerSessionId = workerSession?.session_id ?? (persistedWorkerActive ? session.agent_session_id ?? null : null);
   const displayName = publicDisplayNameForCodexSession(session, workerSession);
   return {
     id: session.session_id,
@@ -552,11 +553,14 @@ export function toPublicManagedAgentSession(
     repoRootPath: session.cwd,
     status: session.status,
     deliveryMode: managedAgentDeliveryMode(session),
-    canStop: session.status === "starting" ||
-      session.status === "running" ||
-      session.status === "unknown" ||
-      (managedAgentDeliveryMode(session) === "desktop_events" && session.status === "completed"),
-    agentSessionId: workerSession?.session_id ?? (persistedWorkerActive ? session.agent_session_id ?? null : null),
+    canStop: Boolean(activeWorkerSessionId) &&
+      (
+        session.status === "starting" ||
+        session.status === "running" ||
+        session.status === "unknown" ||
+        (managedAgentDeliveryMode(session) === "desktop_events" && session.status === "completed")
+      ),
+    agentSessionId: activeWorkerSessionId,
     actorLabel: nonGenericCodexName(workerSession?.actor_label) ?? displayName,
     agentKey: workerSession?.agent_key ?? "codex",
     displayName,

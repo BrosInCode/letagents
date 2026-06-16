@@ -438,6 +438,7 @@ test("managed Codex public state does not expose inactive worker identities", ()
   assert.equal(publicSession.displayName, "CedarVista");
   assert.equal(publicSession.actorLabel, "CedarVista");
   assert.equal(publicSession.agentKey, "codex");
+  assert.equal(publicSession.canStop, false);
 
   resetState();
   const missingWorkerSession = toPublicManagedAgentSession(liveSession({
@@ -448,6 +449,7 @@ test("managed Codex public state does not expose inactive worker identities", ()
   assert.equal(missingWorkerSession.agentSessionId, null);
   assert.equal(missingWorkerSession.displayName, "DawnWinter");
   assert.equal(missingWorkerSession.actorLabel, "DawnWinter");
+  assert.equal(missingWorkerSession.canStop, false);
 });
 
 test("managed Codex sessions expose polling as the backward-compatible default delivery mode", () => {
@@ -468,9 +470,23 @@ test("new desktop-managed Codex starts default to desktop-delivered events", () 
 });
 
 test("desktop event sessions remain stoppable after an idle completed turn", () => {
-  resetState();
+  resetState({
+    agent_sessions: {
+      worker_events: {
+        session_id: "worker_events",
+        room_id: "room_1",
+        session_kind: "worker",
+        runtime: "codex:LOCAL_CODEX_ROOM_test",
+        actor_label: "MapleRidge",
+        agent_key: "codex/maple-ridge",
+        display_name: "MapleRidge",
+        created_at: "2026-06-14T12:00:01.000Z",
+      },
+    },
+  });
   const session = liveSession({
     session_id: "local_session_events",
+    agent_session_id: "worker_events",
     delivery_mode: "desktop_events",
     status: "completed",
   });

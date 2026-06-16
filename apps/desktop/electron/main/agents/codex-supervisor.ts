@@ -504,6 +504,25 @@ function clearCodexRuntimeReasoningState(sessionId: string): void {
   codexRuntimeReasoningPostQueues.delete(sessionId);
 }
 
+function markSpawnedCodexAppServersOffline(reason: string): void {
+  const pids = new Set(spawnedServerPids);
+  for (const session of listStoredCodexLiveSessions()) {
+    if (!session.launched_server || !session.server_pid || !pids.has(session.server_pid)) {
+      continue;
+    }
+    if (!isTerminalCodexSessionStatus(session.status)) {
+      updateCodexLiveSession(session.session_id, (current) => ({
+        ...current,
+        status: "failed",
+        last_error: reason,
+        updated_at: new Date().toISOString(),
+      }));
+    }
+    markAgentSessionEnded(session.agent_session_id);
+    clearCodexRuntimeReasoningState(session.session_id);
+  }
+}
+
 function registerProcessCleanup(): void {
   if (cleanupRegistered) return;
   cleanupRegistered = true;
@@ -513,6 +532,8 @@ function registerProcessCleanup(): void {
       clearInterval(timer);
     }
     sessionMonitorTimers.clear();
+
+    markSpawnedCodexAppServersOffline("LetAgents Desktop stopped the local Codex app-server.");
 
     for (const pid of spawnedServerPids) {
       terminateSpawnedProcess(pid);
@@ -542,8 +563,31 @@ function forgetLaunchedAppServer(pid: number): void {
   spawnedServerPids.delete(pid);
 }
 
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!pid) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ownedCodexAppServerExited(session: DesktopCodexLiveSessionState): boolean {
+  return Boolean(session.launched_server && !isProcessAlive(session.server_pid));
+}
+
+function offlineAppServerError(session: DesktopCodexLiveSessionState): string {
+  return ownedCodexAppServerExited(session)
+    ? "Codex app-server exited or is no longer reachable."
+    : "server unreachable";
+}
+
 function killOwnedAppServer(session: DesktopCodexLiveSessionState): void {
   clearCodexRuntimeReasoningState(session.session_id);
+  markAgentSessionEnded(session.agent_session_id);
   if (!session.launched_server || !session.server_pid) {
     return;
   }
@@ -930,13 +974,17 @@ export async function inspectDesktopManagedAgentSession(
 
   const serverReachable = await isCodexAppServerReady(session.server_url);
   if (!serverReachable) {
+    const ownedServerExited = ownedCodexAppServerExited(session);
     const updated =
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
-        status: deriveCodexLiveSessionStatus(current.status, false, null, null),
+        status: ownedServerExited
+          ? "failed"
+          : deriveCodexLiveSessionStatus(current.status, false, null, null),
+        last_error: offlineAppServerError(current),
         updated_at: new Date().toISOString(),
       })) ?? session;
-    if (updated.launched_server) {
+    if (ownedServerExited || updated.launched_server) {
       killOwnedAppServer(updated);
       clearSessionMonitor(updated.session_id);
     }
@@ -1138,12 +1186,19 @@ async function deliverDesktopEventTurn(
 
   const serverReachable = await isCodexAppServerReady(session.server_url);
   if (!serverReachable) {
-    updateCodexLiveSession(session.session_id, (current) => ({
+    const ownedServerExited = ownedCodexAppServerExited(session);
+    const updated = updateCodexLiveSession(session.session_id, (current) => ({
       ...current,
-      status: "unknown",
-      last_error: "server unreachable while delivering room event",
+      status: ownedServerExited ? "failed" : "unknown",
+      last_error: ownedServerExited
+        ? offlineAppServerError(current)
+        : "server unreachable while delivering room event",
       updated_at: new Date().toISOString(),
     }));
+    if (updated && ownedServerExited) {
+      killOwnedAppServer(updated);
+      clearSessionMonitor(updated.session_id);
+    }
     return;
   }
 
@@ -1388,22 +1443,25 @@ export async function stopDesktopManagedAgent(
   }
 
   const shutdownServer = shouldShutdownManagedAgentOnStop(input);
+  const ownedServerExited = !serverReachable && ownedCodexAppServerExited(session);
   const updated =
     updateCodexLiveSession(session.session_id, (current) => ({
       ...current,
-      status: codexSessionStatusAfterStopAttempt(
-        managedAgentDeliveryMode(current),
-        serverReachable,
-        shutdownServer,
-        interruptSucceeded,
-      ),
+      status: ownedServerExited
+        ? "failed"
+        : codexSessionStatusAfterStopAttempt(
+          managedAgentDeliveryMode(current),
+          serverReachable,
+          shutdownServer,
+          interruptSucceeded,
+        ),
       last_error: serverReachable
         ? interruptError
-        : "server unreachable at stop time",
+        : offlineAppServerError(current),
       updated_at: new Date().toISOString(),
     })) ?? session;
 
-  if (shutdownServer || updated.status !== "running") {
+  if (shutdownServer || ownedServerExited || updated.status !== "running") {
     killOwnedAppServer(updated);
   }
   if (updated.status !== "running") {
