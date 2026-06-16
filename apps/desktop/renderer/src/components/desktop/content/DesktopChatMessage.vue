@@ -38,16 +38,22 @@
         </div>
         <div class="room-message-meta-tail">
           <button
+            class="room-message-reply-action room-message-quote-action"
+            type="button"
+            title="Quote reply"
+            aria-label="Quote reply"
+            @click="$emit('quote-reply', message.id)"
+          >
+            <CornerUpLeft :size="14" aria-hidden="true" />
+          </button>
+          <button
             class="room-message-reply-action room-message-thread-action"
             type="button"
             title="Reply in thread"
             aria-label="Reply in thread"
             @click="$emit('open-thread', message.id)"
           >
-            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H8.25L5 13v-2H4.5A1.5 1.5 0 0 1 3 9.5v-5Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" />
-              <path d="M6 6.25h4M6 8.5h2.75" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
-            </svg>
+            <MessageSquare :size="14" aria-hidden="true" />
           </button>
           <span class="room-message-provenance" :data-kind="ownerKind">
             {{ ownerKind }}
@@ -110,7 +116,10 @@
       @pointerdown.stop
       @contextmenu.prevent.stop
     >
-      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="openThreadFromContext">
+      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="quoteReplyFromContext">
+        <span>Quote reply</span>
+      </button>
+      <button type="button" role="menuitem" @click="openThreadFromContext">
         <span>Reply in thread</span>
       </button>
     </div>
@@ -119,6 +128,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
+import { CornerUpLeft, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
@@ -144,6 +154,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "quote-reply": [messageId: string];
   "open-thread": [messageId: string];
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
@@ -196,7 +207,7 @@ function openContextMenu(event: MouseEvent): void {
   }
   event.preventDefault();
   const menuWidth = 180;
-  const menuHeight = 50;
+  const menuHeight = 86;
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -229,6 +240,11 @@ function focusContextMenuItem(direction: 1 | -1): void {
   const currentIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
   const nextIndex = (currentIndex + direction + items.length) % items.length;
   items[nextIndex]?.focus();
+}
+
+function quoteReplyFromContext(): void {
+  closeContextMenu();
+  emit("quote-reply", props.message.id);
 }
 
 function openThreadFromContext(): void {

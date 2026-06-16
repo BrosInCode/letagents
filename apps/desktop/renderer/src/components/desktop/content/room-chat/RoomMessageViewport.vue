@@ -20,6 +20,7 @@
         :latest-thread-message="latestThreadMessage(message.id)"
         :highlight-query="searchQuery"
         :search-active="message.id === activeSearchMessageId"
+        @quote-reply="$emit('quote-reply', $event)"
         @open-thread="$emit('open-thread', $event)"
         @scroll-to-message="scrollToMessage"
         @open-image="$emit('open-image', $event)"
@@ -127,6 +128,7 @@ const emit = defineEmits<{
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
+  "quote-reply": [messageId: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
 }>();

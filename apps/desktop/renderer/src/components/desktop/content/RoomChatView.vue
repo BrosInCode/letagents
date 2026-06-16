@@ -31,6 +31,7 @@
           @open-agent="openAgentModal"
           @open-image="openImageViewer"
           @open-thread="openThread"
+          @quote-reply="quoteReply"
           @open-github-event="emit('open-github-event', $event)"
           @scroll-position="emit('scroll-position', $event)"
         />
@@ -60,11 +61,12 @@
           :initial-draft="initialDraft"
           :participants="participants"
           :pending-attachment-drafts="pendingAttachmentDrafts"
-          :reply-to="null"
+          :reply-to="replyTarget"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
           :sending="sending"
+          @clear-reply="clearReplyTarget"
           @draft-change="emit('draft-change', $event)"
           @open-add-agent="emit('open-add-agent')"
           @pick-attachments="pickAttachments"
@@ -154,6 +156,7 @@ const emit = defineEmits<{
 }>();
 
 const activeThreadParentId = ref<string | null>(null);
+const replyTarget = ref<DesktopRoomMessage | null>(null);
 const activeThreadParent = computed(() =>
   resolveThreadParent(props.threadMessages, activeThreadParentId.value)
 );
@@ -196,6 +199,14 @@ function openThread(messageId: string): void {
   activeThreadParentId.value = messageId;
 }
 
+function quoteReply(messageId: string): void {
+  replyTarget.value = props.threadMessages.find((message) => message.id === messageId) ?? null;
+}
+
+function clearReplyTarget(): void {
+  replyTarget.value = null;
+}
+
 function closeThread(): void {
   activeThreadParentId.value = null;
 }
@@ -210,11 +221,13 @@ function handleComposerSend(
   attachments: Array<{ upload_id: string }>,
 ): void {
   emit("send-message", text, replyToId, attachments);
+  clearReplyTarget();
   clearAttachmentDrafts();
 }
 
 watch(toRef(props, "roomIdentifier"), () => {
   activeThreadParentId.value = null;
+  clearReplyTarget();
 });
 
 watch(
@@ -233,6 +246,9 @@ watch(
   () => {
     if (activeThreadParentId.value && !activeThreadParent.value) {
       activeThreadParentId.value = null;
+    }
+    if (replyTarget.value && !props.threadMessages.some((message) => message.id === replyTarget.value?.id)) {
+      clearReplyTarget();
     }
   },
   { deep: true },
