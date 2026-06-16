@@ -15,7 +15,16 @@
     <section class="room-thread-body">
       <article class="room-thread-parent" data-testid="room-thread-parent">
         <div class="room-thread-meta">
-          <strong>{{ parentDisplayName }}</strong>
+          <button
+            v-if="isAgentMessage(parent)"
+            class="room-thread-author-button"
+            type="button"
+            :title="`Show ${parentDisplayName} activity`"
+            @click="$emit('open-agent', agentTarget(parent))"
+          >
+            {{ parentDisplayName }}
+          </button>
+          <strong v-else>{{ parentDisplayName }}</strong>
           <time :datetime="parent.timestamp">{{ parentTime }}</time>
         </div>
         <DesktopGitHubEventCard
@@ -49,7 +58,16 @@
         :data-testid="`room-thread-reply-${reply.id}`"
       >
         <div class="room-thread-meta">
-          <strong>{{ displayName(reply) }}</strong>
+          <button
+            v-if="isAgentMessage(reply)"
+            class="room-thread-author-button"
+            type="button"
+            :title="`Show ${displayName(reply)} activity`"
+            @click="$emit('open-agent', agentTarget(reply))"
+          >
+            {{ displayName(reply) }}
+          </button>
+          <strong v-else>{{ displayName(reply) }}</strong>
           <time :datetime="reply.timestamp">{{ formatTimestamp(reply.timestamp) }}</time>
         </div>
         <DesktopGitHubEventCard
@@ -102,6 +120,7 @@ import DesktopMessageAttachments from "../desktop-chat-message/DesktopMessageAtt
 import { parseGitHubEvent } from "../desktop-chat-message/github-event";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { formatTimestamp, renderMessageText } from "../desktop-chat-message/message-rendering";
+import type { AgentModalTarget } from "../desktop-chat-message/types";
 import DesktopLongMessageContent from "../DesktopLongMessageContent.vue";
 
 const props = defineProps<{
@@ -118,6 +137,7 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "send-thread-message": [text: string, parentId: string];
   "open-github-event": [url: string];
+  "open-agent": [target: AgentModalTarget];
 }>();
 
 const draft = ref("");
@@ -147,6 +167,35 @@ watch(
 
 function displayName(message: DesktopRoomMessage): string {
   return message.agentIdentity?.displayName || parseSenderIdentity(message).displayName;
+}
+
+function ownerAttribution(message: DesktopRoomMessage): string | null {
+  return message.agentIdentity?.ownerAttribution || parseSenderIdentity(message).ownerAttribution;
+}
+
+function ideLabel(message: DesktopRoomMessage): string | null {
+  return message.agentIdentity?.ideLabel || parseSenderIdentity(message).ideLabel;
+}
+
+function isAgentMessage(message: DesktopRoomMessage): boolean {
+  return Boolean(
+    message.source === "agent" ||
+    message.agentIdentity ||
+    ownerAttribution(message) ||
+    ideLabel(message),
+  );
+}
+
+function agentTarget(message: DesktopRoomMessage): AgentModalTarget {
+  return {
+    actorLabel: message.actorLabel || message.agentIdentity?.actorLabel || message.sender,
+    displayName: displayName(message),
+    ownerAttribution: ownerAttribution(message),
+    ideLabel: ideLabel(message),
+    sender: message.sender,
+    agentKey: message.agentIdentity?.agentKey || null,
+    agentSessionId: message.agentIdentity?.agentSessionId || null,
+  };
 }
 
 function githubEvent(message: DesktopRoomMessage) {

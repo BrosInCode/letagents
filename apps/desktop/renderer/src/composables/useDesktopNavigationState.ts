@@ -34,6 +34,7 @@ interface DesktopNavigationStateOptions {
 }
 
 interface OpenRoomOptions {
+  aliasIdentifiers?: readonly (string | null | undefined)[];
   displayName?: string | null;
   kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
@@ -153,6 +154,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     const nextRooms = upsertRecentRootRoomSnapshot({
       snapshot,
       recentRootRooms: options.recentRootRooms.value,
+      aliasIdentifiers: rememberOptions.aliasIdentifiers,
       displayName: rememberOptions.displayName || existingRoom?.displayName || null,
       kind,
       rootPath,

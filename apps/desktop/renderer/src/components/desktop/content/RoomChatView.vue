@@ -22,6 +22,8 @@
           :loading-older-messages="loadingOlderMessages"
           :messages="messages"
           :thread-messages="threadMessages"
+          :local-agent-work="localAgentWork"
+          :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :search-query="searchQuery"
@@ -30,6 +32,7 @@
           @open-agent="openAgentModal"
           @open-image="openImageViewer"
           @open-thread="openThread"
+          @quote-reply="quoteReply"
           @open-github-event="emit('open-github-event', $event)"
           @scroll-position="emit('scroll-position', $event)"
         />
@@ -59,12 +62,14 @@
           :initial-draft="initialDraft"
           :participants="participants"
           :pending-attachment-drafts="pendingAttachmentDrafts"
-          :reply-to="null"
+          :reply-to="replyTarget"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
           :sending="sending"
+          @clear-reply="clearReplyTarget"
           @draft-change="emit('draft-change', $event)"
+          @open-add-agent="emit('open-add-agent')"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @send-message="handleComposerSend"
@@ -90,6 +95,7 @@
         :active-search-message-id="activeSearchMessageId"
         @close="closeThread"
         @open-image="openImageViewer"
+        @open-agent="openAgentModal"
         @open-github-event="emit('open-github-event', $event)"
         @send-thread-message="sendThreadMessage"
       />
@@ -107,6 +113,7 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
+import type { ManagedAgentWorkIndicator } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
@@ -120,6 +127,8 @@ const props = defineProps<{
   active: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  localAgentWork: ManagedAgentWorkIndicator[];
+  hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sending: boolean;
@@ -142,12 +151,15 @@ const emit = defineEmits<{
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
+  "open-agent-detail": [target: AgentModalTarget];
+  "open-add-agent": [];
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
 }>();
 
 const activeThreadParentId = ref<string | null>(null);
+const replyTarget = ref<DesktopRoomMessage | null>(null);
 const activeThreadParent = computed(() =>
   resolveThreadParent(props.threadMessages, activeThreadParentId.value)
 );
@@ -183,10 +195,19 @@ const { openAgentModal } = useAgentReasoningLauncher({
   reasoningSessions: () => props.reasoningSessions,
   openReasoning: (sessionId) => emit("open-reasoning", sessionId),
   openFallback: (target) => emit("open-agent-reasoning-fallback", target),
+  openAgentDetail: (target) => emit("open-agent-detail", target),
 });
 
 function openThread(messageId: string): void {
   activeThreadParentId.value = messageId;
+}
+
+function quoteReply(messageId: string): void {
+  replyTarget.value = props.threadMessages.find((message) => message.id === messageId) ?? null;
+}
+
+function clearReplyTarget(): void {
+  replyTarget.value = null;
 }
 
 function closeThread(): void {
@@ -203,11 +224,13 @@ function handleComposerSend(
   attachments: Array<{ upload_id: string }>,
 ): void {
   emit("send-message", text, replyToId, attachments);
+  clearReplyTarget();
   clearAttachmentDrafts();
 }
 
 watch(toRef(props, "roomIdentifier"), () => {
   activeThreadParentId.value = null;
+  clearReplyTarget();
 });
 
 watch(
@@ -226,6 +249,9 @@ watch(
   () => {
     if (activeThreadParentId.value && !activeThreadParent.value) {
       activeThreadParentId.value = null;
+    }
+    if (replyTarget.value && !props.threadMessages.some((message) => message.id === replyTarget.value?.id)) {
+      clearReplyTarget();
     }
   },
   { deep: true },

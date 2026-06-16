@@ -72,6 +72,7 @@ export function rememberRecentRootRooms(storageKey: string, rooms: RecentRootRoo
 export function upsertRecentRootRoomSnapshot(input: {
   snapshot: DesktopRoomSnapshot;
   recentRootRooms: readonly RecentRootRoom[];
+  aliasIdentifiers?: readonly (string | null | undefined)[];
   displayName?: string | null;
   kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
@@ -82,6 +83,10 @@ export function upsertRecentRootRoomSnapshot(input: {
   const normalizedIdentifier = normalizeRoomIdentifier(identifier);
   if (!normalizedIdentifier) return [...input.recentRootRooms];
   const aliases = roomSnapshotAliases(input.snapshot);
+  for (const alias of input.aliasIdentifiers || []) {
+    const normalizedAlias = normalizeRoomIdentifier(alias);
+    if (normalizedAlias) aliases.add(normalizedAlias);
+  }
 
   const rootPath = input.rootPath || null;
   const kind = input.kind || (rootPath ? "project" : "room");
@@ -104,6 +109,28 @@ export function upsertRecentRootRoomSnapshot(input: {
       !aliases.has(normalizeRoomIdentifier(entry.identifier) || "")
     ),
   ].slice(0, 12);
+}
+
+export function resolveAccountRoomAliasIdentifier(
+  roomIdentifier: string | null | undefined,
+  accountRooms: readonly DesktopAccountRoomEntry[],
+): string | null {
+  const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!normalizedIdentifier) return null;
+
+  const matches = accountRooms.filter((room) => {
+    if (normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier) return false;
+    return [
+      room.displayName,
+      room.name,
+    ].some((alias) => normalizeRoomIdentifier(alias) === normalizedIdentifier);
+  });
+  const identifiers = new Set(
+    matches
+      .map((room) => room.roomIdentifier.trim())
+      .filter(Boolean),
+  );
+  return identifiers.size === 1 ? [...identifiers][0] || null : null;
 }
 
 function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {

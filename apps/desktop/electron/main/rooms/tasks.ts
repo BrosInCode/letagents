@@ -13,7 +13,7 @@ import {
   readLetAgentsLocalState,
 } from "../../board-task-actions.js";
 import { apiFetch } from "../auth.js";
-import { letagentsLocalStatePath } from "../paths.js";
+import { getLetAgentsLocalStatePath } from "../paths.js";
 import {
   mapDesktopTaskSummaryPayload,
   type DesktopTaskSummaryPayload,
@@ -168,7 +168,7 @@ export async function runDesktopRoomTaskWorkerAction(
   if (!taskId.trim()) throw new Error("Task id is required.");
 
   const session = getCurrentLocalWorkerSession(
-    readLetAgentsLocalState(letagentsLocalStatePath),
+    readLetAgentsLocalState(getLetAgentsLocalStatePath()),
     trimmedRoomIdentifier,
   );
   if (!session?.session_id || !session.session_token) {
@@ -199,7 +199,7 @@ export async function runDesktopRoomTaskReviewWorkerAction(
   if (!taskId.trim()) throw new Error("Task id is required.");
 
   const session = getCurrentLocalWorkerSession(
-    readLetAgentsLocalState(letagentsLocalStatePath),
+    readLetAgentsLocalState(getLetAgentsLocalStatePath()),
     trimmedRoomIdentifier,
   );
   if (!session?.session_id || !session.session_token) {

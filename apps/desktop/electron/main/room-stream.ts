@@ -1,11 +1,13 @@
 import type {
   DesktopRentalActivityEvent,
+  DesktopRoomMessage,
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
 } from "../ipc-types.js";
 import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
 import { readStoredAuth } from "./auth.js";
+import { isDesktopSmokeCheck } from "./smoke.js";
 import { isLocalChatStorageEnabled } from "./chat-storage/settings.js";
 import { getLocalChatMessages } from "./rooms/messages/local-store.js";
 import {
@@ -16,6 +18,11 @@ import {
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { emitToMainWindow } from "./window.js";
+import { dispatchRoomStreamEventToManagedAgents } from "./agents/codex-supervisor.js";
+import {
+  createManagedMessageDeliveryTracker,
+  type ManagedMessageDeliveryTracker,
+} from "./room-stream-dedupe.js";
 
 let activeRoomStream: {
   roomIdentifier: string;
@@ -24,6 +31,7 @@ let activeRoomStream: {
   pollAbortController: AbortController | null;
   retryMs: number;
   lastMessageId: string | null;
+  managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
   stopped: boolean;
 } | null = null;
 
@@ -37,8 +45,41 @@ function isCurrentRoomStream(
   return activeRoomStream === stream && !stream.stopped;
 }
 
-export function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+export function emitRoomStreamEvent(
+  event: DesktopRoomStreamEvent,
+  options: { deliverToManagedAgents?: boolean } = {},
+): void {
   emitToMainWindow("desktop:room:stream-event", event);
+  if (options.deliverToManagedAgents === false) {
+    return;
+  }
+  try {
+    dispatchRoomStreamEventToManagedAgents(event);
+  } catch {
+    // Agent delivery must not break the human room stream.
+  }
+}
+
+export function deliverDesktopRoomMessageToManagedAgents(
+  roomIdentifier: string,
+  message: DesktopRoomMessage,
+): void {
+  const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(roomIdentifier, message.id);
+  if (!shouldDeliverToManagedAgents) {
+    return;
+  }
+  dispatchRoomStreamEventToManagedAgents({
+    type: "message",
+    roomIdentifier,
+    message,
+  });
+}
+
+function shouldDeliverManagedMessageEvent(
+  roomIdentifier: string,
+  messageId: string | null | undefined,
+): boolean {
+  return activeRoomStream?.managedMessageDeliveryTracker.remember(roomIdentifier, messageId) ?? true;
 }
 
 function mapRoomStreamTaskPayload(task: {
@@ -210,19 +251,21 @@ function handleRoomStreamFrame(
   }
 
   if (eventName === "message") {
+    const messageId = typeof payload.id === "string" ? payload.id : null;
     if (
       activeRoomStream?.roomIdentifier === roomIdentifier &&
-      typeof payload.id === "string"
+      messageId
     ) {
-      activeRoomStream.lastMessageId = payload.id;
+      activeRoomStream.lastMessageId = messageId;
     }
+    const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(eventRoomIdentifier, messageId);
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier: eventRoomIdentifier,
       message: mapRoomMessagePayload(
         payload as Parameters<typeof mapRoomMessagePayload>[0],
       ),
-    });
+    }, { deliverToManagedAgents: shouldDeliverToManagedAgents });
   }
 }
 
@@ -264,11 +307,12 @@ async function pollDesktopRoomMessages(
         if (typeof rawMessage.id === "string") {
           stream.lastMessageId = rawMessage.id;
         }
+        const roomIdentifier = page.room_id || stream.roomIdentifier;
         emitRoomStreamEvent({
           type: "message",
-          roomIdentifier: page.room_id || stream.roomIdentifier,
+          roomIdentifier,
           message: mapRoomMessagePayload(rawMessage),
-        });
+        }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id) });
       }
     } catch (error) {
       if (!isCurrentRoomStream(stream) || pollAbortController.signal.aborted)
@@ -310,7 +354,7 @@ async function pollLocalDesktopRoomMessages(
           type: "message",
           roomIdentifier: stream.roomIdentifier,
           message: mapRoomMessagePayload(rawMessage),
-        });
+        }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(stream.roomIdentifier, rawMessage.id) });
       }
       await new Promise((resolve) => setTimeout(resolve, page.messages.length ? 250 : 1500));
     } catch (error) {
@@ -443,8 +487,16 @@ export async function startDesktopRoomStream(
     pollAbortController: null,
     retryMs: 1000,
     lastMessageId: afterMessageId || null,
+    managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
     stopped: false,
   };
+  if (isDesktopSmokeCheck()) {
+    emitRoomStreamEvent({
+      type: "open",
+      roomIdentifier: trimmedRoomIdentifier,
+    });
+    return;
+  }
   if (await isLocalChatStorageEnabled()) {
     void pollLocalDesktopRoomMessages(activeRoomStream);
     return;

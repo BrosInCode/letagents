@@ -29,6 +29,8 @@ test("getOwnerLabelFromAttribution strips agent suffixes", () => {
 
 test("isAgentIdentityValue detects structured and attributed agent labels", () => {
   assert.equal(isAgentIdentityValue("GardenFern | EmmyMay's agent | Agent"), true);
+  assert.equal(isAgentIdentityValue("AntigravityPair"), true);
+  assert.equal(isAgentIdentityValue("codexter"), false);
   assert.equal(isAgentIdentityValue("EmmyMay"), false);
 });
 
@@ -91,6 +93,17 @@ test("buildRoomParticipantUpsertFromMessage classifies agents, humans, and syste
   assert.equal(agent?.kind, "agent");
   assert.equal(agent?.participant_key, "agent:gardenfern | emmymay's agent | agent");
 
+  const bareRuntimeAgent = buildRoomParticipantUpsertFromMessage({
+    projectId: "focus_5",
+    sender: "AntigravityPair",
+    source: "browser",
+    timestamp: seenAt,
+  });
+  assert.equal(bareRuntimeAgent?.kind, "agent");
+  assert.equal(bareRuntimeAgent?.participant_key, "agent:antigravitypair");
+  assert.equal(bareRuntimeAgent?.display_name, "AntigravityPair");
+  assert.equal(bareRuntimeAgent?.ide_label, "Antigravity");
+
   const human = buildRoomParticipantUpsertFromMessage({
     projectId: "focus_5",
     sender: "EmmyMay",
@@ -100,6 +113,16 @@ test("buildRoomParticipantUpsertFromMessage classifies agents, humans, and syste
   });
   assert.equal(human?.kind, "human");
   assert.equal(human?.participant_key, "human:login:emmymay");
+
+  assert.equal(
+    buildRoomParticipantUpsertFromMessage({
+      projectId: "focus_5",
+      sender: "anonymous",
+      source: "browser",
+      timestamp: seenAt,
+    }),
+    null
+  );
 
   assert.equal(
     buildRoomParticipantUpsertFromMessage({

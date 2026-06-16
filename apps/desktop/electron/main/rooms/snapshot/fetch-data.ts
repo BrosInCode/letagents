@@ -51,7 +51,7 @@ export async function fetchRoomSnapshotData(
         }).then((page) => ({ messages: page.messages }))
       : apiFetch<MessagesResponse>(
           `/rooms/${encodeURIComponent(roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
-        ).catch(() => ({ messages: [] })),
+        ),
     apiFetch<GitHubEventsResponse>(
       `/rooms/${encodeURIComponent(roomIdentifier)}/events?limit=100`,
     ).catch(() => null),

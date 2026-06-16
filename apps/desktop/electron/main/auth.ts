@@ -12,6 +12,7 @@ import type {
 } from "../ipc-types.js";
 import { resolveRoomIdentifier } from "../repo-status.js";
 import { apiUrl, workspaceRoot } from "./paths.js";
+import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
 type ApiErrorPayload = {
   error?: string;
@@ -217,6 +218,9 @@ function buildAuthStatus(input: {
 
 export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
   const storedAuth = await readStoredAuth();
+  if (isDesktopSmokeCheck()) {
+    return desktopSmokeAuthStatus();
+  }
   if (!storedAuth.token) {
     return buildAuthStatus({ storedAuth });
   }

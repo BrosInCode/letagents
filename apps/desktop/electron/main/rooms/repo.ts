@@ -8,6 +8,7 @@ import type {
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
 import { apiFetch } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
+import { isDesktopSmokeCheck } from "../smoke.js";
 import { focusMainWindow } from "../window.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
 import {
@@ -84,6 +85,18 @@ export async function getDesktopGitHubIntegrationStatus(
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before checking GitHub.");
+  }
+
+  if (isDesktopSmokeCheck()) {
+    return {
+      roomId: trimmedRoomIdentifier,
+      accessRoomId: null,
+      configured: false,
+      setupManifestAvailable: false,
+      connected: false,
+      installUrlAvailable: false,
+      repository: null,
+    };
   }
 
   const status = await apiFetch<{

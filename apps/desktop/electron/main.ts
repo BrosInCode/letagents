@@ -5,7 +5,10 @@ import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
 import { attachmentProtocolScheme } from "./main/paths.js";
 import { stopDesktopRoomStream } from "./main/room-stream.js";
+import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
 import { createWindow, hasOpenWindows } from "./main/window.js";
+
+configureDesktopSmokeEnvironment();
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -23,6 +26,7 @@ registerDesktopIpcHandlers();
 
 app.whenReady().then(() => {
   protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
+  seedDesktopSmokeState();
   app.setName("LetAgents");
   configureApplicationMenu();
   createWindow();

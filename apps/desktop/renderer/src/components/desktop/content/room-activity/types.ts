@@ -17,6 +17,8 @@ export interface ActivityParticipant {
   kind: ParticipantKind;
   label: string;
   actorLabel: string | null;
+  agentKey: string | null;
+  agentSessionId: string | null;
   ownerLabel: string | null;
   ideLabel: string | null;
   runtime: string | null;

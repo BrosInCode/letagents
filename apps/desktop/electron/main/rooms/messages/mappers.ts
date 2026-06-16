@@ -26,6 +26,8 @@ export type RoomMessagePayload = {
     owner_attribution?: string | null;
     ide_label?: string | null;
     actor_label?: string | null;
+    agent_key?: string | null;
+    agent_session_id?: string | null;
   } | null;
 };
 
@@ -67,5 +69,7 @@ function mapRoomMessageAgentIdentity(
     ownerAttribution: identity.owner_attribution || null,
     ideLabel: identity.ide_label || null,
     actorLabel: identity.actor_label || null,
+    agentKey: identity.agent_key || null,
+    agentSessionId: identity.agent_session_id || null,
   };
 }

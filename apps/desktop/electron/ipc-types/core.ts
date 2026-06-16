@@ -15,10 +15,12 @@ export interface RepoWorktreeEntry {
   branch: string | null;
   head: string;
   isCurrent: boolean;
+  isMain?: boolean;
 }
 
 export interface RepoStatus {
   rootPath: string;
+  mainRootPath?: string | null;
   branch: string | null;
   worktrees: RepoWorktreeEntry[];
 }

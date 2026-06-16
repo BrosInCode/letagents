@@ -258,9 +258,12 @@ async function writeCodexTomlMcpConfig(
   );
 }
 
-export async function buildMcpInstallState(): Promise<DesktopMcpInstallState> {
+export async function buildMcpInstallState(
+  options: DesktopMcpInstallOptions = {},
+): Promise<DesktopMcpInstallState> {
   const storedSetup = await readStoredMcpSetup();
-  const expected = await buildExpectedLetAgentsMcpServerConfig(storedSetup.cwd);
+  const effectiveCwd = normalizeInstallCwd(options.cwd) || storedSetup.cwd;
+  const expected = await buildExpectedLetAgentsMcpServerConfig(effectiveCwd);
   const targets = getMcpInstallTargetDefinitions().map<DesktopMcpInstallTarget>(
     (target) => {
       const status = getLetAgentsMcpInstallStatus(target, expected);
@@ -412,7 +415,7 @@ export async function installLetAgentsMcpServers(
     installs,
   });
 
-  const installState = await buildMcpInstallState();
+  const installState = await buildMcpInstallState({ cwd: effectiveCwd });
   const targets = installState.targets.filter((candidate) =>
     uniqueTargetIds.includes(candidate.id),
   );

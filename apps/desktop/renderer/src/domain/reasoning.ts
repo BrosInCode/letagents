@@ -7,6 +7,8 @@ export interface ReasoningAgentTarget {
   displayName: string;
   ideLabel?: string | null;
   sender: string;
+  agentKey?: string | null;
+  agentSessionId?: string | null;
 }
 
 export function latestReasoningSessionForTarget(
@@ -26,6 +28,8 @@ export function latestReasoningSessionForTarget(
 export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[] {
   return [
     target.actorLabel,
+    specificAgentKey(target.agentKey),
+    target.agentSessionId,
     target.sender,
     target.displayName,
     actorDisplayNameKey(target.actorLabel),
@@ -36,7 +40,7 @@ export function reasoningSessionAgentKeys(session: DesktopReasoningSession): str
   return [
     session.actorLabel,
     actorDisplayNameKey(session.actorLabel),
-    session.agentKey,
+    specificAgentKey(session.agentKey),
   ].map(normalizeAgentKey).filter(Boolean);
 }
 
@@ -84,6 +88,34 @@ export function reasoningStatus(session: DesktopReasoningSession): string {
     : "Active";
 }
 
+export function isIdleReasoningSession(session: DesktopReasoningSession | null | undefined): boolean {
+  if (!session) {
+    return false;
+  }
+  if (session.closedAt) {
+    return true;
+  }
+
+  const normalized = String(session.latestPayload?.status || session.status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ");
+  return normalized === "idle" ||
+    normalized === "waiting" ||
+    normalized === "waiting for event" ||
+    normalized === "completed" ||
+    normalized === "complete" ||
+    normalized === "done";
+}
+
 function actorDisplayNameKey(actorLabel: string | null | undefined): string | null {
   return actorLabel ? displayNameFromActor(actorLabel) : null;
+}
+
+function specificAgentKey(value: string | null | undefined): string {
+  const normalized = normalizeAgentKey(value);
+  if (!normalized || !/[/:]/.test(normalized)) {
+    return "";
+  }
+  return normalized;
 }

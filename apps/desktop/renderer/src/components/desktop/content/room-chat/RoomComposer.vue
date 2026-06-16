@@ -47,7 +47,21 @@
       <p v-if="sendError || attachmentError" class="desktop-composer-error" data-testid="desktop-composer-error">
         {{ sendError || attachmentError }}
       </p>
-      <p v-else class="desktop-composer-hint">{{ composerHint }}</p>
+      <p v-else class="desktop-composer-hint">
+        <span>{{ composerHint }}</span>
+        <button
+          v-if="roomIdentifier"
+          class="desktop-composer-add-agent"
+          type="button"
+          title="Add agent to room"
+          aria-label="Add agent to room"
+          data-testid="desktop-composer-add-agent"
+          @click="$emit('open-add-agent')"
+        >
+          <Bot :size="14" aria-hidden="true" />
+          <Plus :size="12" aria-hidden="true" />
+        </button>
+      </p>
       <button
         class="desktop-composer-attach"
         type="button"
@@ -76,11 +90,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { Bot, Plus } from "@lucide/vue";
 import type {
   DesktopParticipantSummary,
   DesktopRoomMessage,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
+import { isMentionableRoomParticipant } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import { displaySender, replyPreview } from "./message-format";
 
@@ -102,6 +118,7 @@ const emit = defineEmits<{
   "clear-reply": [];
   "draft-change": [text: string];
   "pick-attachments": [];
+  "open-add-agent": [];
   "remove-attachment": [uploadId: string];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
 }>();
@@ -134,7 +151,7 @@ const mentionOpen = computed({
 const mentionCandidates = computed(() => {
   const query = (mentionQuery.value || "").toLowerCase();
   return props.participants
-    .filter((participant) => participant.activityState !== "offline")
+    .filter(isMentionableRoomParticipant)
     .filter((participant) => participant.displayName.toLowerCase().includes(query))
     .slice(0, 6);
 });

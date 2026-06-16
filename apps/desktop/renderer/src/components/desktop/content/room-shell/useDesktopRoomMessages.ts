@@ -5,6 +5,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   compareRoomMessages,
+  isHiddenChatMessage,
   mergeRoomMessages,
 } from "./messages";
 import {
@@ -14,6 +15,7 @@ import {
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 
 const messageHistoryPageSize = 150;
+const maxAutoHistoryBackfillPages = 5;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -29,6 +31,7 @@ export function useDesktopRoomMessages(options: {
   const hasOlderMessages = ref(true);
   const loadingOlderMessages = ref(false);
   const chatDraftText = ref("");
+  const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
 
   const loadedServerMessages = computed(() => {
@@ -41,6 +44,15 @@ export function useDesktopRoomMessages(options: {
         && (options.githubEventsVisible.value || !isGitHubRoomMessage(message))
       );
   });
+  const hasFilteredRoomActivity = computed(() => {
+    if (visibleMessages.value.length) return false;
+    return [...olderMessages.value, ...options.messages.value, ...localMessages.value]
+      .some((message) =>
+        isUserFacingFilteredMessage(message)
+        || isLowSignalGitHubCheckMessage(message)
+        || (!options.githubEventsVisible.value && isGitHubRoomMessage(message))
+      );
+  });
   const timelineMessages = computed(() => roomTimelineMessages(visibleMessages.value));
   const roomMessagesForAgentInsight = computed(() =>
     [...olderMessages.value, ...options.messages.value, ...localMessages.value].sort(compareRoomMessages)
@@ -49,6 +61,7 @@ export function useDesktopRoomMessages(options: {
   watch(
     () => options.messages.value.map((message) => message.id).join("|"),
     () => {
+      autoHistoryBackfillCount.value = 0;
       const serverIds = new Set(options.messages.value.map((message) => message.id));
       localMessages.value = localMessages.value.filter((message) => !serverIds.has(message.id));
     }
@@ -63,7 +76,25 @@ export function useDesktopRoomMessages(options: {
       loadingOlderMessages.value = false;
       sendError.value = null;
       chatDraftText.value = "";
+      autoHistoryBackfillCount.value = 0;
     },
+  );
+
+  watch(
+    [
+      () => visibleMessages.value.length,
+      () => hasFilteredRoomActivity.value,
+      () => hasOlderMessages.value,
+      () => loadingOlderMessages.value,
+      () => options.room.value.identifier,
+    ],
+    ([visibleCount, hasFilteredActivity, hasOlder, loading, roomIdentifier]) => {
+      if (visibleCount > 0 || !hasFilteredActivity || !hasOlder || loading || !roomIdentifier) return;
+      if (autoHistoryBackfillCount.value >= maxAutoHistoryBackfillPages) return;
+      autoHistoryBackfillCount.value += 1;
+      void loadOlderMessages();
+    },
+    { immediate: true },
   );
 
   async function sendRoomMessage(
@@ -100,6 +131,10 @@ export function useDesktopRoomMessages(options: {
 
   async function loadOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
+    if (typeof window === "undefined" || !window.letagentsDesktop?.room?.getMessagesBefore) {
+      hasOlderMessages.value = false;
+      return;
+    }
     const roomIdentifier = options.room.value.identifier;
     const firstMessageId = oldestRoomHistoryCursor(loadedServerMessages.value);
     if (!firstMessageId) {
@@ -134,6 +169,7 @@ export function useDesktopRoomMessages(options: {
     loadingOlderMessages,
     chatDraftText,
     ownMessageIds,
+    hasFilteredRoomActivity,
     visibleMessages,
     timelineMessages,
     roomMessagesForAgentInsight,
@@ -145,4 +181,8 @@ export function useDesktopRoomMessages(options: {
 
 export function oldestRoomHistoryCursor(messages: readonly DesktopRoomMessage[]): string | null {
   return [...messages].sort(compareRoomMessages)[0]?.id ?? null;
+}
+
+function isUserFacingFilteredMessage(message: DesktopRoomMessage): boolean {
+  return isHiddenChatMessage(message) && !(message.agentPromptKind === "auto" && !message.text.trim());
 }
