@@ -283,7 +283,7 @@ function installSmokeCheck(window: BrowserWindow): void {
         })();
         const detailText = () => document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
         await waitFor("local supervised session", () =>
-          detailText().includes("Supervised worker") &&
+          detailText().includes("Local agent") &&
           detailText().includes("MapleRidge") &&
           detailText().includes("Local")
         );
@@ -294,7 +294,7 @@ function installSmokeCheck(window: BrowserWindow): void {
         result.localStopControl = true;
         document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')?.click();
         await waitFor("stop turn keeps local session", () =>
-          detailText().includes("Supervised worker") &&
+          detailText().includes("Local agent") &&
           detailText().includes("MapleRidge") &&
           document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')
         );

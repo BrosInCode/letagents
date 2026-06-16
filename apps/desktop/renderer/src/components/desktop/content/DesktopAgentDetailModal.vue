@@ -17,9 +17,45 @@
         @keydown.tab="handleDialogTab"
       >
         <header class="desktop-agent-detail-header">
-          <div>
+          <div class="desktop-agent-detail-title-block">
             <span>Agent</span>
-            <h3 :id="titleId">{{ target.displayName }}</h3>
+            <div class="desktop-agent-detail-title-row">
+              <span
+                v-if="matchingManagedSessions.length"
+                class="desktop-agent-detail-status-pulse"
+                :data-state="isPrimaryAgentRunning ? 'running' : 'idle'"
+                :title="isPrimaryAgentRunning ? 'Agent is running' : 'Agent is not currently running'"
+                aria-hidden="true"
+              />
+              <h3 :id="titleId">{{ target.displayName }}</h3>
+              <div
+                v-if="matchingManagedSessions.length"
+                class="desktop-agent-detail-agent-actions"
+                aria-label="Agent controls"
+              >
+                <button
+                  type="button"
+                  class="desktop-agent-detail-icon-button"
+                  :disabled="loadingManagedSessions"
+                  :title="loadingManagedSessions ? 'Refreshing agent status' : 'Refresh agent status'"
+                  aria-label="Refresh agent status"
+                  @click="() => loadManagedSessions()"
+                >
+                  <RefreshCw :size="16" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  class="desktop-agent-detail-icon-button desktop-agent-detail-icon-button-stop"
+                  data-testid="desktop-agent-detail-stop-managed-agent"
+                  :disabled="!primaryManagedSession || !primaryManagedSession.canStop || stoppingSessionId === primaryManagedSession.id"
+                  :title="stoppingSessionId === primaryManagedSession?.id ? 'Stopping turn' : 'Stop turn'"
+                  aria-label="Stop turn"
+                  @click="primaryManagedSession ? stopManagedSession(primaryManagedSession.id) : undefined"
+                >
+                  <Square :size="14" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
             <p>{{ identityLine }}</p>
           </div>
           <div class="desktop-agent-detail-header-actions">
@@ -43,14 +79,7 @@
         <div class="desktop-agent-detail-body">
           <section class="desktop-agent-detail-panel">
             <header>
-              <span>Supervised worker</span>
-              <button
-                type="button"
-                :disabled="loadingManagedSessions"
-                @click="() => loadManagedSessions()"
-              >
-                {{ loadingManagedSessions ? "Refreshing..." : "Refresh" }}
-              </button>
+              <span>Local agent</span>
             </header>
 
             <div v-if="matchingManagedSessions.length" class="desktop-agent-detail-session-list">
@@ -73,7 +102,7 @@
                     :disabled="Boolean(inspectingSessionIds[session.id])"
                     @click="inspectManagedSession(session.id)"
                   >
-                    {{ inspectingSessionIds[session.id] ? "Refreshing..." : "Refresh" }}
+                    {{ inspectingSessionIds[session.id] ? "Refreshing..." : "Refresh transcript" }}
                   </button>
                 </div>
                 <ul
@@ -87,20 +116,11 @@
                     <p>{{ itemText(item) }}</p>
                   </li>
                 </ul>
-                <button
-                  type="button"
-                  class="desktop-agent-detail-stop-button"
-                  data-testid="desktop-agent-detail-stop-managed-agent"
-                  :disabled="!session.canStop || stoppingSessionId === session.id"
-                  @click="stopManagedSession(session.id)"
-                >
-                  {{ stoppingSessionId === session.id ? "Stopping..." : "Stop turn" }}
-                </button>
               </article>
             </div>
 
             <div v-else class="desktop-agent-detail-empty">
-              <strong>No local supervised session matched this agent.</strong>
+              <strong>No local agent session matched this agent.</strong>
               <p>External agents still appear here through their published room activity.</p>
               <button type="button" @click="emit('open-add-agent')">Add agent</button>
             </div>
@@ -145,7 +165,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { X } from "@lucide/vue";
+import { RefreshCw, Square, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentSession,
@@ -225,6 +245,12 @@ const matchingManagedSessions = computed(() => {
 
   return activeSessions.filter((session) => managedAgentSessionMatchesTarget(session, props.target!));
 });
+const primaryManagedSession = computed(() =>
+  matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
+);
+const isPrimaryAgentRunning = computed(() =>
+  matchingManagedSessions.value.some((session) => session.status === "running" || session.status === "starting")
+);
 const targetInspectionKey = computed(() => [
   props.target?.agentSessionId,
   props.target?.agentKey,
