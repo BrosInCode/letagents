@@ -161,6 +161,10 @@ test("isVisibleManagedAgentSession keeps idle desktop-event workers visible", ()
     status: "failed",
     canStop: true,
   })), false);
+  assert.equal(isVisibleManagedAgentSession(session({
+    status: "unknown",
+    canStop: true,
+  })), false);
 });
 
 test("isDeliverableManagedAgentSession requires a registered room worker", () => {

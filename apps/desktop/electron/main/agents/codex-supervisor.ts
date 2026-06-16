@@ -10,6 +10,7 @@ import type {
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
+import { isDesktopSmokeCheck } from "../smoke.js";
 import {
   isCodexAppServerReady,
   launchCodexAppServer,
@@ -585,6 +586,33 @@ function offlineAppServerError(session: DesktopCodexLiveSessionState): string {
     : "server unreachable";
 }
 
+function isSmokeManagedCodexSession(session: DesktopCodexLiveSessionState): boolean {
+  return isDesktopSmokeCheck() && session.server_url === "smoke://codex";
+}
+
+function smokeManagedCodexInspection(
+  session: DesktopCodexLiveSessionState,
+): DesktopManagedAgentInspectResult {
+  const updated =
+    updateCodexLiveSession(session.session_id, (current) => ({
+      ...current,
+      status: "running",
+      last_error: null,
+      updated_at: new Date().toISOString(),
+    })) ?? session;
+  const bound = bindCodexLiveSessionToWorker(updated);
+  return {
+    session: toPublicManagedAgentSession(bound),
+    serverReachable: true,
+    recentItems: [
+      {
+        type: "agentMessage",
+        text: "Published local Codex progress for smoke verification.",
+      },
+    ],
+  };
+}
+
 function killOwnedAppServer(session: DesktopCodexLiveSessionState): void {
   clearCodexRuntimeReasoningState(session.session_id);
   markAgentSessionEnded(session.agent_session_id);
@@ -970,6 +998,10 @@ export async function inspectDesktopManagedAgentSession(
   const session = findStoredSession(sessionId, roomIdentifier);
   if (!session) {
     return null;
+  }
+
+  if (isSmokeManagedCodexSession(session)) {
+    return smokeManagedCodexInspection(session);
   }
 
   const serverReachable = await isCodexAppServerReady(session.server_url);
@@ -1418,6 +1450,17 @@ export async function stopDesktopManagedAgent(
   const session = findStoredSession(input.sessionId, input.roomIdentifier);
   if (!session) {
     return null;
+  }
+
+  if (isSmokeManagedCodexSession(session)) {
+    const updated =
+      updateCodexLiveSession(session.session_id, (current) => ({
+        ...current,
+        status: "running",
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      })) ?? session;
+    return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
   }
 
   const serverReachable = await isCodexAppServerReady(session.server_url);

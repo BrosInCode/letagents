@@ -122,7 +122,7 @@ function seedDesktopSmokeAgentState(now: string): void {
           token: "LOCAL_CODEX_ROOM_smoke",
           thread_id: "thread_smoke_codex",
           turn_id: "turn_smoke_codex",
-          server_url: "http://127.0.0.1:9",
+          server_url: "smoke://codex",
           server_pid: null,
           launched_server: false,
           codex_bin: "codex",

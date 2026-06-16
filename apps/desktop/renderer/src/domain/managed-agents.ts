@@ -23,7 +23,7 @@ export function hasDesktopManagedRuntime(
 export function isVisibleManagedAgentSession(
   session: DesktopManagedAgentSession,
 ): boolean {
-  if (session.status === "failed" || session.status === "interrupted") {
+  if (session.status === "failed" || session.status === "interrupted" || session.status === "unknown") {
     return false;
   }
   return session.canStop;
