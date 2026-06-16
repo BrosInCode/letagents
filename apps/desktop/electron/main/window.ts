@@ -79,6 +79,7 @@ function installSmokeCheck(window: BrowserWindow): void {
           roomSnapshot: typeof api?.room?.getSnapshot === "function",
           workerProviders: typeof api?.workers?.listAgentProviders === "function",
           managedSessions: typeof api?.workers?.listManagedAgentSessions === "function",
+          managedSessionUpdates: typeof api?.workers?.onManagedAgentSessionUpdate === "function",
           managedStart: typeof api?.workers?.startManagedAgent === "function",
           managedStop: typeof api?.workers?.stopManagedAgent === "function",
           desktopShell: false,
@@ -91,6 +92,7 @@ function installSmokeCheck(window: BrowserWindow): void {
           codexMissingRuntime: false,
           codexInstallConfirmation: false,
           managedSessionCodename: false,
+          addAgentStopAgentOnly: false,
           setupConfirmationClears: false,
           setupConfirmationClearsOnClose: false,
           deliveryControls: false,
@@ -187,6 +189,7 @@ function installSmokeCheck(window: BrowserWindow): void {
           modalText().includes("Desktop events")
         );
         result.managedSessionCodename = true;
+        result.addAgentStopAgentOnly = modalText().includes("Stop agent") && !modalText().includes("Stop turn");
         result.deliveryControls = modalText().includes("MCP loop") && modalText().includes("Desktop events");
         result.addAgentModalScroll = (() => {
           const dialog = document.querySelector(".desktop-add-agent-modal");

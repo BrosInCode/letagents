@@ -28,6 +28,30 @@
         @open-github-event="$emit('open-github-event', $event)"
       />
 
+      <div
+        v-if="localAgentWork.length && !roomLoading"
+        class="room-local-agent-work-list"
+        data-testid="room-local-agent-work-list"
+      >
+        <article
+          v-for="work in localAgentWork"
+          :key="work.id"
+          class="room-local-agent-work"
+          data-testid="room-local-agent-work"
+        >
+          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+          <div>
+            <strong>{{ work.displayName }}</strong>
+            <span>{{ work.summary }}</span>
+          </div>
+          <span class="room-local-agent-work-dots" aria-hidden="true">
+            <i></i>
+            <i></i>
+            <i></i>
+          </span>
+        </article>
+      </div>
+
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
           v-for="index in 4"
@@ -44,7 +68,7 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
+      <article v-else-if="!messages.length && !localAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -85,6 +109,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
@@ -116,6 +141,7 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  localAgentWork: ManagedAgentWorkIndicator[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLoading: boolean;
@@ -228,6 +254,24 @@ watch(
     }
   },
   { immediate: true },
+);
+
+watch(
+  () => props.localAgentWork.map((work) => `${work.id}:${work.summary}`).join("|"),
+  async (nextKey, previousKey) => {
+    if (nextKey === previousKey) {
+      return;
+    }
+    await nextTick();
+    if (!messagesElement.value) {
+      return;
+    }
+    if (!previousKey || isScrolledToBottom) {
+      scrollToBottom("auto");
+      return;
+    }
+    updateScrollState();
+  },
 );
 
 watch(

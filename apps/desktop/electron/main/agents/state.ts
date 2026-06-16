@@ -50,6 +50,12 @@ export interface DesktopCodexLiveSessionState {
   codex_bin: string;
   agent_session_id?: string | null;
   reasoning_session_id?: string | null;
+  active_work?: {
+    kind: "message" | "task_update";
+    event_id?: string | null;
+    started_at: string;
+    summary?: string | null;
+  } | null;
   status: DesktopManagedAgentSessionStatus;
   last_error?: string | null;
   started_at: string;
@@ -754,6 +760,14 @@ export function toPublicManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Codex",
     reasoningSessionId: session.reasoning_session_id ?? null,
+    activeWork: session.active_work
+      ? {
+        kind: session.active_work.kind,
+        eventId: session.active_work.event_id ?? null,
+        startedAt: session.active_work.started_at,
+        summary: session.active_work.summary ?? null,
+      }
+      : null,
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,

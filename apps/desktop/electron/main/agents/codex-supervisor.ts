@@ -11,6 +11,7 @@ import type {
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
+import { emitToMainWindow } from "../window.js";
 import {
   isCodexAppServerReady,
   launchCodexAppServer,
@@ -105,6 +106,8 @@ const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
   "Codex did not get a LetAgents room worker identity. Sign into LetAgents Desktop, then try starting the agent again.";
+
+type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
 
 type AgentIdentityCreateResponse = {
   name?: string;
@@ -469,6 +472,7 @@ function queueCodexRuntimeReasoningSummary(
   session: DesktopCodexLiveSessionState,
   summary: CodexRuntimeReasoningSummary,
 ): void {
+  updateActiveWorkSummary(session.session_id, summary.summary);
   const previous = codexRuntimeReasoningPostQueues.get(session.session_id) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)
@@ -515,6 +519,16 @@ function publishCodexRuntimeSnapshot(
 function clearCodexRuntimeReasoningState(sessionId: string): void {
   codexRuntimeReasoningLastPost.delete(sessionId);
   codexRuntimeReasoningPostQueues.delete(sessionId);
+}
+
+function emitManagedAgentSessionUpdate(session: DesktopCodexLiveSessionState | null | undefined): void {
+  if (!session) {
+    return;
+  }
+  emitToMainWindow(
+    "desktop:workers:managed-agent-session",
+    toPublicManagedAgentSession(bindCodexLiveSessionToWorker(session)),
+  );
 }
 
 function markSpawnedCodexAppServersOffline(reason: string): void {
@@ -732,6 +746,7 @@ function statusAfterDesktopEventCompletedTurn(
     return {
       ...bound,
       status: "completed",
+      active_work: null,
       last_error: null,
       updated_at: new Date().toISOString(),
     };
@@ -740,6 +755,7 @@ function statusAfterDesktopEventCompletedTurn(
     return {
       ...session,
       status: "starting",
+      active_work: null,
       last_error: null,
       updated_at: new Date().toISOString(),
     };
@@ -747,6 +763,7 @@ function statusAfterDesktopEventCompletedTurn(
   return {
     ...session,
     status: "unknown",
+    active_work: null,
     last_error: "Codex completed a desktop event turn before registering with LetAgents.",
     updated_at: new Date().toISOString(),
   };
@@ -782,6 +799,7 @@ function statusAfterNoActiveTurnToStop(
   return {
     ...session,
     status,
+    active_work: null,
     last_error: null,
     updated_at: new Date().toISOString(),
   };
@@ -1165,14 +1183,14 @@ export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamE
 
 function enqueueDesktopEventTurn(
   session: DesktopCodexLiveSessionState,
-  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+  event: ManagedRoomEvent,
 ): void {
   const previous = desktopEventQueues.get(session.session_id) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)
     .then(() => deliverDesktopEventTurn(session.session_id, event))
     .catch((error) => {
-      updateCodexLiveSession(session.session_id, (current) => ({
+      clearSessionActiveWork(session.session_id, (current) => ({
         ...current,
         status: "unknown",
         last_error: error instanceof Error ? error.message : String(error),
@@ -1209,18 +1227,96 @@ function publicReplyText(value: string | null | undefined): string | null {
   return trimmed;
 }
 
-function replyTargetForEvent(
-  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
-): string | null {
+function replyTargetForEvent(event: ManagedRoomEvent): string | null {
   if (event.type !== "message") {
     return null;
   }
   return event.message.replyTo?.id ?? null;
 }
 
+function activeWorkForEvent(event: ManagedRoomEvent): NonNullable<DesktopCodexLiveSessionState["active_work"]> {
+  return {
+    kind: event.type,
+    event_id: event.type === "message" ? event.message.id : event.task.id,
+    started_at: new Date().toISOString(),
+    summary: event.type === "message" ? "Reading the room message." : "Reading the task update.",
+  };
+}
+
+function markSessionActiveForEvent(
+  session: DesktopCodexLiveSessionState,
+  event: ManagedRoomEvent,
+  turnId: string,
+): DesktopCodexLiveSessionState {
+  const activeWork = activeWorkForEvent(event);
+  const updated = updateCodexLiveSession(session.session_id, (current) => ({
+    ...current,
+    turn_id: turnId,
+    status: "running",
+    active_work: activeWork,
+    last_error: null,
+    updated_at: activeWork.started_at,
+  })) ?? {
+    ...session,
+    turn_id: turnId,
+    status: "running",
+    active_work: activeWork,
+    last_error: null,
+    updated_at: activeWork.started_at,
+  };
+  emitManagedAgentSessionUpdate(updated);
+  return updated;
+}
+
+function clearSessionActiveWork(
+  sessionId: string,
+  updater: (session: DesktopCodexLiveSessionState) => DesktopCodexLiveSessionState,
+): DesktopCodexLiveSessionState | null {
+  const updated = updateCodexLiveSession(sessionId, (current) => ({
+    ...updater(current),
+    active_work: null,
+  }));
+  emitManagedAgentSessionUpdate(updated);
+  return updated;
+}
+
+function updateActiveWorkSummary(
+  sessionId: string,
+  summary: string | null,
+): void {
+  const trimmed = String(summary ?? "").trim();
+  if (!trimmed) {
+    return;
+  }
+  const session = getStoredCodexLiveSession(sessionId);
+  if (!session?.active_work) {
+    return;
+  }
+  if (session.active_work.summary === trimmed) {
+    return;
+  }
+  const updated = updateCodexLiveSession(sessionId, (current) => {
+    if (!current.active_work) {
+      return current;
+    }
+    if (current.active_work.summary === trimmed) {
+      return current;
+    }
+    return {
+      ...current,
+      active_work: {
+        ...current.active_work,
+        summary: trimmed,
+      },
+      updated_at: new Date().toISOString(),
+    };
+  });
+  emitManagedAgentSessionUpdate(updated);
+}
+
 async function publishDesktopManagedAgentReply(input: {
   session: DesktopCodexLiveSessionState;
-  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
+  event: ManagedRoomEvent;
   text: string | null;
 }): Promise<void> {
   const text = publicReplyText(input.text);
@@ -1259,7 +1355,7 @@ async function publishDesktopManagedAgentReply(input: {
 
 async function deliverDesktopEventTurn(
   sessionId: string,
-  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+  event: ManagedRoomEvent,
 ): Promise<void> {
   const session = getStoredCodexLiveSession(sessionId);
   if (!session || !canDeliverDesktopEventToSession(session)) {
@@ -1269,7 +1365,7 @@ async function deliverDesktopEventTurn(
   const serverReachable = await isCodexAppServerReady(session.server_url);
   if (!serverReachable) {
     const ownedServerExited = ownedCodexAppServerExited(session);
-    const updated = updateCodexLiveSession(session.session_id, (current) => ({
+    const updated = clearSessionActiveWork(session.session_id, (current) => ({
       ...current,
       status: ownedServerExited ? "failed" : "unknown",
       last_error: ownedServerExited
@@ -1308,19 +1404,7 @@ async function deliverDesktopEventTurn(
       throw new Error("Codex app-server did not return a turn id for room event.");
     }
 
-    const activeSession = updateCodexLiveSession(idleSession.session_id, (current) => ({
-      ...current,
-      turn_id: turnId,
-      status: "running",
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    })) ?? {
-      ...idleSession,
-      turn_id: turnId,
-      status: "running",
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    };
+    const activeSession = markSessionActiveForEvent(idleSession, event, turnId);
     queueCodexRuntimeReasoningSummary(activeSession, {
       summary: "Codex worker received a room event.",
       status: "working",
@@ -1365,6 +1449,7 @@ async function waitForCurrentTurnToIdle(
           updateCodexLiveSession(sessionId, (current) => ({
             ...current,
             status: "unknown",
+            active_work: null,
             last_error: "previous turn could not be inspected while delivering room event",
             updated_at: new Date().toISOString(),
           }));
@@ -1401,6 +1486,7 @@ async function waitForCurrentTurnToIdle(
       updateCodexLiveSession(sessionId, (current) => ({
         ...current,
         status: "unknown",
+        active_work: null,
         last_error: "previous turn was still active while delivering room event",
         updated_at: new Date().toISOString(),
       }));
@@ -1438,7 +1524,7 @@ async function waitForDesktopEventTurnCompletion(
       } catch {
         // Best effort; the next inspect pass will reconcile the real state.
       }
-      updateCodexLiveSession(sessionId, (current) => ({
+      clearSessionActiveWork(sessionId, (current) => ({
         ...current,
         status: "unknown",
         last_error: "desktop-delivered event turn timed out",
@@ -1473,11 +1559,12 @@ async function waitForDesktopEventTurnCompletion(
     }
 
     if (turnStatus === "completed") {
-      updateCodexLiveSession(sessionId, statusAfterDesktopEventCompletedTurn);
+      const completed = updateCodexLiveSession(sessionId, statusAfterDesktopEventCompletedTurn);
+      emitManagedAgentSessionUpdate(completed);
       return finalPublicAgentMessageText(turn?.items ?? turn?.output);
     }
 
-    updateCodexLiveSession(sessionId, (current) => ({
+    clearSessionActiveWork(sessionId, (current) => ({
       ...current,
       status: turnStatus === "interrupted"
         ? codexSessionStatusAfterTurnInterrupt(managedAgentDeliveryMode(current), true, false)
@@ -1503,9 +1590,11 @@ export async function stopDesktopManagedAgent(
         updateCodexLiveSession(session.session_id, (current) => ({
           ...current,
           status: "interrupted",
+          active_work: null,
           last_error: null,
           updated_at: new Date().toISOString(),
         })) ?? session;
+      emitManagedAgentSessionUpdate(updated);
       killOwnedAppServer(updated);
       clearSessionMonitor(updated.session_id);
       return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
@@ -1514,9 +1603,11 @@ export async function stopDesktopManagedAgent(
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
         status: "running",
+        active_work: null,
         last_error: null,
         updated_at: new Date().toISOString(),
-    })) ?? session;
+      })) ?? session;
+    emitManagedAgentSessionUpdate(updated);
     return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
   }
 
@@ -1526,9 +1617,11 @@ export async function stopDesktopManagedAgent(
       updateCodexLiveSession(session.session_id, (current) => ({
         ...current,
         status: "interrupted",
+        active_work: null,
         last_error: null,
         updated_at: new Date().toISOString(),
       })) ?? session;
+    emitManagedAgentSessionUpdate(updated);
     killOwnedAppServer(updated);
     clearSessionMonitor(updated.session_id);
     return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
@@ -1559,6 +1652,7 @@ export async function stopDesktopManagedAgent(
           });
           if (!isActiveCodexTurnStatus(turnStatus)) {
             const updated = updateCodexLiveSession(latest.session_id, statusAfterNoActiveTurnToStop) ?? latest;
+            emitManagedAgentSessionUpdate(updated);
             scheduleOwnedSessionMonitor(updated);
             return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
           }
@@ -1593,11 +1687,13 @@ export async function stopDesktopManagedAgent(
           shutdownServer,
           interruptSucceeded,
         ),
+      active_work: null,
       last_error: serverReachable
         ? interruptError
         : offlineAppServerError(current),
       updated_at: new Date().toISOString(),
     })) ?? session;
+  emitManagedAgentSessionUpdate(updated);
 
   if (shutdownServer || ownedServerExited) {
     killOwnedAppServer(updated);

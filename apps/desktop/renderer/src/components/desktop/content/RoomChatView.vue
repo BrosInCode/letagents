@@ -22,6 +22,7 @@
           :loading-older-messages="loadingOlderMessages"
           :messages="messages"
           :thread-messages="threadMessages"
+          :local-agent-work="localAgentWork"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
@@ -112,6 +113,7 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
+import type { ManagedAgentWorkIndicator } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
@@ -125,6 +127,7 @@ const props = defineProps<{
   active: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  localAgentWork: ManagedAgentWorkIndicator[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLoading: boolean;

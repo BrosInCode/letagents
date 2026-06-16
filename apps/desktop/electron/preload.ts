@@ -138,6 +138,13 @@ const api: DesktopApi = {
     list: () => ipcRenderer.invoke("desktop:workers:list"),
     listManagedAgentSessions: (roomIdentifier) =>
       ipcRenderer.invoke("desktop:workers:list-managed-agent-sessions", roomIdentifier || null),
+    onManagedAgentSessionUpdate: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:workers:managed-agent-session", listener);
+      return () => {
+        ipcRenderer.off("desktop:workers:managed-agent-session", listener);
+      };
+    },
     startManagedAgent: (input) =>
       ipcRenderer.invoke("desktop:workers:start-managed-agent", input),
     stopManagedAgent: (input = {}) =>

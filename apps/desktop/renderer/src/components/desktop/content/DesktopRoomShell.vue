@@ -63,6 +63,7 @@
       :loading-older-messages="loadingOlderMessages"
       :participants="roomParticipants"
       :presence="roomPresence"
+      :local-agent-work="localAgentWork"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
       :search-query="searchQuery"
@@ -192,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -209,6 +210,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import {
+  activeManagedAgentWorkIndicators,
   managedAgentSessionMatchesRoom,
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
@@ -296,6 +298,7 @@ const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 let githubEventsRefreshTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
+let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
 const isRepoBackedRoom = computed(() =>
   [props.room.identifier, props.room.name, props.room.displayName]
@@ -402,6 +405,9 @@ const roomParticipants = computed(() =>
 const roomPresence = computed(() =>
   mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
 );
+const localAgentWork = computed(() =>
+  activeManagedAgentWorkIndicators(roomManagedAgentSessions.value, props.room.identifier)
+);
 
 watch(() => props.githubEvents, (nextPage) => {
   if (!nextPage) {
@@ -463,6 +469,17 @@ onBeforeUnmount(() => {
     githubEventsRefreshTimer = null;
   }
   stopManagedAgentSessionsRefreshTimer();
+  unsubscribeManagedAgentSessionUpdate?.();
+  unsubscribeManagedAgentSessionUpdate = null;
+});
+
+onMounted(() => {
+  unsubscribeManagedAgentSessionUpdate = window.letagentsDesktop?.workers?.onManagedAgentSessionUpdate?.((session) => {
+    if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
+      return;
+    }
+    upsertManagedAgentSession(session);
+  }) || null;
 });
 
 function rememberChatScrollPosition(scrollTop: number): void {

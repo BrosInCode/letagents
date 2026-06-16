@@ -83,6 +83,13 @@ export interface ManagedAgentTargetKeys {
   ownerAttribution?: string | null;
 }
 
+export interface ManagedAgentWorkIndicator {
+  id: string;
+  displayName: string;
+  summary: string;
+  startedAt: string;
+}
+
 function specificAgentKey(value: string | null | undefined): string {
   const normalized = normalizeAgentKey(value);
   if (!normalized || !/[/:]/.test(normalized)) {
@@ -290,6 +297,25 @@ export function managedAgentSessionDisplayName(
   }
 
   return "Local agent";
+}
+
+export function activeManagedAgentWorkIndicators(
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+): ManagedAgentWorkIndicator[] {
+  return sessions
+    .filter((session) =>
+      managedAgentSessionMatchesRoom(session, roomIdentifier) &&
+      Boolean(session.activeWork) &&
+      session.status === "running"
+    )
+    .map((session) => ({
+      id: `${session.id}:${session.activeWork?.eventId || session.activeWork?.startedAt || "work"}`,
+      displayName: managedAgentSessionDisplayName(session),
+      summary: session.activeWork?.summary?.trim() || "Working in the room.",
+      startedAt: session.activeWork?.startedAt || session.updatedAt,
+    }))
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
 }
 
 export function mergeDesktopManagedAgentParticipants(

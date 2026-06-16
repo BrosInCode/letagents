@@ -81,6 +81,13 @@ export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
   | "desktop_events";
 
+export interface DesktopManagedAgentActiveWork {
+  kind: "message" | "task_update";
+  eventId: string | null;
+  startedAt: string;
+  summary: string | null;
+}
+
 export interface DesktopManagedAgentSession {
   id: string;
   providerId: DesktopAgentProviderId;
@@ -98,6 +105,7 @@ export interface DesktopManagedAgentSession {
   ownerLabel: string | null;
   ideLabel: string | null;
   reasoningSessionId: string | null;
+  activeWork: DesktopManagedAgentActiveWork | null;
   startedAt: string;
   updatedAt: string;
   lastError: string | null;

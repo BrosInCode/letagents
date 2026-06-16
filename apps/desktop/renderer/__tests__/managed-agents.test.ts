@@ -9,6 +9,7 @@ import type {
   DesktopParticipantSummary,
 } from "../../electron/ipc-types";
 import {
+  activeManagedAgentWorkIndicators,
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
   agentAuthCommand,
@@ -83,6 +84,7 @@ function session(
     ownerLabel: "Local desktop",
     ideLabel: "Codex",
     reasoningSessionId: null,
+    activeWork: null,
     startedAt: "2026-06-14T12:00:00.000Z",
     updatedAt: "2026-06-14T12:00:00.000Z",
     lastError: null,
@@ -207,6 +209,48 @@ test("isDeliverableManagedAgentSession requires a registered room worker", () =>
     agentSessionId: "agent_1",
     canStop: true,
   })), true);
+});
+
+test("activeManagedAgentWorkIndicators only exposes running room work", () => {
+  const indicators = activeManagedAgentWorkIndicators([
+    session({
+      id: "running_local",
+      displayName: "LumenRiver",
+      status: "running",
+      activeWork: {
+        kind: "message",
+        eventId: "msg_1",
+        startedAt: "2026-06-14T12:10:00.000Z",
+        summary: "Checking the attachment path.",
+      },
+    }),
+    session({
+      id: "waiting_local",
+      displayName: "CedarVista",
+      status: "completed",
+      deliveryMode: "desktop_events",
+      activeWork: null,
+    }),
+    session({
+      id: "other_room",
+      roomIdentifier: "room_2",
+      displayName: "MapleRidge",
+      status: "running",
+      activeWork: {
+        kind: "message",
+        eventId: "msg_2",
+        startedAt: "2026-06-14T12:11:00.000Z",
+        summary: "Working elsewhere.",
+      },
+    }),
+  ], "room_1");
+
+  assert.deepEqual(indicators, [{
+    id: "running_local:msg_1",
+    displayName: "LumenRiver",
+    summary: "Checking the attachment path.",
+    startedAt: "2026-06-14T12:10:00.000Z",
+  }]);
 });
 
 test("canStopManagedAgentTurn only enables turn stops for active startup or running turns", () => {

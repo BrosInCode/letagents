@@ -77,6 +77,108 @@
   opacity: 0.76;
 }
 
+.room-local-agent-work-list {
+  display: grid;
+  gap: 6px;
+  width: min(620px, 76%);
+  margin: 10px 0 12px 42px;
+}
+
+.room-local-agent-work {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 8px 12px 8px 9px;
+  border: 1px solid rgba(52, 211, 153, 0.18);
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.72);
+  color: var(--text-secondary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.room-local-agent-work-pulse {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.12);
+  animation: local-agent-work-pulse 1.4s ease-in-out infinite;
+}
+
+.room-local-agent-work div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.room-local-agent-work strong {
+  color: #f7fafc;
+  font-size: 0.78rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.room-local-agent-work div span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-local-agent-work-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.room-local-agent-work-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.32;
+  animation: local-agent-work-dot 1.1s ease-in-out infinite;
+}
+
+.room-local-agent-work-dots i:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.room-local-agent-work-dots i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes local-agent-work-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.88);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes local-agent-work-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  45% {
+    opacity: 0.82;
+    transform: translateY(-1px);
+  }
+}
+
 .room-loading-message {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr);

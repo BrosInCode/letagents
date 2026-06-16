@@ -567,6 +567,27 @@ test("desktop event sessions remain stoppable after an idle completed turn", () 
   assert.equal(publicSession.canStop, true);
 });
 
+test("desktop managed sessions expose active room work when Codex is handling an event", () => {
+  resetState();
+  const publicSession = toPublicManagedAgentSession(liveSession({
+    display_name: "LumenRiver",
+    status: "running",
+    active_work: {
+      kind: "message",
+      event_id: "msg_1",
+      started_at: "2026-06-14T12:12:00.000Z",
+      summary: "Checking the attachment path.",
+    },
+  }));
+
+  assert.deepEqual(publicSession.activeWork, {
+    kind: "message",
+    eventId: "msg_1",
+    startedAt: "2026-06-14T12:12:00.000Z",
+    summary: "Checking the attachment path.",
+  });
+});
+
 test("managed Codex sessions expose a persisted codename before worker binding", () => {
   resetState();
   const publicSession = toPublicManagedAgentSession(liveSession({
