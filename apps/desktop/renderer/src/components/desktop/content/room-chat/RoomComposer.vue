@@ -96,6 +96,7 @@ import type {
   DesktopRoomMessage,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
+import { isMentionableRoomParticipant } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import { displaySender, replyPreview } from "./message-format";
 
@@ -150,7 +151,7 @@ const mentionOpen = computed({
 const mentionCandidates = computed(() => {
   const query = (mentionQuery.value || "").toLowerCase();
   return props.participants
-    .filter((participant) => participant.activityState !== "offline")
+    .filter(isMentionableRoomParticipant)
     .filter((participant) => participant.displayName.toLowerCase().includes(query))
     .slice(0, 6);
 });

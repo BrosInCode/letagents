@@ -30,16 +30,27 @@ function isAgentIdentityValue(value: string | null | undefined): boolean {
 
 function isHumanMessage(message: Message): boolean {
   const normalizedSource = normalizeValue(message.source).toLowerCase();
-  if (normalizedSource === "browser") {
-    return true;
+  const normalizedSender = normalizeValue(message.sender).toLowerCase();
+  if (
+    !normalizedSender ||
+    normalizedSender === "letagents" ||
+    normalizedSender === "system" ||
+    normalizedSender === "github" ||
+    normalizedSender === "anonymous"
+  ) {
+    return false;
   }
+
   if (normalizedSource === "agent") {
     return false;
   }
 
-  const normalizedSender = normalizeValue(message.sender).toLowerCase();
-  if (!normalizedSender || normalizedSender === "letagents" || normalizedSender === "system") {
+  if (isAgentIdentityValue(message.sender)) {
     return false;
+  }
+
+  if (normalizedSource === "browser") {
+    return true;
   }
 
   return !isAgentIdentityValue(message.sender);

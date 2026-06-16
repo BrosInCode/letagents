@@ -128,3 +128,32 @@ test("buildFallbackRoomParticipants skips controller presence and messages", () 
 
   assert.deepEqual(participants, []);
 });
+
+test("buildFallbackRoomParticipants skips anonymous and classifies bare runtime agent names", () => {
+  const participants = buildFallbackRoomParticipants({
+    roomId: "github.com/brosincode/letagents",
+    presence: [],
+    messages: [
+      makeMessage({
+        id: "msg_1",
+        sender: "anonymous",
+        source: "browser",
+        timestamp: "2026-04-08T15:00:00.000Z",
+      }),
+      makeMessage({
+        id: "msg_2",
+        sender: "AntigravityPair",
+        source: "browser",
+        timestamp: "2026-04-08T15:01:00.000Z",
+      }),
+    ],
+  });
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0]?.participant_key, "agent:antigravitypair");
+  assert.equal(participants[0]?.kind, "agent");
+  assert.equal(participants[0]?.display_name, "AntigravityPair");
+  assert.equal(participants[0]?.ide_label, "Antigravity");
+  assert.equal(participants[0]?.activity_state, "offline");
+  assert.deepEqual(participants[0]?.source_flags, ["messages"]);
+});

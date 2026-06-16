@@ -146,7 +146,12 @@ export function buildRoomParticipantUpsertFromMessage(
   }
 
   const lowerSender = normalizedSender.toLowerCase();
-  if (lowerSender === "letagents" || lowerSender === "system" || lowerSender === "github") {
+  if (
+    lowerSender === "letagents" ||
+    lowerSender === "system" ||
+    lowerSender === "github" ||
+    lowerSender === "anonymous"
+  ) {
     return null;
   }
 

@@ -4,10 +4,12 @@ import { ref } from "vue";
 
 import type {
   DesktopAgentPresence,
+  DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopRoomMessageAttachment,
 } from "../../electron/ipc-types";
+import { isMentionableRoomParticipant } from "../src/domain/participants";
 import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
   attachmentHref,
@@ -144,6 +146,41 @@ describe("room chat helpers", () => {
     });
   });
 
+  it("keeps anonymous and misclassified runtime names out of mention candidates", () => {
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "anonymous",
+      githubLogin: "anonymous",
+    })), false);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "AntigravityPair",
+      githubLogin: "AntigravityPair",
+    })), false);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "agent",
+      displayName: "AntigravityPair",
+      githubLogin: null,
+      activityState: "active",
+    })), true);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "kdnofound",
+      githubLogin: "kdnofound",
+    })), true);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "codexter",
+      githubLogin: "codexter",
+    })), true);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "agent",
+      displayName: "OfflineAgent",
+      githubLogin: null,
+      activityState: "offline",
+    })), false);
+  });
+
   it("maps GitHub room messages to desktop event cards", () => {
     const event = parseGitHubEvent({
       ...roomMessage("github_1", null),
@@ -223,6 +260,26 @@ function roomMessage(
           timestamp: "2026-05-28T00:00:00.000Z",
         }
       : null,
+  };
+}
+
+function participant(overrides: Partial<DesktopParticipantSummary> = {}): DesktopParticipantSummary {
+  return {
+    participantKey: "human:login:emmymay",
+    kind: "human",
+    displayName: "EmmyMay",
+    actorLabel: null,
+    agentKey: null,
+    githubLogin: "EmmyMay",
+    ownerLabel: null,
+    ideLabel: null,
+    hiddenAt: null,
+    activityState: null,
+    lastSeenAt: "2026-05-28T00:00:00.000Z",
+    lastRoomActivityAt: "2026-05-28T00:00:00.000Z",
+    lastLiveHeartbeatAt: null,
+    sourceFlags: ["messages"],
+    ...overrides,
   };
 }
 
