@@ -27,9 +27,15 @@ import {
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
-import { normalizeRoomIdentifier, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
+import {
+  normalizeRoomIdentifier,
+  resolveAccountRoomAliasIdentifier,
+  type RecentRootRoom,
+  type RecentRootRoomKind,
+} from "../domain/sidebar-rooms";
 
 interface RememberRootRoomOptions {
+  aliasIdentifiers?: readonly (string | null | undefined)[];
   displayName?: string | null;
   kind?: RecentRootRoomKind | null;
   rootPath?: string | null;
@@ -73,11 +79,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     options.loading.value = true;
     try {
+      const requestedRootRoomIdentifier = options.selectedRootRoomIdentifier.value;
       const [
         nextAppInfo,
         nextRepoStatus,
         nextWorkers,
-        nextRootRoomSnapshot,
+        loadedRootRoomSnapshot,
         nextDiagnostics,
         nextAuthStatus,
         nextMcpInstallState,
@@ -94,12 +101,20 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         window.letagentsDesktop.room.listAccountRooms?.({ limit: 100 }).catch(() => []),
         window.letagentsDesktop.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
       ]);
+      const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
+        requestedRootRoomIdentifier,
+        loadedRootRoomSnapshot,
+        nextAccountRooms || nextSettingsAccountRooms || [],
+      );
+      const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
       options.repoStatus.value = nextRepoStatus;
       options.workers.value = nextWorkers;
       options.rootRoomSnapshot.value = nextRootRoomSnapshot;
       options.selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
-      options.rememberRootRoomSnapshot(nextRootRoomSnapshot);
+      options.rememberRootRoomSnapshot(nextRootRoomSnapshot, {
+        aliasIdentifiers: recoveredAlias ? [recoveredAlias] : undefined,
+      });
       options.diagnostics.value = nextDiagnostics;
       options.authStatus.value = nextAuthStatus;
       options.mcpInstallState.value = nextMcpInstallState;
@@ -113,6 +128,27 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     } finally {
       options.loading.value = false;
     }
+  }
+
+  async function recoverRootRoomSnapshot(
+    requestedRoomIdentifier: string | null,
+    snapshot: DesktopRoomSnapshot,
+    accountRooms: readonly DesktopAccountRoomEntry[],
+  ): Promise<DesktopRoomSnapshot> {
+    if (!shouldRecoverRootRoomSnapshot(requestedRoomIdentifier, snapshot)) {
+      return snapshot;
+    }
+
+    const accountRoomIdentifier = resolveAccountRoomAliasIdentifier(requestedRoomIdentifier, accountRooms);
+    if (accountRoomIdentifier) {
+      const recoveredSnapshot = await window.letagentsDesktop.room.getSnapshot(accountRoomIdentifier);
+      if (recoveredSnapshot.access.status === "ready") return recoveredSnapshot;
+    }
+
+    const workspaceSnapshot = await window.letagentsDesktop.room.getSnapshot(null);
+    return workspaceSnapshot.access.status === "ready"
+      ? workspaceSnapshot
+      : snapshot;
   }
 
   async function refreshAccountRooms(): Promise<void> {
@@ -337,6 +373,27 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     selectedSnapshotLoading,
     upsertSelectedTask,
   };
+}
+
+function shouldRecoverRootRoomSnapshot(
+  requestedRoomIdentifier: string | null,
+  snapshot: DesktopRoomSnapshot,
+): boolean {
+  return Boolean(
+    requestedRoomIdentifier
+    && snapshot.access.status === "unavailable"
+    && snapshot.access.httpStatus === 404
+  );
+}
+
+function recoveredRootRoomAlias(
+  requestedRoomIdentifier: string | null,
+  snapshot: DesktopRoomSnapshot,
+): string | null {
+  const requestedIdentifier = normalizeRoomIdentifier(requestedRoomIdentifier);
+  const recoveredIdentifier = normalizeRoomIdentifier(snapshot.roomIdentifier);
+  if (!requestedIdentifier || !recoveredIdentifier) return null;
+  return requestedIdentifier === recoveredIdentifier ? null : requestedRoomIdentifier;
 }
 
 function createOptimisticSelectedSnapshot(

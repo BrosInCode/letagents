@@ -140,6 +140,8 @@ export interface DesktopRoomMessage {
     ownerAttribution: string | null;
     ideLabel: string | null;
     actorLabel: string | null;
+    agentKey: string | null;
+    agentSessionId: string | null;
   } | null;
   replyTo: DesktopRoomMessageReply | null;
 }

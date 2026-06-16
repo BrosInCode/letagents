@@ -4,10 +4,13 @@ import { ref } from "vue";
 
 import type {
   DesktopAgentPresence,
+  DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopRoomMessageAttachment,
 } from "../../electron/ipc-types";
+import { isMentionableRoomParticipant } from "../src/domain/participants";
+import { isIdleReasoningSession } from "../src/domain/reasoning";
 import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
   attachmentHref,
@@ -131,6 +134,21 @@ describe("room chat helpers", () => {
     assert.equal(hasReasoningStreamSurface({ ...target, ideLabel: null }, [presenceEntry()]), true);
   });
 
+  it("detects idle reasoning sessions before offering turn stops", () => {
+    assert.equal(isIdleReasoningSession(reasoningSession("reasoning_working", "2026-05-28T02:00:00.000Z")), false);
+    assert.equal(isIdleReasoningSession({
+      ...reasoningSession("reasoning_idle", "2026-05-28T02:01:00.000Z"),
+      status: "idle",
+    }), true);
+    assert.equal(isIdleReasoningSession({
+      ...reasoningSession("reasoning_payload_idle", "2026-05-28T02:02:00.000Z"),
+      latestPayload: {
+        summary: "Waiting for the next room event.",
+        status: "idle",
+      },
+    }), true);
+  });
+
   it("parses desktop chat sender identity labels", () => {
     assert.deepEqual(parseSenderIdentity({ sender: "Noether | Emmy's agent | codex" }), {
       displayName: "Noether",
@@ -142,6 +160,41 @@ describe("room chat helpers", () => {
       ownerAttribution: null,
       ideLabel: "Codex",
     });
+  });
+
+  it("keeps anonymous and misclassified runtime names out of mention candidates", () => {
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "anonymous",
+      githubLogin: "anonymous",
+    })), false);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "AntigravityPair",
+      githubLogin: "AntigravityPair",
+    })), false);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "agent",
+      displayName: "AntigravityPair",
+      githubLogin: null,
+      activityState: "active",
+    })), true);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "kdnofound",
+      githubLogin: "kdnofound",
+    })), true);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "human",
+      displayName: "codexter",
+      githubLogin: "codexter",
+    })), true);
+    assert.equal(isMentionableRoomParticipant(participant({
+      kind: "agent",
+      displayName: "OfflineAgent",
+      githubLogin: null,
+      activityState: "offline",
+    })), false);
   });
 
   it("maps GitHub room messages to desktop event cards", () => {
@@ -223,6 +276,26 @@ function roomMessage(
           timestamp: "2026-05-28T00:00:00.000Z",
         }
       : null,
+  };
+}
+
+function participant(overrides: Partial<DesktopParticipantSummary> = {}): DesktopParticipantSummary {
+  return {
+    participantKey: "human:login:emmymay",
+    kind: "human",
+    displayName: "EmmyMay",
+    actorLabel: null,
+    agentKey: null,
+    githubLogin: "EmmyMay",
+    ownerLabel: null,
+    ideLabel: null,
+    hiddenAt: null,
+    activityState: null,
+    lastSeenAt: "2026-05-28T00:00:00.000Z",
+    lastRoomActivityAt: "2026-05-28T00:00:00.000Z",
+    lastLiveHeartbeatAt: null,
+    sourceFlags: ["messages"],
+    ...overrides,
   };
 }
 

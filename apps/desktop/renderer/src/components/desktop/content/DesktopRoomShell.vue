@@ -54,14 +54,16 @@
       :active="activeTab === 'chat'"
       :messages="timelineMessages"
       :thread-messages="visibleMessages"
+      :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
       :room-loading="roomLoading"
       :sending="sendingMessage"
       :send-error="sendError"
       :has-older-messages="hasOlderMessages"
       :loading-older-messages="loadingOlderMessages"
-      :participants="participants"
-      :presence="presence"
+      :participants="roomParticipants"
+      :presence="roomPresence"
+      :local-agent-work="localAgentWork"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
       :search-query="searchQuery"
@@ -73,6 +75,8 @@
       @load-older="loadOlderMessages"
       @open-reasoning="openReasoningInspector"
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
+      @open-agent-detail="openAgentDetail"
+      @open-add-agent="openAddAgentModal"
       @draft-change="chatDraftText = $event"
       @open-github-event="openGitHubEventFromChat"
       @scroll-position="rememberChatScrollPosition"
@@ -84,7 +88,7 @@
         key="board"
         :room-identifier="room.identifier"
         :tasks="tasks"
-        :presence="presence"
+        :presence="roomPresence"
         :workers="workers"
         :selected-task-id="boardSelectedTaskId"
         @task-updated="emit('task-updated', $event)"
@@ -122,14 +126,16 @@
         v-else-if="activeTab === 'activity'"
         key="activity"
         :recent-activity="recentActivity"
-        :participants="participants"
+        :participants="roomParticipants"
         :live-cleared-count="participantHiddenCount"
-        :presence="presence"
+        :presence="roomPresence"
         :reasoning-sessions="reasoningSessions"
         :tasks="tasks"
         :messages="visibleMessages"
         :workers="workers"
         @open-reasoning="openReasoningInspector"
+        @open-add-agent="openAddAgentModal"
+        @open-agent-detail="openAgentDetail"
         @refresh-room="emit('refresh-room')"
       />
 
@@ -161,16 +167,39 @@
       :session="selectedReasoningSessionForInspector"
       @close="closeReasoningInspector"
     />
+
+    <DesktopAgentDetailModal
+      :open="Boolean(selectedAgentDetailTarget)"
+      :room-identifier="room.identifier"
+      :target="selectedAgentDetailTarget"
+      :reasoning-sessions="reasoningSessions"
+      @close="selectedAgentDetailTarget = null"
+      @open-add-agent="openAddAgentModalFromDetail"
+      @open-reasoning="openReasoningFromAgentDetail"
+    />
+
+    <AddAgentModal
+      :open="addAgentModalOpen"
+      :room-identifier="room.identifier"
+      :room-display-name="room.displayName"
+      :repo-root-path="managedAgentRepoRootPath"
+      :managed-sessions="managedAgentSessions"
+      @close="addAgentModalOpen = false"
+      @choose-repo="openAgentRepoPicker"
+      @managed-sessions-updated="replaceManagedAgentSessions"
+      @managed-session-started="upsertManagedAgentSession"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
   DesktopFocusRoomInfo,
   DesktopGitHubEventsPage,
+  DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
   DesktopRoomMessage,
@@ -180,7 +209,16 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
+import {
+  activeManagedAgentWorkIndicators,
+  managedAgentSessionMatchesRoom,
+  mergeDesktopManagedAgentParticipants,
+  mergeDesktopManagedAgentPresence,
+  preferredManagedAgentRepoRootPath,
+} from "../../../domain/managed-agents";
 import type { SidebarMode } from "../types";
+import AddAgentModal from "./AddAgentModal.vue";
+import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RentAnAgentView from "./RentAnAgentView.vue";
@@ -199,6 +237,7 @@ import {
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
+import type { AgentModalTarget } from "./desktop-chat-message/types";
 import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
@@ -222,6 +261,7 @@ const props = defineProps<{
   githubEvents: DesktopGitHubEventsPage | null;
   repoStatus: RepoStatus;
   workers: WorkerSnapshot[];
+  openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
 }>();
 
@@ -233,6 +273,8 @@ const emit = defineEmits<{
   "refresh-room": [];
   "open-focus-room": [roomIdentifier: string];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
+  "choose-repo": [];
+  "add-agent-open-request-consumed": [];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -240,6 +282,8 @@ const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
 const activeTab = ref<RoomTabId>("chat");
 const actionPanelOpen = ref(false);
+const addAgentModalOpen = ref(false);
+const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const roomLinkCopied = ref(false);
 const eventsPage = ref<DesktopGitHubEventsPage | null>(props.githubEvents);
@@ -251,7 +295,10 @@ const eventsSelectedEventId = ref<string | null>(null);
 const eventsLoadedOlderWithoutMatches = ref(false);
 const boardSelectedTaskId = ref<string | null>(null);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
+const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 let githubEventsRefreshTimer: number | null = null;
+let managedAgentSessionsRefreshTimer: number | null = null;
+let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
 const isRepoBackedRoom = computed(() =>
   [props.room.identifier, props.room.name, props.room.displayName]
@@ -277,6 +324,7 @@ const {
   loadingOlderMessages,
   chatDraftText,
   ownMessageIds,
+  hasFilteredRoomActivity,
   visibleMessages,
   timelineMessages,
   roomMessagesForAgentInsight,
@@ -345,6 +393,21 @@ const githubEventsAvailable = computed(() =>
 );
 
 const showEventsTab = computed(() => githubEventsVisible.value && githubEventsAvailable.value);
+const roomManagedAgentSessions = computed(() =>
+  managedAgentSessions.value.filter((session) =>
+    managedAgentSessionMatchesRoom(session, props.room.identifier)
+  )
+);
+const managedAgentRepoRootPath = computed(() => preferredManagedAgentRepoRootPath(props.repoStatus));
+const roomParticipants = computed(() =>
+  mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier)
+);
+const roomPresence = computed(() =>
+  mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
+);
+const localAgentWork = computed(() =>
+  activeManagedAgentWorkIndicators(roomManagedAgentSessions.value, props.room.identifier)
+);
 
 watch(() => props.githubEvents, (nextPage) => {
   if (!nextPage) {
@@ -358,13 +421,28 @@ watch(() => props.githubEvents, (nextPage) => {
 
 watch(() => props.room.identifier, () => {
   eventsPage.value = props.githubEvents;
+  managedAgentSessions.value = [];
   eventsTaskFilterId.value = null;
   eventsSelectedEventId.value = null;
   boardSelectedTaskId.value = null;
   eventsError.value = null;
   eventsLoadedOlderWithoutMatches.value = false;
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
+  void refreshManagedAgentSessions();
+  restartManagedAgentSessionsRefreshTimer();
+}, { immediate: true });
+
+watch(addAgentModalOpen, (open) => {
+  if (open) {
+    void refreshManagedAgentSessions();
+  }
 });
+
+watch(() => props.openAddAgentRequested, (requested) => {
+  if (!requested) return;
+  addAgentModalOpen.value = true;
+  emit("add-agent-open-request-consumed");
+}, { immediate: true });
 
 watch(showEventsTab, (visible) => {
   if (!visible && activeTab.value === "events") {
@@ -390,6 +468,18 @@ onBeforeUnmount(() => {
     window.clearTimeout(githubEventsRefreshTimer);
     githubEventsRefreshTimer = null;
   }
+  stopManagedAgentSessionsRefreshTimer();
+  unsubscribeManagedAgentSessionUpdate?.();
+  unsubscribeManagedAgentSessionUpdate = null;
+});
+
+onMounted(() => {
+  unsubscribeManagedAgentSessionUpdate = window.letagentsDesktop?.workers?.onManagedAgentSessionUpdate?.((session) => {
+    if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
+      return;
+    }
+    upsertManagedAgentSession(session);
+  }) || null;
 });
 
 function rememberChatScrollPosition(scrollTop: number): void {
@@ -571,6 +661,74 @@ function closeActionPanel(): void {
 function openRules(): void {
   rulesOpen.value = true;
   actionPanelOpen.value = false;
+}
+
+function openAddAgentModal(): void {
+  addAgentModalOpen.value = true;
+}
+
+async function refreshManagedAgentSessions(): Promise<void> {
+  if (!window.letagentsDesktop?.workers?.listManagedAgentSessions || !props.room.identifier) return;
+  const roomIdentifier = props.room.identifier;
+  try {
+    const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(roomIdentifier);
+    if (props.room.identifier !== roomIdentifier) return;
+    managedAgentSessions.value = sessions;
+  } catch {
+    if (props.room.identifier === roomIdentifier) {
+      managedAgentSessions.value = managedAgentSessions.value.filter((session) =>
+        managedAgentSessionMatchesRoom(session, roomIdentifier)
+      );
+    }
+  }
+}
+
+function replaceManagedAgentSessions(sessions: DesktopManagedAgentSession[]): void {
+  const otherRoomSessions = managedAgentSessions.value.filter((session) =>
+    !managedAgentSessionMatchesRoom(session, props.room.identifier)
+  );
+  managedAgentSessions.value = [...otherRoomSessions, ...sessions];
+}
+
+function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
+  managedAgentSessions.value = [
+    session,
+    ...managedAgentSessions.value.filter((entry) => entry.id !== session.id),
+  ];
+}
+
+function restartManagedAgentSessionsRefreshTimer(): void {
+  stopManagedAgentSessionsRefreshTimer();
+  if (!props.room.identifier || !window.letagentsDesktop?.workers?.listManagedAgentSessions) return;
+  managedAgentSessionsRefreshTimer = window.setInterval(() => {
+    void refreshManagedAgentSessions();
+  }, 4_000);
+}
+
+function stopManagedAgentSessionsRefreshTimer(): void {
+  if (managedAgentSessionsRefreshTimer !== null) {
+    window.clearInterval(managedAgentSessionsRefreshTimer);
+    managedAgentSessionsRefreshTimer = null;
+  }
+}
+
+function openAgentDetail(target: AgentModalTarget): void {
+  selectedAgentDetailTarget.value = target;
+}
+
+function openAddAgentModalFromDetail(): void {
+  selectedAgentDetailTarget.value = null;
+  addAgentModalOpen.value = true;
+}
+
+function openReasoningFromAgentDetail(sessionId: string): void {
+  selectedAgentDetailTarget.value = null;
+  openReasoningInspector(sessionId);
+}
+
+function openAgentRepoPicker(): void {
+  addAgentModalOpen.value = false;
+  emit("choose-repo");
 }
 
 async function copyRoomLink(): Promise<void> {

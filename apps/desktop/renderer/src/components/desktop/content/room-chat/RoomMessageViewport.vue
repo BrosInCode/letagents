@@ -2,7 +2,7 @@
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
       <button
-        v-if="threadMessages.length && hasOlderMessages"
+        v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
         class="room-load-older"
         type="button"
         :disabled="loadingOlderMessages"
@@ -20,12 +20,37 @@
         :latest-thread-message="latestThreadMessage(message.id)"
         :highlight-query="searchQuery"
         :search-active="message.id === activeSearchMessageId"
+        @quote-reply="$emit('quote-reply', $event)"
         @open-thread="$emit('open-thread', $event)"
         @scroll-to-message="scrollToMessage"
         @open-image="$emit('open-image', $event)"
         @open-agent="$emit('open-agent', $event)"
         @open-github-event="$emit('open-github-event', $event)"
       />
+
+      <div
+        v-if="localAgentWork.length && !roomLoading"
+        class="room-local-agent-work-list"
+        data-testid="room-local-agent-work-list"
+      >
+        <article
+          v-for="work in localAgentWork"
+          :key="work.id"
+          class="room-local-agent-work"
+          data-testid="room-local-agent-work"
+        >
+          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+          <div>
+            <strong>{{ work.displayName }}</strong>
+            <span>{{ work.summary }}</span>
+          </div>
+          <span class="room-local-agent-work-dots" aria-hidden="true">
+            <i></i>
+            <i></i>
+            <i></i>
+          </span>
+        </article>
+      </div>
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
@@ -43,15 +68,9 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length" class="room-empty-card" data-testid="room-chat-empty">
-        <h3>{{ roomIdentifier ? "No messages yet" : "Open a room to begin" }}</h3>
-        <p>
-          {{
-            roomIdentifier
-              ? "Messages from humans, agents, and GitHub will appear here."
-              : "Messages from humans, agents, and GitHub will appear here as the room comes alive."
-          }}
-        </p>
+      <article v-else-if="!messages.length && !localAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
+        <h3>{{ emptyStateTitle }}</h3>
+        <p>{{ emptyStateDescription }}</p>
       </article>
     </div>
     <div
@@ -90,6 +109,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
@@ -110,6 +130,9 @@ interface ScrollAnchor {
   offsetTop: number;
 }
 
+const maxAutoViewportBackfillPages = 5;
+const viewportFillSlack = 32;
+
 const props = defineProps<{
   active: boolean;
   activeSearchMessageId: string | null;
@@ -118,6 +141,8 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  localAgentWork: ManagedAgentWorkIndicator[];
+  hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   roomLoading: boolean;
   searchQuery: string;
@@ -129,14 +154,30 @@ const emit = defineEmits<{
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
+  "quote-reply": [messageId: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
 }>();
+
+const emptyStateTitle = computed(() => {
+  if (!props.roomIdentifier) return "Open a room to begin";
+  return props.hasFilteredRoomActivity ? "No chat messages visible" : "No messages yet";
+});
+
+const emptyStateDescription = computed(() => {
+  if (!props.roomIdentifier) {
+    return "Messages from humans, agents, and GitHub will appear here as the room comes alive.";
+  }
+  return props.hasFilteredRoomActivity
+    ? "The loaded history contains activity that is hidden from Chat."
+    : "Messages from humans, agents, and GitHub will appear here.";
+});
 
 const messagesElement = ref<HTMLElement | null>(null);
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
+const autoViewportBackfillCount = ref(0);
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
@@ -144,6 +185,7 @@ let shouldJumpToLatestOnActivate = false;
 let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
+let autoViewportBackfillFrame: number | null = null;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
@@ -215,6 +257,24 @@ watch(
 );
 
 watch(
+  () => props.localAgentWork.map((work) => `${work.id}:${work.summary}`).join("|"),
+  async (nextKey, previousKey) => {
+    if (nextKey === previousKey) {
+      return;
+    }
+    await nextTick();
+    if (!messagesElement.value) {
+      return;
+    }
+    if (!previousKey || isScrolledToBottom) {
+      scrollToBottom("auto");
+      return;
+    }
+    updateScrollState();
+  },
+);
+
+watch(
   () => props.threadMessages,
   (newMessages, oldMessages = []) => {
     if (!oldMessages.length) return;
@@ -282,6 +342,21 @@ watch(
 );
 
 watch(
+  [
+    () => props.active,
+    () => props.roomLoading,
+    () => props.hasOlderMessages,
+    () => props.loadingOlderMessages,
+    () => props.messages.length,
+    () => props.threadMessages.length,
+    () => props.hasFilteredRoomActivity,
+    () => props.roomIdentifier,
+  ],
+  () => scheduleAutoFillViewport(),
+  { immediate: true, flush: "post" },
+);
+
+watch(
   () => props.roomIdentifier,
   () => {
     unreadCount.value = 0;
@@ -292,6 +367,8 @@ watch(
     shouldRestoreInitialScroll = hasInitialScrollPosition();
     shouldJumpToLatestOnActivate = false;
     shouldRestoreKeepAliveScroll = false;
+    autoViewportBackfillCount.value = 0;
+    cancelAutoFillViewport();
     void nextTick(() => {
       if (!restoreInitialScrollPosition()) {
         scrollToBottom("auto");
@@ -313,6 +390,7 @@ onMounted(() => {
     if (!restoreInitialScrollPosition()) {
       updateScrollState();
     }
+    scheduleAutoFillViewport();
   });
 });
 
@@ -332,9 +410,56 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  cancelAutoFillViewport();
   rememberScrollAnchor();
   emitScrollPosition();
 });
+
+function scheduleAutoFillViewport(): void {
+  cancelAutoFillViewport();
+  if (!canAutoFillViewport()) return;
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    void nextTick(() => maybeAutoFillViewport());
+    return;
+  }
+  autoViewportBackfillFrame = window.requestAnimationFrame(() => {
+    autoViewportBackfillFrame = null;
+    void nextTick(() => maybeAutoFillViewport());
+  });
+}
+
+function cancelAutoFillViewport(): void {
+  if (autoViewportBackfillFrame === null) return;
+  if (typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(autoViewportBackfillFrame);
+  }
+  autoViewportBackfillFrame = null;
+}
+
+function canAutoFillViewport(): boolean {
+  return Boolean(
+    props.active
+    && props.roomIdentifier
+    && !props.roomLoading
+    && props.hasOlderMessages
+    && !props.loadingOlderMessages
+    && autoViewportBackfillCount.value < maxAutoViewportBackfillPages
+  );
+}
+
+function maybeAutoFillViewport(): void {
+  if (!canAutoFillViewport()) return;
+  const element = messagesElement.value;
+  if (!element || !isMeasurableScrollViewport(element)) return;
+  const hasLoadedTimelineActivity = props.messages.length > 0
+    || props.threadMessages.length > 0
+    || props.hasFilteredRoomActivity;
+  if (!hasLoadedTimelineActivity) return;
+  if (element.scrollHeight > element.clientHeight + viewportFillSlack) return;
+
+  autoViewportBackfillCount.value += 1;
+  emit("load-older");
+}
 
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   if (!messagesElement.value) return;

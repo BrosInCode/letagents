@@ -16,6 +16,8 @@ export const apiUrl =
   process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
 export const attachmentProtocolScheme = "letagents-attachment";
 export const roomMessageHistoryPageSize = 150;
-export const letagentsLocalStatePath =
-  process.env.LETAGENTS_STATE_PATH?.trim() ||
-  join(homedir(), ".letagents", "mcp-state.json");
+
+export function getLetAgentsLocalStatePath(): string {
+  return process.env.LETAGENTS_STATE_PATH?.trim() ||
+    join(homedir(), ".letagents", "mcp-state.json");
+}

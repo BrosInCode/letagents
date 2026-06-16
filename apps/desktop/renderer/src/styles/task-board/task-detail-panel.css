@@ -203,23 +203,6 @@
   box-shadow:
     0 26px 80px rgba(0, 0, 0, 0.58),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
-  scrollbar-width: thin;
-}
-
-.desktop-task-modal::-webkit-scrollbar {
-  width: 10px;
-}
-
-.desktop-task-modal::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.desktop-task-modal::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.28);
-  background-clip: content-box;
 }
 
 .desktop-task-modal-close {

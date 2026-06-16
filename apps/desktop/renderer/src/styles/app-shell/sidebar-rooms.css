@@ -16,8 +16,6 @@
   overflow-anchor: none;
   overscroll-behavior: contain;
   padding: 8px 18px 8px 0;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-  scrollbar-width: thin;
   scroll-padding-block: 8px var(--scroll-fade-size-active);
   --scroll-mask-edge: var(--scroll-fade-size);
   -webkit-mask-image: linear-gradient(
@@ -38,7 +36,6 @@
 .project-list:hover,
 .project-list:focus-within {
   --scroll-mask-edge: var(--scroll-fade-size-active);
-  scrollbar-color: var(--scrollbar-thumb-hover) transparent;
 }
 
 .project-group {

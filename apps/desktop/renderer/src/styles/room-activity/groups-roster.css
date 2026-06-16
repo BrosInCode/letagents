@@ -17,9 +17,7 @@
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
 }
 
 .desktop-activity-group,
@@ -267,25 +265,4 @@
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.1);
-}
-
-.desktop-activity-groups::-webkit-scrollbar,
-.desktop-activity-detail::-webkit-scrollbar {
-  width: 6px;
-}
-
-.desktop-activity-groups::-webkit-scrollbar-track,
-.desktop-activity-detail::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.desktop-activity-groups::-webkit-scrollbar-thumb,
-.desktop-activity-detail::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
-}
-
-.desktop-activity-groups::-webkit-scrollbar-thumb:hover,
-.desktop-activity-detail::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
 }

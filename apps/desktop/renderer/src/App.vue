@@ -141,6 +141,7 @@
           :github-events="selectedSnapshot?.githubEvents || null"
           :repo-status="repoStatusValue"
           :workers="workers"
+          :open-add-agent-requested="openAddAgentAfterRepoPick"
           :initial-chat-scroll-top="chatScrollTopByRoom[selectedRoomInfo.identifier] ?? null"
           @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
@@ -149,6 +150,8 @@
           @refresh-room="handleRefreshRoom"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @cycle-sidebar="cycleSidebar"
+          @choose-repo="pickRepoRoomForAgent"
+          @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
         />
       </KeepAlive>
 
@@ -283,6 +286,7 @@ const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
 const chatScrollTopByRoom = ref<Record<string, number>>({});
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+const openAddAgentAfterRepoPick = ref(false);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
 const chatStorageAvailable = ref(true);
 const chatStorageBusy = ref(false);
@@ -790,6 +794,14 @@ const {
   selectedMcpTargetIds,
   setupLoadError,
 });
+
+async function pickRepoRoomForAgent(): Promise<void> {
+  openAddAgentAfterRepoPick.value = false;
+  const openedRoom = await pickRepoRoom();
+  if (openedRoom) {
+    openAddAgentAfterRepoPick.value = true;
+  }
+}
 
 function getChatStorageBridge(): typeof window.letagentsDesktop.chatStorage | null {
   const bridge = window.letagentsDesktop?.chatStorage;

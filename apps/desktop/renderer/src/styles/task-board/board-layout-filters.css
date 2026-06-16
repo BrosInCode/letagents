@@ -24,29 +24,6 @@
   overflow-x: auto;
   overflow-y: auto;
   padding: 0 2px 16px;
-  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
-  scrollbar-width: thin;
-}
-
-.desktop-board-kanban-scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-.desktop-board-kanban-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.desktop-board-kanban-scroll::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.28);
-  background-clip: content-box;
-}
-
-.desktop-board-kanban-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.42);
-  background-clip: content-box;
 }
 
 .desktop-board-toolbar {

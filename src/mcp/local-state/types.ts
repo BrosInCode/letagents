@@ -54,6 +54,8 @@ export interface CodexLiveSessionState {
   cwd: string;
   stop_phrase: string;
   max_minutes: number;
+  delivery_mode?: "mcp_polling" | "desktop_events";
+  desktop_managed?: boolean;
   deadline_utc?: string | null;
   token: string;
   thread_id: string;

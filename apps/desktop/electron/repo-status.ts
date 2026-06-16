@@ -28,58 +28,63 @@ async function getCurrentBranch(workspaceRoot: string): Promise<string | null> {
   }
 }
 
-async function getWorktrees(workspaceRoot: string): Promise<RepoWorktreeEntry[]> {
-  try {
-    const stdout = await runGit(workspaceRoot, ["worktree", "list", "--porcelain"]);
-    const lines = stdout.split(/\r?\n/);
-    const entries: RepoWorktreeEntry[] = [];
-    let current: Partial<RepoWorktreeEntry> | null = null;
+export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string): RepoWorktreeEntry[] {
+  const lines = stdout.split(/\r?\n/);
+  const entries: RepoWorktreeEntry[] = [];
+  let current: Partial<RepoWorktreeEntry> | null = null;
 
-    for (const line of lines) {
-      if (!line.trim()) {
-        if (current?.path && current.head) {
-          entries.push({
-            path: current.path,
-            branch: current.branch ?? null,
-            head: current.head,
-            isCurrent: current.path === workspaceRoot,
-          });
-        }
-        current = null;
-        continue;
-      }
-
-      const [key, ...rest] = line.split(" ");
-      const value = rest.join(" ").trim();
-      if (key === "worktree") {
-        current = { path: value };
-      } else if (current && key === "HEAD") {
-        current.head = value;
-      } else if (current && key === "branch") {
-        current.branch = value.replace(/^refs\/heads\//, "");
-      }
-    }
-
+  const pushCurrent = () => {
     if (current?.path && current.head) {
       entries.push({
         path: current.path,
         branch: current.branch ?? null,
         head: current.head,
         isCurrent: current.path === workspaceRoot,
+        isMain: entries.length === 0,
       });
     }
+    current = null;
+  };
 
-    return entries;
+  for (const line of lines) {
+    if (!line.trim()) {
+      pushCurrent();
+      continue;
+    }
+
+    const [key, ...rest] = line.split(" ");
+    const value = rest.join(" ").trim();
+    if (key === "worktree") {
+      pushCurrent();
+      current = { path: value };
+    } else if (current && key === "HEAD") {
+      current.head = value;
+    } else if (current && key === "branch") {
+      current.branch = value.replace(/^refs\/heads\//, "");
+    }
+  }
+
+  pushCurrent();
+
+  return entries;
+}
+
+async function getWorktrees(workspaceRoot: string): Promise<RepoWorktreeEntry[]> {
+  try {
+    const stdout = await runGit(workspaceRoot, ["worktree", "list", "--porcelain"]);
+    return parseGitWorktreePorcelain(stdout, workspaceRoot);
   } catch {
     return [];
   }
 }
 
 export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus> {
+  const worktrees = await getWorktrees(workspaceRoot);
   return {
     rootPath: workspaceRoot,
+    mainRootPath: worktrees.find((worktree) => worktree.isMain)?.path ?? workspaceRoot,
     branch: await getCurrentBranch(workspaceRoot),
-    worktrees: await getWorktrees(workspaceRoot),
+    worktrees,
   };
 }
 export function normalizeGitRemoteToRoomIdentifier(remote: string): string | null {

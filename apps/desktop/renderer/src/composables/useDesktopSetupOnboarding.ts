@@ -46,7 +46,8 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
 
   const showFirstRunGate = computed(() => {
     return !options.mcpInstallState.value
-      || !options.mcpInstallState.value.completed;
+      || !options.mcpInstallState.value.completed
+      || !options.authStatus.value?.authenticated;
   });
 
   const visibleMcpInstallState = computed<DesktopMcpInstallState>(() => {
@@ -130,7 +131,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     return options.repoStatus.value?.rootPath?.trim() || null;
   }
 
-  async function pickRepoRoom(): Promise<void> {
+  async function pickRepoRoom(): Promise<boolean> {
     options.loading.value = true;
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = "Opening the repo picker...";
@@ -140,10 +141,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         throw new Error("Restart LetAgents Desktop so the repo picker can open.");
       }
       const result = await window.letagentsDesktop.repos.pickRoom();
-      if (result.canceled) return;
+      if (result.canceled) return false;
       if (result.error || !result.snapshot) {
         options.authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
-        return;
+        return false;
       }
       options.repoStatus.value = result.repoStatus;
       const folderLabel = rootPathLabel(result.repoPath) || result.repoPath || "Selected project folder";
@@ -157,8 +158,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       options.authFeedback.value = result.warning
         ? `${result.warning} Room selected: ${roomLabel}.`
         : `Repo room selected: ${roomLabel}. Open it when you are ready.`;
+      return true;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the repo picker.";
+      return false;
     } finally {
       options.loading.value = false;
     }

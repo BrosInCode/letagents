@@ -52,28 +52,48 @@ export function formatOwnerAttribution(ownerLabel: string): string {
 }
 
 export function inferAgentIdeLabel(value: string | null | undefined): string | null {
-  const normalized = normalizeWhitespace(String(value ?? "")).toLowerCase();
+  const raw = normalizeWhitespace(String(value ?? ""));
+  const normalized = raw.toLowerCase();
   if (!normalized) {
     return null;
   }
 
-  if (normalized === "codex" || normalized.startsWith("codex-")) {
+  if (matchesRuntimePrefix(raw, "codex")) {
     return "Codex";
   }
 
-  if (normalized === "antigravity" || normalized.startsWith("antigravity-")) {
+  if (matchesRuntimePrefix(raw, "antigravity")) {
     return "Antigravity";
   }
 
-  if (normalized === "claude" || normalized.startsWith("claude-")) {
+  if (matchesRuntimePrefix(raw, "claude")) {
     return "Claude";
   }
 
-  if (normalized === "orchestrator" || normalized.startsWith("orchestrator-")) {
+  if (matchesRuntimePrefix(raw, "orchestrator")) {
     return "Orchestrator";
   }
 
   return null;
+}
+
+function matchesRuntimePrefix(value: string, prefix: string): boolean {
+  const normalized = value.toLowerCase();
+  if (normalized === prefix || normalized.startsWith(`${prefix}-`)) {
+    return true;
+  }
+
+  const compact = value.replace(/[^a-zA-Z0-9]+/g, "");
+  if (compact.toLowerCase() === prefix) {
+    return true;
+  }
+
+  if (!compact.toLowerCase().startsWith(prefix)) {
+    return false;
+  }
+
+  const next = compact[prefix.length];
+  return Boolean(next && /[A-Z0-9]/.test(next));
 }
 
 export function buildAgentActorLabel(input: {
