@@ -13,6 +13,7 @@ import {
   agentSetupConfirmationMessage,
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
+  canStopManagedAgentTurn,
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
@@ -206,6 +207,26 @@ test("isDeliverableManagedAgentSession requires a registered room worker", () =>
     agentSessionId: "agent_1",
     canStop: true,
   })), true);
+});
+
+test("canStopManagedAgentTurn only enables turn stops for active startup or running turns", () => {
+  assert.equal(canStopManagedAgentTurn(session({
+    status: "running",
+    canStop: true,
+  })), true);
+  assert.equal(canStopManagedAgentTurn(session({
+    status: "starting",
+    canStop: true,
+  })), true);
+  assert.equal(canStopManagedAgentTurn(session({
+    deliveryMode: "desktop_events",
+    status: "completed",
+    canStop: true,
+  })), false);
+  assert.equal(canStopManagedAgentTurn(session({
+    status: "running",
+    canStop: false,
+  })), false);
 });
 
 test("isExternalMcpProviderReady distinguishes bridge-only providers from desktop-supervised providers", () => {

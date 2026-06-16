@@ -151,7 +151,7 @@
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
                     type="button"
-                    :disabled="!session.canStop || Boolean(stoppingSessionId)"
+                    :disabled="!canStopManagedAgentTurn(session) || Boolean(stoppingSessionId)"
                     @click="stopManagedAgent(session.id, 'turn')"
                   >
                     {{ stoppingSessionId === session.id && stoppingSessionMode === "turn" ? "Stopping..." : "Stop turn" }}
@@ -259,6 +259,7 @@ import {
   agentSetupConfirmationMessage,
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
+  canStopManagedAgentTurn,
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
@@ -501,7 +502,9 @@ async function stopManagedAgent(sessionId: string, stopMode: "turn" | "worker"):
     });
     if (!isCurrentModalState(requestVersion)) return;
     if (session) {
-      setupMessage.value = managedAgentStopResultMessage(session);
+      setupMessage.value = stopMode === "turn" && session.status === "completed"
+        ? "No current turn is running."
+        : managedAgentStopResultMessage(session);
       upsertManagedSession(session);
     }
     await loadManagedSessions();

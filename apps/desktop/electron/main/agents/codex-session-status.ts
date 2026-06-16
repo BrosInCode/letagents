@@ -197,6 +197,17 @@ export function codexSessionStatusAfterStopAttempt(
   return codexSessionStatusAfterTurnInterrupt(deliveryMode, serverReachable, shutdownServer);
 }
 
+export function codexSessionStatusAfterNoActiveTurnStop(
+  deliveryMode: DesktopManagedAgentDeliveryMode,
+  currentStatus: DesktopManagedAgentSessionStatus,
+): DesktopManagedAgentSessionStatus {
+  if (deliveryMode === "desktop_events") {
+    return "completed";
+  }
+
+  return currentStatus;
+}
+
 export function shouldShutdownManagedAgentOnStop(
   input: DesktopManagedAgentStopInput = {},
 ): boolean {

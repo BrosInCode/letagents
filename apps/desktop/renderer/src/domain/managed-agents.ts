@@ -52,6 +52,15 @@ export function isDeliverableManagedAgentSession(
     );
 }
 
+export function canStopManagedAgentTurn(
+  session: Pick<DesktopManagedAgentSession, "canStop" | "status"> | null | undefined,
+): boolean {
+  return Boolean(
+    session?.canStop &&
+    (session.status === "starting" || session.status === "running")
+  );
+}
+
 export function normalizeManagedAgentRoomIdentifier(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
 }

@@ -53,6 +53,7 @@ import {
   extractThreadStatus,
   extractTurnStatus,
   codexSessionStatusAfterInspectFailure,
+  codexSessionStatusAfterNoActiveTurnStop,
   codexSessionStatusAfterTurnInterrupt,
   codexSessionStatusAfterStopAttempt,
   isLikelyMaterializingError,
@@ -719,7 +720,7 @@ function statusAfterDesktopEventCompletedTurn(
   if (bound.agent_session_id) {
     return {
       ...bound,
-      status: "running",
+      status: "completed",
       last_error: null,
       updated_at: new Date().toISOString(),
     };
@@ -736,6 +737,25 @@ function statusAfterDesktopEventCompletedTurn(
     ...session,
     status: "unknown",
     last_error: "Codex completed a desktop event turn before registering with LetAgents.",
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function statusAfterNoActiveTurnToStop(
+  session: DesktopCodexLiveSessionState,
+): DesktopCodexLiveSessionState {
+  const status = codexSessionStatusAfterNoActiveTurnStop(
+    managedAgentDeliveryMode(session),
+    session.status,
+  );
+  if (status === "completed") {
+    return statusAfterDesktopEventCompletedTurn(session);
+  }
+
+  return {
+    ...session,
+    status,
+    last_error: null,
     updated_at: new Date().toISOString(),
   };
 }
@@ -1493,13 +1513,38 @@ export async function stopDesktopManagedAgent(
   let interruptError: string | null = null;
   let interruptSucceeded = false;
   if (serverReachable) {
+    const latest = getStoredCodexLiveSession(session.session_id) ?? session;
     try {
       const client = new CodexRpcClient(session.server_url);
       await client.connect();
       try {
+        try {
+          const read = await client.request<ThreadReadResult>("thread/read", {
+            threadId: latest.thread_id,
+            includeTurns: true,
+          });
+          const turns = read?.thread?.turns ?? [];
+          const turn = turns.find((candidate) => candidate.id === latest.turn_id);
+          const threadStatus = extractThreadStatus(read?.thread);
+          const turnStatus = extractTurnStatus(turn);
+          publishCodexRuntimeSnapshot(latest, {
+            threadStatus,
+            turnStatus,
+            recentItems: turn?.items ?? turn?.output,
+          });
+          if (!isActiveCodexTurnStatus(turnStatus)) {
+            const updated = updateCodexLiveSession(latest.session_id, statusAfterNoActiveTurnToStop) ?? latest;
+            scheduleOwnedSessionMonitor(updated);
+            return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
+          }
+        } catch (error) {
+          if (!isLikelyMaterializingError(error)) {
+            throw error;
+          }
+        }
         await client.request("turn/interrupt", {
-          threadId: session.thread_id,
-          turnId: session.turn_id,
+          threadId: latest.thread_id,
+          turnId: latest.turn_id,
         });
         interruptSucceeded = true;
       } finally {
@@ -1529,10 +1574,12 @@ export async function stopDesktopManagedAgent(
       updated_at: new Date().toISOString(),
     })) ?? session;
 
-  if (shutdownServer || ownedServerExited || updated.status !== "running") {
+  if (shutdownServer || ownedServerExited) {
     killOwnedAppServer(updated);
   }
-  if (updated.status !== "running") {
+  const keepMonitoring = updated.status === "running" ||
+    (managedAgentDeliveryMode(updated) === "desktop_events" && updated.status === "completed");
+  if (!keepMonitoring) {
     clearSessionMonitor(updated.session_id);
   } else {
     scheduleOwnedSessionMonitor(updated);

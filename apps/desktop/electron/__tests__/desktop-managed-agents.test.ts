@@ -33,6 +33,7 @@ const { buildDesktopEventPrompt } = await import("../main/agents/codex-event-pro
 const { codexInstallCommand } = await import("../main/agents/codex-install.js");
 const {
   codexSessionStatusAfterInspectFailure,
+  codexSessionStatusAfterNoActiveTurnStop,
   codexSessionStatusAfterTurnInterrupt,
   codexSessionStatusAfterStopAttempt,
   deriveCodexLiveSessionStatus,
@@ -1199,6 +1200,12 @@ test("managed Codex stop modes distinguish stopping a turn from shutting down th
   assert.equal(shouldShutdownManagedAgentOnStop({ stopMode: "worker" }), true);
   assert.equal(shouldShutdownManagedAgentOnStop({ shutdownServer: true }), true);
   assert.equal(shouldShutdownManagedAgentOnStop({}), false);
+});
+
+test("managed Codex idle turn stops leave desktop-event workers waiting", () => {
+  assert.equal(codexSessionStatusAfterNoActiveTurnStop("desktop_events", "running"), "completed");
+  assert.equal(codexSessionStatusAfterNoActiveTurnStop("desktop_events", "completed"), "completed");
+  assert.equal(codexSessionStatusAfterNoActiveTurnStop("mcp_polling", "running"), "running");
 });
 
 test("active Codex turn statuses keep desktop event delivery from overlapping turns", () => {

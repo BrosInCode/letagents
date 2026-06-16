@@ -47,7 +47,7 @@
                   type="button"
                   class="desktop-agent-detail-icon-button desktop-agent-detail-icon-button-stop"
                   data-testid="desktop-agent-detail-stop-managed-agent"
-                  :disabled="!primaryManagedSession || !primaryManagedSession.canStop || Boolean(stoppingSessionId)"
+                  :disabled="!canStopManagedAgentTurn(primaryManagedSession) || Boolean(stoppingSessionId)"
                   :title="isStoppingPrimarySession('turn') ? 'Stopping turn' : 'Stop turn'"
                   aria-label="Stop turn"
                   @click="primaryManagedSession ? stopManagedSession(primaryManagedSession.id, 'turn') : undefined"
@@ -192,6 +192,7 @@ import {
 } from "../../../domain/reasoning";
 import {
   isVisibleManagedAgentSession,
+  canStopManagedAgentTurn,
   managedAgentSessionMatchesTarget,
   managedAgentSessionDisplayName,
   managedAgentSessionStatusLabel,
@@ -465,7 +466,9 @@ async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"
     }
     stopStatusMessage.value = stopMode === "worker"
       ? "Local agent stopped."
-      : "Current turn stopped.";
+      : stopped?.status === "completed"
+        ? "No current turn is running."
+        : "Current turn stopped.";
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
     managedSessionError.value = error instanceof Error
