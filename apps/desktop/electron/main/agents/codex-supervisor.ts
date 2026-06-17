@@ -44,10 +44,14 @@ import {
 } from "./codex-event-prompt.js";
 import {
   buildManagedAgentContextResultPrompt,
-  containsManagedAgentContextRequestPrefix,
   executeManagedAgentContextRequest,
+  hasManagedAgentContextRequestLine,
   parseManagedAgentContextRequest,
 } from "./managed-agent-context.js";
+import type {
+  ManagedAgentContextRequest,
+  ManagedAgentContextResult,
+} from "./managed-agent-context-protocol.js";
 import {
   CodexRpcClient,
   type RpcNotification,
@@ -109,6 +113,7 @@ const SESSION_MONITOR_INTERVAL_MS = 30_000;
 const DESKTOP_EVENT_TURN_POLL_INTERVAL_MS = 1_000;
 const DESKTOP_EVENT_TURN_TIMEOUT_MS = 5 * 60_000;
 const DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT = 3;
+const DESKTOP_EVENT_CONTEXT_REQUEST_TIMEOUT_MS = 30_000;
 const CODEX_RUNTIME_REASONING_THROTTLE_MS = 750;
 const CODEX_RUNTIME_REASONING_REPEAT_MS = 30_000;
 
@@ -1404,6 +1409,7 @@ async function runDesktopEventTurnWithContext(input: {
   session: DesktopCodexLiveSessionState;
   event: ManagedRoomEvent;
   prompt: string;
+  allowContextRequests: boolean;
 }): Promise<{ session: DesktopCodexLiveSessionState; text: string | null }> {
   let started = await startDesktopEventCodexTurn(input);
   queueCodexRuntimeReasoningSummary(started.session, {
@@ -1419,11 +1425,14 @@ async function runDesktopEventTurnWithContext(input: {
     started.turnId,
   );
   let latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
+  if (!input.allowContextRequests) {
+    return { session: latest, text: replyText };
+  }
 
   for (let requestCount = 0; requestCount < DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT; requestCount += 1) {
     const request = parseManagedAgentContextRequest(replyText);
     if (!request) {
-      if (containsManagedAgentContextRequestPrefix(replyText)) {
+      if (hasManagedAgentContextRequestLine(replyText)) {
         const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
           ...current,
           status: "unknown",
@@ -1444,7 +1453,7 @@ async function runDesktopEventTurnWithContext(input: {
       next_action: "Injecting compact context into Codex.",
     });
 
-    const result = await executeManagedAgentContextRequest(latest, request);
+    const result = await executeManagedAgentContextRequestWithTimeout(latest, request);
     const contextPrompt = buildManagedAgentContextResultPrompt(result);
     const readySession = getStoredCodexLiveSession(input.session.session_id) ?? latest;
     started = await startDesktopEventCodexTurn({
@@ -1473,7 +1482,7 @@ async function runDesktopEventTurnWithContext(input: {
     emitManagedAgentSessionUpdate(capped);
     return { session: capped, text: null };
   }
-  if (containsManagedAgentContextRequestPrefix(replyText)) {
+  if (hasManagedAgentContextRequestLine(replyText)) {
     const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
       ...current,
       status: "unknown",
@@ -1486,6 +1495,33 @@ async function runDesktopEventTurnWithContext(input: {
   }
 
   return { session: latest, text: replyText };
+}
+
+async function executeManagedAgentContextRequestWithTimeout(
+  session: DesktopCodexLiveSessionState,
+  request: ManagedAgentContextRequest,
+): Promise<ManagedAgentContextResult> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      executeManagedAgentContextRequest(session, request),
+      new Promise<ManagedAgentContextResult>((resolve) => {
+        timeout = setTimeout(() => {
+          resolve({
+            ok: false,
+            tool: request.tool,
+            roomIdentifier: session.room_identifier || session.room_id,
+            storage: null,
+            error: "Desktop context tool timed out.",
+          });
+        }, DESKTOP_EVENT_CONTEXT_REQUEST_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 async function deliverDesktopEventTurn(
@@ -1533,6 +1569,7 @@ async function deliverDesktopEventTurn(
       session: idleSession,
       event,
       prompt,
+      allowContextRequests: !stopAfterTurn,
     });
     await publishDesktopManagedAgentReply({
       session: completed.session,

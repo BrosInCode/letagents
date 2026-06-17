@@ -14,7 +14,7 @@ import {
 } from "../rooms/tasks/mappers.js";
 export {
   buildManagedAgentContextResultPrompt,
-  containsManagedAgentContextRequestPrefix,
+  hasManagedAgentContextRequestLine,
   isManagedAgentContextRequest,
   MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
   parseManagedAgentContextRequest,
@@ -29,6 +29,7 @@ import type { DesktopCodexLiveSessionState } from "./state.js";
 const MAX_CONTEXT_MESSAGES = 50;
 const MAX_CONTEXT_SEARCH_SCAN = 500;
 const MAX_CONTEXT_TASKS = 20;
+const MAX_CONTEXT_TASK_SCAN = 500;
 
 type ContextStorage = ManagedAgentContextStorage;
 
@@ -252,6 +253,22 @@ function uniqueMessages(messages: RoomMessagePayload[]): RoomMessagePayload[] {
   );
 }
 
+function threadMessagesFromWindow(
+  rootMessageId: string,
+  messages: RoomMessagePayload[],
+): RoomMessagePayload[] {
+  const included = new Set([rootMessageId]);
+  const threadMessages: RoomMessagePayload[] = [];
+  for (const message of messages) {
+    const replyToId = message.reply_to?.id;
+    if (replyToId && included.has(replyToId)) {
+      included.add(message.id);
+      threadMessages.push(message);
+    }
+  }
+  return threadMessages;
+}
+
 async function readRecentRoomMessages(
   roomIdentifier: string,
   storage: ContextStorage,
@@ -346,6 +363,15 @@ async function readThread(
       error: "read_thread requires root_message_id.",
     };
   }
+  if (!parseMessageNumber(rootMessageId)) {
+    return {
+      ok: false,
+      tool: "read_thread",
+      roomIdentifier,
+      storage,
+      error: "read_thread requires a valid root_message_id.",
+    };
+  }
 
   if (storage === "local") {
     const page = await getLocalChatThreadMessages(roomIdentifier, rootMessageId, { limit });
@@ -369,7 +395,7 @@ async function readThread(
   ]);
   const messages = uniqueMessages([
     ...(rootMessage ? [rootMessage] : []),
-    ...page.messages.filter((message) => message.reply_to?.id === rootMessageId),
+    ...threadMessagesFromWindow(rootMessageId, page.messages),
   ]).slice(0, limit);
   return {
     ok: true,
@@ -397,6 +423,15 @@ async function readMessagesAround(
       roomIdentifier,
       storage,
       error: "read_messages_around requires message_id.",
+    };
+  }
+  if (!parseMessageNumber(messageId)) {
+    return {
+      ok: false,
+      tool: "read_messages_around",
+      roomIdentifier,
+      storage,
+      error: "read_messages_around requires a valid message_id.",
     };
   }
 
@@ -438,10 +473,28 @@ async function readMessagesAround(
 }
 
 async function fetchCloudTasks(roomIdentifier: string): Promise<DesktopTaskSummary[]> {
-  const page = await apiFetch<{ tasks?: DesktopTaskSummaryPayload[] }>(
-    `/rooms/${encodeURIComponent(roomIdentifier)}/tasks`,
+  const page = await fetchCloudTaskPage(roomIdentifier, { limit: MAX_CONTEXT_TASKS });
+  return page.tasks;
+}
+
+async function fetchCloudTaskPage(
+  roomIdentifier: string,
+  options?: { limit?: number; after?: string },
+): Promise<{ tasks: DesktopTaskSummary[]; hasMore: boolean }> {
+  const params = new URLSearchParams();
+  if (options?.limit) {
+    params.set("limit", String(options.limit));
+  }
+  if (options?.after) {
+    params.set("after", options.after);
+  }
+  const page = await apiFetch<{ tasks?: DesktopTaskSummaryPayload[]; has_more?: boolean }>(
+    `/rooms/${encodeURIComponent(roomIdentifier)}/tasks${params.size ? `?${params.toString()}` : ""}`,
   );
-  return (page.tasks || []).map(mapDesktopTaskSummaryPayload);
+  return {
+    tasks: (page.tasks || []).map(mapDesktopTaskSummaryPayload),
+    hasMore: Boolean(page.has_more),
+  };
 }
 
 async function fetchCloudTask(roomIdentifier: string, taskId: string): Promise<DesktopTaskSummary> {
@@ -449,6 +502,61 @@ async function fetchCloudTask(roomIdentifier: string, taskId: string): Promise<D
     `/rooms/${encodeURIComponent(roomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
   );
   return mapDesktopTaskSummaryPayload(task);
+}
+
+async function searchCloudTasks(
+  roomIdentifier: string,
+  query: string,
+): Promise<{ tasks: DesktopTaskSummary[]; hasMore: boolean; scanned: number; scannedAll: boolean }> {
+  const matches: DesktopTaskSummary[] = [];
+  let after: string | undefined;
+  let scanned = 0;
+  let hasMore = false;
+
+  while (scanned < MAX_CONTEXT_TASK_SCAN && matches.length < MAX_CONTEXT_TASKS) {
+    const page = await fetchCloudTaskPage(roomIdentifier, {
+      limit: Math.min(100, MAX_CONTEXT_TASK_SCAN - scanned),
+      after,
+    });
+    scanned += page.tasks.length;
+    for (const task of page.tasks) {
+      if (!query || taskMatchesQuery(task, query)) {
+        matches.push(task);
+        if (matches.length >= MAX_CONTEXT_TASKS) {
+          break;
+        }
+      }
+    }
+
+    hasMore = page.hasMore;
+    after = page.tasks[page.tasks.length - 1]?.id;
+    if (!page.hasMore || !after) {
+      return {
+        tasks: matches,
+        hasMore: page.hasMore || matches.length >= MAX_CONTEXT_TASKS,
+        scanned,
+        scannedAll: true,
+      };
+    }
+  }
+
+  return {
+    tasks: matches,
+    hasMore: hasMore || scanned >= MAX_CONTEXT_TASK_SCAN || matches.length >= MAX_CONTEXT_TASKS,
+    scanned,
+    scannedAll: false,
+  };
+}
+
+function taskMatchesQuery(task: DesktopTaskSummary, query: string): boolean {
+  return [
+    task.id,
+    task.title,
+    task.description,
+    task.status,
+    task.assignee,
+    task.assigneeAgentKey,
+  ].some((value) => String(value ?? "").toLowerCase().includes(query));
 }
 
 async function getTaskContext(
@@ -480,26 +588,17 @@ async function getTaskContext(
   }
 
   const query = stringArg(args, "query").toLowerCase();
-  const tasks = (await fetchCloudTasks(roomIdentifier))
-    .filter((task) => {
-      if (!query) return true;
-      return [
-        task.id,
-        task.title,
-        task.description,
-        task.status,
-        task.assignee,
-        task.assigneeAgentKey,
-      ].some((value) => String(value ?? "").toLowerCase().includes(query));
-    })
-    .slice(0, MAX_CONTEXT_TASKS);
+  const taskSearch = await searchCloudTasks(roomIdentifier, query);
   return {
     ok: true,
     tool: "get_task_context",
     roomIdentifier,
     storage,
-    tasks: tasks.map(compactTask),
-    hasMore: false,
+    tasks: taskSearch.tasks.map(compactTask),
+    hasMore: taskSearch.hasMore,
+    note: taskSearch.scannedAll
+      ? undefined
+      : `Task search scanned the first ${taskSearch.scanned} tasks only.`,
   };
 }
 
