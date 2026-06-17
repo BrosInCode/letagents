@@ -14,6 +14,13 @@ const api: DesktopApi = {
   app: {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
   },
+  appAgent: {
+    getSettingsStatus: () =>
+      ipcRenderer.invoke("desktop:app-agent:get-settings-status"),
+    saveSettings: (input) =>
+      ipcRenderer.invoke("desktop:app-agent:save-settings", input),
+    run: (input) => ipcRenderer.invoke("desktop:app-agent:run", input),
+  },
   room: {
     listAccountRooms: (options) => ipcRenderer.invoke("desktop:room:list-account-rooms", options ?? {}),
     updateAccountRoom: (roomIdentifier: string, updates) =>

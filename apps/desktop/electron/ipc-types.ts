@@ -1,5 +1,6 @@
 export type * from "./ipc-types/activity.js";
 export type * from "./ipc-types/agents.js";
+export type * from "./ipc-types/app-agent.js";
 export type * from "./ipc-types/api.js";
 export type * from "./ipc-types/auth.js";
 export type * from "./ipc-types/core.js";

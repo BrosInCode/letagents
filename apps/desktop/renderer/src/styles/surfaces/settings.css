@@ -564,6 +564,35 @@ img.settings-profile-avatar {
   outline: none;
 }
 
+.settings-field {
+  display: grid;
+  gap: 8px;
+  max-width: 540px;
+}
+
+.settings-field span {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.settings-field input {
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(10, 10, 10, 0.36);
+  color: var(--text);
+  font: inherit;
+  padding: 0 14px;
+}
+
+.settings-field input:focus {
+  border-color: var(--border-accent);
+  outline: none;
+}
+
 .settings-feedback {
   margin: 0;
   padding: 12px 14px;

@@ -160,6 +160,9 @@
         v-if="activeEntry.type !== 'room'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
+        :app-agent-busy="appAgentBusy"
+        :app-agent-feedback="appAgentFeedback"
+        :app-agent-settings="appAgentSettingsStatus"
         :auth-status="authStatus"
         :busy="loading || authBusy"
         :chat-storage-busy="chatStorageBusy"
@@ -191,15 +194,25 @@
         @restore-room="restoreAccountRoom"
         @select-all-mcp-targets="selectAllMcpTargets"
         @select-mcp-target="selectMcpTarget"
+        @save-app-agent-settings="saveAppAgentSettings"
         @set-chat-storage-mode="setChatStorageMode"
         @sync-local-chat="syncLocalChat"
         @toggle-pin-room="toggleAccountRoomPin"
-        @refresh="refreshSettings"
+        @refresh="refreshSettingsSurface"
         @sign-out="signOut"
         @start-auth="startAuthFlow"
       />
 
     </section>
+
+    <DesktopAppAgent
+      :active-room-identifier="selectedRoomIdentifier || selectedRootRoomIdentifier"
+      :busy="appAgentBusy"
+      :result="appAgentResult"
+      :settings-status="appAgentSettingsStatus"
+      @open-settings="openAppAgentSettings"
+      @run="runAppAgent"
+    />
 
     <DesktopNewRoomModal
       v-if="newRoomModalOpen"
@@ -222,6 +235,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
+  DesktopAppAgentRunInput,
+  DesktopAppAgentRunResult,
+  DesktopAppAgentSaveSettingsInput,
+  DesktopAppAgentSettingsStatus,
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopChatStorageSettings,
@@ -238,6 +255,7 @@ import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
@@ -251,7 +269,7 @@ import { useDesktopNavigationState } from "./composables/useDesktopNavigationSta
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
-import { settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   hasUnreadRoomActivity,
@@ -264,6 +282,7 @@ import {
   normalizeRoomIdentifier,
   readStoredRecentRootRooms,
 } from "./domain/sidebar-rooms";
+import { shouldRefreshRoomsAfterAppAgentResult } from "./domain/app-agent";
 
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
@@ -294,6 +313,10 @@ const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
 const chatStorageAvailable = ref(true);
 const chatStorageBusy = ref(false);
 const chatStorageFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
+const appAgentSettingsStatus = ref<DesktopAppAgentSettingsStatus | null>(null);
+const appAgentBusy = ref(false);
+const appAgentResult = ref<DesktopAppAgentRunResult | null>(null);
+const appAgentFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const mcpInstallState = ref<DesktopMcpInstallState | null>(null);
 const selectedMcpTargetIds = ref<DesktopMcpInstallTargetId[]>([]);
@@ -383,6 +406,7 @@ const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
   if (activeEntry.value.type !== "system") return "storage:chat";
   if (activeEntry.value.id === "system:setup") return "system:setup";
+  if (activeEntry.value.id === "system:app-agent") return "system:app-agent";
   if (activeEntry.value.id === "system:repos") return "system:runtime";
   if (activeEntry.value.id === "system:workers") return "system:agents";
   if (activeEntry.value.id === "system:diagnostics") return "system:diagnostics";
@@ -849,6 +873,84 @@ async function loadChatStorageSettings(): Promise<void> {
   }
 }
 
+async function loadAppAgentSettingsStatus(): Promise<void> {
+  try {
+    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.getSettingsStatus();
+  } catch (error) {
+    appAgentFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "App Agent settings could not be loaded.",
+    };
+  }
+}
+
+async function saveAppAgentSettings(input: DesktopAppAgentSaveSettingsInput): Promise<void> {
+  appAgentBusy.value = true;
+  appAgentFeedback.value = null;
+  try {
+    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.saveSettings(input);
+    appAgentFeedback.value = {
+      state: "success",
+      message: "App Agent settings saved.",
+    };
+  } catch (error) {
+    appAgentFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "App Agent settings could not be saved.",
+    };
+  } finally {
+    appAgentBusy.value = false;
+  }
+}
+
+async function refreshSettingsSurface(): Promise<void> {
+  await Promise.all([
+    refreshSettings(),
+    loadAppAgentSettingsStatus(),
+  ]);
+}
+
+function openAppAgentSettings(): void {
+  activeEntry.value = appAgentEntry;
+}
+
+async function runAppAgent(input: DesktopAppAgentRunInput): Promise<void> {
+  appAgentBusy.value = true;
+  appAgentResult.value = null;
+  try {
+    const result = await window.letagentsDesktop.appAgent.run({
+      ...input,
+      activeRoomIdentifier:
+        input.activeRoomIdentifier || selectedRoomIdentifier.value || selectedRootRoomIdentifier.value,
+    });
+    appAgentResult.value = result;
+    if (result.settingsStatus) {
+      appAgentSettingsStatus.value = result.settingsStatus;
+    }
+    if (shouldRefreshRoomsAfterAppAgentResult(result)) {
+      await refreshAccountRooms();
+      await refreshSelectedSnapshot(rootRoomSnapshot.value);
+      refreshForegroundData();
+    }
+  } catch (error) {
+    appAgentResult.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "The App Agent could not complete that request.",
+    };
+  } finally {
+    appAgentBusy.value = false;
+  }
+}
+
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
   await window.letagentsDesktop.room.stopStream();
   await refreshActiveRepoStatus();
@@ -1021,6 +1123,7 @@ onMounted(() => {
   window.addEventListener("focus", handleWindowFocus);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   void loadChatStorageSettings();
+  void loadAppAgentSettingsStatus();
   void loadFirstRunSetup();
 });
 

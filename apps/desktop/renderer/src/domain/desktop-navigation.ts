@@ -8,6 +8,14 @@ export const setupEntry: SystemEntry = {
   sectionLabel: "System",
 };
 
+export const appAgentEntry: SystemEntry = {
+  id: "system:app-agent",
+  type: "system",
+  title: "App Agent",
+  description: "OpenRouter actions",
+  sectionLabel: "System",
+};
+
 export const repositoryEntry: SystemEntry = {
   id: "system:repos",
   type: "system",
@@ -42,6 +50,7 @@ export const diagnosticsEntry: SystemEntry = {
 
 export const systemEntries: SystemEntry[] = [
   setupEntry,
+  appAgentEntry,
   repositoryEntry,
   workersEntry,
   settingsEntry,

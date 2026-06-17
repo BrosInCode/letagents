@@ -14,7 +14,13 @@ export type RoomEntry = {
 };
 
 export type SystemEntry = {
-  id: "system:setup" | "system:repos" | "system:workers" | "system:settings" | "system:diagnostics";
+  id:
+    | "system:setup"
+    | "system:app-agent"
+    | "system:repos"
+    | "system:workers"
+    | "system:settings"
+    | "system:diagnostics";
   type: "system";
   title: string;
   description: string;

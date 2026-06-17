@@ -1,6 +1,12 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopAppInfo, DiagnosticsSnapshot, RepoStatus, WorkerSnapshot } from "./core.js";
 import type {
+  DesktopAppAgentRunInput,
+  DesktopAppAgentRunResult,
+  DesktopAppAgentSaveSettingsInput,
+  DesktopAppAgentSettingsStatus,
+} from "./app-agent.js";
+import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
@@ -60,6 +66,11 @@ export interface DesktopApi {
   };
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
+  };
+  appAgent: {
+    getSettingsStatus: () => Promise<DesktopAppAgentSettingsStatus>;
+    saveSettings: (input: DesktopAppAgentSaveSettingsInput) => Promise<DesktopAppAgentSettingsStatus>;
+    run: (input: DesktopAppAgentRunInput) => Promise<DesktopAppAgentRunResult>;
   };
   room: {
     listAccountRooms: (options?: DesktopAccountRoomListOptions) => Promise<DesktopAccountRoomEntry[]>;
