@@ -140,6 +140,7 @@ test("missing App Agent key returns a clear configuration error", async () => {
 
 test("selected ambiguous room choice calls the room update helper", async () => {
   const settingsPath = await tempSettingsPath();
+  await writePlainSettings(settingsPath);
   await withSettingsEnv(settingsPath, async () => {
     const calls: Array<{ roomIdentifier: string; pinned: boolean | undefined }> = [];
     const result = await runDesktopAppAgent(
@@ -162,13 +163,40 @@ test("selected ambiguous room choice calls the room update helper", async () => 
   });
 });
 
-test("single high-confidence model match mutates through set_room_pinned", async () => {
+test("exact room name prompt mutates before asking the model", async () => {
   const settingsPath = await tempSettingsPath();
   await writePlainSettings(settingsPath);
   await withSettingsEnv(settingsPath, async () => {
     const calls: Array<{ roomIdentifier: string; pinned: boolean | undefined }> = [];
     const result = await runDesktopAppAgent(
-      { prompt: "Pin the LetAgents room." },
+      { prompt: "pin shore-delta" },
+      {
+        listAccountRooms: async () => [
+          room({ roomIdentifier: "shore-delta", displayName: "shore-delta" }),
+        ],
+        updateAccountRoom: async (roomIdentifier, updates) => {
+          calls.push({ roomIdentifier, pinned: updates.pinned });
+          return { roomIdentifier, pinned: updates.pinned };
+        },
+        runAgent: async () => {
+          throw new Error("model should not run for exact room names");
+        },
+      },
+    );
+
+    assert.equal(result.state, "success");
+    assert.equal(result.message, "Pinned shore-delta.");
+    assert.deepEqual(calls, [{ roomIdentifier: "shore-delta", pinned: true }]);
+  });
+});
+
+test("single high-confidence model fallback mutates through set_room_pinned", async () => {
+  const settingsPath = await tempSettingsPath();
+  await writePlainSettings(settingsPath);
+  await withSettingsEnv(settingsPath, async () => {
+    const calls: Array<{ roomIdentifier: string; pinned: boolean | undefined }> = [];
+    const result = await runDesktopAppAgent(
+      { prompt: "Pin the repo room I opened yesterday." },
       {
         listAccountRooms: async () => [room()],
         updateAccountRoom: async (roomIdentifier, updates) => {
@@ -201,7 +229,7 @@ test("ambiguous model match returns choices without mutation", async () => {
   await withSettingsEnv(settingsPath, async () => {
     let mutated = false;
     const result = await runDesktopAppAgent(
-      { prompt: "Pin the rentals room." },
+      { prompt: "Pin the room about leases." },
       {
         listAccountRooms: async () => [
           room({ roomIdentifier: "room_1", displayName: "Rentals" }),
@@ -247,7 +275,7 @@ test("model errors return safe UI messages", async () => {
   await writePlainSettings(settingsPath);
   await withSettingsEnv(settingsPath, async () => {
     const result = await runDesktopAppAgent(
-      { prompt: "Pin the LetAgents room." },
+      { prompt: "Pin the repo room I opened yesterday." },
       {
         listAccountRooms: async () => [room()],
         updateAccountRoom: async () => ({ roomIdentifier: "room_1", pinned: true }),

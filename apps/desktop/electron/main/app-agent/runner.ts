@@ -103,13 +103,8 @@ function normalizeRoomText(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
-function roomMatchesIdentifier(
-  room: DesktopAccountRoomEntry,
-  roomIdentifier: string,
-): boolean {
-  const expected = normalizeRoomText(roomIdentifier);
-  if (!expected) return false;
-  const candidates = [
+function roomAliasCandidates(room: DesktopAccountRoomEntry): string[] {
+  return [
     room.roomIdentifier,
     room.displayName,
     room.name,
@@ -118,8 +113,26 @@ function roomMatchesIdentifier(
       focusRoom.displayName,
       focusRoom.name,
     ]),
-  ].map(normalizeRoomText);
-  return candidates.some((candidate) => candidate === expected);
+  ]
+    .map(normalizeRoomText)
+    .filter((value, index, values): value is string =>
+      Boolean(value) && values.indexOf(value) === index,
+    );
+}
+
+function normalizeSearchText(value: string): string {
+  return normalizeRoomText(value)
+    .replace(/["'`]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function roomMatchesIdentifier(
+  room: DesktopAccountRoomEntry,
+  roomIdentifier: string,
+): boolean {
+  const expected = normalizeRoomText(roomIdentifier);
+  if (!expected) return false;
+  return roomAliasCandidates(room).some((candidate) => candidate === expected);
 }
 
 function toRoomChoice(
@@ -189,6 +202,59 @@ async function runSelectedRoomMutation(
     };
   }
 
+  const actionResult = await deps.updateAccountRoom(room.roomIdentifier, {
+    pinned: desiredPinned,
+  });
+  return {
+    state: "success",
+    message: `${desiredPinned ? "Pinned" : "Unpinned"} ${room.displayName}.`,
+    roomIdentifier: room.roomIdentifier,
+    displayName: room.displayName,
+    pinned: desiredPinned,
+    actionResult,
+  };
+}
+
+function promptMentionsAlias(prompt: string, alias: string): boolean {
+  const normalizedPrompt = normalizeSearchText(prompt);
+  const normalizedAlias = normalizeSearchText(alias);
+  if (!normalizedAlias) return false;
+  if (normalizedPrompt === normalizedAlias) return true;
+  const escapedAlias = normalizedAlias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${escapedAlias}([^a-z0-9]|$)`, "i").test(
+    normalizedPrompt,
+  );
+}
+
+function resolveExactPromptRoomMatches(
+  prompt: string,
+  rooms: DesktopAccountRoomEntry[],
+): DesktopAccountRoomEntry[] {
+  return rooms.filter((room) =>
+    roomAliasCandidates(room).some((alias) => promptMentionsAlias(prompt, alias)),
+  );
+}
+
+async function runExactPromptRoomMutation(
+  input: DesktopAppAgentRunInput,
+  deps: AppAgentToolDeps,
+): Promise<DesktopAppAgentRunResult | null> {
+  const desiredPinned = resolvePinnedIntent(input.prompt);
+  if (desiredPinned === null) return null;
+  const rooms = await deps.listAccountRooms({ includeArchived: true, limit: 100 });
+  const matches = resolveExactPromptRoomMatches(input.prompt, rooms);
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    return {
+      state: "choices",
+      message: "I found multiple matching rooms. Choose one to continue.",
+      choices: matches.slice(0, 5).map((room) =>
+        toRoomChoice(room, desiredPinned, "Exact name match"),
+      ),
+    };
+  }
+
+  const room = matches[0];
   const actionResult = await deps.updateAccountRoom(room.roomIdentifier, {
     pinned: desiredPinned,
   });
@@ -340,9 +406,6 @@ export async function runDesktopAppAgent(
   };
 
   try {
-    const selectedResult = await runSelectedRoomMutation(input, runtimeDeps);
-    if (selectedResult) return selectedResult;
-
     const settingsStatus = await getAppAgentSettingsStatus();
     const settings = await readAppAgentSettings();
     if (!settingsStatus.configured || !settings.openRouterApiKey || !settings.model) {
@@ -353,6 +416,15 @@ export async function runDesktopAppAgent(
         settingsStatus,
       };
     }
+
+    const selectedResult = await runSelectedRoomMutation(input, runtimeDeps);
+    if (selectedResult) return selectedResult;
+
+    const exactPromptResult = await runExactPromptRoomMutation(
+      { ...input, prompt },
+      runtimeDeps,
+    );
+    if (exactPromptResult) return exactPromptResult;
 
     const decision = await runtimeDeps.runAgent(
       { ...input, prompt },
@@ -387,6 +459,8 @@ export async function runDesktopAppAgent(
 export const appAgentTestUtils = {
   toRoomChoice,
   roomMatchesIdentifier,
+  resolveExactPromptRoomMatches,
   buildAppAgentTools,
+  runExactPromptRoomMutation,
   runSelectedRoomMutation,
 };
