@@ -3,6 +3,7 @@
     <DesktopRoomHeader
       :sidebar-mode="sidebarMode"
       :room="room"
+      :storage="storage"
       :tabs="tabs"
       :active-tab="activeTab"
       :search-open="searchOpen"
@@ -18,6 +19,7 @@
       :action-panel-open="actionPanelOpen"
       :search-open="searchOpen"
       :room="room"
+      :storage="storage"
       :room-url="roomUrl"
       :copied="roomLinkCopied"
       :sound-enabled="soundEnabled"
@@ -32,6 +34,7 @@
       :github-error="githubError"
       :github-events-available="githubEventsAvailable"
       :github-events-visible="githubEventsVisible"
+      :storage-busy="storageBusy"
       :search-summary="searchSummary"
       :search-results-count="searchResults.length"
       @copy-room-link="copyRoomLink"
@@ -40,6 +43,9 @@
       @toggle-notifications="toggleNotifications"
       @toggle-liquid-glass="toggleLiquidGlass"
       @toggle-github-events-visible="toggleGitHubEventsVisible"
+      @set-room-storage-mode="setRoomStorageMode"
+      @fork-room-to-local="forkRoomToLocal"
+      @publish-local-room="publishLocalRoom"
       @rename-room="renameRoom"
       @refresh-github="refreshGitHubIntegration"
       @install-github="installGitHubIntegration"
@@ -54,6 +60,7 @@
       :active="activeTab === 'chat'"
       :messages="timelineMessages"
       :thread-messages="visibleMessages"
+      :message-namespace="messageNamespace"
       :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
       :room-loading="roomLoading"
@@ -202,6 +209,8 @@ import type {
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
+  DesktopRoomSnapshot,
+  DesktopRoomStorageState,
   DesktopRoomMessage,
   DesktopReasoningSession,
   DesktopTaskSummary,
@@ -250,6 +259,7 @@ const props = defineProps<{
   sidebarMode: SidebarMode;
   roomLoading: boolean;
   room: DesktopRoomInfo;
+  storage: DesktopRoomStorageState;
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
@@ -270,7 +280,7 @@ const emit = defineEmits<{
   "message-sent": [message: DesktopRoomMessage];
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];
-  "refresh-room": [];
+  "refresh-room": [snapshot?: DesktopRoomSnapshot];
   "open-focus-room": [roomIdentifier: string];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
@@ -294,6 +304,7 @@ const eventsTaskFilterId = ref<string | null>(null);
 const eventsSelectedEventId = ref<string | null>(null);
 const eventsLoadedOlderWithoutMatches = ref(false);
 const boardSelectedTaskId = ref<string | null>(null);
+const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 let githubEventsRefreshTimer: number | null = null;
@@ -303,6 +314,14 @@ const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdenti
 const isRepoBackedRoom = computed(() =>
   [props.room.identifier, props.room.name, props.room.displayName]
     .some((value) => value.toLowerCase().startsWith("github.com/"))
+);
+const isLocalRoom = computed(() => props.storage.effectiveMode === "local");
+const messageNamespace = computed(() =>
+  [
+    props.room.identifier,
+    props.storage.effectiveMode,
+    props.storage.localRoom?.roomIdentifier || "cloud",
+  ].join(":")
 );
 
 const {
@@ -450,6 +469,13 @@ watch(showEventsTab, (visible) => {
   }
 });
 
+watch(isLocalRoom, (local) => {
+  if (!local) return;
+  if (["rooms", "rent"].includes(activeTab.value)) {
+    activeTab.value = "chat";
+  }
+});
+
 watch(activeTab, (tab) => {
   if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
     void refreshGitHubEvents().catch(() => undefined);
@@ -501,14 +527,17 @@ const tabs = computed<RoomTab[]>(() => [
     count: null,
   }] : []),
   { id: "board", label: "Board", count: null },
-  { id: "activity", label: "Activity", count: null },
-  { id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
-  { id: "rent", label: "Rent an Agent", count: null },
+  { id: "activity" as const, label: "Activity", count: null },
+  ...(!isLocalRoom.value ? [
+    { id: "rooms" as const, label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
+    { id: "rent" as const, label: "Rent an Agent", count: null },
+  ] : []),
 ]);
 
 function selectTab(tabId: RoomTabId): void {
   if (activeTab.value === tabId) return;
   if (tabId === "events" && !showEventsTab.value) return;
+  if (isLocalRoom.value && ["rooms", "rent"].includes(tabId)) return;
   activeTab.value = tabId;
 }
 
@@ -597,6 +626,54 @@ function toggleGitHubEventsVisible(): void {
   if (githubEventsRefreshTimer !== null) {
     window.clearTimeout(githubEventsRefreshTimer);
     githubEventsRefreshTimer = null;
+  }
+}
+
+async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"]): Promise<void> {
+  const bridge = window.letagentsDesktop?.chatStorage;
+  if (!bridge?.setRoomMode || storageBusy.value) return;
+  if (mode === "local" && !props.storage.localRoom) {
+    await forkRoomToLocal();
+    return;
+  }
+  storageBusy.value = true;
+  try {
+    await bridge.setRoomMode(props.room.identifier, mode);
+    const snapshot = await window.letagentsDesktop?.room?.getSnapshot?.(props.room.identifier);
+    emit("refresh-room", snapshot);
+  } finally {
+    storageBusy.value = false;
+  }
+}
+
+async function forkRoomToLocal(): Promise<void> {
+  const bridge = window.letagentsDesktop?.chatStorage;
+  if (!bridge?.forkRoomToLocal || storageBusy.value) return;
+  const confirmed = window.confirm(
+    "Switch this room to Local on this device? Desktop will import the current chat and board into local storage, keep this same room visible, and keep new updates on this device until you publish.",
+  );
+  if (!confirmed) return;
+  storageBusy.value = true;
+  try {
+    const result = await bridge.forkRoomToLocal(props.room.identifier);
+    await window.letagentsDesktop?.room?.stopStream?.(props.room.identifier);
+    actionPanelOpen.value = false;
+    emit("refresh-room", result.snapshot);
+  } finally {
+    storageBusy.value = false;
+  }
+}
+
+async function publishLocalRoom(): Promise<void> {
+  const bridge = window.letagentsDesktop?.chatStorage;
+  if (!bridge?.publishLocalRoom || storageBusy.value) return;
+  storageBusy.value = true;
+  try {
+    await bridge.publishLocalRoom(props.room.identifier);
+    const snapshot = await window.letagentsDesktop?.room?.getSnapshot?.(props.room.identifier);
+    emit("refresh-room", snapshot);
+  } finally {
+    storageBusy.value = false;
   }
 }
 

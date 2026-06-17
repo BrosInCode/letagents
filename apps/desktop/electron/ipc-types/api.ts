@@ -27,7 +27,10 @@ import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
   DesktopChatStorageSettings,
+  DesktopLocalRoomMutationResult,
   DesktopLocalChatSyncResult,
+  DesktopRoomStorageOverrideMode,
+  DesktopRoomStorageState,
   DesktopInviteRoomCreation,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
@@ -146,6 +149,14 @@ export interface DesktopApi {
   chatStorage: {
     getSettings: () => Promise<DesktopChatStorageSettings>;
     setMode: (mode: DesktopChatStorageSettings["mode"]) => Promise<DesktopChatStorageSettings>;
+    getRoomStorage: (roomIdentifier: string) => Promise<DesktopRoomStorageState>;
+    setRoomMode: (
+      roomIdentifier: string,
+      mode: DesktopRoomStorageOverrideMode
+    ) => Promise<DesktopRoomStorageState>;
+    createLocalRoom: (input?: { displayName?: string | null }) => Promise<DesktopLocalRoomMutationResult>;
+    forkRoomToLocal: (roomIdentifier: string) => Promise<DesktopLocalRoomMutationResult>;
+    publishLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
     syncLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
   };
   rental?: DesktopRentalApi;

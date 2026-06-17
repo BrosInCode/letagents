@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { localChatDatabasePath } from "../../chat-storage/settings.js";
+import type { RoomMessageAttachmentPayload } from "../../attachments/mappers.js";
 import type { RoomMessagePayload } from "./mappers.js";
 
 type SqliteStatement = {
@@ -32,6 +33,17 @@ type LocalMessageRow = {
   sync_started_at: string | null;
 };
 
+type LocalAttachmentRow = {
+  attachment_id: string;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  url: string | null;
+  download_url: string | null;
+  data_url: string | null;
+  content_base64: string | null;
+};
+
 export type LocalMessagePage = {
   messages: RoomMessagePayload[];
   has_more: boolean;
@@ -43,6 +55,7 @@ export type LocalChatMessageInput = {
   source?: string | null;
   agent_prompt_kind?: string | null;
   reply_to?: string | null;
+  attachments?: RoomMessageAttachmentPayload[];
 };
 
 export type LocalSyncMessagePayload = RoomMessagePayload & {
@@ -105,6 +118,22 @@ async function getDb(): Promise<SqliteDatabase> {
         ON local_chat_messages (room_id, timestamp);
       CREATE INDEX IF NOT EXISTS local_chat_messages_sync_idx
         ON local_chat_messages (room_id, synced_cloud_id);
+      CREATE TABLE IF NOT EXISTS local_chat_attachments (
+        room_id TEXT NOT NULL,
+        message_number INTEGER NOT NULL,
+        attachment_id TEXT NOT NULL,
+        file_name TEXT,
+        mime_type TEXT,
+        size_bytes INTEGER,
+        url TEXT,
+        download_url TEXT,
+        data_url TEXT,
+        content_base64 TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (room_id, message_number, attachment_id)
+      );
+      CREATE INDEX IF NOT EXISTS local_chat_attachments_message_idx
+        ON local_chat_attachments (room_id, message_number);
     `);
     addColumnIfMissing(db, "local_chat_messages", "sync_key", "TEXT");
     addColumnIfMissing(db, "local_chat_messages", "sync_started_at", "TEXT");
@@ -112,6 +141,9 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
         ON local_chat_messages (room_id, sync_key)
         WHERE sync_key IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_cloud_id_idx
+        ON local_chat_messages (room_id, synced_cloud_id)
+        WHERE synced_cloud_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS local_chat_messages_sync_started_idx
         ON local_chat_messages (room_id, sync_started_at);
     `);
@@ -158,15 +190,57 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
   };
 }
 
+function mapAttachmentRow(row: Record<string, unknown>): LocalAttachmentRow {
+  return {
+    attachment_id: String(row.attachment_id || ""),
+    file_name: typeof row.file_name === "string" ? row.file_name : null,
+    mime_type: typeof row.mime_type === "string" ? row.mime_type : null,
+    size_bytes:
+      row.size_bytes === null || row.size_bytes === undefined
+        ? null
+        : Number(row.size_bytes),
+    url: typeof row.url === "string" ? row.url : null,
+    download_url: typeof row.download_url === "string" ? row.download_url : null,
+    data_url: typeof row.data_url === "string" ? row.data_url : null,
+    content_base64:
+      typeof row.content_base64 === "string" ? row.content_base64 : null,
+  };
+}
+
+function normalizeAttachmentPayload(
+  attachment: RoomMessageAttachmentPayload,
+): LocalAttachmentRow {
+  return {
+    attachment_id: attachment.id || randomUUID(),
+    file_name: attachment.file_name || attachment.filename || attachment.name || null,
+    mime_type: attachment.mime_type || attachment.content_type || null,
+    size_bytes: attachment.size_bytes ?? attachment.byte_size ?? null,
+    url: attachment.url || null,
+    download_url: attachment.download_url || attachment.url || null,
+    data_url: attachment.data_url || null,
+    content_base64: attachment.content_base64 || null,
+  };
+}
+
 function toMessagePayload(
   row: LocalMessageRow,
   replyTo?: LocalMessageRow | null,
+  attachments: LocalAttachmentRow[] = [],
 ): RoomMessagePayload {
   return {
     id: formatMessageId(row.number),
     sender: row.sender,
     text: row.text,
-    attachments: [],
+    attachments: attachments.map((attachment) => ({
+      id: attachment.attachment_id,
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      size_bytes: attachment.size_bytes,
+      url: attachment.url,
+      download_url: attachment.download_url,
+      data_url: attachment.data_url,
+      content_base64: attachment.content_base64,
+    })),
     agent_prompt_kind: row.agent_prompt_kind,
     source: row.source,
     timestamp: row.timestamp,
@@ -203,6 +277,7 @@ async function hydrateMessageRows(
     ),
   ];
   const replies = new Map<number, LocalMessageRow>();
+  const attachmentsByMessageNumber = new Map<number, LocalAttachmentRow[]>();
   for (const number of replyNumbers) {
     const reply = database
       .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND number = ?")
@@ -213,7 +288,25 @@ async function hydrateMessageRows(
     }
   }
 
-  return rows.map((row) => toMessagePayload(row, row.reply_to_number ? replies.get(row.reply_to_number) ?? null : null));
+  const messageNumbers = rows.map((row) => row.number);
+  for (const number of messageNumbers) {
+    const attachments = database
+      .prepare(`
+        SELECT *
+        FROM local_chat_attachments
+        WHERE room_id = ? AND message_number = ?
+        ORDER BY created_at ASC
+      `)
+      .all(roomId, number)
+      .map(mapAttachmentRow);
+    attachmentsByMessageNumber.set(number, attachments);
+  }
+
+  return rows.map((row) => toMessagePayload(
+    row,
+    row.reply_to_number ? replies.get(row.reply_to_number) ?? null : null,
+    attachmentsByMessageNumber.get(row.number) || [],
+  ));
 }
 
 function syncKeyForMessage(roomId: string, number: number): string {
@@ -282,6 +375,7 @@ export async function addLocalChatMessage(
   }
 
   const timestamp = new Date().toISOString();
+  const attachmentRows = (input.attachments || []).map(normalizeAttachmentPayload);
   let row: LocalMessageRow;
   beginImmediate(database);
   try {
@@ -319,13 +413,36 @@ export async function addLocalChatMessage(
         row.source,
         row.timestamp,
       );
+    for (const attachment of attachmentRows) {
+      database
+        .prepare(`
+          INSERT INTO local_chat_attachments (
+            room_id, message_number, attachment_id, file_name, mime_type, size_bytes,
+            url, download_url, data_url, content_base64, created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          row.room_id,
+          row.number,
+          attachment.attachment_id,
+          attachment.file_name,
+          attachment.mime_type,
+          attachment.size_bytes,
+          attachment.url || null,
+          attachment.download_url || attachment.url || null,
+          attachment.data_url || null,
+          attachment.content_base64 || null,
+          row.timestamp,
+        );
+    }
     database.exec("COMMIT");
   } catch (error) {
     rollback(database);
     throw error;
   }
 
-  return toMessagePayload(row, replyTarget);
+  return toMessagePayload(row, replyTarget, attachmentRows);
 }
 
 export async function getLocalChatMessages(
@@ -493,6 +610,95 @@ export async function markLocalChatMessageSynced(input: {
       WHERE room_id = ? AND number = ?
     `)
     .run(input.cloudMessageId, new Date().toISOString(), input.roomId, localNumber);
+}
+
+export async function importLocalChatMessages(
+  roomId: string,
+  messages: RoomMessagePayload[],
+): Promise<void> {
+  const trimmedRoomId = roomId.trim();
+  if (!trimmedRoomId || messages.length === 0) return;
+  const database = await getDb();
+  const sortedMessages = [...messages].sort(
+    (left, right) =>
+      Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""),
+  );
+  const cloudIdToNumber = new Map<string, number>();
+  const existingRows = database
+    .prepare(`
+      SELECT number, synced_cloud_id
+      FROM local_chat_messages
+      WHERE room_id = ? AND synced_cloud_id IS NOT NULL
+    `)
+    .all(trimmedRoomId);
+  for (const row of existingRows) {
+    if (typeof row.synced_cloud_id === "string") {
+      cloudIdToNumber.set(row.synced_cloud_id, Number(row.number || 0));
+    }
+  }
+
+  beginImmediate(database);
+  try {
+    for (const message of sortedMessages) {
+      if (!message.id || cloudIdToNumber.has(message.id)) continue;
+      const number = allocateLocalMessageNumber(database, trimmedRoomId);
+      cloudIdToNumber.set(message.id, number);
+      const replyCloudId =
+        typeof message.reply_to?.id === "string" ? message.reply_to.id : null;
+      const replyNumber = replyCloudId
+        ? cloudIdToNumber.get(replyCloudId) || null
+        : null;
+      database
+        .prepare(`
+          INSERT INTO local_chat_messages (
+            room_id, number, reply_to_number, sender, text, agent_prompt_kind, source,
+            timestamp, synced_cloud_id, synced_at, sync_key, sync_started_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+          ON CONFLICT(room_id, number) DO NOTHING
+        `)
+        .run(
+          trimmedRoomId,
+          number,
+          replyNumber,
+          message.sender || "unknown",
+          message.text || "",
+          message.agent_prompt_kind || null,
+          message.source || null,
+          message.timestamp || new Date().toISOString(),
+          message.id,
+          new Date().toISOString(),
+        );
+      for (const attachment of message.attachments || []) {
+        database
+          .prepare(`
+            INSERT INTO local_chat_attachments (
+              room_id, message_number, attachment_id, file_name, mime_type, size_bytes,
+              url, download_url, data_url, content_base64, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id, message_number, attachment_id) DO NOTHING
+          `)
+          .run(
+            trimmedRoomId,
+            number,
+            attachment.id || randomUUID(),
+            attachment.file_name || attachment.filename || attachment.name || null,
+            attachment.mime_type || attachment.content_type || null,
+            attachment.size_bytes ?? attachment.byte_size ?? null,
+            attachment.url || null,
+            attachment.download_url || attachment.url || null,
+            attachment.data_url || null,
+            attachment.content_base64 || null,
+            message.timestamp || new Date().toISOString(),
+          );
+      }
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    rollback(database);
+    throw error;
+  }
 }
 
 export async function getSyncedCloudMessageId(input: {

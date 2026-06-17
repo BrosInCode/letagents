@@ -206,6 +206,7 @@ export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
   access: DesktopRoomAccess;
   room: DesktopRoomInfo | null;
+  storage: DesktopRoomStorageState;
   focusRooms: DesktopFocusRoomInfo[];
   tasks: DesktopTaskSummary[];
   participants: DesktopParticipantSummary[];
@@ -234,15 +235,49 @@ export interface DesktopRoomLatestMessage {
 
 export interface DesktopChatStorageSettings {
   mode: "cloud" | "local";
+  defaultMode: "cloud" | "local";
+  roomOverrides: Record<string, DesktopRoomStorageOverrideMode>;
   databasePath: string;
+  localFilesPath: string;
   settingsPath: string;
   savedAt: string;
 }
 
+export type DesktopRoomStorageOverrideMode = "inherit" | "cloud" | "local";
+
+export interface DesktopRoomStorageState {
+  roomIdentifier: string | null;
+  defaultMode: "cloud" | "local";
+  overrideMode: DesktopRoomStorageOverrideMode;
+  effectiveMode: "cloud" | "local";
+  isLocalRoom: boolean;
+  localRoom: DesktopLocalRoomInfo | null;
+  databasePath: string;
+  localFilesPath: string;
+}
+
+export interface DesktopLocalRoomInfo {
+  roomIdentifier: string;
+  displayName: string;
+  cloudRoomIdentifier: string | null;
+  publishStatus: "local_only" | "linked";
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+}
+
 export interface DesktopLocalChatSyncResult {
   roomIdentifier: string;
+  cloudRoomIdentifier: string | null;
   syncedCount: number;
   skippedCount: number;
+  syncedTaskCount: number;
+  skippedTaskCount: number;
+}
+
+export interface DesktopLocalRoomMutationResult {
+  roomIdentifier: string;
+  snapshot: DesktopRoomSnapshot;
 }
 
 export type DesktopRoomStreamEvent =

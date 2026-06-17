@@ -6,6 +6,14 @@ import type {
 } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
 import { desktopSmokeAccountRooms, isDesktopSmokeCheck } from "../smoke.js";
+import {
+  archiveLocalRoom,
+  getLocalRoom,
+  getLocalRoomByCloudRoom,
+  listLocalRoomEntries,
+  setLocalRoomArchived,
+  setLocalRoomPinned,
+} from "./local-store.js";
 
 function mapDesktopAccountFocusRoomEntry(
   payload: Record<string, unknown>,
@@ -178,19 +186,60 @@ export async function listDesktopAccountRooms(
       return { rooms: [] };
     throw error;
   });
-  return (response.rooms || [])
+  const cloudRooms = (response.rooms || [])
     .filter(
       (room): room is Record<string, unknown> =>
         Boolean(room) && typeof room === "object",
     )
     .map(mapDesktopAccountRoomEntry)
     .filter((room) => Boolean(room.roomIdentifier));
+  const localRooms = await listLocalRoomEntries({ linkedIdentity: "cloud" });
+  const seen = new Set(cloudRooms.map((room) => room.roomIdentifier));
+  const visibleLocalRooms: DesktopAccountRoomEntry[] = [];
+  for (const room of localRooms) {
+    if (seen.has(room.roomIdentifier)) continue;
+    seen.add(room.roomIdentifier);
+    visibleLocalRooms.push(room);
+  }
+  return [
+    ...visibleLocalRooms,
+    ...cloudRooms,
+  ];
 }
 
 export async function updateDesktopAccountRoom(
   roomIdentifier: string,
   updates: { pinned?: boolean; archived?: boolean },
 ): Promise<DesktopAccountRoomActionResult> {
+  const localRoom = await getLocalRoom(roomIdentifier)
+    || await getLocalRoomByCloudRoom(roomIdentifier);
+  if (
+    updates.pinned !== undefined &&
+    await setLocalRoomPinned(roomIdentifier, updates.pinned)
+  ) {
+    return {
+      roomIdentifier: localRoom?.cloudRoomIdentifier || localRoom?.roomIdentifier || roomIdentifier,
+      pinned: updates.pinned,
+      archived: false,
+    };
+  }
+  if (
+    updates.archived !== undefined &&
+    await setLocalRoomArchived(roomIdentifier, updates.archived)
+  ) {
+    return {
+      roomIdentifier: localRoom?.cloudRoomIdentifier || localRoom?.roomIdentifier || roomIdentifier,
+      pinned: localRoom ? undefined : false,
+      archived: updates.archived,
+    };
+  }
+  if (localRoom) {
+    return {
+      roomIdentifier: localRoom.cloudRoomIdentifier || localRoom.roomIdentifier,
+      pinned: updates.pinned,
+      archived: false,
+    };
+  }
   const response = await apiFetch<Record<string, unknown>>(
     `/account/rooms/${encodeURIComponent(roomIdentifier)}`,
     {
@@ -205,6 +254,15 @@ export async function updateDesktopAccountRoom(
 export async function leaveDesktopAccountRoom(
   roomIdentifier: string,
 ): Promise<DesktopAccountRoomActionResult> {
+  const localRoom = await getLocalRoom(roomIdentifier)
+    || await getLocalRoomByCloudRoom(roomIdentifier);
+  if (localRoom) {
+    await archiveLocalRoom(localRoom.roomIdentifier);
+    return {
+      roomIdentifier: localRoom.cloudRoomIdentifier || localRoom.roomIdentifier,
+      archived: true,
+    };
+  }
   const response = await apiFetch<Record<string, unknown>>(
     `/account/rooms/${encodeURIComponent(roomIdentifier)}/leave`,
     { method: "POST" },
@@ -215,6 +273,16 @@ export async function leaveDesktopAccountRoom(
 export async function deleteDesktopAccountRoom(
   roomIdentifier: string,
 ): Promise<DesktopAccountRoomActionResult> {
+  const localRoom = await getLocalRoom(roomIdentifier)
+    || await getLocalRoomByCloudRoom(roomIdentifier);
+  if (localRoom) {
+    await archiveLocalRoom(localRoom.roomIdentifier);
+    return {
+      roomIdentifier: localRoom.cloudRoomIdentifier || localRoom.roomIdentifier,
+      archived: true,
+      deleted: true,
+    };
+  }
   const response = await apiFetch<Record<string, unknown>>(
     `/account/rooms/${encodeURIComponent(roomIdentifier)}`,
     { method: "DELETE" },

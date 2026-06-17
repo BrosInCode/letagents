@@ -4,12 +4,15 @@ import { z } from "zod";
 import { AGENT_PRESENCE_STATUSES, type AgentPresenceStatus } from "../../../../shared/agent-presence.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
+  addLocalChatMessage,
   agentSessionCredentials,
   currentRoom,
   getFallbackProjectId,
   getRememberedRoomPresence,
   getTargetRoomId,
+  isLocalRoomStorageEnabled,
   normalizeOptionalToolString,
+  resolveLocalRoomStorageIdentifiers,
   resolveWorkerToolIdentity,
   roomScopedApiCall,
   syncRoomPresence,
@@ -85,6 +88,50 @@ export function registerPostReasoningTool(server: McpServer): void {
         confidence,
         status,
       };
+      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
+      if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+        const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+        const effectiveLocalRoomId = sqliteRoomId || localRoomId;
+        let milestoneMessageId: string | null = null;
+        const normalizedMilestone = normalizeOptionalToolString(milestone);
+        if (normalizedMilestone) {
+          const milestoneMessage = await addLocalChatMessage(effectiveLocalRoomId, {
+            sender: identity.actor_label,
+            text: normalizedMilestone,
+            source: "agent",
+          });
+          milestoneMessageId = milestoneMessage.id;
+          touchCurrentRoom(milestoneMessageId);
+        }
+
+        await syncRoomPresence(effectiveLocalRoomId, identity, {
+          status: status ?? getRememberedRoomPresence(effectiveLocalRoomId, identity).status,
+          status_text: normalizedSummary,
+        }, agentSession);
+
+        const now = new Date().toISOString();
+        return jsonToolResponse({
+          success: true,
+          room_id: effectiveLocalRoomId,
+          local: true,
+          session: {
+            id: `local_reasoning:${identity.actor_label}`,
+            actor_label: identity.actor_label,
+            agent_key: identity.canonical_key,
+            status: status ?? "working",
+            summary: normalizedSummary,
+            latest_payload: snapshot,
+            updated_at: now,
+          },
+          update: {
+            id: `local_reasoning_update:${now}`,
+            payload: snapshot,
+            created_at: now,
+          },
+          milestone_message_id: milestoneMessageId,
+          agent_identity: toPublicAgentIdentity(identity),
+        });
+      }
 
       const query = new URLSearchParams({
         open: "true",

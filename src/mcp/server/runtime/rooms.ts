@@ -8,6 +8,7 @@ import {
 } from "../../room-id.js";
 import {
   getCurrentCodexLiveSession,
+  isLocalRoomStorageEnabled,
   getStoredCurrentRoom,
 } from "../../local-state.js";
 import {
@@ -52,6 +53,30 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
   response: Record<string, unknown>;
 }> {
   const roomId = joinedVia === "join_code" ? normalizeInviteCode(identifier) : identifier.trim();
+
+  if (joinedVia !== "join_code" && await isLocalRoomStorageEnabled(roomId)) {
+    const agentIdentity = await ensureAgentIdentity();
+    const room = rememberRoom(
+      toRoomState({
+        room_id: roomId,
+        project_id: null,
+        code: null,
+        display_name: roomId,
+        joined_via: joinedVia,
+        is_local: true,
+      })
+    );
+    return {
+      room,
+      response: {
+        room_id: roomId,
+        display_name: roomId,
+        joined_via: joinedVia,
+        is_local: true,
+        agent_identity: toPublicAgentIdentity(agentIdentity),
+      },
+    };
+  }
 
   try {
     const response = await apiCall<Record<string, unknown>>(

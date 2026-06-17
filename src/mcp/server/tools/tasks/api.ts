@@ -1,5 +1,16 @@
 import { encodeRoomIdPath } from "../../../room-id.js";
-import { apiCall, roomScopedApiCall } from "../../runtime.js";
+import {
+  addLocalTask,
+  apiCall,
+  claimLocalTaskReviewLease,
+  getLocalTask,
+  isLocalRoomStorageEnabled,
+  listLocalTasks,
+  releaseLocalTaskReviewLease,
+  resolveLocalRoomStorageIdentifiers,
+  roomScopedApiCall,
+  updateLocalTask,
+} from "../../runtime.js";
 import type { TaskToolTarget } from "./context.js";
 
 export function taskCollectionRoomPath(roomId: string): string {
@@ -18,7 +29,21 @@ export function taskDetailProjectPath(projectId: string, taskId: string): string
   return `${taskCollectionProjectPath(projectId)}/${encodeURIComponent(taskId)}`;
 }
 
-export function createTask(target: TaskToolTarget, body: Record<string, unknown>) {
+function localRoomIdForTarget(target: TaskToolTarget): string | null {
+  return target.effectiveRoomId ?? target.roomId ?? target.projectId ?? null;
+}
+
+export async function createTask(target: TaskToolTarget, body: Record<string, unknown>) {
+  const localRoomId = localRoomIdForTarget(target);
+  if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+    const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+    return addLocalTask(sqliteRoomId || localRoomId, {
+      title: String(body.title || ""),
+      description: typeof body.description === "string" ? body.description : null,
+      created_by: typeof body.created_by === "string" ? body.created_by : null,
+    });
+  }
+
   return roomScopedApiCall({
     room_id: target.roomId,
     project_id: target.projectId,
@@ -31,7 +56,17 @@ export function createTask(target: TaskToolTarget, body: Record<string, unknown>
   });
 }
 
-export function listTasks(target: TaskToolTarget, queryString: string) {
+export async function listTasks(target: TaskToolTarget, queryString: string) {
+  const localRoomId = localRoomIdForTarget(target);
+  if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+    const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+    const params = new URLSearchParams(queryString);
+    return listLocalTasks(sqliteRoomId || localRoomId, {
+      status: params.get("status"),
+      openOnly: params.get("open") !== "false",
+    });
+  }
+
   return roomScopedApiCall<{
     tasks?: Array<{ id?: string }>;
     has_more?: boolean;
@@ -43,7 +78,13 @@ export function listTasks(target: TaskToolTarget, queryString: string) {
   });
 }
 
-export function patchTask(target: TaskToolTarget, taskId: string, body: Record<string, unknown>) {
+export async function patchTask(target: TaskToolTarget, taskId: string, body: Record<string, unknown>) {
+  const localRoomId = localRoomIdForTarget(target);
+  if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+    const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+    return updateLocalTask(sqliteRoomId || localRoomId, taskId, body);
+  }
+
   return roomScopedApiCall({
     room_id: target.roomId,
     project_id: target.projectId,
@@ -56,13 +97,105 @@ export function patchTask(target: TaskToolTarget, taskId: string, body: Record<s
   });
 }
 
-export function postCanonicalTaskAction<T>(
+export async function postCanonicalTaskAction<T>(
   roomId: string,
   taskId: string,
   actionPath: "lease-action" | "review-lease-action",
   body: Record<string, unknown>
 ): Promise<T> {
-  return apiCall<T>(`${taskDetailRoomPath(roomId, taskId)}/${actionPath}`, {
+  if (await isLocalRoomStorageEnabled(roomId)) {
+    const { localRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
+    const sqliteRoomId = localRoomId || roomId;
+    const action = typeof body.action === "string" ? body.action : "noop";
+    const existingTask = await getLocalTask(sqliteRoomId, taskId);
+    if (!existingTask) {
+      throw new Error("Task not found.");
+    }
+
+    if (actionPath === "review-lease-action") {
+      if (action === "claim") {
+        const result = await claimLocalTaskReviewLease(sqliteRoomId, taskId, {
+          holder_label:
+            typeof body.actor_label === "string" ? body.actor_label : null,
+          agent_key:
+            typeof body.actor_key === "string" ? body.actor_key : null,
+          agent_session_id:
+            typeof body.agent_session_id === "string"
+              ? body.agent_session_id
+              : null,
+        });
+        return {
+          action,
+          task: result.task,
+          lease: result.lease,
+        } as T;
+      }
+      if (action === "release") {
+        const result = await releaseLocalTaskReviewLease(sqliteRoomId, taskId, {
+          lease_id:
+            typeof body.lease_id === "string" ? body.lease_id : null,
+        });
+        return {
+          action,
+          task: result.task,
+          released_lease: result.released_lease,
+        } as T;
+      }
+      return {
+        action,
+        task: existingTask,
+        lease: null,
+        released_lease: null,
+      } as T;
+    }
+
+    if (action === "handoff") {
+      const targetActorKey =
+        typeof body.target_actor_key === "string" && body.target_actor_key.trim()
+          ? body.target_actor_key.trim()
+          : null;
+      const task = targetActorKey
+        ? await updateLocalTask(sqliteRoomId, taskId, {
+            status: "assigned",
+            assignee: targetActorKey,
+            assignee_agent_key: targetActorKey,
+          })
+        : existingTask;
+      return {
+        action,
+        task,
+        released_lease: null,
+        new_lease: null,
+      } as T;
+    }
+
+    if (action === "release") {
+      const releasableStatuses = new Set(["assigned", "in_progress", "blocked", "in_review"]);
+      const patch: Record<string, unknown> = {
+        assignee: null,
+        assignee_agent_key: null,
+      };
+      if (releasableStatuses.has(existingTask.status)) {
+        patch.status = "accepted";
+        patch.skip_transition_validation = true;
+      }
+      const task = await updateLocalTask(sqliteRoomId, taskId, patch);
+      return {
+        action,
+        task,
+        released_lease: null,
+      } as T;
+    }
+
+    return {
+      action,
+      task: existingTask,
+      released_lease: null,
+    } as T;
+  }
+
+  const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
+  return apiCall<T>(`${taskDetailRoomPath(cloudRoomId || roomId, taskId)}/${actionPath}`, {
     method: "POST",
     body: JSON.stringify(body),
   });

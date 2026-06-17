@@ -2,11 +2,21 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import type { DesktopChatStorageSettings } from "../../ipc-types.js";
+import type {
+  DesktopChatStorageSettings,
+  DesktopRoomStorageOverrideMode,
+  DesktopRoomStorageState,
+} from "../../ipc-types.js";
 
 export type ChatStorageMode = DesktopChatStorageSettings["mode"];
+export type RoomStorageOverrideMode = DesktopRoomStorageOverrideMode;
 
 const validModes = new Set<ChatStorageMode>(["cloud", "local"]);
+const validRoomOverrideModes = new Set<RoomStorageOverrideMode>([
+  "inherit",
+  "cloud",
+  "local",
+]);
 
 export const chatStorageSettingsPath =
   process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() ||
@@ -16,8 +26,14 @@ export const localChatDatabasePath =
   process.env.LETAGENTS_LOCAL_CHAT_DB?.trim() ||
   join(homedir(), ".letagents", "local-chat.sqlite");
 
+export const localFilesPath =
+  process.env.LETAGENTS_LOCAL_FILES_DIR?.trim() ||
+  join(homedir(), ".letagents", "local-files");
+
 type PersistedChatStorageSettings = {
   mode?: string;
+  defaultMode?: string;
+  roomOverrides?: Record<string, unknown>;
   savedAt?: string;
 };
 
@@ -27,13 +43,44 @@ function normalizeChatStorageMode(value: unknown): ChatStorageMode {
     : "cloud";
 }
 
+function normalizeRoomOverrideMode(
+  value: unknown,
+): RoomStorageOverrideMode {
+  return typeof value === "string" &&
+    validRoomOverrideModes.has(value as RoomStorageOverrideMode)
+    ? (value as RoomStorageOverrideMode)
+    : "inherit";
+}
+
+function normalizeRoomOverrides(
+  value: unknown,
+): Record<string, RoomStorageOverrideMode> {
+  if (!value || typeof value !== "object") return {};
+  const overrides: Record<string, RoomStorageOverrideMode> = {};
+  for (const [roomIdentifier, rawMode] of Object.entries(value)) {
+    const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+    const normalizedMode = normalizeRoomOverrideMode(rawMode);
+    if (!normalizedRoomIdentifier || normalizedMode === "inherit") continue;
+    overrides[normalizedRoomIdentifier] = normalizedMode;
+  }
+  return overrides;
+}
+
+function normalizeRoomIdentifier(roomIdentifier: string): string {
+  return roomIdentifier.trim();
+}
+
 function buildSettings(input: {
   mode: ChatStorageMode;
+  roomOverrides?: Record<string, RoomStorageOverrideMode>;
   savedAt?: string | null;
 }): DesktopChatStorageSettings {
   return {
     mode: input.mode,
+    defaultMode: input.mode,
+    roomOverrides: input.roomOverrides || {},
     databasePath: localChatDatabasePath,
+    localFilesPath,
     settingsPath: chatStorageSettingsPath,
     savedAt: input.savedAt || new Date(0).toISOString(),
   };
@@ -43,8 +90,10 @@ export async function readChatStorageSettings(): Promise<DesktopChatStorageSetti
   try {
     const raw = await readFile(chatStorageSettingsPath, "utf8");
     const parsed = JSON.parse(raw) as PersistedChatStorageSettings;
+    const mode = normalizeChatStorageMode(parsed.defaultMode ?? parsed.mode);
     return buildSettings({
-      mode: normalizeChatStorageMode(parsed.mode),
+      mode,
+      roomOverrides: normalizeRoomOverrides(parsed.roomOverrides),
       savedAt: parsed.savedAt,
     });
   } catch {
@@ -52,19 +101,81 @@ export async function readChatStorageSettings(): Promise<DesktopChatStorageSetti
   }
 }
 
-export async function setChatStorageMode(
-  mode: ChatStorageMode,
+async function writeChatStorageSettings(
+  settings: DesktopChatStorageSettings,
 ): Promise<DesktopChatStorageSettings> {
-  const normalizedMode = normalizeChatStorageMode(mode);
   const next = {
-    mode: normalizedMode,
+    mode: settings.mode,
+    defaultMode: settings.defaultMode,
+    roomOverrides: settings.roomOverrides,
     savedAt: new Date().toISOString(),
   } satisfies PersistedChatStorageSettings;
   await mkdir(dirname(chatStorageSettingsPath), { recursive: true });
   await writeFile(chatStorageSettingsPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-  return buildSettings(next);
+  return buildSettings({
+    mode: normalizeChatStorageMode(next.defaultMode ?? next.mode),
+    roomOverrides: normalizeRoomOverrides(next.roomOverrides),
+    savedAt: next.savedAt,
+  });
+}
+
+export async function setChatStorageMode(
+  mode: ChatStorageMode,
+): Promise<DesktopChatStorageSettings> {
+  const normalizedMode = normalizeChatStorageMode(mode);
+  const current = await readChatStorageSettings();
+  return writeChatStorageSettings({
+    ...current,
+    mode: normalizedMode,
+    defaultMode: normalizedMode,
+  });
 }
 
 export async function isLocalChatStorageEnabled(): Promise<boolean> {
   return (await readChatStorageSettings()).mode === "local";
+}
+
+export async function setRoomStorageMode(
+  roomIdentifier: string,
+  mode: RoomStorageOverrideMode,
+): Promise<DesktopRoomStorageState> {
+  const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!normalizedRoomIdentifier) {
+    throw new Error("Choose a room before changing storage mode.");
+  }
+  const normalizedMode = normalizeRoomOverrideMode(mode);
+  const current = await readChatStorageSettings();
+  const roomOverrides = { ...current.roomOverrides };
+  if (normalizedMode === "inherit") {
+    delete roomOverrides[normalizedRoomIdentifier];
+  } else {
+    roomOverrides[normalizedRoomIdentifier] = normalizedMode;
+  }
+  await writeChatStorageSettings({
+    ...current,
+    roomOverrides,
+  });
+  return resolveRoomStorageMode(normalizedRoomIdentifier);
+}
+
+export async function resolveRoomStorageMode(
+  roomIdentifier?: string | null,
+): Promise<DesktopRoomStorageState> {
+  const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier || "");
+  const settings = await readChatStorageSettings();
+  const overrideMode = normalizedRoomIdentifier
+    ? settings.roomOverrides[normalizedRoomIdentifier] || "inherit"
+    : "inherit";
+  const effectiveMode =
+    overrideMode === "inherit" ? settings.defaultMode : overrideMode;
+  return {
+    roomIdentifier: normalizedRoomIdentifier || null,
+    defaultMode: settings.defaultMode,
+    overrideMode,
+    effectiveMode,
+    isLocalRoom: effectiveMode === "local",
+    localRoom: null,
+    databasePath: localChatDatabasePath,
+    localFilesPath,
+  };
 }

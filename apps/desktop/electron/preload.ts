@@ -81,6 +81,16 @@ const api: DesktopApi = {
   chatStorage: {
     getSettings: () => ipcRenderer.invoke("desktop:chat-storage:get-settings"),
     setMode: (mode) => ipcRenderer.invoke("desktop:chat-storage:set-mode", mode),
+    getRoomStorage: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:chat-storage:get-room-storage", roomIdentifier),
+    setRoomMode: (roomIdentifier, mode) =>
+      ipcRenderer.invoke("desktop:chat-storage:set-room-mode", roomIdentifier, mode),
+    createLocalRoom: (input) =>
+      ipcRenderer.invoke("desktop:chat-storage:create-local-room", input ?? {}),
+    forkRoomToLocal: (roomIdentifier) =>
+      ipcRenderer.invoke("desktop:chat-storage:fork-room-to-local", roomIdentifier),
+    publishLocalRoom: (roomIdentifier) =>
+      ipcRenderer.invoke("desktop:chat-storage:publish-local-room", roomIdentifier),
     syncLocalRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
   },

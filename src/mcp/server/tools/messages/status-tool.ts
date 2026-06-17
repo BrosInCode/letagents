@@ -10,7 +10,8 @@ import {
   getFallbackProjectId,
   getRememberedRoomPresence,
   getTargetRoomId,
-  isLocalChatStorageEnabled,
+  isLocalRoomStorageEnabled,
+  resolveLocalRoomStorageIdentifiers,
   resolveWorkerToolIdentity,
   roomScopedApiCall,
   syncRoomPresence,
@@ -61,8 +62,10 @@ export function registerPostStatusTool(server: McpServer): void {
       const statusText = `[status] ${status}`;
       const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
 
-      if (localRoomId && await isLocalChatStorageEnabled()) {
-        const message = await addLocalChatMessage(localRoomId, {
+      if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+        const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+        const effectiveLocalRoomId = sqliteRoomId || localRoomId;
+        const message = await addLocalChatMessage(effectiveLocalRoomId, {
           sender,
           text: statusText,
           source: "agent",

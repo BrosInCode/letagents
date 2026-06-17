@@ -8,6 +8,10 @@ import type {
   DesktopAuthStatus,
   DesktopRoomSnapshot,
 } from "../ipc-types.js";
+import {
+  localChatDatabasePath,
+  localFilesPath,
+} from "./chat-storage/settings.js";
 
 const smokeRoomIdentifier = "smoke-room";
 const smokeCodexWorkerSessionId = "worker_smoke_codex";
@@ -190,6 +194,16 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
       concludedAt: null,
       conclusionSummary: null,
       conclusionDetails: null,
+    },
+    storage: {
+      roomIdentifier: smokeRoomIdentifier,
+      defaultMode: "cloud",
+      overrideMode: "inherit",
+      effectiveMode: "cloud",
+      isLocalRoom: false,
+      localRoom: null,
+      databasePath: localChatDatabasePath,
+      localFilesPath,
     },
     focusRooms: [],
     tasks: [],

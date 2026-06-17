@@ -36,6 +36,9 @@ export const tasks = pgTable(
       table.room_id,
       table.assignee_agent_key
     ),
+    room_source_message_id_unique_idx: uniqueIndex("tasks_room_source_message_id_unique_idx")
+      .on(table.room_id, table.source_message_id)
+      .where(sql`${table.source_message_id} IS NOT NULL`),
   })
 );
 

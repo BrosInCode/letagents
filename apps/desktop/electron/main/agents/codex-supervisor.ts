@@ -7,11 +7,17 @@ import type {
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
   DesktopManagedAgentStopInput,
+  DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
+import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
+import {
+  cloudRoomIdentifierForStorage,
+  resolveLocalAwareRoomStorageMode,
+} from "../rooms/local-store.js";
 import {
   isCodexAppServerReady,
   launchCodexAppServer,
@@ -68,6 +74,7 @@ import {
   summarizeItems,
 } from "./codex-session-status.js";
 import { runDesktopAgentProviderPreflight } from "./providers.js";
+import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
 import {
   bindCodexLiveSessionToWorker,
   getCurrentCodexLiveSession,
@@ -1186,9 +1193,10 @@ function enqueueDesktopEventTurn(
   event: ManagedRoomEvent,
 ): void {
   const previous = desktopEventQueues.get(session.session_id) ?? Promise.resolve();
+  const storage = resolveLocalAwareRoomStorageMode(event.roomIdentifier);
   const next = previous
     .catch(() => undefined)
-    .then(() => deliverDesktopEventTurn(session.session_id, event))
+    .then(async () => deliverDesktopEventTurn(session.session_id, event, await storage))
     .catch((error) => {
       clearSessionActiveWork(session.session_id, (current) => ({
         ...current,
@@ -1309,6 +1317,7 @@ function updateActiveWorkSummary(
 async function publishDesktopManagedAgentReply(input: {
   session: DesktopCodexLiveSessionState;
   event: ManagedRoomEvent;
+  storage: DesktopRoomStorageState;
   text: string | null;
 }): Promise<void> {
   const text = desktopEventPublicReplyText(input.session.token, input.text);
@@ -1327,8 +1336,22 @@ async function publishDesktopManagedAgentReply(input: {
     return;
   }
 
+  const roomIdentifier = input.session.room_identifier || input.session.room_id;
+  const localReply = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier,
+    storage: input.storage,
+    workerSession,
+    replyTo: replyTargetForEvent(input.event),
+    text,
+  });
+  if (localReply) {
+    emitPersistedLocalRoomMessage(roomIdentifier, localReply);
+    return;
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
   await apiFetch<Record<string, unknown>>(
-    `/rooms/${encodeURIComponent(input.session.room_identifier || input.session.room_id)}/messages`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
       method: "POST",
       headers: {
@@ -1348,6 +1371,7 @@ async function publishDesktopManagedAgentReply(input: {
 async function deliverDesktopEventTurn(
   sessionId: string,
   event: ManagedRoomEvent,
+  storage: DesktopRoomStorageState,
 ): Promise<void> {
   const session = getStoredCodexLiveSession(sessionId);
   if (!session || !canDeliverDesktopEventToSession(session)) {
@@ -1408,6 +1432,7 @@ async function deliverDesktopEventTurn(
     await publishDesktopManagedAgentReply({
       session: latest,
       event,
+      storage,
       text: replyText,
     });
     if (stopAfterTurn) {
