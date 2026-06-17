@@ -1,14 +1,23 @@
 import {
   getStoredAgentSession,
+  isLocalRoomStorageEnabled,
+  saveAgentSession,
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
 } from "../../local-state.js";
+import { randomUUID } from "node:crypto";
 import { normalizeAgentBaseName } from "../../../shared/codenames.js";
 import { formatOwnerAttribution } from "../../../shared/agent-identity.js";
 import {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
 } from "../../../shared/request-headers.js";
+import {
+  AGENT_INSTANCE_UUID,
+  detectAgentIdeLabel,
+  detectAgentRuntimeLabel,
+  ensureAgentIdentity,
+} from "./identity.js";
 
 export function buildAgentDeliveryHeaders(
   agentSession?: StoredAgentSessionState | null
@@ -107,11 +116,51 @@ export async function resolveWorkerToolIdentity(input: {
   roomId?: string | null;
   agentSessionId?: string | null;
 }): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
-  const agentSession = requireWorkerAgentSession(input.roomId, input.agentSessionId);
+  const agentSession = input.agentSessionId
+    ? requireWorkerAgentSession(input.roomId, input.agentSessionId)
+    : input.roomId && await isLocalRoomStorageEnabled(input.roomId)
+      ? await ensureLocalWorkerAgentSession(input.roomId)
+      : requireWorkerAgentSession(input.roomId, input.agentSessionId);
   return {
     identity: identityFromAgentSession(agentSession),
     agentSession,
   };
+}
+
+export async function ensureLocalWorkerAgentSession(
+  roomId: string,
+  input: {
+    sessionKind?: "worker" | "controller";
+    runtime?: string | null;
+    displayName?: string | null;
+  } = {},
+): Promise<StoredAgentSessionState> {
+  const identity = await ensureAgentIdentity();
+  const now = new Date().toISOString();
+  const runtime = input.runtime?.trim() || detectAgentRuntimeLabel();
+  const displayName = input.displayName?.trim() || identity.display_name;
+  return saveAgentSession({
+    session_id: `local_${randomUUID()}`,
+    session_token: `local_${randomUUID()}`,
+    room_id: roomId,
+    session_kind: input.sessionKind ?? "worker",
+    runtime,
+    host_id: null,
+    host_kind: "local",
+    host_label: "Local device",
+    liveness_capability: null,
+    tool_bridge_id: null,
+    actor_label: identity.actor_label,
+    agent_key: identity.canonical_key || identity.runtime_key || identity.actor_label,
+    agent_instance_id: AGENT_INSTANCE_UUID,
+    display_name: displayName,
+    owner_label: identity.owner_label,
+    ide_label: identity.ide_label ?? detectAgentIdeLabel(),
+    created_at: now,
+    updated_at: now,
+    last_seen_at: now,
+    ended_at: null,
+  });
 }
 
 export function agentSessionCredentials(agentSession: StoredAgentSessionState): {

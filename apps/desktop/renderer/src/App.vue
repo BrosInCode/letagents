@@ -130,6 +130,7 @@
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
           :room="selectedRoomInfo"
+          :storage="selectedRoomStorage"
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
           :participants="selectedSnapshot?.participants || []"
@@ -147,7 +148,7 @@
           @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
-          @refresh-room="handleRefreshRoom"
+          @refresh-room="handleRoomShellRefresh"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
@@ -210,6 +211,7 @@
       @close="closeNewRoomModal"
       @confirm-project="confirmProjectRoomFromModal"
       @create-invite="createInviteRoom"
+      @create-local="createLocalRoomFromModal"
       @open-project="openProjectRoomFromModal"
       @join="joinRoomCodeFromModal"
     />
@@ -227,6 +229,7 @@ import type {
   DesktopMcpInstallTargetId,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
+  DesktopRoomStorageState,
   DiagnosticsSnapshot,
   RepoStatus,
   WorkerSnapshot,
@@ -363,6 +366,18 @@ const selectedRoomRenderKey = computed(() =>
   || selectedSnapshot.value?.roomIdentifier
   || selectedRoomInfo.value.identifier
   || activeEntry.value.id
+);
+const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
+  selectedSnapshot.value?.storage || {
+    roomIdentifier: selectedRoomInfo.value.identifier || null,
+    defaultMode: chatStorageSettings.value?.defaultMode || chatStorageSettings.value?.mode || "cloud",
+    overrideMode: "inherit",
+    effectiveMode: chatStorageSettings.value?.mode || "cloud",
+    isLocalRoom: false,
+    localRoom: null,
+    databasePath: chatStorageSettings.value?.databasePath || "",
+    localFilesPath: chatStorageSettings.value?.localFilesPath || "",
+  }
 );
 
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
@@ -717,6 +732,7 @@ const {
   closeNewRoomModal,
   confirmProjectRoomFromModal,
   createInviteRoom,
+  createLocalRoomFromModal,
   joinRoomCodeFromModal,
   newRoomBusy,
   newRoomFeedback,
@@ -894,11 +910,11 @@ async function syncLocalChat(): Promise<void> {
     if (!bridge) return;
     const result = await bridge.syncLocalRoom(roomIdentifier);
     chatStorageFeedback.value = {
-      state: result.skippedCount > 0 ? "info" : "success",
+      state: result.skippedCount > 0 || result.skippedTaskCount > 0 ? "info" : "success",
       message:
-        result.skippedCount > 0
-          ? `Synced ${result.syncedCount} messages. ${result.skippedCount} messages were skipped.`
-          : `Synced ${result.syncedCount} local messages to cloud.`,
+        result.skippedCount > 0 || result.skippedTaskCount > 0
+          ? `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks. ${result.skippedCount + result.skippedTaskCount} items were skipped.`
+          : `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.`,
     };
   } catch (error) {
     chatStorageFeedback.value = {
@@ -916,6 +932,12 @@ async function syncLocalChat(): Promise<void> {
 function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]): void {
   handleMessageSent(message);
   markActiveRoomRead();
+}
+
+function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
+  handleRefreshRoom(snapshot);
+  if (!snapshot?.roomIdentifier) return;
+  void syncSelectedRoomStream(snapshot.roomIdentifier);
 }
 
 function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {

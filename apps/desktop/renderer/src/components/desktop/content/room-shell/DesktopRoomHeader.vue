@@ -25,8 +25,18 @@
               />
             </svg>
           </span>
-          <span>{{ room.displayName }}</span>
+          <span class="desktop-room-title-text">{{ room.displayName }}</span>
         </h3>
+        <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
+          <span
+            v-if="storage.effectiveMode === 'local'"
+            class="desktop-room-badge"
+            data-testid="desktop-room-local-badge"
+          >
+            Local
+          </span>
+          <span v-if="room.code" class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
+        </div>
       </div>
     </div>
 
@@ -155,22 +165,20 @@
         </button>
       </nav>
 
-      <div v-if="room.code" class="desktop-room-badges">
-        <span class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
-      </div>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import type { DesktopRoomInfo } from "../../../../../../electron/ipc-types";
+import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
   room: DesktopRoomInfo;
+  storage: DesktopRoomStorageState;
   tabs: RoomTab[];
   activeTab: RoomTabId;
   searchOpen: boolean;

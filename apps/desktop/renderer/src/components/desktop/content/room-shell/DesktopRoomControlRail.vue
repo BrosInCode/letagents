@@ -6,6 +6,7 @@
           v-if="actionPanelOpen"
           key="settings"
           :room="room"
+          :storage="storage"
           :room-url="roomUrl"
           :copied="copied"
           :sound-enabled="soundEnabled"
@@ -20,12 +21,16 @@
           :github-error="githubError"
           :github-events-available="githubEventsAvailable"
           :github-events-visible="githubEventsVisible"
+          :storage-busy="storageBusy"
           @copy-room-link="emit('copyRoomLink')"
           @open-rules="emit('openRules')"
           @toggle-sound="emit('toggleSound')"
           @toggle-notifications="emit('toggleNotifications')"
           @toggle-liquid-glass="emit('toggleLiquidGlass')"
           @toggle-github-events-visible="emit('toggleGithubEventsVisible')"
+          @set-room-storage-mode="emit('setRoomStorageMode', $event)"
+          @fork-room-to-local="emit('forkRoomToLocal')"
+          @publish-local-room="emit('publishLocalRoom')"
           @rename-room="emit('renameRoom', $event)"
           @refresh-github="emit('refreshGithub')"
           @install-github="emit('installGithub')"
@@ -65,6 +70,7 @@ import { nextTick, ref, watch } from "vue";
 import type {
   DesktopGitHubIntegrationStatus,
   DesktopRoomInfo,
+  DesktopRoomStorageState,
 } from "../../../../../../electron/ipc-types";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 
@@ -72,6 +78,7 @@ const props = defineProps<{
   actionPanelOpen: boolean;
   searchOpen: boolean;
   room: DesktopRoomInfo;
+  storage: DesktopRoomStorageState;
   roomUrl: string;
   copied: boolean;
   soundEnabled: boolean;
@@ -86,6 +93,7 @@ const props = defineProps<{
   githubError: string | null;
   githubEventsAvailable: boolean;
   githubEventsVisible: boolean;
+  storageBusy: boolean;
   searchSummary: string;
   searchResultsCount: number;
 }>();
@@ -97,6 +105,9 @@ const emit = defineEmits<{
   toggleNotifications: [];
   toggleLiquidGlass: [];
   toggleGithubEventsVisible: [];
+  setRoomStorageMode: [mode: DesktopRoomStorageState["overrideMode"]];
+  forkRoomToLocal: [];
+  publishLocalRoom: [];
   renameRoom: [displayName: string];
   refreshGithub: [];
   installGithub: [];

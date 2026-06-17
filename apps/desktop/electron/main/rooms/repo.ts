@@ -1,4 +1,5 @@
 import { dialog } from "electron";
+import { basename } from "node:path";
 import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
@@ -11,6 +12,13 @@ import { openAllowedExternalUrl } from "../external-url.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { focusMainWindow } from "../window.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
+import {
+  cloudRoomIdentifierForStorage,
+  createLocalRoom,
+  localRoomIdentifierForStorage,
+  resolveLocalAwareRoomStorageMode,
+  updateLocalRoomDisplayName,
+} from "./local-store.js";
 import {
   mapDesktopRoomInfoPayload,
   rememberJoinedRoomInfo,
@@ -42,6 +50,13 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
   const selectedPath = result.filePaths[0];
   const resolved = await resolveRoomIdentifierFromPath(selectedPath);
   const repoPath = resolved.repoRoot || selectedPath;
+  const storage = await resolveLocalAwareRoomStorageMode(resolved.roomIdentifier);
+  if (storage.effectiveMode === "local") {
+    await createLocalRoom({
+      roomIdentifier: resolved.roomIdentifier,
+      displayName: basename(repoPath),
+    });
+  }
   return {
     canceled: false,
     repoPath,
@@ -67,16 +82,39 @@ export async function renameDesktopRoom(
     throw new Error("Enter a room name.");
   }
 
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoom = await updateLocalRoomDisplayName(
+      localRoomIdentifierForStorage(storage, trimmedRoomIdentifier),
+      trimmedDisplayName,
+    );
+    const payload: RoomInfoPayload = {
+      room_id: localRoom.roomIdentifier,
+      code: "",
+      name: localRoom.displayName,
+      display_name: localRoom.displayName,
+      role: "local",
+      authenticated: false,
+      kind: "main",
+    };
+    rememberJoinedRoomInfo(localRoom.roomIdentifier, payload);
+    return mapDesktopRoomInfoPayload(localRoom.roomIdentifier, payload);
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const updated = await apiFetch<RoomInfoPayload>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ display_name: trimmedDisplayName }),
     },
   );
-  rememberJoinedRoomInfo(trimmedRoomIdentifier, updated);
-  return mapDesktopRoomInfoPayload(trimmedRoomIdentifier, updated);
+  rememberJoinedRoomInfo(cloudRoomIdentifier, updated);
+  return mapDesktopRoomInfoPayload(cloudRoomIdentifier, updated);
 }
 
 export async function getDesktopGitHubIntegrationStatus(
@@ -99,6 +137,23 @@ export async function getDesktopGitHubIntegrationStatus(
     };
   }
 
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    return {
+      roomId: localRoomIdentifierForStorage(storage, trimmedRoomIdentifier),
+      accessRoomId: null,
+      configured: false,
+      setupManifestAvailable: false,
+      connected: false,
+      installUrlAvailable: false,
+      repository: null,
+    };
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const status = await apiFetch<{
     room_id?: string;
     access_room_id?: string | null;
@@ -107,10 +162,10 @@ export async function getDesktopGitHubIntegrationStatus(
     connected?: boolean;
     install_url_available?: boolean;
     repository?: { full_name?: string } | null;
-  }>(`/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/integrations/github`);
+  }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/integrations/github`);
 
   return {
-    roomId: status.room_id || trimmedRoomIdentifier,
+    roomId: status.room_id || cloudRoomIdentifier,
     accessRoomId: status.access_room_id || null,
     configured: Boolean(status.configured),
     setupManifestAvailable: Boolean(status.setup_manifest_available),
@@ -130,8 +185,20 @@ export async function openDesktopGitHubInstall(
     throw new Error("Choose a room before opening GitHub.");
   }
 
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    return {
+      opened: false,
+      message: "Publish this local room before connecting GitHub.",
+    };
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const payload = await apiFetch<{ install_url?: string }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/integrations/github/install-url`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/integrations/github/install-url`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

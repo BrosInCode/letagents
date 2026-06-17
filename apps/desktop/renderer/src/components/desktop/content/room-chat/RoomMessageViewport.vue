@@ -141,6 +141,7 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
@@ -186,6 +187,8 @@ let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
 let autoViewportBackfillFrame: number | null = null;
+let threadActivityNamespace = props.messageNamespace;
+let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
@@ -275,8 +278,27 @@ watch(
 );
 
 watch(
+  () => props.messageNamespace,
+  (namespace, previousNamespace) => {
+    if (namespace === previousNamespace) return;
+    threadActivityNamespace = namespace;
+    suppressNextThreadActivityNotice = true;
+    threadActivityNotice.value = null;
+  },
+);
+
+watch(
   () => props.threadMessages,
   (newMessages, oldMessages = []) => {
+    if (
+      suppressNextThreadActivityNotice ||
+      threadActivityNamespace !== props.messageNamespace
+    ) {
+      suppressNextThreadActivityNotice = false;
+      threadActivityNamespace = props.messageNamespace;
+      threadActivityNotice.value = null;
+      return;
+    }
     if (!oldMessages.length) return;
 
     const previousNewestMessage = newestMessage([...oldMessages]);

@@ -10,7 +10,8 @@ import {
   getLocalChatMessages,
   getRememberedRoomPresence,
   getTargetRoomId,
-  isLocalChatStorageEnabled,
+  isLocalRoomStorageEnabled,
+  resolveLocalRoomStorageIdentifiers,
   resolveWorkerToolIdentity,
   roomScopedApiCall,
   syncRoomPresence,
@@ -100,8 +101,9 @@ async function findMessageById(input: {
   projectId: string | null;
   messageId: string;
 }): Promise<MessageRecord | null> {
-  if (input.localRoomId && await isLocalChatStorageEnabled()) {
-    return findLocalMessageById(input.localRoomId, input.messageId);
+  if (input.localRoomId && await isLocalRoomStorageEnabled(input.localRoomId)) {
+    const { localRoomId } = await resolveLocalRoomStorageIdentifiers(input.localRoomId);
+    return findLocalMessageById(localRoomId || input.localRoomId, input.messageId);
   }
   return findRemoteMessageById({
     roomId: input.roomId,
@@ -165,8 +167,9 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     })
     : replyTarget;
 
-  if (localRoomId && await isLocalChatStorageEnabled()) {
-    const message = await addLocalChatMessage(localRoomId, {
+  if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+    const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+    const message = await addLocalChatMessage(sqliteRoomId || localRoomId, {
       sender: identity.actor_label,
       text: input.text,
       reply_to: resolvedReplyTarget,

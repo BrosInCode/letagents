@@ -9,7 +9,8 @@ import {
   getLocalChatMessages,
   getTargetRoomId,
   heartbeatRoomPresence,
-  isLocalChatStorageEnabled,
+  isLocalRoomStorageEnabled,
+  resolveLocalRoomStorageIdentifiers,
   roomScopedApiCall,
   toAgentReadableMessages,
 } from "../../runtime.js";
@@ -26,11 +27,12 @@ export function registerReadMessagesTool(server: McpServer): void {
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
       const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
-      if (localRoomId && await isLocalChatStorageEnabled()) {
+      if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+        const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
         const allMessages: unknown[] = [];
         let afterCursor: string | undefined;
         for (;;) {
-          const result = await getLocalChatMessages(localRoomId, {
+          const result = await getLocalChatMessages(sqliteRoomId || localRoomId, {
             after: afterCursor,
             include_prompt_only: true,
           });
@@ -42,7 +44,7 @@ export function registerReadMessagesTool(server: McpServer): void {
           afterCursor = lastMsg.id;
         }
         return jsonToolResponse({
-          room_id: localRoomId,
+          room_id: sqliteRoomId || localRoomId,
           messages: toAgentReadableMessages(allMessages),
         });
       }

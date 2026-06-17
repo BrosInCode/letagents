@@ -1,6 +1,12 @@
 import { getRoomIdentityPresenceCacheKey } from "../../agent-presence.js";
 import { encodeRoomIdPath } from "../../room-id.js";
-import { touchRoomSession, type StoredAgentIdentityState, type StoredAgentSessionState } from "../../local-state.js";
+import {
+  isLocalRoomStorageEnabled,
+  resolveLocalRoomStorageIdentifiers,
+  touchRoomSession,
+  type StoredAgentIdentityState,
+  type StoredAgentSessionState,
+} from "../../local-state.js";
 import { type AgentPresenceStatus } from "../../../shared/agent-presence.js";
 import { apiCall, isMissingRouteError } from "./api.js";
 import { agentSessionCredentials, identityFromAgentSession } from "./agent-sessions.js";
@@ -41,9 +47,15 @@ export async function syncRoomPresence(
     getRoomIdentityPresenceCacheKey(roomId, resolvedIdentity.actor_label),
     presence
   );
+  const { localRoomId, cloudRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
+  if (await isLocalRoomStorageEnabled(roomId)) {
+    touchRoomSession(localRoomId || roomId);
+    return;
+  }
+  const apiRoomId = cloudRoomId || roomId;
 
   try {
-    await apiCall(`/rooms/${encodeRoomIdPath(roomId)}/presence`, {
+    await apiCall(`/rooms/${encodeRoomIdPath(apiRoomId)}/presence`, {
       method: "POST",
       body: JSON.stringify({
         actor_label: resolvedIdentity.actor_label,
@@ -57,7 +69,7 @@ export async function syncRoomPresence(
         ...agentSessionCredentials(agentSession),
       }),
     });
-    touchRoomSession(roomId);
+    touchRoomSession(apiRoomId);
   } catch (error) {
     if (isMissingRouteError(error)) {
       return;

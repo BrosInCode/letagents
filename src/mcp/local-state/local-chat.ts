@@ -10,7 +10,7 @@ export type LocalChatMessage = {
   agent_prompt_kind: string | null;
   source: string | null;
   timestamp: string;
-  attachments: [];
+  attachments: LocalChatAttachment[];
   reply_to: {
     id: string;
     sender: string;
@@ -20,10 +20,43 @@ export type LocalChatMessage = {
   } | null;
 };
 
+export type LocalChatAttachment = {
+  id: string;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  url: string | null;
+  download_url: string | null;
+  data_url: string | null;
+  content_base64: string | null;
+};
+
 export type LocalChatMessagePage = {
   messages: LocalChatMessage[];
   has_more: boolean;
   room_id: string;
+};
+
+export type LocalTask = {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  assignee: string | null;
+  assignee_agent_key: string | null;
+  created_by: string | null;
+  pr_url: string | null;
+  active_leases?: Array<{
+    id: string;
+    kind: "review" | string;
+    holder_label: string | null;
+    agent_key: string | null;
+    agent_session_id: string | null;
+    status: string;
+    updated_at: string | null;
+  }>;
+  created_at: string;
+  updated_at: string;
 };
 
 type SqliteStatement = {
@@ -50,6 +83,17 @@ type LocalMessageRow = {
   sync_started_at: string | null;
 };
 
+type LocalAttachmentRow = {
+  attachment_id: string;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  url: string | null;
+  download_url: string | null;
+  data_url: string | null;
+  content_base64: string | null;
+};
+
 type LocalChatInput = {
   sender: string;
   text: string;
@@ -66,6 +110,18 @@ const localChatDatabasePath =
   process.env.LETAGENTS_LOCAL_CHAT_DB?.trim() ||
   join(homedir(), ".letagents", "local-chat.sqlite");
 let db: SqliteDatabase | null = null;
+
+const validLocalTaskTransitions: Record<string, string[]> = {
+  proposed: ["accepted", "cancelled"],
+  accepted: ["assigned", "cancelled"],
+  assigned: ["in_progress", "in_review", "cancelled"],
+  in_progress: ["blocked", "in_review", "done", "cancelled"],
+  blocked: ["in_progress", "in_review", "cancelled"],
+  in_review: ["merged", "in_progress", "blocked", "done", "cancelled"],
+  merged: ["done", "accepted"],
+  done: ["accepted"],
+  cancelled: ["accepted"],
+};
 
 function formatMessageId(number: number): string {
   return `msg_${number}`;
@@ -104,13 +160,34 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
   };
 }
 
+function mapAttachmentRow(row: Record<string, unknown>): LocalAttachmentRow {
+  return {
+    attachment_id: String(row.attachment_id || ""),
+    file_name: typeof row.file_name === "string" ? row.file_name : null,
+    mime_type: typeof row.mime_type === "string" ? row.mime_type : null,
+    size_bytes:
+      row.size_bytes === null || row.size_bytes === undefined
+        ? null
+        : Number(row.size_bytes),
+    url: typeof row.url === "string" ? row.url : null,
+    download_url: typeof row.download_url === "string" ? row.download_url : null,
+    data_url: typeof row.data_url === "string" ? row.data_url : null,
+    content_base64:
+      typeof row.content_base64 === "string" ? row.content_base64 : null,
+  };
+}
+
 function visibleMessageClause(includePromptOnly?: boolean): string {
   return includePromptOnly
     ? "1 = 1"
     : "NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')";
 }
 
-function toMessage(row: LocalMessageRow, replyTo?: LocalMessageRow | null): LocalChatMessage {
+function toMessage(
+  row: LocalMessageRow,
+  replyTo?: LocalMessageRow | null,
+  attachments: LocalAttachmentRow[] = [],
+): LocalChatMessage {
   return {
     id: formatMessageId(row.number),
     sender: row.sender,
@@ -118,7 +195,16 @@ function toMessage(row: LocalMessageRow, replyTo?: LocalMessageRow | null): Loca
     agent_prompt_kind: row.agent_prompt_kind,
     source: row.source,
     timestamp: row.timestamp,
-    attachments: [],
+    attachments: attachments.map((attachment) => ({
+      id: attachment.attachment_id,
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      size_bytes: attachment.size_bytes,
+      url: attachment.url,
+      download_url: attachment.download_url,
+      data_url: attachment.data_url,
+      content_base64: attachment.content_base64,
+    })),
     reply_to: replyTo
       ? {
           id: formatMessageId(replyTo.number),
@@ -165,9 +251,75 @@ async function getDb(): Promise<SqliteDatabase> {
       ON local_chat_messages (room_id, timestamp);
     CREATE INDEX IF NOT EXISTS local_chat_messages_sync_idx
       ON local_chat_messages (room_id, synced_cloud_id);
+    CREATE TABLE IF NOT EXISTS local_chat_attachments (
+      room_id TEXT NOT NULL,
+      message_number INTEGER NOT NULL,
+      attachment_id TEXT NOT NULL,
+      file_name TEXT,
+      mime_type TEXT,
+      size_bytes INTEGER,
+      url TEXT,
+      download_url TEXT,
+      data_url TEXT,
+      content_base64 TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (room_id, message_number, attachment_id)
+    );
+    CREATE INDEX IF NOT EXISTS local_chat_attachments_message_idx
+      ON local_chat_attachments (room_id, message_number);
+    CREATE TABLE IF NOT EXISTS local_rooms (
+      room_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      cloud_room_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      published_at TEXT,
+      archived_at TEXT,
+      pinned_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS local_task_room_sequences (
+      room_id TEXT PRIMARY KEY,
+      next_number INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS local_tasks (
+      room_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL,
+      assignee TEXT,
+      assignee_agent_key TEXT,
+      created_by TEXT,
+      pr_url TEXT,
+      workflow_artifacts_json TEXT,
+      workflow_refs_json TEXT,
+      synced_cloud_id TEXT,
+      sync_key TEXT,
+      sync_started_at TEXT,
+      sync_dirty INTEGER NOT NULL DEFAULT 0,
+      review_lease_id TEXT,
+      review_holder_label TEXT,
+      review_agent_key TEXT,
+      review_agent_session_id TEXT,
+      review_updated_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (room_id, task_id)
+    );
   `);
   addColumnIfMissing(db, "local_chat_messages", "sync_key", "TEXT");
   addColumnIfMissing(db, "local_chat_messages", "sync_started_at", "TEXT");
+  addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "workflow_refs_json", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "sync_started_at", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "sync_dirty", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "local_tasks", "review_lease_id", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "review_holder_label", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "review_agent_key", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "review_agent_session_id", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "review_updated_at", "TEXT");
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
       ON local_chat_messages (room_id, sync_key)
@@ -193,6 +345,18 @@ function addColumnIfMissing(
   }
 }
 
+function resolveLocalTaskStatus(fromStatus: string, toStatus?: unknown): string {
+  if (typeof toStatus !== "string" || !toStatus.trim()) return fromStatus;
+  const nextStatus = toStatus.trim();
+  if (!validLocalTaskTransitions[fromStatus]?.includes(nextStatus)) {
+    throw new Error(
+      `Invalid transition: ${fromStatus} -> ${nextStatus}. ` +
+        `Allowed: ${validLocalTaskTransitions[fromStatus]?.join(", ") || "none"}`,
+    );
+  }
+  return nextStatus;
+}
+
 async function hydrateRows(
   database: SqliteDatabase,
   rows: LocalMessageRow[],
@@ -200,6 +364,7 @@ async function hydrateRows(
   if (rows.length === 0) return [];
   const roomId = rows[0]?.room_id || "";
   const replies = new Map<number, LocalMessageRow>();
+  const attachmentsByMessageNumber = new Map<number, LocalAttachmentRow[]>();
   const replyNumbers = [
     ...new Set(
       rows
@@ -218,8 +383,25 @@ async function hydrateRows(
     }
   }
 
+  for (const number of rows.map((row) => row.number)) {
+    const attachments = database
+      .prepare(`
+        SELECT *
+        FROM local_chat_attachments
+        WHERE room_id = ? AND message_number = ?
+        ORDER BY created_at ASC
+      `)
+      .all(roomId, number)
+      .map(mapAttachmentRow);
+    attachmentsByMessageNumber.set(number, attachments);
+  }
+
   return rows.map((row) =>
-    toMessage(row, row.reply_to_number ? replies.get(row.reply_to_number) ?? null : null),
+    toMessage(
+      row,
+      row.reply_to_number ? replies.get(row.reply_to_number) ?? null : null,
+      attachmentsByMessageNumber.get(row.number) || [],
+    ),
   );
 }
 
@@ -269,6 +451,100 @@ export async function isLocalChatStorageEnabled(): Promise<boolean> {
     return parsed.mode === "local";
   } catch {
     return false;
+  }
+}
+
+export async function isLocalRoomStorageEnabled(
+  roomId?: string | null,
+): Promise<boolean> {
+  const envMode = process.env.LETAGENTS_CHAT_STORAGE?.trim().toLowerCase();
+  if (envMode === "local") return true;
+  if (envMode === "cloud") return false;
+
+  const normalizedRoomId = roomId?.trim() || "";
+  let localRoom: Record<string, unknown> | undefined;
+  if (normalizedRoomId) {
+    try {
+      const database = await getDb();
+      localRoom = database
+        .prepare("SELECT room_id, cloud_room_id FROM local_rooms WHERE (room_id = ? OR cloud_room_id = ?) AND archived_at IS NULL LIMIT 1")
+        .get(normalizedRoomId, normalizedRoomId);
+    } catch {
+      localRoom = undefined;
+    }
+  }
+
+  try {
+    const raw = await readFile(chatStorageSettingsPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      mode?: unknown;
+      defaultMode?: unknown;
+      roomOverrides?: Record<string, unknown>;
+    };
+    const overrideKeys = [
+      normalizedRoomId,
+      typeof localRoom?.cloud_room_id === "string" ? localRoom.cloud_room_id : "",
+      typeof localRoom?.room_id === "string" ? localRoom.room_id : "",
+    ].filter((value, index, values): value is string =>
+      Boolean(value && values.indexOf(value) === index)
+    );
+    const override = parsed.roomOverrides
+      ? overrideKeys
+        .map((key) => parsed.roomOverrides?.[key])
+        .find((value) => value === "local" || value === "cloud")
+      : null;
+    if (override === "local") return true;
+    if (override === "cloud") {
+      const localOnlyRoom = Boolean(localRoom && !localRoom.cloud_room_id);
+      return localOnlyRoom;
+    }
+    const requestedLocalRoom = Boolean(
+      normalizedRoomId &&
+        typeof localRoom?.room_id === "string" &&
+        localRoom.room_id === normalizedRoomId,
+    );
+    const localOnlyRoom = Boolean(localRoom && !localRoom.cloud_room_id);
+    if (localOnlyRoom || requestedLocalRoom) return true;
+    return (parsed.defaultMode ?? parsed.mode) === "local";
+  } catch {
+    const requestedLocalRoom = Boolean(
+      normalizedRoomId &&
+        typeof localRoom?.room_id === "string" &&
+        localRoom.room_id === normalizedRoomId,
+    );
+    const localOnlyRoom = Boolean(localRoom && !localRoom.cloud_room_id);
+    return localOnlyRoom || requestedLocalRoom;
+  }
+}
+
+export async function resolveLocalRoomStorageIdentifiers(
+  roomId?: string | null,
+): Promise<{ localRoomId: string | null; cloudRoomId: string | null }> {
+  const normalizedRoomId = roomId?.trim() || "";
+  if (!normalizedRoomId) return { localRoomId: null, cloudRoomId: null };
+  try {
+    const database = await getDb();
+    const row = database
+      .prepare(`
+        SELECT room_id, cloud_room_id
+        FROM local_rooms
+        WHERE (room_id = ? OR cloud_room_id = ?) AND archived_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `)
+      .get(normalizedRoomId, normalizedRoomId);
+    return {
+      localRoomId:
+        typeof row?.room_id === "string" && row.room_id.trim()
+          ? row.room_id
+          : normalizedRoomId,
+      cloudRoomId:
+        typeof row?.cloud_room_id === "string" && row.cloud_room_id.trim()
+          ? row.cloud_room_id
+          : normalizedRoomId,
+    };
+  } catch {
+    return { localRoomId: normalizedRoomId, cloudRoomId: normalizedRoomId };
   }
 }
 
@@ -397,4 +673,299 @@ export async function waitForLocalChatMessages(
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
   }
+}
+
+function allocateLocalTaskId(database: SqliteDatabase, roomId: string): string {
+  database
+    .prepare(`
+      INSERT INTO local_task_room_sequences (room_id, next_number)
+      SELECT ?, COALESCE(MAX(CAST(SUBSTR(task_id, 6) AS INTEGER)), 0) + 1
+      FROM local_tasks
+      WHERE room_id = ? AND task_id GLOB 'task_[0-9]*'
+      ON CONFLICT(room_id) DO NOTHING
+    `)
+    .run(roomId, roomId);
+  const row = database
+    .prepare("SELECT next_number FROM local_task_room_sequences WHERE room_id = ?")
+    .get(roomId);
+  const number = Number(row?.next_number || 0);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error("Local task sequence could not be allocated.");
+  }
+  database
+    .prepare("UPDATE local_task_room_sequences SET next_number = next_number + 1 WHERE room_id = ?")
+    .run(roomId);
+  return `task_${number}`;
+}
+
+function mapTaskRow(row: Record<string, unknown>): LocalTask {
+  const reviewLeaseId =
+    typeof row.review_lease_id === "string" && row.review_lease_id.trim()
+      ? row.review_lease_id
+      : null;
+  return {
+    id: String(row.task_id || ""),
+    title: String(row.title || ""),
+    description: typeof row.description === "string" ? row.description : null,
+    status: String(row.status || "proposed"),
+    assignee: typeof row.assignee === "string" ? row.assignee : null,
+    assignee_agent_key:
+      typeof row.assignee_agent_key === "string" ? row.assignee_agent_key : null,
+    created_by: typeof row.created_by === "string" ? row.created_by : null,
+    pr_url: typeof row.pr_url === "string" ? row.pr_url : null,
+    active_leases: reviewLeaseId
+      ? [
+          {
+            id: reviewLeaseId,
+            kind: "review",
+            holder_label:
+              typeof row.review_holder_label === "string"
+                ? row.review_holder_label
+                : null,
+            agent_key:
+              typeof row.review_agent_key === "string"
+                ? row.review_agent_key
+                : null,
+            agent_session_id:
+              typeof row.review_agent_session_id === "string"
+                ? row.review_agent_session_id
+                : null,
+            status: "active",
+            updated_at:
+              typeof row.review_updated_at === "string"
+                ? row.review_updated_at
+                : null,
+          },
+        ]
+      : [],
+    created_at: String(row.created_at || ""),
+    updated_at: String(row.updated_at || ""),
+  };
+}
+
+export async function addLocalTask(
+  roomId: string,
+  input: {
+    title: string;
+    description?: string | null;
+    created_by?: string | null;
+  },
+): Promise<LocalTask> {
+  const trimmedRoomId = roomId.trim();
+  const title = input.title.trim();
+  if (!trimmedRoomId) throw new Error("No room is available for this request.");
+  if (!title) throw new Error("Task title is required.");
+  const database = await getDb();
+  const now = new Date().toISOString();
+  let taskId = "";
+  beginImmediate(database);
+  try {
+    taskId = allocateLocalTaskId(database, trimmedRoomId);
+    database
+      .prepare(`
+        INSERT INTO local_tasks (
+          room_id, task_id, title, description, status, assignee, assignee_agent_key,
+          created_by, pr_url, workflow_artifacts_json, workflow_refs_json,
+          synced_cloud_id, sync_key, sync_started_at, sync_dirty, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'proposed', NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, NULL, 1, ?, ?)
+      `)
+      .run(
+        trimmedRoomId,
+        taskId,
+        title,
+        input.description?.trim() || null,
+        input.created_by || "agent",
+        `local-task:${trimmedRoomId}:${taskId}`,
+        now,
+        now,
+      );
+    database.exec("COMMIT");
+  } catch (error) {
+    rollback(database);
+    throw error;
+  }
+  const task = await getLocalTask(trimmedRoomId, taskId);
+  if (!task) throw new Error("Local task could not be created.");
+  return task;
+}
+
+export async function listLocalTasks(
+  roomId: string,
+  options: { status?: string | null; openOnly?: boolean } = {},
+): Promise<{ tasks: LocalTask[]; has_more: boolean }> {
+  const clauses = ["room_id = ?"];
+  const params: unknown[] = [roomId];
+  if (options.status) {
+    clauses.push("status = ?");
+    params.push(options.status);
+  }
+  if (options.openOnly !== false) {
+    clauses.push("status NOT IN ('done', 'cancelled')");
+  }
+  const database = await getDb();
+  const tasks = database
+    .prepare(`
+      SELECT *
+      FROM local_tasks
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY created_at ASC
+    `)
+    .all(...params)
+    .map(mapTaskRow);
+  return { tasks, has_more: false };
+}
+
+export async function getLocalTask(
+  roomId: string,
+  taskId: string,
+): Promise<LocalTask | null> {
+  const database = await getDb();
+  const row = database
+    .prepare("SELECT * FROM local_tasks WHERE room_id = ? AND task_id = ?")
+    .get(roomId, taskId);
+  return row ? mapTaskRow(row) : null;
+}
+
+export async function updateLocalTask(
+  roomId: string,
+  taskId: string,
+  patch: Record<string, unknown>,
+): Promise<LocalTask> {
+  const current = await getLocalTask(roomId, taskId);
+  if (!current) throw new Error("Task not found.");
+  const nextStatus =
+    patch.skip_transition_validation === true
+      ? typeof patch.status === "string" && patch.status.trim()
+        ? patch.status.trim()
+        : current.status
+      : resolveLocalTaskStatus(current.status, patch.status);
+  const now = new Date().toISOString();
+  const database = await getDb();
+  database
+    .prepare(`
+      UPDATE local_tasks
+      SET status = ?,
+          assignee = ?,
+          assignee_agent_key = ?,
+          pr_url = ?,
+          sync_dirty = 1,
+          updated_at = ?
+      WHERE room_id = ? AND task_id = ?
+    `)
+    .run(
+      nextStatus,
+      patch.assignee === undefined ? current.assignee : patch.assignee || null,
+      patch.assignee_agent_key === undefined
+        ? current.assignee_agent_key
+        : typeof patch.assignee_agent_key === "string"
+          ? patch.assignee_agent_key
+          : null,
+      patch.pr_url === undefined ? current.pr_url : patch.pr_url || null,
+      now,
+      roomId,
+      taskId,
+    );
+  const updated = await getLocalTask(roomId, taskId);
+  if (!updated) throw new Error("Task not found.");
+  return updated;
+}
+
+export async function claimLocalTaskReviewLease(
+  roomId: string,
+  taskId: string,
+  input: {
+    holder_label?: string | null;
+    agent_key?: string | null;
+    agent_session_id?: string | null;
+  },
+): Promise<{ task: LocalTask; lease: NonNullable<LocalTask["active_leases"]>[number] }> {
+  const current = await getLocalTask(roomId, taskId);
+  if (!current) throw new Error("Task not found.");
+  const actorKey = input.agent_key?.trim() || null;
+  if (
+    actorKey &&
+    current.assignee_agent_key &&
+    current.assignee_agent_key === actorKey
+  ) {
+    throw new Error("A worker holding the task cannot also claim review authority.");
+  }
+  const currentReviewLease = current.active_leases?.find((lease) => lease.kind === "review");
+  if (
+    currentReviewLease?.agent_key &&
+    actorKey &&
+    currentReviewLease.agent_key !== actorKey
+  ) {
+    throw new Error("Review authority is already held by another local reviewer.");
+  }
+  const database = await getDb();
+  const now = new Date().toISOString();
+  const leaseId = currentReviewLease?.id || `local_review_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  database
+    .prepare(`
+      UPDATE local_tasks
+      SET review_lease_id = ?,
+          review_holder_label = ?,
+          review_agent_key = ?,
+          review_agent_session_id = ?,
+          review_updated_at = ?,
+          updated_at = ?
+      WHERE room_id = ? AND task_id = ?
+    `)
+    .run(
+      leaseId,
+      input.holder_label?.trim() || actorKey || "Local reviewer",
+      actorKey,
+      input.agent_session_id?.trim() || null,
+      now,
+      now,
+      roomId,
+      taskId,
+    );
+  const task = await getLocalTask(roomId, taskId);
+  const lease = task?.active_leases?.find((entry) => entry.id === leaseId);
+  if (!task || !lease) throw new Error("Review authority could not be claimed.");
+  return { task, lease };
+}
+
+export async function releaseLocalTaskReviewLease(
+  roomId: string,
+  taskId: string,
+  input: { lease_id?: string | null } = {},
+): Promise<{
+  task: LocalTask;
+  released_lease: NonNullable<LocalTask["active_leases"]>[number] | null;
+}> {
+  const current = await getLocalTask(roomId, taskId);
+  if (!current) throw new Error("Task not found.");
+  const currentReviewLease = current.active_leases?.find((lease) => lease.kind === "review") || null;
+  if (
+    input.lease_id &&
+    currentReviewLease &&
+    input.lease_id !== currentReviewLease.id
+  ) {
+    throw new Error("Review lease id did not match the active local review authority.");
+  }
+  const database = await getDb();
+  const now = new Date().toISOString();
+  database
+    .prepare(`
+      UPDATE local_tasks
+      SET review_lease_id = NULL,
+          review_holder_label = NULL,
+          review_agent_key = NULL,
+          review_agent_session_id = NULL,
+          review_updated_at = NULL,
+          updated_at = ?
+      WHERE room_id = ? AND task_id = ?
+    `)
+    .run(now, roomId, taskId);
+  const task = await getLocalTask(roomId, taskId);
+  if (!task) throw new Error("Task not found.");
+  return {
+    task,
+    released_lease: currentReviewLease
+      ? { ...currentReviewLease, status: "released" }
+      : null,
+  };
 }

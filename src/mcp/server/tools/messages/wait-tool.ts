@@ -13,7 +13,8 @@ import {
   getRememberedRoomPresence,
   getTargetRoomId,
   identityFromAgentSession,
-  isLocalChatStorageEnabled,
+  isLocalRoomStorageEnabled,
+  resolveLocalRoomStorageIdentifiers,
   resolveAgentSession,
   roomScopedApiCall,
   syncRoomPresence,
@@ -107,14 +108,20 @@ async function collectThreadContextMessages(input: {
     .map(replyReferenceId)
     .filter((id): id is string => Boolean(id && !knownIds.has(id)));
   const contextMessages: MessageRecord[] = [];
-  const useLocalStorage = Boolean(input.localRoomId && await isLocalChatStorageEnabled());
+  const useLocalStorage = Boolean(
+    input.localRoomId && await isLocalRoomStorageEnabled(input.localRoomId)
+  );
+  const localIdentifiers = useLocalStorage
+    ? await resolveLocalRoomStorageIdentifiers(input.localRoomId)
+    : { localRoomId: input.localRoomId };
+  const sqliteRoomId = localIdentifiers.localRoomId || input.localRoomId;
 
   while (pendingIds.length > 0) {
     const nextId = pendingIds.shift();
     if (!nextId || seenIds.has(nextId)) continue;
     seenIds.add(nextId);
     const message = useLocalStorage && input.localRoomId
-      ? await findLocalMessageById(input.localRoomId, nextId)
+      ? await findLocalMessageById(sqliteRoomId || input.localRoomId, nextId)
       : await findRemoteMessageById({
         roomId: input.roomId,
         projectId: input.projectId,
@@ -163,21 +170,23 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
         maxPollMs
       );
-      if (localRoomId && await isLocalChatStorageEnabled()) {
-        const result = await waitForLocalChatMessages(localRoomId, {
+      if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
+        const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+        const effectiveLocalRoomId = sqliteRoomId || localRoomId;
+        const result = await waitForLocalChatMessages(effectiveLocalRoomId, {
           after: after_message_id,
           timeoutMs: serverTimeout,
           include_prompt_only: true,
         });
-        touchRoomSession(localRoomId, getLastMessageId(result));
+        touchRoomSession(effectiveLocalRoomId, getLastMessageId(result));
         const threadContext = await collectThreadContextMessages({
           messages: result.messages,
-          localRoomId,
+          localRoomId: effectiveLocalRoomId,
           roomId: targetRoomId,
           projectId: targetProjectId,
         });
         return jsonToolResponse({
-          room_id: localRoomId,
+          room_id: effectiveLocalRoomId,
           messages: toAgentReadableMessages(result.messages, threadContext),
         });
       }

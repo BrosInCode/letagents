@@ -8,7 +8,10 @@ import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
 import { readStoredAuth } from "./auth.js";
 import { isDesktopSmokeCheck } from "./smoke.js";
-import { isLocalChatStorageEnabled } from "./chat-storage/settings.js";
+import {
+  localRoomIdentifierForStorage,
+  resolveLocalAwareRoomStorageMode,
+} from "./rooms/local-store.js";
 import { getLocalChatMessages } from "./rooms/messages/local-store.js";
 import {
   mapDesktopReasoningSessionPayload,
@@ -31,6 +34,7 @@ let activeRoomStream: {
   pollAbortController: AbortController | null;
   retryMs: number;
   lastMessageId: string | null;
+  localRoomIdentifier: string | null;
   managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
   stopped: boolean;
 } | null = null;
@@ -73,6 +77,30 @@ export function deliverDesktopRoomMessageToManagedAgents(
     roomIdentifier,
     message,
   });
+}
+
+export function emitPersistedLocalRoomMessage(
+  roomIdentifier: string,
+  message: DesktopRoomMessage,
+): void {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const stream = activeRoomStream;
+  if (
+    !stream ||
+    stream.roomIdentifier !== trimmedRoomIdentifier ||
+    stream.stopped ||
+    !stream.localRoomIdentifier
+  ) {
+    return;
+  }
+
+  stream.lastMessageId = message.id;
+  stream.managedMessageDeliveryTracker.remember(trimmedRoomIdentifier, message.id);
+  emitRoomStreamEvent({
+    type: "message",
+    roomIdentifier: trimmedRoomIdentifier,
+    message,
+  }, { deliverToManagedAgents: false });
 }
 
 function shouldDeliverManagedMessageEvent(
@@ -334,6 +362,7 @@ async function pollDesktopRoomMessages(
 
 async function pollLocalDesktopRoomMessages(
   stream: NonNullable<typeof activeRoomStream>,
+  localRoomIdentifier: string,
 ): Promise<void> {
   emitRoomStreamEvent({
     type: "open",
@@ -342,7 +371,7 @@ async function pollLocalDesktopRoomMessages(
 
   while (isCurrentRoomStream(stream)) {
     try {
-      const page = await getLocalChatMessages(stream.roomIdentifier, {
+      const page = await getLocalChatMessages(localRoomIdentifier, {
         after: stream.lastMessageId,
         limit: roomMessageHistoryPageSize,
       });
@@ -487,6 +516,7 @@ export async function startDesktopRoomStream(
     pollAbortController: null,
     retryMs: 1000,
     lastMessageId: afterMessageId || null,
+    localRoomIdentifier: null,
     managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
     stopped: false,
   };
@@ -497,8 +527,16 @@ export async function startDesktopRoomStream(
     });
     return;
   }
-  if (await isLocalChatStorageEnabled()) {
-    void pollLocalDesktopRoomMessages(activeRoomStream);
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    activeRoomStream.localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    void pollLocalDesktopRoomMessages(
+      activeRoomStream,
+      activeRoomStream.localRoomIdentifier,
+    );
     return;
   }
   void openDesktopRoomStream(activeRoomStream);

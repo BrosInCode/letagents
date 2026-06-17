@@ -47,6 +47,62 @@
         </form>
 
         <div class="desktop-room-property-list" aria-label="Room settings inspector">
+          <div
+            class="desktop-room-property-row desktop-room-storage-row"
+            :data-busy="storageBusy"
+            :aria-busy="storageBusy"
+            data-testid="desktop-room-storage-card"
+          >
+            <span class="desktop-room-action-icon is-emerald" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M5 7c0-2 3.1-3.5 7-3.5S19 5 19 7v10c0 2-3.1 3.5-7 3.5S5 19 5 17V7Z" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M5 7c0 2 3.1 3.5 7 3.5S19 9 19 7M5 12c0 2 3.1 3.5 7 3.5S19 14 19 12" stroke="currentColor" stroke-width="1.8"/>
+              </svg>
+            </span>
+            <span class="desktop-room-property-copy">
+              <strong>Storage</strong>
+              <small>{{ storageBusy ? "Changing room storage..." : storageDescription }}</small>
+              <small v-if="storage.effectiveMode === 'local'" class="desktop-room-storage-path">
+                DB {{ storage.databasePath }}
+              </small>
+            </span>
+            <span class="desktop-room-storage-actions">
+              <button
+                type="button"
+                :data-active="storage.overrideMode === 'inherit'"
+                :disabled="storageBusy"
+                @click="$emit('set-room-storage-mode', 'inherit')"
+              >
+                App default
+              </button>
+              <button
+                type="button"
+                :data-active="storage.overrideMode === 'cloud'"
+                :disabled="storageBusy"
+                @click="$emit('set-room-storage-mode', 'cloud')"
+              >
+                Cloud
+              </button>
+              <button
+                type="button"
+                :data-active="storage.effectiveMode === 'local'"
+                :disabled="storageBusy"
+                @click="selectLocalStorage"
+              >
+                Local
+              </button>
+              <button
+                v-if="storage.effectiveMode === 'local'"
+                type="button"
+                :disabled="storageBusy"
+                @click="$emit('publish-local-room')"
+              >
+                {{ storageBusy ? "Publishing..." : "Publish" }}
+              </button>
+            </span>
+            <span v-if="storageBusy" class="desktop-room-storage-progress" aria-hidden="true"></span>
+          </div>
+
           <button class="desktop-room-property-row" type="button" data-testid="desktop-room-rules-card" @click="$emit('open-rules')">
             <span class="desktop-room-action-icon is-blue" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -174,10 +230,16 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { DesktopGitHubIntegrationStatus, DesktopRoomInfo } from "../../../../../../electron/ipc-types";
+import type {
+  DesktopGitHubIntegrationStatus,
+  DesktopRoomInfo,
+  DesktopRoomStorageOverrideMode,
+  DesktopRoomStorageState,
+} from "../../../../../../electron/ipc-types";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
+  storage: DesktopRoomStorageState;
   roomUrl: string;
   copied: boolean;
   soundEnabled: boolean;
@@ -192,6 +254,7 @@ const props = defineProps<{
   githubError: string | null;
   githubEventsAvailable: boolean;
   githubEventsVisible: boolean;
+  storageBusy: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -201,6 +264,9 @@ const emit = defineEmits<{
   "toggle-notifications": [];
   "toggle-liquid-glass": [];
   "toggle-github-events-visible": [];
+  "set-room-storage-mode": [mode: DesktopRoomStorageOverrideMode];
+  "fork-room-to-local": [mode: "local"];
+  "publish-local-room": [];
   "rename-room": [displayName: string];
   "refresh-github": [];
   "install-github": [];
@@ -225,6 +291,27 @@ const notificationShortLabel = computed(() => {
   if (props.notificationPermission === "denied") return "Blocked";
   return "Off";
 });
+
+const storageDescription = computed(() => {
+  if (props.storage.effectiveMode === "local") {
+    const target = props.storage.localRoom?.cloudRoomIdentifier;
+    return target
+      ? `Messages and tasks stay local until published to ${target}.`
+      : "Messages and tasks stay on this device until you publish.";
+  }
+  if (props.storage.overrideMode === "cloud") {
+    return "This room always uses cloud storage.";
+  }
+  return `Using app default: ${props.storage.defaultMode}.`;
+});
+
+function selectLocalStorage(): void {
+  if (props.storage.localRoom) {
+    emit("set-room-storage-mode", "local");
+    return;
+  }
+  emit("fork-room-to-local", "local");
+}
 
 const notificationDescription = computed(() => {
   if (props.notificationPermission === "unsupported") return "Desktop alerts are unavailable in this environment.";

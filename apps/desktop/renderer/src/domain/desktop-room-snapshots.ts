@@ -110,6 +110,7 @@ export function mergeRoomSnapshotMessages(
       githubEvents: mergeDesktopGitHubEventsPage(current.githubEvents, incoming.githubEvents),
     };
   }
+  if (!snapshotStorageNamespacesMatch(current, incoming)) return incoming;
   return {
     ...incoming,
     messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
@@ -192,6 +193,18 @@ function shouldPreserveCurrentRoomSnapshot(
   if (current.access.status !== "ready" || incoming.access.status !== "unavailable") return false;
   const transientStatuses = new Set([408, 429, 500, 502, 503, 504]);
   return incoming.access.httpStatus === null || transientStatuses.has(incoming.access.httpStatus);
+}
+
+function snapshotStorageNamespacesMatch(
+  current: DesktopRoomSnapshot,
+  incoming: DesktopRoomSnapshot
+): boolean {
+  const currentStorage = current.storage;
+  const incomingStorage = incoming.storage;
+  if (currentStorage.effectiveMode !== incomingStorage.effectiveMode) return false;
+  if (currentStorage.effectiveMode !== "local") return true;
+  return normalizeRoomIdentifier(currentStorage.localRoom?.roomIdentifier) ===
+    normalizeRoomIdentifier(incomingStorage.localRoom?.roomIdentifier);
 }
 
 function compareDesktopReasoningSessions(left: DesktopReasoningSession, right: DesktopReasoningSession): number {

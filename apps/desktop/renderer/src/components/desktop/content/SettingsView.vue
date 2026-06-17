@@ -90,7 +90,7 @@
           <div class="settings-control-list">
             <SettingsRow
               v-if="activePane === 'storage:chat'"
-              title="Storage mode"
+              title="Default storage for new rooms"
               :description="chatStorageSubtitle"
               :badge="chatStorageModeLabel"
               :badge-state="chatStorageSettings?.mode === 'local' ? 'installed' : 'connected'"
@@ -122,7 +122,7 @@
             <SettingsRow
               v-if="activePane !== 'storage:sync'"
               title="Local database"
-              description="Messages written in local mode are stored on this computer."
+              description="Local room messages and tasks are stored on this computer."
             >
               <code>{{ chatStorageSettings?.databasePath || "Local database path unavailable" }}</code>
               <template #action>
@@ -139,9 +139,28 @@
             </SettingsRow>
 
             <SettingsRow
+              v-if="activePane !== 'storage:sync'"
+              title="Local files"
+              description="Files attached in local rooms are copied here."
+            >
+              <code>{{ chatStorageSettings?.localFilesPath || "Local files path unavailable" }}</code>
+              <template #action>
+                <button
+                  class="ghost-button settings-action-button"
+                  type="button"
+                  :disabled="!chatStorageSettings?.localFilesPath"
+                  @click="copyText(chatStorageSettings?.localFilesPath || '')"
+                >
+                  <Copy aria-hidden="true" />
+                  <span>{{ copiedText === chatStorageSettings?.localFilesPath ? "Copied" : "Copy path" }}</span>
+                </button>
+              </template>
+            </SettingsRow>
+
+            <SettingsRow
               v-if="activePane !== 'storage:database'"
               title="Current room sync"
-              description="Sync local messages only when you explicitly choose to send them to cloud storage."
+              description="Publish local messages and tasks only when you explicitly choose to sync them."
               badge="manual"
               badge-state="away"
             >
@@ -162,7 +181,7 @@
             <SettingsRow
               v-if="activePane === 'storage:sync'"
               title="Sync behavior"
-              description="Local chat never uploads automatically. Sync is always a manual room action."
+              description="Local rooms never upload automatically. Sync is always a manual room action."
               badge="manual"
               badge-state="connected"
             />
@@ -170,14 +189,14 @@
             <SettingsRow
               v-if="activePane === 'storage:database'"
               title="Storage settings file"
-              description="This file records whether chat storage is using cloud or local mode."
+              description="This file records the app default and per-room storage overrides."
             >
               <code>{{ chatStorageSettings?.settingsPath || "Settings path unavailable" }}</code>
             </SettingsRow>
 
             <SettingsRow
               title="Attachments in local mode"
-              description="Cloud attachment staging is disabled while local storage is active."
+              description="Local room files are copied into the local files directory."
               :badge="chatStorageSettings?.mode === 'local' ? 'cloud disabled' : 'cloud enabled'"
               :badge-state="chatStorageSettings?.mode === 'local' ? 'starting' : 'connected'"
               :emphasis="chatStorageSettings?.mode === 'local' ? 'warning' : 'normal'"
@@ -210,7 +229,7 @@
                 <dd>{{ chatStorageSavedLabel }}</dd>
               </div>
             </dl>
-            <p class="settings-privacy-note">Local history stays on this device until you sync it.</p>
+            <p class="settings-privacy-note">Rooms can override this default from room settings.</p>
           </aside>
         </div>
 
@@ -576,6 +595,7 @@ import {
   CircleUser,
   Cloud,
   CloudUpload,
+  Copy,
   Database,
   GitBranch,
   HardDrive,
@@ -840,9 +860,9 @@ const chatStorageModeLabel = computed(() =>
 
 const chatStorageSubtitle = computed(() => {
   if (props.chatStorageSettings?.mode === "local") {
-    return "Messages are stored on this computer until you sync them.";
+    return "New rooms default to local storage on this computer.";
   }
-  return "Messages use LetAgents cloud storage.";
+  return "New rooms default to LetAgents cloud storage.";
 });
 
 const chatStorageSavedLabel = computed(() => {

@@ -22,6 +22,7 @@
           :loading-older-messages="loadingOlderMessages"
           :messages="messages"
           :thread-messages="threadMessages"
+          :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
@@ -127,6 +128,7 @@ const props = defineProps<{
   active: boolean;
   messages: DesktopRoomMessage[];
   threadMessages: DesktopRoomMessage[];
+  messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;

@@ -15,6 +15,15 @@ import {
 import { apiFetch } from "../auth.js";
 import { getLetAgentsLocalStatePath } from "../paths.js";
 import {
+  addLocalTask,
+  claimLocalTaskReviewLease,
+  cloudRoomIdentifierForStorage,
+  localRoomIdentifierForStorage,
+  releaseLocalTaskReviewLease,
+  resolveLocalAwareRoomStorageMode,
+  updateLocalTask,
+} from "./local-store.js";
+import {
   mapDesktopTaskSummaryPayload,
   type DesktopTaskSummaryPayload,
 } from "./tasks/mappers.js";
@@ -64,8 +73,26 @@ export async function addDesktopRoomTask(
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before adding a task.");
   if (!trimmedTitle) throw new Error("Task title is required.");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    return {
+      task: await addLocalTask(localRoomIdentifier, {
+        title: trimmedTitle,
+        description: trimmedDescription,
+        createdBy: "human",
+      }),
+    };
+  }
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const data = await apiFetch<{ task?: unknown; id?: unknown }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks`,
     {
       method: "POST",
       headers: {
@@ -97,8 +124,26 @@ export async function updateDesktopRoomTask(
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before updating a task.");
   if (!taskId.trim()) throw new Error("Task id is required.");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    return {
+      task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
+        status: updates.status,
+        assignee: updates.assignee,
+        prUrl: updates.pr_url,
+      }),
+    };
+  }
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const data = await apiFetch<{ task?: unknown; id?: unknown }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
     {
       method: "PATCH",
       headers: {
@@ -120,8 +165,29 @@ export async function updateDesktopRoomTaskLease(
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before updating a task lease.");
   if (!taskId.trim()) throw new Error("Task id is required.");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const nextStatus =
+      input.action === "release"
+        ? "accepted"
+        : undefined;
+    return {
+      task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
+        status: nextStatus,
+        validateStatus: nextStatus ? false : undefined,
+      }),
+    };
+  }
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const data = await apiFetch<{ task?: unknown; id?: unknown }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/lease-action`,
     {
       method: "POST",
       headers: {
@@ -143,8 +209,40 @@ export async function updateDesktopRoomTaskReviewLease(
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before updating review authority.");
   if (!taskId.trim()) throw new Error("Task id is required.");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    if (input.action === "release") {
+      const result = await releaseLocalTaskReviewLease(
+        localRoomIdentifier,
+        taskId.trim(),
+        { leaseId: input.lease_id },
+      );
+      return { task: result.task };
+    }
+    const result = await claimLocalTaskReviewLease(
+      localRoomIdentifier,
+      taskId.trim(),
+      {
+        holderLabel: input.target_actor_key || "Local reviewer",
+        agentKey: input.target_actor_key || null,
+        agentSessionId: input.target_agent_session_id || null,
+        leaseId: input.lease_id,
+      },
+    );
+    return {
+      task: result.task,
+    };
+  }
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const data = await apiFetch<{ task?: unknown; id?: unknown }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
     {
       method: "POST",
       headers: {
@@ -166,10 +264,42 @@ export async function runDesktopRoomTaskWorkerAction(
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before updating a task.");
   if (!taskId.trim()) throw new Error("Task id is required.");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const session = getCurrentLocalWorkerSession(
+      readLetAgentsLocalState(getLetAgentsLocalStatePath()),
+      localRoomIdentifier,
+    );
+    const actor = session?.display_name || session?.agent_key || "Local agent";
+    const nextStatus =
+      input.action === "claim"
+        ? "assigned"
+        : input.action === "start"
+          ? "in_progress"
+          : input.action === "submit_review"
+            ? "in_review"
+            : input.action === "block"
+              ? "blocked"
+              : undefined;
+    return {
+      task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
+        status: nextStatus,
+        assignee: input.action === "claim" ? actor : undefined,
+      }),
+    };
+  }
 
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const session = getCurrentLocalWorkerSession(
     readLetAgentsLocalState(getLetAgentsLocalStatePath()),
-    trimmedRoomIdentifier,
+    cloudRoomIdentifier,
   );
   if (!session?.session_id || !session.session_token) {
     throw new Error(
@@ -178,7 +308,7 @@ export async function runDesktopRoomTaskWorkerAction(
   }
 
   const data = await apiFetch<{ task?: unknown; id?: unknown }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -197,10 +327,45 @@ export async function runDesktopRoomTaskReviewWorkerAction(
   if (!trimmedRoomIdentifier)
     throw new Error("Choose a room before updating review authority.");
   if (!taskId.trim()) throw new Error("Task id is required.");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const session = getCurrentLocalWorkerSession(
+      readLetAgentsLocalState(getLetAgentsLocalStatePath()),
+      localRoomIdentifier,
+    );
+    if (input.action === "release") {
+      const result = await releaseLocalTaskReviewLease(
+        localRoomIdentifier,
+        taskId.trim(),
+        { leaseId: input.lease_id },
+      );
+      return { task: result.task };
+    }
+    const result = await claimLocalTaskReviewLease(
+      localRoomIdentifier,
+      taskId.trim(),
+      {
+        holderLabel: session?.display_name || session?.agent_key || "Local reviewer",
+        agentKey: session?.agent_key || null,
+        agentSessionId: session?.session_id || null,
+      },
+    );
+    return {
+      task: result.task,
+    };
+  }
 
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
   const session = getCurrentLocalWorkerSession(
     readLetAgentsLocalState(getLetAgentsLocalStatePath()),
-    trimmedRoomIdentifier,
+    cloudRoomIdentifier,
   );
   if (!session?.session_id || !session.session_token) {
     throw new Error(
@@ -209,7 +374,7 @@ export async function runDesktopRoomTaskReviewWorkerAction(
   }
 
   const data = await apiFetch<{ task?: unknown; id?: unknown }>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/tasks/${encodeURIComponent(taskId)}/review-lease-action`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

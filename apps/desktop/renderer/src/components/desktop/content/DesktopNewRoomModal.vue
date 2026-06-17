@@ -126,7 +126,7 @@
 
 <script setup lang="ts">
 import type { Component } from "vue";
-import { FolderOpen, Hash, KeyRound, X } from "@lucide/vue";
+import { FolderOpen, Hash, HardDrive, KeyRound, X } from "@lucide/vue";
 import type { PendingProjectRoomSelection } from "../../../composables/useDesktopNewRoomModal";
 
 defineProps<{
@@ -142,11 +142,12 @@ const emit = defineEmits<{
   close: [];
   confirmProject: [];
   createInvite: [];
+  createLocal: [];
   openProject: [];
   join: [];
 }>();
 
-type RoomActionEvent = "createInvite" | "openProject";
+type RoomActionEvent = "createInvite" | "createLocal" | "openProject";
 
 type RoomAction = {
   id: string;
@@ -182,11 +183,25 @@ const secondaryRoomActions: RoomAction[] = [
     icon: Hash,
     testId: "new-room-create-invite",
   },
+  {
+    id: "local-room",
+    title: "Start local room",
+    description: "Create a private room on this device. Publish later to sync it.",
+    buttonLabel: "Start",
+    event: "createLocal",
+    icon: HardDrive,
+    testId: "new-room-create-local",
+  },
 ];
 
 function handleAction(event: RoomActionEvent): void {
   if (event === "openProject") {
     emit("openProject");
+    return;
+  }
+
+  if (event === "createLocal") {
+    emit("createLocal");
     return;
   }
 

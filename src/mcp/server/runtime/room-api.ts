@@ -1,4 +1,7 @@
-import { touchRoomSession } from "../../local-state.js";
+import {
+  resolveLocalRoomStorageIdentifiers,
+  touchRoomSession,
+} from "../../local-state.js";
 import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../../../shared/request-headers.js";
 import {
   apiCall,
@@ -32,12 +35,14 @@ export async function roomScopedApiCall<T>(input: {
   };
 
   if (input.room_id) {
+    const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(input.room_id);
+    const apiRoomId = cloudRoomId || input.room_id;
     try {
-      const result = await apiCall<T>(input.room_path(input.room_id), options);
+      const result = await apiCall<T>(input.room_path(apiRoomId), options);
       touchRoomSession(input.room_id, getLastMessageId(result));
       return result;
     } catch (error) {
-      await maybeHandleRepoRoomAuthRequired(error, input.room_id);
+      await maybeHandleRepoRoomAuthRequired(error, apiRoomId);
       if (!input.project_id || !isMissingRouteError(error)) {
         throw error;
       }

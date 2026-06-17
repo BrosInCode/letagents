@@ -3,6 +3,7 @@ export * from "./rooms/diagnostics.js";
 export * from "./rooms/events.js";
 export * from "./rooms/focus-rooms.js";
 export * from "./rooms/invite-room.js";
+export * from "./rooms/local-rooms.js";
 export * from "./rooms/messages.js";
 export * from "./rooms/reasoning.js";
 export * from "./rooms/repo.js";

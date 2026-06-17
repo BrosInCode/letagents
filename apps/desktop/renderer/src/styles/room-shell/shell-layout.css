@@ -74,6 +74,7 @@
   align-items: center;
   gap: 9px;
   min-width: 0;
+  flex: 0 1 auto;
   margin: 0;
   color: var(--text);
   font-size: 1.28rem;
@@ -82,7 +83,7 @@
   letter-spacing: 0;
 }
 
-.desktop-room-title > span:last-child {
+.desktop-room-title-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -92,7 +93,9 @@
 .desktop-room-heading {
   display: flex;
   align-items: center;
+  gap: 9px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .desktop-room-provider-icon {
@@ -272,21 +275,22 @@
 .desktop-room-badges {
   display: flex;
   flex-wrap: wrap;
+  flex: 0 0 auto;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 6px;
 }
 
 .desktop-room-badge {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: var(--radius-md);
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.035);
   color: var(--text-secondary);
-  font-size: 0.74rem;
-  font-weight: 650;
+  font-size: 0.68rem;
+  font-weight: 760;
   text-transform: capitalize;
 }
 

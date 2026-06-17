@@ -75,3 +75,95 @@
   font-size: 0.76rem;
   line-height: 1.36;
 }
+
+.desktop-room-storage-row {
+  align-items: start;
+  grid-template-columns: auto minmax(0, 1fr);
+  row-gap: 8px;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-storage-row:hover {
+  transform: none;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.desktop-room-shell[data-liquid-glass="true"] .desktop-room-storage-row:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.032) 52%, rgba(255, 255, 255, 0.014)),
+    rgba(255, 255, 255, 0.028);
+}
+
+.desktop-room-storage-path {
+  overflow: hidden;
+  max-width: 420px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-room-storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 2;
+  justify-content: flex-start;
+  gap: 6px;
+  max-width: none;
+}
+
+.desktop-room-storage-actions button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.desktop-room-storage-actions button:hover:not(:disabled),
+.desktop-room-storage-actions button:focus-visible:not(:disabled),
+.desktop-room-storage-actions button[data-active="true"] {
+  border-color: rgba(86, 164, 255, 0.36);
+  background: rgba(86, 164, 255, 0.12);
+  color: var(--text);
+}
+
+.desktop-room-storage-actions button:disabled {
+  opacity: 0.58;
+  cursor: wait;
+  pointer-events: none;
+}
+
+.desktop-room-storage-progress {
+  grid-column: 2;
+  position: relative;
+  overflow: hidden;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.desktop-room-storage-progress::before {
+  position: absolute;
+  inset: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(86, 164, 255, 0), rgba(86, 164, 255, 0.9), rgba(86, 164, 255, 0));
+  animation: desktop-room-storage-progress 1s var(--ease-out) infinite;
+  content: "";
+}
+
+@keyframes desktop-room-storage-progress {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}

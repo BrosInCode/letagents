@@ -21,7 +21,10 @@ import {
   getSessionLivenessRegistration,
   getStoredAgentSession,
   getTargetRoomId,
+  ensureLocalWorkerAgentSession,
+  isLocalRoomStorageEnabled,
   joinRoomIdentifier,
+  resolveLocalRoomStorageIdentifiers,
   saveAgentSession,
   toPublicAgentSession,
   toPublicRoomState,
@@ -74,6 +77,34 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
+      const requestedRuntime = runtime?.trim() || detectAgentRuntimeLabel();
+      if (await isLocalRoomStorageEnabled(targetRoomId)) {
+        const session = await ensureLocalWorkerAgentSession(targetRoomId, {
+          sessionKind: session_kind ?? "worker",
+          runtime: requestedRuntime,
+          displayName: display_name,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  local: true,
+                  agent_session: toPublicAgentSession(session),
+                  agent_session_id: session.session_id,
+                  use_agent_session_id: "Pass this exact local agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, and task tools for this same-machine local room.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
       const identity = await ensureAgentIdentity();
       if (!identity.canonical_key) {
         return {
@@ -93,9 +124,10 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
-      const requestedRuntime = runtime?.trim() || detectAgentRuntimeLabel();
+      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
+      const apiRoomId = cloudRoomId || targetRoomId;
       const created = await apiCall<Record<string, unknown>>(
-        `/rooms/${encodeRoomIdPath(targetRoomId)}/agent-sessions`,
+        `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -120,7 +152,7 @@ export function registerAgentSessionTools(server: McpServer): void {
       const session = saveAgentSession({
         session_id: sessionId,
         session_token: sessionToken,
-        room_id: typeof created.room_id === "string" ? created.room_id : targetRoomId,
+        room_id: typeof created.room_id === "string" ? created.room_id : apiRoomId,
         session_kind: created.session_kind === "controller" ? "controller" : "worker",
         runtime: typeof created.runtime === "string" ? created.runtime : "unknown",
         host_id: typeof created.host_id === "string" ? created.host_id : null,
@@ -242,8 +274,30 @@ export function registerAgentSessionTools(server: McpServer): void {
           ? agentSessionCredentials(localSession)
           : {};
 
+      if (await isLocalRoomStorageEnabled(targetRoomId)) {
+        const endedSession = endStoredAgentSession(targetSessionId);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  local: true,
+                  agent_session: toPublicAgentSession(endedSession),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
+      const apiRoomId = cloudRoomId || targetRoomId;
       const result = await apiCall<Record<string, unknown>>(
-        `/rooms/${encodeRoomIdPath(targetRoomId)}/agent-sessions/${encodeURIComponent(targetSessionId)}/disconnect`,
+        `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions/${encodeURIComponent(targetSessionId)}/disconnect`,
         {
           method: "POST",
           body: JSON.stringify(requestBody),

@@ -164,6 +164,26 @@ export async function findTaskByPrUrl(roomId: string, prUrl: string): Promise<Ta
   return task ? toTask(task as TaskRow) : undefined;
 }
 
+export async function findTaskBySourceMessageId(
+  roomId: string,
+  sourceMessageId: string,
+): Promise<Task | undefined> {
+  const trimmedSourceMessageId = sourceMessageId.trim();
+  if (!trimmedSourceMessageId) return undefined;
+
+  const [task] = await db
+    .select()
+    .from(tasks)
+    .where(and(
+      eq(tasks.room_id, roomId),
+      eq(tasks.source_message_id, trimmedSourceMessageId),
+    ))
+    .orderBy(asc(tasks.number))
+    .limit(1);
+
+  return task ? toTask(task as TaskRow) : undefined;
+}
+
 export function hasTaskWorkflowArtifactMatchIdentifier(match: TaskWorkflowArtifactMatch): boolean {
   return (
     Boolean(match.url) ||

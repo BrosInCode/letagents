@@ -26,6 +26,7 @@ export interface RoomState {
   code?: string | null;
   display_name?: string | null;
   joined_via: JoinedVia;
+  is_local?: boolean;
 }
 
 export let currentRoom: RoomState | null = null;
@@ -68,6 +69,7 @@ export function toRoomState(input: {
   code?: string | null;
   display_name?: string | null;
   joined_via: JoinedVia;
+  is_local?: boolean;
 }): RoomState {
   return {
     room_id: input.room_id,
@@ -75,6 +77,7 @@ export function toRoomState(input: {
     code: input.code ?? null,
     display_name: input.display_name ?? null,
     joined_via: input.joined_via,
+    is_local: input.is_local ?? false,
   };
 }
 
@@ -103,6 +106,7 @@ export function toPublicRoomState(state: RoomState | null): Record<string, unkno
     code: state.code ?? null,
     display_name: state.display_name ?? null,
     joined_via: state.joined_via,
+    is_local: state.is_local ?? false,
   });
 }
 
@@ -152,6 +156,9 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
     last_message_id: lastMessageId,
   });
   getSseClient().unsubscribeAll();
+  if (state.is_local) {
+    return state;
+  }
   getSseClient().subscribe(
     {
       roomId: state.room_id,

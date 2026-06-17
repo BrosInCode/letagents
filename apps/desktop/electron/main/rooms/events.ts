@@ -51,6 +51,25 @@ export async function getDesktopGitHubEvents(
     };
   }
 
+  const {
+    cloudRoomIdentifierForStorage,
+    localRoomIdentifierForStorage,
+    resolveLocalAwareRoomStorageMode,
+  } = await import("./local-store.js");
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    return {
+      roomIdentifier: localRoomIdentifierForStorage(storage, trimmedRoomIdentifier),
+      githubRoomIdentifier: null,
+      events: [],
+      hasMore: false,
+    };
+  }
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+
   const params = new URLSearchParams();
   params.set("limit", String(clampEventsLimit(query.limit)));
   appendQueryParam(params, "after", query.after);
@@ -62,9 +81,9 @@ export async function getDesktopGitHubEvents(
 
   const { apiFetch } = await import("../auth.js");
   const payload = await apiFetch<GitHubEventsResponse>(
-    `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/events?${params.toString()}`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/events?${params.toString()}`,
   );
-  return mapGitHubEventsPayload(trimmedRoomIdentifier, payload);
+  return mapGitHubEventsPayload(cloudRoomIdentifier, payload);
 }
 
 export function mapGitHubEventsPayload(

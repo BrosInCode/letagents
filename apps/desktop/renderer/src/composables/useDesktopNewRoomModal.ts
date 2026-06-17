@@ -71,6 +71,39 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     }
   }
 
+  async function createLocalRoomFromModal(): Promise<void> {
+    const bridge = window.letagentsDesktop.chatStorage;
+    if (!bridge?.createLocalRoom) {
+      newRoomFeedback.value = "Restart LetAgents Desktop to enable local rooms.";
+      newRoomFeedbackState.value = "error";
+      return;
+    }
+    newRoomBusy.value = true;
+    newRoomFeedback.value = "Creating local room...";
+    newRoomFeedbackState.value = "info";
+    try {
+      const result = await bridge.createLocalRoom();
+      options.openRoomSnapshot(result.snapshot, {
+        kind: "room",
+        rootPath: null,
+        meta: "Local on this device",
+      });
+      newRoomFeedback.value = "Local room created.";
+      newRoomFeedbackState.value = "success";
+      newRoomModalOpen.value = false;
+      newRoomJoinCode.value = "";
+      newRoomProjectSelection.value = null;
+    } catch (error) {
+      newRoomFeedback.value =
+        error instanceof Error
+          ? error.message
+          : "LetAgents could not create a local room.";
+      newRoomFeedbackState.value = "error";
+    } finally {
+      newRoomBusy.value = false;
+    }
+  }
+
   async function openProjectRoomFromModal(): Promise<void> {
     newRoomBusy.value = true;
     newRoomFeedback.value = "Opening the project picker...";
@@ -147,6 +180,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     closeNewRoomModal,
     confirmProjectRoomFromModal,
     createInviteRoom,
+    createLocalRoomFromModal,
     joinRoomCodeFromModal,
     newRoomBusy,
     newRoomFeedback,

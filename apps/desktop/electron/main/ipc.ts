@@ -25,6 +25,7 @@ import type {
   DesktopAuthStatus,
   DesktopAppInfo,
   DesktopChatStorageSettings,
+  DesktopLocalRoomMutationResult,
   DiagnosticsSnapshot,
   DesktopFocusRoomInfo,
   DesktopGitHubEventsPage,
@@ -33,6 +34,8 @@ import type {
   DesktopGitHubIntegrationStatus,
   DesktopInviteRoomCreation,
   DesktopLocalChatSyncResult,
+  DesktopRoomStorageOverrideMode,
+  DesktopRoomStorageState,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallOptions,
   DesktopMcpInstallResult,
@@ -109,6 +112,7 @@ import {
   getDesktopGitHubEvents,
   getDesktopGitHubIntegrationStatus,
   getDesktopRoomLatestMessages,
+  getDesktopRoomStorage,
   getDesktopReasoningSession,
   getDesktopRoomMessagesBefore,
   leaveDesktopAccountRoom,
@@ -125,7 +129,11 @@ import {
   concludeDesktopFocusRoom,
   createDesktopAdHocFocusRoom,
   createDesktopTaskFocusRoom,
+  createDesktopLocalRoom,
+  forkDesktopRoomToLocal,
+  publishDesktopLocalRoom,
   setChatStorageMode,
+  setDesktopRoomStorageMode,
   syncDesktopLocalChatRoom,
   updateDesktopAccountRoom,
   updateDesktopFocusRoomSettings,
@@ -453,6 +461,47 @@ export function registerDesktopIpcHandlers(
       _event,
       mode: DesktopChatStorageSettings["mode"],
     ): Promise<DesktopChatStorageSettings> => setChatStorageMode(mode),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:get-room-storage",
+    async (
+      _event,
+      roomIdentifier: string,
+    ): Promise<DesktopRoomStorageState> =>
+      getDesktopRoomStorage(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:set-room-mode",
+    async (
+      _event,
+      roomIdentifier: string,
+      mode: DesktopRoomStorageOverrideMode,
+    ): Promise<DesktopRoomStorageState> =>
+      setDesktopRoomStorageMode(roomIdentifier, mode),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:create-local-room",
+    async (
+      _event,
+      input?: { displayName?: string | null },
+    ): Promise<DesktopLocalRoomMutationResult> =>
+      createDesktopLocalRoom(input ?? {}),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:fork-room-to-local",
+    async (
+      _event,
+      roomIdentifier: string,
+    ): Promise<DesktopLocalRoomMutationResult> =>
+      forkDesktopRoomToLocal(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:chat-storage:publish-local-room",
+    async (
+      _event,
+      roomIdentifier: string,
+    ): Promise<DesktopLocalChatSyncResult> =>
+      publishDesktopLocalRoom(roomIdentifier),
   );
   targetIpcMain.handle(
     "desktop:chat-storage:sync-local-room",

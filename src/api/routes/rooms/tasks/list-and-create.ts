@@ -3,6 +3,7 @@ import type { Express } from "express";
 import {
   createCoordinationEvent,
   createTask,
+  findTaskBySourceMessageId,
   getOpenTasks,
   getTasks,
   updateTask,
@@ -69,7 +70,7 @@ export function registerTaskListAndCreateRoutes(
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
 
-    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id } = requestBody as {
+    const { title, description, created_by, source_message_id, actor_label, actor_key, actor_instance_id, client_task_id } = requestBody as {
       title?: string;
       description?: string;
       created_by?: string;
@@ -77,6 +78,7 @@ export function registerTaskListAndCreateRoutes(
       actor_label?: string;
       actor_key?: string;
       actor_instance_id?: string;
+      client_task_id?: string;
     };
 
     const createdBy = workerIdentity?.actor_label ?? created_by ?? null;
@@ -84,17 +86,28 @@ export function registerTaskListAndCreateRoutes(
     const effectiveActorKey = workerIdentity?.agent_key ?? actor_key ?? null;
     const effectiveActorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(actor_instance_id);
     const effectiveActorSessionId = workerIdentity?.agent_session_id ?? null;
+    const clientTaskId = deps.normalizeOptionalString(client_task_id);
+    const sourceMessageId = clientTaskId ?? deps.normalizeOptionalString(source_message_id) ?? null;
 
     if (!title || !createdBy) {
       res.status(400).json({ error: "title and created_by are required" });
       return;
     }
 
+    if (clientTaskId) {
+      const existingTask = await findTaskBySourceMessageId(project.id, clientTaskId);
+      if (existingTask) {
+        const taskWithDetails = await attachTaskDetails(project.id, existingTask);
+        res.status(200).json({ ...taskWithDetails, room_id: project.id, idempotent: true });
+        return;
+      }
+    }
+
     const admission = await deps.enforceTaskAdmissionCoordination({
       req,
       projectId: project.id,
       title,
-      sourceMessageId: source_message_id ?? null,
+      sourceMessageId,
       actorLabel: effectiveActorLabel,
       actorKey: effectiveActorKey,
       actorInstanceId: effectiveActorInstanceId,
@@ -105,7 +118,20 @@ export function registerTaskListAndCreateRoutes(
       return;
     }
 
-    const task = await createTask(project.id, title, createdBy, description, source_message_id);
+    let task: Awaited<ReturnType<typeof createTask>>;
+    try {
+      task = await createTask(project.id, title, createdBy, description, sourceMessageId ?? undefined);
+    } catch (error) {
+      if (sourceMessageId) {
+        const existingTask = await findTaskBySourceMessageId(project.id, sourceMessageId);
+        if (existingTask) {
+          const taskWithDetails = await attachTaskDetails(project.id, existingTask);
+          res.status(200).json({ ...taskWithDetails, room_id: project.id, idempotent: true });
+          return;
+        }
+      }
+      throw error;
+    }
 
     if (req.authKind === "owner_token" && !isDesktopHumanWrite(req, requestBody)) {
       await createCoordinationEvent({

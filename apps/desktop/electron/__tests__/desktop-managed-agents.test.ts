@@ -6,6 +6,8 @@ import test from "node:test";
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-desktop-managed-agents-"));
 process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
+process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
+process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
 
 const {
   bindCodexLiveSessionToWorker,
@@ -61,12 +63,27 @@ const {
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
 const { agentProviderMcpInstallOptions } = await import("../main/agents/provider-setup-options.js");
+const { persistDesktopManagedAgentLocalReply } = await import("../main/agents/managed-agent-local-replies.js");
+const {
+  createLocalRoom,
+  resolveLocalAwareRoomStorageMode,
+  setLocalAwareRoomStorageMode,
+} = await import("../main/rooms/local-store.js");
+const {
+  addLocalChatMessage,
+  getLocalChatMessages,
+} = await import("../main/rooms/messages/local-store.js");
 
 import type { DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
-import type { DesktopCodexLiveSessionState } from "../main/agents/state.js";
+import type {
+  DesktopCodexLiveSessionState,
+  StoredAgentSessionState,
+} from "../main/agents/state.js";
 
 test.after(() => {
   delete process.env.LETAGENTS_STATE_PATH;
+  delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
+  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -124,6 +141,28 @@ function taskSummary(
     stalePromptState: null,
     createdAt: "2026-06-14T12:00:00.000Z",
     updatedAt: "2026-06-14T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function managedWorkerSession(
+  overrides: Partial<StoredAgentSessionState> = {},
+): StoredAgentSessionState {
+  return {
+    session_id: "agent_session_1",
+    session_token: "session_token_1",
+    room_id: "room_1",
+    session_kind: "worker",
+    runtime: "codex:LOCAL_CODEX_ROOM_test",
+    actor_label: "StoneForge",
+    agent_key: "codex/stone-forge",
+    display_name: "StoneForge",
+    owner_label: "EmmyMay's agent",
+    ide_label: "Codex",
+    created_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    last_seen_at: "2026-06-14T12:00:00.000Z",
+    ended_at: null,
     ...overrides,
   };
 }
@@ -921,6 +960,106 @@ test("desktop event public replies suppress internal stop markers", () => {
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", ""), null);
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "OTHER_CODEX_ROOM_DONE"), "OTHER_CODEX_ROOM_DONE");
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Done publicly."), "Done publicly.");
+});
+
+test("desktop managed agent replies are persisted into local room chat", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_room_1",
+    cloudRoomIdentifier: "room_1",
+    displayName: "Room One",
+  });
+  await setLocalAwareRoomStorageMode("room_1", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_1");
+
+  const result = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "room_1",
+    storage,
+    workerSession: managedWorkerSession(),
+    replyTo: null,
+    text: "Yes, I am here.",
+  });
+
+  assert.equal(result?.text, "Yes, I am here.");
+  const page = await getLocalChatMessages("local_room_1");
+  const reply = page.messages.at(-1);
+  assert.equal(reply?.text, "Yes, I am here.");
+  assert.equal(reply?.source, "agent");
+  assert.equal(reply?.sender, "StoneForge | EmmyMay's agent | Codex");
+  assert.equal(reply?.reply_to, null);
+});
+
+test("desktop managed agent local replies stay in the source thread", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_thread_room",
+    cloudRoomIdentifier: "room_thread",
+    displayName: "Thread Room",
+  });
+  await setLocalAwareRoomStorageMode("room_thread", "local");
+  const root = await addLocalChatMessage("local_thread_room", {
+    sender: "EmmyMay",
+    text: "Root topic",
+    source: "browser",
+  });
+  const storage = await resolveLocalAwareRoomStorageMode("room_thread");
+
+  await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "room_thread",
+    storage,
+    workerSession: managedWorkerSession({ room_id: "room_thread" }),
+    replyTo: root.id,
+    text: "Thread answer.",
+  });
+
+  const page = await getLocalChatMessages("local_thread_room");
+  const reply = page.messages.at(-1);
+  assert.equal(reply?.text, "Thread answer.");
+  assert.equal(reply?.reply_to?.id, root.id);
+});
+
+test("desktop managed agent task replies are persisted into local room chat", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_task_room",
+    cloudRoomIdentifier: "room_task",
+    displayName: "Task Room",
+  });
+  await setLocalAwareRoomStorageMode("room_task", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_task");
+
+  await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "room_task",
+    storage,
+    workerSession: managedWorkerSession({ room_id: "room_task" }),
+    replyTo: null,
+    text: "I handled the local task.",
+  });
+
+  const page = await getLocalChatMessages("local_task_room");
+  const reply = page.messages.at(-1);
+  assert.equal(reply?.text, "I handled the local task.");
+  assert.equal(reply?.source, "agent");
+  assert.equal(reply?.reply_to, null);
+});
+
+test("desktop managed agent replies use the captured local storage target", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_flip_room",
+    cloudRoomIdentifier: "room_flip",
+    displayName: "Flip Room",
+  });
+  await setLocalAwareRoomStorageMode("room_flip", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_flip");
+  await setLocalAwareRoomStorageMode("room_flip", "cloud");
+
+  await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "room_flip",
+    storage,
+    workerSession: managedWorkerSession({ room_id: "room_flip" }),
+    replyTo: null,
+    text: "Reply using the original local target.",
+  });
+
+  const page = await getLocalChatMessages("local_flip_room");
+  assert.equal(page.messages.at(-1)?.text, "Reply using the original local target.");
 });
 
 test("desktop event routing treats only the exact room stop phrase as a worker stop", () => {

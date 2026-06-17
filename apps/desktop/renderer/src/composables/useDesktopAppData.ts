@@ -309,7 +309,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
   }
 
-  function handleRefreshRoom(): void {
+  function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
+    if (snapshot) {
+      options.rootRoomSnapshot.value = snapshot;
+      options.selectedSnapshot.value = snapshot;
+      options.selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
+      options.rememberRootRoomSnapshot(snapshot);
+      options.reconcileActiveEntry();
+      options.scheduleLiveMetadataRefresh(0);
+      return;
+    }
     void refreshSelectedSnapshot();
     options.scheduleLiveMetadataRefresh(0);
   }
@@ -441,6 +450,7 @@ function createOptimisticSelectedSnapshot(
       conclusionSummary: focusRoom?.conclusionSummary || null,
       conclusionDetails: focusRoom?.conclusionDetails || null,
     },
+    storage: baseRootSnapshot.storage,
     focusRooms: [],
     tasks: [],
     participants: [],
