@@ -10,8 +10,8 @@
  */
 export const VALID_TRANSITIONS: Record<string, string[]> = {
   requested: ["accepted", "cancelled"],
-  accepted: ["provisioning"],
-  provisioning: ["active", "failed"],
+  accepted: ["provisioning", "cancelled"],
+  provisioning: ["active", "failed", "cancelled"],
   active: [
     "blocked",
     "patch_review",
@@ -20,11 +20,11 @@ export const VALID_TRANSITIONS: Record<string, string[]> = {
     "expired",
     "stale",
   ],
-  blocked: ["active"],
-  patch_review: ["active", "pr_opened"],
-  pr_opened: ["completed"],
+  blocked: ["active", "cancelled"],
+  patch_review: ["active", "pr_opened", "cancelled"],
+  pr_opened: ["completed", "cancelled"],
   budget_exhausted: ["active", "completed", "cancelled"],
-  stale: ["active", "expired"],
+  stale: ["active", "expired", "cancelled"],
 };
 
 /**

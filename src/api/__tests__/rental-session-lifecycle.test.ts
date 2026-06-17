@@ -27,11 +27,17 @@ describe("isValidTransition (§18.2 state machine)", () => {
   it("accepted → provisioning is valid", () => {
     assert.ok(isValidTransition("accepted", "provisioning"));
   });
+  it("accepted → cancelled is valid", () => {
+    assert.ok(isValidTransition("accepted", "cancelled"));
+  });
   it("provisioning → active is valid", () => {
     assert.ok(isValidTransition("provisioning", "active"));
   });
   it("provisioning → failed is valid", () => {
     assert.ok(isValidTransition("provisioning", "failed"));
+  });
+  it("provisioning → cancelled is valid", () => {
+    assert.ok(isValidTransition("provisioning", "cancelled"));
   });
   it("active → blocked is valid", () => {
     assert.ok(isValidTransition("active", "blocked"));
@@ -48,6 +54,15 @@ describe("isValidTransition (§18.2 state machine)", () => {
   it("active → expired is valid", () => {
     assert.ok(isValidTransition("active", "expired"));
   });
+  it("blocked → cancelled is valid", () => {
+    assert.ok(isValidTransition("blocked", "cancelled"));
+  });
+  it("patch_review → cancelled is valid", () => {
+    assert.ok(isValidTransition("patch_review", "cancelled"));
+  });
+  it("pr_opened → cancelled is valid", () => {
+    assert.ok(isValidTransition("pr_opened", "cancelled"));
+  });
   it("budget_exhausted → active is valid (extend budget)", () => {
     assert.ok(isValidTransition("budget_exhausted", "active"));
   });
@@ -56,6 +71,9 @@ describe("isValidTransition (§18.2 state machine)", () => {
   });
   it("budget_exhausted → cancelled is valid", () => {
     assert.ok(isValidTransition("budget_exhausted", "cancelled"));
+  });
+  it("stale → cancelled is valid", () => {
+    assert.ok(isValidTransition("stale", "cancelled"));
   });
 
   // Invalid transitions
@@ -76,6 +94,15 @@ describe("isValidTransition (§18.2 state machine)", () => {
   });
   it("requested → completed is invalid (skip states)", () => {
     assert.ok(!isValidTransition("requested", "completed"));
+  });
+  it("completed → cancelled is invalid (terminal state)", () => {
+    assert.ok(!isValidTransition("completed", "cancelled"));
+  });
+  it("failed → cancelled is invalid (terminal state)", () => {
+    assert.ok(!isValidTransition("failed", "cancelled"));
+  });
+  it("expired → cancelled is invalid (terminal state)", () => {
+    assert.ok(!isValidTransition("expired", "cancelled"));
   });
 });
 
