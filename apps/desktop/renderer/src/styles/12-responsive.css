@@ -12,9 +12,7 @@
   .first-run-github-step,
   .first-run-room-step,
   .mcp-selected-app,
-  .mcp-onboarding .mcp-choice-card,
-  .first-run-github-step,
-  .first-run-room-step {
+  .mcp-onboarding .mcp-choice-card {
     grid-template-columns: 1fr;
   }
 

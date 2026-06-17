@@ -5,11 +5,11 @@
       :key="target.id"
       class="mcp-choice-card"
       type="button"
-      :data-selected="selectedTargetIds.includes(target.id)"
+      :data-selected="selectedTargetIdSet.has(target.id)"
       :data-status="target.status"
       :data-testid="`mcp-target-${target.id}`"
       :aria-label="targetAriaLabel(target)"
-      :aria-pressed="selectedTargetIds.includes(target.id)"
+      :aria-pressed="selectedTargetIdSet.has(target.id)"
       @click="$emit('select-target', target.id)"
     >
       <span class="mcp-target-mark" aria-hidden="true">
@@ -23,7 +23,7 @@
         {{ statusLabel(target.status) }}
       </span>
       <span class="mcp-choice-check" aria-hidden="true">
-        <svg v-if="selectedTargetIds.includes(target.id)" viewBox="0 0 24 24">
+        <svg v-if="selectedTargetIdSet.has(target.id)" viewBox="0 0 24 24">
           <path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </span>
@@ -41,10 +41,11 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import type { DesktopMcpInstallTarget, DesktopMcpInstallTargetId } from "../../../../../electron/ipc-types";
 import McpHarnessIcon from "./McpHarnessIcon.vue";
 
-defineProps<{
+const props = defineProps<{
   targets: DesktopMcpInstallTarget[];
   selectedTargetIds: DesktopMcpInstallTargetId[];
 }>();
@@ -54,6 +55,8 @@ defineEmits<{
   "select-all": [];
   "clear-selection": [];
 }>();
+
+const selectedTargetIdSet = computed(() => new Set(props.selectedTargetIds));
 
 function statusLabel(status: DesktopMcpInstallTarget["status"]): string {
   if (status === "installed") return "Ready";

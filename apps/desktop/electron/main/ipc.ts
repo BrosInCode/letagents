@@ -640,9 +640,7 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:setup:get-mcp-install-state",
-    async (): Promise<DesktopMcpInstallState> => {
-      return buildMcpInstallState();
-    },
+    async (): Promise<DesktopMcpInstallState> => buildMcpInstallState(),
   );
   targetIpcMain.handle(
     "desktop:setup:install-mcp-server",
@@ -650,9 +648,8 @@ export function registerDesktopIpcHandlers(
       _event,
       targetId: DesktopMcpInstallTargetId,
       options?: DesktopMcpInstallOptions,
-    ): Promise<DesktopMcpInstallResult> => {
-      return installLetAgentsMcpServer(targetId, options ?? {});
-    },
+    ): Promise<DesktopMcpInstallResult> =>
+      installLetAgentsMcpServer(targetId, options ?? {}),
   );
   targetIpcMain.handle(
     "desktop:setup:install-mcp-servers",
@@ -660,15 +657,12 @@ export function registerDesktopIpcHandlers(
       _event,
       targetIds: DesktopMcpInstallTargetId[],
       options?: DesktopMcpInstallOptions,
-    ): Promise<DesktopMcpInstallManyResult> => {
-      return installLetAgentsMcpServers(targetIds, options ?? {});
-    },
+    ): Promise<DesktopMcpInstallManyResult> =>
+      installLetAgentsMcpServers(targetIds, options ?? {}),
   );
   targetIpcMain.handle(
     "desktop:setup:complete-mcp-onboarding",
-    async (): Promise<DesktopMcpInstallState> => {
-      return completeMcpOnboarding();
-    },
+    async (): Promise<DesktopMcpInstallState> => completeMcpOnboarding(),
   );
   targetIpcMain.handle(
     "desktop:repos:get-status",

@@ -3,6 +3,11 @@ import test from "node:test";
 import { computed, ref } from "vue";
 
 import type {
+  DesktopAuthStatus,
+  DesktopMcpInstallManyResult,
+  DesktopMcpInstallOptions,
+  DesktopMcpInstallState,
+  DesktopMcpInstallTargetId,
   DesktopRepoRoomSelection,
   DesktopRoomSnapshot,
   RepoStatus,
@@ -10,6 +15,29 @@ import type {
 import { useDesktopSetupOnboarding } from "../src/composables/useDesktopSetupOnboarding";
 import { setupEntry } from "../src/domain/desktop-navigation";
 import type { RoomEntry, SidebarEntry } from "../src/components/desktop/types";
+
+type OpenRoomSnapshot = (
+  snapshot: DesktopRoomSnapshot,
+  options?: { displayName?: string | null; kind?: string | null; rootPath?: string | null; meta?: string | null },
+) => void;
+
+interface SetupStateInput {
+  authStatus?: DesktopAuthStatus | null;
+  mcpInstallState?: DesktopMcpInstallState | null;
+  pickResult?: DesktopRepoRoomSelection;
+  pinnedRoomIdentifier?: string;
+  repoStatus?: RepoStatus | null;
+  openRoomSnapshot?: OpenRoomSnapshot;
+  refresh?: () => Promise<void>;
+  selectedMcpTargetIds?: DesktopMcpInstallTargetId[];
+  setupBridge?: {
+    installMcpServers?: (
+      targetIds: DesktopMcpInstallTargetId[],
+      options?: DesktopMcpInstallOptions,
+    ) => Promise<DesktopMcpInstallManyResult>;
+    completeMcpOnboarding?: () => Promise<DesktopMcpInstallState>;
+  };
+}
 
 test("pickRepoRoom reports success and opens the selected repo room", async () => {
   const opened: Array<{
@@ -73,21 +101,59 @@ test("pickRepoRoom reports false when the picker is canceled", async () => {
   assert.equal(state.repoStatus.value, null);
 });
 
-function makeSetupState(input: {
-  pickResult: DesktopRepoRoomSelection;
-  openRoomSnapshot: (
-    snapshot: DesktopRoomSnapshot,
-    options?: { displayName?: string | null; kind?: string | null; rootPath?: string | null; meta?: string | null },
-  ) => void;
-}) {
+test("first-run gate only depends on MCP completion", () => {
+  const state = makeSetupState({
+    mcpInstallState: mcpInstallStateFixture({ completed: false }),
+  });
+
+  assert.equal(state.onboarding.showFirstRunGate.value, true);
+
+  state.mcpInstallState.value = mcpInstallStateFixture({ completed: true });
+
+  assert.equal(state.onboarding.showFirstRunGate.value, false);
+});
+
+test("finishFirstRunOnboarding completes room-code setup without reinstalling with stale cwd", async () => {
+  const installCalls: Array<{ targetIds: DesktopMcpInstallTargetId[]; cwd?: string | null }> = [];
+  const completedState = mcpInstallStateFixture({ completed: true });
+  const state = makeSetupState({
+    mcpInstallState: mcpInstallStateFixture({ completed: false }),
+    pinnedRoomIdentifier: "ABCD-1234",
+    repoStatus: null,
+    selectedMcpTargetIds: ["codex"],
+    setupBridge: {
+      installMcpServers: async (targetIds, options) => {
+        installCalls.push({ targetIds, cwd: options?.cwd });
+        return {
+          success: true,
+          targets: [],
+          installState: mcpInstallStateFixture({ completed: false }),
+          message: "installed",
+        };
+      },
+      completeMcpOnboarding: async () => completedState,
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.finishFirstRunOnboarding());
+
+  assert.deepEqual(installCalls, []);
+  assert.deepEqual(state.mcpInstallState.value, completedState);
+  assert.equal(state.activeEntry.value.roomIdentifier, "ABCD-1234");
+});
+
+function makeSetupState(input: SetupStateInput = {}) {
+  const roomIdentifier = input.pinnedRoomIdentifier || "github.com/BrosInCode/letagents";
   const loading = ref(false);
   const authFeedback = ref<string | null>(null);
-  const repoStatus = ref<RepoStatus | null>(null);
+  const repoStatus = ref<RepoStatus | null>(input.repoStatus ?? null);
+  const activeEntry = ref<SidebarEntry>(setupEntry);
+  const mcpInstallState = ref<DesktopMcpInstallState | null>(input.mcpInstallState ?? null);
   const pinnedRoom = computed<RoomEntry>(() => ({
-    id: "room:main:github.com/BrosInCode/letagents",
+    id: `room:main:${roomIdentifier}`,
     type: "room",
     kind: "parent",
-    roomIdentifier: "github.com/BrosInCode/letagents",
+    roomIdentifier,
     title: "letagents",
     meta: null,
     sectionLabel: "Project",
@@ -99,34 +165,37 @@ function makeSetupState(input: {
     pinned: false,
   }));
   const onboarding = useDesktopSetupOnboarding({
-    activeEntry: ref<SidebarEntry>(setupEntry),
+    activeEntry,
     authFeedback,
-    authStatus: ref(null),
+    authStatus: ref(input.authStatus ?? null),
     firstRunStage: ref("room"),
     loading,
     loadFirstRunRoomContext: async () => undefined,
     mcpInstallBusy: ref(false),
     mcpInstallFeedback: ref(null),
-    mcpInstallState: ref(null),
+    mcpInstallState,
     mcpWizardStep: ref("choose"),
-    openRoomSnapshot: input.openRoomSnapshot,
+    openRoomSnapshot: input.openRoomSnapshot ?? (() => undefined),
     pinnedRoom,
-    refresh: async () => undefined,
+    refresh: input.refresh ?? (async () => undefined),
     repoStatus,
-    selectedMcpTargetIds: ref([]),
+    selectedMcpTargetIds: ref(input.selectedMcpTargetIds ?? []),
     setupLoadError: ref(null),
   });
 
   return {
+    activeEntry,
     authFeedback,
     loading,
+    mcpInstallState,
     onboarding,
     repoStatus,
     windowBridge: {
       letagentsDesktop: {
         repos: {
-          pickRoom: async () => input.pickResult,
+          pickRoom: async () => input.pickResult ?? canceledPickResult(),
         },
+        setup: input.setupBridge ?? {},
       },
     },
   };
@@ -157,6 +226,41 @@ function repoStatusFixture(): RepoStatus {
     rootPath: "/Users/emmy/Projects/letagents",
     branch: "codex/desktop-codex-room-agents",
     worktrees: [],
+  };
+}
+
+function canceledPickResult(): DesktopRepoRoomSelection {
+  return {
+    canceled: true,
+    repoPath: null,
+    repoStatus: null,
+    roomIdentifier: null,
+    source: null,
+    snapshot: null,
+    error: null,
+    warning: null,
+  };
+}
+
+function mcpInstallStateFixture(
+  overrides: Partial<DesktopMcpInstallState> = {},
+): DesktopMcpInstallState {
+  return {
+    completed: false,
+    completedAt: null,
+    selectedTargetId: "codex",
+    targets: [
+      {
+        id: "codex",
+        name: "Codex",
+        description: "Add the MCP connection Codex needs to join rooms.",
+        configPath: "~/.codex/config.toml",
+        status: "installed",
+        lastInstalledAt: "2026-06-17T00:00:00.000Z",
+        restartHint: "Restart Codex so it discovers the LetAgents MCP server.",
+      },
+    ],
+    ...overrides,
   };
 }
 

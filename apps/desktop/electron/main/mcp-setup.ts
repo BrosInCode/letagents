@@ -136,7 +136,7 @@ function withRefreshedAuthEnv(
   current: LetAgentsMcpServerConfig,
   expected: LetAgentsMcpServerConfig,
 ): LetAgentsMcpServerConfig {
-  const expectedEnv = stringRecord(expected.env);
+  const expectedEnv = expected.env || {};
   const expectedToken = expectedEnv.LETAGENTS_TOKEN?.trim() || null;
   const env: Record<string, string> = {
     ...stringRecord(current.env),
@@ -192,41 +192,18 @@ async function readMcpJsonConfig(
   }
 }
 
-function getJsonLetAgentsMcpInstallStatus(
-  configPath: string,
-  expected: LetAgentsMcpServerConfig,
-): DesktopMcpInstallTarget["status"] {
-  try {
-    const raw = readFileSync(configPath, "utf8");
-    return getJsonLetAgentsMcpInstallStatusFromRaw(raw, expected);
-  } catch {
-    return "not_installed";
-  }
-}
-
-function getCodexTomlLetAgentsMcpInstallStatus(
-  configPath: string,
-  expected: LetAgentsMcpServerConfig,
-): DesktopMcpInstallTarget["status"] {
-  try {
-    const raw = readFileSync(configPath, "utf8");
-    return getCodexTomlLetAgentsMcpInstallStatusFromRaw(raw, expected);
-  } catch {
-    return "not_installed";
-  }
-}
-
 function getLetAgentsMcpInstallStatus(
   target: McpInstallTargetDefinition,
   expected: LetAgentsMcpServerConfig,
 ): DesktopMcpInstallTarget["status"] {
-  if (target.configFormat === "codex_toml") {
-    return getCodexTomlLetAgentsMcpInstallStatus(
-      target.configPath,
-      expected,
-    );
+  try {
+    const raw = readFileSync(target.configPath, "utf8");
+    return target.configFormat === "codex_toml"
+      ? getCodexTomlLetAgentsMcpInstallStatusFromRaw(raw, expected)
+      : getJsonLetAgentsMcpInstallStatusFromRaw(raw, expected);
+  } catch {
+    return "not_installed";
   }
-  return getJsonLetAgentsMcpInstallStatus(target.configPath, expected);
 }
 
 async function writeMcpJsonConfig(
@@ -363,17 +340,8 @@ export async function refreshInstalledLetAgentsMcpServerAuth(): Promise<void> {
   const storedSetup = await readStoredMcpSetup();
   const expected = await buildExpectedLetAgentsMcpServerConfig(storedSetup.cwd);
 
-  const installedTargetIds = new Set(
-    Object.entries(storedSetup.installs)
-      .filter(([, install]) => Boolean(install?.lastInstalledAt))
-      .map(([targetId]) => targetId as DesktopMcpInstallTargetId),
-  );
-  if (!installedTargetIds.size) return;
-
-  const targetDefinitions = getMcpInstallTargetDefinitions().filter((target) =>
-    installedTargetIds.has(target.id),
-  );
-  for (const targetDefinition of targetDefinitions) {
+  for (const targetDefinition of getMcpInstallTargetDefinitions()) {
+    if (!storedSetup.installs[targetDefinition.id]?.lastInstalledAt) continue;
     await refreshLetAgentsMcpServerAuthForTarget(targetDefinition, expected);
   }
 }
@@ -433,13 +401,6 @@ export async function installLetAgentsMcpServer(
   targetId: DesktopMcpInstallTargetId,
   options: DesktopMcpInstallOptions = {},
 ): Promise<DesktopMcpInstallResult> {
-  const targetDefinition = getMcpInstallTargetDefinitions().find(
-    (target) => target.id === targetId,
-  );
-  if (!targetDefinition) {
-    throw new Error(`Unknown MCP install target: ${targetId}`);
-  }
-
   const result = await installLetAgentsMcpServers([targetId], options);
   const installState = result.installState;
   const target = installState.targets.find(

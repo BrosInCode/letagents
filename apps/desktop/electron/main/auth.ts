@@ -239,11 +239,11 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
     }>("/auth/session");
     const account = normalizeAuthAccount(session.account);
     if (session.authenticated && account) {
-      await updateStoredAuth({ account });
-      return buildAuthStatus({ storedAuth: await readStoredAuth(), account });
+      const nextAuth = await updateStoredAuth({ account });
+      return buildAuthStatus({ storedAuth: nextAuth, account });
     }
 
-    await updateStoredAuth({
+    const nextAuth = await updateStoredAuth({
       token: null,
       ownerTokenId: null,
       oauthTokenExpiresAt: null,
@@ -251,7 +251,7 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
     });
     authInvalidatedHandler?.();
     return buildAuthStatus({
-      storedAuth: await readStoredAuth(),
+      storedAuth: nextAuth,
       error: "Your saved sign-in expired. Connect again to open private rooms.",
     });
   } catch (error) {

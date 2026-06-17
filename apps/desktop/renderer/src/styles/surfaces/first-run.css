@@ -186,8 +186,9 @@
 
 .github-reason-card,
 .github-signin-card,
-.first-run-room-card,
-.setup-check-item {
+.setup-check-item,
+.room-choice-card,
+.suggested-room-card {
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   background: rgba(20, 20, 20, 0.66);
@@ -241,7 +242,6 @@
 
 .github-reason-card p,
 .github-signin-card p,
-.first-run-room-card p,
 .setup-check-item p {
   margin: 0;
   color: var(--text-secondary);
@@ -277,8 +277,7 @@
   height: 30px;
 }
 
-.github-signin-card > strong,
-.first-run-room-card h2 {
+.github-signin-card > strong {
   margin: 0;
   font-size: 1.55rem;
   letter-spacing: -0.04em;
@@ -287,13 +286,6 @@
 .room-choice-panel {
   display: grid;
   gap: 12px;
-}
-
-.room-choice-card,
-.suggested-room-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: rgba(20, 20, 20, 0.66);
 }
 
 .room-choice-card {
