@@ -507,9 +507,16 @@ async function fetchCloudTask(roomIdentifier: string, taskId: string): Promise<D
 async function searchCloudTasks(
   roomIdentifier: string,
   query: string,
-): Promise<{ tasks: DesktopTaskSummary[]; hasMore: boolean; scanned: number; scannedAll: boolean }> {
+  afterTaskId?: string,
+): Promise<{
+  tasks: DesktopTaskSummary[];
+  hasMore: boolean;
+  scanned: number;
+  scannedAll: boolean;
+  nextCursor?: string;
+}> {
   const matches: DesktopTaskSummary[] = [];
-  let after: string | undefined;
+  let after = afterTaskId;
   let scanned = 0;
   let hasMore = false;
 
@@ -518,18 +525,27 @@ async function searchCloudTasks(
       limit: Math.min(100, MAX_CONTEXT_TASK_SCAN - scanned),
       after,
     });
-    scanned += page.tasks.length;
-    for (const task of page.tasks) {
+    let lastProcessedTaskId: string | undefined;
+    for (const [index, task] of page.tasks.entries()) {
+      scanned += 1;
+      lastProcessedTaskId = task.id;
       if (!query || taskMatchesQuery(task, query)) {
         matches.push(task);
         if (matches.length >= MAX_CONTEXT_TASKS) {
-          break;
+          const hasUnreadTasks = index < page.tasks.length - 1 || page.hasMore;
+          return {
+            tasks: matches,
+            hasMore: hasUnreadTasks,
+            scanned,
+            scannedAll: !hasUnreadTasks,
+            nextCursor: hasUnreadTasks ? task.id : undefined,
+          };
         }
       }
     }
 
     hasMore = page.hasMore;
-    after = page.tasks[page.tasks.length - 1]?.id;
+    after = lastProcessedTaskId;
     if (!page.hasMore || !after) {
       return {
         tasks: matches,
@@ -545,6 +561,7 @@ async function searchCloudTasks(
     hasMore: hasMore || scanned >= MAX_CONTEXT_TASK_SCAN || matches.length >= MAX_CONTEXT_TASKS,
     scanned,
     scannedAll: false,
+    nextCursor: after,
   };
 }
 
@@ -557,6 +574,10 @@ function taskMatchesQuery(task: DesktopTaskSummary, query: string): boolean {
     task.assignee,
     task.assigneeAgentKey,
   ].some((value) => String(value ?? "").toLowerCase().includes(query));
+}
+
+function isValidTaskCursor(value: string): boolean {
+  return /^task_\d+$/.test(value);
 }
 
 async function getTaskContext(
@@ -588,7 +609,17 @@ async function getTaskContext(
   }
 
   const query = stringArg(args, "query").toLowerCase();
-  const taskSearch = await searchCloudTasks(roomIdentifier, query);
+  const afterTaskId = stringArg(args, "after_task_id") || stringArg(args, "after");
+  if (afterTaskId && !isValidTaskCursor(afterTaskId)) {
+    return {
+      ok: false,
+      tool: "get_task_context",
+      roomIdentifier,
+      storage,
+      error: "after_task_id must be a task cursor such as task_123.",
+    };
+  }
+  const taskSearch = await searchCloudTasks(roomIdentifier, query, afterTaskId || undefined);
   return {
     ok: true,
     tool: "get_task_context",
@@ -596,9 +627,10 @@ async function getTaskContext(
     storage,
     tasks: taskSearch.tasks.map(compactTask),
     hasMore: taskSearch.hasMore,
+    nextCursor: taskSearch.nextCursor,
     note: taskSearch.scannedAll
       ? undefined
-      : `Task search scanned the first ${taskSearch.scanned} tasks only.`,
+      : `Task search scanned ${taskSearch.scanned} tasks${taskSearch.nextCursor ? `; pass after_task_id=${taskSearch.nextCursor} to continue.` : "."}`,
   };
 }
 

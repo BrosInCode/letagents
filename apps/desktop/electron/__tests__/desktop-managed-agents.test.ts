@@ -1009,18 +1009,36 @@ test("desktop context requests parse and stay out of public replies", () => {
   };
 
   assert.deepEqual(parseManagedAgentContextRequest(requestLine), expectedRequest);
+  assert.deepEqual(parseManagedAgentContextRequest(`- ${requestLine}`), expectedRequest);
+  assert.deepEqual(parseManagedAgentContextRequest(`> ${requestLine}`), expectedRequest);
+  assert.deepEqual(parseManagedAgentContextRequest(`1. ${requestLine}`), expectedRequest);
   assert.equal(parseManagedAgentContextRequest(`Need context:\n${requestLine}`), null);
   assert.equal(parseManagedAgentContextRequest(`${requestLine} thanks`), null);
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", requestLine), null);
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `Need context:\n${requestLine}`), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `- ${requestLine}`), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `> ${requestLine}`), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `1. ${requestLine}`), null);
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX} not-json`),
+    null,
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX}: {"tool":"read_thread"}`),
+    null,
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX}{"tool":"read_thread"}`),
     null,
   );
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", MANAGED_AGENT_CONTEXT_REQUEST_PREFIX), null);
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_CONTEXT_REQUEST inline."),
     "This mentions LETAGENTS_CONTEXT_REQUEST inline.",
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "LETAGENTS_CONTEXT_REQUEST. This is plain prose."),
+    "LETAGENTS_CONTEXT_REQUEST. This is plain prose.",
   );
   assert.equal(parseManagedAgentContextRequest("LETAGENTS_CONTEXT_REQUEST not-json"), null);
   assert.equal(parseManagedAgentContextRequest("hello"), null);

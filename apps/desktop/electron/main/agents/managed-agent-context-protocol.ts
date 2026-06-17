@@ -24,6 +24,7 @@ export type ManagedAgentContextResult =
       messages?: unknown[];
       tasks?: unknown[];
       hasMore?: boolean;
+      nextCursor?: string;
       note?: string;
     }
   | {
@@ -71,7 +72,7 @@ export function parseManagedAgentContextRequest(
 }
 
 export function hasManagedAgentContextRequestLine(value: string | null | undefined): boolean {
-  return nonEmptyLines(String(value ?? "")).some(isManagedAgentContextRequestLine);
+  return nonEmptyLines(String(value ?? "")).some(isPotentialManagedAgentContextRequestLine);
 }
 
 export function isManagedAgentContextRequest(value: string | null | undefined): boolean {
@@ -111,18 +112,34 @@ function nonEmptyLines(text: string): string[] {
 }
 
 function requestPayloadFromLine(line: string): string | null {
-  const trimmed = line.trim();
-  if (!isManagedAgentContextRequestLine(trimmed)) {
+  const candidate = stripManagedAgentContextRequestDecoration(line);
+  if (!candidate.startsWith(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX)) {
     return null;
   }
-  return trimmed.slice(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length).trim() || null;
+  const next = candidate[MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length];
+  if (next && !/\s/.test(next)) {
+    return null;
+  }
+  return candidate.slice(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length).trim() || null;
 }
 
-function isManagedAgentContextRequestLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX)) {
+function isPotentialManagedAgentContextRequestLine(line: string): boolean {
+  const candidate = stripManagedAgentContextRequestDecoration(line);
+  if (!candidate.startsWith(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX)) {
     return false;
   }
-  const next = trimmed[MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length];
-  return !next || /\s/.test(next);
+  const next = candidate[MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length];
+  return !next || /\s/.test(next) || next === ":" || next === "{";
+}
+
+function stripManagedAgentContextRequestDecoration(line: string): string {
+  let candidate = line.trim();
+  while (candidate.startsWith(">")) {
+    candidate = candidate.slice(1).trimStart();
+  }
+  const listPrefix = /^(?:[-*+]\s+|\d+[.)]\s+)/.exec(candidate);
+  if (listPrefix) {
+    candidate = candidate.slice(listPrefix[0].length).trimStart();
+  }
+  return candidate;
 }
