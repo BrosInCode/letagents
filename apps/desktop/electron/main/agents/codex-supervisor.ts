@@ -44,6 +44,7 @@ import {
 } from "./codex-event-prompt.js";
 import {
   buildManagedAgentContextResultPrompt,
+  containsManagedAgentContextRequestPrefix,
   executeManagedAgentContextRequest,
   parseManagedAgentContextRequest,
 } from "./managed-agent-context.js";
@@ -1422,6 +1423,17 @@ async function runDesktopEventTurnWithContext(input: {
   for (let requestCount = 0; requestCount < DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT; requestCount += 1) {
     const request = parseManagedAgentContextRequest(replyText);
     if (!request) {
+      if (containsManagedAgentContextRequestPrefix(replyText)) {
+        const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
+          ...current,
+          status: "unknown",
+          active_work: null,
+          last_error: "Codex emitted a malformed desktop context request.",
+          updated_at: new Date().toISOString(),
+        })) ?? latest;
+        emitManagedAgentSessionUpdate(malformed);
+        return { session: malformed, text: null };
+      }
       return { session: latest, text: replyText };
     }
 
@@ -1460,6 +1472,17 @@ async function runDesktopEventTurnWithContext(input: {
     })) ?? latest;
     emitManagedAgentSessionUpdate(capped);
     return { session: capped, text: null };
+  }
+  if (containsManagedAgentContextRequestPrefix(replyText)) {
+    const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
+      ...current,
+      status: "unknown",
+      active_work: null,
+      last_error: "Codex emitted a malformed desktop context request.",
+      updated_at: new Date().toISOString(),
+    })) ?? latest;
+    emitManagedAgentSessionUpdate(malformed);
+    return { session: malformed, text: null };
   }
 
   return { session: latest, text: replyText };

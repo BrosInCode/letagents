@@ -38,35 +38,43 @@ export function parseManagedAgentContextRequest(
   value: string | null | undefined,
 ): ManagedAgentContextRequest | null {
   const text = String(value ?? "").trim();
-  if (!text.startsWith(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX)) {
+  if (!containsManagedAgentContextRequestPrefix(text)) {
     return null;
   }
 
-  const jsonText = text.slice(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length).trim();
-  if (!jsonText) {
-    return null;
+  for (const candidate of managedAgentContextRequestPayloads(text)) {
+    const jsonText = jsonObjectPrefix(candidate);
+    if (!jsonText) {
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") {
+      continue;
+    }
+
+    const record = parsed as Record<string, unknown>;
+    const tool = typeof record.tool === "string" ? record.tool : "";
+    if (!isManagedContextToolName(tool)) {
+      continue;
+    }
+
+    const args = record.arguments && typeof record.arguments === "object" && !Array.isArray(record.arguments)
+      ? (record.arguments as Record<string, unknown>)
+      : {};
+    return { tool, arguments: args };
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") {
-    return null;
-  }
+  return null;
+}
 
-  const record = parsed as Record<string, unknown>;
-  const tool = typeof record.tool === "string" ? record.tool : "";
-  if (!isManagedContextToolName(tool)) {
-    return null;
-  }
-
-  const args = record.arguments && typeof record.arguments === "object" && !Array.isArray(record.arguments)
-    ? (record.arguments as Record<string, unknown>)
-    : {};
-  return { tool, arguments: args };
+export function containsManagedAgentContextRequestPrefix(value: string | null | undefined): boolean {
+  return String(value ?? "").includes(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX);
 }
 
 export function isManagedAgentContextRequest(value: string | null | undefined): boolean {
@@ -96,4 +104,60 @@ function isManagedContextToolName(value: string): value is ManagedAgentContextTo
     "get_task_context",
     "get_room_context_summary",
   ].includes(value);
+}
+
+function managedAgentContextRequestPayloads(text: string): string[] {
+  const payloads: string[] = [];
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const index = text.indexOf(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX, searchFrom);
+    if (index === -1) {
+      break;
+    }
+
+    const rest = text.slice(index + MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length);
+    const line = rest.split(/\r?\n/, 1)[0]?.trim() ?? "";
+    if (line) {
+      payloads.push(line);
+    }
+    searchFrom = index + MANAGED_AGENT_CONTEXT_REQUEST_PREFIX.length;
+  }
+  return payloads;
+}
+
+function jsonObjectPrefix(value: string): string | null {
+  const start = value.indexOf("{");
+  if (start === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
 }

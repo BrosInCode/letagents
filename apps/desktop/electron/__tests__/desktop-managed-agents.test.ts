@@ -1000,15 +1000,23 @@ test("desktop-delivered event prompts advertise brokered context tools", () => {
 test("desktop context requests parse and stay out of public replies", () => {
   const requestLine =
     `${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX} {"tool":"read_thread","arguments":{"root_message_id":"msg_12","limit":40}}`;
-
-  assert.deepEqual(parseManagedAgentContextRequest(requestLine), {
+  const expectedRequest = {
     tool: "read_thread",
     arguments: {
       root_message_id: "msg_12",
       limit: 40,
     },
-  });
+  };
+
+  assert.deepEqual(parseManagedAgentContextRequest(requestLine), expectedRequest);
+  assert.deepEqual(parseManagedAgentContextRequest(`Need context:\n${requestLine}`), expectedRequest);
+  assert.deepEqual(parseManagedAgentContextRequest(`${requestLine} thanks`), expectedRequest);
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", requestLine), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `Need context:\n${requestLine}`), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX} not-json`),
+    null,
+  );
   assert.equal(parseManagedAgentContextRequest("LETAGENTS_CONTEXT_REQUEST not-json"), null);
   assert.equal(parseManagedAgentContextRequest("hello"), null);
 });

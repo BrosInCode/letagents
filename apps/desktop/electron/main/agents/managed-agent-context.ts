@@ -14,6 +14,7 @@ import {
 } from "../rooms/tasks/mappers.js";
 export {
   buildManagedAgentContextResultPrompt,
+  containsManagedAgentContextRequestPrefix,
   isManagedAgentContextRequest,
   MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
   parseManagedAgentContextRequest,
@@ -180,6 +181,10 @@ async function fetchCloudMessages(input: {
   before?: string;
   after?: string;
 }): Promise<{ messages: RoomMessagePayload[]; hasMore: boolean }> {
+  if (input.limit <= 0) {
+    return { messages: [], hasMore: false };
+  }
+
   const params = new URLSearchParams();
   params.set("limit", String(input.limit));
   if (input.before) {
@@ -201,6 +206,19 @@ async function fetchCloudMessages(input: {
   };
 }
 
+async function fetchCloudAnchorMessage(
+  roomIdentifier: string,
+  messageId: string,
+): Promise<RoomMessagePayload | null> {
+  const messageNumber = parseMessageNumber(messageId);
+  const page = await fetchCloudMessages({
+    roomIdentifier,
+    after: messageNumber && messageNumber > 1 ? formatMessageId(messageNumber - 1) : undefined,
+    limit: 1,
+  });
+  return page.messages.find((message) => message.id === messageId) ?? null;
+}
+
 async function fetchCloudRecentWindow(
   roomIdentifier: string,
   limit = MAX_CONTEXT_SEARCH_SCAN,
@@ -211,6 +229,27 @@ async function fetchCloudRecentWindow(
     limit: Math.min(MAX_CONTEXT_SEARCH_SCAN, Math.max(MAX_CONTEXT_MESSAGES, limit)),
   });
   return page.messages;
+}
+
+function parseMessageNumber(messageId: string): number | null {
+  const match = /^msg_(\d+)$/.exec(messageId.trim());
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function formatMessageId(number: number): string {
+  return `msg_${number}`;
+}
+
+function uniqueMessages(messages: RoomMessagePayload[]): RoomMessagePayload[] {
+  const messagesById = new Map<string, RoomMessagePayload>();
+  for (const message of messages) {
+    messagesById.set(message.id, message);
+  }
+  return [...messagesById.values()].sort(
+    (left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""),
+  );
 }
 
 async function readRecentRoomMessages(
@@ -320,22 +359,28 @@ async function readThread(
     };
   }
 
-  const page = await fetchCloudMessages({
-    roomIdentifier,
-    after: rootMessageId,
-    limit: MAX_CONTEXT_SEARCH_SCAN,
-  });
-  const messages = page.messages
-    .filter((message) => message.id === rootMessageId || message.reply_to?.id === rootMessageId)
-    .slice(0, limit);
+  const [rootMessage, page] = await Promise.all([
+    fetchCloudAnchorMessage(roomIdentifier, rootMessageId),
+    fetchCloudMessages({
+      roomIdentifier,
+      after: rootMessageId,
+      limit: MAX_CONTEXT_SEARCH_SCAN,
+    }),
+  ]);
+  const messages = uniqueMessages([
+    ...(rootMessage ? [rootMessage] : []),
+    ...page.messages.filter((message) => message.reply_to?.id === rootMessageId),
+  ]).slice(0, limit);
   return {
     ok: true,
     tool: "read_thread",
     roomIdentifier,
     storage,
     messages: messages.map(compactMessage),
-    hasMore: messages.length >= limit,
-    note: "Cloud thread reads include replies after the root message; the root message is included only when available from the fetched window.",
+    hasMore: page.hasMore || messages.length >= limit,
+    note: rootMessage
+      ? "Cloud thread reads include the root message and replies after it."
+      : "Cloud thread reads include replies after the root message; the root message could not be fetched from the history API.",
   };
 }
 
@@ -369,17 +414,16 @@ async function readMessagesAround(
     };
   }
 
-  const [beforePage, afterPage] = await Promise.all([
+  const [beforePage, anchorMessage, afterPage] = await Promise.all([
     fetchCloudMessages({ roomIdentifier, before: messageId, limit: before }),
+    fetchCloudAnchorMessage(roomIdentifier, messageId),
     fetchCloudMessages({ roomIdentifier, after: messageId, limit: after }),
   ]);
-  const messagesById = new Map<string, RoomMessagePayload>();
-  for (const message of [...beforePage.messages, ...afterPage.messages]) {
-    messagesById.set(message.id, message);
-  }
-  const messages = [...messagesById.values()].sort(
-    (left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""),
-  );
+  const messages = uniqueMessages([
+    ...beforePage.messages,
+    ...(anchorMessage ? [anchorMessage] : []),
+    ...afterPage.messages,
+  ]);
   return {
     ok: true,
     tool: "read_messages_around",
@@ -387,7 +431,9 @@ async function readMessagesAround(
     storage,
     messages: messages.map(compactMessage),
     hasMore: beforePage.hasMore || afterPage.hasMore,
-    note: "Cloud message windows do not include the anchor message unless it is returned by the history API.",
+    note: anchorMessage
+      ? "Cloud message window includes the requested anchor message."
+      : "Cloud message window could not fetch the requested anchor message from the history API.",
   };
 }
 
@@ -396,6 +442,13 @@ async function fetchCloudTasks(roomIdentifier: string): Promise<DesktopTaskSumma
     `/rooms/${encodeURIComponent(roomIdentifier)}/tasks`,
   );
   return (page.tasks || []).map(mapDesktopTaskSummaryPayload);
+}
+
+async function fetchCloudTask(roomIdentifier: string, taskId: string): Promise<DesktopTaskSummary> {
+  const task = await apiFetch<DesktopTaskSummaryPayload>(
+    `/rooms/${encodeURIComponent(roomIdentifier)}/tasks/${encodeURIComponent(taskId)}`,
+  );
+  return mapDesktopTaskSummaryPayload(task);
 }
 
 async function getTaskContext(
@@ -414,10 +467,21 @@ async function getTaskContext(
   }
 
   const taskId = stringArg(args, "task_id") || stringArg(args, "id");
+  if (taskId) {
+    const task = await fetchCloudTask(roomIdentifier, taskId);
+    return {
+      ok: true,
+      tool: "get_task_context",
+      roomIdentifier,
+      storage,
+      tasks: [compactTask(task)],
+      hasMore: false,
+    };
+  }
+
   const query = stringArg(args, "query").toLowerCase();
   const tasks = (await fetchCloudTasks(roomIdentifier))
     .filter((task) => {
-      if (taskId) return task.id === taskId;
       if (!query) return true;
       return [
         task.id,

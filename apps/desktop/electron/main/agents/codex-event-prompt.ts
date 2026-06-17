@@ -4,7 +4,7 @@ import type {
   DesktopTaskSummary,
 } from "../../ipc-types.js";
 import {
-  isManagedAgentContextRequest,
+  containsManagedAgentContextRequestPrefix,
   MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
 } from "./managed-agent-context-protocol.js";
 import type { DesktopCodexLiveSessionState } from "./state.js";
@@ -22,7 +22,7 @@ export function desktopEventPublicReplyText(
   if (sessionToken && trimmed === `${sessionToken}_DONE`) {
     return null;
   }
-  if (isManagedAgentContextRequest(trimmed)) {
+  if (containsManagedAgentContextRequestPrefix(trimmed)) {
     return null;
   }
   return trimmed;
