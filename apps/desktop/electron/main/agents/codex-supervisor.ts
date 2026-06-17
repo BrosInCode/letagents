@@ -43,6 +43,11 @@ import {
   desktopEventPublicReplyText,
 } from "./codex-event-prompt.js";
 import {
+  buildManagedAgentContextResultPrompt,
+  executeManagedAgentContextRequest,
+  parseManagedAgentContextRequest,
+} from "./managed-agent-context.js";
+import {
   CodexRpcClient,
   type RpcNotification,
   type ThreadReadResult,
@@ -102,6 +107,7 @@ import {
 const SESSION_MONITOR_INTERVAL_MS = 30_000;
 const DESKTOP_EVENT_TURN_POLL_INTERVAL_MS = 1_000;
 const DESKTOP_EVENT_TURN_TIMEOUT_MS = 5 * 60_000;
+const DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT = 3;
 const CODEX_RUNTIME_REASONING_THROTTLE_MS = 750;
 const CODEX_RUNTIME_REASONING_REPEAT_MS = 30_000;
 
@@ -1368,6 +1374,97 @@ async function publishDesktopManagedAgentReply(input: {
   );
 }
 
+async function startDesktopEventCodexTurn(input: {
+  client: CodexRpcClient;
+  session: DesktopCodexLiveSessionState;
+  event: ManagedRoomEvent;
+  prompt: string;
+}): Promise<{ session: DesktopCodexLiveSessionState; turnId: string }> {
+  const turnStart = await input.client.request<TurnStartResult>("turn/start", {
+    threadId: input.session.thread_id,
+    cwd: input.session.cwd,
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "dangerFullAccess" },
+    input: [{ type: "text", text: input.prompt, text_elements: [] }],
+  });
+  const turnId = turnStart.turn?.id;
+  if (!turnId) {
+    throw new Error("Codex app-server did not return a turn id for room event.");
+  }
+
+  return {
+    session: markSessionActiveForEvent(input.session, input.event, turnId),
+    turnId,
+  };
+}
+
+async function runDesktopEventTurnWithContext(input: {
+  client: CodexRpcClient;
+  session: DesktopCodexLiveSessionState;
+  event: ManagedRoomEvent;
+  prompt: string;
+}): Promise<{ session: DesktopCodexLiveSessionState; text: string | null }> {
+  let started = await startDesktopEventCodexTurn(input);
+  queueCodexRuntimeReasoningSummary(started.session, {
+    summary: "Codex worker received a room event.",
+    status: "working",
+    checking: "Desktop supervisor delivered the room event into Codex.",
+    next_action: "Streaming Codex runtime progress for this turn.",
+  });
+
+  let replyText = await waitForDesktopEventTurnCompletion(
+    input.client,
+    input.session.session_id,
+    started.turnId,
+  );
+  let latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
+
+  for (let requestCount = 0; requestCount < DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT; requestCount += 1) {
+    const request = parseManagedAgentContextRequest(replyText);
+    if (!request) {
+      return { session: latest, text: replyText };
+    }
+
+    queueCodexRuntimeReasoningSummary(latest, {
+      summary: `Reading ${request.tool} context.`,
+      status: "working",
+      checking: "Desktop context broker is fetching room-scoped context.",
+      next_action: "Injecting compact context into Codex.",
+    });
+
+    const result = await executeManagedAgentContextRequest(latest, request);
+    const contextPrompt = buildManagedAgentContextResultPrompt(result);
+    const readySession = getStoredCodexLiveSession(input.session.session_id) ?? latest;
+    started = await startDesktopEventCodexTurn({
+      client: input.client,
+      session: readySession,
+      event: input.event,
+      prompt: contextPrompt,
+    });
+    updateActiveWorkSummary(started.session.session_id, `Reading ${request.tool} context.`);
+    replyText = await waitForDesktopEventTurnCompletion(
+      input.client,
+      input.session.session_id,
+      started.turnId,
+    );
+    latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
+  }
+
+  if (parseManagedAgentContextRequest(replyText)) {
+    const capped = updateCodexLiveSession(input.session.session_id, (current) => ({
+      ...current,
+      status: "unknown",
+      active_work: null,
+      last_error: `Codex requested more than ${DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT} desktop context tools for one room event.`,
+      updated_at: new Date().toISOString(),
+    })) ?? latest;
+    emitManagedAgentSessionUpdate(capped);
+    return { session: capped, text: null };
+  }
+
+  return { session: latest, text: replyText };
+}
+
 async function deliverDesktopEventTurn(
   sessionId: string,
   event: ManagedRoomEvent,
@@ -1408,32 +1505,17 @@ async function deliverDesktopEventTurn(
 
     const stopAfterTurn = isStopPhraseRoomStreamEvent(idleSession, event);
     const prompt = buildDesktopEventPrompt(bindCodexLiveSessionToWorker(idleSession), event);
-    const turnStart = await client.request<TurnStartResult>("turn/start", {
-      threadId: idleSession.thread_id,
-      cwd: idleSession.cwd,
-      approvalPolicy: "never",
-      sandboxPolicy: { type: "dangerFullAccess" },
-      input: [{ type: "text", text: prompt, text_elements: [] }],
+    const completed = await runDesktopEventTurnWithContext({
+      client,
+      session: idleSession,
+      event,
+      prompt,
     });
-    const turnId = turnStart.turn?.id;
-    if (!turnId) {
-      throw new Error("Codex app-server did not return a turn id for room event.");
-    }
-
-    const activeSession = markSessionActiveForEvent(idleSession, event, turnId);
-    queueCodexRuntimeReasoningSummary(activeSession, {
-      summary: "Codex worker received a room event.",
-      status: "working",
-      checking: "Desktop supervisor delivered the room event into Codex.",
-      next_action: "Streaming Codex runtime progress for this turn.",
-    });
-    const replyText = await waitForDesktopEventTurnCompletion(client, idleSession.session_id, turnId);
-    const latest = getStoredCodexLiveSession(idleSession.session_id) ?? idleSession;
     await publishDesktopManagedAgentReply({
-      session: latest,
+      session: completed.session,
       event,
       storage,
-      text: replyText,
+      text: completed.text,
     });
     if (stopAfterTurn) {
       stopSessionAfterRoomStopPhrase(idleSession.session_id);

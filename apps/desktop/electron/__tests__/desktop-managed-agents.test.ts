@@ -36,6 +36,11 @@ const {
   buildDesktopEventPrompt,
   desktopEventPublicReplyText,
 } = await import("../main/agents/codex-event-prompt.js");
+const {
+  buildManagedAgentContextResultPrompt,
+  MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
+  parseManagedAgentContextRequest,
+} = await import("../main/agents/managed-agent-context-protocol.js");
 const { codexInstallCommand } = await import("../main/agents/codex-install.js");
 const {
   codexSessionStatusAfterInspectFailure,
@@ -951,6 +956,87 @@ test("desktop-delivered event prompts include stop handling without resuming MCP
   assert.match(prompt, /Do not call LetAgents MCP room tools/);
   assert.match(prompt, /desktop should publish as you/);
   assert.match(prompt, /Do not include hidden chain-of-thought/);
+});
+
+test("desktop-delivered event prompts advertise brokered context tools", () => {
+  const prompt = buildDesktopEventPrompt(liveSession({
+    token: "LOCAL_CODEX_ROOM_test",
+    display_name: "CedarVista",
+    agent_session_id: "agent_session_1",
+  }), {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_12",
+      sender: "Emmy",
+      text: "can you cancel the local test task?",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-14T12:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      replyTo: {
+        id: "msg_10",
+        sender: "Emmy",
+        text: "local test task details live earlier in this thread",
+        source: "browser",
+        timestamp: "2026-06-14T11:58:00.000Z",
+      },
+    },
+  });
+
+  assert.match(prompt, /do not assume earlier thread history is already in this prompt/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX));
+  assert.match(prompt, /read_recent_room_messages/);
+  assert.match(prompt, /search_room_messages/);
+  assert.match(prompt, /read_thread/);
+  assert.match(prompt, /read_messages_around/);
+  assert.match(prompt, /get_task_context/);
+  assert.match(prompt, /get_room_context_summary/);
+  assert.match(prompt, /read-only, room-scoped, desktop-brokered/);
+});
+
+test("desktop context requests parse and stay out of public replies", () => {
+  const requestLine =
+    `${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX} {"tool":"read_thread","arguments":{"root_message_id":"msg_12","limit":40}}`;
+
+  assert.deepEqual(parseManagedAgentContextRequest(requestLine), {
+    tool: "read_thread",
+    arguments: {
+      root_message_id: "msg_12",
+      limit: 40,
+    },
+  });
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", requestLine), null);
+  assert.equal(parseManagedAgentContextRequest("LETAGENTS_CONTEXT_REQUEST not-json"), null);
+  assert.equal(parseManagedAgentContextRequest("hello"), null);
+});
+
+test("desktop context result prompts return compact brokered context", () => {
+  const prompt = buildManagedAgentContextResultPrompt({
+    ok: true,
+    tool: "read_thread",
+    roomIdentifier: "room_1",
+    storage: "local",
+    messages: [{
+      id: "msg_12",
+      sender: "Emmy",
+      actor: null,
+      timestamp: "2026-06-14T12:00:00.000Z",
+      text: "Please cancel the local test task.",
+      source: "browser",
+      replyTo: null,
+      attachments: 0,
+    }],
+    hasMore: false,
+  });
+
+  assert.match(prompt, /read-only, room-scoped context/);
+  assert.match(prompt, /"tool": "read_thread"/);
+  assert.match(prompt, /"id": "msg_12"/);
+  assert.doesNotMatch(prompt, /SELECT/i);
+  assert.doesNotMatch(prompt, /local_chat_messages/);
 });
 
 test("desktop event public replies suppress internal stop markers", () => {

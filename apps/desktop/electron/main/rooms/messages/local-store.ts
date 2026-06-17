@@ -528,6 +528,107 @@ export async function getLocalChatMessagesBefore(
   };
 }
 
+export async function searchLocalChatMessages(
+  roomId: string,
+  query: string,
+  options?: { limit?: number; include_prompt_only?: boolean },
+): Promise<LocalMessagePage> {
+  const trimmedQuery = query.trim().toLowerCase();
+  if (!trimmedQuery) {
+    return getLatestLocalChatMessages(roomId, options);
+  }
+
+  const limit = clampLimit(options?.limit);
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+        AND (
+          LOWER(text) LIKE ?
+          OR LOWER(sender) LIKE ?
+        )
+      ORDER BY number DESC
+      LIMIT ?
+    `)
+    .all(roomId, `%${trimmedQuery}%`, `%${trimmedQuery}%`, limit + 1)
+    .map(mapRow);
+  const hasMore = rows.length > limit;
+  const bounded = (hasMore ? rows.slice(0, limit) : rows).reverse();
+  return {
+    messages: await hydrateMessageRows(database, bounded),
+    has_more: hasMore,
+  };
+}
+
+export async function getLocalChatThreadMessages(
+  roomId: string,
+  rootMessageId: string,
+  options?: { limit?: number; include_prompt_only?: boolean },
+): Promise<LocalMessagePage> {
+  const rootNumber = parseMessageNumber(rootMessageId);
+  if (!rootNumber) {
+    return { messages: [], has_more: false };
+  }
+
+  const limit = clampLimit(options?.limit);
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+        AND (number = ? OR reply_to_number = ?)
+      ORDER BY number ASC
+      LIMIT ?
+    `)
+    .all(roomId, rootNumber, rootNumber, limit + 1)
+    .map(mapRow);
+  const hasMore = rows.length > limit;
+  const bounded = hasMore ? rows.slice(0, limit) : rows;
+  return {
+    messages: await hydrateMessageRows(database, bounded),
+    has_more: hasMore,
+  };
+}
+
+export async function getLocalChatMessagesAround(
+  roomId: string,
+  messageId: string,
+  options?: {
+    before?: number;
+    after?: number;
+    include_prompt_only?: boolean;
+  },
+): Promise<LocalMessagePage> {
+  const anchorNumber = parseMessageNumber(messageId);
+  if (!anchorNumber) {
+    return { messages: [], has_more: false };
+  }
+
+  const before = Math.max(0, Math.min(50, Math.floor(Number(options?.before ?? 10))));
+  const after = Math.max(0, Math.min(50, Math.floor(Number(options?.after ?? 10))));
+  const lower = Math.max(1, anchorNumber - before);
+  const upper = anchorNumber + after;
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+        AND number >= ?
+        AND number <= ?
+      ORDER BY number ASC
+    `)
+    .all(roomId, lower, upper)
+    .map(mapRow);
+  return {
+    messages: await hydrateMessageRows(database, rows),
+    has_more: false,
+  };
+}
+
 function staleSyncStartedAt(): string {
   return new Date(Date.now() - 5 * 60 * 1000).toISOString();
 }

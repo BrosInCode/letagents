@@ -3,6 +3,10 @@ import type {
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
 } from "../../ipc-types.js";
+import {
+  isManagedAgentContextRequest,
+  MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
+} from "./managed-agent-context-protocol.js";
 import type { DesktopCodexLiveSessionState } from "./state.js";
 
 export const DESKTOP_EVENTS_NO_ROOM_REPLY = "NO_ROOM_REPLY";
@@ -16,6 +20,9 @@ export function desktopEventPublicReplyText(
     return null;
   }
   if (sessionToken && trimmed === `${sessionToken}_DONE`) {
+    return null;
+  }
+  if (isManagedAgentContextRequest(trimmed)) {
     return null;
   }
   return trimmed;
@@ -43,7 +50,11 @@ export function buildDesktopEventPrompt(
     "Instructions:",
     `- If this is a room message whose text exactly equals ${JSON.stringify(session.stop_phrase)}, stop this local worker: finish with exactly ${session.token}_DONE.`,
     "- Decide whether this event requires action from you.",
-    "- The desktop app owns the LetAgents room connection for this worker. Do not call LetAgents MCP room tools and do not call wait_for_messages.",
+    "- The desktop app owns the LetAgents room connection for this worker. Do not call LetAgents MCP room tools, do not call wait_for_messages, and do not assume earlier thread history is already in this prompt.",
+    "- If you need older room or thread context, use the desktop context tools by finishing this turn with exactly one context request line:",
+    `  ${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX} {"tool":"read_thread","arguments":{"root_message_id":"msg_12","limit":40}}`,
+    "- Available desktop context tools: read_recent_room_messages, search_room_messages, read_thread, read_messages_around, get_task_context, get_room_context_summary.",
+    "- Context tools are read-only, room-scoped, desktop-brokered, and return compact results. Use them only when needed.",
     "- If action is useful, do the local work in this Codex thread and make your final answer the public room reply the desktop should publish as you.",
     "- If this message is a reply, write the final answer as the reply text; the desktop will keep it in the same thread.",
     "- For task_update events, act only when the task is unclaimed and appropriate for you, assigned or leased to you, needs your review, or contains a blocker that you can resolve. If it is assigned or leased to another worker, finish quietly.",
