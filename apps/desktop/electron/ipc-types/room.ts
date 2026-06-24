@@ -112,6 +112,23 @@ export interface DesktopRoomMessageReply {
   timestamp: string;
 }
 
+export interface DesktopRoomMessageThreadParticipant {
+  sender: string;
+  source: string | null;
+  messageCount: number;
+  latestMessageId: string;
+}
+
+export interface DesktopRoomMessageThreadSummary {
+  rootMessageId: string;
+  replyCount: number;
+  unreadCount: number;
+  hasUnread: boolean;
+  latestReply: DesktopRoomMessageReply | null;
+  participants: DesktopRoomMessageThreadParticipant[];
+  lastReadMessageId: string | null;
+}
+
 export interface DesktopRoomMessageAttachment {
   id: string | null;
   name: string | null;
@@ -143,6 +160,9 @@ export interface DesktopRoomMessage {
     agentKey: string | null;
     agentSessionId: string | null;
   } | null;
+  threadRootId: string;
+  threadReplyToId: string | null;
+  thread: DesktopRoomMessageThreadSummary | null;
   replyTo: DesktopRoomMessageReply | null;
 }
 
@@ -225,6 +245,30 @@ export interface DesktopSendRoomMessageResult {
 export interface DesktopRoomMessagesPage {
   messages: DesktopRoomMessage[];
   hasOlder: boolean;
+}
+
+export interface DesktopRoomThreadPage {
+  root: DesktopRoomMessage;
+  replies: DesktopRoomMessage[];
+  summary: DesktopRoomMessageThreadSummary;
+  hasOlder: boolean;
+}
+
+export type DesktopRoomThreadInboxFilter = "all" | "unread";
+
+export interface DesktopRoomThreadInboxItem {
+  root: DesktopRoomMessage;
+  summary: DesktopRoomMessageThreadSummary;
+}
+
+export interface DesktopRoomThreadInboxPage {
+  threads: DesktopRoomThreadInboxItem[];
+  hasMore: boolean;
+  unreadThreadCount: number;
+}
+
+export interface DesktopRoomThreadReadResult {
+  thread: DesktopRoomMessageThreadSummary;
 }
 
 export interface DesktopRoomLatestMessage {

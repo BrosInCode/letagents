@@ -338,6 +338,10 @@
   font-weight: 700;
 }
 
+.desktop-room-tab-indicator {
+  margin-left: -1px;
+}
+
 .desktop-room-tab:hover {
   color: var(--text);
 }

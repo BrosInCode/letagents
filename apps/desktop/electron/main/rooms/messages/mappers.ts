@@ -4,6 +4,14 @@ import {
   type RoomMessageAttachmentPayload,
 } from "../../attachments/mappers.js";
 
+export type RoomMessageReplyPayload = {
+  id: string;
+  sender: string;
+  text: string;
+  source?: string | null;
+  timestamp: string;
+};
+
 export type RoomMessagePayload = {
   id: string;
   sender: string;
@@ -12,13 +20,10 @@ export type RoomMessagePayload = {
   agent_prompt_kind?: string | null;
   source?: string | null;
   timestamp: string;
-  reply_to?: {
-    id: string;
-    sender: string;
-    text: string;
-    source?: string | null;
-    timestamp: string;
-  } | null;
+  thread_root_id?: string | null;
+  thread_reply_to_id?: string | null;
+  thread?: RoomMessageThreadSummaryPayload | null;
+  reply_to?: RoomMessageReplyPayload | null;
   agent_identity?: {
     name?: string | null;
     display_name?: string | null;
@@ -29,6 +34,21 @@ export type RoomMessagePayload = {
     agent_key?: string | null;
     agent_session_id?: string | null;
   } | null;
+};
+
+export type RoomMessageThreadSummaryPayload = {
+  root_message_id?: string | null;
+  reply_count?: number | null;
+  unread_count?: number | null;
+  has_unread?: boolean | null;
+  latest_reply?: RoomMessageReplyPayload | null;
+  participants?: Array<{
+    sender?: string | null;
+    source?: string | null;
+    message_count?: number | null;
+    latest_message_id?: string | null;
+  }> | null;
+  last_read_message_id?: string | null;
 };
 
 export function mapRoomMessagePayload(
@@ -46,6 +66,13 @@ export function mapRoomMessagePayload(
     timestamp: message.timestamp,
     actorLabel: message.agent_identity?.actor_label || null,
     agentIdentity: mapRoomMessageAgentIdentity(message.agent_identity || null),
+    threadRootId:
+      message.thread_root_id ||
+      message.thread?.root_message_id ||
+      message.reply_to?.id ||
+      message.id,
+    threadReplyToId: message.thread_reply_to_id || message.reply_to?.id || null,
+    thread: mapRoomMessageThreadSummary(message.thread),
     replyTo: message.reply_to
       ? {
           id: message.reply_to.id,
@@ -55,6 +82,44 @@ export function mapRoomMessagePayload(
           timestamp: message.reply_to.timestamp,
         }
       : null,
+  };
+}
+
+export function mapRoomMessageThreadSummary(
+  thread: RoomMessageThreadSummaryPayload,
+): NonNullable<DesktopRoomMessage["thread"]>;
+export function mapRoomMessageThreadSummary(
+  thread?: RoomMessageThreadSummaryPayload | null,
+): DesktopRoomMessage["thread"];
+export function mapRoomMessageThreadSummary(
+  thread?: RoomMessageThreadSummaryPayload | null,
+): DesktopRoomMessage["thread"] {
+  if (!thread) return null;
+  const unreadCount = Number(thread.unread_count || 0);
+  const latestReply = thread.latest_reply
+    ? {
+        id: thread.latest_reply.id,
+        sender: thread.latest_reply.sender,
+        text: thread.latest_reply.text,
+        source: thread.latest_reply.source || null,
+        timestamp: thread.latest_reply.timestamp,
+      }
+    : null;
+  return {
+    rootMessageId: thread.root_message_id || "",
+    replyCount: Number(thread.reply_count || 0),
+    unreadCount,
+    hasUnread: Boolean(thread.has_unread) || unreadCount > 0,
+    latestReply,
+    participants: (thread.participants || [])
+      .map((participant) => ({
+        sender: participant.sender || "",
+        source: participant.source || null,
+        messageCount: Number(participant.message_count || 0),
+        latestMessageId: participant.latest_message_id || "",
+      }))
+      .filter((participant) => participant.sender && participant.latestMessageId),
+    lastReadMessageId: thread.last_read_message_id || null,
   };
 }
 

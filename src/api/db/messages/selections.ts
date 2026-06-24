@@ -4,6 +4,7 @@ export const messageRowSelection = {
   room_id: messages.room_id,
   number: messages.number,
   reply_to_number: messages.reply_to_number,
+  thread_root_number: messages.thread_root_number,
   sender: messages.sender,
   text: messages.text,
   agent_prompt_kind: messages.agent_prompt_kind,
@@ -16,7 +17,6 @@ export const messageReplySelection = {
   number: messages.number,
   sender: messages.sender,
   text: messages.text,
-  agent_prompt_kind: messages.agent_prompt_kind,
   source: messages.source,
   timestamp: messages.timestamp,
 };

@@ -6,6 +6,7 @@ import type {
 } from "../../ipc-types.js";
 import { setRoomStorageMode } from "../chat-storage/settings.js";
 import { importLocalChatMessages } from "./messages/local-store.js";
+import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
 import {
   createLocalRoom,
   getLocalRoomByCloudRoom,
@@ -64,7 +65,9 @@ export async function forkDesktopRoomToLocal(
       displayName: room.displayName,
       cloudRoomIdentifier: room.identifier,
     });
-  await importLocalChatMessages(localRoom.roomIdentifier, data.messagesData.messages || []);
+  await importLocalChatMessages(localRoom.roomIdentifier, data.messagesData.messages || [], {
+    readerKey: await resolveLocalThreadReaderKey(),
+  });
   await importLocalTasks(localRoom.roomIdentifier, mapped.tasks);
   await setRoomStorageMode(localRoom.roomIdentifier, "inherit");
   await setRoomStorageMode(room.identifier, "local");

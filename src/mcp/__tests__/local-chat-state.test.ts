@@ -34,6 +34,8 @@ function openSqliteDb() {
     DatabaseSync: new (path: string) => {
       exec: (sql: string) => void;
       prepare: (sql: string) => {
+        all: (...params: unknown[]) => Record<string, unknown>[];
+        get: (...params: unknown[]) => Record<string, unknown> | undefined;
         run: (...params: unknown[]) => unknown;
       };
     };
@@ -71,6 +73,51 @@ test("MCP local chat state follows setting and supports message wait", async () 
     timeoutMs: 1,
   });
   assert.deepEqual(emptyPoll.messages, []);
+});
+
+test("MCP local chat state persists thread roots for nested replies", async () => {
+  const root = await addLocalChatMessage("thread_room", {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  const firstReply = await addLocalChatMessage("thread_room", {
+    sender: "Agent",
+    text: "first",
+    source: "agent",
+    reply_to: root.id,
+  });
+  const nestedReply = await addLocalChatMessage("thread_room", {
+    sender: "Agent",
+    text: "nested",
+    source: "agent",
+    reply_to: firstReply.id,
+  });
+
+  assert.equal(firstReply.thread_root_id, root.id);
+  assert.equal(firstReply.thread_reply_to_id, root.id);
+  assert.equal(nestedReply.thread_root_id, root.id);
+  assert.equal(nestedReply.thread_reply_to_id, firstReply.id);
+
+  const db = openSqliteDb();
+  const rows = db
+    .prepare(`
+      SELECT number, reply_to_number, thread_root_number
+      FROM local_chat_messages
+      WHERE room_id = ?
+      ORDER BY number ASC
+    `)
+    .all("thread_room");
+
+  assert.deepEqual(rows.map((row) => ({
+    number: Number(row.number),
+    reply_to_number: row.reply_to_number === null ? null : Number(row.reply_to_number),
+    thread_root_number: row.thread_root_number === null ? null : Number(row.thread_root_number),
+  })), [
+    { number: 1, reply_to_number: null, thread_root_number: null },
+    { number: 2, reply_to_number: 1, thread_root_number: 1 },
+    { number: 3, reply_to_number: 2, thread_root_number: 1 },
+  ]);
 });
 
 test("MCP local chat state resolves per-room overrides", async () => {

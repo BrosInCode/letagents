@@ -7,6 +7,9 @@ export interface Message {
   agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
   timestamp: string;
+  thread_root_id: string;
+  thread_reply_to_id: string | null;
+  thread: MessageThreadSummary | null;
   reply_to: MessageReplyReference | null;
   attachments: MessageAttachment[];
 }
@@ -17,6 +20,23 @@ export interface MessageReplyReference {
   text: string;
   source: string | null;
   timestamp: string;
+}
+
+export interface MessageThreadParticipant {
+  sender: string;
+  source: string | null;
+  message_count: number;
+  latest_message_id: string;
+}
+
+export interface MessageThreadSummary {
+  root_message_id: string;
+  reply_count: number;
+  unread_count: number;
+  has_unread: boolean;
+  latest_reply: MessageReplyReference | null;
+  participants: MessageThreadParticipant[];
+  last_read_message_id: string | null;
 }
 
 export interface MessageAttachment {
@@ -56,12 +76,21 @@ export interface MessageRow {
   room_id: string;
   number: number;
   reply_to_number: number | null;
+  thread_root_number: number | null;
   sender: string;
   text: string;
   agent_prompt_kind: string | null;
   source: string | null;
   client_message_id: string | null;
   timestamp: string;
+}
+
+export interface MessageThreadReadRow {
+  room_id: string;
+  thread_root_number: number;
+  account_id: string;
+  last_read_message_number: number;
+  read_at: string;
 }
 
 export interface MessageAttachmentRow {

@@ -101,6 +101,9 @@ function roomMessage(id: string, text: string): DesktopRoomMessage {
     timestamp: "2026-06-17T00:00:00.000Z",
     actorLabel: null,
     agentIdentity: null,
+    threadRootId: id,
+    threadReplyToId: null,
+    thread: null,
     replyTo: null,
   };
 }

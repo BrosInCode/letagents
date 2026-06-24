@@ -3,9 +3,13 @@ import type {
   DesktopTaskSummary,
   DesktopRoomLatestMessage,
   DesktopRoomMessagesPage,
+  DesktopRoomThreadInboxFilter,
+  DesktopRoomThreadInboxPage,
+  DesktopRoomThreadPage,
+  DesktopRoomThreadReadResult,
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
-import { apiFetch, readStoredAuth } from "../auth.js";
+import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
   consumeLocalStagedAttachments,
   publishLocalAttachmentPayload,
@@ -15,7 +19,10 @@ import {
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
   getLocalChatMessagesBefore,
+  getLocalMessageThread,
+  getLocalMessageThreads,
   getSyncedCloudMessageId,
+  markLocalMessageThreadRead,
   markLocalChatMessageSynced,
 } from "./messages/local-store.js";
 import {
@@ -40,16 +47,28 @@ import { roomMessageHistoryPageSize } from "../paths.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import {
   mapRoomMessagePayload,
+  mapRoomMessageThreadSummary,
   type RoomMessagePayload,
 } from "./messages/mappers.js";
+import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
 
 export { mapRoomMessagePayload, type RoomMessagePayload };
+
+type RoomThreadInboxPayload = {
+  threads: Array<{
+    root: RoomMessagePayload;
+    summary: NonNullable<RoomMessagePayload["thread"]>;
+  }>;
+  has_more: boolean;
+  unread_thread_count: number;
+};
 
 export async function sendDesktopRoomMessage(
   roomIdentifier: string,
   text: string,
   replyTo?: string | null,
   attachments: Array<{ upload_id: string }> = [],
+  threadRootId?: string | null,
 ): Promise<DesktopSendRoomMessageResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
@@ -77,8 +96,10 @@ export async function sendDesktopRoomMessage(
       sender,
       text: trimmedText,
       reply_to: replyTo || null,
+      thread_root_id: threadRootId || null,
       source: "browser",
       attachments: localAttachments,
+      readerKey: await resolveLocalThreadReaderKey(storedAuth),
     });
     return {
       message: mapRoomMessagePayload(message),
@@ -101,6 +122,7 @@ export async function sendDesktopRoomMessage(
         sender,
         text: trimmedText,
         reply_to: replyTo || null,
+        thread_root_id: threadRootId || null,
         attachments,
       }),
     },
@@ -109,6 +131,226 @@ export async function sendDesktopRoomMessage(
   return {
     message: mapRoomMessagePayload(message),
   };
+}
+
+export async function getDesktopRoomThread(
+  roomIdentifier: string,
+  threadRootId: string,
+  beforeMessageId?: string | null,
+  limit = roomMessageHistoryPageSize,
+): Promise<DesktopRoomThreadPage> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedThreadRootId = threadRootId.trim();
+  const trimmedBeforeMessageId = beforeMessageId?.trim() || null;
+  if (!trimmedRoomIdentifier || !trimmedThreadRootId) {
+    throw new Error("Choose a thread before opening it.");
+  }
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const page = await getLocalMessageThread(localRoomIdentifier, trimmedThreadRootId, {
+      before: trimmedBeforeMessageId,
+      limit,
+      readerKey: await resolveLocalThreadReaderKey(),
+    });
+    if (!page) {
+      throw new Error("Thread not found.");
+    }
+    return {
+      root: mapRoomMessagePayload(page.root),
+      replies: page.replies.map(mapRoomMessagePayload),
+      summary: mapRoomMessageThreadSummary(page.summary),
+      hasOlder: page.has_older,
+    };
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (trimmedBeforeMessageId) params.set("before", trimmedBeforeMessageId);
+  const page = await apiFetch<{
+    root: RoomMessagePayload;
+    replies?: RoomMessagePayload[];
+    summary?: RoomMessagePayload["thread"];
+    has_older?: boolean;
+  }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread?${params.toString()}`,
+  );
+  const summary = mapRoomMessageThreadSummary(
+    page.summary ?? page.root.thread ?? null,
+  );
+  if (!summary) {
+    throw new Error("Thread not found.");
+  }
+  const root = mapRoomMessagePayload(page.root);
+  return {
+    root,
+    replies: (page.replies || []).map(mapRoomMessagePayload),
+    summary,
+    hasOlder: Boolean(page.has_older),
+  };
+}
+
+export async function getDesktopRoomThreads(
+  roomIdentifier: string,
+  filter: DesktopRoomThreadInboxFilter = "all",
+  beforeMessageId?: string | null,
+  limit = roomMessageHistoryPageSize,
+): Promise<DesktopRoomThreadInboxPage> {
+  const trimmedRoomIdentifier = typeof roomIdentifier === "string" ? roomIdentifier.trim() : "";
+  const trimmedBeforeMessageId = typeof beforeMessageId === "string" ? beforeMessageId.trim() || null : null;
+  if (!trimmedRoomIdentifier) {
+    throw new Error("Choose a room before opening the inbox.");
+  }
+  if (beforeMessageId !== undefined && beforeMessageId !== null && typeof beforeMessageId !== "string") {
+    throw new Error("Thread inbox cursor must be a message id.");
+  }
+  if (trimmedBeforeMessageId && !/^msg_\d+$/.test(trimmedBeforeMessageId)) {
+    throw new Error("Thread inbox cursor must be a message id.");
+  }
+  if (filter !== "all" && filter !== "unread") {
+    throw new Error("Thread inbox filter must be all or unread.");
+  }
+  const normalizedLimit = normalizeThreadInboxLimit(limit);
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const page = await getLocalMessageThreads(localRoomIdentifier, {
+      filter,
+      before: trimmedBeforeMessageId,
+      limit: normalizedLimit,
+      readerKey: await resolveLocalThreadReaderKey(),
+    });
+    return {
+      threads: page.threads.map((item) => ({
+        root: mapRoomMessagePayload(item.root),
+        summary: mapRoomMessageThreadSummary(item.summary),
+      })),
+      hasMore: page.has_more,
+      unreadThreadCount: page.unread_thread_count,
+    };
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+  const params = new URLSearchParams({
+    filter,
+    limit: String(normalizedLimit),
+  });
+  if (trimmedBeforeMessageId) params.set("before", trimmedBeforeMessageId);
+  try {
+    const page = await apiFetch<RoomThreadInboxPayload>(
+      `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/threads?${params.toString()}`,
+    );
+    return mapThreadInboxPayload(page);
+  } catch (error) {
+    if (error instanceof DesktopApiError && error.status === 404) {
+      return emptyThreadInboxPage();
+    }
+    throw error;
+  }
+}
+
+function emptyThreadInboxPage(): DesktopRoomThreadInboxPage {
+  return { threads: [], hasMore: false, unreadThreadCount: 0 };
+}
+
+function normalizeThreadInboxLimit(limit: unknown): number {
+  if (limit === null || limit === undefined) return roomMessageHistoryPageSize;
+  const parsed = Number(limit);
+  if (!Number.isFinite(parsed)) return roomMessageHistoryPageSize;
+  return Math.max(1, Math.min(500, Math.floor(parsed)));
+}
+
+function mapThreadInboxPayload(page: RoomThreadInboxPayload): DesktopRoomThreadInboxPage {
+  if (!Array.isArray(page.threads)) {
+    throw new Error("Thread inbox response is missing threads.");
+  }
+  const unreadThreadCount = Number(page.unread_thread_count);
+  if (!Number.isFinite(unreadThreadCount)) {
+    throw new Error("Thread inbox response is missing unread count.");
+  }
+  return {
+    threads: page.threads.map((item) => {
+      if (!item?.root || !item.summary) {
+        throw new Error("Thread inbox response included an incomplete thread.");
+      }
+      return {
+        root: mapRoomMessagePayload(item.root),
+        summary: mapRoomMessageThreadSummary(item.summary),
+      };
+    }),
+    hasMore: Boolean(page.has_more),
+    unreadThreadCount,
+  };
+}
+
+export async function markDesktopRoomThreadRead(
+  roomIdentifier: string,
+  threadRootId: string,
+  messageId?: string | null,
+): Promise<DesktopRoomThreadReadResult> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedThreadRootId = threadRootId.trim();
+  const trimmedMessageId = messageId?.trim() || null;
+  if (!trimmedRoomIdentifier || !trimmedThreadRootId) {
+    throw new Error("Choose a thread before marking it read.");
+  }
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const summary = await markLocalMessageThreadRead(
+      localRoomIdentifier,
+      trimmedThreadRootId,
+      trimmedMessageId,
+      { readerKey: await resolveLocalThreadReaderKey() },
+    );
+    if (!summary) {
+      throw new Error("Thread not found.");
+    }
+    return {
+      thread: mapRoomMessageThreadSummary(summary),
+    };
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+  const result = await apiFetch<{
+    thread?: RoomMessagePayload["thread"];
+  }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread/read`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
+      body: JSON.stringify({ message_id: trimmedMessageId }),
+    },
+  );
+  const mapped = mapRoomMessageThreadSummary(result.thread);
+  if (!mapped) {
+    throw new Error("Thread read state could not be updated.");
+  }
+  return { thread: mapped };
 }
 
 export async function getDesktopRoomMessagesBefore(
@@ -135,7 +377,7 @@ export async function getDesktopRoomMessagesBefore(
     const page = await getLocalChatMessagesBefore(
       localRoomIdentifier,
       trimmedBeforeMessageId,
-      { limit },
+      { limit, readerKey: await resolveLocalThreadReaderKey() },
     );
     return {
       messages: page.messages.map(mapRoomMessagePayload),
@@ -201,7 +443,10 @@ export async function getDesktopRoomLatestMessages(
           roomIdentifier,
         );
         const page = storage.effectiveMode === "local"
-          ? await getLatestLocalChatMessages(localRoomIdentifier, { limit: 1 })
+          ? await getLatestLocalChatMessages(localRoomIdentifier, {
+              limit: 1,
+              readerKey: await resolveLocalThreadReaderKey(),
+            })
           : await apiFetch<{
               messages?: RoomMessagePayload[];
             }>(
@@ -258,6 +503,19 @@ export async function syncDesktopLocalChatRoom(
       skippedCount += 1;
       continue;
     }
+    const localThreadRootId = localMessage.thread_root_id || null;
+    const threadRootCloudId =
+      localThreadRootId && localThreadRootId !== localMessage.id
+        ? cloudIdsByLocalId.get(localThreadRootId) ??
+          (await getSyncedCloudMessageId({
+            roomId: localRoomIdentifier,
+            localMessageId: localThreadRootId,
+          }))
+        : null;
+    if (localThreadRootId && localThreadRootId !== localMessage.id && !threadRootCloudId) {
+      skippedCount += 1;
+      continue;
+    }
     let attachments: Array<{ upload_id: string }> = [];
     try {
       attachments = await Promise.all(
@@ -282,6 +540,7 @@ export async function syncDesktopLocalChatRoom(
           sender: localMessage.sender,
           text: localMessage.text,
           reply_to: replyToCloudId,
+          thread_root_id: threadRootCloudId,
           attachments,
           client_message_id: localMessage.sync_key,
         }),

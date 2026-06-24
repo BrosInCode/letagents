@@ -13,16 +13,22 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-desktop-local-chat-"));
 process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
 process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
+process.env.LETAGENTS_LOCAL_PROFILE_PATH = join(tempDir, "local-profile.json");
 
 const {
   addLocalChatMessage,
   claimUnsyncedLocalChatMessages,
   getLocalChatMessages,
   getLocalChatMessagesBefore,
+  getLocalMessageThread,
+  getLocalMessageThreads,
   getSyncedCloudMessageId,
+  importLocalChatMessages,
   markLocalChatMessageSynced,
+  markLocalMessageThreadRead,
 } = await import("../main/rooms/messages/local-store.js");
 const {
+  readLocalProfileId,
   readChatStorageSettings,
   resolveRoomStorageMode,
   setChatStorageMode,
@@ -52,6 +58,7 @@ const {
 test.after(() => {
   delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
   delete process.env.LETAGENTS_LOCAL_CHAT_DB;
+  delete process.env.LETAGENTS_LOCAL_PROFILE_PATH;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -90,6 +97,186 @@ test("desktop local chat store persists messages, replies, and sync metadata", a
     }),
     "msg_44",
   );
+});
+
+test("desktop local chat store rejects thread targets hidden from chat", async () => {
+  const hidden = await addLocalChatMessage("room_hidden_thread_target", {
+    sender: "Agent",
+    text: "",
+    agent_prompt_kind: "auto",
+    source: "agent",
+  });
+  const visible = await addLocalChatMessage("room_hidden_thread_target", {
+    sender: "Human",
+    text: "visible root",
+    source: "browser",
+  });
+
+  await assert.rejects(
+    () => addLocalChatMessage("room_hidden_thread_target", {
+      sender: "Human",
+      text: "reply to hidden prompt",
+      reply_to: hidden.id,
+      source: "browser",
+    }),
+    /reply_to must reference a visible local message/,
+  );
+
+  await assert.rejects(
+    () => addLocalChatMessage("room_hidden_thread_target", {
+      sender: "Human",
+      text: "quote hidden prompt",
+      reply_to: visible.id,
+      thread_root_id: hidden.id,
+      source: "browser",
+    }),
+    /thread_root_id must reference a visible local message/,
+  );
+});
+
+test("desktop local chat store scopes thread reads by reader", async () => {
+  const root = await addLocalChatMessage("room_scoped_reads", {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  const firstReply = await addLocalChatMessage("room_scoped_reads", {
+    sender: "Agent",
+    text: "first reply",
+    reply_to: root.id,
+    source: "agent",
+  });
+  await addLocalChatMessage("room_scoped_reads", {
+    sender: "Agent",
+    text: "second reply",
+    reply_to: firstReply.id,
+    thread_root_id: root.id,
+    source: "agent",
+  });
+
+  const firstReaderInitial = await getLocalMessageThread("room_scoped_reads", root.id, {
+    readerKey: "account:first",
+  });
+  assert.equal(firstReaderInitial?.summary.unread_count, 2);
+
+  await markLocalMessageThreadRead("room_scoped_reads", root.id, firstReply.id, {
+    readerKey: "account:first",
+  });
+
+  const firstReader = await getLocalMessageThread("room_scoped_reads", root.id, {
+    readerKey: "account:first",
+  });
+  const secondReader = await getLocalMessageThread("room_scoped_reads", root.id, {
+    readerKey: "account:second",
+  });
+  assert.equal(firstReader?.summary.last_read_message_id, firstReply.id);
+  assert.equal(firstReader?.summary.unread_count, 1);
+  assert.equal(secondReader?.summary.last_read_message_id, null);
+  assert.equal(secondReader?.summary.unread_count, 2);
+});
+
+test("desktop local chat store lists thread inbox pages with unread filtering", async () => {
+  const firstRoot = await addLocalChatMessage("room_thread_inbox", {
+    sender: "Human",
+    text: "first root",
+    source: "browser",
+  });
+  await addLocalChatMessage("room_thread_inbox", {
+    sender: "Agent",
+    text: "first reply",
+    reply_to: firstRoot.id,
+    source: "agent",
+  });
+  const secondRoot = await addLocalChatMessage("room_thread_inbox", {
+    sender: "Human",
+    text: "second root",
+    source: "browser",
+  });
+  const secondReply = await addLocalChatMessage("room_thread_inbox", {
+    sender: "Agent",
+    text: "second reply",
+    reply_to: secondRoot.id,
+    source: "agent",
+  });
+
+  const allThreads = await getLocalMessageThreads("room_thread_inbox", {
+    readerKey: "account:inbox",
+  });
+  assert.deepEqual(allThreads.threads.map((item) => item.root.id), [secondRoot.id, firstRoot.id]);
+  assert.equal(allThreads.unread_thread_count, 2);
+
+  await markLocalMessageThreadRead("room_thread_inbox", secondRoot.id, secondReply.id, {
+    readerKey: "account:inbox",
+  });
+  const unreadThreads = await getLocalMessageThreads("room_thread_inbox", {
+    filter: "unread",
+    readerKey: "account:inbox",
+  });
+  assert.deepEqual(unreadThreads.threads.map((item) => item.root.id), [firstRoot.id]);
+  assert.equal(unreadThreads.unread_thread_count, 1);
+});
+
+test("desktop local chat import seeds thread read state from cloud metadata", async () => {
+  await importLocalChatMessages("room_import_read_state", [
+    {
+      id: "msg_10",
+      sender: "Human",
+      text: "root",
+      attachments: [],
+      source: "browser",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      thread_root_id: "msg_10",
+      thread_reply_to_id: null,
+      reply_to: null,
+      thread: {
+        root_message_id: "msg_10",
+        reply_count: 1,
+        unread_count: 0,
+        has_unread: false,
+        latest_reply: {
+          id: "msg_11",
+          sender: "Agent",
+          text: "reply",
+          source: "agent",
+          timestamp: "2026-01-01T00:00:01.000Z",
+        },
+        participants: [],
+        last_read_message_id: "msg_11",
+      },
+    },
+    {
+      id: "msg_11",
+      sender: "Agent",
+      text: "reply",
+      attachments: [],
+      source: "agent",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      thread_root_id: "msg_10",
+      thread_reply_to_id: "msg_10",
+      reply_to: {
+        id: "msg_10",
+        sender: "Human",
+        text: "root",
+        source: "browser",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      thread: null,
+    },
+  ], {
+    readerKey: "account:seeded",
+  });
+
+  const page = await getLocalMessageThread("room_import_read_state", "msg_1", {
+    readerKey: "account:seeded",
+  });
+  assert.equal(page?.summary.last_read_message_id, "msg_2");
+  assert.equal(page?.summary.unread_count, 0);
+
+  const otherReaderPage = await getLocalMessageThread("room_import_read_state", "msg_1", {
+    readerKey: "account:other",
+  });
+  assert.equal(otherReaderPage?.summary.last_read_message_id, null);
+  assert.equal(otherReaderPage?.summary.unread_count, 1);
 });
 
 test("desktop local chat store claims unsynced messages with stable sync keys", async () => {
@@ -274,6 +461,11 @@ test("desktop archived local rooms can be restored from archived-aware lookup", 
   );
 });
 
+test("desktop local profile id is stable across concurrent first reads", async () => {
+  const ids = await Promise.all(Array.from({ length: 8 }, () => readLocalProfileId()));
+  assert.equal(new Set(ids).size, 1);
+});
+
 test("desktop local room task store supports board create and lifecycle updates", async () => {
   await createLocalRoom({
     roomIdentifier: "task_room",
@@ -362,6 +554,30 @@ test("desktop local task review leases are claimed and released locally", async 
   });
   assert.equal(released.releasedLease?.status, "released");
   assert.deepEqual(released.task.activeLeases, []);
+});
+
+test("desktop local task review leases reject the assigned worker", async () => {
+  await createLocalRoom({
+    roomIdentifier: "review_assignee_room",
+    displayName: "Review Assignee Room",
+  });
+  const task = await addLocalTask("review_assignee_room", {
+    title: "Review by someone else",
+  });
+  await updateLocalTask("review_assignee_room", task.id, {
+    status: "accepted",
+    assignee: "Local Worker",
+    assigneeAgentKey: "local/worker",
+  });
+
+  await assert.rejects(
+    () => claimLocalTaskReviewLease("review_assignee_room", task.id, {
+      holderLabel: "Local Worker",
+      agentKey: "local/worker",
+      agentSessionId: "local_session_2",
+    }),
+    /cannot also claim review authority/,
+  );
 });
 
 test("desktop and MCP local chat writers allocate unique ids across processes", async () => {

@@ -289,6 +289,7 @@ export async function runDesktopRoomTaskWorkerAction(
       task: await updateLocalTask(localRoomIdentifier, taskId.trim(), {
         status: nextStatus,
         assignee: input.action === "claim" ? actor : undefined,
+        assigneeAgentKey: input.action === "claim" ? session?.agent_key || null : undefined,
       }),
     };
   }

@@ -424,6 +424,9 @@ function roomMessage(overrides: Partial<DesktopRoomMessage>): DesktopRoomMessage
     timestamp: "2026-05-28T00:00:00.000Z",
     actorLabel: null,
     agentIdentity: null,
+    threadRootId: overrides.threadRootId || overrides.id || "msg_1",
+    threadReplyToId: null,
+    thread: null,
     replyTo: null,
     ...overrides,
   };

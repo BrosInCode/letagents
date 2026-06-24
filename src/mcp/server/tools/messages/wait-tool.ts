@@ -215,9 +215,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         room_id: targetRoomId,
         project_id: targetProjectId,
         room_path: (targetRoomId) =>
-          `/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`,
+          appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
         project_path: (targetProjectId) =>
-          `/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`,
+          appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
         options: {
           signal: AbortSignal.timeout(clientTimeout),
           headers: deliveryHeaders,
@@ -242,9 +242,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
             room_id: targetRoomId,
             project_id: targetProjectId,
             room_path: (targetRoomId) =>
-              `/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`,
+              appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`),
             project_path: (targetProjectId) =>
-              `/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`,
+              appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`),
           });
 
           const msgs = page.messages ?? [];
