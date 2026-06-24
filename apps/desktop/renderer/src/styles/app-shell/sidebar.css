@@ -144,6 +144,19 @@
   color: var(--text-secondary);
 }
 
+.pinned-room .pin-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+}
+
+.pinned-room .pin-mark svg {
+  width: 13px;
+  height: 13px;
+}
+
 .project-icon svg,
 .pin-mark svg,
 .system-icon svg,

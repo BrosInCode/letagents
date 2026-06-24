@@ -34,6 +34,7 @@ const {
   claimLocalTasksForPublish,
   cloudRoomIdentifierForStorage,
   createLocalRoom,
+  getLocalRoomIncludingArchived,
   getLocalTask,
   localRoomIdentifierForStorage,
   listLocalRoomEntries,
@@ -43,6 +44,7 @@ const {
   releaseLocalTaskReviewLease,
   resolveLocalAwareRoomStorageMode,
   setLocalAwareRoomStorageMode,
+  setLocalRoomArchived,
   setLocalRoomPinned,
   updateLocalTask,
 } = await import("../main/rooms/local-store.js");
@@ -247,6 +249,29 @@ test("desktop local room pinning persists in local account room entries", async 
 
   await setLocalRoomPinned(room.roomIdentifier, false);
   assert.equal((await listLocalRoomEntries()).find((entry) => entry.roomIdentifier === room.roomIdentifier)?.pinned, false);
+});
+
+test("desktop archived local rooms can be restored from archived-aware lookup", async () => {
+  const room = await createLocalRoom({
+    roomIdentifier: "restore_local_room",
+    displayName: "Restore Local Room",
+  });
+
+  await setLocalRoomArchived(room.roomIdentifier, true);
+  assert.equal(
+    (await listLocalRoomEntries()).some((entry) => entry.roomIdentifier === room.roomIdentifier),
+    false,
+  );
+  assert.equal(
+    (await getLocalRoomIncludingArchived(room.roomIdentifier))?.displayName,
+    "Restore Local Room",
+  );
+
+  await setLocalRoomArchived(room.roomIdentifier, false);
+  assert.equal(
+    (await listLocalRoomEntries()).some((entry) => entry.roomIdentifier === room.roomIdentifier),
+    true,
+  );
 });
 
 test("desktop local room task store supports board create and lifecycle updates", async () => {

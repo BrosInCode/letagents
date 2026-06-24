@@ -12,7 +12,7 @@ export const appAgentEntry: SystemEntry = {
   id: "system:app-agent",
   type: "system",
   title: "App Agent",
-  description: "OpenRouter actions",
+  description: "Typed app control",
   sectionLabel: "System",
 };
 

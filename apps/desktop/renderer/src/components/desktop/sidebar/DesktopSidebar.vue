@@ -16,18 +16,92 @@
       </button>
     </div>
 
-    <button
-      v-if="sidebarMode === 'expanded'"
-      class="sidebar-cta"
-      type="button"
-      data-testid="sidebar-new-room"
-      @click="$emit('new-room')"
-    >
-      <span class="cta-plus" aria-hidden="true">
-        <Plus />
-      </span>
-      <span>New room</span>
-    </button>
+    <div v-if="sidebarMode === 'expanded'" class="sidebar-actions">
+      <button
+        class="sidebar-cta"
+        type="button"
+        data-testid="sidebar-new-room"
+        @click="$emit('new-room')"
+      >
+        <span class="cta-plus" aria-hidden="true">
+          <Plus />
+        </span>
+        <span>New room</span>
+      </button>
+
+      <section v-if="pinnedProjectEntries.length" class="sidebar-pinned-section" data-testid="sidebar-section-pinned">
+        <p class="pinned-section-label">Pinned</p>
+        <div class="pinned-list">
+          <article
+            v-for="project in pinnedProjectEntries"
+            :key="project.id"
+            class="project-group pinned-project-group"
+            :data-testid="`pinned-room-group-${project.id}`"
+          >
+            <button
+              class="pinned-room"
+              :data-active="activeEntry.id === project.parent.id"
+              :data-unread="project.parent.hasUnread"
+              type="button"
+              :data-testid="`pinned-room-${project.parent.id}`"
+              @click="$emit('select-entry', project.parent)"
+              @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
+            >
+              <span class="pin-mark" aria-hidden="true">
+                <Pin />
+              </span>
+              <span class="pinned-main">
+                <span class="room-title-line">
+                  <span class="pinned-title">{{ project.roomName }}</span>
+                  <span
+                    v-if="project.parent.hasUnread"
+                    class="room-unread-dot"
+                    aria-label="Unread messages"
+                    title="Unread messages"
+                  ></span>
+                </span>
+                <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
+              </span>
+              <span
+                v-if="project.focusRooms.length"
+                class="project-open"
+                :data-collapsed="collapsedProjects[project.id]"
+                :data-testid="`pinned-room-group-toggle-${project.id}`"
+                @click.stop="$emit('toggle-project', project.id)"
+              >
+                <ChevronRight aria-hidden="true" />
+              </span>
+            </button>
+
+            <Transition name="sidebar-reveal">
+              <div v-if="!collapsedProjects[project.id] && project.focusRooms.length" class="project-room-list">
+                <button
+                  v-for="focusRoom in project.focusRooms"
+                  :key="focusRoom.id"
+                  class="room-row room-focus"
+                  :data-active="activeEntry.id === focusRoom.id"
+                  :data-unread="focusRoom.hasUnread"
+                  type="button"
+                  :data-testid="`pinned-focus-room-${focusRoom.id}`"
+                  @click="$emit('select-entry', focusRoom)"
+                  @contextmenu.prevent.stop="openRoomContextMenu($event, focusRoom)"
+                >
+                  <span class="room-title-line">
+                    <span class="room-title">{{ focusRoom.title }}</span>
+                    <span
+                      v-if="focusRoom.hasUnread"
+                      class="room-unread-dot"
+                      aria-label="Unread messages"
+                      title="Unread messages"
+                    ></span>
+                  </span>
+                </button>
+              </div>
+            </Transition>
+          </article>
+        </div>
+      </section>
+    </div>
 
     <section v-if="sidebarMode === 'expanded'" class="sidebar-section" data-testid="sidebar-section-rooms">
       <button
@@ -47,7 +121,7 @@
       <Transition name="sidebar-reveal">
         <div v-if="!roomsCollapsed" class="project-list">
           <article
-            v-for="project in projectEntries"
+            v-for="project in roomProjectEntries"
             :key="project.id"
             class="project-group"
             :data-testid="`room-group-${project.id}`"
@@ -76,7 +150,7 @@
                     ></span>
                   </span>
                   <small>
-                    {{ project.focusRooms.length ? `${project.focusRooms.length} focus ${project.focusRooms.length === 1 ? "room" : "rooms"}` : project.parent.meta }}
+                    {{ projectSubtitle(project) }}
                   </small>
                 </span>
               </div>
@@ -117,6 +191,7 @@
               </div>
             </Transition>
           </article>
+          <p v-if="!roomProjectEntries.length" class="room-empty">No other rooms</p>
         </div>
       </Transition>
     </section>
@@ -197,14 +272,14 @@
         @click="archiveContextRoom"
       >
         <Archive aria-hidden="true" />
-        <span>Archive room</span>
+        <span>{{ archiveContextLabel }}</span>
       </button>
     </div>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { Archive, ChevronRight, Copy, House, Plus, Settings } from "@lucide/vue";
+import { Archive, ChevronRight, Copy, House, Pin, Plus, Settings } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
 
@@ -236,8 +311,11 @@ type RoomContextMenu = {
 
 const roomContextMenu = ref<RoomContextMenu | null>(null);
 
+const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
+const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
+
 const totalRoomCount = computed(() =>
-  props.projectEntries.reduce((total, project) => total + 1 + project.focusRooms.length, 0)
+  roomProjectEntries.value.reduce((total, project) => total + 1 + project.focusRooms.length, 0)
 );
 
 const contextProject = computed(() => {
@@ -251,6 +329,12 @@ const canArchiveContextRoom = computed(() => {
   if (!entry || entry.kind !== "parent" || !entry.roomIdentifier) return false;
   return entry.id !== props.primaryRoom.id;
 });
+
+const archiveContextLabel = computed(() =>
+  roomContextMenu.value?.entry.source === "recent"
+    ? "Hide from sidebar"
+    : "Archive room",
+);
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
   const menuWidth = 228;
@@ -290,6 +374,13 @@ function archiveContextRoom(): void {
   if (!roomContextMenu.value || !canArchiveContextRoom.value) return;
   emit("archive-room", roomContextMenu.value.entry);
   closeRoomContextMenu();
+}
+
+function projectSubtitle(project: ProjectGroup): string {
+  if (project.focusRooms.length) {
+    return `${project.focusRooms.length} focus ${project.focusRooms.length === 1 ? "room" : "rooms"}`;
+  }
+  return project.parent.meta;
 }
 
 async function copyContextRoomUrl(): Promise<void> {

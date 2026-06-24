@@ -203,13 +203,14 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     latestMessageId: options.rootRoomSnapshot.value?.messages.at(-1)?.id || null,
     latestMessageAt: options.rootRoomSnapshot.value?.messages.at(-1)?.timestamp || null,
     hasUnread: false,
+    pinned: false,
+    source: "current",
   }));
 
   const projectEntries = computed<ProjectGroup[]>(() => buildSidebarProjectGroups({
     currentParentRoom: currentParentRoom.value,
     focusRooms: focusRooms.value,
     accountRooms: options.accountRooms.value,
-    recentRootRooms: options.recentRootRooms.value,
   }));
 
   const pinnedRoom = computed<RoomEntry>(() => ({
@@ -225,6 +226,8 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     latestMessageId: currentParentRoom.value.latestMessageId,
     latestMessageAt: currentParentRoom.value.latestMessageAt,
     hasUnread: false,
+    pinned: currentParentRoom.value.pinned,
+    source: "current",
   }));
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);

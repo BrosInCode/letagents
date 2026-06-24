@@ -163,7 +163,10 @@ import {
   getAppAgentSettingsStatus,
   saveAppAgentSettings,
 } from "./app-agent/settings.js";
-import { runDesktopAppAgent } from "./app-agent/runner.js";
+import {
+  listDesktopAppAgentActions,
+  runDesktopAppAgent,
+} from "./app-agent/runner.js";
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
@@ -206,6 +209,10 @@ export function registerDesktopIpcHandlers(
       _event,
       input: DesktopAppAgentSaveSettingsInput,
     ): Promise<DesktopAppAgentSettingsStatus> => saveAppAgentSettings(input),
+  );
+  targetIpcMain.handle(
+    "desktop:app-agent:list-actions",
+    async () => listDesktopAppAgentActions(),
   );
   targetIpcMain.handle(
     "desktop:app-agent:run",

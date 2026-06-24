@@ -96,6 +96,7 @@ function makeSetupState(input: {
     latestMessageId: null,
     latestMessageAt: null,
     hasUnread: false,
+    pinned: false,
   }));
   const onboarding = useDesktopSetupOnboarding({
     activeEntry: ref<SidebarEntry>(setupEntry),

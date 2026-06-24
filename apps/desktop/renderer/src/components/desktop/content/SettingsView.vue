@@ -485,8 +485,8 @@
           />
 
           <SettingsRow
-            title="OpenRouter model"
-            description="Use a model slug that supports tool calling."
+            title="Planner model"
+            description="The model interprets intent and selects typed App Agent actions. Side effects still run through the app registry."
           >
             <label class="settings-field">
               <span>Model slug</span>
@@ -501,7 +501,7 @@
           </SettingsRow>
 
           <SettingsRow
-            title="OpenRouter API key"
+            title="Model provider key"
             :description="appAgentKeyDescription"
             :badge="appAgentSettings?.hasApiKey ? 'stored' : 'missing'"
             :badge-state="appAgentSettings?.hasApiKey ? 'connected' : 'offline'"
@@ -511,7 +511,7 @@
               <input
                 v-model="appAgentApiKeyDraft"
                 type="password"
-                :placeholder="appAgentSettings?.hasApiKey ? 'Leave blank to keep saved key' : 'OpenRouter API key'"
+                :placeholder="appAgentSettings?.hasApiKey ? 'Leave blank to keep saved key' : 'Provider API key'"
                 autocomplete="off"
                 data-testid="settings-app-agent-api-key"
               />
@@ -536,6 +536,55 @@
               </button>
             </template>
           </SettingsRow>
+        </div>
+
+        <div class="app-agent-registry-panel" data-testid="settings-app-agent-actions">
+          <header class="app-agent-registry-header">
+            <div>
+              <p class="settings-section-kicker">Capabilities</p>
+              <h3>What App Agent can do</h3>
+              <p>
+                Read-only view of the app actions this assistant can review and
+                run for you.
+              </p>
+            </div>
+            <span class="state-pill" data-state="installed">{{ appAgentActionCountLabel }}</span>
+          </header>
+
+          <div class="app-agent-action-list">
+            <article
+              v-for="action in sortedAppAgentActions"
+              :key="action.id"
+              class="app-agent-action-row"
+              :data-risk="action.risk"
+              :data-testid="`settings-app-agent-action-${slugify(action.id)}`"
+            >
+              <div class="app-agent-action-main">
+                <div class="app-agent-action-title-line">
+                  <div class="app-agent-action-title-copy">
+                    <strong>{{ actionDisplayName(action) }}</strong>
+                    <span>{{ actionCapabilityName(action) }} · {{ actionCategoryLabel(action.category) }}</span>
+                  </div>
+                  <div class="app-agent-action-policies">
+                    <span class="state-pill" :data-state="actionRiskState(action.risk)">
+                      {{ actionRiskLabel(action.risk) }}
+                    </span>
+                    <span class="state-pill" :data-state="action.requiresConfirmation ? 'starting' : 'connected'">
+                      {{ action.requiresConfirmation ? "Asks first" : "Runs directly" }}
+                    </span>
+                  </div>
+                </div>
+                <p>{{ actionDisplayDescription(action) }}</p>
+                <div class="app-agent-action-footer">
+                  <span>{{ actionRefreshTargetsLabel(action) }}</span>
+                </div>
+              </div>
+            </article>
+
+            <article v-if="!sortedAppAgentActions.length" class="surface-row single-line">
+              <p class="surface-title">No App Agent actions are registered.</p>
+            </article>
+          </div>
         </div>
 
         <p
@@ -686,6 +735,7 @@ import {
 import { computed, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
+  DesktopAppAgentActionMetadata,
   DesktopAppAgentSaveSettingsInput,
   DesktopAppAgentSettingsStatus,
   DesktopAuthStatus,
@@ -712,6 +762,7 @@ type RoomFilter = "active" | "pinned" | "created" | "joined";
 const props = defineProps<{
   accountRooms: DesktopAccountRoomEntry[];
   appInfo: DesktopAppInfo | null;
+  appAgentActions: DesktopAppAgentActionMetadata[];
   appAgentBusy: boolean;
   appAgentFeedback: SettingsFeedback | null;
   appAgentSettings: DesktopAppAgentSettingsStatus | null;
@@ -794,7 +845,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
     label: "System",
     items: [
       { id: "system:setup", title: "Setup", description: "Install LetAgents", icon: Wrench },
-      { id: "system:app-agent", title: "App Agent", description: "OpenRouter actions", icon: KeyRound },
+      { id: "system:app-agent", title: "App Agent", description: "App control", icon: KeyRound },
       { id: "system:runtime", title: "Runtime", description: "Repo and desktop state", icon: GitBranch },
       { id: "system:mcp", title: "MCP", description: "Connected apps", icon: ServerCog },
       { id: "system:agents", title: "Agents", description: "Status and availability", icon: Bot },
@@ -833,7 +884,7 @@ const activePaneDescription = computed(() => {
   if (activePane.value === "rooms:left") return "Restore rooms you previously left.";
   if (activePane.value === "storage:chat") return "Choose where room messages are stored before sync.";
   if (activePane.value === "rooms:danger") return "Review actions that remove access or delete rooms you created.";
-  if (activePane.value === "system:app-agent") return "Configure the OpenRouter model used by the floating App Agent.";
+  if (activePane.value === "system:app-agent") return "Configure the App Agent and see what it can do in the app.";
   return activePaneItem.value.description;
 });
 
@@ -973,10 +1024,20 @@ const appAgentBadgeState = computed(() =>
 const appAgentStatusDescription = computed(() => {
   if (props.appAgentSettings?.error) return props.appAgentSettings.error;
   if (props.appAgentSettings?.configured) {
-    return `Ready with ${props.appAgentSettings.model}.`;
+    return `Ready to control the app with ${props.appAgentSettings.model}.`;
   }
-  return "Add an OpenRouter key and model before running app actions.";
+  return "Add a tool-capable planner model before running app actions.";
 });
+
+const sortedAppAgentActions = computed(() =>
+  [...props.appAgentActions].sort((left, right) =>
+    `${left.category}:${actionDisplayName(left)}`.localeCompare(`${right.category}:${actionDisplayName(right)}`),
+  ),
+);
+
+const appAgentActionCountLabel = computed(() =>
+  `${props.appAgentActions.length} ${props.appAgentActions.length === 1 ? "action" : "actions"}`,
+);
 
 const appAgentSavedLabel = computed(() => {
   if (!props.appAgentSettings?.savedAt) return "never";
@@ -991,9 +1052,56 @@ const appAgentSavedLabel = computed(() => {
 });
 
 const appAgentKeyDescription = computed(() => {
-  if (!props.appAgentSettings?.savedAt) return "No key has been saved yet.";
+  if (!props.appAgentSettings?.savedAt) return "No provider key has been saved yet.";
   return `Last saved ${appAgentSavedLabel.value}.`;
 });
+
+function actionRiskState(risk: DesktopAppAgentActionMetadata["risk"]): string {
+  if (risk === "low") return "connected";
+  if (risk === "medium") return "starting";
+  return "failed";
+}
+
+function actionRiskLabel(risk: DesktopAppAgentActionMetadata["risk"]): string {
+  if (risk === "low") return "Low risk";
+  if (risk === "medium") return "Review first";
+  return "High risk";
+}
+
+function actionCategoryLabel(category: DesktopAppAgentActionMetadata["category"]): string {
+  return category === "rooms" ? "Rooms" : "Settings";
+}
+
+function actionDisplayName(action: DesktopAppAgentActionMetadata): string {
+  return action.displayName || readableActionId(action.id);
+}
+
+function actionCapabilityName(action: DesktopAppAgentActionMetadata): string {
+  return action.capabilityName || readableActionId(action.id);
+}
+
+function actionDisplayDescription(action: DesktopAppAgentActionMetadata): string {
+  return action.displayDescription || action.description;
+}
+
+function actionRefreshTargetsLabel(action: DesktopAppAgentActionMetadata): string {
+  const labels = action.refreshTargets.map((target) => {
+    if (target === "rooms") return "room list";
+    if (target === "active_room") return "current room";
+    if (target === "foreground") return "visible app state";
+    return "settings";
+  });
+  return labels.length
+    ? `Updates ${labels.join(", ")} after it runs.`
+    : "No visible update after it runs.";
+}
+
+function readableActionId(actionId: string): string {
+  return actionId
+    .replace(/^[^.]+\./, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 watch(
   () => props.initialPane,

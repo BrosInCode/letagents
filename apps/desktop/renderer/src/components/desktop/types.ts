@@ -11,6 +11,8 @@ export type RoomEntry = {
   latestMessageId: string | null;
   latestMessageAt: string | null;
   hasUnread: boolean;
+  pinned: boolean;
+  source: "current" | "account" | "recent";
 };
 
 export type SystemEntry = {

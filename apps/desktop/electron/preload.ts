@@ -19,6 +19,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:app-agent:get-settings-status"),
     saveSettings: (input) =>
       ipcRenderer.invoke("desktop:app-agent:save-settings", input),
+    listActions: () => ipcRenderer.invoke("desktop:app-agent:list-actions"),
     run: (input) => ipcRenderer.invoke("desktop:app-agent:run", input),
   },
   room: {

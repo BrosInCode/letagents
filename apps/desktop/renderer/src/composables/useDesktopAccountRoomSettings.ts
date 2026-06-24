@@ -28,6 +28,7 @@ interface DesktopAccountRoomSettingsOptions {
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
   refresh: () => Promise<void>;
   refreshAccountRooms: () => Promise<void>;
+  onRoomArchived?: (roomIdentifier: string, displayName?: string | null) => Promise<void>;
 }
 
 export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSettingsOptions) {
@@ -146,8 +147,9 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       if (isAccountRoom) {
         await window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { archived: true });
       }
-      forgetRecentRootRoom(roomIdentifier);
+      forgetRecentRootRoom(roomIdentifier, displayName);
       await options.refreshAccountRooms();
+      await options.onRoomArchived?.(roomIdentifier, displayName);
       settingsFeedback.value = {
         message: isAccountRoom ? `${displayName} archived.` : `${displayName} hidden from recent rooms.`,
         state: "success",
@@ -206,11 +208,20 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     return `${action}:${room.roomIdentifier}`;
   }
 
-  function forgetRecentRootRoom(roomIdentifier: string): void {
-    const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
-    if (!normalizedRoomIdentifier) return;
+  function forgetRecentRootRoom(
+    roomIdentifier: string,
+    displayName?: string | null,
+  ): void {
+    const aliases = new Set(
+      [roomIdentifier, displayName]
+        .map(normalizeRoomIdentifier)
+        .filter((value): value is string => Boolean(value)),
+    );
+    if (!aliases.size) return;
     const nextRecentRooms = options.recentRootRooms.value.filter(
-      (room) => normalizeRoomIdentifier(room.identifier) !== normalizedRoomIdentifier
+      (room) =>
+        !aliases.has(normalizeRoomIdentifier(room.identifier) || "") &&
+        !aliases.has(normalizeRoomIdentifier(room.displayName) || "")
     );
     options.recentRootRooms.value = nextRecentRooms;
     rememberRecentRootRooms(options.recentRootRoomsStorageKey, nextRecentRooms);

@@ -1,6 +1,7 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopAppInfo, DiagnosticsSnapshot, RepoStatus, WorkerSnapshot } from "./core.js";
 import type {
+  DesktopAppAgentActionMetadata,
   DesktopAppAgentRunInput,
   DesktopAppAgentRunResult,
   DesktopAppAgentSaveSettingsInput,
@@ -70,6 +71,7 @@ export interface DesktopApi {
   appAgent: {
     getSettingsStatus: () => Promise<DesktopAppAgentSettingsStatus>;
     saveSettings: (input: DesktopAppAgentSaveSettingsInput) => Promise<DesktopAppAgentSettingsStatus>;
+    listActions: () => Promise<DesktopAppAgentActionMetadata[]>;
     run: (input: DesktopAppAgentRunInput) => Promise<DesktopAppAgentRunResult>;
   };
   room: {

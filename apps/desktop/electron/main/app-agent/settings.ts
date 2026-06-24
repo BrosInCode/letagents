@@ -82,7 +82,9 @@ function encryptSecret(
   secretStorage: AppAgentSecretStorage,
 ): string | null {
   if (!value) return null;
-  if (!secretStorage.isEncryptionAvailable()) return `plain:${value}`;
+  if (!secretStorage.isEncryptionAvailable()) {
+    throw new Error("Secure credential storage is unavailable, so the OpenRouter API key was not saved.");
+  }
   return `safe:${secretStorage.encryptString(value).toString("base64")}`;
 }
 
