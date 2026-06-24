@@ -11,10 +11,18 @@ export type RoomEntry = {
   latestMessageId: string | null;
   latestMessageAt: string | null;
   hasUnread: boolean;
+  pinned: boolean;
+  source: "current" | "account" | "recent";
 };
 
 export type SystemEntry = {
-  id: "system:setup" | "system:repos" | "system:workers" | "system:settings" | "system:diagnostics";
+  id:
+    | "system:setup"
+    | "system:app-agent"
+    | "system:repos"
+    | "system:workers"
+    | "system:settings"
+    | "system:diagnostics";
   type: "system";
   title: string;
   description: string;

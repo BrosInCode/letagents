@@ -475,6 +475,128 @@
         />
       </section>
 
+      <section v-else-if="activePane === 'system:app-agent'" class="settings-panel" data-testid="settings-app-agent-panel">
+        <div class="settings-control-list">
+          <SettingsRow
+            title="App Agent"
+            :description="appAgentStatusDescription"
+            :badge="appAgentStatusLabel"
+            :badge-state="appAgentBadgeState"
+          />
+
+          <SettingsRow
+            title="Planner model"
+            description="The model interprets intent and selects typed App Agent actions. Side effects still run through the app registry."
+          >
+            <label class="settings-field">
+              <span>Model slug</span>
+              <input
+                v-model="appAgentModelDraft"
+                type="text"
+                placeholder="anthropic/claude-3.5-sonnet"
+                autocomplete="off"
+                data-testid="settings-app-agent-model"
+              />
+            </label>
+          </SettingsRow>
+
+          <SettingsRow
+            title="Model provider key"
+            :description="appAgentKeyDescription"
+            :badge="appAgentSettings?.hasApiKey ? 'stored' : 'missing'"
+            :badge-state="appAgentSettings?.hasApiKey ? 'connected' : 'offline'"
+          >
+            <label class="settings-field">
+              <span>API key</span>
+              <input
+                v-model="appAgentApiKeyDraft"
+                type="password"
+                :placeholder="appAgentSettings?.hasApiKey ? 'Leave blank to keep saved key' : 'Provider API key'"
+                autocomplete="off"
+                data-testid="settings-app-agent-api-key"
+              />
+            </label>
+          </SettingsRow>
+
+          <SettingsRow
+            title="Settings file"
+            description="The key is encrypted before it is written when Electron secure storage is available."
+          >
+            <code>{{ appAgentSettings?.settingsPath || "Settings path unavailable" }}</code>
+            <template #action>
+              <button
+                class="primary-button settings-action-button"
+                type="button"
+                :disabled="appAgentBusy"
+                data-testid="settings-app-agent-save"
+                @click="saveAppAgentSettings"
+              >
+                <Save aria-hidden="true" />
+                <span>{{ appAgentBusy ? "Saving" : "Save" }}</span>
+              </button>
+            </template>
+          </SettingsRow>
+        </div>
+
+        <div class="app-agent-registry-panel" data-testid="settings-app-agent-actions">
+          <header class="app-agent-registry-header">
+            <div>
+              <p class="settings-section-kicker">Capabilities</p>
+              <h3>What App Agent can do</h3>
+              <p>
+                Read-only view of the app actions this assistant can review and
+                run for you.
+              </p>
+            </div>
+            <span class="state-pill" data-state="installed">{{ appAgentActionCountLabel }}</span>
+          </header>
+
+          <div class="app-agent-action-list">
+            <article
+              v-for="action in sortedAppAgentActions"
+              :key="action.id"
+              class="app-agent-action-row"
+              :data-risk="action.risk"
+              :data-testid="`settings-app-agent-action-${slugify(action.id)}`"
+            >
+              <div class="app-agent-action-main">
+                <div class="app-agent-action-title-line">
+                  <div class="app-agent-action-title-copy">
+                    <strong>{{ actionDisplayName(action) }}</strong>
+                    <span>{{ actionCapabilityName(action) }} · {{ actionCategoryLabel(action.category) }}</span>
+                  </div>
+                  <div class="app-agent-action-policies">
+                    <span class="state-pill" :data-state="actionRiskState(action.risk)">
+                      {{ actionRiskLabel(action.risk) }}
+                    </span>
+                    <span class="state-pill" :data-state="action.requiresConfirmation ? 'starting' : 'connected'">
+                      {{ action.requiresConfirmation ? "Asks first" : "Runs directly" }}
+                    </span>
+                  </div>
+                </div>
+                <p>{{ actionDisplayDescription(action) }}</p>
+                <div class="app-agent-action-footer">
+                  <span>{{ actionRefreshTargetsLabel(action) }}</span>
+                </div>
+              </div>
+            </article>
+
+            <article v-if="!sortedAppAgentActions.length" class="surface-row single-line">
+              <p class="surface-title">No App Agent actions are registered.</p>
+            </article>
+          </div>
+        </div>
+
+        <p
+          v-if="appAgentFeedback"
+          class="settings-feedback"
+          :data-state="appAgentFeedback.state"
+          data-testid="settings-app-agent-feedback"
+        >
+          {{ appAgentFeedback.message }}
+        </p>
+      </section>
+
       <section v-else-if="activePane === 'system:runtime'" class="settings-panel" data-testid="settings-runtime-panel">
         <div class="settings-control-list">
           <SettingsRow title="Desktop runtime" :description="apiEndpointLabel" badge="local" badge-state="connected">
@@ -599,10 +721,12 @@ import {
   Database,
   GitBranch,
   HardDrive,
+  KeyRound,
   LogIn,
   LogOut,
   Pin,
   RefreshCw,
+  Save,
   ServerCog,
   SlidersHorizontal,
   Trash2,
@@ -611,6 +735,9 @@ import {
 import { computed, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
+  DesktopAppAgentActionMetadata,
+  DesktopAppAgentSaveSettingsInput,
+  DesktopAppAgentSettingsStatus,
   DesktopAuthStatus,
   DesktopAppInfo,
   DesktopChatStorageSettings,
@@ -635,6 +762,10 @@ type RoomFilter = "active" | "pinned" | "created" | "joined";
 const props = defineProps<{
   accountRooms: DesktopAccountRoomEntry[];
   appInfo: DesktopAppInfo | null;
+  appAgentActions: DesktopAppAgentActionMetadata[];
+  appAgentBusy: boolean;
+  appAgentFeedback: SettingsFeedback | null;
+  appAgentSettings: DesktopAppAgentSettingsStatus | null;
   authStatus: DesktopAuthStatus | null;
   busy: boolean;
   chatStorageAvailable: boolean;
@@ -656,7 +787,7 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "back-mcp": [];
   "back-to-app": [];
   "clear-mcp-target-selection": [];
@@ -669,6 +800,7 @@ defineEmits<{
   "restore-room": [room: DesktopAccountRoomEntry];
   "select-all-mcp-targets": [];
   "select-mcp-target": [targetId: DesktopMcpInstallTargetId];
+  "save-app-agent-settings": [input: DesktopAppAgentSaveSettingsInput];
   "set-chat-storage-mode": [mode: DesktopChatStorageSettings["mode"]];
   "sync-local-chat": [];
   "toggle-pin-room": [room: DesktopAccountRoomEntry];
@@ -683,6 +815,8 @@ const copiedText = ref<string | null>(null);
 const roomFilter = ref<RoomFilter>("active");
 const roomSearch = ref("");
 const selectedRoomDetailIdentifier = ref<string | null>(null);
+const appAgentModelDraft = ref("");
+const appAgentApiKeyDraft = ref("");
 
 const settingsNavGroups: SettingsNavGroup[] = [
   {
@@ -711,6 +845,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
     label: "System",
     items: [
       { id: "system:setup", title: "Setup", description: "Install LetAgents", icon: Wrench },
+      { id: "system:app-agent", title: "App Agent", description: "App control", icon: KeyRound },
       { id: "system:runtime", title: "Runtime", description: "Repo and desktop state", icon: GitBranch },
       { id: "system:mcp", title: "MCP", description: "Connected apps", icon: ServerCog },
       { id: "system:agents", title: "Agents", description: "Status and availability", icon: Bot },
@@ -749,6 +884,7 @@ const activePaneDescription = computed(() => {
   if (activePane.value === "rooms:left") return "Restore rooms you previously left.";
   if (activePane.value === "storage:chat") return "Choose where room messages are stored before sync.";
   if (activePane.value === "rooms:danger") return "Review actions that remove access or delete rooms you created.";
+  if (activePane.value === "system:app-agent") return "Configure the App Agent and see what it can do in the app.";
   return activePaneItem.value.description;
 });
 
@@ -877,6 +1013,96 @@ const chatStorageSavedLabel = computed(() => {
   }).format(timestamp);
 });
 
+const appAgentStatusLabel = computed(() =>
+  props.appAgentSettings?.configured ? "configured" : "setup needed",
+);
+
+const appAgentBadgeState = computed(() =>
+  props.appAgentSettings?.configured ? "connected" : "offline",
+);
+
+const appAgentStatusDescription = computed(() => {
+  if (props.appAgentSettings?.error) return props.appAgentSettings.error;
+  if (props.appAgentSettings?.configured) {
+    return `Ready to control the app with ${props.appAgentSettings.model}.`;
+  }
+  return "Add a tool-capable planner model before running app actions.";
+});
+
+const sortedAppAgentActions = computed(() =>
+  [...props.appAgentActions].sort((left, right) =>
+    `${left.category}:${actionDisplayName(left)}`.localeCompare(`${right.category}:${actionDisplayName(right)}`),
+  ),
+);
+
+const appAgentActionCountLabel = computed(() =>
+  `${props.appAgentActions.length} ${props.appAgentActions.length === 1 ? "action" : "actions"}`,
+);
+
+const appAgentSavedLabel = computed(() => {
+  if (!props.appAgentSettings?.savedAt) return "never";
+  const timestamp = new Date(props.appAgentSettings.savedAt);
+  if (Number.isNaN(timestamp.getTime())) return "recently";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(timestamp);
+});
+
+const appAgentKeyDescription = computed(() => {
+  if (!props.appAgentSettings?.savedAt) return "No provider key has been saved yet.";
+  return `Last saved ${appAgentSavedLabel.value}.`;
+});
+
+function actionRiskState(risk: DesktopAppAgentActionMetadata["risk"]): string {
+  if (risk === "low") return "connected";
+  if (risk === "medium") return "starting";
+  return "failed";
+}
+
+function actionRiskLabel(risk: DesktopAppAgentActionMetadata["risk"]): string {
+  if (risk === "low") return "Low risk";
+  if (risk === "medium") return "Review first";
+  return "High risk";
+}
+
+function actionCategoryLabel(category: DesktopAppAgentActionMetadata["category"]): string {
+  return category === "rooms" ? "Rooms" : "Settings";
+}
+
+function actionDisplayName(action: DesktopAppAgentActionMetadata): string {
+  return action.displayName || readableActionId(action.id);
+}
+
+function actionCapabilityName(action: DesktopAppAgentActionMetadata): string {
+  return action.capabilityName || readableActionId(action.id);
+}
+
+function actionDisplayDescription(action: DesktopAppAgentActionMetadata): string {
+  return action.displayDescription || action.description;
+}
+
+function actionRefreshTargetsLabel(action: DesktopAppAgentActionMetadata): string {
+  const labels = action.refreshTargets.map((target) => {
+    if (target === "rooms") return "room list";
+    if (target === "active_room") return "current room";
+    if (target === "foreground") return "visible app state";
+    return "settings";
+  });
+  return labels.length
+    ? `Updates ${labels.join(", ")} after it runs.`
+    : "No visible update after it runs.";
+}
+
+function readableActionId(actionId: string): string {
+  return actionId
+    .replace(/^[^.]+\./, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 watch(
   () => props.initialPane,
   (nextPane) => {
@@ -885,9 +1111,25 @@ watch(
   }
 );
 
+watch(
+  () => props.appAgentSettings?.model,
+  (model) => {
+    appAgentModelDraft.value = model || "";
+    appAgentApiKeyDraft.value = "";
+  },
+  { immediate: true },
+);
+
 function selectPane(paneId: SettingsPaneId): void {
   activePane.value = paneId;
   selectedRoomDetailIdentifier.value = null;
+}
+
+function saveAppAgentSettings(): void {
+  emit("save-app-agent-settings", {
+    model: appAgentModelDraft.value,
+    openRouterApiKey: appAgentApiKeyDraft.value.trim() || undefined,
+  });
 }
 
 function actionKey(action: "delete" | "leave" | "pin" | "restore", room: DesktopAccountRoomEntry): string {

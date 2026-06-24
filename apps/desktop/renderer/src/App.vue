@@ -160,6 +160,10 @@
         v-if="activeEntry.type !== 'room'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
+        :app-agent-actions="appAgentActions"
+        :app-agent-busy="appAgentBusy"
+        :app-agent-feedback="appAgentFeedback"
+        :app-agent-settings="appAgentSettingsStatus"
         :auth-status="authStatus"
         :busy="loading || authBusy"
         :chat-storage-busy="chatStorageBusy"
@@ -191,15 +195,28 @@
         @restore-room="restoreAccountRoom"
         @select-all-mcp-targets="selectAllMcpTargets"
         @select-mcp-target="selectMcpTarget"
+        @save-app-agent-settings="saveAppAgentSettings"
         @set-chat-storage-mode="setChatStorageMode"
         @sync-local-chat="syncLocalChat"
         @toggle-pin-room="toggleAccountRoomPin"
-        @refresh="refreshSettings"
+        @refresh="refreshSettingsSurface"
         @sign-out="signOut"
         @start-auth="startAuthFlow"
       />
 
     </section>
+
+    <DesktopAppAgent
+      :active-room-display-name="selectedRoomInfo.displayName || activeEntry.title"
+      :active-room-identifier="selectedRoomIdentifier || selectedRootRoomIdentifier"
+      :active-room-pinned="activeEntry.type === 'room' && activeEntry.pinned"
+      :busy="appAgentBusy"
+      :result="appAgentResult"
+      :settings-status="appAgentSettingsStatus"
+      @clear-result="appAgentResult = null"
+      @open-settings="openAppAgentSettings"
+      @run="runAppAgent"
+    />
 
     <DesktopNewRoomModal
       v-if="newRoomModalOpen"
@@ -222,6 +239,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
+  DesktopAppAgentActionMetadata,
+  DesktopAppAgentRunInput,
+  DesktopAppAgentRunResult,
+  DesktopAppAgentSaveSettingsInput,
+  DesktopAppAgentSettingsStatus,
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopChatStorageSettings,
@@ -238,6 +260,7 @@ import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
@@ -251,7 +274,7 @@ import { useDesktopNavigationState } from "./composables/useDesktopNavigationSta
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
-import { settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   hasUnreadRoomActivity,
@@ -263,7 +286,12 @@ import {
 import {
   normalizeRoomIdentifier,
   readStoredRecentRootRooms,
+  rememberRecentRootRooms,
 } from "./domain/sidebar-rooms";
+import {
+  appAgentArchivedRoomIdentifiers,
+  appAgentRefreshTargets,
+} from "./domain/app-agent";
 
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
@@ -294,6 +322,11 @@ const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
 const chatStorageAvailable = ref(true);
 const chatStorageBusy = ref(false);
 const chatStorageFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
+const appAgentSettingsStatus = ref<DesktopAppAgentSettingsStatus | null>(null);
+const appAgentActions = ref<DesktopAppAgentActionMetadata[]>([]);
+const appAgentBusy = ref(false);
+const appAgentResult = ref<DesktopAppAgentRunResult | null>(null);
+const appAgentFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
 const diagnostics = ref<DiagnosticsSnapshot | null>(null);
 const mcpInstallState = ref<DesktopMcpInstallState | null>(null);
 const selectedMcpTargetIds = ref<DesktopMcpInstallTargetId[]>([]);
@@ -383,6 +416,7 @@ const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
   if (activeEntry.value.type !== "system") return "storage:chat";
   if (activeEntry.value.id === "system:setup") return "system:setup";
+  if (activeEntry.value.id === "system:app-agent") return "system:app-agent";
   if (activeEntry.value.id === "system:repos") return "system:runtime";
   if (activeEntry.value.id === "system:workers") return "system:agents";
   if (activeEntry.value.id === "system:diagnostics") return "system:diagnostics";
@@ -620,6 +654,8 @@ function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
     latestMessageId: null,
     latestMessageAt: null,
     hasUnread: false,
+    pinned: false,
+    source: "account",
   };
   handleSidebarEntrySelected(fallbackEntry);
 }
@@ -772,6 +808,9 @@ const {
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   refresh: () => refresh(),
   refreshAccountRooms: () => refreshAccountRooms(),
+  onRoomArchived: async (roomIdentifier, displayName) => {
+    await leaveArchivedRoomIfActive(roomIdentifier, displayName);
+  },
 });
 
 const {
@@ -846,6 +885,281 @@ async function loadChatStorageSettings(): Promise<void> {
           ? error.message
           : "Chat storage settings could not be loaded.",
     };
+  }
+}
+
+async function loadAppAgentSettingsStatus(): Promise<void> {
+  try {
+    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.getSettingsStatus();
+  } catch (error) {
+    appAgentFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "App Agent settings could not be loaded.",
+    };
+  }
+}
+
+async function loadAppAgentActions(): Promise<void> {
+  try {
+    appAgentActions.value = await window.letagentsDesktop.appAgent.listActions();
+  } catch (error) {
+    appAgentFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "App Agent actions could not be loaded.",
+    };
+  }
+}
+
+async function saveAppAgentSettings(input: DesktopAppAgentSaveSettingsInput): Promise<void> {
+  appAgentBusy.value = true;
+  appAgentFeedback.value = null;
+  try {
+    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.saveSettings(input);
+    appAgentFeedback.value = {
+      state: "success",
+      message: "App Agent settings saved.",
+    };
+  } catch (error) {
+    appAgentFeedback.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "App Agent settings could not be saved.",
+    };
+  } finally {
+    appAgentBusy.value = false;
+  }
+}
+
+async function refreshSettingsSurface(): Promise<void> {
+  await Promise.all([
+    refreshSettings(),
+    loadAppAgentSettingsStatus(),
+    loadAppAgentActions(),
+  ]);
+}
+
+function openAppAgentSettings(): void {
+  activeEntry.value = appAgentEntry;
+}
+
+async function runAppAgent(input: DesktopAppAgentRunInput): Promise<void> {
+  appAgentBusy.value = true;
+  appAgentResult.value = null;
+  try {
+    const runInput: DesktopAppAgentRunInput = {
+      ...input,
+      activeRoomDisplayName:
+        input.activeRoomDisplayName || selectedRoomInfo.value.displayName || activeEntry.value.title,
+      activeRoomIdentifier:
+        input.activeRoomIdentifier || selectedRoomIdentifier.value || selectedRootRoomIdentifier.value,
+      activeRoomPinned:
+        input.activeRoomPinned === true || (activeEntry.value.type === "room" && activeEntry.value.pinned),
+    };
+    const result = await window.letagentsDesktop.appAgent.run(runInput);
+    appAgentResult.value = result;
+    if (result.settingsStatus) {
+      appAgentSettingsStatus.value = result.settingsStatus;
+    }
+    const refreshTargets = appAgentRefreshTargets(result);
+    if (refreshTargets.includes("rooms")) {
+      await refreshAccountRooms();
+    }
+    const archivedActiveRoom =
+      await leaveArchivedActiveRoomAfterAppAgent(result, runInput, {
+        deferNavigation: Boolean(result.openRoomIdentifier),
+      }) ||
+      await leaveArchivedSelectedRoomFromSettingsList();
+    if (result.openRoomIdentifier) {
+      await openRoomFromAppAgent(result.openRoomIdentifier);
+    }
+    if (refreshTargets.includes("settings")) {
+      await Promise.all([
+        refreshSettingsSurface(),
+        loadChatStorageSettings(),
+      ]);
+    }
+    if (refreshTargets.includes("active_room") && !archivedActiveRoom) {
+      await refreshSelectedSnapshot(rootRoomSnapshot.value);
+    }
+    if (refreshTargets.includes("foreground")) {
+      refreshForegroundData();
+    }
+  } catch (error) {
+    appAgentResult.value = {
+      state: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "The App Agent could not complete that request.",
+    };
+  } finally {
+    appAgentBusy.value = false;
+  }
+}
+
+async function leaveArchivedActiveRoomAfterAppAgent(
+  result: DesktopAppAgentRunResult,
+  input: DesktopAppAgentRunInput,
+  options: { deferNavigation?: boolean } = {},
+): Promise<boolean> {
+  const archivedAliases = new Set(appAgentArchivedRoomIdentifiers(result));
+  if (!archivedAliases.size) return false;
+  forgetRecentRootRoomAliases(archivedAliases);
+
+  const activeAliases = currentActiveRoomAliases(input);
+  if (![...archivedAliases].some((alias) => activeAliases.has(alias))) {
+    return false;
+  }
+
+  for (const alias of activeAliases) {
+    archivedAliases.add(alias);
+  }
+  forgetRecentRootRoomAliases(archivedAliases);
+  if (options.deferNavigation) {
+    rootRoomSnapshot.value = null;
+    selectedSnapshot.value = null;
+    selectedRootRoomIdentifier.value = null;
+    return true;
+  }
+  await leaveArchivedActiveRoom(archivedAliases);
+  return true;
+}
+
+async function leaveArchivedRoomIfActive(
+  roomIdentifier: string,
+  displayName?: string | null,
+): Promise<boolean> {
+  const archivedAliases = roomAliasSet([roomIdentifier, displayName]);
+  if (!archivedAliases.size) return false;
+  forgetRecentRootRoomAliases(archivedAliases);
+  const activeAliases = currentActiveRoomAliases();
+  if (![...archivedAliases].some((alias) => activeAliases.has(alias))) {
+    return false;
+  }
+  for (const alias of activeAliases) {
+    archivedAliases.add(alias);
+  }
+  forgetRecentRootRoomAliases(archivedAliases);
+  await leaveArchivedActiveRoom(archivedAliases);
+  return true;
+}
+
+async function leaveArchivedSelectedRoomFromSettingsList(): Promise<boolean> {
+  if (activeEntry.value.type !== "room") return false;
+  const activeAliases = currentActiveRoomAliases();
+  const archivedRoom = settingsAccountRooms.value.find(
+    (room) => room.archived && roomMatchesAliases(room, activeAliases),
+  ) || null;
+  if (!archivedRoom) return false;
+
+  const archivedAliases = roomAliasSet([
+    archivedRoom.roomIdentifier,
+    archivedRoom.displayName,
+    archivedRoom.name,
+  ]);
+  for (const alias of activeAliases) {
+    archivedAliases.add(alias);
+  }
+  forgetRecentRootRoomAliases(archivedAliases);
+  await leaveArchivedActiveRoom(archivedAliases);
+  return true;
+}
+
+async function leaveArchivedActiveRoom(archivedAliases: Set<string>): Promise<void> {
+  const nextRoom = accountRooms.value.find(
+    (room) => !room.archived && !roomMatchesAliases(room, archivedAliases),
+  ) || null;
+  if (nextRoom) {
+    await openRoomFromAppAgent(nextRoom.roomIdentifier);
+    return;
+  }
+
+  rootRoomSnapshot.value = null;
+  selectedSnapshot.value = null;
+  selectedRootRoomIdentifier.value = null;
+  activeEntry.value = settingsEntry;
+}
+
+function currentActiveRoomAliases(input?: Partial<DesktopAppAgentRunInput>): Set<string> {
+  return roomAliasSet([
+    input?.activeRoomIdentifier,
+    input?.activeRoomDisplayName,
+    selectedRoomIdentifier.value,
+    selectedRootRoomIdentifier.value,
+    selectedRoomInfo.value.identifier,
+    selectedRoomInfo.value.displayName,
+    selectedRoomInfo.value.name,
+    selectedRoomInfo.value.code,
+    selectedSnapshot.value?.roomIdentifier,
+    selectedSnapshot.value?.access.roomIdentifier,
+    selectedSnapshot.value?.access.code,
+    selectedSnapshot.value?.room?.identifier,
+    selectedSnapshot.value?.room?.displayName,
+    selectedSnapshot.value?.room?.name,
+    selectedSnapshot.value?.room?.code,
+    rootRoomSnapshot.value?.roomIdentifier,
+    rootRoomSnapshot.value?.access.roomIdentifier,
+    rootRoomSnapshot.value?.access.code,
+    rootRoomSnapshot.value?.room?.identifier,
+    rootRoomSnapshot.value?.room?.displayName,
+    rootRoomSnapshot.value?.room?.name,
+    rootRoomSnapshot.value?.room?.code,
+    activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
+    activeEntry.value.title,
+  ]);
+}
+
+function roomAliasSet(values: readonly (string | null | undefined)[]): Set<string> {
+  return new Set(
+    values
+      .map(normalizeRoomIdentifier)
+      .filter((value): value is string => Boolean(value)),
+  );
+}
+
+function roomMatchesAliases(room: DesktopAccountRoomEntry, aliases: Set<string>): boolean {
+  return [
+    room.roomIdentifier,
+    room.displayName,
+    room.name,
+  ].some((value) => aliases.has(normalizeRoomIdentifier(value) || ""));
+}
+
+function forgetRecentRootRoomAliases(aliases: Set<string>): void {
+  if (!aliases.size) return;
+  const nextRecentRooms = recentRootRooms.value.filter(
+    (room) =>
+      !aliases.has(normalizeRoomIdentifier(room.identifier) || "") &&
+      !aliases.has(normalizeRoomIdentifier(room.displayName) || ""),
+  );
+  if (nextRecentRooms.length === recentRootRooms.value.length) return;
+  recentRootRooms.value = nextRecentRooms;
+  rememberRecentRootRooms(recentRootRoomsStorageKey, nextRecentRooms);
+}
+
+async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
+  const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!normalizedIdentifier) return;
+  const knownRoom = [...accountRooms.value, ...settingsAccountRooms.value]
+    .find((room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier);
+  loading.value = true;
+  try {
+    const snapshot = await window.letagentsDesktop.room.getSnapshot(normalizedIdentifier);
+    openRoomSnapshot(snapshot, {
+      kind: "room",
+      rootPath: null,
+      meta: knownRoom?.role === "admin" ? "Admin" : "Account room",
+    });
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -986,6 +1300,18 @@ watch(
 );
 
 watch(
+  [
+    () => settingsAccountRooms.value,
+    () => selectedRootRoomIdentifier.value,
+    () => rootRoomSnapshot.value?.roomIdentifier || null,
+  ],
+  () => {
+    void leaveArchivedSelectedRoomFromSettingsList();
+  },
+  { deep: true, immediate: true }
+);
+
+watch(
   () => selectedRoomIdentifier.value,
   (roomIdentifier) => {
     void syncSelectedRoomStream(roomIdentifier);
@@ -1021,6 +1347,8 @@ onMounted(() => {
   window.addEventListener("focus", handleWindowFocus);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   void loadChatStorageSettings();
+  void loadAppAgentSettingsStatus();
+  void loadAppAgentActions();
   void loadFirstRunSetup();
 });
 

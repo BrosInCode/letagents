@@ -274,6 +274,72 @@ describe("useDesktopNavigationState", () => {
 
     assert.equal(resolveAccountRoomAliasIdentifier("shared-name", rooms), null);
   });
+
+  it("marks pinned account rooms and orders them above unpinned sidebar rooms", () => {
+    withLocalStorage(() => {
+      const accountRooms = ref<DesktopAccountRoomEntry[]>([
+        accountRoom("room_unpinned", "Unpinned room"),
+        accountRoom("room_pinned", "Pinned room", { pinned: true }),
+      ]);
+      const state = useDesktopNavigationState({
+        accountRooms,
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(null),
+        selectedRootRoomIdentifier: ref<string | null>(null),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      assert.equal(state.projectEntries.value[0].parent.title, "Pinned room");
+      assert.equal(state.projectEntries.value[0].parent.pinned, true);
+      assert.equal(state.projectEntries.value.some((project) => project.parent.title === "Unpinned room"), true);
+    });
+  });
+
+  it("does not render cached recent rooms as sidebar room rows", () => {
+    withLocalStorage(() => {
+      const state = useDesktopNavigationState({
+        accountRooms: ref<DesktopAccountRoomEntry[]>([
+          accountRoom("room_live", "Live room"),
+        ]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([{
+          identifier: "room_cached",
+          kind: "room",
+          rootPath: null,
+          displayName: "Cached room",
+          meta: "Temporary room",
+          updatedAt: "2026-06-07T00:00:00.000Z",
+        }]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(null),
+        selectedRootRoomIdentifier: ref<string | null>(null),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      const roomNames = state.projectEntries.value.map((project) => project.parent.title);
+
+      assert.equal(roomNames.includes("Live room"), true);
+      assert.equal(roomNames.includes("Cached room"), false);
+    });
+  });
 });
 
 function roomSnapshot(
@@ -334,7 +400,11 @@ function roomSnapshot(
   };
 }
 
-function accountRoom(roomIdentifier: string, displayName: string): DesktopAccountRoomEntry {
+function accountRoom(
+  roomIdentifier: string,
+  displayName: string,
+  options: { pinned?: boolean } = {},
+): DesktopAccountRoomEntry {
   return {
     roomIdentifier,
     displayName,
@@ -346,7 +416,7 @@ function accountRoom(roomIdentifier: string, displayName: string): DesktopAccoun
     focusStatus: null,
     role: "admin",
     source: null,
-    pinned: false,
+    pinned: options.pinned || false,
     archived: false,
     canLeave: true,
     canDelete: false,

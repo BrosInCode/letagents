@@ -417,11 +417,16 @@ export async function getLocalRoomByCloudRoom(
 }
 
 export async function listLocalRoomEntries(
-  options: { linkedIdentity?: "local" | "cloud" } = {},
+  options: { includeArchived?: boolean; linkedIdentity?: "local" | "cloud" } = {},
 ): Promise<DesktopAccountRoomEntry[]> {
   const database = await getDb();
   const rows = database
-    .prepare("SELECT * FROM local_rooms WHERE archived_at IS NULL ORDER BY updated_at DESC")
+    .prepare(`
+      SELECT *
+      FROM local_rooms
+      ${options.includeArchived ? "" : "WHERE archived_at IS NULL"}
+      ORDER BY updated_at DESC
+    `)
     .all()
     .map(mapRoomRow);
   return rows.map((row) => ({
@@ -439,7 +444,7 @@ export async function listLocalRoomEntries(
     role: "admin",
     source: "local",
     pinned: Boolean(row.pinned_at),
-    archived: false,
+    archived: Boolean(row.archived_at),
     canLeave: false,
     canDelete: true,
     deleteReason: null,
@@ -457,20 +462,47 @@ export async function archiveLocalRoom(
   return setLocalRoomArchived(roomIdentifier, true);
 }
 
-async function getLocalRoomIncludingArchived(
+export async function getLocalRoomIncludingArchived(
   roomIdentifier: string,
 ): Promise<DesktopLocalRoomInfo | null> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  if (!trimmedRoomIdentifier) return null;
   const database = await getDb();
   const row = database
     .prepare(`
       SELECT *
       FROM local_rooms
-      WHERE room_id = ? OR cloud_room_id = ?
+      WHERE room_id = ?
       ORDER BY updated_at DESC
       LIMIT 1
     `)
-    .get(roomIdentifier, roomIdentifier);
+    .get(trimmedRoomIdentifier);
   return row ? toLocalRoomInfo(mapRoomRow(row)) : null;
+}
+
+export async function getLocalRoomByCloudRoomIncludingArchived(
+  cloudRoomIdentifier: string,
+): Promise<DesktopLocalRoomInfo | null> {
+  const trimmedRoomIdentifier = cloudRoomIdentifier.trim();
+  if (!trimmedRoomIdentifier) return null;
+  const database = await getDb();
+  const row = database
+    .prepare(`
+      SELECT *
+      FROM local_rooms
+      WHERE cloud_room_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `)
+    .get(trimmedRoomIdentifier);
+  return row ? toLocalRoomInfo(mapRoomRow(row)) : null;
+}
+
+async function getLocalRoomForMutationIncludingArchived(
+  roomIdentifier: string,
+): Promise<DesktopLocalRoomInfo | null> {
+  return await getLocalRoomIncludingArchived(roomIdentifier)
+    || await getLocalRoomByCloudRoomIncludingArchived(roomIdentifier);
 }
 
 export async function updateLocalRoomDisplayName(
@@ -504,7 +536,7 @@ export async function setLocalRoomArchived(
 ): Promise<boolean> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) return false;
-  const room = await getLocalRoomIncludingArchived(trimmedRoomIdentifier);
+  const room = await getLocalRoomForMutationIncludingArchived(trimmedRoomIdentifier);
   if (!room) return false;
   const database = await getDb();
   const now = new Date().toISOString();
@@ -524,7 +556,7 @@ export async function setLocalRoomPinned(
 ): Promise<boolean> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   if (!trimmedRoomIdentifier) return false;
-  const room = await getLocalRoomIncludingArchived(trimmedRoomIdentifier);
+  const room = await getLocalRoomForMutationIncludingArchived(trimmedRoomIdentifier);
   if (!room) return false;
   const database = await getDb();
   const now = new Date().toISOString();

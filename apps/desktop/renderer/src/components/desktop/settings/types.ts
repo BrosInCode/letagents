@@ -9,6 +9,7 @@ export type SettingsPaneId =
   | "storage:sync"
   | "storage:database"
   | "system:setup"
+  | "system:app-agent"
   | "system:runtime"
   | "system:mcp"
   | "system:agents"

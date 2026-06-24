@@ -10,6 +10,10 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
+  DesktopAppAgentRunInput,
+  DesktopAppAgentRunResult,
+  DesktopAppAgentSaveSettingsInput,
+  DesktopAppAgentSettingsStatus,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
@@ -155,6 +159,14 @@ import {
 } from "./room-stream.js";
 import { apiUrl, workspaceRoot } from "./paths.js";
 import { openAllowedExternalUrl } from "./external-url.js";
+import {
+  getAppAgentSettingsStatus,
+  saveAppAgentSettings,
+} from "./app-agent/settings.js";
+import {
+  listDesktopAppAgentActions,
+  runDesktopAppAgent,
+} from "./app-agent/runner.js";
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
@@ -185,6 +197,29 @@ export function registerDesktopIpcHandlers(
       workspaceRoot,
       apiUrl,
     }),
+  );
+  targetIpcMain.handle(
+    "desktop:app-agent:get-settings-status",
+    async (): Promise<DesktopAppAgentSettingsStatus> =>
+      getAppAgentSettingsStatus(),
+  );
+  targetIpcMain.handle(
+    "desktop:app-agent:save-settings",
+    async (
+      _event,
+      input: DesktopAppAgentSaveSettingsInput,
+    ): Promise<DesktopAppAgentSettingsStatus> => saveAppAgentSettings(input),
+  );
+  targetIpcMain.handle(
+    "desktop:app-agent:list-actions",
+    async () => listDesktopAppAgentActions(),
+  );
+  targetIpcMain.handle(
+    "desktop:app-agent:run",
+    async (
+      _event,
+      input: DesktopAppAgentRunInput,
+    ): Promise<DesktopAppAgentRunResult> => runDesktopAppAgent(input),
   );
 
   targetIpcMain.handle(

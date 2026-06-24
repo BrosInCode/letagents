@@ -150,7 +150,6 @@ export function buildSidebarProjectGroups(input: {
   currentParentRoom: RoomEntry;
   focusRooms: DesktopRoomSnapshot["focusRooms"];
   accountRooms: readonly DesktopAccountRoomEntry[];
-  recentRootRooms: readonly RecentRootRoom[];
 }): ProjectGroup[] {
   const groups: ProjectGroup[] = [];
   const groupsByRoom = new Map<string, ProjectGroup>();
@@ -179,17 +178,7 @@ export function buildSidebarProjectGroups(input: {
     upsertGroup(accountRoomToGroup(accountRoom));
   }
 
-  for (const recentRoom of input.recentRootRooms) {
-    const parent = recentRootRoomToEntry(recentRoom);
-    upsertGroup({
-      id: `project:${parent.id}`,
-      roomName: parent.title,
-      parent,
-      focusRooms: [],
-    });
-  }
-
-  return groups;
+  return sortSidebarProjectGroups(groups);
 }
 
 function mergeRoomEntries(current: RoomEntry[], incoming: RoomEntry[]): RoomEntry[] {
@@ -213,6 +202,7 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
     ...current,
     latestMessageId: incoming.latestMessageId || current.latestMessageId,
     latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
+    pinned: current.pinned || incoming.pinned,
   };
 }
 
@@ -235,6 +225,8 @@ function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][nu
     latestMessageId: null,
     latestMessageAt: null,
     hasUnread: false,
+    pinned: false,
+    source: "account",
   };
 }
 
@@ -265,23 +257,8 @@ function accountFocusRoomToEntry(room: DesktopAccountRoomEntry["focusRooms"][num
     latestMessageId: room.latestMessageId,
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
-  };
-}
-
-function recentRootRoomToEntry(room: RecentRootRoom): RoomEntry {
-  return {
-    id: rootRoomEntryId(room.identifier),
-    type: "room",
-    kind: "parent",
-    roomIdentifier: room.identifier,
-    title: room.displayName,
-    meta: room.meta,
-    sectionLabel: "Parent room",
-    headline: "Return to this room.",
-    description: "Recent project rooms stay available here after you open another room.",
-    latestMessageId: null,
-    latestMessageAt: null,
-    hasUnread: false,
+    pinned: false,
+    source: "account",
   };
 }
 
@@ -299,7 +276,21 @@ function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
     latestMessageId: room.latestMessageId,
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
+    pinned: room.pinned,
+    source: "account",
   };
+}
+
+function sortSidebarProjectGroups(groups: ProjectGroup[]): ProjectGroup[] {
+  return groups
+    .map((group, index) => ({ group, index }))
+    .sort((left, right) => {
+      if (left.group.parent.pinned !== right.group.parent.pinned) {
+        return left.group.parent.pinned ? -1 : 1;
+      }
+      return left.index - right.index;
+    })
+    .map(({ group }) => group);
 }
 
 function accountRoomMeta(room: DesktopAccountRoomEntry): string {

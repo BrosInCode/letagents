@@ -564,6 +564,35 @@ img.settings-profile-avatar {
   outline: none;
 }
 
+.settings-field {
+  display: grid;
+  gap: 8px;
+  max-width: 540px;
+}
+
+.settings-field span {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.settings-field input {
+  min-height: 44px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(10, 10, 10, 0.36);
+  color: var(--text);
+  font: inherit;
+  padding: 0 14px;
+}
+
+.settings-field input:focus {
+  border-color: var(--border-accent);
+  outline: none;
+}
+
 .settings-feedback {
   margin: 0;
   padding: 12px 14px;
@@ -583,6 +612,129 @@ img.settings-profile-avatar {
   border-color: rgba(239, 68, 68, 0.24);
   color: var(--red);
   background: var(--red-dim);
+}
+
+.settings-section-kicker {
+  margin: 0 0 5px;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.app-agent-registry-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.app-agent-registry-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.app-agent-registry-header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 1.04rem;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.app-agent-registry-header p {
+  max-width: 680px;
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.app-agent-action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.app-agent-action-row {
+  display: grid;
+  align-items: start;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.app-agent-action-main {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.app-agent-action-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.app-agent-action-title-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-agent-action-title-copy strong {
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.app-agent-action-title-copy span {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.app-agent-action-policies {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.app-agent-action-policies .state-pill {
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.app-agent-action-main p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.38;
+}
+
+.app-agent-action-footer {
+  padding-top: 2px;
+}
+
+.app-agent-action-footer span {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  font-weight: 720;
 }
 
 .settings-room-list,
@@ -903,13 +1055,19 @@ img.settings-profile-avatar {
   }
 
   .settings-room-row,
+  .app-agent-action-row,
   .settings-room-detail-header,
   .settings-room-detail-grid {
     grid-template-columns: 1fr;
   }
 
-  .settings-room-row {
+  .settings-room-row,
+  .app-agent-action-row {
     align-items: start;
+  }
+
+  .app-agent-registry-header {
+    display: grid;
   }
 
   .settings-room-meta,
