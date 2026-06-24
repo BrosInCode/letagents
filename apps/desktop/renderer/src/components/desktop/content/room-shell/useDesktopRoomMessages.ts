@@ -35,7 +35,7 @@ export function useDesktopRoomMessages(options: {
   const ownMessageIds = new Set<string>();
 
   const loadedServerMessages = computed(() => {
-    return mergeRoomMessages([...olderMessages.value, ...options.messages.value], []);
+    return mergeRoomMessages(olderMessages.value, options.messages.value);
   });
   const visibleMessages = computed(() => {
     return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
@@ -100,7 +100,8 @@ export function useDesktopRoomMessages(options: {
   async function sendRoomMessage(
     text: string,
     replyTo: string | null = null,
-    attachments: Array<{ upload_id: string }> = []
+    attachments: Array<{ upload_id: string }> = [],
+    threadRootId: string | null = null,
   ): Promise<void> {
     const trimmedText = text.trim();
     if (!trimmedText && attachments.length === 0) return;
@@ -112,7 +113,8 @@ export function useDesktopRoomMessages(options: {
         options.room.value.identifier,
         trimmedText,
         replyTo,
-        attachments
+        attachments,
+        threadRootId,
       );
       ownMessageIds.add(result.message.id);
       localMessages.value = mergeRoomMessages(localMessages.value, [result.message]);
@@ -131,10 +133,6 @@ export function useDesktopRoomMessages(options: {
 
   async function loadOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
-    if (typeof window === "undefined" || !window.letagentsDesktop?.room?.getMessagesBefore) {
-      hasOlderMessages.value = false;
-      return;
-    }
     const roomIdentifier = options.room.value.identifier;
     const firstMessageId = oldestRoomHistoryCursor(loadedServerMessages.value);
     if (!firstMessageId) {

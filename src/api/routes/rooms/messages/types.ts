@@ -47,6 +47,7 @@ export interface RoomMessageRouteDeps {
   ): Promise<boolean>;
   parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null;
   parseOptionalReplyToMessageId(value: unknown): string | null;
+  parseOptionalThreadRootMessageId(value: unknown): string | null;
   shouldIncludePromptOnlyMessages(req: Request): boolean;
   emitProjectMessage(
     projectId: string,
@@ -56,8 +57,10 @@ export interface RoomMessageRouteDeps {
       source?: string;
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
+      thread_root_id?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
       client_message_id?: string | null;
+      account_id?: string | null;
     }
   ): Promise<Message>;
   rememberRoomParticipantFromMessage(input: {

@@ -56,6 +56,7 @@
     />
 
     <RoomChatView
+      ref="roomChatView"
       v-show="activeTab === 'chat'"
       :active="activeTab === 'chat'"
       :messages="timelineMessages"
@@ -63,6 +64,7 @@
       :message-namespace="messageNamespace"
       :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
+      :github-events-visible="githubEventsVisible"
       :room-loading="roomLoading"
       :sending="sendingMessage"
       :send-error="sendError"
@@ -87,11 +89,30 @@
       @draft-change="chatDraftText = $event"
       @open-github-event="openGitHubEventFromChat"
       @scroll-position="rememberChatScrollPosition"
+      @thread-read="handleThreadRead"
     />
 
     <Transition name="room-panel" mode="out-in">
+      <RoomInboxView
+        v-if="activeTab === 'inbox'"
+        key="inbox"
+        v-model:filter="inboxFilter"
+        :items="inboxItems"
+        :loading="inboxLoading"
+        :loading-older="inboxLoadingOlder"
+        :error="inboxError"
+        :has-more="inboxHasMore"
+        @refresh="loadInboxThreads"
+        @load-older="loadOlderInboxThreads"
+        @open-thread="openInboxThread"
+        @clear-item="clearInboxItem"
+        @open-task="openInboxTask"
+        @open-github-event="openInboxGitHubEvent"
+        @open-reasoning="openReasoningInspector"
+      />
+
       <RoomBoardView
-        v-if="activeTab === 'board'"
+        v-else-if="activeTab === 'board'"
         key="board"
         :room-identifier="room.identifier"
         :tasks="tasks"
@@ -200,7 +221,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -212,6 +233,7 @@ import type {
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
   DesktopRoomMessage,
+  DesktopRoomThreadInboxPage,
   DesktopReasoningSession,
   DesktopTaskSummary,
   RepoStatus,
@@ -236,6 +258,7 @@ import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
+import RoomInboxView from "./RoomInboxView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import { encodeRoomPathIdentifier } from "./room-shell/messages";
@@ -247,6 +270,12 @@ import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import {
+  buildDesktopInboxItems,
+  desktopInboxItemFingerprint,
+  type DesktopInboxFilter,
+  type DesktopInboxItem,
+} from "./room-inbox/items";
 import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
@@ -291,11 +320,22 @@ const roomRef = toRef(props, "room");
 const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
 const activeTab = ref<RoomTabId>("chat");
+const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailTarget = ref<AgentModalTarget | null>(null);
 const rulesOpen = ref(false);
 const roomLinkCopied = ref(false);
+const inboxFilter = ref<DesktopInboxFilter>("actionable");
+const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
+const inboxLoading = ref(false);
+const inboxLoadingOlder = ref(false);
+const inboxError = ref<string | null>(null);
+const inboxLoadedKey = ref<string | null>(null);
+const inboxDismissals = ref<Record<string, string>>({});
+const inboxSeenFingerprints = ref<string[]>([]);
+const inboxUnseenCount = ref(0);
+const inboxSeenInitialized = ref(false);
 const eventsPage = ref<DesktopGitHubEventsPage | null>(props.githubEvents);
 const eventsLoading = ref(false);
 const eventsLoadingOlder = ref(false);
@@ -308,6 +348,7 @@ const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 let githubEventsRefreshTimer: number | null = null;
+let inboxRefreshTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
@@ -323,6 +364,7 @@ const messageNamespace = computed(() =>
     props.storage.localRoom?.roomIdentifier || "cloud",
   ].join(":")
 );
+inboxDismissals.value = readInboxDismissals(messageNamespace.value);
 
 const {
   soundEnabled,
@@ -427,6 +469,28 @@ const roomPresence = computed(() =>
 const localAgentWork = computed(() =>
   activeManagedAgentWorkIndicators(roomManagedAgentSessions.value, props.room.identifier)
 );
+const rawInboxItems = computed(() =>
+  buildDesktopInboxItems({
+    filter: inboxFilter.value,
+    threadPage: threadInboxPage.value,
+    tasks: props.tasks,
+    githubEvents: eventsPage.value?.events || [],
+    reasoningSessions: props.reasoningSessions,
+    fallbackRepository: githubRepository.value,
+  })
+);
+const inboxItems = computed(() =>
+  rawInboxItems.value.filter((item) => !isInboxItemDismissed(item))
+);
+const inboxActionableCount = computed(() =>
+  inboxItems.value.filter((item) => item.actionable).length
+);
+const inboxActionableFingerprints = computed(() =>
+  inboxItems.value
+    .filter((item) => item.actionable)
+    .map(desktopInboxItemFingerprint)
+);
+const inboxHasMore = computed(() => Boolean(threadInboxPage.value?.hasMore));
 
 watch(() => props.githubEvents, (nextPage) => {
   if (!nextPage) {
@@ -449,6 +513,15 @@ watch(() => props.room.identifier, () => {
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
   void refreshManagedAgentSessions();
   restartManagedAgentSessionsRefreshTimer();
+}, { immediate: true });
+
+watch(messageNamespace, () => {
+  inboxDismissals.value = readInboxDismissals(messageNamespace.value);
+  resetInboxIndicatorState();
+  resetInboxState();
+  if (activeTab.value === "inbox") {
+    void loadInboxThreads().catch(() => undefined);
+  }
 }, { immediate: true });
 
 watch(addAgentModalOpen, (open) => {
@@ -480,12 +553,36 @@ watch(activeTab, (tab) => {
   if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
     void refreshGitHubEvents().catch(() => undefined);
   }
+  if (tab === "inbox" && inboxLoadedKey.value !== currentInboxLoadKey() && !inboxLoading.value) {
+    void loadInboxThreads().catch(() => undefined);
+  }
+  if (tab === "inbox") {
+    acknowledgeInboxItems();
+  }
 });
+
+watch(inboxFilter, () => {
+  resetInboxState();
+  void loadInboxThreads().catch(() => undefined);
+});
+
+watch(inboxActionableFingerprints, (fingerprints) => {
+  if (!inboxSeenInitialized.value || activeTab.value === "inbox") {
+    acknowledgeInboxItems(fingerprints);
+    return;
+  }
+
+  const seen = new Set(inboxSeenFingerprints.value);
+  inboxUnseenCount.value = fingerprints.filter((fingerprint) => !seen.has(fingerprint)).length;
+}, { immediate: true });
 
 watch(() => props.messages.at(-1)?.id || null, () => {
   const latestMessage = props.messages.at(-1);
-  if (!showEventsTab.value) return;
-  if (!latestMessage || !shouldRefreshEventsForMessage(latestMessage)) return;
+  if (!latestMessage) return;
+  if (isThreadReplyMessage(latestMessage)) {
+    scheduleInboxRefresh(activeTab.value === "inbox" ? 200 : 700);
+  }
+  if (!showEventsTab.value || !shouldRefreshEventsForMessage(latestMessage)) return;
   scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
 });
 
@@ -493,6 +590,10 @@ onBeforeUnmount(() => {
   if (githubEventsRefreshTimer !== null) {
     window.clearTimeout(githubEventsRefreshTimer);
     githubEventsRefreshTimer = null;
+  }
+  if (inboxRefreshTimer !== null) {
+    window.clearTimeout(inboxRefreshTimer);
+    inboxRefreshTimer = null;
   }
   stopManagedAgentSessionsRefreshTimer();
   unsubscribeManagedAgentSessionUpdate?.();
@@ -521,6 +622,20 @@ watchRoomNotifications({
 
 const tabs = computed<RoomTab[]>(() => [
   { id: "chat", label: "Chat", count: null },
+  {
+    id: "inbox",
+    label: "Inbox",
+    count: inboxActionableCount.value || null,
+    indicator: inboxUnseenCount.value > 0 && activeTab.value !== "inbox"
+      ? {
+          label: inboxUnseenCount.value === 1 ? "New inbox item" : "New inbox items",
+          count: inboxUnseenCount.value,
+          tone: "info",
+          pulse: true,
+          mode: "dot",
+        }
+      : null,
+  },
   ...(showEventsTab.value ? [{
     id: "events" as const,
     label: "Events",
@@ -539,6 +654,212 @@ function selectTab(tabId: RoomTabId): void {
   if (tabId === "events" && !showEventsTab.value) return;
   if (isLocalRoom.value && ["rooms", "rent"].includes(tabId)) return;
   activeTab.value = tabId;
+}
+
+function currentInboxLoadKey(): string {
+  return `${messageNamespace.value}:${inboxFilter.value}`;
+}
+
+function resetInboxIndicatorState(): void {
+  inboxSeenFingerprints.value = [];
+  inboxUnseenCount.value = 0;
+  inboxSeenInitialized.value = false;
+}
+
+function acknowledgeInboxItems(fingerprints = inboxActionableFingerprints.value): void {
+  inboxSeenFingerprints.value = [...fingerprints];
+  inboxUnseenCount.value = 0;
+  inboxSeenInitialized.value = true;
+}
+
+function inboxDismissalsStorageKey(namespace: string): string {
+  return `letagents-desktop:room-inbox-dismissals:${namespace}`;
+}
+
+function readInboxDismissals(namespace: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(inboxDismissalsStorageKey(namespace)) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeInboxDismissals(namespace: string, dismissals: Record<string, string>): void {
+  try {
+    window.localStorage.setItem(inboxDismissalsStorageKey(namespace), JSON.stringify(dismissals));
+  } catch {
+    // Clearing the current view should still work even when storage is unavailable.
+  }
+}
+
+function resetInboxState(): void {
+  threadInboxPage.value = null;
+  inboxLoading.value = false;
+  inboxLoadingOlder.value = false;
+  inboxError.value = null;
+  inboxLoadedKey.value = null;
+  if (inboxRefreshTimer !== null) {
+    window.clearTimeout(inboxRefreshTimer);
+    inboxRefreshTimer = null;
+  }
+}
+
+async function loadInboxThreads(options: { append?: boolean } = {}): Promise<void> {
+  const roomApi = window.letagentsDesktop?.room;
+  const requestKey = currentInboxLoadKey();
+  const append = Boolean(options.append);
+  if (!roomApi?.getThreads) {
+    threadInboxPage.value = { threads: [], hasMore: false, unreadThreadCount: 0 };
+    inboxLoadedKey.value = requestKey;
+    return;
+  }
+  if (append) {
+    if (inboxLoadingOlder.value || !threadInboxPage.value?.hasMore) return;
+  } else if (inboxLoading.value) {
+    return;
+  }
+
+  const before = append
+    ? threadInboxPage.value?.threads.at(-1)?.summary.latestReply?.id || null
+    : null;
+  if (append && !before) return;
+  if (append) {
+    inboxLoadingOlder.value = true;
+  } else {
+    inboxLoading.value = true;
+  }
+  inboxError.value = null;
+
+  try {
+    const page = await roomApi.getThreads(
+      props.room.identifier,
+      inboxFilter.value === "actionable" ? "unread" : "all",
+      before,
+      75,
+    );
+    if (currentInboxLoadKey() !== requestKey) return;
+    threadInboxPage.value = append && threadInboxPage.value
+      ? mergeThreadInboxPages(threadInboxPage.value, page)
+      : page;
+    inboxLoadedKey.value = requestKey;
+  } catch (error) {
+    if (currentInboxLoadKey() === requestKey) {
+      inboxError.value = error instanceof Error ? error.message : "Inbox could not be loaded.";
+    }
+  } finally {
+    if (currentInboxLoadKey() === requestKey) {
+      inboxLoading.value = false;
+      inboxLoadingOlder.value = false;
+    }
+  }
+}
+
+function loadOlderInboxThreads(): void {
+  void loadInboxThreads({ append: true });
+}
+
+function mergeThreadInboxPages(
+  current: DesktopRoomThreadInboxPage,
+  next: DesktopRoomThreadInboxPage,
+): DesktopRoomThreadInboxPage {
+  const threadsByRoot = new Map(current.threads.map((item) => [item.root.id, item]));
+  for (const item of next.threads) {
+    threadsByRoot.set(item.root.id, item);
+  }
+  return {
+    threads: [...threadsByRoot.values()],
+    hasMore: next.hasMore,
+    unreadThreadCount: next.unreadThreadCount,
+  };
+}
+
+async function openInboxThread(item: Extract<DesktopInboxItem, { kind: "thread" }>): Promise<void> {
+  activeTab.value = "chat";
+  await nextTick();
+  roomChatView.value?.openThread(item.root.id);
+}
+
+async function markInboxThreadRead(
+  item: Extract<DesktopInboxItem, { kind: "thread" }>,
+  options: { reload?: boolean } = {},
+): Promise<void> {
+  const roomApi = window.letagentsDesktop?.room;
+  if (!roomApi?.markThreadRead) return;
+  try {
+    const result = await roomApi.markThreadRead(
+      props.room.identifier,
+      item.root.id,
+      item.summary.latestReply?.id || item.root.id,
+    );
+    if (options.reload === false) {
+      handleThreadRead(item.root.id, result.thread);
+    } else {
+      await loadInboxThreads();
+    }
+  } catch (error) {
+    inboxError.value = error instanceof Error ? error.message : "Thread read state could not be updated.";
+  }
+}
+
+function clearInboxItem(item: DesktopInboxItem): void {
+  const nextDismissals = {
+    ...inboxDismissals.value,
+    [item.id]: desktopInboxItemFingerprint(item),
+  };
+  inboxDismissals.value = nextDismissals;
+  writeInboxDismissals(messageNamespace.value, nextDismissals);
+  if (item.kind === "thread" && item.unreadCount > 0) {
+    void markInboxThreadRead(item, { reload: false });
+  }
+}
+
+function isInboxItemDismissed(item: DesktopInboxItem): boolean {
+  return inboxDismissals.value[item.id] === desktopInboxItemFingerprint(item);
+}
+
+function handleThreadRead(threadRootId: string, summary: DesktopRoomThreadInboxPage["threads"][number]["summary"]): void {
+  const page = threadInboxPage.value;
+  if (!page) return;
+  const previous = page.threads.find((item) => item.root.id === threadRootId);
+  if (!previous) return;
+  const previousUnread = previous.summary.unreadCount > 0 ? 1 : 0;
+  const nextUnread = summary.unreadCount > 0 ? 1 : 0;
+  threadInboxPage.value = {
+    ...page,
+    unreadThreadCount: Math.max(0, page.unreadThreadCount - previousUnread + nextUnread),
+    threads: page.threads.map((item) =>
+      item.root.id === threadRootId
+        ? { ...item, root: { ...item.root, thread: summary }, summary }
+        : item
+    ),
+  };
+}
+
+function openInboxTask(taskId: string): void {
+  boardSelectedTaskId.value = taskId;
+  activeTab.value = "board";
+}
+
+function openInboxGitHubEvent(eventId: string): void {
+  githubEventsVisible.value = true;
+  rememberGitHubEventsVisible(props.room.identifier, true);
+  eventsTaskFilterId.value = null;
+  eventsSelectedEventId.value = eventId;
+  activeTab.value = "events";
+}
+
+function scheduleInboxRefresh(delayMs: number): void {
+  if (inboxRefreshTimer !== null) {
+    window.clearTimeout(inboxRefreshTimer);
+  }
+  inboxRefreshTimer = window.setTimeout(() => {
+    inboxRefreshTimer = null;
+    void loadInboxThreads().catch(() => undefined);
+  }, delayMs);
 }
 
 async function refreshGitHubEvents(): Promise<void> {
@@ -681,6 +1002,10 @@ function shouldRefreshEventsForMessage(message: DesktopRoomMessage): boolean {
   const source = (message.source || "").toLowerCase();
   const sender = (message.sender || "").toLowerCase();
   return source === "github" || sender === "github";
+}
+
+function isThreadReplyMessage(message: DesktopRoomMessage): boolean {
+  return Boolean(message.threadReplyToId || (message.threadRootId && message.threadRootId !== message.id));
 }
 
 function repoRepositoryFromRoomIdentifier(identifier: string): string | null {

@@ -11,23 +11,18 @@ import {
 } from "../../../shared/room-agent-prompts.js";
 import { db } from "../client.js";
 import { message_attachment_uploads, message_attachments, messages } from "../schema.js";
-import {
-  toMessageAttachment,
-  toMessageReplyReference,
-  toMessageWithReply,
-} from "../mappers.js";
+import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
   MessageAttachmentRow,
-  MessageReplyReference,
   MessageRow,
 } from "../types.js";
 import { nextRoomScopedNumber, parseScopedId } from "../utils.js";
 import {
   messageRowSelection,
   messageAttachmentUploadSelection,
-  messageReplySelection,
 } from "./selections.js";
+import { hydrateMessageReplies } from "./history.js";
 
 function normalizeClientMessageId(value?: string | null): string | null {
   if (typeof value !== "string") return null;
@@ -39,8 +34,10 @@ export interface AddMessageOptions {
   source?: string;
   agent_prompt_kind?: AgentPromptKind | null;
   reply_to_message_id?: string | null;
+  thread_root_message_id?: string | null;
   attachments?: NormalizedMessageAttachmentReference[];
   client_message_id?: string | null;
+  account_id?: string | null;
 }
 
 export interface AddMessageResult {
@@ -57,11 +54,14 @@ export async function addMessageWithCreateStatus(
   const promptKind = options?.agent_prompt_kind ?? null;
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
-  return db.transaction(async (tx) => {
-    let replyReference: MessageReplyReference | null = null;
+  const result = await db.transaction(async (tx): Promise<AddMessageResult | { messageRow: MessageRow; created: boolean }> => {
     const replyToNumber =
       options?.reply_to_message_id
         ? parseScopedId(options.reply_to_message_id, "msg")
+        : null;
+    const explicitThreadRootNumber =
+      options?.thread_root_message_id
+        ? parseScopedId(options.thread_root_message_id, "msg")
         : null;
 
     if (clientMessageId) {
@@ -72,17 +72,8 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (existingMessage) {
-        let existingReplyReference: MessageReplyReference | null = null;
-        if (existingMessage.reply_to_number) {
-          const [replyTarget] = await tx
-            .select(messageReplySelection)
-            .from(messages)
-            .where(and(eq(messages.room_id, roomId), eq(messages.number, existingMessage.reply_to_number)))
-            .limit(1);
-          existingReplyReference = replyTarget ? toMessageReplyReference(replyTarget) : null;
-        }
         return {
-          message: toMessageWithReply(existingMessage, existingReplyReference),
+          messageRow: existingMessage,
           created: false,
         };
       }
@@ -91,10 +82,14 @@ export async function addMessageWithCreateStatus(
     if (options?.reply_to_message_id && !replyToNumber) {
       throw new Error("reply_to must be a valid message id");
     }
+    if (options?.thread_root_message_id && !explicitThreadRootNumber) {
+      throw new Error("thread_root_id must be a valid message id");
+    }
 
+    let replyTargetRootNumber: number | null = null;
     if (replyToNumber) {
       const [replyTarget] = await tx
-        .select(messageReplySelection)
+        .select(messageRowSelection)
         .from(messages)
         .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
         .limit(1);
@@ -107,13 +102,36 @@ export async function addMessageWithCreateStatus(
         throw new Error("reply_to must reference a visible message");
       }
 
-      replyReference = toMessageReplyReference(replyTarget);
+      replyTargetRootNumber = replyTarget.thread_root_number ?? replyTarget.number;
+    }
+
+    let threadRootNumber = explicitThreadRootNumber ?? replyTargetRootNumber;
+    if (explicitThreadRootNumber) {
+      const [threadRoot] = await tx
+        .select(messageRowSelection)
+        .from(messages)
+        .where(and(eq(messages.room_id, roomId), eq(messages.number, explicitThreadRootNumber)))
+        .limit(1);
+
+      if (!threadRoot) {
+        throw new Error("thread_root_id must reference an existing message in this room");
+      }
+
+      if (isPromptOnlyAgentMessage(threadRoot.text, normalizeAgentPromptKind(threadRoot.agent_prompt_kind))) {
+        throw new Error("thread_root_id must reference a visible message");
+      }
+
+      threadRootNumber = threadRoot.thread_root_number ?? threadRoot.number;
+      if (replyTargetRootNumber && replyTargetRootNumber !== threadRootNumber) {
+        throw new Error("reply_to must belong to the requested thread");
+      }
     }
 
     const message: MessageRow = {
       room_id: roomId,
       number: await nextRoomScopedNumber("messages", roomId, tx),
       reply_to_number: replyToNumber,
+      thread_root_number: threadRootNumber,
       sender,
       text,
       agent_prompt_kind: promptKind,
@@ -138,17 +156,8 @@ export async function addMessageWithCreateStatus(
         if (!existingMessage) {
           throw new Error("message idempotency conflict could not be resolved");
         }
-        let existingReplyReference: MessageReplyReference | null = null;
-        if (existingMessage.reply_to_number) {
-          const [replyTarget] = await tx
-            .select(messageReplySelection)
-            .from(messages)
-            .where(and(eq(messages.room_id, roomId), eq(messages.number, existingMessage.reply_to_number)))
-            .limit(1);
-          existingReplyReference = replyTarget ? toMessageReplyReference(replyTarget) : null;
-        }
         return {
-          message: toMessageWithReply(existingMessage, existingReplyReference),
+          messageRow: existingMessage,
           created: false,
         };
       }
@@ -216,10 +225,20 @@ export async function addMessageWithCreateStatus(
     }
 
     return {
-      message: toMessageWithReply(createdMessage, replyReference, attachmentRows.map(toMessageAttachment)),
+      messageRow: createdMessage,
       created: true,
     };
   });
+  if ("messageRow" in result) {
+    const [message] = await hydrateMessageReplies(roomId, [result.messageRow], {
+      accountId: options?.account_id ?? null,
+    });
+    return {
+      message: message ?? toMessageWithReply(result.messageRow, null),
+      created: result.created,
+    };
+  }
+  return result;
 }
 
 export async function addMessage(

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,12 +31,23 @@ export const localFilesPath =
   process.env.LETAGENTS_LOCAL_FILES_DIR?.trim() ||
   join(homedir(), ".letagents", "local-files");
 
+export const localProfilePath =
+  process.env.LETAGENTS_LOCAL_PROFILE_PATH?.trim() ||
+  join(homedir(), ".letagents", "local-profile.json");
+
 type PersistedChatStorageSettings = {
   mode?: string;
   defaultMode?: string;
   roomOverrides?: Record<string, unknown>;
   savedAt?: string;
 };
+
+type PersistedLocalProfile = {
+  id?: string;
+  createdAt?: string;
+};
+
+let localProfileIdPromise: Promise<string> | null = null;
 
 function normalizeChatStorageMode(value: unknown): ChatStorageMode {
   return typeof value === "string" && validModes.has(value as ChatStorageMode)
@@ -99,6 +111,54 @@ export async function readChatStorageSettings(): Promise<DesktopChatStorageSetti
   } catch {
     return buildSettings({ mode: "cloud" });
   }
+}
+
+export async function readLocalProfileId(): Promise<string> {
+  localProfileIdPromise ??= readOrCreateLocalProfileId().catch((error: unknown) => {
+    localProfileIdPromise = null;
+    throw error;
+  });
+  return localProfileIdPromise;
+}
+
+async function readPersistedLocalProfileId(): Promise<string | null> {
+  try {
+    const raw = await readFile(localProfilePath, "utf8");
+    const parsed = JSON.parse(raw) as PersistedLocalProfile;
+    const id = typeof parsed.id === "string" ? parsed.id.trim() : "";
+    if (id) return id;
+  } catch {
+    // Missing profile files are expected on first launch.
+  }
+  return null;
+}
+
+async function readOrCreateLocalProfileId(): Promise<string> {
+  const existingId = await readPersistedLocalProfileId();
+  if (existingId) return existingId;
+  const id = randomUUID();
+  await mkdir(dirname(localProfilePath), { recursive: true });
+  try {
+    await writeLocalProfileId(id, "wx");
+  } catch (error) {
+    if (!isFileExistsError(error)) throw error;
+    const racedId = await readPersistedLocalProfileId();
+    if (racedId) return racedId;
+    await writeLocalProfileId(id);
+  }
+  return id;
+}
+
+async function writeLocalProfileId(id: string, flag?: "wx"): Promise<void> {
+  await writeFile(
+    localProfilePath,
+    `${JSON.stringify({ id, createdAt: new Date().toISOString() }, null, 2)}\n`,
+    { encoding: "utf8", ...(flag ? { flag } : {}) },
+  );
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }
 
 async function writeChatStorageSettings(

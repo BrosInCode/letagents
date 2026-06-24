@@ -35,6 +35,12 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
+    getThreads: (roomIdentifier: string, filter = "all", beforeMessageId?: string | null, limit?: number) =>
+      ipcRenderer.invoke("desktop:room:get-threads", roomIdentifier, filter, beforeMessageId ?? null, limit ?? 150),
+    getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) =>
+      ipcRenderer.invoke("desktop:room:get-thread", roomIdentifier, threadRootId, beforeMessageId ?? null, limit ?? 150),
+    markThreadRead: (roomIdentifier: string, threadRootId: string, messageId?: string | null) =>
+      ipcRenderer.invoke("desktop:room:mark-thread-read", roomIdentifier, threadRootId, messageId ?? null),
     getReasoningSession: (roomIdentifier: string, sessionId: string) =>
       ipcRenderer.invoke("desktop:room:get-reasoning-session", roomIdentifier, sessionId),
     pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
@@ -52,8 +58,14 @@ const api: DesktopApi = {
         ipcRenderer.off("desktop:room:stream-event", listener);
       };
     },
-    sendMessage: (roomIdentifier: string, text: string, replyTo?: string | null, attachments?: Array<{ upload_id: string }>) =>
-      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? []),
+    sendMessage: (
+      roomIdentifier: string,
+      text: string,
+      replyTo?: string | null,
+      attachments?: Array<{ upload_id: string }>,
+      threadRootId?: string | null,
+    ) =>
+      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null),
     addTask: (roomIdentifier: string, input) =>
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>

@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { check, foreignKey, index, integer, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
-import { rooms } from "./core.js";
+import { accounts, rooms } from "./core.js";
 import { rentalVisibilityEnum } from "./rentals.js";
 
 export const messages = pgTable(
@@ -12,6 +12,7 @@ export const messages = pgTable(
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     number: integer("number").notNull(),
     reply_to_number: integer("reply_to_number"),
+    thread_root_number: integer("thread_root_number"),
     sender: text("sender").notNull(),
     text: text("text").notNull(),
     agent_prompt_kind: text("agent_prompt_kind"),
@@ -27,6 +28,7 @@ export const messages = pgTable(
     pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
     room_idx: index("messages_room_id_idx").on(table.room_id),
     reply_to_idx: index("messages_reply_to_idx").on(table.room_id, table.reply_to_number),
+    thread_root_idx: index("messages_thread_root_idx").on(table.room_id, table.thread_root_number),
     client_message_id_idx: uniqueIndex("messages_room_client_message_id_uq")
       .on(table.room_id, table.client_message_id)
       .where(sql`${table.client_message_id} IS NOT NULL`),
@@ -44,6 +46,30 @@ export const messages = pgTable(
       "messages_agent_prompt_kind_check",
       sql`${table.agent_prompt_kind} IS NULL OR ${table.agent_prompt_kind} IN ('join', 'inline', 'auto')`
     ),
+  })
+);
+
+export const message_thread_reads = pgTable(
+  "message_thread_reads",
+  {
+    room_id: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    thread_root_number: integer("thread_root_number").notNull(),
+    account_id: text("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    last_read_message_number: integer("last_read_message_number").notNull(),
+    read_at: timestamp("read_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "message_thread_reads_pk",
+      columns: [table.room_id, table.thread_root_number, table.account_id],
+    }),
+    account_idx: index("message_thread_reads_account_idx").on(table.account_id),
+    room_account_idx: index("message_thread_reads_room_account_idx").on(table.room_id, table.account_id),
+    thread_root_idx: index("message_thread_reads_thread_root_idx").on(table.room_id, table.thread_root_number),
   })
 );
 

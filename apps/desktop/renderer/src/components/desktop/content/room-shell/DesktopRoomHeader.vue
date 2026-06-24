@@ -120,6 +120,14 @@
               stroke-linejoin="round"
             />
             <path
+              v-else-if="tab.id === 'inbox'"
+              d="M3.25 3.5h9.5v5.25l-1.5 3.75h-6.5l-1.5-3.75V3.5Zm0 5.25h3l.75 1.5h2l.75-1.5h3"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
               v-else-if="tab.id === 'events'"
               d="M2.5 8h2.25l1.5-3.5 3 7 1.25-3.5h3M11.5 3.5h2v2"
               stroke="currentColor"
@@ -162,6 +170,15 @@
           </svg>
           <span>{{ tab.label }}</span>
           <small v-if="tab.count !== null">{{ tab.count }}</small>
+          <DesktopStatusIndicator
+            v-if="tab.indicator"
+            class="desktop-room-tab-indicator"
+            :label="tab.indicator.label"
+            :count="tab.indicator.count ?? null"
+            :tone="tab.indicator.tone ?? 'info'"
+            :pulse="tab.indicator.pulse ?? false"
+            :mode="tab.indicator.mode ?? 'dot'"
+          />
         </button>
       </nav>
 
@@ -172,6 +189,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
+import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
 

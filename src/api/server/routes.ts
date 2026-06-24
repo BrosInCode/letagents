@@ -25,6 +25,7 @@ import { normalizeOptionalString } from "../tasks/coordination-inputs.js";
 import {
   parseOptionalAgentPromptKind,
   parseOptionalReplyToMessageId,
+  parseOptionalThreadRootMessageId,
   shouldIncludePromptOnlyMessages,
 } from "../messages/inputs.js";
 import {
@@ -211,6 +212,7 @@ export function registerApiRoutes(app: Express): void {
     requireParticipant,
     parseOptionalAgentPromptKind,
     parseOptionalReplyToMessageId,
+    parseOptionalThreadRootMessageId,
     shouldIncludePromptOnlyMessages,
     emitProjectMessage,
     rememberRoomParticipantFromMessage,

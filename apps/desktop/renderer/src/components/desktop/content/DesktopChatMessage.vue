@@ -6,6 +6,7 @@
       'is-github-message': Boolean(githubEvent),
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
+      'is-active-thread-root': activeThreadRoot,
     }"
     :data-owner-kind="ownerKind"
     :data-message-id="message.id"
@@ -96,12 +97,35 @@
       </div>
 
       <button
-        v-if="threadCount > 0"
+        v-if="threadIndicatorVisible"
         class="room-thread-marker"
+        :class="{ 'is-active': activeThreadRoot }"
         type="button"
+        :aria-label="threadMarkerAriaLabel"
         @click="$emit('open-thread', message.id)"
       >
-        {{ threadMarkerLabel }}
+        <span class="room-thread-marker-main">
+          <MessageSquare :size="13" aria-hidden="true" />
+          <strong>{{ threadMarkerCountLabel }}</strong>
+          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
+            {{ threadSummary.unreadCount }}
+          </span>
+          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
+        </span>
+        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
+          <span
+            v-for="participant in threadSummary.participants"
+            :key="participant.key"
+            class="room-thread-participant-avatar"
+            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
+            :title="participant.displayName"
+          >
+            {{ participantInitials(participant.displayName) }}
+          </span>
+        </span>
+        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
+          {{ threadMarkerPreview }}
+        </span>
       </button>
     </div>
 
@@ -143,12 +167,13 @@ import {
   truncate,
 } from "./desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 
 const props = defineProps<{
   message: DesktopRoomMessage;
-  threadCount: number;
-  latestThreadMessage: DesktopRoomMessage | null;
+  threadSummary: ThreadIndicatorSummary;
+  activeThreadRoot: boolean;
   highlightQuery: string;
   searchActive: boolean;
 }>();
@@ -185,11 +210,26 @@ const replyDisplayName = computed(() =>
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
-const threadMarkerLabel = computed(() => {
-  const base = props.threadCount === 1 ? "View 1 reply" : `View ${props.threadCount} replies`;
-  if (!props.latestThreadMessage) return base;
-  const latestName = parseSenderIdentity(props.latestThreadMessage).displayName;
-  return `${base} · latest ${latestName} ${formatTimestamp(props.latestThreadMessage.timestamp)}`;
+const threadIndicatorVisible = computed(() =>
+  props.threadSummary.count > 0 || props.threadSummary.hasPartialHistory || props.threadSummary.loadingEarlier
+);
+const threadMarkerCountLabel = computed(() => {
+  if (props.threadSummary.loadingEarlier && props.threadSummary.count === 0) return "Loading replies";
+  if (props.threadSummary.count === 1) return "1 reply";
+  return `${props.threadSummary.count} replies`;
+});
+const threadMarkerPreview = computed(() => {
+  const latest = props.threadSummary.latest;
+  const preview = truncate((props.threadSummary.latestPreview || "").replace(/\s+/g, " ").trim(), 92);
+  const timestamp = props.threadSummary.latestTimestamp ? formatTimestamp(props.threadSummary.latestTimestamp) : null;
+  if (!preview && !timestamp && !latest) return props.threadSummary.hasPartialHistory ? "Earlier replies are not fully loaded" : null;
+  const latestName = latest ? parseSenderIdentity(latest).displayName : "Latest";
+  const prefix = timestamp ? `${latestName} ${timestamp}` : latestName;
+  return preview ? `${prefix}: ${preview}` : prefix;
+});
+const threadMarkerAriaLabel = computed(() => {
+  const unread = props.threadSummary.unreadCount > 0 ? `, ${props.threadSummary.unreadCount} unread` : "";
+  return `${threadMarkerCountLabel.value}${unread}. Open thread.`;
 });
 const agentModalTarget = computed<AgentModalTarget>(() => ({
   actorLabel: props.message.actorLabel || props.message.agentIdentity?.actorLabel || props.message.sender,
@@ -200,6 +240,15 @@ const agentModalTarget = computed<AgentModalTarget>(() => ({
   agentKey: props.message.agentIdentity?.agentKey || null,
   agentSessionId: props.message.agentIdentity?.agentSessionId || null,
 }));
+
+function participantInitials(value: string): string {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  const initials = parts.length === 1
+    ? parts[0].slice(0, 2)
+    : `${parts[0][0]}${parts[parts.length - 1][0]}`;
+  return initials.toUpperCase();
+}
 
 function openContextMenu(event: MouseEvent): void {
   if (shouldUseNativeContextMenu(event)) {
