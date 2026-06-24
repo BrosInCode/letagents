@@ -256,10 +256,11 @@ function toMessagePayload(
   };
 }
 
-function visibleMessageClause(includePromptOnly?: boolean): string {
+function visibleMessageClause(includePromptOnly?: boolean, alias?: string): string {
+  const prefix = alias ? `${alias}.` : "";
   return includePromptOnly
     ? "1 = 1"
-    : "NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')";
+    : `NOT (${prefix}agent_prompt_kind = 'auto' AND TRIM(${prefix}text) = '')`;
 }
 
 async function hydrateMessageRows(
@@ -526,6 +527,154 @@ export async function getLocalChatMessagesBefore(
     messages: await hydrateMessageRows(database, bounded),
     has_more: hasMore,
   };
+}
+
+export async function searchLocalChatMessages(
+  roomId: string,
+  query: string,
+  options?: { limit?: number; include_prompt_only?: boolean },
+): Promise<LocalMessagePage> {
+  const trimmedQuery = query.trim().toLowerCase();
+  if (!trimmedQuery) {
+    return getLatestLocalChatMessages(roomId, options);
+  }
+
+  const limit = clampLimit(options?.limit);
+  const pattern = `%${escapeLikePattern(trimmedQuery)}%`;
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+        AND (
+          LOWER(text) LIKE ? ESCAPE '\\'
+          OR LOWER(sender) LIKE ? ESCAPE '\\'
+        )
+      ORDER BY number DESC
+      LIMIT ?
+    `)
+    .all(roomId, pattern, pattern, limit + 1)
+    .map(mapRow);
+  const hasMore = rows.length > limit;
+  const bounded = (hasMore ? rows.slice(0, limit) : rows).reverse();
+  return {
+    messages: await hydrateMessageRows(database, bounded),
+    has_more: hasMore,
+  };
+}
+
+export async function getLocalChatThreadMessages(
+  roomId: string,
+  rootMessageId: string,
+  options?: { limit?: number; include_prompt_only?: boolean },
+): Promise<LocalMessagePage> {
+  const rootNumber = parseMessageNumber(rootMessageId);
+  if (!rootNumber) {
+    return { messages: [], has_more: false };
+  }
+
+  const limit = clampLimit(options?.limit);
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      WITH RECURSIVE thread_numbers(number) AS (
+        SELECT number
+        FROM local_chat_messages
+        WHERE room_id = ?
+          AND number = ?
+          AND ${visibleMessageClause(options?.include_prompt_only)}
+        UNION ALL
+        SELECT child.number
+        FROM local_chat_messages child
+        JOIN thread_numbers parent ON child.reply_to_number = parent.number
+        WHERE child.room_id = ?
+          AND ${visibleMessageClause(options?.include_prompt_only, "child")}
+      )
+      SELECT *
+      FROM local_chat_messages
+      WHERE room_id = ?
+        AND number IN (SELECT number FROM thread_numbers)
+      ORDER BY number ASC
+      LIMIT ?
+    `)
+    .all(roomId, rootNumber, roomId, roomId, limit + 1)
+    .map(mapRow);
+  const hasMore = rows.length > limit;
+  const bounded = hasMore ? rows.slice(0, limit) : rows;
+  return {
+    messages: await hydrateMessageRows(database, bounded),
+    has_more: hasMore,
+  };
+}
+
+export async function getLocalChatMessagesAround(
+  roomId: string,
+  messageId: string,
+  options?: {
+    before?: number;
+    after?: number;
+    include_prompt_only?: boolean;
+  },
+): Promise<LocalMessagePage> {
+  const anchorNumber = parseMessageNumber(messageId);
+  if (!anchorNumber) {
+    return { messages: [], has_more: false };
+  }
+
+  const before = Math.max(0, Math.min(50, Math.floor(Number(options?.before ?? 10))));
+  const after = Math.max(0, Math.min(50, Math.floor(Number(options?.after ?? 10))));
+  const database = await getDb();
+  const beforeRows = before > 0
+    ? database
+      .prepare(`
+        SELECT * FROM local_chat_messages
+        WHERE room_id = ?
+          AND ${visibleMessageClause(options?.include_prompt_only)}
+          AND number < ?
+        ORDER BY number DESC
+        LIMIT ?
+      `)
+      .all(roomId, anchorNumber, before + 1)
+      .map(mapRow)
+    : [];
+  const anchorRows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+        AND number = ?
+      LIMIT 1
+    `)
+    .all(roomId, anchorNumber)
+    .map(mapRow);
+  const afterRows = after > 0
+    ? database
+      .prepare(`
+        SELECT * FROM local_chat_messages
+        WHERE room_id = ?
+          AND ${visibleMessageClause(options?.include_prompt_only)}
+          AND number > ?
+        ORDER BY number ASC
+        LIMIT ?
+      `)
+      .all(roomId, anchorNumber, after + 1)
+      .map(mapRow)
+    : [];
+  const hasMore = beforeRows.length > before || afterRows.length > after;
+  const rows = [
+    ...(beforeRows.length > before ? beforeRows.slice(0, before) : beforeRows).reverse(),
+    ...anchorRows,
+    ...(afterRows.length > after ? afterRows.slice(0, after) : afterRows),
+  ];
+  return {
+    messages: await hydrateMessageRows(database, rows),
+    has_more: hasMore,
+  };
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
 }
 
 function staleSyncStartedAt(): string {

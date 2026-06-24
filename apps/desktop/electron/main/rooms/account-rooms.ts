@@ -184,13 +184,25 @@ async function fetchDesktopAccountRooms(input: {
       return { rooms: [] };
     throw error;
   });
-  return (response.rooms || [])
+  const cloudRooms = (response.rooms || [])
     .filter(
       (room): room is Record<string, unknown> =>
         Boolean(room) && typeof room === "object",
     )
     .map(mapDesktopAccountRoomEntry)
     .filter((room) => Boolean(room.roomIdentifier));
+  const localRooms = await listLocalRoomEntries({ linkedIdentity: "cloud" });
+  const seen = new Set(cloudRooms.map((room) => room.roomIdentifier));
+  const visibleLocalRooms: DesktopAccountRoomEntry[] = [];
+  for (const room of localRooms) {
+    if (seen.has(room.roomIdentifier)) continue;
+    seen.add(room.roomIdentifier);
+    visibleLocalRooms.push(room);
+  }
+  return [
+    ...visibleLocalRooms,
+    ...cloudRooms,
+  ];
 }
 
 export async function listDesktopAccountRooms(
