@@ -5,7 +5,6 @@ import { computed, ref } from "vue";
 import type {
   DesktopAuthStatus,
   DesktopMcpInstallManyResult,
-  DesktopMcpInstallOptions,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopRepoRoomSelection,
@@ -33,7 +32,6 @@ interface SetupStateInput {
   setupBridge?: {
     installMcpServers?: (
       targetIds: DesktopMcpInstallTargetId[],
-      options?: DesktopMcpInstallOptions,
     ) => Promise<DesktopMcpInstallManyResult>;
     completeMcpOnboarding?: () => Promise<DesktopMcpInstallState>;
   };
@@ -113,8 +111,33 @@ test("first-run gate only depends on MCP completion", () => {
   assert.equal(state.onboarding.showFirstRunGate.value, false);
 });
 
+test("installSelectedMcpTargets does not pass repo cwd to global MCP install", async () => {
+  const installCalls: Array<[DesktopMcpInstallTargetId[]]> = [];
+  const installState = mcpInstallStateFixture({ completed: false });
+  const state = makeSetupState({
+    mcpInstallState: installState,
+    repoStatus: repoStatusFixture(),
+    selectedMcpTargetIds: ["codex"],
+    setupBridge: {
+      installMcpServers: async (...args: [DesktopMcpInstallTargetId[]]) => {
+        installCalls.push(args);
+        return {
+          success: true,
+          targets: installState.targets,
+          installState,
+          message: "installed",
+        };
+      },
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
+
+  assert.deepEqual(installCalls, [[["codex"]]]);
+});
+
 test("finishFirstRunOnboarding completes room-code setup without reinstalling with stale cwd", async () => {
-  const installCalls: Array<{ targetIds: DesktopMcpInstallTargetId[]; cwd?: string | null }> = [];
+  const installCalls: DesktopMcpInstallTargetId[][] = [];
   const completedState = mcpInstallStateFixture({ completed: true });
   const state = makeSetupState({
     mcpInstallState: mcpInstallStateFixture({ completed: false }),
@@ -122,8 +145,8 @@ test("finishFirstRunOnboarding completes room-code setup without reinstalling wi
     repoStatus: null,
     selectedMcpTargetIds: ["codex"],
     setupBridge: {
-      installMcpServers: async (targetIds, options) => {
-        installCalls.push({ targetIds, cwd: options?.cwd });
+      installMcpServers: async (targetIds) => {
+        installCalls.push(targetIds);
         return {
           success: true,
           targets: [],

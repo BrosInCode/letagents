@@ -10,47 +10,43 @@
         </header>
       </div>
 
-      <Transition name="room-panel" mode="out-in">
-        <div v-if="stage === 'mcp'" key="mcp" class="first-run-stage" data-testid="first-run-stage-mcp">
-          <McpHarnessChoiceStep
-            v-if="mcpWizardStep === 'choose'"
-            :targets="mcpState.targets"
-            :selected-target-ids="selectedMcpTargetIds"
-            @select-target="$emit('select-target', $event)"
-            @select-all="$emit('select-all-targets')"
-            @clear-selection="$emit('clear-target-selection')"
-          />
-
-          <McpInstallConfirmStep
-            v-else-if="mcpWizardStep === 'install'"
-            :targets="selectedMcpTargets"
-          />
-
-          <McpInstallDoneStep v-else :targets="selectedMcpTargets" />
-        </div>
-
-        <FirstRunGithubStep
-          v-else-if="stage === 'github'"
-          key="github"
-          :auth-status="authStatus"
-          :busy="authBusy"
-          @start-auth="$emit('start-auth')"
-          @open-verification="$emit('open-verification', $event)"
-          @poll-auth="$emit('poll-auth')"
-          @sign-out="$emit('sign-out')"
+      <div v-if="stage === 'mcp'" class="first-run-stage" data-testid="first-run-stage-mcp">
+        <McpHarnessChoiceStep
+          v-if="mcpWizardStep === 'choose'"
+          :targets="mcpState.targets"
+          :selected-target-ids="selectedMcpTargetIds"
+          @select-target="$emit('select-target', $event)"
+          @select-all="$emit('select-all-targets')"
+          @clear-selection="$emit('clear-target-selection')"
         />
 
-        <FirstRunRoomStep
-          v-else
-          key="room"
-          :room-name="roomName"
-          :room-identifier="roomIdentifier"
-          :github-connected="!!authStatus?.authenticated"
-          :busy="busy"
-          @pick-repo="$emit('pick-repo')"
-          @join-room-code="$emit('join-room-code', $event)"
+        <McpInstallConfirmStep
+          v-else-if="mcpWizardStep === 'install'"
+          :targets="selectedMcpTargets"
         />
-      </Transition>
+
+        <McpInstallDoneStep v-else :targets="selectedMcpTargets" />
+      </div>
+
+      <FirstRunGithubStep
+        v-else-if="stage === 'github'"
+        :auth-status="authStatus"
+        :busy="authBusy"
+        @start-auth="$emit('start-auth')"
+        @open-verification="$emit('open-verification', $event)"
+        @poll-auth="$emit('poll-auth')"
+        @sign-out="$emit('sign-out')"
+      />
+
+      <FirstRunRoomStep
+        v-else
+        :room-name="roomName"
+        :room-identifier="roomIdentifier"
+        :github-connected="!!authStatus?.authenticated"
+        :busy="busy"
+        @pick-repo="$emit('pick-repo')"
+        @join-room-code="$emit('join-room-code', $event)"
+      />
 
       <div class="mcp-wizard-actions" data-testid="first-run-actions">
         <button

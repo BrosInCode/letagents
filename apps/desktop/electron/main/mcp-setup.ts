@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type {
-  DesktopMcpInstallOptions,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
@@ -22,12 +21,11 @@ import {
   type LetAgentsMcpServerConfig,
   type McpServerJsonConfig,
 } from "./mcp-config.js";
-import { apiUrl, workspaceRoot } from "./paths.js";
+import { apiUrl } from "./paths.js";
 
 type StoredMcpInstallSetup = {
   completed: boolean;
   completedAt: string | null;
-  cwd: string | null;
   selectedTargetId: DesktopMcpInstallTargetId | null;
   installs: Partial<
     Record<DesktopMcpInstallTargetId, { lastInstalledAt: string }>
@@ -101,9 +99,6 @@ async function readStoredMcpSetup(): Promise<StoredMcpInstallSetup> {
     return {
       completed: Boolean(parsed.completed),
       completedAt: parsed.completedAt || null,
-      cwd: typeof parsed.cwd === "string" && parsed.cwd.trim()
-        ? parsed.cwd.trim()
-        : null,
       selectedTargetId: parsed.selectedTargetId || null,
       installs: parsed.installs || {},
     };
@@ -111,16 +106,10 @@ async function readStoredMcpSetup(): Promise<StoredMcpInstallSetup> {
     return {
       completed: false,
       completedAt: null,
-      cwd: null,
       selectedTargetId: null,
       installs: {},
     };
   }
-}
-
-function normalizeInstallCwd(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  return trimmed || null;
 }
 
 function stringRecord(value: unknown): Record<string, string> {
@@ -148,21 +137,18 @@ function withRefreshedAuthEnv(
     delete env.LETAGENTS_TOKEN;
   }
 
+  const { cwd: _legacyCwd, ...server } = current;
   return {
-    ...current,
+    ...server,
     env,
   };
 }
 
-async function buildExpectedLetAgentsMcpServerConfig(
-  cwd?: string | null,
-): Promise<LetAgentsMcpServerConfig> {
+async function buildExpectedLetAgentsMcpServerConfig(): Promise<LetAgentsMcpServerConfig> {
   const storedAuth = await readStoredAuth();
   return createLetAgentsMcpServerConfig({
     apiUrl,
-    workspaceRoot,
     authToken: storedAuth.token,
-    cwd,
   });
 }
 
@@ -235,12 +221,9 @@ async function writeCodexTomlMcpConfig(
   );
 }
 
-export async function buildMcpInstallState(
-  options: DesktopMcpInstallOptions = {},
-): Promise<DesktopMcpInstallState> {
+export async function buildMcpInstallState(): Promise<DesktopMcpInstallState> {
   const storedSetup = await readStoredMcpSetup();
-  const effectiveCwd = normalizeInstallCwd(options.cwd) || storedSetup.cwd;
-  const expected = await buildExpectedLetAgentsMcpServerConfig(effectiveCwd);
+  const expected = await buildExpectedLetAgentsMcpServerConfig();
   const targets = getMcpInstallTargetDefinitions().map<DesktopMcpInstallTarget>(
     (target) => {
       const status = getLetAgentsMcpInstallStatus(target, expected);
@@ -338,7 +321,7 @@ async function refreshLetAgentsMcpServerAuthForTarget(
 
 export async function refreshInstalledLetAgentsMcpServerAuth(): Promise<void> {
   const storedSetup = await readStoredMcpSetup();
-  const expected = await buildExpectedLetAgentsMcpServerConfig(storedSetup.cwd);
+  const expected = await buildExpectedLetAgentsMcpServerConfig();
 
   for (const targetDefinition of getMcpInstallTargetDefinitions()) {
     if (!storedSetup.installs[targetDefinition.id]?.lastInstalledAt) continue;
@@ -348,7 +331,6 @@ export async function refreshInstalledLetAgentsMcpServerAuth(): Promise<void> {
 
 export async function installLetAgentsMcpServers(
   targetIds: DesktopMcpInstallTargetId[],
-  options: DesktopMcpInstallOptions = {},
 ): Promise<DesktopMcpInstallManyResult> {
   if (!targetIds.length) {
     throw new Error("Choose at least one app for MCP setup.");
@@ -360,10 +342,7 @@ export async function installLetAgentsMcpServers(
     uniqueTargetIds.includes(target.id),
   );
   const storedSetup = await readStoredMcpSetup();
-  const effectiveCwd = normalizeInstallCwd(options.cwd)
-    || storedSetup.cwd
-    || workspaceRoot;
-  const expected = await buildExpectedLetAgentsMcpServerConfig(effectiveCwd);
+  const expected = await buildExpectedLetAgentsMcpServerConfig();
 
   for (const targetDefinition of targetDefinitions) {
     await writeLetAgentsMcpServerForTarget(targetDefinition, expected);
@@ -378,12 +357,11 @@ export async function installLetAgentsMcpServers(
   await writeStoredMcpSetup({
     completed: storedSetup.completed,
     completedAt: storedSetup.completedAt,
-    cwd: effectiveCwd,
     selectedTargetId: uniqueTargetIds[0] || storedSetup.selectedTargetId,
     installs,
   });
 
-  const installState = await buildMcpInstallState({ cwd: effectiveCwd });
+  const installState = await buildMcpInstallState();
   const targets = installState.targets.filter((candidate) =>
     uniqueTargetIds.includes(candidate.id),
   );
@@ -399,9 +377,8 @@ export async function installLetAgentsMcpServers(
 
 export async function installLetAgentsMcpServer(
   targetId: DesktopMcpInstallTargetId,
-  options: DesktopMcpInstallOptions = {},
 ): Promise<DesktopMcpInstallResult> {
-  const result = await installLetAgentsMcpServers([targetId], options);
+  const result = await installLetAgentsMcpServers([targetId]);
   const installState = result.installState;
   const target = installState.targets.find(
     (candidate) => candidate.id === targetId,

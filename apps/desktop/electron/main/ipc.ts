@@ -41,7 +41,6 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopMcpInstallManyResult,
-  DesktopMcpInstallOptions,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
   DesktopMcpInstallTarget,
@@ -647,18 +646,16 @@ export function registerDesktopIpcHandlers(
     async (
       _event,
       targetId: DesktopMcpInstallTargetId,
-      options?: DesktopMcpInstallOptions,
     ): Promise<DesktopMcpInstallResult> =>
-      installLetAgentsMcpServer(targetId, options ?? {}),
+      installLetAgentsMcpServer(targetId),
   );
   targetIpcMain.handle(
     "desktop:setup:install-mcp-servers",
     async (
       _event,
       targetIds: DesktopMcpInstallTargetId[],
-      options?: DesktopMcpInstallOptions,
     ): Promise<DesktopMcpInstallManyResult> =>
-      installLetAgentsMcpServers(targetIds, options ?? {}),
+      installLetAgentsMcpServers(targetIds),
   );
   targetIpcMain.handle(
     "desktop:setup:complete-mcp-onboarding",

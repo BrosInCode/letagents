@@ -67,7 +67,6 @@ const {
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
-const { agentProviderMcpInstallOptions } = await import("../main/agents/provider-setup-options.js");
 const { persistDesktopManagedAgentLocalReply } = await import("../main/agents/managed-agent-local-replies.js");
 const {
   createLocalRoom,
@@ -1942,13 +1941,4 @@ test("agent provider setup confirmation copy covers install actions", () => {
   assert.equal(bridgeInstall.action, "install_mcp_bridge");
   assert.match(bridgeInstall.message, /requires confirmation/i);
   assert.match(bridgeInstall.detail || "", /MCP configuration/i);
-});
-
-test("agent provider MCP setup preserves the selected repository cwd", () => {
-  assert.deepEqual(
-    agentProviderMcpInstallOptions({ repoRootPath: " /tmp/room-worktree " }),
-    { cwd: "/tmp/room-worktree" },
-  );
-  assert.deepEqual(agentProviderMcpInstallOptions({ repoRootPath: " " }), {});
-  assert.deepEqual(agentProviderMcpInstallOptions({ repoRootPath: null }), {});
 });

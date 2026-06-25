@@ -1,9 +1,5 @@
 export type DesktopMcpInstallTargetId = "claude-code" | "antigravity" | "cursor" | "codex";
 
-export interface DesktopMcpInstallOptions {
-  cwd?: string | null;
-}
-
 export interface DesktopMcpInstallTarget {
   id: DesktopMcpInstallTargetId;
   name: string;

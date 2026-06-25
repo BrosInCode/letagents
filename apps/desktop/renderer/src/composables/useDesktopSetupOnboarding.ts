@@ -124,10 +124,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpWizardStep.value = options.mcpWizardStep.value === "done" ? "install" : "choose";
   }
 
-  function selectedInstallCwd(): string | null {
-    return options.repoStatus.value?.rootPath?.trim() || null;
-  }
-
   async function pickRepoRoom(): Promise<boolean> {
     options.loading.value = true;
     options.mcpInstallFeedback.value = null;
@@ -227,9 +223,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       if (!window.letagentsDesktop?.setup) {
         throw new Error("Restart LetAgents Desktop so setup can install MCP automatically.");
       }
-      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds, {
-        cwd: selectedInstallCwd(),
-      });
+      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds);
       options.mcpInstallState.value = result.installState;
       options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
       options.mcpInstallFeedback.value = result.message;
@@ -267,15 +261,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     try {
       if (!window.letagentsDesktop?.setup) {
         throw new Error("Restart LetAgents Desktop so setup can finish.");
-      }
-      const targetIds = [...options.selectedMcpTargetIds.value];
-      const cwd = selectedInstallCwd();
-      if (targetIds.length && cwd) {
-        const result = await window.letagentsDesktop.setup.installMcpServers(targetIds, {
-          cwd,
-        });
-        options.mcpInstallState.value = result.installState;
-        options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
       }
       options.mcpInstallState.value = await window.letagentsDesktop.setup.completeMcpOnboarding();
       options.activeEntry.value = options.pinnedRoom.value;

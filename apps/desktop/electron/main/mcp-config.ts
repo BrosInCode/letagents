@@ -22,12 +22,9 @@ type McpInstallStatus = DesktopMcpInstallTarget["status"];
 
 export function createLetAgentsMcpServerConfig(input: {
   apiUrl: string;
-  workspaceRoot: string;
   authToken?: string | null;
-  cwd?: string | null;
 }): LetAgentsMcpServerConfig {
   const token = input.authToken?.trim() || null;
-  const cwd = input.cwd?.trim() || input.workspaceRoot;
   const env: Record<string, string> = {
     LETAGENTS_API_URL: input.apiUrl,
   };
@@ -38,7 +35,6 @@ export function createLetAgentsMcpServerConfig(input: {
   return {
     command: "npx",
     args: ["-y", "letagents"],
-    cwd,
     env,
   };
 }
@@ -219,7 +215,7 @@ export function buildCodexTomlLetAgentsMcpConfig(
     "[mcp_servers.letagents]",
     `command = ${tomlString(expected.command || "npx")}`,
     `args = ${tomlStringArray(expected.args || ["-y", "letagents"])}`,
-    `cwd = ${tomlString(expected.cwd || "")}`,
+    ...(expected.cwd ? [`cwd = ${tomlString(expected.cwd)}`] : []),
     "",
     "[mcp_servers.letagents.env]",
     ...envLines.map(([key, value]) => `${key} = ${tomlString(value)}`),
