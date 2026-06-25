@@ -11,6 +11,8 @@ export type LocalChatMessage = {
   source: string | null;
   timestamp: string;
   attachments: LocalChatAttachment[];
+  thread_root_id: string;
+  thread_reply_to_id: string | null;
   reply_to: {
     id: string;
     sender: string;
@@ -74,6 +76,7 @@ type LocalMessageRow = {
   room_id: string;
   number: number;
   reply_to_number: number | null;
+  thread_root_number: number | null;
   sender: string;
   text: string;
   agent_prompt_kind: string | null;
@@ -100,6 +103,7 @@ type LocalChatInput = {
   source?: string | null;
   agent_prompt_kind?: string | null;
   reply_to?: string | null;
+  thread_root_id?: string | null;
 };
 
 const require = createRequire(import.meta.url);
@@ -148,6 +152,10 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
       row.reply_to_number === null || row.reply_to_number === undefined
         ? null
         : Number(row.reply_to_number),
+    thread_root_number:
+      row.thread_root_number === null || row.thread_root_number === undefined
+        ? null
+        : Number(row.thread_root_number),
     sender: String(row.sender || ""),
     text: String(row.text || ""),
     agent_prompt_kind:
@@ -158,6 +166,17 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
     sync_started_at:
       typeof row.sync_started_at === "string" ? row.sync_started_at : null,
   };
+}
+
+function getLocalMessageRow(
+  database: SqliteDatabase,
+  roomId: string,
+  number: number,
+): LocalMessageRow | null {
+  const row = database
+    .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND number = ?")
+    .get(roomId, number);
+  return row ? mapRow(row) : null;
 }
 
 function mapAttachmentRow(row: Record<string, unknown>): LocalAttachmentRow {
@@ -205,6 +224,8 @@ function toMessage(
       data_url: attachment.data_url,
       content_base64: attachment.content_base64,
     })),
+    thread_root_id: formatMessageId(row.thread_root_number ?? row.number),
+    thread_reply_to_id: row.reply_to_number ? formatMessageId(row.reply_to_number) : null,
     reply_to: replyTo
       ? {
           id: formatMessageId(replyTo.number),
@@ -236,6 +257,7 @@ async function getDb(): Promise<SqliteDatabase> {
       room_id TEXT NOT NULL,
       number INTEGER NOT NULL,
       reply_to_number INTEGER,
+      thread_root_number INTEGER,
       sender TEXT NOT NULL,
       text TEXT NOT NULL,
       agent_prompt_kind TEXT,
@@ -309,6 +331,7 @@ async function getDb(): Promise<SqliteDatabase> {
   `);
   addColumnIfMissing(db, "local_chat_messages", "sync_key", "TEXT");
   addColumnIfMissing(db, "local_chat_messages", "sync_started_at", "TEXT");
+  addColumnIfMissing(db, "local_chat_messages", "thread_root_number", "INTEGER");
   addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
   addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
   addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
@@ -326,7 +349,10 @@ async function getDb(): Promise<SqliteDatabase> {
       WHERE sync_key IS NOT NULL;
     CREATE INDEX IF NOT EXISTS local_chat_messages_sync_started_idx
       ON local_chat_messages (room_id, sync_started_at);
+    CREATE INDEX IF NOT EXISTS local_chat_messages_thread_root_idx
+      ON local_chat_messages (room_id, thread_root_number);
   `);
+  backfillLocalThreadRoots(db);
   return db;
 }
 
@@ -342,6 +368,27 @@ function addColumnIfMissing(
     if (!String(error).toLowerCase().includes("duplicate column")) {
       throw error;
     }
+  }
+}
+
+function backfillLocalThreadRoots(database: SqliteDatabase): void {
+  const rows = database
+    .prepare("SELECT * FROM local_chat_messages ORDER BY room_id ASC, number ASC")
+    .all()
+    .map(mapRow);
+  const rowsByKey = new Map(rows.map((row) => [`${row.room_id}\0${row.number}`, row]));
+  for (const row of rows) {
+    if (!row.reply_to_number || row.thread_root_number) continue;
+    const parent = rowsByKey.get(`${row.room_id}\0${row.reply_to_number}`);
+    const rootNumber = parent?.thread_root_number ?? parent?.number ?? row.reply_to_number;
+    row.thread_root_number = rootNumber;
+    database
+      .prepare(`
+        UPDATE local_chat_messages
+        SET thread_root_number = ?
+        WHERE room_id = ? AND number = ? AND thread_root_number IS NULL
+      `)
+      .run(rootNumber, row.room_id, row.number);
   }
 }
 
@@ -374,12 +421,9 @@ async function hydrateRows(
   ];
 
   for (const number of replyNumbers) {
-    const reply = database
-      .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND number = ?")
-      .get(roomId, number);
+    const reply = getLocalMessageRow(database, roomId, number);
     if (reply) {
-      const row = mapRow(reply);
-      replies.set(row.number, row);
+      replies.set(reply.number, reply);
     }
   }
 
@@ -559,18 +603,32 @@ export async function addLocalChatMessage(
 
   const database = await getDb();
   const replyToNumber = parseMessageNumber(input.reply_to);
+  const explicitThreadRootNumber = parseMessageNumber(input.thread_root_id);
   let replyTarget: LocalMessageRow | null = null;
   if (input.reply_to && !replyToNumber) {
     throw new Error("reply_to must be a valid local message id.");
   }
+  if (input.thread_root_id && !explicitThreadRootNumber) {
+    throw new Error("thread_root_id must be a valid local message id.");
+  }
+  let replyTargetRootNumber: number | null = null;
   if (replyToNumber) {
-    const replyRow = database
-      .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND number = ?")
-      .get(trimmedRoomId, replyToNumber);
-    if (!replyRow) {
+    replyTarget = getLocalMessageRow(database, trimmedRoomId, replyToNumber);
+    if (!replyTarget) {
       throw new Error("reply_to must reference an existing local message in this room.");
     }
-    replyTarget = mapRow(replyRow);
+    replyTargetRootNumber = replyTarget.thread_root_number ?? replyTarget.number;
+  }
+  let threadRootNumber = explicitThreadRootNumber ?? replyTargetRootNumber;
+  if (explicitThreadRootNumber) {
+    const rootTarget = getLocalMessageRow(database, trimmedRoomId, explicitThreadRootNumber);
+    if (!rootTarget) {
+      throw new Error("thread_root_id must reference an existing local message in this room.");
+    }
+    threadRootNumber = rootTarget.thread_root_number ?? rootTarget.number;
+    if (replyTargetRootNumber && replyTargetRootNumber !== threadRootNumber) {
+      throw new Error("reply_to must belong to the requested local thread.");
+    }
   }
 
   const timestamp = new Date().toISOString();
@@ -582,6 +640,7 @@ export async function addLocalChatMessage(
       room_id: trimmedRoomId,
       number,
       reply_to_number: replyToNumber,
+      thread_root_number: threadRootNumber,
       sender,
       text: input.text,
       agent_prompt_kind: input.agent_prompt_kind || null,
@@ -594,15 +653,16 @@ export async function addLocalChatMessage(
     database
       .prepare(`
         INSERT INTO local_chat_messages (
-          room_id, number, reply_to_number, sender, text, agent_prompt_kind, source,
+          room_id, number, reply_to_number, thread_root_number, sender, text, agent_prompt_kind, source,
           timestamp, synced_cloud_id, synced_at, sync_key, sync_started_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
       `)
       .run(
         row.room_id,
         row.number,
         row.reply_to_number,
+        row.thread_root_number,
         row.sender,
         row.text,
         row.agent_prompt_kind,

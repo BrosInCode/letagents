@@ -16,8 +16,8 @@
         v-for="message in messages"
         :key="message.id"
         :message="message"
-        :thread-count="threadCount(message.id)"
-        :latest-thread-message="latestThreadMessage(message.id)"
+        :thread-summary="threadIndicatorSummary(message)"
+        :active-thread-root="message.id === activeThreadParentId"
         :highlight-query="searchQuery"
         :search-active="message.id === activeSearchMessageId"
         @quote-reply="$emit('quote-reply', $event)"
@@ -74,14 +74,14 @@
       </article>
     </div>
     <div
-      v-if="visibleThreadActivityNotice && !roomLoading"
+      v-if="threadActivityNotice && !roomLoading"
       class="room-thread-activity-pill"
       data-testid="room-thread-activity-pill"
     >
       <button class="room-thread-activity-open" type="button" @click="openThreadActivityNotice">
-        <span>{{ visibleThreadActivityNotice.label }}</span>
-        <strong>{{ visibleThreadActivityNotice.title }}</strong>
-        <small>{{ visibleThreadActivityNotice.preview }}</small>
+        <span>Thread reply</span>
+        <strong>{{ threadActivityNotice.title }}</strong>
+        <small>{{ threadActivityNotice.preview }}</small>
       </button>
       <button
         class="room-thread-activity-dismiss"
@@ -115,12 +115,10 @@ import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
-import { buildThreadSummaries } from "./thread-utils";
+import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
 
 interface ThreadActivityNotice {
   parentId: string;
-  replyId: string;
-  label: string;
   title: string;
   preview: string;
 }
@@ -191,7 +189,6 @@ let threadActivityNamespace = props.messageNamespace;
 let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
-const visibleThreadActivityNotice = computed(() => threadActivityNotice.value);
 
 watch(
   () => props.messages,
@@ -301,22 +298,22 @@ watch(
     }
     if (!oldMessages.length) return;
 
-    const previousNewestMessage = newestMessage([...oldMessages]);
+    const previousNewestMessage = newestMessage(oldMessages);
     const oldReplyIds = new Set(
       oldMessages
-        .filter((message) => message.replyTo?.id)
+        .filter((message) => threadParentId(message))
         .map((message) => message.id),
     );
     const newThreadReplies = newMessages.filter((message) =>
-      message.replyTo?.id &&
+      threadParentId(message) &&
       !oldReplyIds.has(message.id) &&
-      isNewerThan(message, previousNewestMessage)
+      (!previousNewestMessage || compareRoomMessages(message, previousNewestMessage) > 0)
     );
     const latestReply = newestMessage(newThreadReplies);
-    const parentId = latestReply?.replyTo?.id || null;
+    const parentId = latestReply ? threadParentId(latestReply) : null;
     if (!latestReply || !parentId || parentId === props.activeThreadParentId) return;
 
-    threadActivityNotice.value = buildThreadActivityNotice(latestReply);
+    threadActivityNotice.value = buildThreadActivityNotice(latestReply, parentId);
   },
 );
 
@@ -636,19 +633,18 @@ function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
   element.style.scrollBehavior = previousScrollBehavior;
 }
 
-function threadCount(messageId: string): number {
-  return threadSummaries.value.get(messageId)?.count || 0;
+function threadIndicatorSummary(message: DesktopRoomMessage) {
+  return buildThreadIndicatorSummary(message, threadSummaries.value.get(message.id) || null);
 }
 
-function latestThreadMessage(messageId: string): DesktopRoomMessage | null {
-  return threadSummaries.value.get(messageId)?.latest || null;
-}
+defineExpose({
+  scrollToMessage,
+});
 
 function openThreadActivityNotice(): void {
-  const notice = visibleThreadActivityNotice.value;
+  const notice = threadActivityNotice.value;
   if (!notice) return;
   threadActivityNotice.value = null;
-  dismissThreadActivityNotice(notice);
   emit("open-thread", notice.parentId);
 }
 
@@ -661,42 +657,25 @@ function scrollToMessage(messageId: string | null): void {
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
 }
 
-function dismissThreadActivityNotice(notice: ThreadActivityNotice | null = visibleThreadActivityNotice.value): void {
-  if (!notice) return;
+function dismissThreadActivityNotice(): void {
   threadActivityNotice.value = null;
 }
 
-function buildThreadActivityNotice(reply: DesktopRoomMessage, label = "Thread reply"): ThreadActivityNotice | null {
-  const parentId = reply.replyTo?.id;
-  if (!parentId) return null;
+function buildThreadActivityNotice(reply: DesktopRoomMessage, parentId: string): ThreadActivityNotice {
   const senderName = parseSenderIdentity(reply).displayName;
-  const summary = threadSummaries.value.get(parentId);
+  const replyCount = threadSummaries.value.get(parentId)?.count || 1;
   return {
     parentId,
-    replyId: reply.id,
-    label,
     title: `${senderName} replied`,
-    preview: `${summary?.count || 1} ${(summary?.count || 1) === 1 ? "reply" : "replies"} · ${messagePreview(reply)}`,
+    preview: `${replyCount} ${replyCount === 1 ? "reply" : "replies"} · ${truncate(threadQuotePreview(reply), 92)}`,
   };
 }
 
-function messagePreview(message: DesktopRoomMessage): string {
-  const text = (message.text || "").replace(/\s+/g, " ").trim();
-  if (text) return truncate(text, 92);
-  if (message.attachments.length === 1) return "1 attachment";
-  if (message.attachments.length > 1) return `${message.attachments.length} attachments`;
-  return "No message body.";
-}
-
-function newestMessage(messages: DesktopRoomMessage[]): DesktopRoomMessage | null {
+function newestMessage(messages: readonly DesktopRoomMessage[]): DesktopRoomMessage | null {
   return messages.reduce<DesktopRoomMessage | null>((latest, message) => {
     if (!latest) return message;
     return compareRoomMessages(message, latest) >= 0 ? message : latest;
   }, null);
-}
-
-function isNewerThan(message: DesktopRoomMessage, previous: DesktopRoomMessage | null): boolean {
-  return !previous || compareRoomMessages(message, previous) > 0;
 }
 
 </script>

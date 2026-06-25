@@ -99,15 +99,15 @@
         </Transition>
       </div>
 
-      <nav class="desktop-room-tabs" role="tablist" aria-label="Room navigation" data-testid="desktop-room-tabs">
+      <nav class="desktop-room-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
         <button
           v-for="tab in tabs"
           :key="tab.id"
           class="desktop-room-tab"
           :data-active="activeTab === tab.id"
           :data-testid="`desktop-room-tab-${tab.id}`"
-          role="tab"
-          :aria-selected="activeTab === tab.id"
+          :aria-current="activeTab === tab.id ? 'page' : undefined"
+          :aria-label="tabAriaLabel(tab)"
           type="button"
           @click="emit('selectTab', tab.id)"
         >
@@ -117,6 +117,14 @@
               d="M3.5 4.5h9v5.25h-4L5.5 12v-2.25h-2V4.5Z"
               stroke="currentColor"
               stroke-width="1.4"
+              stroke-linejoin="round"
+            />
+            <path
+              v-else-if="tab.id === 'inbox'"
+              d="M3.25 3.5h9.5v5.25l-1.5 3.75h-6.5l-1.5-3.75V3.5Zm0 5.25h3l.75 1.5h2l.75-1.5h3"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
               stroke-linejoin="round"
             />
             <path
@@ -162,6 +170,15 @@
           </svg>
           <span>{{ tab.label }}</span>
           <small v-if="tab.count !== null">{{ tab.count }}</small>
+          <DesktopStatusIndicator
+            v-if="tab.indicator"
+            class="desktop-room-tab-indicator"
+            :label="tab.indicator.label"
+            :count="tab.indicator.count ?? null"
+            :tone="tab.indicator.tone ?? 'info'"
+            :pulse="tab.indicator.pulse ?? false"
+            :mode="tab.indicator.mode ?? 'dot'"
+          />
         </button>
       </nav>
 
@@ -172,6 +189,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
+import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
 
@@ -236,6 +254,15 @@ function runOverflowAction(action: "find" | "settings"): void {
     return;
   }
   emit("toggleActionPanel");
+}
+
+function tabAriaLabel(tab: RoomTab): string {
+  const parts = [tab.label];
+  if (tab.count !== null) parts.push(String(tab.count));
+  if (tab.indicator) {
+    parts.push(tab.indicator.count ? `${tab.indicator.count} new` : tab.indicator.label);
+  }
+  return parts.join(", ");
 }
 
 function handleDocumentPointerDown(event: PointerEvent): void {

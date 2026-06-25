@@ -6,6 +6,7 @@ import type { Request } from "express";
 import {
   parseOptionalAgentPromptKind,
   parseOptionalReplyToMessageId,
+  parseOptionalThreadRootMessageId,
   shouldIncludePromptOnlyMessages,
 } from "../messages/inputs.js";
 
@@ -55,6 +56,17 @@ test("parseOptionalReplyToMessageId rejects malformed reply targets", () => {
   assert.throws(
     () => parseOptionalReplyToMessageId(42),
     /reply_to must be a valid message id/
+  );
+});
+
+test("parseOptionalThreadRootMessageId trims and validates message ids", () => {
+  assert.equal(parseOptionalThreadRootMessageId(undefined), null);
+  assert.equal(parseOptionalThreadRootMessageId(null), null);
+  assert.equal(parseOptionalThreadRootMessageId(""), null);
+  assert.equal(parseOptionalThreadRootMessageId(" msg_7 "), "msg_7");
+  assert.throws(
+    () => parseOptionalThreadRootMessageId("message_7"),
+    /thread_root_id must be a valid message id/,
   );
 });
 

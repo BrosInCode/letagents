@@ -64,6 +64,10 @@ import type {
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
+  DesktopRoomThreadInboxFilter,
+  DesktopRoomThreadInboxPage,
+  DesktopRoomThreadPage,
+  DesktopRoomThreadReadResult,
   DesktopStagedAttachment,
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
@@ -117,12 +121,15 @@ import {
   getDesktopGitHubIntegrationStatus,
   getDesktopRoomLatestMessages,
   getDesktopRoomStorage,
+  getDesktopRoomThread,
+  getDesktopRoomThreads,
   getDesktopReasoningSession,
   getDesktopRoomMessagesBefore,
   leaveDesktopAccountRoom,
   listDesktopAccountRooms,
   openDesktopGitHubInstall,
   pickRepoRoom,
+  markDesktopRoomThreadRead,
   renameDesktopRoom,
   runDesktopRoomTaskReviewWorkerAction,
   runDesktopRoomTaskWorkerAction,
@@ -280,6 +287,38 @@ export function registerDesktopIpcHandlers(
       getDesktopRoomMessagesBefore(roomIdentifier, beforeMessageId, limit),
   );
   targetIpcMain.handle(
+    "desktop:room:get-threads",
+    async (
+      _event,
+      roomIdentifier: string,
+      filter?: DesktopRoomThreadInboxFilter,
+      beforeMessageId?: string | null,
+      limit?: number,
+    ): Promise<DesktopRoomThreadInboxPage> =>
+      getDesktopRoomThreads(roomIdentifier, filter, beforeMessageId, limit),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-thread",
+    async (
+      _event,
+      roomIdentifier: string,
+      threadRootId: string,
+      beforeMessageId?: string | null,
+      limit?: number,
+    ): Promise<DesktopRoomThreadPage> =>
+      getDesktopRoomThread(roomIdentifier, threadRootId, beforeMessageId, limit),
+  );
+  targetIpcMain.handle(
+    "desktop:room:mark-thread-read",
+    async (
+      _event,
+      roomIdentifier: string,
+      threadRootId: string,
+      messageId?: string | null,
+    ): Promise<DesktopRoomThreadReadResult> =>
+      markDesktopRoomThreadRead(roomIdentifier, threadRootId, messageId),
+  );
+  targetIpcMain.handle(
     "desktop:room:get-reasoning-session",
     async (
       _event,
@@ -331,8 +370,9 @@ export function registerDesktopIpcHandlers(
       text: string,
       replyTo?: string | null,
       attachments?: Array<{ upload_id: string }>,
+      threadRootId?: string | null,
     ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? []);
+      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId);
       deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message);
       return result;
     },

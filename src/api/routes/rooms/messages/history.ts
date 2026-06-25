@@ -2,14 +2,19 @@ import type { Express } from "express";
 
 import {
   getLatestMessages,
+  getMessageThread,
+  getMessageThreads,
   getMessages,
   getMessagesAfter,
   getMessagesBefore,
+  markMessageThreadRead,
   type Message,
 } from "../../../db.js";
 import {
   parseLimit,
   parsePollTimeout,
+  respondWithBadRequest,
+  respondWithInternalError,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import {
@@ -34,15 +39,21 @@ export function registerMessageHistoryRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
     const before = typeof req.query.before === "string" ? req.query.before : undefined;
+    if ((after && !isMessageId(after)) || (before && before !== "latest" && !isMessageId(before))) {
+      res.status(400).json({ error: "message cursor must be a valid message id" });
+      return;
+    }
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const accountId = req.sessionAccount?.account_id ?? null;
     const result = before === "latest"
-      ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly })
+      ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
       : before
-        ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly })
+        ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
         : await getMessages(project.id, {
           limit,
           after,
           include_prompt_only: includePromptOnly,
+          account_id: accountId,
         });
 
     res.json({
@@ -62,6 +73,7 @@ export function registerMessageHistoryRoutes(
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const accountId = req.sessionAccount?.account_id ?? null;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let endDelivery: (() => Promise<void>) | null = null;
@@ -84,6 +96,7 @@ export function registerMessageHistoryRoutes(
     const existing = await getMessagesAfter(projectId, after, {
       limit,
       include_prompt_only: includePromptOnly,
+      account_id: accountId,
     });
 
     if (settled) {
@@ -123,6 +136,7 @@ export function registerMessageHistoryRoutes(
       const next = await getMessagesAfter(projectId, after, {
         limit,
         include_prompt_only: includePromptOnly,
+        account_id: accountId,
       });
       if (next.messages.length > 0) resolveRequest(next.messages, next.has_more);
     }
@@ -137,4 +151,126 @@ export function registerMessageHistoryRoutes(
     deps.messageEvents.on("message:created", onMessageCreated);
     req.on("close", onClientClose);
   });
+
+  app.get(/^\/rooms\/(.+)\/messages\/threads$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await resolveParticipantRoom(req, res, deps);
+      if (!project) return;
+
+      const filter = typeof req.query.filter === "string" ? req.query.filter : "all";
+      if (filter !== "all" && filter !== "unread") {
+        res.status(400).json({ error: "filter must be all or unread" });
+        return;
+      }
+      const before = typeof req.query.before === "string" ? req.query.before : undefined;
+      if (before && !isMessageId(before)) {
+        res.status(400).json({ error: "before must be a valid message id" });
+        return;
+      }
+      const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+      const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+      const page = await getMessageThreads(project.id, {
+        filter,
+        limit,
+        before,
+        include_prompt_only: includePromptOnly,
+        account_id: req.sessionAccount?.account_id ?? null,
+      });
+
+      res.json({
+        room_id: project.id,
+        threads: page.threads,
+        has_more: page.has_more,
+        unread_thread_count: page.unread_thread_count,
+      });
+    } catch (error) {
+      respondWithInternalError(
+        res,
+        "GET /rooms/:room_id/messages/threads",
+        error,
+        "Threads could not be fetched.",
+      );
+    }
+  });
+
+  app.get(/^\/rooms\/(.+)\/messages\/(msg_\d+)\/thread$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await resolveParticipantRoom(req, res, deps);
+      if (!project) return;
+
+      const rootMessageId = req.params[1];
+      const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+      const before = typeof req.query.before === "string" ? req.query.before : undefined;
+      if (before && !isMessageId(before)) {
+        res.status(400).json({ error: "before must be a valid message id" });
+        return;
+      }
+      const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+      const page = await getMessageThread(project.id, rootMessageId, {
+        limit,
+        before,
+        include_prompt_only: includePromptOnly,
+        account_id: req.sessionAccount?.account_id ?? null,
+      });
+      if (!page) {
+        res.status(404).json({ error: "thread not found" });
+        return;
+      }
+
+      res.json({
+        room_id: project.id,
+        ...page,
+      });
+    } catch (error) {
+      respondWithBadRequest(
+        res,
+        "GET /rooms/:room_id/messages/:message_id/thread",
+        error,
+        "Thread could not be fetched.",
+      );
+    }
+  });
+
+  app.put(/^\/rooms\/(.+)\/messages\/(msg_\d+)\/thread\/read$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await resolveParticipantRoom(req, res, deps);
+      if (!project) return;
+
+      const accountId = req.sessionAccount?.account_id;
+      if (!accountId) {
+        res.status(401).json({ error: "account session required" });
+        return;
+      }
+
+      const rootMessageId = req.params[1];
+      const { message_id } = req.body as { message_id?: string | null };
+      if (message_id !== undefined && message_id !== null && typeof message_id !== "string") {
+        res.status(400).json({ error: "message_id must be a valid message id" });
+        return;
+      }
+      const summary = await markMessageThreadRead(project.id, rootMessageId, accountId, {
+        message_id: message_id ?? null,
+      });
+      if (!summary) {
+        res.status(404).json({ error: "thread not found" });
+        return;
+      }
+
+      res.json({
+        room_id: project.id,
+        thread: summary,
+      });
+    } catch (error) {
+      respondWithBadRequest(
+        res,
+        "PUT /rooms/:room_id/messages/:message_id/thread/read",
+        error,
+        "Thread read state could not be updated.",
+      );
+    }
+  });
+}
+
+function isMessageId(value: string): boolean {
+  return /^msg_\d+$/.test(value);
 }

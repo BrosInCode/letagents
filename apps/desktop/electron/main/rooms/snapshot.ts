@@ -11,6 +11,7 @@ import {
 import { getJoinedRoomInfo } from "./room-info.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import { getLatestLocalChatMessages } from "./messages/local-store.js";
+import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
 import { fetchRoomSnapshotData } from "./snapshot/fetch-data.js";
 import {
   createApiErrorRoomSnapshot,
@@ -51,6 +52,7 @@ export async function fetchRoomSnapshot(
         listLocalTasks(localRoom.roomIdentifier),
         getLatestLocalChatMessages(localRoom.roomIdentifier, {
           limit: 150,
+          readerKey: await resolveLocalThreadReaderKey(),
         }).then((page) => page.messages),
       ]);
       return createLocalReadyRoomSnapshot({

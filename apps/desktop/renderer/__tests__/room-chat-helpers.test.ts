@@ -24,10 +24,13 @@ import {
   latestReasoningForAgent,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
 import {
+  applyThreadQuoteToDraft,
+  buildThreadIndicatorSummary,
   buildThreadSummaries,
-  recentThreadActivities,
   resolveThreadParent,
   roomTimelineMessages,
+  threadQuotePreview,
+  threadReadState,
   threadReplies,
 } from "../src/components/desktop/content/room-chat/thread-utils";
 import {
@@ -78,6 +81,149 @@ describe("room chat helpers", () => {
     assert.deepEqual(roomTimelineMessages(messages).map((message) => message.id), ["msg_1"]);
   });
 
+  it("merges thread summary metadata into timeline indicators", () => {
+    const parent = {
+      ...roomMessage("msg_1", null),
+      thread: {
+        rootMessageId: "msg_1",
+        replyCount: 5,
+        unreadCount: 2,
+        hasUnread: true,
+        latestReply: {
+          id: "msg_4",
+          sender: "Grace Hopper | Codex",
+          text: "backend supplied preview",
+          source: "agent",
+          timestamp: "2026-05-28T00:04:00.000Z",
+        },
+        participants: [
+          { sender: "Ada Lovelace | Codex", source: "agent", messageCount: 3, latestMessageId: "msg_4" },
+          { sender: "Grace Hopper", source: "user", messageCount: 2, latestMessageId: "msg_3" },
+        ],
+        lastReadMessageId: null,
+      },
+    };
+
+    const indicator = buildThreadIndicatorSummary(parent, {
+      count: 1,
+      latest: roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"),
+      replies: [],
+    });
+
+    assert.equal(indicator.count, 5);
+    assert.equal(indicator.unreadCount, 2);
+    assert.equal(indicator.latest?.id, "msg_4");
+    assert.equal(indicator.latestPreview, "backend supplied preview");
+    assert.equal(indicator.latestTimestamp, "2026-05-28T00:04:00.000Z");
+    assert.deepEqual(indicator.participants.map((participant) => participant.displayName), [
+      "Ada Lovelace",
+      "Grace Hopper",
+    ]);
+  });
+
+  it("lets newer live thread replies refresh stale timeline indicators", () => {
+    const oldReply = roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z");
+    const newReply = roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z");
+    newReply.text = "new live reply";
+    const parent = {
+      ...roomMessage("msg_1", null),
+      thread: {
+        rootMessageId: "msg_1",
+        replyCount: 1,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: oldReply,
+        participants: [],
+        lastReadMessageId: "msg_2",
+      },
+    };
+
+    const indicator = buildThreadIndicatorSummary(parent, {
+      count: 2,
+      latest: newReply,
+      replies: [oldReply, newReply],
+    });
+
+    assert.equal(indicator.count, 2);
+    assert.equal(indicator.unreadCount, 1);
+    assert.equal(indicator.latest?.id, "msg_3");
+    assert.equal(indicator.latestPreview, "new live reply");
+    assert.equal(indicator.latestTimestamp, "2026-05-28T00:03:00.000Z");
+  });
+
+  it("computes the first unread reply from read state", () => {
+    const replies = [
+      roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z"),
+      roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"),
+      roomMessage("msg_4", "msg_1", "2026-05-28T00:04:00.000Z"),
+    ];
+    const parent = {
+      ...roomMessage("msg_1", null),
+      thread: {
+        rootMessageId: "msg_1",
+        replyCount: 3,
+        unreadCount: 2,
+        hasUnread: true,
+        latestReply: null,
+        participants: [],
+        lastReadMessageId: "msg_2",
+      },
+    };
+
+    assert.deepEqual(threadReadState(parent, replies), {
+      unreadCount: 2,
+      firstUnreadReplyId: "msg_3",
+    });
+  });
+
+  it("places the unread divider at the first loaded reply when the read cursor is outside the page", () => {
+    const replies = [
+      roomMessage("msg_5", "msg_1", "2026-05-28T00:05:00.000Z"),
+      roomMessage("msg_6", "msg_1", "2026-05-28T00:06:00.000Z"),
+    ];
+    const parent = {
+      ...roomMessage("msg_1", null),
+      thread: {
+        rootMessageId: "msg_1",
+        replyCount: 6,
+        unreadCount: 2,
+        hasUnread: true,
+        latestReply: null,
+        participants: [],
+        lastReadMessageId: "msg_2",
+      },
+    };
+
+    assert.deepEqual(threadReadState(parent, replies), {
+      unreadCount: 2,
+      firstUnreadReplyId: "msg_5",
+    });
+  });
+
+  it("builds quote text for replies inside a thread", () => {
+    const quoted = {
+      ...roomMessage("msg_2", "msg_1"),
+      sender: "Noether | Emmy's agent | codex",
+      text: "This is the context to carry forward.",
+      agentIdentity: {
+        name: "noether",
+        displayName: "Noether",
+        ownerLabel: "Emmy",
+        ownerAttribution: "Emmy's agent",
+        ideLabel: "Codex",
+        actorLabel: "Noether | Emmy's agent | Codex",
+        agentKey: "Emmy/noether",
+        agentSessionId: "session_1",
+      },
+    };
+
+    assert.equal(threadQuotePreview(quoted), "This is the context to carry forward.");
+    assert.equal(
+      applyThreadQuoteToDraft("Following up", quoted),
+      "> Noether: This is the context to carry forward.\n\nFollowing up",
+    );
+  });
+
   it("filters direct thread replies for a selected parent", () => {
     const messages = [
       roomMessage("msg_1", null),
@@ -90,21 +236,21 @@ describe("room chat helpers", () => {
     assert.deepEqual(threadReplies(messages, null), []);
   });
 
-  it("resolves thread parents from reply snapshots and ranks recent thread activity", () => {
+  it("resolves thread parents from reply snapshots", () => {
     const messages = [
       roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z"),
-      roomMessage("msg_4", "msg_3", "2026-05-28T00:04:00.000Z"),
       roomMessage("msg_5", "msg_1", "2026-05-28T00:05:00.000Z"),
     ];
 
     assert.deepEqual(resolveThreadParent(messages, "msg_1")?.text, "msg_1");
     assert.equal(resolveThreadParent(messages, "missing"), null);
+  });
 
-    const activities = recentThreadActivities(messages);
+  it("does not use a nested reply quote as the thread root fallback", () => {
+    const nestedReply = roomMessage("msg_3", "msg_2", "2026-05-28T00:03:00.000Z");
+    nestedReply.threadRootId = "msg_1";
 
-    assert.deepEqual(activities.map((activity) => activity.parent.id), ["msg_1", "msg_3"]);
-    assert.deepEqual(activities.map((activity) => activity.latest.id), ["msg_5", "msg_4"]);
-    assert.equal(activities[0]?.count, 2);
+    assert.equal(resolveThreadParent([nestedReply], "msg_1"), null);
   });
 
   it("searches thread replies even when they are hidden from the room timeline", () => {
@@ -267,6 +413,9 @@ function roomMessage(
     timestamp,
     actorLabel: null,
     agentIdentity: null,
+    threadRootId: replyToId || id,
+    threadReplyToId: replyToId,
+    thread: null,
     replyTo: replyToId
       ? {
           id: replyToId,

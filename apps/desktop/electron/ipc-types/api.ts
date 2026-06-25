@@ -43,6 +43,10 @@ import type {
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
   DesktopRoomMessagesPage,
+  DesktopRoomThreadInboxFilter,
+  DesktopRoomThreadInboxPage,
+  DesktopRoomThreadPage,
+  DesktopRoomThreadReadResult,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
   DesktopSendRoomMessageResult,
@@ -85,6 +89,9 @@ export interface DesktopApi {
     getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
+    getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
+    getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;
+    markThreadRead: (roomIdentifier: string, threadRootId: string, messageId?: string | null) => Promise<DesktopRoomThreadReadResult>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
     pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
     stageDroppedAttachmentContents?: (
@@ -99,7 +106,8 @@ export interface DesktopApi {
       roomIdentifier: string,
       text: string,
       replyTo?: string | null,
-      attachments?: Array<{ upload_id: string }>
+      attachments?: Array<{ upload_id: string }>,
+      threadRootId?: string | null
     ) => Promise<DesktopSendRoomMessageResult>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (

@@ -13,6 +13,7 @@ import {
   resolveLocalAwareRoomStorageMode,
 } from "./rooms/local-store.js";
 import { getLocalChatMessages } from "./rooms/messages/local-store.js";
+import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
 import {
   mapDesktopReasoningSessionPayload,
   mapDesktopReasoningUpdatePayload,
@@ -374,6 +375,7 @@ async function pollLocalDesktopRoomMessages(
       const page = await getLocalChatMessages(localRoomIdentifier, {
         after: stream.lastMessageId,
         limit: roomMessageHistoryPageSize,
+        readerKey: await resolveLocalThreadReaderKey(),
       });
       if (!isCurrentRoomStream(stream)) return;
       for (const rawMessage of page.messages) {

@@ -4,7 +4,7 @@ import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-w
 import { isInviteCode } from "../rooms/routing.js";
 import { github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, rooms } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
-import type { CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomKind, RoomParticipant, RoomParticipantRow, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
+import type { CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomKind, RoomParticipant, RoomParticipantRow, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
   const inviteRoom = isInviteCode(row.id);
@@ -154,6 +154,9 @@ export function toMessage(row: MessageRow): Message {
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,
     timestamp: row.timestamp,
+    thread_root_id: formatMessageId(row.thread_root_number ?? row.number),
+    thread_reply_to_id: row.reply_to_number ? formatMessageId(row.reply_to_number) : null,
+    thread: null,
     reply_to: null,
     attachments: [],
   };
@@ -172,7 +175,8 @@ export function toMessageReplyReference(row: Pick<MessageRow, "number" | "sender
 export function toMessageWithReply(
   row: MessageRow,
   replyReference: MessageReplyReference | null,
-  attachments: MessageAttachment[] = []
+  attachments: MessageAttachment[] = [],
+  thread: MessageThreadSummary | null = null,
 ): Message {
   return {
     id: formatMessageId(row.number),
@@ -181,6 +185,9 @@ export function toMessageWithReply(
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,
     timestamp: row.timestamp,
+    thread_root_id: formatMessageId(row.thread_root_number ?? row.number),
+    thread_reply_to_id: row.reply_to_number ? formatMessageId(row.reply_to_number) : null,
+    thread,
     reply_to: replyReference,
     attachments,
   };

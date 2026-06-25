@@ -125,6 +125,7 @@ function createRouteApp() {
     get: new Map<string, Handler>(),
     patch: new Map<string, Handler>(),
     post: new Map<string, Handler>(),
+    put: new Map<string, Handler>(),
   };
 
   const app = {
@@ -139,6 +140,9 @@ function createRouteApp() {
     },
     post(path: RegExp, handler: Handler) {
       handlers.post.set(path.toString(), handler);
+    },
+    put(path: RegExp, handler: Handler) {
+      handlers.put.set(path.toString(), handler);
     },
   };
 
@@ -317,6 +321,7 @@ function registerRoutesForRoom(room: { id: string }): RouteHandlers {
     requireParticipant,
     parseOptionalAgentPromptKind: () => null,
     parseOptionalReplyToMessageId: (value) => typeof value === "string" ? value.trim() || null : null,
+    parseOptionalThreadRootMessageId: (value) => typeof value === "string" ? value.trim() || null : null,
     shouldIncludePromptOnlyMessages: () => false,
     emitProjectMessage: async (projectId, sender, text, options) => addMessage(projectId, sender, text, {
       source: options?.source,

@@ -16,6 +16,7 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const addMessage = dbModule?.addMessage;
+const addMessageWithCreateStatus = dbModule?.addMessageWithCreateStatus;
 const createMessageAttachmentUpload = dbModule?.createMessageAttachmentUpload;
 const createProjectWithName = dbModule?.createProjectWithName;
 const getMessageAttachment = dbModule?.getMessageAttachment;
@@ -97,5 +98,61 @@ test(
     const upload = await getMessageAttachmentUpload(room.id, "upl_1234567890abcdef");
     assert.equal(upload?.status, "attached");
     assert.equal(upload?.attached_message_number, 1);
+  }
+);
+
+test(
+  "idempotent message retries return hydrated attachments and thread metadata",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+  },
+  async () => {
+    if (
+      !addMessage ||
+      !addMessageWithCreateStatus ||
+      !createMessageAttachmentUpload ||
+      !createProjectWithName
+    ) {
+      throw new Error("DB-backed attachment tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("idempotent-thread-room");
+    const root = await addMessage(room.id, "human", "root", { source: "browser" });
+    await createMessageAttachmentUpload({
+      upload_id: "upl_idempotent_retry",
+      room_id: room.id,
+      filename: "diagram.png",
+      content_type: "image/png",
+      byte_size: 42,
+      storage_provider: "s3",
+      bucket: "letagents-test",
+      object_key: "rooms/idempotent-thread-room/uploads/upl_idempotent_retry/diagram.png",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const created = await addMessageWithCreateStatus(room.id, "human", "reply", {
+      source: "browser",
+      reply_to_message_id: root.id,
+      thread_root_message_id: root.id,
+      attachments: [{ upload_id: "upl_idempotent_retry" }],
+      client_message_id: "client-thread-retry",
+      account_id: "acct_1",
+    });
+    const retried = await addMessageWithCreateStatus(room.id, "human", "reply", {
+      source: "browser",
+      client_message_id: "client-thread-retry",
+      account_id: "acct_1",
+    });
+
+    assert.equal(created.created, true);
+    assert.equal(retried.created, false);
+    assert.equal(retried.message.id, created.message.id);
+    assert.equal(retried.message.reply_to?.id, root.id);
+    assert.equal(retried.message.attachments.length, 1);
+    assert.equal(retried.message.attachments[0].filename, "diagram.png");
+    assert.equal(retried.message.thread?.root_message_id, root.id);
+    assert.equal(retried.message.thread?.reply_count, 1);
+    assert.equal(retried.message.thread?.latest_reply?.id, created.message.id);
   }
 );

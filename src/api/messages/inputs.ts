@@ -24,17 +24,25 @@ export function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | 
 }
 
 export function parseOptionalReplyToMessageId(value: unknown): string | null {
+  return parseOptionalMessageId(value, "reply_to");
+}
+
+export function parseOptionalThreadRootMessageId(value: unknown): string | null {
+  return parseOptionalMessageId(value, "thread_root_id");
+}
+
+function parseOptionalMessageId(value: unknown, fieldName: "reply_to" | "thread_root_id"): string | null {
   if (value === undefined || value === null || value === "") {
     return null;
   }
 
   if (typeof value !== "string") {
-    throw new Error("reply_to must be a valid message id");
+    throw new Error(`${fieldName} must be a valid message id`);
   }
 
   const normalized = value.trim();
   if (!/^msg_\d+$/.test(normalized)) {
-    throw new Error("reply_to must be a valid message id");
+    throw new Error(`${fieldName} must be a valid message id`);
   }
 
   return normalized;

@@ -4,6 +4,8 @@ import {
   startSseStream,
   stopSseStream,
 } from "../../../http/sse.js";
+import { hydrateMessageReplies, type Message } from "../../../db.js";
+import { parseScopedId } from "../../../db/utils.js";
 import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
@@ -61,13 +63,32 @@ export function registerMessageStreamRoute(
     }
 
     const heartbeat = startSseStream(res);
+    let streamClosed = false;
+    let messageWriteQueue = Promise.resolve();
 
-    const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
+    const writeMessageCreated = async ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
       if (eventProjectId !== projectId) return;
+      if (streamClosed) return;
       if (!deps.shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
         return;
       }
-      res.write(`data: ${JSON.stringify({ ...message, room_id: project.id })}\n\n`);
+      try {
+        const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
+        if (streamClosed) return;
+        res.write(`data: ${JSON.stringify({ ...streamMessage, room_id: project.id })}\n\n`);
+      } catch (error) {
+        console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
+        if (streamClosed) return;
+        res.write(`data: ${JSON.stringify({ ...message, room_id: project.id })}\n\n`);
+      }
+    };
+
+    const onMessageCreated = (event: MessageCreatedEvent) => {
+      messageWriteQueue = messageWriteQueue
+        .then(() => writeMessageCreated(event))
+        .catch((error: unknown) => {
+          console.error(`[room messages stream] failed to write message event for ${project.id}`, error);
+        });
     };
 
     const onTaskUpdated = (event: TaskUpdatedEvent) => {
@@ -110,6 +131,7 @@ export function registerMessageStreamRoute(
     rentalEvents.on("activity:created", onRentalActivityCreated);
 
     req.on("close", () => {
+      streamClosed = true;
       deps.messageEvents.off("message:created", onMessageCreated);
       deps.taskEvents.off("task:updated", onTaskUpdated);
       rentalEvents.off("activity:created", onRentalActivityCreated);
@@ -123,4 +145,31 @@ export function registerMessageStreamRoute(
       stopSseStream(res, heartbeat);
     });
   });
+}
+
+async function hydrateStreamMessage(
+  roomId: string,
+  message: Message,
+  accountId: string | null,
+): Promise<Message> {
+  if (!accountId) return message;
+  const messageNumber = parseScopedId(message.id, "msg");
+  if (!messageNumber) return message;
+  const rootNumber = parseScopedId(message.thread_root_id, "msg");
+  const replyToNumber = message.thread_reply_to_id
+    ? parseScopedId(message.thread_reply_to_id, "msg")
+    : null;
+  const [hydrated] = await hydrateMessageReplies(roomId, [{
+    room_id: roomId,
+    number: messageNumber,
+    reply_to_number: replyToNumber,
+    thread_root_number: rootNumber && rootNumber !== messageNumber ? rootNumber : null,
+    sender: message.sender,
+    text: message.text,
+    agent_prompt_kind: message.agent_prompt_kind,
+    source: message.source,
+    client_message_id: null,
+    timestamp: message.timestamp,
+  }], { accountId });
+  return hydrated ?? message;
 }

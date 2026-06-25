@@ -27,6 +27,7 @@ export function registerCreateMessageRoute(
       text,
       agent_prompt_kind,
       reply_to,
+      thread_root_id,
       attachments: rawAttachments,
       agent_session_id,
       agent_session_token,
@@ -36,6 +37,7 @@ export function registerCreateMessageRoute(
       text?: string;
       agent_prompt_kind?: string;
       reply_to?: string;
+      thread_root_id?: string;
       attachments?: unknown;
       agent_session_id?: string;
       agent_session_token?: string;
@@ -44,6 +46,7 @@ export function registerCreateMessageRoute(
     try {
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
+      const threadRootMessageId = deps.parseOptionalThreadRootMessageId(thread_root_id);
       const attachments = normalizeMessageAttachmentReferences(rawAttachments);
       const desktopHumanWrite = isDesktopHumanWrite(req, {
         agent_session_id,
@@ -87,8 +90,10 @@ export function registerCreateMessageRoute(
         source,
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
+        thread_root_id: threadRootMessageId,
         attachments,
         ...(typeof client_message_id === "string" ? { client_message_id } : {}),
+        account_id: req.sessionAccount?.account_id ?? null,
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId: project.id,
