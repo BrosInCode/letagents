@@ -47,6 +47,13 @@
       <button type="button" @click="emit('refresh')">Retry</button>
     </div>
 
+    <Transition name="desktop-inbox-undo-motion">
+      <div v-if="lastClearedItem" class="desktop-inbox-undo" role="status">
+        <span>Cleared "{{ lastClearedItem.title }}"</span>
+        <button type="button" @click="emit('restore-item', lastClearedItem)">Undo</button>
+      </div>
+    </Transition>
+
     <div v-if="loading && items.length === 0" class="desktop-inbox-loading-list" aria-label="Loading inbox">
       <div v-for="index in 6" :key="index" class="desktop-inbox-skeleton" aria-hidden="true">
         <span></span>
@@ -60,8 +67,8 @@
 
     <div v-else-if="!error && items.length === 0" class="desktop-inbox-empty">
       <Inbox :size="22" />
-      <strong>{{ filter === "actionable" ? "Inbox clear" : "No inbox history yet" }}</strong>
-      <span>{{ filter === "actionable" ? "Items you clear or resolve will stay out of this queue." : "Threads and room activity will appear here as they happen." }}</span>
+      <strong>{{ filter === "actionable" ? "Nothing needs your attention" : "No inbox history yet" }}</strong>
+      <span>{{ filter === "actionable" ? "Unread threads, blocked work, failed checks, and reviews will appear here." : "Threads, tasks, checks, and agent updates will appear here as they happen." }}</span>
     </div>
 
     <div v-else-if="selectedItem" class="desktop-inbox-workspace">
@@ -213,7 +220,7 @@
           </section>
 
           <section class="desktop-inbox-why">
-            <span>Why this is here</span>
+            <span>Why it matters</span>
             <p>{{ whyText(selectedItem) }}</p>
           </section>
         </article>
@@ -255,6 +262,7 @@ const props = defineProps<{
   loadingOlder: boolean;
   error: string | null;
   hasMore: boolean;
+  lastClearedItem: DesktopInboxItem | null;
 }>();
 
 const emit = defineEmits<{
@@ -263,6 +271,7 @@ const emit = defineEmits<{
   "load-older": [];
   "open-thread": [item: Extract<DesktopInboxItem, { kind: "thread" }>];
   "clear-item": [item: DesktopInboxItem];
+  "restore-item": [item: DesktopInboxItem];
   "open-task": [taskId: string];
   "open-github-event": [eventId: string];
   "open-reasoning": [sessionId: string];

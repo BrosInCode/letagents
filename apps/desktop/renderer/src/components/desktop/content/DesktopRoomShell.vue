@@ -102,10 +102,12 @@
         :loading-older="inboxLoadingOlder"
         :error="inboxError"
         :has-more="inboxHasMore"
+        :last-cleared-item="lastClearedInboxItem"
         @refresh="loadInboxThreads"
         @load-older="loadOlderInboxThreads"
         @open-thread="openInboxThread"
         @clear-item="clearInboxItem"
+        @restore-item="restoreInboxItem"
         @open-task="openInboxTask"
         @open-github-event="openInboxGitHubEvent"
         @open-reasoning="openReasoningInspector"
@@ -333,6 +335,7 @@ const inboxLoadingOlder = ref(false);
 const inboxError = ref<string | null>(null);
 const inboxLoadedKey = ref<string | null>(null);
 const inboxDismissals = ref<Record<string, string>>({});
+const lastClearedInboxItem = ref<DesktopInboxItem | null>(null);
 const inboxSeenFingerprints = ref<string[]>([]);
 const inboxUnseenCount = ref(0);
 const inboxSeenInitialized = ref(false);
@@ -349,6 +352,7 @@ const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 let githubEventsRefreshTimer: number | null = null;
 let inboxRefreshTimer: number | null = null;
+let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
@@ -517,6 +521,7 @@ watch(() => props.room.identifier, () => {
 
 watch(messageNamespace, () => {
   inboxDismissals.value = readInboxDismissals(messageNamespace.value);
+  clearInboxUndoState();
   resetInboxIndicatorState();
   resetInboxState();
   if (activeTab.value === "inbox") {
@@ -594,6 +599,10 @@ onBeforeUnmount(() => {
   if (inboxRefreshTimer !== null) {
     window.clearTimeout(inboxRefreshTimer);
     inboxRefreshTimer = null;
+  }
+  if (inboxUndoTimer !== null) {
+    window.clearTimeout(inboxUndoTimer);
+    inboxUndoTimer = null;
   }
   stopManagedAgentSessionsRefreshTimer();
   unsubscribeManagedAgentSessionUpdate?.();
@@ -783,37 +792,9 @@ async function openInboxThread(item: Extract<DesktopInboxItem, { kind: "thread" 
   roomChatView.value?.openThread(item.root.id);
 }
 
-async function markInboxThreadRead(
-  item: Extract<DesktopInboxItem, { kind: "thread" }>,
-  options: { reload?: boolean } = {},
-): Promise<boolean> {
-  const roomApi = window.letagentsDesktop?.room;
-  if (!roomApi?.markThreadRead) return false;
-  try {
-    const result = await roomApi.markThreadRead(
-      props.room.identifier,
-      item.root.id,
-      item.summary.latestReply?.id || item.root.id,
-    );
-    if (options.reload === false) {
-      handleThreadRead(item.root.id, result.thread);
-    } else {
-      await loadInboxThreads();
-    }
-    return true;
-  } catch (error) {
-    inboxError.value = error instanceof Error ? error.message : "Thread read state could not be updated.";
-    return false;
-  }
-}
-
-async function clearInboxItem(item: DesktopInboxItem): Promise<void> {
-  if (item.kind === "thread" && item.unreadCount > 0) {
-    const markedRead = await markInboxThreadRead(item, { reload: false });
-    if (!markedRead) return;
-  }
-
+function clearInboxItem(item: DesktopInboxItem): void {
   dismissInboxItem(item);
+  showInboxUndo(item);
 }
 
 function dismissInboxItem(item: DesktopInboxItem): void {
@@ -823,6 +804,32 @@ function dismissInboxItem(item: DesktopInboxItem): void {
   };
   inboxDismissals.value = nextDismissals;
   writeInboxDismissals(messageNamespace.value, nextDismissals);
+}
+
+function restoreInboxItem(item: DesktopInboxItem): void {
+  const nextDismissals = { ...inboxDismissals.value };
+  delete nextDismissals[item.id];
+  inboxDismissals.value = nextDismissals;
+  writeInboxDismissals(messageNamespace.value, nextDismissals);
+  clearInboxUndoState();
+}
+
+function showInboxUndo(item: DesktopInboxItem): void {
+  lastClearedInboxItem.value = item;
+  if (inboxUndoTimer !== null) {
+    window.clearTimeout(inboxUndoTimer);
+  }
+  inboxUndoTimer = window.setTimeout(() => {
+    clearInboxUndoState();
+  }, 8_000);
+}
+
+function clearInboxUndoState(): void {
+  lastClearedInboxItem.value = null;
+  if (inboxUndoTimer !== null) {
+    window.clearTimeout(inboxUndoTimer);
+    inboxUndoTimer = null;
+  }
 }
 
 function isInboxItemDismissed(item: DesktopInboxItem): boolean {

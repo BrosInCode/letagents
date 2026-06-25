@@ -67,7 +67,7 @@ export function connectionLabel(participant: ActivityParticipant): string {
   if (participant.kind === "human") return "human";
   if (participant.activityState === "active") return "connected";
   if (participant.activityState === "away") return "idle";
-  if (hasAgentSignal(participant)) return "signal only";
+  if (hasAgentSignal(participant)) return "work signal";
   return "offline";
 }
 

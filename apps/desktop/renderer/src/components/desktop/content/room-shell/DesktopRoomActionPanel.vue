@@ -1,7 +1,10 @@
 <template>
   <section class="desktop-room-action-panel" data-testid="desktop-room-action-panel">
     <div class="desktop-room-action-panel-topbar">
-      <p class="desktop-room-action-kicker">Room settings</p>
+      <div>
+        <p class="desktop-room-action-kicker">Room settings</p>
+        <p class="desktop-room-action-summary">Name, share, store, and connect this room without leaving the conversation.</p>
+      </div>
       <button
         class="desktop-room-action-panel-close"
         type="button"
@@ -34,7 +37,7 @@
           <div class="desktop-room-inline-note" :data-state="renameError ? 'error' : 'neutral'">
             <span class="desktop-room-mini-dot" />
             <p v-if="renameError">{{ renameError }}</p>
-            <p v-else>Rename and share this room without leaving chat.</p>
+            <p v-else>Use a name teammates can recognize in the sidebar and room list.</p>
           </div>
 
           <div class="desktop-room-link-line" data-testid="desktop-room-share-card">
@@ -111,8 +114,8 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Rules</strong>
-              <small>Review the room contract and operating constraints.</small>
+              <strong>Room contract</strong>
+              <small>Review the instructions agents and teammates should follow here.</small>
             </span>
             <span class="desktop-room-row-action">Open</span>
           </button>
@@ -125,7 +128,7 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Sounds</strong>
+              <strong>Sound effects</strong>
               <small>{{ soundEnabled ? "Message and send sounds are active." : "Room sounds are muted." }}</small>
             </span>
             <span class="desktop-room-toggle" :data-active="soundEnabled">
@@ -141,7 +144,7 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Alerts</strong>
+              <strong>Notifications</strong>
               <small>{{ notificationDescription }}</small>
             </span>
             <span class="desktop-room-status-chip" :data-state="notificationShortLabel.toLowerCase()">{{ notificationShortLabel }}</span>
@@ -155,8 +158,8 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Liquid glass</strong>
-              <small>{{ liquidGlassEnabled ? "Room widgets use glass surfaces." : "Room widgets use simpler surfaces." }}</small>
+              <strong>Glass surfaces</strong>
+              <small>{{ liquidGlassEnabled ? "Use layered translucent panels." : "Use simpler high-contrast panels." }}</small>
             </span>
             <span class="desktop-room-toggle" :data-active="liquidGlassEnabled">
               <span />
@@ -177,8 +180,8 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>GitHub events</strong>
-              <small>{{ githubEventsVisible ? "Show the Events tab for this room." : "Hide the Events tab for this room." }}</small>
+              <strong>Events tab</strong>
+              <small>{{ githubEventsVisible ? "Show GitHub activity in its own tab." : "Keep GitHub activity out of the tab bar." }}</small>
             </span>
             <span class="desktop-room-toggle" :data-active="githubEventsVisible">
               <span />
@@ -193,7 +196,7 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Export</strong>
+              <strong>Export chat</strong>
               <small>Download the visible chat history as plain text.</small>
             </span>
             <span class="desktop-room-row-action">Export</span>

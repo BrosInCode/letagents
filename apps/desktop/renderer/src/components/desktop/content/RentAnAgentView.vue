@@ -38,8 +38,8 @@
       <div>
         <p class="surface-title">Session started: {{ lastCreatedSession.taskTitle }}</p>
         <p class="surface-subtitle">
-          <code>{{ lastCreatedSession.id }}</code> · {{ lastCreatedSession.mode }} ·
-          {{ lastCreatedSession.status }}
+          <code>{{ lastCreatedSession.id }}</code> · {{ humanizeToken(lastCreatedSession.mode) }} ·
+          {{ humanizeToken(lastCreatedSession.status) }}
         </p>
       </div>
       <div class="surface-meta">
@@ -70,8 +70,7 @@
         <div>
           <p class="surface-title">Rent an Agent is not enabled in this build.</p>
           <p class="surface-subtitle">
-            Set <code>LETAGENTS_RENT_ENABLED=1</code> in the desktop environment and restart
-            to try the marketplace.
+            This workspace cannot use the marketplace yet. Restart after enabling the feature for this desktop build.
           </p>
         </div>
         <div class="surface-meta">
@@ -145,7 +144,7 @@
             :data-state="badgeState(badge)"
           >{{ badge }}</span>
           <span class="state-pill" :data-state="statusState(listing.status)">
-            {{ listing.status }}
+            {{ humanizeToken(listing.status) }}
           </span>
           <button
             type="button"
@@ -256,12 +255,20 @@ function isDisabledResult(value: unknown): boolean {
 function listingSubtitle(listing: DesktopRentalListing): string {
   const parts: string[] = [];
   if (listing.providerDisplayName) parts.push(listing.providerDisplayName);
-  parts.push(listing.ideKind);
+  parts.push(humanizeToken(listing.ideKind));
   if (listing.modelLabel) parts.push(listing.modelLabel);
   if (listing.activeSessionCount > 0) {
     parts.push(`${listing.activeSessionCount}/${listing.maxConcurrentSessions} active`);
   }
   return parts.join(" • ");
+}
+
+function humanizeToken(value: string): string {
+  return value
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
 }
 
 function badgeState(badge: string): string {

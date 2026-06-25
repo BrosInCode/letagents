@@ -240,6 +240,12 @@
   text-align: center;
 }
 
+.desktop-board-empty-action {
+  width: fit-content;
+  min-width: 138px;
+  justify-self: center;
+}
+
 .desktop-board-empty-state h3 {
   margin: 0 0 4px;
   color: var(--text);
@@ -247,6 +253,7 @@
 }
 
 .desktop-board-empty-state p {
+  max-width: 420px;
   margin: 0;
   font-size: 0.82rem;
   line-height: 1.5;

@@ -9,7 +9,7 @@
         <div class="desktop-new-room-heading">
           <p class="desktop-new-room-kicker">New room</p>
           <h2 id="new-room-title">Open a room</h2>
-          <p>Choose a project folder, join a shared room, or start a temporary room.</p>
+          <p>Pick the room that matches how your team wants to collaborate.</p>
         </div>
         <button class="desktop-modal-close" type="button" aria-label="Close new room dialog" @click="emit('close')">
           <X aria-hidden="true" />
@@ -38,7 +38,7 @@
             :data-testid="action.testId"
             @click="handleAction(action.event)"
           >
-            {{ projectSelection ? "Change..." : action.buttonLabel }}
+            {{ projectSelection ? "Change folder" : action.buttonLabel }}
           </button>
           <div v-if="projectSelection" class="desktop-new-room-project-preview" data-testid="new-room-project-preview">
             <dl>
@@ -164,8 +164,8 @@ const primaryRoomActions: RoomAction[] = [
   {
     id: "project-folder",
     title: "Open project room",
-    description: "Choose a local project and confirm the room LetAgents resolves.",
-    buttonLabel: "Choose...",
+    description: "Use a local checkout so agents join the right repo room.",
+    buttonLabel: "Choose folder",
     event: "openProject",
     icon: FolderOpen,
     primary: true,
@@ -177,7 +177,7 @@ const secondaryRoomActions: RoomAction[] = [
   {
     id: "invite-room",
     title: "Start temporary room",
-    description: "Create an ad-hoc room with a shareable code.",
+    description: "Create a shareable room for work that is not tied to one repo.",
     buttonLabel: "Start",
     event: "createInvite",
     icon: Hash,

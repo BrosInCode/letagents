@@ -134,12 +134,12 @@ const canSend = computed(() =>
 const composerTargetLabel = computed(() => props.roomIdentifier ? "Message the room" : "No room selected");
 const composerPlaceholder = computed(() => {
   if (props.roomLoading) return "Loading room...";
-  return props.roomIdentifier ? "Write a message..." : "Choose a room to start writing";
+  return props.roomIdentifier ? "Message teammates and agents..." : "Choose a room to start writing";
 });
 const composerHint = computed(() => {
   if (props.roomLoading) return "Room messages and participants are loading.";
   return props.roomIdentifier
-    ? "Use @ to bring a person or agent into the thread."
+    ? "Use @ to bring a person or agent into the conversation."
     : "Select a room from the sidebar to enable chat.";
 });
 const mentionOpen = computed({

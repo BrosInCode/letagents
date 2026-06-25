@@ -135,6 +135,47 @@
   color: #fecaca;
 }
 
+.desktop-inbox-undo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 12px;
+  background: rgba(96, 165, 250, 0.08);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.16);
+}
+
+.desktop-inbox-undo span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-inbox-undo button {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(96, 165, 250, 0.26);
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.12);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.desktop-inbox-undo button:hover,
+.desktop-inbox-undo button:focus-visible {
+  border-color: rgba(96, 165, 250, 0.38);
+  background: rgba(96, 165, 250, 0.18);
+}
+
 .desktop-inbox-workspace {
   display: grid;
   flex: 1 1 auto;
@@ -850,6 +891,19 @@
   transform: translateY(-4px) scale(0.998);
 }
 
+.desktop-inbox-undo-motion-enter-active,
+.desktop-inbox-undo-motion-leave-active {
+  transition:
+    opacity 160ms var(--ease-out),
+    transform 160ms var(--ease-out);
+}
+
+.desktop-inbox-undo-motion-enter-from,
+.desktop-inbox-undo-motion-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
 .desktop-inbox-detail-motion-enter-active .desktop-inbox-detail-grid div,
 .desktop-inbox-detail-motion-enter-active .desktop-inbox-activity li,
 .desktop-inbox-detail-motion-enter-active .desktop-inbox-why,
@@ -966,7 +1020,9 @@
   .desktop-inbox-row-motion-leave-active,
   .desktop-inbox-row-motion-move,
   .desktop-inbox-detail-motion-enter-active,
-  .desktop-inbox-detail-motion-leave-active {
+  .desktop-inbox-detail-motion-leave-active,
+  .desktop-inbox-undo-motion-enter-active,
+  .desktop-inbox-undo-motion-leave-active {
     transition: none;
   }
 
@@ -978,7 +1034,9 @@
   .desktop-inbox-row-motion-enter-from,
   .desktop-inbox-row-motion-leave-to,
   .desktop-inbox-detail-motion-enter-from,
-  .desktop-inbox-detail-motion-leave-to {
+  .desktop-inbox-detail-motion-leave-to,
+  .desktop-inbox-undo-motion-enter-from,
+  .desktop-inbox-undo-motion-leave-to {
     opacity: 1;
     transform: none;
   }

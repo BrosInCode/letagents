@@ -126,17 +126,26 @@
               data-testid="desktop-add-agent-external-prompt"
               aria-label="External agent join prompt"
             >
-              <div>
-                <span>CLI prompt</span>
+              <div class="desktop-add-agent-external-prompt-intro">
+                <div>
+                  <span>External agent setup</span>
+                  <p>
+                    Copy this CLI prompt into {{ selectedProvider?.name || "the provider" }} so it can join the
+                    correct room, use a readable codename, and keep listening for work.
+                  </p>
+                </div>
                 <button
                   type="button"
                   :disabled="copyingExternalPrompt"
                   @click="copyExternalJoinPrompt"
                 >
-                  {{ copyingExternalPrompt ? "Copying..." : "Copy" }}
+                  {{ copyingExternalPrompt ? "Copying..." : "Copy CLI prompt" }}
                 </button>
               </div>
-              <pre><code>{{ externalJoinPrompt }}</code></pre>
+              <details class="desktop-add-agent-external-prompt-details">
+                <summary>Show CLI prompt</summary>
+                <pre><code>{{ externalJoinPrompt }}</code></pre>
+              </details>
             </section>
 
             <section v-if="activeManagedSessions.length" class="desktop-add-agent-managed-sessions">
@@ -686,7 +695,7 @@ async function copyExternalJoinPrompt(): Promise<void> {
     setupMessage.value = "Copied the agent join prompt.";
   } catch {
     if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = `Clipboard unavailable. Prompt: ${prompt}`;
+    setupMessage.value = "Clipboard unavailable. Open Show CLI prompt, then copy the prompt manually.";
   } finally {
     if (isCurrentModalState(requestVersion)) {
       copyingExternalPrompt.value = false;

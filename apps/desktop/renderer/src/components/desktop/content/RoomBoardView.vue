@@ -48,8 +48,16 @@
     <div v-if="groupedTasks.length === 0" class="desktop-task-empty desktop-board-empty-state" data-testid="room-board-empty">
       <div>
         <h3>No tasks yet</h3>
-        <p>Add a task or use the <code>add_task</code> MCP tool.</p>
+        <p>Create the first task here so a teammate or agent can pick it up.</p>
       </div>
+      <button
+        class="desktop-board-primary-action desktop-board-empty-action"
+        type="button"
+        :disabled="busyAction !== null"
+        @click="openCreateTaskModal"
+      >
+        Add first task
+      </button>
     </div>
 
     <div v-else-if="visibleTaskCount === 0" class="desktop-task-empty desktop-board-empty-state">
@@ -163,7 +171,7 @@
         <header class="desktop-task-create-header">
           <span>New task</span>
           <h3 id="desktop-create-task-title">Describe the work</h3>
-          <p>Write the task clearly enough for a human or agent to pick it up.</p>
+          <p>Give the next person or agent the outcome, context, and done condition.</p>
         </header>
 
         <label class="desktop-task-create-field" for="desktop-create-task-description">
@@ -173,18 +181,18 @@
             ref="createTaskDescriptionField"
             v-model="createTaskDescription"
             rows="7"
-            placeholder="What needs to be done?"
+            placeholder="What should happen, and how will we know it is done?"
             :disabled="busyAction !== null"
           ></textarea>
         </label>
 
         <label class="desktop-task-create-field" for="desktop-create-task-title-input">
-          <span>Title <small>optional</small></span>
+          <span>Short title <small>optional</small></span>
           <input
             id="desktop-create-task-title-input"
             v-model="createTaskTitle"
             type="text"
-            placeholder="Short label for the board"
+            placeholder="Use the first line if left blank"
             :disabled="busyAction !== null"
           />
         </label>

@@ -43,7 +43,7 @@
             <dd>{{ activityScopeLabel(currentSettings.activity_scope) }}</dd>
           </div>
           <div>
-            <dt>Code</dt>
+            <dt>GitHub</dt>
             <dd>{{ githubRoutingLabel(currentSettings.github_event_routing) }}</dd>
           </div>
         </dl>
@@ -163,12 +163,12 @@
         <input
           v-model="adHocTitle"
           type="text"
-          placeholder="New focus room"
+          placeholder="Focus room goal"
           aria-label="New focus room title"
           :disabled="creatingAdHoc"
         />
         <button type="submit" :disabled="!adHocTitle.trim() || creatingAdHoc">
-          {{ creatingAdHoc ? "Opening..." : "Open" }}
+          {{ creatingAdHoc ? "Creating..." : "Create" }}
         </button>
       </form>
 

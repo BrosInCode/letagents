@@ -32,7 +32,7 @@
             <header>
               <div>
                 <h3>Reachable now</h3>
-                <p>Worker sessions that can receive room messages.</p>
+                <p>Agents available for new room messages.</p>
               </div>
               <strong>{{ reachableAgents.length }}</strong>
             </header>
@@ -86,7 +86,7 @@
                 <small>{{ signalLabel(agent) }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
               </span>
               <span class="desktop-activity-row-meta">
-                <span class="desktop-activity-mini-pill">signal only</span>
+                <span class="desktop-activity-mini-pill">work signal</span>
                 <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} reasoning</span>
                 <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
               </span>
@@ -366,7 +366,7 @@ function connectionDisplayLabel(participant: ActivityParticipant): string {
 
 function detailSubtitle(participant: ActivityParticipant): string {
   if (participant.activityState === "active" || participant.activityState === "away") return "Reachable in chat";
-  if (connectionLabel(participant) === "signal only") return "Work updates available";
+  if (connectionLabel(participant) === "work signal") return "Work updates available";
   return "Not reachable in chat";
 }
 
