@@ -355,6 +355,8 @@ let inboxRefreshTimer: number | null = null;
 let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
+let inboxReloadAfterCurrentLoad = false;
+let inboxThreadBaselinePending = false;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
 const isRepoBackedRoom = computed(() =>
   [props.room.identifier, props.room.name, props.room.displayName]
@@ -523,11 +525,13 @@ watch(() => props.room.identifier, () => {
 watch(messageNamespace, () => {
   inboxDismissals.value = readInboxDismissals(messageNamespace.value);
   clearInboxUndoState();
-  resetInboxIndicatorState();
+  const hasSeenState = hydrateInboxIndicatorState(messageNamespace.value);
   resetInboxState();
-  if (activeTab.value === "inbox") {
-    void loadInboxThreads().catch(() => undefined);
+  inboxThreadBaselinePending = !hasSeenState;
+  if (inboxThreadBaselinePending) {
+    acknowledgeInboxItems();
   }
+  void loadInboxThreads({ baselineIndicator: inboxThreadBaselinePending }).catch(() => undefined);
 }, { immediate: true });
 
 watch(addAgentModalOpen, (open) => {
@@ -570,12 +574,16 @@ watch(activeTab, (tab) => {
 
 watch(inboxFilter, () => {
   resetInboxState();
-  void loadInboxThreads().catch(() => undefined);
+  void loadInboxThreads({ baselineIndicator: !inboxSeenInitialized.value }).catch(() => undefined);
 });
 
 watch(inboxActionableFingerprints, (fingerprints) => {
-  if (!inboxSeenInitialized.value || activeTab.value === "inbox") {
+  if (activeTab.value === "inbox") {
     acknowledgeInboxItems(fingerprints);
+    return;
+  }
+  if (!inboxSeenInitialized.value) {
+    inboxUnseenCount.value = 0;
     return;
   }
 
@@ -711,9 +719,47 @@ function resetInboxIndicatorState(): void {
 }
 
 function acknowledgeInboxItems(fingerprints = inboxActionableFingerprints.value): void {
-  inboxSeenFingerprints.value = [...fingerprints];
+  inboxSeenFingerprints.value = [...new Set(fingerprints)];
   inboxUnseenCount.value = 0;
   inboxSeenInitialized.value = true;
+  writeInboxSeenFingerprints(messageNamespace.value, inboxSeenFingerprints.value);
+}
+
+function inboxSeenStorageKey(namespace: string): string {
+  return `letagents-desktop:room-inbox-seen:${namespace}`;
+}
+
+function hydrateInboxIndicatorState(namespace: string): boolean {
+  const fingerprints = readInboxSeenFingerprints(namespace);
+  if (fingerprints === null) {
+    resetInboxIndicatorState();
+    return false;
+  }
+  inboxSeenFingerprints.value = fingerprints;
+  inboxUnseenCount.value = 0;
+  inboxSeenInitialized.value = true;
+  return true;
+}
+
+function readInboxSeenFingerprints(namespace: string): string[] | null {
+  try {
+    const raw = window.localStorage.getItem(inboxSeenStorageKey(namespace));
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    if (!parsed.every((item) => typeof item === "string")) return null;
+    return [...new Set(parsed)];
+  } catch {
+    return null;
+  }
+}
+
+function writeInboxSeenFingerprints(namespace: string, fingerprints: string[]): void {
+  try {
+    window.localStorage.setItem(inboxSeenStorageKey(namespace), JSON.stringify(fingerprints));
+  } catch {
+    // The indicator can fall back to the in-memory baseline when storage is unavailable.
+  }
 }
 
 function inboxDismissalsStorageKey(namespace: string): string {
@@ -746,24 +792,31 @@ function resetInboxState(): void {
   inboxLoadingOlder.value = false;
   inboxError.value = null;
   inboxLoadedKey.value = null;
+  inboxReloadAfterCurrentLoad = false;
   if (inboxRefreshTimer !== null) {
     window.clearTimeout(inboxRefreshTimer);
     inboxRefreshTimer = null;
   }
 }
 
-async function loadInboxThreads(options: { append?: boolean } = {}): Promise<void> {
+async function loadInboxThreads(options: { append?: boolean; baselineIndicator?: boolean } = {}): Promise<void> {
   const roomApi = window.letagentsDesktop?.room;
   const requestKey = currentInboxLoadKey();
   const append = Boolean(options.append);
+  const shouldBaselineIndicator = !append && (options.baselineIndicator || inboxThreadBaselinePending);
   if (!roomApi?.getThreads) {
     threadInboxPage.value = { threads: [], hasMore: false, unreadThreadCount: 0 };
     inboxLoadedKey.value = requestKey;
+    if (shouldBaselineIndicator) {
+      acknowledgeInboxItems();
+      inboxThreadBaselinePending = false;
+    }
     return;
   }
   if (append) {
     if (inboxLoadingOlder.value || !threadInboxPage.value?.hasMore) return;
   } else if (inboxLoading.value) {
+    inboxReloadAfterCurrentLoad = true;
     return;
   }
 
@@ -790,14 +843,23 @@ async function loadInboxThreads(options: { append?: boolean } = {}): Promise<voi
       ? mergeThreadInboxPages(threadInboxPage.value, page)
       : page;
     inboxLoadedKey.value = requestKey;
+    if (shouldBaselineIndicator) {
+      acknowledgeInboxItems();
+      inboxThreadBaselinePending = false;
+    }
   } catch (error) {
     if (currentInboxLoadKey() === requestKey) {
       inboxError.value = error instanceof Error ? error.message : "Inbox could not be loaded.";
     }
   } finally {
+    const shouldReload = !append && inboxReloadAfterCurrentLoad && currentInboxLoadKey() === requestKey;
     if (currentInboxLoadKey() === requestKey) {
       inboxLoading.value = false;
       inboxLoadingOlder.value = false;
+    }
+    if (shouldReload) {
+      inboxReloadAfterCurrentLoad = false;
+      void loadInboxThreads().catch(() => undefined);
     }
   }
 }
