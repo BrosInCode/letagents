@@ -11,11 +11,11 @@
       </span>
     </div>
     <div>
-      <p class="rent-detail-label">Mode</p>
-      <span>{{ session.mode }}</span>
+      <p class="rent-detail-label">Access</p>
+      <span>{{ rentalModeLabel(session.mode) }}</span>
     </div>
     <div>
-      <p class="rent-detail-label">LRT</p>
+      <p class="rent-detail-label">Rental credits</p>
       <span v-if="usage && usage.lrtLimit !== null">
         {{ usage.lrtUsed }}/{{ usage.lrtLimit }}
       </span>
@@ -36,6 +36,10 @@ defineProps<{
   session: DesktopRentalSession;
   usage: DesktopRentalUsageSnapshot | null;
 }>();
+
+function rentalModeLabel(mode: string): string {
+  return mode === "trusted_open" ? "Full workspace access" : "Limited access";
+}
 </script>
 
 <style scoped>

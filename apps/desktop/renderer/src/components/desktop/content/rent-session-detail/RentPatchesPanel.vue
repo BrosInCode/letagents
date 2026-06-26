@@ -1,7 +1,7 @@
 <template>
   <section>
     <p v-if="loading" class="rent-detail-empty">Loading patches...</p>
-    <p v-else-if="patches.length === 0" class="rent-detail-empty">No patches yet.</p>
+    <p v-else-if="patches.length === 0" class="rent-detail-empty">No code changes submitted yet.</p>
     <article
       v-for="patch in patches"
       v-else
@@ -44,6 +44,9 @@
         v-if="canRequestPatchChanges(patch) || canApprovePatch(patch)"
         class="rent-detail-patch-actions"
       >
+        <small v-if="canApprovePatch(patch)" class="rent-detail-patch-helper">
+          Review the diff and warnings before approving.
+        </small>
         <button
           v-if="canRequestPatchChanges(patch)"
           type="button"
@@ -62,7 +65,7 @@
           :disabled="patchActionBusyFor === patch.id"
           @click="$emit('approve', patch.id)"
         >
-          {{ patchActionBusyFor === patch.id && patchActionKind === "approve" ? "Approving..." : "Approve patch" }}
+          {{ patchActionBusyFor === patch.id && patchActionKind === "approve" ? "Approving..." : "Approve code changes" }}
         </button>
       </footer>
     </article>
@@ -166,9 +169,16 @@ defineEmits<{
 }
 .rent-detail-patch-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: 0.4rem;
+}
+.rent-detail-patch-helper {
+  color: var(--color-text-muted, rgba(255, 255, 255, 0.58));
+  font-size: 0.76rem;
+  line-height: 1.3;
+  margin-right: auto;
 }
 .rent-create-secondary,
 .rent-create-primary {

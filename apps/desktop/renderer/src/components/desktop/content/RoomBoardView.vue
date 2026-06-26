@@ -4,7 +4,7 @@
       <div class="desktop-board-header">
         <div class="desktop-board-heading">
           <span>Board</span>
-          <strong>Open work across this room</strong>
+          <strong>Team tasks and agent handoffs</strong>
         </div>
         <button
           class="desktop-board-primary-action desktop-board-add-button"
@@ -62,10 +62,17 @@
 
     <div v-else-if="visibleTaskCount === 0" class="desktop-task-empty desktop-board-empty-state">
       <div>
-        <h3>No matching tasks</h3>
-        <p>Clear the search or switch filters.</p>
+        <h3>{{ emptyTaskState.title }}</h3>
+        <p>{{ emptyTaskState.description }}</p>
       </div>
-      <button type="button" class="desktop-board-clear-filter" @click="clearFilters">Clear filters</button>
+      <button
+        v-if="emptyTaskState.actionLabel"
+        type="button"
+        class="desktop-board-clear-filter"
+        @click="runEmptyTaskStateAction"
+      >
+        {{ emptyTaskState.actionLabel }}
+      </button>
     </div>
 
     <div v-else class="desktop-board-kanban-scroll">
@@ -117,13 +124,16 @@
 
     <div
       v-if="modalTask"
+      ref="taskModalBackdropElement"
       class="desktop-task-modal-backdrop"
       role="dialog"
       aria-modal="true"
       :aria-label="`Task details for ${modalTask.title}`"
       @click.self="closeTaskModal"
+      @keydown.esc.prevent="closeTaskModal"
+      @keydown.tab="handleTaskModalTab"
     >
-      <div class="desktop-task-modal">
+      <div ref="taskModalElement" class="desktop-task-modal" tabindex="-1">
         <button
           type="button"
           class="desktop-task-modal-close"
@@ -150,13 +160,16 @@
 
     <div
       v-if="isCreateTaskModalOpen"
+      ref="createTaskBackdropElement"
       class="desktop-task-modal-backdrop"
       role="dialog"
       aria-modal="true"
       aria-labelledby="desktop-create-task-title"
       @click.self="closeCreateTaskModal"
+      @keydown.esc.prevent="closeCreateTaskModal"
+      @keydown.tab="handleCreateTaskModalTab"
     >
-      <form class="desktop-task-modal desktop-task-create-modal" @submit.prevent="submitCreateTask">
+      <form ref="createTaskModalElement" class="desktop-task-modal desktop-task-create-modal" tabindex="-1" @submit.prevent="submitCreateTask">
         <button
           type="button"
           class="desktop-task-modal-close"
@@ -223,6 +236,11 @@
 import { computed, nextTick, ref, watch } from "vue";
 import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
+import {
+  currentFocusableElement,
+  restoreFocus,
+  trapFocusInDialog,
+} from "./modal-focus";
 import RoomBoardTaskCard from "./room-board/RoomBoardTaskCard.vue";
 import RoomBoardTaskInspector from "./room-board/RoomBoardTaskInspector.vue";
 import { normalizeActor, normalizeRoom, readableStatus } from "./room-board/formatters";
@@ -273,9 +291,15 @@ const isCreateTaskModalOpen = ref(false);
 const createTaskTitle = ref("");
 const createTaskDescription = ref("");
 const createTaskDescriptionField = ref<HTMLTextAreaElement | null>(null);
+const taskModalBackdropElement = ref<HTMLElement | null>(null);
+const taskModalElement = ref<HTMLElement | null>(null);
+const createTaskBackdropElement = ref<HTMLElement | null>(null);
+const createTaskModalElement = ref<HTMLElement | null>(null);
+let taskModalPreviousFocusElement: HTMLElement | null = null;
+let createTaskModalPreviousFocusElement: HTMLElement | null = null;
 const boardFilters: Array<{ id: BoardFilter; label: string }> = [
   { id: "open", label: "Open" },
-  { id: "mine", label: "Mine" },
+  { id: "mine", label: "Local agent" },
   { id: "unclaimed", label: "Unclaimed" },
   { id: "needs-review", label: "Needs review" },
   { id: "closed", label: "Closed" },
@@ -309,6 +333,7 @@ const visibleGroups = computed<TaskGroup[]>(() =>
 );
 const visibleTasks = computed(() => visibleGroups.value.flatMap((group) => group.tasks));
 const visibleTaskCount = computed(() => visibleTasks.value.length);
+const hasSearchQuery = computed(() => Boolean(searchQuery.value.trim()));
 const modalTask = computed(() =>
   visibleTasks.value.find((task) => task.id === localSelectedTaskId.value)
   || props.tasks.find((task) => task.id === localSelectedTaskId.value)
@@ -323,31 +348,103 @@ const draggedTask = computed(() =>
 const canCreateTask = computed(() =>
   Boolean(createTaskTitle.value.trim() || createTaskDescription.value.trim())
 );
+const emptyTaskState = computed((): { title: string; description: string; actionLabel: string | null; action: "clear-search" | "show-open" | "show-closed" | "add-task" | null } => {
+  if (hasSearchQuery.value) {
+    return {
+      title: "No tasks match this search",
+      description: "Try another title, task id, owner, or external link.",
+      actionLabel: "Clear search",
+      action: "clear-search",
+    };
+  }
+
+  if (activeFilter.value === "mine") {
+    return {
+      title: "No tasks for the local agent",
+      description: "Tasks assigned to the agent running from this desktop will appear here.",
+      actionLabel: "Show open tasks",
+      action: "show-open",
+    };
+  }
+
+  if (activeFilter.value === "unclaimed") {
+    return {
+      title: "No unclaimed tasks",
+      description: "Proposed or accepted tasks without an owner will appear here.",
+      actionLabel: "Show open tasks",
+      action: "show-open",
+    };
+  }
+
+  if (activeFilter.value === "needs-review") {
+    return {
+      title: "Nothing needs review",
+      description: "Tasks waiting for review or blocked follow-up will appear here.",
+      actionLabel: "Show open tasks",
+      action: "show-open",
+    };
+  }
+
+  if (activeFilter.value === "closed") {
+    return {
+      title: "No closed tasks",
+      description: "Done and cancelled tasks will appear here after the room finishes work.",
+      actionLabel: "Show open tasks",
+      action: "show-open",
+    };
+  }
+
+  const closedTaskCount = filterCount("closed");
+  return closedTaskCount > 0
+    ? {
+      title: "No open tasks",
+      description: "All tasks in this room are closed right now. Switch to Closed to review finished work.",
+      actionLabel: "Show closed tasks",
+      action: "show-closed",
+    }
+    : {
+      title: "No open tasks",
+      description: "Create a task when there is new work to hand off to a teammate or agent.",
+      actionLabel: "Add task",
+      action: "add-task",
+    };
+});
 
 watch(() => props.selectedTaskId || null, (taskId) => {
   localSelectedTaskId.value = taskId;
 });
 
 function openTaskModal(taskId: string): void {
+  taskModalPreviousFocusElement = currentFocusableElement();
   localSelectedTaskId.value = taskId;
   emit("update:selected-task-id", taskId);
+  void nextTick(() => taskModalElement.value?.focus({ preventScroll: true }));
 }
 
 function closeTaskModal(): void {
   localSelectedTaskId.value = null;
   emit("update:selected-task-id", null);
+  restoreFocus(taskModalPreviousFocusElement);
+  taskModalPreviousFocusElement = null;
 }
 
 function openCreateTaskModal(): void {
-  closeTaskModal();
+  if (localSelectedTaskId.value) {
+    localSelectedTaskId.value = null;
+    emit("update:selected-task-id", null);
+    taskModalPreviousFocusElement = null;
+  }
+  createTaskModalPreviousFocusElement = currentFocusableElement();
   isCreateTaskModalOpen.value = true;
-  void nextTick(() => createTaskDescriptionField.value?.focus());
+  void nextTick(() => createTaskDescriptionField.value?.focus({ preventScroll: true }));
 }
 
 function closeCreateTaskModal(): void {
   if (busyAction.value !== null) return;
   isCreateTaskModalOpen.value = false;
   resetCreateTaskForm();
+  restoreFocus(createTaskModalPreviousFocusElement);
+  createTaskModalPreviousFocusElement = null;
 }
 
 function resetCreateTaskForm(): void {
@@ -363,8 +460,7 @@ async function submitCreateTask(): Promise<void> {
     description: description || null,
   });
   if (!created) return;
-  isCreateTaskModalOpen.value = false;
-  resetCreateTaskForm();
+  closeCreateTaskModal();
 }
 
 function deriveTaskTitle(title: string, description: string): string {
@@ -425,12 +521,12 @@ function onColumnDrop(status: string): void {
 }
 
 function canDragTask(task: DesktopTaskSummary): boolean {
-  return actionsFor(task).some((action) => Boolean(action.targetStatus));
+  return busyAction.value === null && actionsFor(task).some((action) => Boolean(action.targetStatus));
 }
 
 function canDropOnStatus(status: string): boolean {
   const task = draggedTask.value;
-  return Boolean(task && dropActionFor(task, status));
+  return busyAction.value === null && Boolean(task && dropActionFor(task, status));
 }
 
 function dropActionFor(task: DesktopTaskSummary, status: string): TaskAction | null {
@@ -442,6 +538,33 @@ function clearFilters(): void {
   searchQuery.value = "";
   activeFilter.value = "open";
   closeTaskModal();
+}
+
+function runEmptyTaskStateAction(): void {
+  const action = emptyTaskState.value.action;
+  if (action === "clear-search") {
+    searchQuery.value = "";
+    return;
+  }
+  if (action === "show-open") {
+    activeFilter.value = "open";
+    return;
+  }
+  if (action === "show-closed") {
+    activeFilter.value = "closed";
+    return;
+  }
+  if (action === "add-task") {
+    openCreateTaskModal();
+  }
+}
+
+function handleTaskModalTab(event: KeyboardEvent): void {
+  trapFocusInDialog(event, taskModalElement.value || taskModalBackdropElement.value);
+}
+
+function handleCreateTaskModalTab(event: KeyboardEvent): void {
+  trapFocusInDialog(event, createTaskModalElement.value || createTaskBackdropElement.value);
 }
 
 function setActiveFilter(filter: string): void {

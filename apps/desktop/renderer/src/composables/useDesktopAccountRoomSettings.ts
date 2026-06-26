@@ -142,7 +142,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     );
 
     settingsRoomActionBusyKey.value = `archive:${roomIdentifier}`;
-    settingsFeedback.value = { message: `Archiving ${displayName}...`, state: "info" };
+    settingsFeedback.value = { message: `Hiding ${displayName}...`, state: "info" };
     try {
       if (isAccountRoom) {
         await window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { archived: true });
@@ -151,12 +151,12 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       await options.refreshAccountRooms();
       await options.onRoomArchived?.(roomIdentifier, displayName);
       settingsFeedback.value = {
-        message: isAccountRoom ? `${displayName} archived.` : `${displayName} hidden from recent rooms.`,
+        message: isAccountRoom ? `${displayName} hidden from your rooms.` : `${displayName} hidden from recent rooms.`,
         state: "success",
       };
     } catch (error) {
       settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not archive ${displayName}.`,
+        message: error instanceof Error ? error.message : `Could not hide ${displayName}.`,
         state: "error",
       };
     } finally {

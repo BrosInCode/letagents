@@ -69,7 +69,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.setupLoadError.value = null;
     try {
       if (!window.letagentsDesktop?.setup) {
-        throw new Error("The desktop bridge is stale. Restart LetAgents Desktop so setup can install MCP automatically.");
+        throw new Error("The desktop app connection is stale. Restart LetAgents Desktop so setup can install agent app connections automatically.");
       }
       const [nextMcpInstallState, nextAuthStatus] = await Promise.all([
         window.letagentsDesktop.setup.getMcpInstallState(),

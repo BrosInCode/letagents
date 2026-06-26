@@ -420,7 +420,7 @@ test("App Agent timeline summarizes trace activity and outcomes", () => {
     [
       ["Understanding request", "done"],
       ["Checking available rooms", "done"],
-      ["Archiving room", "done"],
+      ["Hiding room", "done"],
       ["Refreshing app", "done"],
       ["Done", "done"],
     ],
@@ -461,7 +461,7 @@ test("App Agent activity display hides technical tool names", () => {
 
   assert.deepEqual(
     displayEntries.map((entry) => entry.label),
-    ["Checked rooms", "Ran archive action", "Ran archive action", "Ran pin action"],
+    ["Checked rooms", "Ran hide action", "Ran hide action", "Ran pin action"],
   );
   assert.doesNotMatch(
     JSON.stringify(displayEntries),
@@ -580,6 +580,6 @@ test("App Agent status label reflects busy and setup states", () => {
       settingsPath: "/tmp/settings.json",
       error: null,
     }, false),
-    "openai/gpt-4o-mini",
+    "Ready to help with this room",
   );
 });

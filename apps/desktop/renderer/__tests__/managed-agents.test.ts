@@ -333,13 +333,13 @@ test("externalMcpProviderInstruction does not imply the desktop starts bridge-on
   });
   assert.equal(
     externalMcpProviderInstruction(externalProvider),
-    "Open Antigravity, then ask it to join this room through the installed MCP bridge.",
+    "Open Antigravity, then ask it to join this room through the installed LetAgents connection.",
   );
   const repoPrompt = externalMcpProviderJoinPrompt(externalProvider, "github.com/BrosInCode/letagents");
   assert.match(repoPrompt, /Call join_room with \{"name":"github\.com\/BrosInCode\/letagents","session_mode":"current"\}\./);
   assert.match(repoPrompt, /Examples: MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor/);
-  assert.match(repoPrompt, /Call set_agent_name with \{"name":"<your codename>"\} before posting status or registering/);
-  assert.match(repoPrompt, /Call register_agent_session with \{"session_kind":"worker","runtime":"antigravity","display_name":"<your codename>"\}/);
+  assert.match(repoPrompt, /Call set_agent_name with \{"name":"<your agent name>"\} before posting status or registering/);
+  assert.match(repoPrompt, /Call register_agent_session with \{"session_kind":"worker","runtime":"antigravity","display_name":"<your agent name>"\}/);
   assert.match(repoPrompt, /Do not continue into the room loop until register_agent_session succeeds/);
   assert.match(repoPrompt, /Call post_status with \{"agent_session_id":"<returned agent_session_id>","status":"available in the room"\}/);
   assert.match(repoPrompt, /Call read_messages once, then call get_board once/);
@@ -386,7 +386,7 @@ test("agent setup action labels and confirmation copy are provider-aware", () =>
   );
   assert.equal(
     agentSetupActionButtonLabel("install_mcp_bridge", provider(), true, false),
-    "Confirm bridge install",
+    "Confirm connection install",
   );
   assert.equal(
     agentSetupActionButtonLabel("install_runtime", provider(), true, true),
@@ -404,7 +404,7 @@ test("agent setup action labels and confirmation copy are provider-aware", () =>
       runtimeCommand: null,
       mcpTargetId: "antigravity",
     })),
-    "LetAgents will update Antigravity's MCP configuration to add the LetAgents bridge after confirmation.",
+    "LetAgents will update Antigravity's agent app configuration to add the LetAgents connection after confirmation.",
   );
 });
 

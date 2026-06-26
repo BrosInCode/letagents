@@ -3,7 +3,7 @@ export function livenessCapabilityLabel(value: string | null | undefined): strin
   if (normalized === "codex_app_server_runtime_stream") return "Codex app-server stream";
   if (normalized === "session_activity") return "Session activity";
   if (normalized === "process_observed") return "Process observed";
-  if (normalized === "tool_bridge_only") return "Tool bridge";
+  if (normalized === "tool_bridge_only") return "Tool connection";
   return "Liveness signal";
 }
 

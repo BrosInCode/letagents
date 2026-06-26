@@ -100,7 +100,7 @@
                 :disabled="storageBusy"
                 @click="$emit('publish-local-room')"
               >
-                {{ storageBusy ? "Publishing..." : "Publish" }}
+                {{ storageBusy ? "Publishing..." : "Publish to cloud" }}
               </button>
             </span>
             <span v-if="storageBusy" class="desktop-room-storage-progress" aria-hidden="true"></span>

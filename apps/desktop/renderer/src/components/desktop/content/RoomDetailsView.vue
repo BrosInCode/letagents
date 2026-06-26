@@ -35,11 +35,11 @@
             <dd>{{ room.parentRoomId || "No parent room" }}</dd>
           </div>
           <div>
-            <dt>Updates</dt>
+            <dt>Parent room updates</dt>
             <dd>{{ parentVisibilityLabel(currentSettings.parent_visibility) }}</dd>
           </div>
           <div>
-            <dt>Scope</dt>
+            <dt>Activity shown</dt>
             <dd>{{ activityScopeLabel(currentSettings.activity_scope) }}</dd>
           </div>
           <div>
@@ -51,19 +51,19 @@
 
       <form class="focus-room-form" data-testid="focus-room-settings-form" @submit.prevent="saveSettings">
         <div class="focus-room-section-heading">
-          <h4>Parent updates</h4>
+          <h4>Updates to parent room</h4>
           <span v-if="settingsChanged">Unsaved</span>
         </div>
         <div class="focus-room-select-grid">
           <DesktopSelectField
             v-model="settingsDraft.parent_visibility"
-            label="Visibility"
+            label="Parent room updates"
             :options="parentVisibilityOptions"
             :disabled="savingSettings"
           />
           <DesktopSelectField
             v-model="settingsDraft.activity_scope"
-            label="Scope"
+            label="Activity shown"
             :options="activityScopeOptions"
             :disabled="savingSettings"
           />
@@ -86,7 +86,7 @@
         @submit.prevent="shareFocusRoomResult"
       >
         <div class="focus-room-section-heading">
-          <h4>Share result</h4>
+          <h4>Send result to parent room</h4>
         </div>
         <textarea
           v-model="resultSummary"
@@ -125,7 +125,7 @@
         </div>
 
         <button class="focus-room-primary" type="submit" :disabled="!canShareResult || sharingResult">
-          {{ sharingResult ? "Sharing..." : "Share result" }}
+          {{ sharingResult ? "Sharing..." : "Send result to parent room" }}
         </button>
       </form>
 
@@ -300,13 +300,13 @@
                 <div class="focus-room-select-grid single">
                   <DesktopSelectField
                     v-model="settingsDraft.parent_visibility"
-                    label="Parent updates"
+                    label="Parent room updates"
                     :options="parentVisibilityOptions"
                     :disabled="savingSettings"
                   />
                   <DesktopSelectField
                     v-model="settingsDraft.activity_scope"
-                    label="Activity scope"
+                    label="Activity shown"
                     :options="activityScopeOptions"
                     :disabled="savingSettings"
                   />
@@ -344,7 +344,7 @@
                   @click="closeFocusRoom(selectedFocusRoom)"
                 >
                   <CheckCircle2 :size="15" aria-hidden="true" />
-                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Closing..." : "Close" }}
+                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Completing..." : "Mark complete" }}
                 </button>
                 <button
                   v-if="canArchiveFocusRooms"
@@ -354,7 +354,7 @@
                   @click="archiveFocusRoom(selectedFocusRoom)"
                 >
                   <Archive :size="15" aria-hidden="true" />
-                  {{ archivingFocusKey === focusKeyFor(selectedFocusRoom) ? "Archiving..." : "Archive" }}
+                  {{ archivingFocusKey === focusKeyFor(selectedFocusRoom) ? "Hiding..." : "Hide focus room" }}
                 </button>
               </div>
             </div>
@@ -450,11 +450,11 @@
         @click="closeContextFocusRoom"
       >
         <CheckCircle2 :size="15" aria-hidden="true" />
-        Close room
+        Mark focus room complete
       </button>
       <button v-if="canArchiveFocusRooms" type="button" role="menuitem" class="danger" @click="archiveContextFocusRoom">
         <Archive :size="15" aria-hidden="true" />
-        Archive room
+        Hide focus room
       </button>
     </div>
   </section>
@@ -930,8 +930,14 @@ async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
   const parentRoomId = focusRoom.parentRoomId || props.room.identifier;
   if (!focusKey || !parentRoomId || closingFocusKey.value) return;
 
+  if (focusRoom.sourceTaskId && props.room.kind !== "focus") {
+    openFocusRoom(focusRoom.identifier);
+    setFeedback("Open the focus room to add artifact, review, blocker, and owner details before marking it complete.", "info");
+    return;
+  }
+
   const summary = window.prompt(
-    `Close ${focusRoom.displayName} with a short result summary:`,
+    `Mark ${focusRoom.displayName} complete with a short result summary:`,
     focusRoom.conclusionSummary || "Closed manually.",
   )?.trim();
   if (!summary) return;
@@ -956,9 +962,9 @@ async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
     activeTab.value = "concluded";
     selectedFocusRoomId.value = focusRoom.roomId;
     emit("refresh-room");
-    setFeedback("Focus room closed.", "success");
+    setFeedback("Focus room marked complete.", "success");
   } catch (error) {
-    setFeedback(errorMessage(error, "Focus room could not be closed."), "error");
+    setFeedback(errorMessage(error, "Focus room could not be marked complete."), "error");
   } finally {
     closingFocusKey.value = null;
   }
@@ -970,7 +976,7 @@ async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> 
   if (!focusKey || !parentRoomId || archivingFocusKey.value) return;
 
   const confirmed = window.confirm(
-    `Archive ${focusRoom.displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
+    `Hide ${focusRoom.displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
   );
   if (!confirmed) return;
 
@@ -982,9 +988,9 @@ async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> 
       selectedFocusRoomId.value = null;
     }
     emit("refresh-room");
-    setFeedback("Focus room archived.", "success");
+    setFeedback("Focus room hidden.", "success");
   } catch (error) {
-    setFeedback(errorMessage(error, "Focus room could not be archived."), "error");
+    setFeedback(errorMessage(error, "Focus room could not be hidden."), "error");
   } finally {
     archivingFocusKey.value = null;
   }

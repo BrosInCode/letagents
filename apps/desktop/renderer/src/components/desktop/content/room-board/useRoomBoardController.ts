@@ -96,13 +96,13 @@ export function useRoomBoardController(
 
     if (task.status === "proposed") {
       actions.push(statusAction("accept", "Accept", "primary", "accepted"));
-      if (!work) actions.push(statusAction("delete", "Delete", "danger", "cancelled", false));
+      if (!work) actions.push(statusAction("cancel", "Cancel task", "danger", "cancelled", false, "Cancelling..."));
     }
     if (task.status === "accepted") {
       if (worker && !work) {
         actions.push(workerAction("claim", "Claim", "primary"));
       }
-      if (!work) actions.push(statusAction("delete", "Delete", "danger", "cancelled", false));
+      if (!work) actions.push(statusAction("cancel", "Cancel task", "danger", "cancelled", false, "Cancelling..."));
     }
     if (task.status === "assigned" && workerOwnsTask) {
       actions.push(workerAction("start", "Start", "primary"));
@@ -129,7 +129,8 @@ export function useRoomBoardController(
     if (work) {
       actions.push({
         id: "release-work",
-        label: "Release lane",
+        label: "Release worker",
+        busyLabel: "Releasing...",
         tone: "neutral",
         run: async (nextTask) => (await window.letagentsDesktop.room.updateTaskLease(props.roomIdentifier, nextTask.id, {
           action: "release",
@@ -142,6 +143,7 @@ export function useRoomBoardController(
       actions.push({
         id: "release-review",
         label: "Release review",
+        busyLabel: "Releasing...",
         tone: "neutral",
         run: async (nextTask) => {
           if (workerReviewsTask) {
@@ -163,6 +165,7 @@ export function useRoomBoardController(
       actions.push({
         id: "claim-review",
         label: "Claim review",
+        busyLabel: "Claiming...",
         tone: "primary",
         run: async (nextTask) => (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
           action: "claim",
@@ -206,6 +209,7 @@ export function useRoomBoardController(
   }
 
   async function runBoardMutation(id: string, mutation: () => Promise<DesktopTaskSummary>): Promise<boolean> {
+    if (busyAction.value !== null) return false;
     busyAction.value = id;
     errorMessage.value = null;
     try {
@@ -226,11 +230,13 @@ export function useRoomBoardController(
     label: string,
     tone: TaskAction["tone"],
     status: string,
-    draggable = true
+    draggable = true,
+    busyLabel?: string
   ): TaskAction {
     return {
       id,
       label,
+      busyLabel,
       tone,
       targetStatus: draggable ? status : undefined,
       run: async (task) => (await window.letagentsDesktop.room.updateTask(props.roomIdentifier, task.id, { status })).task,
@@ -249,9 +255,17 @@ export function useRoomBoardController(
       resume: "in_progress",
       submit_review: "in_review",
     };
+    const busyLabelByAction: Record<typeof action, string> = {
+      claim: "Claiming...",
+      start: "Starting...",
+      block: "Blocking...",
+      resume: "Resuming...",
+      submit_review: "Submitting...",
+    };
     return {
       id: action,
       label,
+      busyLabel: busyLabelByAction[action],
       tone,
       targetStatus: targetStatusByAction[action],
       run: async (task) => (await window.letagentsDesktop.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,

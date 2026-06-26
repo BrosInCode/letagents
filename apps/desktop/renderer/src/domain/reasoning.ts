@@ -57,7 +57,7 @@ export function reasoningSummary(session: DesktopReasoningSession): string {
     || session.checking
     || session.nextAction
     || session.hypothesis
-    || "No summary exposed yet.";
+    || "No progress summary yet.";
 }
 
 export function reasoningFieldRows(session: DesktopReasoningSession): Array<{ label: string; value: string }> {

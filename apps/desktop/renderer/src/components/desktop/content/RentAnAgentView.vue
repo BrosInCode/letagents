@@ -38,7 +38,7 @@
       <div>
         <p class="surface-title">Session started: {{ lastCreatedSession.taskTitle }}</p>
         <p class="surface-subtitle">
-          <code>{{ lastCreatedSession.id }}</code> · {{ humanizeToken(lastCreatedSession.mode) }} ·
+          <code>{{ lastCreatedSession.id }}</code> · {{ rentalModeLabel(lastCreatedSession.mode) }} ·
           {{ humanizeToken(lastCreatedSession.status) }}
         </p>
       </div>
@@ -68,9 +68,9 @@
     <div v-if="state === 'disabled'" class="surface-list" data-testid="rent-an-agent-disabled">
       <article class="surface-row single-line">
         <div>
-          <p class="surface-title">Rent an Agent is not enabled in this build.</p>
+          <p class="surface-title">Rent an Agent is turned off in this desktop app.</p>
           <p class="surface-subtitle">
-            This workspace cannot use the marketplace yet. Restart after enabling the feature for this desktop build.
+            Enable the rental marketplace for this app, then restart LetAgents Desktop.
           </p>
         </div>
         <div class="surface-meta">
@@ -150,11 +150,15 @@
             type="button"
             class="rent-refresh-button rent-start-button"
             :data-testid="`rent-start-${listing.id}`"
+            :title="startBlockedReason(listing) || 'Start a rented agent session'"
             :disabled="!canStart(listing)"
             @click="openSessionModal(listing)"
           >
             Start rental
           </button>
+          <small v-if="startBlockedReason(listing)" class="rent-start-reason">
+            {{ startBlockedReason(listing) }}
+          </small>
         </div>
       </article>
     </div>
@@ -271,6 +275,10 @@ function humanizeToken(value: string): string {
     .join(" ");
 }
 
+function rentalModeLabel(mode: string): string {
+  return mode === "trusted_open" ? "Full workspace access" : "Limited access";
+}
+
 function badgeState(badge: string): string {
   const normalized = badge.toLowerCase();
   if (/(verified|ready|live|active)/.test(normalized)) return "connected";
@@ -290,6 +298,14 @@ function canStart(listing: DesktopRentalListing): boolean {
   if (listing.status !== "active") return false;
   if (listing.maxConcurrentSessions > 0 && listing.activeSessionCount >= listing.maxConcurrentSessions) return false;
   return true;
+}
+
+function startBlockedReason(listing: DesktopRentalListing): string | null {
+  if (listing.status !== "active") return `Unavailable: ${humanizeToken(listing.status)}.`;
+  if (listing.maxConcurrentSessions > 0 && listing.activeSessionCount >= listing.maxConcurrentSessions) {
+    return "At capacity right now.";
+  }
+  return null;
 }
 
 function openSessionModal(listing: DesktopRentalListing): void {
@@ -338,7 +354,7 @@ function onSessionUpdated(session: DesktopRentalSession): void {
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .rent-refresh-button:disabled {
-  cursor: progress;
+  cursor: not-allowed;
   opacity: 0.6;
 }
 .rent-refresh-button:not(:disabled):hover {
@@ -348,6 +364,13 @@ function onSessionUpdated(session: DesktopRentalSession): void {
   background: var(--color-accent, #4f7cff);
   color: white;
   border-color: transparent;
+}
+.rent-start-reason {
+  color: var(--color-text-muted, rgba(255, 255, 255, 0.58));
+  display: block;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  text-align: right;
 }
 .rent-session-banner {
   background: color-mix(in srgb, var(--color-accent, #4f7cff) 12%, transparent);

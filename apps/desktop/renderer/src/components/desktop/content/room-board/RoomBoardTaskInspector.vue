@@ -29,8 +29,8 @@
         <strong>{{ relativeTime(task.updatedAt || task.createdAt) }}</strong>
       </span>
       <span>
-        <small>Work lease</small>
-        <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No active lease" }}</strong>
+        <small>Current worker</small>
+        <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
       </span>
     </section>
 
@@ -41,7 +41,7 @@
     >
       <header>
         <div>
-          <small>Execution authority</small>
+          <small>Who can work on this</small>
           <strong>{{ authorityState.label }}</strong>
         </div>
         <span>{{ authorityState.badge }}</span>
@@ -56,7 +56,7 @@
     >
       <header>
         <div>
-          <small>Board review authority</small>
+          <small>Reviewer</small>
           <strong>{{ reviewAuthorityState.label }}</strong>
         </div>
         <span>{{ reviewAuthorityState.badge }}</span>
@@ -65,8 +65,8 @@
 
       <div class="desktop-task-detail-grid">
         <span>
-          <small>Work holder</small>
-          <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No active work lease" }}</strong>
+          <small>Current worker</small>
+          <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
         </span>
         <span>
           <small>Reviewer</small>
@@ -149,10 +149,10 @@
           type="button"
           class="desktop-task-action"
           :data-tone="action.tone"
-          :disabled="busyAction === `${task.id}:${action.id}`"
+          :disabled="busyAction !== null"
           @click="$emit('run-action', action)"
         >
-          {{ busyAction === `${task.id}:${action.id}` ? "Working..." : action.label }}
+          {{ busyAction === `${task.id}:${action.id}` ? action.busyLabel || "Working..." : action.label }}
         </button>
       </div>
     </section>
@@ -213,7 +213,7 @@ const coordinationItems = computed(() => {
     items.push({
       key: lease.id,
       kind: lease.kind === "review" ? "review" : "lease",
-      label: `${lease.kind} lease: ${compactPerson(lease.holderLabel || lease.agentKey) || "assigned"}`,
+      label: `${lease.kind === "review" ? "Review" : readableStatus(lease.kind)}: ${compactPerson(lease.holderLabel || lease.agentKey) || "assigned"}`,
     });
   }
   for (const lock of props.task.activeLocks) {

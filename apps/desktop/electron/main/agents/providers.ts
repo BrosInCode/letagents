@@ -31,7 +31,7 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "claude-code",
     name: "Claude Code",
-    description: "Connect Claude Code through the LetAgents MCP bridge.",
+    description: "Join from Claude Code.",
     capabilities: ["external_mcp"],
     runtimeCommand: null,
     mcpTargetId: "claude-code",
@@ -39,7 +39,7 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "antigravity",
     name: "Antigravity",
-    description: "Connect Antigravity through the LetAgents MCP bridge.",
+    description: "Join from Antigravity.",
     capabilities: ["external_mcp"],
     runtimeCommand: null,
     mcpTargetId: "antigravity",
@@ -47,7 +47,7 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "cursor",
     name: "Cursor",
-    description: "Connect Cursor through the LetAgents MCP bridge.",
+    description: "Join from Cursor.",
     capabilities: ["external_mcp"],
     runtimeCommand: null,
     mcpTargetId: "cursor",
@@ -55,7 +55,7 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "codex",
     name: "Codex",
-    description: "Run a local Codex room agent supervised by this desktop.",
+    description: "Start a Codex agent here.",
     capabilities: [
       "external_mcp",
       "desktop_managed_runtime",
@@ -131,8 +131,8 @@ function bridgePreflight(
       providerId: provider.id,
       status: "ready",
       canStart: false,
-      message: `${provider.name} is connected through LetAgents MCP.`,
-      detail: "The bridge is installed. Open this provider's CLI or app, then ask it to join this room through LetAgents.",
+      message: `${provider.name} is connected to LetAgents.`,
+      detail: "Open this agent app, then ask it to join this room through LetAgents.",
       nextAction: null,
       version: null,
       mcpStatus,
@@ -143,8 +143,8 @@ function bridgePreflight(
     providerId: provider.id,
     status: "bridge_required",
     canStart: false,
-    message: `${provider.name} needs the LetAgents bridge.`,
-    detail: "Install or repair the MCP connection before this provider can join rooms.",
+    message: `${provider.name} needs the LetAgents connection.`,
+    detail: "Install or repair the agent app connection before this provider can join rooms.",
     nextAction: "install_mcp_bridge",
     version: null,
     mcpStatus,
@@ -203,8 +203,8 @@ async function codexPreflight(
       providerId: provider.id,
       status: "bridge_required",
       canStart: false,
-      message: "Codex needs the LetAgents bridge.",
-      detail: "Install or repair the LetAgents MCP server in Codex so the local agent can act in rooms.",
+      message: "Codex needs the LetAgents connection.",
+      detail: "Install or repair the Codex connection so the local agent can act in rooms.",
       nextAction: "install_mcp_bridge",
       version,
       mcpStatus,
@@ -229,7 +229,7 @@ async function codexPreflight(
     status: "ready",
     canStart: true,
     message: "Codex is ready to start.",
-    detail: "This desktop can launch and supervise a local Codex room agent.",
+    detail: "This desktop can start and monitor a local Codex agent.",
     nextAction: null,
     version,
     mcpStatus,
@@ -267,12 +267,12 @@ export async function runDesktopAgentProviderPreflight(
         ? input.repoRootPath?.trim()
           ? `${provider.name} is ready to start.`
           : `Choose a local repository before starting ${provider.name}.`
-        : `${provider.name} is connected through LetAgents MCP.`,
+        : `${provider.name} is connected to LetAgents.`,
       detail: provider.capabilities.includes("desktop_managed_runtime")
         ? input.repoRootPath?.trim()
           ? "Smoke mode can launch and supervise this local provider."
           : "A desktop-managed agent needs a local repo or worktree for code actions."
-        : "The bridge is installed. Open this provider's CLI or app, then ask it to join this room through LetAgents.",
+        : "Open this agent app, then ask it to join this room through LetAgents.",
       nextAction: provider.capabilities.includes("desktop_managed_runtime") && !input.repoRootPath?.trim()
         ? "choose_repo"
         : null,

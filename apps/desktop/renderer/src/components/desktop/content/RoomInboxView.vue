@@ -49,7 +49,7 @@
 
     <Transition name="desktop-inbox-undo-motion">
       <div v-if="lastClearedItem" class="desktop-inbox-undo" role="status">
-        <span>Cleared "{{ lastClearedItem.title }}"</span>
+        <span>Dismissed "{{ lastClearedItem.title }}"</span>
         <button type="button" @click="emit('restore-item', lastClearedItem)">Undo</button>
       </div>
     </Transition>
@@ -78,7 +78,7 @@
             <span>Queue</span>
             <strong>{{ items.length }}</strong>
           </div>
-          <p>{{ filter === "actionable" ? "Grouped by what needs a decision next." : "Room activity grouped into readable items." }}</p>
+          <p>{{ filter === "actionable" ? "Items that may need a reply, fix, or review." : "Threads, tasks, checks, and agent updates in one list." }}</p>
         </header>
 
         <TransitionGroup name="desktop-inbox-row-motion" tag="div" class="desktop-inbox-list">
@@ -122,11 +122,11 @@
               <button
                 class="desktop-inbox-clear-pill"
                 type="button"
-                aria-label="Clear inbox item"
+                aria-label="Dismiss inbox item"
                 @click.stop="clearItem(item)"
               >
                 <X :size="13" />
-                <span>Clear</span>
+                <span>Dismiss</span>
               </button>
             </div>
           </article>
@@ -169,7 +169,7 @@
             </button>
             <button type="button" @click="clearItem(selectedItem)">
               <X :size="14" />
-              <span>Clear item</span>
+              <span>Dismiss item</span>
             </button>
           </div>
 
@@ -362,7 +362,7 @@ function openActionLabel(item: DesktopInboxItem): string {
 function itemDetailRows(item: DesktopInboxItem): DetailRow[] {
   const rows: DetailRow[] = [
     { label: "Source", value: itemSourceLabel(item) },
-    { label: "Status", value: item.actionable ? "Needs action" : "Cleared" },
+    { label: "Status", value: item.actionable ? "Needs action" : "Dismissed" },
   ];
   if (item.timestamp) rows.push({ label: "Latest", value: formatTimestamp(item.timestamp) });
   if (item.firstSeenTimestamp && item.firstSeenTimestamp !== item.timestamp) {

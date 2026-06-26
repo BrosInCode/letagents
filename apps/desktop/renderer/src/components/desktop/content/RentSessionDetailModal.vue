@@ -8,10 +8,14 @@
         @click.self="$emit('close')"
       >
         <section
+          ref="dialogElement"
           class="desktop-rules-dialog rent-detail-dialog"
           role="dialog"
           aria-modal="true"
           aria-labelledby="rent-detail-title"
+          tabindex="-1"
+          @keydown.esc.prevent="$emit('close')"
+          @keydown.tab="handleDialogTab"
         >
           <header class="desktop-rules-header">
             <div>
@@ -79,7 +83,7 @@
 </template>
 
 <script setup lang="ts">
-import { toRef } from "vue";
+import { nextTick, ref, toRef, watch } from "vue";
 import type { DesktopRentalSession } from "../../../../../electron/ipc-types";
 import RentActivityPanel from "./rent-session-detail/RentActivityPanel.vue";
 import RentPatchesPanel from "./rent-session-detail/RentPatchesPanel.vue";
@@ -87,6 +91,11 @@ import RentSessionSummary from "./rent-session-detail/RentSessionSummary.vue";
 import RentSessionTabs from "./rent-session-detail/RentSessionTabs.vue";
 import RentUsagePanel from "./rent-session-detail/RentUsagePanel.vue";
 import { useRentSessionDetail } from "./rent-session-detail/useRentSessionDetail";
+import {
+  currentFocusableElement,
+  restoreFocus,
+  trapFocusInDialog,
+} from "./modal-focus";
 
 const props = defineProps<{
   open: boolean;
@@ -97,6 +106,9 @@ const emit = defineEmits<{
   close: [];
   "session-updated": [session: DesktopRentalSession];
 }>();
+
+const dialogElement = ref<HTMLElement | null>(null);
+let previousFocusElement: HTMLElement | null = null;
 
 const {
   activeTab,
@@ -121,6 +133,24 @@ const {
   onClose: () => emit("close"),
   onSessionUpdated: (session) => emit("session-updated", session),
 });
+
+watch(
+  () => props.open && Boolean(props.session),
+  (open) => {
+    if (open) {
+      previousFocusElement = currentFocusableElement();
+      void nextTick(() => dialogElement.value?.focus({ preventScroll: true }));
+    } else {
+      restoreFocus(previousFocusElement);
+      previousFocusElement = null;
+    }
+  },
+  { immediate: true },
+);
+
+function handleDialogTab(event: KeyboardEvent): void {
+  trapFocusInDialog(event, dialogElement.value);
+}
 </script>
 
 <style scoped>
