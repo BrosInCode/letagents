@@ -8,6 +8,7 @@ const launcherOrbCenterOffset = { x: launcherSize / 2, y: launcherSize / 2 };
 const panelOrbCenterOffset = { x: 37, y: 36 };
 const viewportMargin = 12;
 const topViewportMargin = 72;
+const launcherBottomReserve = 172;
 
 export function appAgentPanelPositionFromLauncher(
   launcherPosition: { x: number; y: number },
@@ -49,6 +50,7 @@ export function appAgentClampTopLeft(
   topLeft: { x: number; y: number },
   size: { width: number; height: number },
   viewport: { width: number; height: number },
+  bottomMargin = viewportMargin,
 ): { x: number; y: number } {
   return {
     x: Math.min(
@@ -57,7 +59,7 @@ export function appAgentClampTopLeft(
     ),
     y: Math.min(
       Math.max(topViewportMargin, topLeft.y),
-      Math.max(topViewportMargin, viewport.height - size.height - viewportMargin),
+      Math.max(topViewportMargin, viewport.height - size.height - bottomMargin),
     ),
   };
 }
@@ -145,8 +147,8 @@ export function useAppAgentPosition(
       // Position persistence is optional.
     }
     rememberLauncherPosition({
-      x: Math.max(16, window.innerWidth - 96),
-      y: Math.max(84, window.innerHeight - 124),
+      x: Math.max(16, window.innerWidth - launcherSize - 20),
+      y: Math.max(84, window.innerHeight - launcherSize - launcherBottomReserve),
     }, true);
   }
 
@@ -187,7 +189,11 @@ export function useAppAgentPosition(
     return appAgentClampTopLeft(topLeft, size, {
       width: window.innerWidth,
       height: window.innerHeight,
-    });
+    }, isLauncherSize(size) ? launcherBottomReserve : viewportMargin);
+  }
+
+  function isLauncherSize(size: { width: number; height: number }): boolean {
+    return size.width === launcherSize && size.height === launcherSize;
   }
 
   function surfaceSize(nextOpen: boolean): { width: number; height: number } {

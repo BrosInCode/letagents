@@ -17,6 +17,7 @@ import {
   visibleAppAgentChoices,
 } from "../src/domain/app-agent";
 import {
+  appAgentClampTopLeft,
   appAgentPanelPositionForLauncher,
   appAgentOrbCenterFromLauncherPosition,
   appAgentOrbCenterFromPanelPosition,
@@ -72,6 +73,18 @@ test("App Agent panel opens near an orb dragged to the message input", () => {
   assert.deepEqual(
     appAgentPanelPositionForLauncher(launcherPosition, compactPanel, viewport),
     { x: 894, y: 496 },
+  );
+});
+
+test("App Agent launcher keeps clear of bottom room controls", () => {
+  assert.deepEqual(
+    appAgentClampTopLeft(
+      { x: 1200, y: 644 },
+      { width: 76, height: 76 },
+      { width: 1296, height: 768 },
+      172,
+    ),
+    { x: 1200, y: 520 },
   );
 });
 

@@ -78,7 +78,9 @@
 .desktop-rules-header h2 {
   margin-top: 7px;
   font-size: clamp(1.8rem, 4vw, 3.2rem);
-  letter-spacing: -0.08em;
+  line-height: 1;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
 .desktop-rules-header button {

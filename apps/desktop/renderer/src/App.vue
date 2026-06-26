@@ -395,7 +395,8 @@ const sidebarProjectEntries = computed(() =>
   }))
 );
 const selectedRoomRenderKey = computed(() =>
-  selectedSnapshot.value?.room?.identifier
+  selectedRoomIdentifier.value
+  || selectedSnapshot.value?.room?.identifier
   || selectedSnapshot.value?.roomIdentifier
   || selectedRoomInfo.value.identifier
   || activeEntry.value.id

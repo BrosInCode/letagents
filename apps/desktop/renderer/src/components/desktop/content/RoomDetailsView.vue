@@ -701,27 +701,8 @@ const headerMeta = computed(() => {
 });
 
 watch(
-  () => [props.focusRooms, props.tasks, props.room.kind] as const,
-  () => {
-    if (props.room.kind === "focus") return;
-    const selectedFocusStillExists =
-      selectedFocusRoomId.value && props.focusRooms.some((focusRoom) => focusRoom.roomId === selectedFocusRoomId.value);
-    const selectedTaskStillExists =
-      selectedTaskId.value && props.tasks.some((task) => task.id === selectedTaskId.value);
-    if (selectedFocusStillExists || selectedTaskStillExists) return;
-
-    const firstFocusRoom = openFocusRooms.value[0] || concludedFocusRooms.value[0] || null;
-    if (firstFocusRoom) {
-      selectedFocusRoomId.value = firstFocusRoom.roomId;
-      selectedTaskId.value = null;
-      activeTab.value = firstFocusRoom.focusStatus === "concluded" ? "concluded" : "open";
-      return;
-    }
-    const firstTask = candidateTasks.value[0] || null;
-    selectedTaskId.value = firstTask?.id || null;
-    selectedFocusRoomId.value = null;
-    if (firstTask) activeTab.value = "tasks";
-  },
+  () => [props.focusRooms, props.tasks, props.room.kind, activeTab.value, searchQuery.value] as const,
+  () => ensureSelectionMatchesActiveTab(),
   { immediate: true },
 );
 
@@ -768,6 +749,47 @@ function selectTask(taskId: string): void {
 
 function setActiveTab(tab: string): void {
   activeTab.value = tab as FocusRoomTab;
+  ensureSelectionMatchesActiveTab();
+}
+
+function ensureSelectionMatchesActiveTab(): void {
+  if (props.room.kind === "focus") return;
+
+  if (activeTab.value === "open" && !normalizedSearch.value && !openFocusRooms.value.length) {
+    const firstFallbackFocusRoom = concludedFocusRooms.value[0] || null;
+    if (firstFallbackFocusRoom) {
+      activeTab.value = "concluded";
+      selectedFocusRoomId.value = firstFallbackFocusRoom.roomId;
+      selectedTaskId.value = null;
+      return;
+    }
+    const firstFallbackTask = candidateTasks.value[0] || null;
+    if (firstFallbackTask) {
+      activeTab.value = "tasks";
+      selectedTaskId.value = firstFallbackTask.id;
+      selectedFocusRoomId.value = null;
+      return;
+    }
+  }
+
+  if (activeTab.value === "tasks") {
+    const selectedTaskVisible = Boolean(
+      selectedTaskId.value && visibleTasks.value.some((task) => task.id === selectedTaskId.value),
+    );
+    if (!selectedTaskVisible) {
+      selectedTaskId.value = visibleTasks.value[0]?.id || null;
+    }
+    selectedFocusRoomId.value = null;
+    return;
+  }
+
+  const selectedFocusRoomVisible = Boolean(
+    selectedFocusRoomId.value && visibleFocusRooms.value.some((focusRoom) => focusRoom.roomId === selectedFocusRoomId.value),
+  );
+  if (!selectedFocusRoomVisible) {
+    selectedFocusRoomId.value = visibleFocusRooms.value[0]?.roomId || null;
+  }
+  selectedTaskId.value = null;
 }
 
 function openFocusRoom(roomIdentifier: string): void {

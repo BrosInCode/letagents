@@ -321,7 +321,7 @@ const emit = defineEmits<{
 const roomRef = toRef(props, "room");
 const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
-const activeTab = ref<RoomTabId>("chat");
+const activeTab = ref<RoomTabId>(readRoomActiveTab(props.room.identifier));
 const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
@@ -507,6 +507,7 @@ watch(() => props.githubEvents, (nextPage) => {
 }, { immediate: true });
 
 watch(() => props.room.identifier, () => {
+  activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
   managedAgentSessions.value = [];
   eventsTaskFilterId.value = null;
@@ -541,20 +542,21 @@ watch(() => props.openAddAgentRequested, (requested) => {
   emit("add-agent-open-request-consumed");
 }, { immediate: true });
 
-watch(showEventsTab, (visible) => {
-  if (!visible && activeTab.value === "events") {
+watch(() => [showEventsTab.value, props.roomLoading] as const, ([visible, loading]) => {
+  if (!visible && !loading && activeTab.value === "events") {
     activeTab.value = "chat";
   }
-});
+}, { immediate: true });
 
 watch(isLocalRoom, (local) => {
   if (!local) return;
   if (["rooms", "rent"].includes(activeTab.value)) {
     activeTab.value = "chat";
   }
-});
+}, { immediate: true });
 
 watch(activeTab, (tab) => {
+  rememberRoomActiveTab(props.room.identifier, tab);
   if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
     void refreshGitHubEvents().catch(() => undefined);
   }
@@ -564,7 +566,7 @@ watch(activeTab, (tab) => {
   if (tab === "inbox") {
     acknowledgeInboxItems();
   }
-});
+}, { flush: "sync" });
 
 watch(inboxFilter, () => {
   resetInboxState();
@@ -663,6 +665,39 @@ function selectTab(tabId: RoomTabId): void {
   if (tabId === "events" && !showEventsTab.value) return;
   if (isLocalRoom.value && ["rooms", "rent"].includes(tabId)) return;
   activeTab.value = tabId;
+}
+
+function roomActiveTabStorageKey(roomIdentifier: string): string {
+  return `letagents-desktop:room-active-tab:${roomIdentifier}`;
+}
+
+function isRoomTabId(value: string | null): value is RoomTabId {
+  return (
+    value === "chat"
+    || value === "inbox"
+    || value === "events"
+    || value === "board"
+    || value === "activity"
+    || value === "rooms"
+    || value === "rent"
+  );
+}
+
+function readRoomActiveTab(roomIdentifier: string): RoomTabId {
+  try {
+    const stored = window.localStorage.getItem(roomActiveTabStorageKey(roomIdentifier));
+    return isRoomTabId(stored) ? stored : "chat";
+  } catch {
+    return "chat";
+  }
+}
+
+function rememberRoomActiveTab(roomIdentifier: string, tab: RoomTabId): void {
+  try {
+    window.localStorage.setItem(roomActiveTabStorageKey(roomIdentifier), tab);
+  } catch {
+    // Tab memory is only a convenience; navigation should still work when storage is blocked.
+  }
 }
 
 function currentInboxLoadKey(): string {
