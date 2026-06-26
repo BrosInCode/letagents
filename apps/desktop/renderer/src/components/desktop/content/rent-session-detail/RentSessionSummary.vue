@@ -7,7 +7,7 @@
     <div>
       <p class="rent-detail-label">Status</p>
       <span class="state-pill" :data-state="sessionStatusState(session.status)">
-        {{ session.status }}
+        {{ humanizeToken(session.status) }}
       </span>
     </div>
     <div>
@@ -30,16 +30,13 @@ import type {
   DesktopRentalSession,
   DesktopRentalUsageSnapshot,
 } from "../../../../../../electron/ipc-types";
-import { sessionStatusState } from "./presentation";
+import { humanizeToken, rentalModeLabel, sessionStatusState } from "./presentation";
 
 defineProps<{
   session: DesktopRentalSession;
   usage: DesktopRentalUsageSnapshot | null;
 }>();
 
-function rentalModeLabel(mode: string): string {
-  return mode === "trusted_open" ? "Full workspace access" : "Limited access";
-}
 </script>
 
 <style scoped>

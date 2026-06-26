@@ -72,12 +72,12 @@
             <p class="surface-title">{{ request.taskTitle }}</p>
             <p class="surface-subtitle">
               {{ request.renterDisplayName || "Unknown renter" }} ·
-              {{ rentalModeLabel(request.mode) }} · {{ continuityLabel(request.continuityMode) }}
+              {{ rentalModeLabel(request.mode) }} · {{ rentalContinuityLabel(request.continuityMode) }}
             </p>
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="requestState(request.status)">
-              {{ request.status }}
+              {{ humanizeToken(request.status) }}
             </span>
             <button
               type="button"
@@ -133,7 +133,7 @@
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="sessionStateFor(session.status)">
-              {{ session.status }}
+              {{ humanizeToken(session.status) }}
             </span>
             <button
               type="button"
@@ -180,7 +180,7 @@
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="listingState(listing.status)">
-              {{ listing.status }}
+              {{ humanizeToken(listing.status) }}
             </span>
           </div>
         </article>
@@ -199,6 +199,7 @@ import type {
   DesktopRentalProviderDashboard,
   DesktopRentalSession,
 } from "../../../../../electron/ipc-types";
+import { humanizeToken, rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
 
 const emit = defineEmits<{
   "open-session": [session: DesktopRentalSession];
@@ -353,13 +354,6 @@ function requestState(status: string): string {
   return "offline";
 }
 
-function rentalModeLabel(mode: string): string {
-  return mode === "trusted_open" ? "Full workspace access" : "Limited access";
-}
-
-function continuityLabel(mode: string): string {
-  return mode === "full_transcript" ? "Full room transcript" : "Summary only";
-}
 </script>
 
 <style scoped>

@@ -64,7 +64,7 @@
                   data-testid="rent-create-mode"
                   :disabled="submitting || availableModes.length <= 1"
                 >
-                  <option v-for="opt in availableModes" :key="opt" :value="opt">{{ modeLabel(opt) }}</option>
+                  <option v-for="opt in availableModes" :key="opt" :value="opt">{{ rentalModeLabel(opt) }}</option>
                 </select>
               </label>
 
@@ -75,8 +75,8 @@
                   data-testid="rent-create-continuity"
                   :disabled="submitting"
                 >
-                  <option value="smart_handoff">Summary only</option>
-                  <option value="full_transcript">Full room transcript</option>
+                  <option value="smart_handoff">{{ rentalContinuityLabel("smart_handoff") }}</option>
+                  <option value="full_transcript">{{ rentalContinuityLabel("full_transcript") }}</option>
                 </select>
                 <small class="rent-create-helper">Full room transcript may include sensitive room history.</small>
               </label>
@@ -126,6 +126,7 @@ import {
   restoreFocus,
   trapFocusInDialog,
 } from "./modal-focus";
+import { rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
 
 const props = defineProps<{
   open: boolean;
@@ -231,10 +232,6 @@ function isDisabledResult(value: unknown): boolean {
     && value !== null
     && (value as { enabled?: unknown }).enabled === false
   );
-}
-
-function modeLabel(value: DesktopRentalMode): string {
-  return value === "trusted_open" ? "Full workspace access (trusted)" : "Limited access";
 }
 
 function handleDialogTab(event: KeyboardEvent): void {

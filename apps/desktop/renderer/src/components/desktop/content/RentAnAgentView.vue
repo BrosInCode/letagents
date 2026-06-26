@@ -187,6 +187,7 @@ import type { DesktopRentalListing, DesktopRentalSession } from "../../../../../
 import RentSessionCreateModal from "./RentSessionCreateModal.vue";
 import RentSessionDetailModal from "./RentSessionDetailModal.vue";
 import RentProviderDashboard from "./RentProviderDashboard.vue";
+import { humanizeToken, rentalModeLabel } from "./rent-session-detail/presentation";
 
 defineProps<{
   roomIdentifier: string;
@@ -265,18 +266,6 @@ function listingSubtitle(listing: DesktopRentalListing): string {
     parts.push(`${listing.activeSessionCount}/${listing.maxConcurrentSessions} active`);
   }
   return parts.join(" • ");
-}
-
-function humanizeToken(value: string): string {
-  return value
-    .split(/[_-]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-    .join(" ");
-}
-
-function rentalModeLabel(mode: string): string {
-  return mode === "trusted_open" ? "Full workspace access" : "Limited access";
 }
 
 function badgeState(badge: string): string {

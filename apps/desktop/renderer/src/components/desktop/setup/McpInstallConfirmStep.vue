@@ -15,8 +15,8 @@
         <small>{{ subtitle }}</small>
       </span>
     </div>
-    <p>LetAgents will add the MCP connection to {{ targetLabel }}.</p>
-    <p class="mcp-install-note">LetAgents updates the app's local MCP settings. Your code stays on this machine.</p>
+    <p>LetAgents will add the LetAgents connection to {{ targetLabel }}.</p>
+    <p class="mcp-install-note">LetAgents updates the app's local connection settings. Your code stays on this machine.</p>
   </div>
 </template>
 

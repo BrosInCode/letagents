@@ -411,7 +411,12 @@ const emptyTaskState = computed((): { title: string; description: string; action
 });
 
 watch(() => props.selectedTaskId || null, (taskId) => {
+  const isExternalSelection = taskId !== null && taskId !== localSelectedTaskId.value;
   localSelectedTaskId.value = taskId;
+  if (isExternalSelection) {
+    taskModalPreviousFocusElement = currentFocusableElement();
+    void nextTick(() => taskModalElement.value?.focus({ preventScroll: true }));
+  }
 });
 
 function openTaskModal(taskId: string): void {
@@ -532,12 +537,6 @@ function canDropOnStatus(status: string): boolean {
 function dropActionFor(task: DesktopTaskSummary, status: string): TaskAction | null {
   if (task.status === status) return null;
   return actionsFor(task).find((action) => action.targetStatus === status) || null;
-}
-
-function clearFilters(): void {
-  searchQuery.value = "";
-  activeFilter.value = "open";
-  closeTaskModal();
 }
 
 function runEmptyTaskStateAction(): void {

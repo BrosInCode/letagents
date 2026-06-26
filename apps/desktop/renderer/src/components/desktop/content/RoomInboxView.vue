@@ -359,10 +359,16 @@ function openActionLabel(item: DesktopInboxItem): string {
   return "Open task";
 }
 
+function itemStatusLabel(item: DesktopInboxItem): string {
+  if (item.actionable) return "Needs action";
+  if (item.kind === "thread") return item.unreadCount > 0 ? "Unread" : "Read";
+  return "No action needed";
+}
+
 function itemDetailRows(item: DesktopInboxItem): DetailRow[] {
   const rows: DetailRow[] = [
     { label: "Source", value: itemSourceLabel(item) },
-    { label: "Status", value: item.actionable ? "Needs action" : "Dismissed" },
+    { label: "Status", value: itemStatusLabel(item) },
   ];
   if (item.timestamp) rows.push({ label: "Latest", value: formatTimestamp(item.timestamp) });
   if (item.firstSeenTimestamp && item.firstSeenTimestamp !== item.timestamp) {

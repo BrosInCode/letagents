@@ -116,7 +116,7 @@ function submitRoomCode(): void {
 
 const checklist = computed(() => [
   {
-    title: "MCP installed",
+    title: "Agent app ready",
     copy: "Your chosen agent app can load LetAgents.",
   },
   props.githubConnected

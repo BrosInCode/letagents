@@ -1179,6 +1179,7 @@ function openReasoningFromAgentDetail(sessionId: string): void {
 }
 
 function openAgentRepoPicker(): void {
+  addAgentModalOpen.value = false;
   emit("choose-repo");
 }
 

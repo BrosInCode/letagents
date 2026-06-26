@@ -6,7 +6,7 @@
       </svg>
     </div>
     <strong>{{ title }}</strong>
-    <p>The MCP connection is in place. Restart {{ restartLabel }}, then your agents can see LetAgents and join the room.</p>
+    <p>The LetAgents connection is in place. Restart {{ restartLabel }}, then your agents can see LetAgents and join the room.</p>
   </div>
 </template>
 
