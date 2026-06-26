@@ -102,10 +102,12 @@
         :loading-older="inboxLoadingOlder"
         :error="inboxError"
         :has-more="inboxHasMore"
+        :last-cleared-item="lastClearedInboxItem"
         @refresh="loadInboxThreads"
         @load-older="loadOlderInboxThreads"
         @open-thread="openInboxThread"
         @clear-item="clearInboxItem"
+        @restore-item="restoreInboxItem"
         @open-task="openInboxTask"
         @open-github-event="openInboxGitHubEvent"
         @open-reasoning="openReasoningInspector"
@@ -319,7 +321,7 @@ const emit = defineEmits<{
 const roomRef = toRef(props, "room");
 const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
-const activeTab = ref<RoomTabId>("chat");
+const activeTab = ref<RoomTabId>(readRoomActiveTab(props.room.identifier));
 const roomChatView = ref<InstanceType<typeof RoomChatView> | null>(null);
 const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
@@ -333,6 +335,7 @@ const inboxLoadingOlder = ref(false);
 const inboxError = ref<string | null>(null);
 const inboxLoadedKey = ref<string | null>(null);
 const inboxDismissals = ref<Record<string, string>>({});
+const lastClearedInboxItem = ref<DesktopInboxItem | null>(null);
 const inboxSeenFingerprints = ref<string[]>([]);
 const inboxUnseenCount = ref(0);
 const inboxSeenInitialized = ref(false);
@@ -349,6 +352,7 @@ const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 let githubEventsRefreshTimer: number | null = null;
 let inboxRefreshTimer: number | null = null;
+let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
@@ -503,6 +507,7 @@ watch(() => props.githubEvents, (nextPage) => {
 }, { immediate: true });
 
 watch(() => props.room.identifier, () => {
+  activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
   managedAgentSessions.value = [];
   eventsTaskFilterId.value = null;
@@ -517,6 +522,7 @@ watch(() => props.room.identifier, () => {
 
 watch(messageNamespace, () => {
   inboxDismissals.value = readInboxDismissals(messageNamespace.value);
+  clearInboxUndoState();
   resetInboxIndicatorState();
   resetInboxState();
   if (activeTab.value === "inbox") {
@@ -536,20 +542,21 @@ watch(() => props.openAddAgentRequested, (requested) => {
   emit("add-agent-open-request-consumed");
 }, { immediate: true });
 
-watch(showEventsTab, (visible) => {
-  if (!visible && activeTab.value === "events") {
+watch(() => [showEventsTab.value, props.roomLoading] as const, ([visible, loading]) => {
+  if (!visible && !loading && activeTab.value === "events") {
     activeTab.value = "chat";
   }
-});
+}, { immediate: true });
 
 watch(isLocalRoom, (local) => {
   if (!local) return;
   if (["rooms", "rent"].includes(activeTab.value)) {
     activeTab.value = "chat";
   }
-});
+}, { immediate: true });
 
 watch(activeTab, (tab) => {
+  rememberRoomActiveTab(props.room.identifier, tab);
   if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
     void refreshGitHubEvents().catch(() => undefined);
   }
@@ -559,7 +566,7 @@ watch(activeTab, (tab) => {
   if (tab === "inbox") {
     acknowledgeInboxItems();
   }
-});
+}, { flush: "sync" });
 
 watch(inboxFilter, () => {
   resetInboxState();
@@ -594,6 +601,10 @@ onBeforeUnmount(() => {
   if (inboxRefreshTimer !== null) {
     window.clearTimeout(inboxRefreshTimer);
     inboxRefreshTimer = null;
+  }
+  if (inboxUndoTimer !== null) {
+    window.clearTimeout(inboxUndoTimer);
+    inboxUndoTimer = null;
   }
   stopManagedAgentSessionsRefreshTimer();
   unsubscribeManagedAgentSessionUpdate?.();
@@ -654,6 +665,39 @@ function selectTab(tabId: RoomTabId): void {
   if (tabId === "events" && !showEventsTab.value) return;
   if (isLocalRoom.value && ["rooms", "rent"].includes(tabId)) return;
   activeTab.value = tabId;
+}
+
+function roomActiveTabStorageKey(roomIdentifier: string): string {
+  return `letagents-desktop:room-active-tab:${roomIdentifier}`;
+}
+
+function isRoomTabId(value: string | null): value is RoomTabId {
+  return (
+    value === "chat"
+    || value === "inbox"
+    || value === "events"
+    || value === "board"
+    || value === "activity"
+    || value === "rooms"
+    || value === "rent"
+  );
+}
+
+function readRoomActiveTab(roomIdentifier: string): RoomTabId {
+  try {
+    const stored = window.localStorage.getItem(roomActiveTabStorageKey(roomIdentifier));
+    return isRoomTabId(stored) ? stored : "chat";
+  } catch {
+    return "chat";
+  }
+}
+
+function rememberRoomActiveTab(roomIdentifier: string, tab: RoomTabId): void {
+  try {
+    window.localStorage.setItem(roomActiveTabStorageKey(roomIdentifier), tab);
+  } catch {
+    // Tab memory is only a convenience; navigation should still work when storage is blocked.
+  }
 }
 
 function currentInboxLoadKey(): string {
@@ -783,37 +827,9 @@ async function openInboxThread(item: Extract<DesktopInboxItem, { kind: "thread" 
   roomChatView.value?.openThread(item.root.id);
 }
 
-async function markInboxThreadRead(
-  item: Extract<DesktopInboxItem, { kind: "thread" }>,
-  options: { reload?: boolean } = {},
-): Promise<boolean> {
-  const roomApi = window.letagentsDesktop?.room;
-  if (!roomApi?.markThreadRead) return false;
-  try {
-    const result = await roomApi.markThreadRead(
-      props.room.identifier,
-      item.root.id,
-      item.summary.latestReply?.id || item.root.id,
-    );
-    if (options.reload === false) {
-      handleThreadRead(item.root.id, result.thread);
-    } else {
-      await loadInboxThreads();
-    }
-    return true;
-  } catch (error) {
-    inboxError.value = error instanceof Error ? error.message : "Thread read state could not be updated.";
-    return false;
-  }
-}
-
-async function clearInboxItem(item: DesktopInboxItem): Promise<void> {
-  if (item.kind === "thread" && item.unreadCount > 0) {
-    const markedRead = await markInboxThreadRead(item, { reload: false });
-    if (!markedRead) return;
-  }
-
+function clearInboxItem(item: DesktopInboxItem): void {
   dismissInboxItem(item);
+  showInboxUndo(item);
 }
 
 function dismissInboxItem(item: DesktopInboxItem): void {
@@ -823,6 +839,32 @@ function dismissInboxItem(item: DesktopInboxItem): void {
   };
   inboxDismissals.value = nextDismissals;
   writeInboxDismissals(messageNamespace.value, nextDismissals);
+}
+
+function restoreInboxItem(item: DesktopInboxItem): void {
+  const nextDismissals = { ...inboxDismissals.value };
+  delete nextDismissals[item.id];
+  inboxDismissals.value = nextDismissals;
+  writeInboxDismissals(messageNamespace.value, nextDismissals);
+  clearInboxUndoState();
+}
+
+function showInboxUndo(item: DesktopInboxItem): void {
+  lastClearedInboxItem.value = item;
+  if (inboxUndoTimer !== null) {
+    window.clearTimeout(inboxUndoTimer);
+  }
+  inboxUndoTimer = window.setTimeout(() => {
+    clearInboxUndoState();
+  }, 8_000);
+}
+
+function clearInboxUndoState(): void {
+  lastClearedInboxItem.value = null;
+  if (inboxUndoTimer !== null) {
+    window.clearTimeout(inboxUndoTimer);
+    inboxUndoTimer = null;
+  }
 }
 
 function isInboxItemDismissed(item: DesktopInboxItem): boolean {

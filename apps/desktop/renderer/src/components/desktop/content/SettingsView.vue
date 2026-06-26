@@ -159,8 +159,8 @@
 
             <SettingsRow
               v-if="activePane !== 'storage:database'"
-              title="Current room sync"
-              description="Publish local messages and tasks only when you explicitly choose to sync them."
+              title="Publish this local room"
+              description="Upload this room's local messages and tasks to LetAgents cloud. Nothing uploads until you click Publish."
               badge="manual"
               badge-state="away"
             >
@@ -173,15 +173,15 @@
                   @click="$emit('sync-local-chat')"
                 >
                   <CloudUpload aria-hidden="true" />
-                  <span>Sync current room</span>
+                  <span>Publish to cloud</span>
                 </button>
               </template>
             </SettingsRow>
 
             <SettingsRow
               v-if="activePane === 'storage:sync'"
-              title="Sync behavior"
-              description="Local rooms never upload automatically. Sync is always a manual room action."
+              title="Publish behavior"
+              description="Local rooms never upload automatically. Publishing is always a manual room action."
               badge="manual"
               badge-state="connected"
             />
@@ -340,7 +340,7 @@
                 :data-testid="`settings-leave-room-${slugify(selectedRoomDetail.roomIdentifier)}`"
                 @click="$emit('leave-room', selectedRoomDetail)"
               >
-                {{ busyLabel(selectedRoomDetail, "leave", "Leave") }}
+                {{ busyLabel(selectedRoomDetail, "leave", "Leave room") }}
               </button>
               <button
                 v-if="selectedRoomDetail.canDelete"
@@ -350,7 +350,7 @@
                 :data-testid="`settings-delete-room-${slugify(selectedRoomDetail.roomIdentifier)}`"
                 @click="$emit('delete-room', selectedRoomDetail)"
               >
-                {{ busyLabel(selectedRoomDetail, "delete", "Delete") }}
+                {{ busyLabel(selectedRoomDetail, "delete", "Delete room permanently") }}
               </button>
               <span v-else-if="selectedRoomDetail.deleteReason" class="settings-muted-note" :title="selectedRoomDetail.deleteReason">
                 Protected
@@ -829,16 +829,16 @@ const settingsNavGroups: SettingsNavGroup[] = [
     label: "Rooms",
     items: [
       { id: "rooms:defaults", title: "Rooms", description: "Active, pinned, and joined", icon: SlidersHorizontal },
-      { id: "rooms:left", title: "Recovery", description: "Restore rooms you left", icon: ArchiveRestore },
-      { id: "rooms:danger", title: "Danger", description: "Leave and delete rooms", icon: Trash2 },
+      { id: "rooms:left", title: "Left rooms", description: "Restore rooms you left", icon: ArchiveRestore },
+      { id: "rooms:danger", title: "Room removal", description: "Leave and delete rooms", icon: Trash2 },
     ],
   },
   {
     label: "Storage",
     items: [
       { id: "storage:chat", title: "Chat storage", description: "Cloud or local messages", icon: Cloud },
-      { id: "storage:sync", title: "Sync", description: "Manual room upload", icon: CloudUpload },
-      { id: "storage:database", title: "Local database", description: "SQLite paths", icon: Database },
+      { id: "storage:sync", title: "Publishing", description: "Manual cloud upload", icon: CloudUpload },
+      { id: "storage:database", title: "Local database", description: "Local database files", icon: Database },
     ],
   },
   {
@@ -847,9 +847,9 @@ const settingsNavGroups: SettingsNavGroup[] = [
       { id: "system:setup", title: "Setup", description: "Install LetAgents", icon: Wrench },
       { id: "system:app-agent", title: "App Agent", description: "App control", icon: KeyRound },
       { id: "system:runtime", title: "Runtime", description: "Repo and desktop state", icon: GitBranch },
-      { id: "system:mcp", title: "MCP", description: "Connected apps", icon: ServerCog },
+      { id: "system:mcp", title: "Agent app connections", description: "Connected apps", icon: ServerCog },
       { id: "system:agents", title: "Agents", description: "Status and availability", icon: Bot },
-      { id: "system:diagnostics", title: "Diagnostics", description: "Local truth and recovery", icon: Activity },
+      { id: "system:diagnostics", title: "Troubleshooting", description: "Local truth and recovery", icon: Activity },
     ],
   },
 ];
@@ -882,9 +882,9 @@ const activePaneTitle = computed(() => activePaneItem.value.title);
 const activePaneDescription = computed(() => {
   if (activePane.value === "rooms:defaults") return "Manage active, pinned, and joined rooms.";
   if (activePane.value === "rooms:left") return "Restore rooms you previously left.";
-  if (activePane.value === "storage:chat") return "Choose where room messages are stored before sync.";
+  if (activePane.value === "storage:chat") return "Choose where room messages are stored before upload.";
   if (activePane.value === "rooms:danger") return "Review actions that remove access or delete rooms you created.";
-  if (activePane.value === "system:app-agent") return "Configure the App Agent and see what it can do in the app.";
+  if (activePane.value === "system:app-agent") return "Configure the app assistant and see what it can do in the app.";
   return activePaneItem.value.description;
 });
 

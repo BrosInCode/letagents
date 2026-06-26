@@ -39,8 +39,8 @@
       data-testid="rent-provider-disabled"
     >
       <div>
-        <p class="surface-title">Rent an Agent is not enabled in this build.</p>
-        <p class="surface-subtitle">Set <code>LETAGENTS_RENT_ENABLED=1</code> and restart.</p>
+        <p class="surface-title">Rent an Agent is turned off in this desktop app.</p>
+        <p class="surface-subtitle">Enable the rental marketplace for this app, then restart LetAgents Desktop.</p>
       </div>
       <div class="surface-meta">
         <span class="state-pill" data-state="offline">disabled</span>
@@ -72,12 +72,12 @@
             <p class="surface-title">{{ request.taskTitle }}</p>
             <p class="surface-subtitle">
               {{ request.renterDisplayName || "Unknown renter" }} ·
-              {{ request.mode }} · {{ request.continuityMode }}
+              {{ rentalModeLabel(request.mode) }} · {{ rentalContinuityLabel(request.continuityMode) }}
             </p>
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="requestState(request.status)">
-              {{ request.status }}
+              {{ humanizeToken(request.status) }}
             </span>
             <button
               type="button"
@@ -124,16 +124,16 @@
           <div>
             <p class="surface-title">{{ session.taskTitle }}</p>
             <p class="surface-subtitle">
-              <code>{{ session.id }}</code> · {{ session.mode }} ·
+              <code>{{ session.id }}</code> · {{ rentalModeLabel(session.mode) }} ·
               <span v-if="session.lrtLimit !== null">
-                {{ session.lrtUsed }}/{{ session.lrtLimit }} LRT
+                {{ session.lrtUsed }}/{{ session.lrtLimit }} rental credits
               </span>
-              <span v-else>{{ session.lrtUsed }} LRT</span>
+              <span v-else>{{ session.lrtUsed }} rental credits</span>
             </p>
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="sessionStateFor(session.status)">
-              {{ session.status }}
+              {{ humanizeToken(session.status) }}
             </span>
             <button
               type="button"
@@ -160,7 +160,7 @@
         >
           <p class="surface-title">No listings yet.</p>
           <p class="surface-subtitle">
-            Listing CRUD lands in a follow-up slice. For now, create listings via the MCP tools.
+            Your rentable agents will appear here after listings are created.
           </p>
         </article>
 
@@ -180,7 +180,7 @@
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="listingState(listing.status)">
-              {{ listing.status }}
+              {{ humanizeToken(listing.status) }}
             </span>
           </div>
         </article>
@@ -199,6 +199,7 @@ import type {
   DesktopRentalProviderDashboard,
   DesktopRentalSession,
 } from "../../../../../electron/ipc-types";
+import { humanizeToken, rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
 
 const emit = defineEmits<{
   "open-session": [session: DesktopRentalSession];
@@ -352,6 +353,7 @@ function requestState(status: string): string {
   if (status === "accepted") return "connected";
   return "offline";
 }
+
 </script>
 
 <style scoped>

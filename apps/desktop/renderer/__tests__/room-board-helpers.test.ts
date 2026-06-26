@@ -31,7 +31,7 @@ describe("room board helpers", () => {
     }));
 
     assert.equal(state.state, "mismatch");
-    assert.equal(state.label, "Lease overrides owner");
+    assert.equal(state.label, "Different worker is active");
   });
 
   it("marks review authority as conflicted when the reviewer also holds the work lease", () => {

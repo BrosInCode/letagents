@@ -25,7 +25,7 @@ export function providerSetupConfirmationResult(
     providerId: provider.id,
     action,
     success: false,
-    message: `${name} bridge install requires confirmation.`,
-    detail: "LetAgents will update this provider's MCP configuration only after the user confirms this action.",
+    message: `${name} connection install requires confirmation.`,
+    detail: "LetAgents will update this provider's agent app configuration only after the user confirms this action.",
   };
 }

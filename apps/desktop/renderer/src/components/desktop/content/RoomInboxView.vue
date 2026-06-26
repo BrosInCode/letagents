@@ -47,6 +47,13 @@
       <button type="button" @click="emit('refresh')">Retry</button>
     </div>
 
+    <Transition name="desktop-inbox-undo-motion">
+      <div v-if="lastClearedItem" class="desktop-inbox-undo" role="status">
+        <span>Dismissed "{{ lastClearedItem.title }}"</span>
+        <button type="button" @click="emit('restore-item', lastClearedItem)">Undo</button>
+      </div>
+    </Transition>
+
     <div v-if="loading && items.length === 0" class="desktop-inbox-loading-list" aria-label="Loading inbox">
       <div v-for="index in 6" :key="index" class="desktop-inbox-skeleton" aria-hidden="true">
         <span></span>
@@ -60,8 +67,8 @@
 
     <div v-else-if="!error && items.length === 0" class="desktop-inbox-empty">
       <Inbox :size="22" />
-      <strong>{{ filter === "actionable" ? "Inbox clear" : "No inbox history yet" }}</strong>
-      <span>{{ filter === "actionable" ? "Items you clear or resolve will stay out of this queue." : "Threads and room activity will appear here as they happen." }}</span>
+      <strong>{{ filter === "actionable" ? "Nothing needs your attention" : "No inbox history yet" }}</strong>
+      <span>{{ filter === "actionable" ? "Unread threads, blocked work, failed checks, and reviews will appear here." : "Threads, tasks, checks, and agent updates will appear here as they happen." }}</span>
     </div>
 
     <div v-else-if="selectedItem" class="desktop-inbox-workspace">
@@ -71,7 +78,7 @@
             <span>Queue</span>
             <strong>{{ items.length }}</strong>
           </div>
-          <p>{{ filter === "actionable" ? "Grouped by what needs a decision next." : "Room activity grouped into readable items." }}</p>
+          <p>{{ filter === "actionable" ? "Items that may need a reply, fix, or review." : "Threads, tasks, checks, and agent updates in one list." }}</p>
         </header>
 
         <TransitionGroup name="desktop-inbox-row-motion" tag="div" class="desktop-inbox-list">
@@ -115,11 +122,11 @@
               <button
                 class="desktop-inbox-clear-pill"
                 type="button"
-                aria-label="Clear inbox item"
+                aria-label="Dismiss inbox item"
                 @click.stop="clearItem(item)"
               >
                 <X :size="13" />
-                <span>Clear</span>
+                <span>Dismiss</span>
               </button>
             </div>
           </article>
@@ -162,7 +169,7 @@
             </button>
             <button type="button" @click="clearItem(selectedItem)">
               <X :size="14" />
-              <span>Clear item</span>
+              <span>Dismiss item</span>
             </button>
           </div>
 
@@ -213,7 +220,7 @@
           </section>
 
           <section class="desktop-inbox-why">
-            <span>Why this is here</span>
+            <span>Why it matters</span>
             <p>{{ whyText(selectedItem) }}</p>
           </section>
         </article>
@@ -255,6 +262,7 @@ const props = defineProps<{
   loadingOlder: boolean;
   error: string | null;
   hasMore: boolean;
+  lastClearedItem: DesktopInboxItem | null;
 }>();
 
 const emit = defineEmits<{
@@ -263,6 +271,7 @@ const emit = defineEmits<{
   "load-older": [];
   "open-thread": [item: Extract<DesktopInboxItem, { kind: "thread" }>];
   "clear-item": [item: DesktopInboxItem];
+  "restore-item": [item: DesktopInboxItem];
   "open-task": [taskId: string];
   "open-github-event": [eventId: string];
   "open-reasoning": [sessionId: string];
@@ -350,10 +359,16 @@ function openActionLabel(item: DesktopInboxItem): string {
   return "Open task";
 }
 
+function itemStatusLabel(item: DesktopInboxItem): string {
+  if (item.actionable) return "Needs action";
+  if (item.kind === "thread") return item.unreadCount > 0 ? "Unread" : "Read";
+  return "No action needed";
+}
+
 function itemDetailRows(item: DesktopInboxItem): DetailRow[] {
   const rows: DetailRow[] = [
     { label: "Source", value: itemSourceLabel(item) },
-    { label: "Status", value: item.actionable ? "Needs action" : "Cleared" },
+    { label: "Status", value: itemStatusLabel(item) },
   ];
   if (item.timestamp) rows.push({ label: "Latest", value: formatTimestamp(item.timestamp) });
   if (item.firstSeenTimestamp && item.firstSeenTimestamp !== item.timestamp) {

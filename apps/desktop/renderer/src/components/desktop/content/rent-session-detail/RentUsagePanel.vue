@@ -3,19 +3,19 @@
     <p v-if="!usage" class="rent-detail-empty">Loading usage...</p>
     <dl v-else class="rent-detail-dl">
       <div>
-        <dt>LRT used</dt>
+        <dt>Rental credits used</dt>
         <dd>{{ usage.lrtUsed }}</dd>
       </div>
       <div>
-        <dt>LRT reserved</dt>
+        <dt>Rental credits reserved</dt>
         <dd>{{ usage.lrtReserved }}</dd>
       </div>
       <div>
-        <dt>LRT limit</dt>
+        <dt>Rental credit limit</dt>
         <dd>{{ usage.lrtLimit ?? "—" }}</dd>
       </div>
       <div>
-        <dt>LRT remaining</dt>
+        <dt>Rental credits remaining</dt>
         <dd>{{ usage.lrtRemaining ?? "—" }}</dd>
       </div>
       <div>

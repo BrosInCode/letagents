@@ -332,8 +332,8 @@ const canArchiveContextRoom = computed(() => {
 
 const archiveContextLabel = computed(() =>
   roomContextMenu.value?.entry.source === "recent"
-    ? "Hide from sidebar"
-    : "Archive room",
+    ? "Remove from my rooms"
+    : "Hide room",
 );
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {

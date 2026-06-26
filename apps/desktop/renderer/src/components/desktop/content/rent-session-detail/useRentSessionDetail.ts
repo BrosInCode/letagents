@@ -130,7 +130,7 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
     const bridge = getRentalBridge();
     if (!bridge) return;
 
-    const confirmed = window.confirm("Cancel this rental session? The remaining LRT budget will be released.");
+    const confirmed = window.confirm("Stop this rented agent session? The agent will stop working on this task and any unused rental budget will be released.");
     if (!confirmed) return;
 
     cancelBusy.value = true;

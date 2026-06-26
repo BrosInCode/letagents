@@ -3,12 +3,23 @@
   z-index: 80;
   width: max-content;
   color: var(--text);
+  transition:
+    opacity var(--duration-fast) var(--ease-out),
+    filter var(--duration-fast) var(--ease-out),
+    visibility var(--duration-fast) step-end;
   --app-agent-orb-active: #a7c7ff;
   --app-agent-orb-confirm: var(--amber);
   --app-agent-orb-success: var(--green);
   --app-agent-orb-error: var(--red);
   --app-agent-orb-accent: var(--app-agent-orb-active);
   --app-agent-orb-smoke: rgba(124, 141, 169, 0.2);
+}
+
+.desktop-shell:has(.desktop-room-control-rail) .app-agent[data-open="false"][data-state="idle"] {
+  pointer-events: none;
+  opacity: 0;
+  filter: blur(4px);
+  visibility: hidden;
 }
 
 .app-agent-orb {

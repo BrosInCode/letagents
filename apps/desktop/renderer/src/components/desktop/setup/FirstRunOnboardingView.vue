@@ -217,12 +217,12 @@ const copy = computed(() => {
     return "Open a room for a repository, or join one someone has already shared with you.";
   }
   if (props.mcpWizardStep === "install") {
-    return "LetAgents will add a small MCP connection to this app, already pointed at this repository and ready for the right room.";
+    return "LetAgents will add a small app connection, already pointed at this repository and ready for the right room.";
   }
   if (props.mcpWizardStep === "done") {
     return "Restart or reload the app you selected. Your agents will see LetAgents the next time they start.";
   }
-  return "Choose the coding apps your agents use. LetAgents will add the MCP connection there, so agents can join rooms without copy-paste setup.";
+  return "Choose the coding apps your agents use. LetAgents will add the connection there, so agents can join rooms without copy-paste setup.";
 });
 
 const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [

@@ -3,6 +3,7 @@ import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 export type TaskAction = {
   id: string;
   label: string;
+  busyLabel?: string;
   tone: "primary" | "neutral" | "danger";
   targetStatus?: string;
   run: (task: DesktopTaskSummary) => Promise<DesktopTaskSummary>;

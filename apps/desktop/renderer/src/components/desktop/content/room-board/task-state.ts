@@ -36,24 +36,24 @@ export function executionAuthorityState(task: DesktopTaskSummary): AuthorityPane
     if (owner && task.assigneeAgentKey && lease.agentKey && normalizeActor(task.assigneeAgentKey) !== normalizeActor(lease.agentKey)) {
       return {
         state: "mismatch",
-        label: "Lease overrides owner",
-        badge: "Mismatch",
-        detail: `Assigned to ${owner}, but execution authority is held by ${holder || "another worker"}. Release the lane if this is stale.`,
+        label: "Different worker is active",
+        badge: "Check owner",
+        detail: `Assigned to ${owner}, but ${holder || "another worker"} is currently allowed to work on it. Release the worker if this is stale.`,
       };
     }
     return {
       state: "held",
-      label: "Lane held",
-      badge: "Lane held",
-      detail: `${holder || "A worker"} has active execution authority for this task.`,
+      label: "Work in progress",
+      badge: "Active",
+      detail: `${holder || "A worker"} can update this task right now.`,
     };
   }
   return {
     state: "missing",
-    label: "No active lease",
-    badge: "Missing",
+    label: "No one is working on this now",
+    badge: "Unclaimed",
     detail: task.assignee
-      ? "The task has an owner but no active work lease recorded."
+      ? "The task has an owner, but no active worker is attached right now."
       : "No worker owns this task yet.",
   };
 }
@@ -71,15 +71,15 @@ export function reviewPanelState(task: DesktopTaskSummary): ReviewPanelState {
       state: "idle",
       label: "Review not active",
       badge: "Idle",
-      detail: "Move the task to review before assigning board review authority.",
+      detail: "Move the task to review before assigning a reviewer.",
     };
   }
   if (conflicts.length) {
     return {
       state: "conflict",
-      label: "Reviewer conflicts with work holder",
+      label: "Reviewer is also the worker",
       badge: "Conflict",
-      detail: "At least one reviewer also matches the active work lease. Assign a different worker before treating the board review as valid.",
+      detail: "The reviewer also appears to be the active worker. Assign someone else before treating this as reviewed.",
     };
   }
   if (reviews.length) {
@@ -87,7 +87,7 @@ export function reviewPanelState(task: DesktopTaskSummary): ReviewPanelState {
       state: "assigned",
       label: "Reviewer assigned",
       badge: "Assigned",
-      detail: "A separate worker has board review authority for this task.",
+      detail: "A separate teammate or agent is assigned to review this task.",
     };
   }
   return {

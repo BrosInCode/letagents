@@ -73,15 +73,15 @@
 
             <dl class="desktop-add-agent-checks">
               <div>
-                <dt>Runtime</dt>
+                <dt>Agent app</dt>
                 <dd>{{ runtimeLabel }}</dd>
               </div>
               <div>
-                <dt>Bridge</dt>
+                <dt>LetAgents connection</dt>
                 <dd>{{ bridgeLabel }}</dd>
               </div>
               <div>
-                <dt>Repository</dt>
+                <dt>Project folder</dt>
                 <dd>{{ repoLabel }}</dd>
               </div>
             </dl>
@@ -107,14 +107,14 @@
                   :data-selected="deliveryMode === 'mcp_polling'"
                   @click="deliveryMode = 'mcp_polling'"
                 >
-                  MCP loop
+                  From the agent app
                 </button>
                 <button
                   type="button"
                   :data-selected="deliveryMode === 'desktop_events'"
                   @click="deliveryMode = 'desktop_events'"
                 >
-                  Desktop events
+                  From this desktop app
                 </button>
               </div>
               <p>{{ deliveryModeDescription }}</p>
@@ -126,17 +126,26 @@
               data-testid="desktop-add-agent-external-prompt"
               aria-label="External agent join prompt"
             >
-              <div>
-                <span>CLI prompt</span>
+              <div class="desktop-add-agent-external-prompt-intro">
+                <div>
+                  <span>External agent setup</span>
+                  <p>
+                    Copy these instructions into {{ selectedProvider?.name || "the provider" }} so it can join the
+                    correct room, use a readable agent name, and keep listening for work.
+                  </p>
+                </div>
                 <button
                   type="button"
                   :disabled="copyingExternalPrompt"
                   @click="copyExternalJoinPrompt"
                 >
-                  {{ copyingExternalPrompt ? "Copying..." : "Copy" }}
+                  {{ copyingExternalPrompt ? "Copying..." : "Copy agent instructions" }}
                 </button>
               </div>
-              <pre><code>{{ externalJoinPrompt }}</code></pre>
+              <details class="desktop-add-agent-external-prompt-details">
+                <summary>Show full instructions</summary>
+                <pre><code>{{ externalJoinPrompt }}</code></pre>
+              </details>
             </section>
 
             <section v-if="activeManagedSessions.length" class="desktop-add-agent-managed-sessions">
@@ -145,7 +154,7 @@
                 :key="session.id"
                 class="desktop-add-agent-managed-session"
               >
-                <span>{{ session.deliveryMode === "desktop_events" ? "Desktop events" : "MCP loop" }}</span>
+                <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
                 <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
                 <small>{{ managedAgentSessionStatusLabel(session) }} - {{ session.repoRootPath }}</small>
                 <div class="desktop-add-agent-managed-session-actions">
@@ -198,7 +207,7 @@
                 class="desktop-add-agent-primary"
                 @click="emit('choose-repo')"
               >
-                Choose repository
+                Choose project folder
               </button>
 
               <button
@@ -218,13 +227,13 @@
                 {{ externalMcpProviderInstruction(selectedProvider) }}
               </span>
               <span v-else-if="activeManagedSessions.length" class="desktop-add-agent-confirmation">
-                Each start creates a separate supervised worker.
+                Each start creates a separate local agent session.
               </span>
               <span
                 v-else-if="preflight?.status === 'ready' && hasDesktopManagedRuntime(selectedProvider)"
                 class="desktop-add-agent-confirmation"
               >
-                Starts a supervised Codex worker for this room.
+                Starts a Codex agent for this room.
               </span>
             </div>
 
@@ -361,13 +370,13 @@ const repoLabel = computed(() => {
   if (!agentProviderNeedsDesktopRepo(selectedProvider.value)) {
     return "Handled by provider app";
   }
-  return props.repoRootPath || "Required for local agents";
+  return props.repoRootPath || "Required before local agents can start";
 });
 
 const deliveryModeDescription = computed(() =>
   deliveryMode.value === "desktop_events"
-    ? "The desktop room stream feeds new room events into Codex."
-    : "Codex joins the room and waits through the LetAgents MCP bridge."
+    ? "This desktop app sends room updates to the local agent."
+    : "The agent app joins the room through its LetAgents connection."
 );
 
 watch(
@@ -686,7 +695,7 @@ async function copyExternalJoinPrompt(): Promise<void> {
     setupMessage.value = "Copied the agent join prompt.";
   } catch {
     if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = `Clipboard unavailable. Prompt: ${prompt}`;
+    setupMessage.value = "Clipboard unavailable. Open Show full instructions, then copy the prompt manually.";
   } finally {
     if (isCurrentModalState(requestVersion)) {
       copyingExternalPrompt.value = false;

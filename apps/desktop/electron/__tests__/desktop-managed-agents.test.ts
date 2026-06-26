@@ -1941,7 +1941,7 @@ test("agent provider setup confirmation copy covers install actions", () => {
   assert.equal(bridgeInstall.success, false);
   assert.equal(bridgeInstall.action, "install_mcp_bridge");
   assert.match(bridgeInstall.message, /requires confirmation/i);
-  assert.match(bridgeInstall.detail || "", /MCP configuration/i);
+  assert.match(bridgeInstall.detail || "", /agent app configuration/i);
 });
 
 test("agent provider MCP setup preserves the selected repository cwd", () => {

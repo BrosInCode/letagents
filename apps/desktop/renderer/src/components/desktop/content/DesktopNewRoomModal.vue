@@ -8,8 +8,8 @@
       <header class="desktop-new-room-header">
         <div class="desktop-new-room-heading">
           <p class="desktop-new-room-kicker">New room</p>
-          <h2 id="new-room-title">Open a room</h2>
-          <p>Choose a project folder, join a shared room, or start a temporary room.</p>
+          <h2 id="new-room-title">Create or join a room</h2>
+          <p>Choose how this room should be stored and shared.</p>
         </div>
         <button class="desktop-modal-close" type="button" aria-label="Close new room dialog" @click="emit('close')">
           <X aria-hidden="true" />
@@ -38,7 +38,7 @@
             :data-testid="action.testId"
             @click="handleAction(action.event)"
           >
-            {{ projectSelection ? "Change..." : action.buttonLabel }}
+            {{ projectSelection ? "Change project folder" : action.buttonLabel }}
           </button>
           <div v-if="projectSelection" class="desktop-new-room-project-preview" data-testid="new-room-project-preview">
             <dl>
@@ -66,7 +66,7 @@
               data-testid="new-room-confirm-project"
               @click="emit('confirmProject')"
             >
-              Open room
+              Open repository room
             </button>
           </div>
         </article>
@@ -163,9 +163,9 @@ type RoomAction = {
 const primaryRoomActions: RoomAction[] = [
   {
     id: "project-folder",
-    title: "Open project room",
-    description: "Choose a local project and confirm the room LetAgents resolves.",
-    buttonLabel: "Choose...",
+    title: "Use a project folder",
+    description: "Choose a folder from this computer so LetAgents can match it to the right repository room.",
+    buttonLabel: "Choose project folder",
     event: "openProject",
     icon: FolderOpen,
     primary: true,
@@ -176,18 +176,18 @@ const primaryRoomActions: RoomAction[] = [
 const secondaryRoomActions: RoomAction[] = [
   {
     id: "invite-room",
-    title: "Start temporary room",
-    description: "Create an ad-hoc room with a shareable code.",
-    buttonLabel: "Start",
+    title: "Create shared room",
+    description: "Create a shareable room for work that is not tied to one repo.",
+    buttonLabel: "Create shared room",
     event: "createInvite",
     icon: Hash,
     testId: "new-room-create-invite",
   },
   {
     id: "local-room",
-    title: "Start local room",
-    description: "Create a private room on this device. Publish later to sync it.",
-    buttonLabel: "Start",
+    title: "Create local room",
+    description: "Create a private room on this device. Publish it later if you want to share it.",
+    buttonLabel: "Create local room",
     event: "createLocal",
     icon: HardDrive,
     testId: "new-room-create-local",

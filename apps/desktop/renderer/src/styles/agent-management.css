@@ -359,14 +359,29 @@
   text-transform: uppercase;
 }
 
-.desktop-add-agent-external-prompt div {
+.desktop-add-agent-external-prompt-intro {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
 }
 
+.desktop-add-agent-external-prompt-intro > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.desktop-add-agent-external-prompt-intro p {
+  max-width: 48ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .desktop-add-agent-external-prompt button {
+  flex: 0 0 auto;
   min-height: 26px;
   padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -380,6 +395,24 @@
 
 .desktop-add-agent-external-prompt button:hover:not(:disabled) {
   border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text);
+}
+
+.desktop-add-agent-external-prompt-details {
+  display: grid;
+  gap: 8px;
+}
+
+.desktop-add-agent-external-prompt-details summary {
+  width: fit-content;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.desktop-add-agent-external-prompt-details summary:hover,
+.desktop-add-agent-external-prompt-details summary:focus-visible {
   color: var(--text);
 }
 

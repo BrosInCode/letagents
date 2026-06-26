@@ -60,36 +60,36 @@ function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
     {
       id: "claude-code",
       name: "Claude Code",
-      description: "Add the MCP connection Claude Code needs to join rooms.",
+      description: "Add the LetAgents connection Claude Code needs to join rooms.",
       configPath: join(home, ".claude", "settings.json"),
       configFormat: "json",
       restartHint:
-        "Restart Claude Code or reload its MCP servers after installing.",
+        "Restart Claude Code or reload its LetAgents connection after installing.",
     },
     {
       id: "antigravity",
       name: "Antigravity",
-      description: "Add the MCP connection Antigravity needs to join rooms.",
+      description: "Add the LetAgents connection Antigravity needs to join rooms.",
       configPath: join(home, ".gemini", "settings.json"),
       configFormat: "json",
       restartHint:
-        "Restart Antigravity so it picks up the updated MCP settings.",
+        "Restart Antigravity so it picks up the LetAgents connection.",
     },
     {
       id: "cursor",
       name: "Cursor",
-      description: "Add the MCP connection Cursor needs to join rooms.",
+      description: "Add the LetAgents connection Cursor needs to join rooms.",
       configPath: join(home, ".cursor", "mcp.json"),
       configFormat: "json",
-      restartHint: "Reload Cursor or restart its MCP server after installing.",
+      restartHint: "Reload Cursor or restart its LetAgents connection after installing.",
     },
     {
       id: "codex",
       name: "Codex",
-      description: "Add the MCP connection Codex needs to join rooms.",
+      description: "Add the LetAgents connection Codex needs to join rooms.",
       configPath: join(home, ".codex", "config.toml"),
       configFormat: "codex_toml",
-      restartHint: "Restart Codex so it discovers the LetAgents MCP server.",
+      restartHint: "Restart Codex so it discovers LetAgents.",
     },
   ];
 }
@@ -383,7 +383,7 @@ export async function installLetAgentsMcpServers(
   options: DesktopMcpInstallOptions = {},
 ): Promise<DesktopMcpInstallManyResult> {
   if (!targetIds.length) {
-    throw new Error("Choose at least one app for MCP setup.");
+    throw new Error("Choose at least one app for LetAgents setup.");
   }
 
   const uniqueTargetIds = [...new Set(targetIds)];
@@ -425,7 +425,7 @@ export async function installLetAgentsMcpServers(
     success: true,
     targets,
     installState,
-    message: `LetAgents was added to ${targetNames}. Restart or reload those apps so the MCP connection is available.`,
+    message: `LetAgents was added to ${targetNames}. Restart or reload those apps so the LetAgents connection is available.`,
   };
 }
 

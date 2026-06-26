@@ -35,15 +35,15 @@
             <dd>{{ room.parentRoomId || "No parent room" }}</dd>
           </div>
           <div>
-            <dt>Updates</dt>
+            <dt>Parent room updates</dt>
             <dd>{{ parentVisibilityLabel(currentSettings.parent_visibility) }}</dd>
           </div>
           <div>
-            <dt>Scope</dt>
+            <dt>Activity shown</dt>
             <dd>{{ activityScopeLabel(currentSettings.activity_scope) }}</dd>
           </div>
           <div>
-            <dt>Code</dt>
+            <dt>GitHub</dt>
             <dd>{{ githubRoutingLabel(currentSettings.github_event_routing) }}</dd>
           </div>
         </dl>
@@ -51,19 +51,19 @@
 
       <form class="focus-room-form" data-testid="focus-room-settings-form" @submit.prevent="saveSettings">
         <div class="focus-room-section-heading">
-          <h4>Parent updates</h4>
+          <h4>Updates to parent room</h4>
           <span v-if="settingsChanged">Unsaved</span>
         </div>
         <div class="focus-room-select-grid">
           <DesktopSelectField
             v-model="settingsDraft.parent_visibility"
-            label="Visibility"
+            label="Parent room updates"
             :options="parentVisibilityOptions"
             :disabled="savingSettings"
           />
           <DesktopSelectField
             v-model="settingsDraft.activity_scope"
-            label="Scope"
+            label="Activity shown"
             :options="activityScopeOptions"
             :disabled="savingSettings"
           />
@@ -86,7 +86,7 @@
         @submit.prevent="shareFocusRoomResult"
       >
         <div class="focus-room-section-heading">
-          <h4>Share result</h4>
+          <h4>Send result to parent room</h4>
         </div>
         <textarea
           v-model="resultSummary"
@@ -125,7 +125,7 @@
         </div>
 
         <button class="focus-room-primary" type="submit" :disabled="!canShareResult || sharingResult">
-          {{ sharingResult ? "Sharing..." : "Share result" }}
+          {{ sharingResult ? "Sharing..." : "Send result to parent room" }}
         </button>
       </form>
 
@@ -163,12 +163,12 @@
         <input
           v-model="adHocTitle"
           type="text"
-          placeholder="New focus room"
+          placeholder="Focus room goal"
           aria-label="New focus room title"
           :disabled="creatingAdHoc"
         />
         <button type="submit" :disabled="!adHocTitle.trim() || creatingAdHoc">
-          {{ creatingAdHoc ? "Opening..." : "Open" }}
+          {{ creatingAdHoc ? "Creating..." : "Create" }}
         </button>
       </form>
 
@@ -300,13 +300,13 @@
                 <div class="focus-room-select-grid single">
                   <DesktopSelectField
                     v-model="settingsDraft.parent_visibility"
-                    label="Parent updates"
+                    label="Parent room updates"
                     :options="parentVisibilityOptions"
                     :disabled="savingSettings"
                   />
                   <DesktopSelectField
                     v-model="settingsDraft.activity_scope"
-                    label="Activity scope"
+                    label="Activity shown"
                     :options="activityScopeOptions"
                     :disabled="savingSettings"
                   />
@@ -344,7 +344,7 @@
                   @click="closeFocusRoom(selectedFocusRoom)"
                 >
                   <CheckCircle2 :size="15" aria-hidden="true" />
-                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Closing..." : "Close" }}
+                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Completing..." : "Mark complete" }}
                 </button>
                 <button
                   v-if="canArchiveFocusRooms"
@@ -354,7 +354,7 @@
                   @click="archiveFocusRoom(selectedFocusRoom)"
                 >
                   <Archive :size="15" aria-hidden="true" />
-                  {{ archivingFocusKey === focusKeyFor(selectedFocusRoom) ? "Archiving..." : "Archive" }}
+                  {{ archivingFocusKey === focusKeyFor(selectedFocusRoom) ? "Hiding..." : "Hide focus room" }}
                 </button>
               </div>
             </div>
@@ -450,11 +450,11 @@
         @click="closeContextFocusRoom"
       >
         <CheckCircle2 :size="15" aria-hidden="true" />
-        Close room
+        Mark focus room complete
       </button>
       <button v-if="canArchiveFocusRooms" type="button" role="menuitem" class="danger" @click="archiveContextFocusRoom">
         <Archive :size="15" aria-hidden="true" />
-        Archive room
+        Hide focus room
       </button>
     </div>
   </section>
@@ -701,27 +701,8 @@ const headerMeta = computed(() => {
 });
 
 watch(
-  () => [props.focusRooms, props.tasks, props.room.kind] as const,
-  () => {
-    if (props.room.kind === "focus") return;
-    const selectedFocusStillExists =
-      selectedFocusRoomId.value && props.focusRooms.some((focusRoom) => focusRoom.roomId === selectedFocusRoomId.value);
-    const selectedTaskStillExists =
-      selectedTaskId.value && props.tasks.some((task) => task.id === selectedTaskId.value);
-    if (selectedFocusStillExists || selectedTaskStillExists) return;
-
-    const firstFocusRoom = openFocusRooms.value[0] || concludedFocusRooms.value[0] || null;
-    if (firstFocusRoom) {
-      selectedFocusRoomId.value = firstFocusRoom.roomId;
-      selectedTaskId.value = null;
-      activeTab.value = firstFocusRoom.focusStatus === "concluded" ? "concluded" : "open";
-      return;
-    }
-    const firstTask = candidateTasks.value[0] || null;
-    selectedTaskId.value = firstTask?.id || null;
-    selectedFocusRoomId.value = null;
-    if (firstTask) activeTab.value = "tasks";
-  },
+  () => [props.focusRooms, props.tasks, props.room.kind, activeTab.value, searchQuery.value] as const,
+  () => ensureSelectionMatchesActiveTab(),
   { immediate: true },
 );
 
@@ -768,6 +749,47 @@ function selectTask(taskId: string): void {
 
 function setActiveTab(tab: string): void {
   activeTab.value = tab as FocusRoomTab;
+  ensureSelectionMatchesActiveTab();
+}
+
+function ensureSelectionMatchesActiveTab(): void {
+  if (props.room.kind === "focus") return;
+
+  if (activeTab.value === "open" && !normalizedSearch.value && !openFocusRooms.value.length) {
+    const firstFallbackFocusRoom = concludedFocusRooms.value[0] || null;
+    if (firstFallbackFocusRoom) {
+      activeTab.value = "concluded";
+      selectedFocusRoomId.value = firstFallbackFocusRoom.roomId;
+      selectedTaskId.value = null;
+      return;
+    }
+    const firstFallbackTask = candidateTasks.value[0] || null;
+    if (firstFallbackTask) {
+      activeTab.value = "tasks";
+      selectedTaskId.value = firstFallbackTask.id;
+      selectedFocusRoomId.value = null;
+      return;
+    }
+  }
+
+  if (activeTab.value === "tasks") {
+    const selectedTaskVisible = Boolean(
+      selectedTaskId.value && visibleTasks.value.some((task) => task.id === selectedTaskId.value),
+    );
+    if (!selectedTaskVisible) {
+      selectedTaskId.value = visibleTasks.value[0]?.id || null;
+    }
+    selectedFocusRoomId.value = null;
+    return;
+  }
+
+  const selectedFocusRoomVisible = Boolean(
+    selectedFocusRoomId.value && visibleFocusRooms.value.some((focusRoom) => focusRoom.roomId === selectedFocusRoomId.value),
+  );
+  if (!selectedFocusRoomVisible) {
+    selectedFocusRoomId.value = visibleFocusRooms.value[0]?.roomId || null;
+  }
+  selectedTaskId.value = null;
 }
 
 function openFocusRoom(roomIdentifier: string): void {
@@ -908,8 +930,14 @@ async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
   const parentRoomId = focusRoom.parentRoomId || props.room.identifier;
   if (!focusKey || !parentRoomId || closingFocusKey.value) return;
 
+  if (focusRoom.sourceTaskId && props.room.kind !== "focus") {
+    openFocusRoom(focusRoom.identifier);
+    setFeedback("Open the focus room to add artifact, review, blocker, and owner details before marking it complete.", "info");
+    return;
+  }
+
   const summary = window.prompt(
-    `Close ${focusRoom.displayName} with a short result summary:`,
+    `Mark ${focusRoom.displayName} complete with a short result summary:`,
     focusRoom.conclusionSummary || "Closed manually.",
   )?.trim();
   if (!summary) return;
@@ -934,9 +962,9 @@ async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
     activeTab.value = "concluded";
     selectedFocusRoomId.value = focusRoom.roomId;
     emit("refresh-room");
-    setFeedback("Focus room closed.", "success");
+    setFeedback("Focus room marked complete.", "success");
   } catch (error) {
-    setFeedback(errorMessage(error, "Focus room could not be closed."), "error");
+    setFeedback(errorMessage(error, "Focus room could not be marked complete."), "error");
   } finally {
     closingFocusKey.value = null;
   }
@@ -948,7 +976,7 @@ async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> 
   if (!focusKey || !parentRoomId || archivingFocusKey.value) return;
 
   const confirmed = window.confirm(
-    `Archive ${focusRoom.displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
+    `Hide ${focusRoom.displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
   );
   if (!confirmed) return;
 
@@ -960,9 +988,9 @@ async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> 
       selectedFocusRoomId.value = null;
     }
     emit("refresh-room");
-    setFeedback("Focus room archived.", "success");
+    setFeedback("Focus room hidden.", "success");
   } catch (error) {
-    setFeedback(errorMessage(error, "Focus room could not be archived."), "error");
+    setFeedback(errorMessage(error, "Focus room could not be hidden."), "error");
   } finally {
     archivingFocusKey.value = null;
   }

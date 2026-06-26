@@ -37,10 +37,10 @@
 
     <div v-if="taskWorkLease || taskSecondaryLeases.length || task.activeLocks.length || task.stalePromptState?.isStale || task.stalePromptState?.muted || taskWorkflowRefs.length" class="desktop-task-coordination">
       <span v-if="taskWorkLease" class="desktop-task-chip" data-kind="work">
-        Lane {{ compactPerson(taskWorkLease.holderLabel || taskWorkLease.agentKey) || "held" }}
+        Working: {{ compactPerson(taskWorkLease.holderLabel || taskWorkLease.agentKey) || "someone" }}
       </span>
       <span v-for="lease in taskSecondaryLeases" :key="lease.id" class="desktop-task-chip" data-kind="review">
-        {{ lease.kind }} lease: {{ compactPerson(lease.holderLabel || lease.agentKey) || "assigned" }}
+        {{ lease.kind === "review" ? "Review" : readableStatus(lease.kind) }}: {{ compactPerson(lease.holderLabel || lease.agentKey) || "assigned" }}
       </span>
       <span v-for="lock in task.activeLocks" :key="lock.id" class="desktop-task-chip" data-kind="lock">
         {{ lock.scope }} lock: {{ lock.reason }}{{ lock.message ? ` - ${lock.message}` : "" }}
@@ -72,10 +72,10 @@
         type="button"
         class="desktop-task-action"
         :data-tone="primaryAction.tone"
-        :disabled="busyAction === `${task.id}:${primaryAction.id}`"
+        :disabled="busyAction !== null"
         @click.stop="$emit('run-action', primaryAction)"
       >
-        {{ busyAction === `${task.id}:${primaryAction.id}` ? "Working..." : primaryAction.label }}
+        {{ busyAction === `${task.id}:${primaryAction.id}` ? primaryAction.busyLabel || "Working..." : primaryAction.label }}
       </button>
     </div>
   </article>

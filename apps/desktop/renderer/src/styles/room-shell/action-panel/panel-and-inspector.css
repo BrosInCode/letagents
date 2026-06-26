@@ -14,9 +14,23 @@
 
 .desktop-room-action-panel-topbar {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.desktop-room-action-panel-topbar > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.desktop-room-action-summary {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+  font-weight: 560;
+  line-height: 1.35;
 }
 
 .desktop-room-action-panel-close {

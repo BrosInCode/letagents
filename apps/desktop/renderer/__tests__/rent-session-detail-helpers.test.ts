@@ -6,8 +6,11 @@ import {
   canCancelSessionStatus,
   canRequestPatchChanges,
   formatTime,
+  humanizeToken,
   patchCheckState,
   patchState,
+  rentalContinuityLabel,
+  rentalModeLabel,
   sessionStatusState,
 } from "../src/components/desktop/content/rent-session-detail/presentation";
 
@@ -52,5 +55,14 @@ describe("rent session detail presentation helpers", () => {
   it("returns raw timestamps when the value cannot be parsed", () => {
     assert.equal(formatTime(null), "—");
     assert.equal(formatTime("not-a-date"), "not-a-date");
+  });
+
+  it("keeps rental labels human readable across surfaces", () => {
+    assert.equal(humanizeToken("in_progress"), "In Progress");
+    assert.equal(humanizeToken("budget-exhausted"), "Budget Exhausted");
+    assert.equal(rentalModeLabel("trusted_open"), "Full workspace access");
+    assert.equal(rentalModeLabel("scoped"), "Limited access");
+    assert.equal(rentalContinuityLabel("full_transcript"), "Full room transcript");
+    assert.equal(rentalContinuityLabel("smart_handoff"), "Summary only");
   });
 });

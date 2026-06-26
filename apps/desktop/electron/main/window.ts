@@ -186,11 +186,11 @@ function installSmokeCheck(window: BrowserWindow): void {
         result.codexMissingRuntime = true;
         await waitFor("managed session codename", () =>
           modalText().includes("MapleRidge") &&
-          modalText().includes("Desktop events")
+          modalText().includes("From this desktop app")
         );
         result.managedSessionCodename = true;
         result.addAgentStopAgentOnly = modalText().includes("Stop agent") && !modalText().includes("Stop turn");
-        result.deliveryControls = modalText().includes("MCP loop") && modalText().includes("Desktop events");
+        result.deliveryControls = modalText().includes("From the agent app") && modalText().includes("From this desktop app");
         result.addAgentModalScroll = (() => {
           const dialog = document.querySelector(".desktop-add-agent-modal");
           const status = dialog?.querySelector(".desktop-add-agent-status");
@@ -221,9 +221,9 @@ function installSmokeCheck(window: BrowserWindow): void {
           antigravityProvider.click();
           await waitFor("antigravity instruction", () => modalText().includes("Open Antigravity"));
           result.externalProviderInstruction = modalText().includes(
-            "Open Antigravity, then ask it to join this room through the installed MCP bridge."
+            "Open Antigravity, then ask it to join this room through the installed LetAgents connection."
           );
-          result.externalJoinPrompt = modalText().includes("CLI prompt") &&
+          result.externalJoinPrompt = modalText().includes("Show full instructions") &&
             modalText().includes("Call join_room") &&
             modalText().includes("set_agent_name") &&
             modalText().includes("register_agent_session") &&

@@ -7,15 +7,15 @@
     <div>
       <p class="rent-detail-label">Status</p>
       <span class="state-pill" :data-state="sessionStatusState(session.status)">
-        {{ session.status }}
+        {{ humanizeToken(session.status) }}
       </span>
     </div>
     <div>
-      <p class="rent-detail-label">Mode</p>
-      <span>{{ session.mode }}</span>
+      <p class="rent-detail-label">Access</p>
+      <span>{{ rentalModeLabel(session.mode) }}</span>
     </div>
     <div>
-      <p class="rent-detail-label">LRT</p>
+      <p class="rent-detail-label">Rental credits</p>
       <span v-if="usage && usage.lrtLimit !== null">
         {{ usage.lrtUsed }}/{{ usage.lrtLimit }}
       </span>
@@ -30,12 +30,13 @@ import type {
   DesktopRentalSession,
   DesktopRentalUsageSnapshot,
 } from "../../../../../../electron/ipc-types";
-import { sessionStatusState } from "./presentation";
+import { humanizeToken, rentalModeLabel, sessionStatusState } from "./presentation";
 
 defineProps<{
   session: DesktopRentalSession;
   usage: DesktopRentalUsageSnapshot | null;
 }>();
+
 </script>
 
 <style scoped>

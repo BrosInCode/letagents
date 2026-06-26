@@ -18,7 +18,7 @@
       >
         <header class="desktop-reasoning-inspector-header">
           <div>
-            <span class="desktop-reasoning-inspector-eyebrow">Agent reasoning</span>
+            <span class="desktop-reasoning-inspector-eyebrow">Agent progress</span>
             <h3 :id="titleId">{{ heading }}</h3>
             <p>{{ subtitle }}</p>
           </div>
@@ -58,7 +58,7 @@
                 <h4>{{ timelineEntries.length }} updates</h4>
               </div>
               <p v-if="detailError">{{ detailError }}</p>
-              <p v-else-if="isLoadingDetail">Loading reasoning updates...</p>
+              <p v-else-if="isLoadingDetail">Loading progress updates...</p>
             </header>
 
             <ol v-if="timelineEntries.length" class="desktop-reasoning-timeline">
@@ -77,7 +77,7 @@
               </li>
             </ol>
             <p v-else-if="!isLoadingDetail" class="desktop-reasoning-empty">
-              No detailed reasoning updates have been exposed for this stream yet.
+              No detailed progress updates have been shared for this stream yet.
             </p>
           </section>
         </div>
@@ -178,7 +178,7 @@ const currentSnapshot = computed<DesktopReasoningSnapshot | null>(() => {
 const currentSummary = computed(() =>
   currentSnapshot.value?.summary
   || activeSession.value?.summary
-  || "No summary exposed yet."
+  || "No progress summary yet."
 );
 
 const structuredFields = computed<ReasoningField[]>(() => {

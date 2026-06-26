@@ -166,7 +166,7 @@ export function externalMcpProviderInstruction(
   provider: Pick<DesktopAgentProvider, "name"> | null | undefined,
 ): string {
   const name = provider?.name?.trim() || "this provider";
-  return `Open ${name}, then ask it to join this room through the installed MCP bridge.`;
+  return `Open ${name}, then ask it to join this room through the installed LetAgents connection.`;
 }
 
 function looksLikeLetAgentsInviteCode(value: string): boolean {
@@ -197,11 +197,11 @@ export function externalMcpProviderJoinPrompt(
       : `Call join_room with ${toolCallPayload({ name: room, session_mode: "current" })}.`
     : "Call join_room or join_code for this LetAgents room once you know the room target.";
   return [
-    "Use the installed LetAgents MCP bridge.",
+    "Use the installed LetAgents connection.",
     joinInstruction,
-    `Choose a short distinct LetAgents-style codename before doing any room work. Examples: ${LETAGENTS_CODENAME_EXAMPLES}.`,
-    `Call set_agent_name with ${toolCallPayload({ name: "<your codename>" })} before posting status or registering.`,
-    `Call register_agent_session with ${toolCallPayload({ session_kind: "worker", runtime, display_name: "<your codename>" })}.`,
+    `Choose a short distinct LetAgents-style agent name before doing any room work. Examples: ${LETAGENTS_CODENAME_EXAMPLES}.`,
+    `Call set_agent_name with ${toolCallPayload({ name: "<your agent name>" })} before posting status or registering.`,
+    `Call register_agent_session with ${toolCallPayload({ session_kind: "worker", runtime, display_name: "<your agent name>" })}.`,
     "Do not continue into the room loop until register_agent_session succeeds.",
     `Call post_status with ${toolCallPayload({ agent_session_id: "<returned agent_session_id>", status: "available in the room" })}.`,
     "Call read_messages once, then call get_board once.",
@@ -237,7 +237,7 @@ export function agentSetupActionButtonLabel(
     const name = provider?.name?.trim() || "runtime";
     return armed ? `Confirm install ${name}` : `Install ${name}`;
   }
-  return armed ? "Confirm bridge install" : "Install LetAgents bridge";
+  return armed ? "Confirm connection install" : "Install LetAgents connection";
 }
 
 export function agentSetupConfirmationMessage(
@@ -250,7 +250,7 @@ export function agentSetupConfirmationMessage(
       ? "LetAgents will install the official Codex CLI runtime on this machine after confirmation."
       : `LetAgents will install the official ${name} runtime on this machine after confirmation.`;
   }
-  return `LetAgents will update ${name}'s MCP configuration to add the LetAgents bridge after confirmation.`;
+  return `LetAgents will update ${name}'s agent app configuration to add the LetAgents connection after confirmation.`;
 }
 
 export function managedAgentSessionStatusLabel(

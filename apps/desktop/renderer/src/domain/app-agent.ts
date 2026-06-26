@@ -47,7 +47,7 @@ export function appAgentStatusLabel(
 ): string {
   if (busy) return "Running";
   if (!settingsStatus) return "Checking";
-  return settingsStatus.configured ? settingsStatus.model : "Setup needed";
+  return settingsStatus.configured ? "Ready to help with this room" : "Setup needed";
 }
 
 function plainRecord(input: Record<string, unknown>): Record<string, unknown> {
@@ -408,7 +408,7 @@ function timelineItemFromTrace(entry: DesktopAppAgentTraceEntry): AppAgentTimeli
 }
 
 function actionTimelineLabel(entry: DesktopAppAgentTraceEntry): string {
-  if (entry.actionId?.includes("archive")) return "Archiving room";
+  if (entry.actionId?.includes("archive")) return "Hiding room";
   if (entry.actionId?.includes("pin")) return "Updating pin";
   if (entry.actionId?.includes("open")) return "Opening room";
   if (entry.actionId?.includes("settings")) return "Updating setting";
@@ -438,7 +438,7 @@ function appAgentTraceDisplayLabel(entry: DesktopAppAgentTraceEntry): string {
     return "Prepared action plan";
   }
   if (entry.actionId?.includes("archive") || label.includes("archive_unpinned")) {
-    return entry.status === "error" ? "Archive action failed" : "Ran archive action";
+    return entry.status === "error" ? "Hide action failed" : "Ran hide action";
   }
   if (entry.actionId?.includes("pin")) {
     return entry.status === "error" ? "Pin action failed" : "Ran pin action";

@@ -3,6 +3,7 @@
     ref="surfaceElement"
     class="app-agent"
     :data-open="open"
+    :data-state="surfaceState"
     :style="positionStyle"
     data-testid="desktop-app-agent"
   >

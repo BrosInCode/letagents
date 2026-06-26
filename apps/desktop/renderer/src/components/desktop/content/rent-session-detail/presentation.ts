@@ -55,6 +55,22 @@ export function formatTime(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+export function humanizeToken(value: string): string {
+  return value
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+export function rentalModeLabel(mode: string): string {
+  return mode === "trusted_open" ? "Full workspace access" : "Limited access";
+}
+
+export function rentalContinuityLabel(mode: string): string {
+  return mode === "full_transcript" ? "Full room transcript" : "Summary only";
+}
+
 export function canApprovePatch(patch: DesktopRentalPatch): boolean {
   if (patch.prUrl) return false;
   return ["passed", "passed_with_warnings", "needs_renter_approval"].includes(patch.gateStatus);

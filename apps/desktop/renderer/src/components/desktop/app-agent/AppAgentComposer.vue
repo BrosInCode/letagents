@@ -6,7 +6,7 @@
         :value="prompt"
         :disabled="busy"
         rows="3"
-        placeholder="Ask the app..."
+        placeholder="Ask App Agent to summarize, find, or update this room..."
         data-testid="app-agent-prompt"
         @input="$emit('update:prompt', ($event.target as HTMLTextAreaElement).value)"
       ></textarea>

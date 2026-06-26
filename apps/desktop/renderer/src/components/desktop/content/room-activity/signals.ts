@@ -46,7 +46,7 @@ export function workSignalFrom(
   if (presence?.status === "blocked") return { state: "blocked", label: "Blocked" };
   if (presence?.status === "reviewing") return { state: "reviewing", label: "Reviewing" };
   if (presence?.status === "working") return { state: "working", label: statusText ? "Working" : "In progress" };
-  if (reasoningCount > 0) return { state: "responding", label: "Reasoning" };
+  if (reasoningCount > 0) return { state: "responding", label: "Progress update" };
   if (currentTaskCount > 0) return { state: "working", label: "Assigned" };
   return null;
 }
@@ -67,7 +67,7 @@ export function connectionLabel(participant: ActivityParticipant): string {
   if (participant.kind === "human") return "human";
   if (participant.activityState === "active") return "connected";
   if (participant.activityState === "away") return "idle";
-  if (hasAgentSignal(participant)) return "signal only";
+  if (hasAgentSignal(participant)) return "work update";
   return "offline";
 }
 

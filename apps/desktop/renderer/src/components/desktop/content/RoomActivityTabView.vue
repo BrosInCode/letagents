@@ -19,7 +19,7 @@
       <article v-if="!liveRosterAgents.length" class="desktop-activity-live-empty">
         <span>Live activity</span>
         <h3>No agents are live right now</h3>
-        <p>Reachable agents and current work signals appear here when they are active in this room.</p>
+        <p>Agents you can message will appear here when they are online or working in this room.</p>
         <div class="desktop-activity-empty-actions">
           <button type="button" @click="emit('open-add-agent')">Add agent</button>
           <button type="button" @click="refreshActivity">Refresh</button>
@@ -31,8 +31,8 @@
           <section v-if="reachableAgents.length" class="desktop-activity-group">
             <header>
               <div>
-                <h3>Reachable now</h3>
-                <p>Worker sessions that can receive room messages.</p>
+                <h3>Available now</h3>
+                <p>Agents available for new room messages.</p>
               </div>
               <strong>{{ reachableAgents.length }}</strong>
             </header>
@@ -62,7 +62,7 @@
             <header>
               <div>
                 <h3>Working</h3>
-                <p>Recent task, status, or reasoning signals without room delivery.</p>
+                <p>Recent task, status, or progress updates from agents at work.</p>
               </div>
               <strong>{{ workingAgents.length }}</strong>
             </header>
@@ -86,8 +86,8 @@
                 <small>{{ signalLabel(agent) }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
               </span>
               <span class="desktop-activity-row-meta">
-                <span class="desktop-activity-mini-pill">signal only</span>
-                <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} reasoning</span>
+                <span class="desktop-activity-mini-pill">work update</span>
+                <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} progress</span>
                 <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
               </span>
             </button>
@@ -146,7 +146,7 @@
 
           <section v-if="selectedLiveParticipant.latestReasoning" class="desktop-activity-detail-section">
             <header>
-              <h4>Reasoning</h4>
+              <h4>Agent progress</h4>
               <span>{{ reasoningStatus(selectedLiveParticipant.latestReasoning) }}</span>
             </header>
             <article class="desktop-activity-reasoning">
@@ -174,7 +174,7 @@
 
           <section v-if="selectedLiveParticipant.activeReasoning.length" class="desktop-activity-detail-section">
             <header>
-              <h4>Live reasoning</h4>
+              <h4>Live progress</h4>
               <span>{{ selectedLiveParticipant.activeReasoning.length }}</span>
             </header>
             <article v-for="session in selectedLiveParticipant.activeReasoning" :key="session.id" class="desktop-activity-reasoning">
@@ -182,7 +182,7 @@
               <p>{{ reasoningSummary(session) }}</p>
               <span>{{ reasoningStatus(session) }} · {{ formatRelativeTime(session.updatedAt || session.createdAt) }}</span>
               <button type="button" class="desktop-reasoning-open-button" @click="emit('open-reasoning', session.id)">
-                Open reasoning
+                Open progress
               </button>
             </article>
           </section>
@@ -196,7 +196,7 @@
           <header>
             <div>
               <h3>Room history</h3>
-              <p>Participants ordered by their latest room-family activity.</p>
+              <p>Participants ordered by latest activity in this room and related focus rooms.</p>
             </div>
             <strong>{{ recentActivity.length }}</strong>
           </header>
@@ -366,7 +366,7 @@ function connectionDisplayLabel(participant: ActivityParticipant): string {
 
 function detailSubtitle(participant: ActivityParticipant): string {
   if (participant.activityState === "active" || participant.activityState === "away") return "Reachable in chat";
-  if (connectionLabel(participant) === "signal only") return "Work updates available";
+  if (connectionLabel(participant) === "work update") return "Work updates available";
   return "Not reachable in chat";
 }
 

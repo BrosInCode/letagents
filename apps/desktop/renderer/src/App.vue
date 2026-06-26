@@ -395,7 +395,8 @@ const sidebarProjectEntries = computed(() =>
   }))
 );
 const selectedRoomRenderKey = computed(() =>
-  selectedSnapshot.value?.room?.identifier
+  selectedRoomIdentifier.value
+  || selectedSnapshot.value?.room?.identifier
   || selectedSnapshot.value?.roomIdentifier
   || selectedRoomInfo.value.identifier
   || activeEntry.value.id
@@ -1192,7 +1193,7 @@ async function setChatStorageMode(mode: DesktopChatStorageSettings["mode"]): Pro
       message:
         mode === "local"
           ? "Local chat storage is on. New messages stay on this computer."
-          : "Cloud chat storage is on. Local history remains local until you sync it.",
+          : "Cloud chat storage is on. Local history remains local until you publish it.",
     };
     await refreshActiveRoomAfterChatStorageChange();
   } catch (error) {
@@ -1213,7 +1214,7 @@ async function syncLocalChat(): Promise<void> {
   if (!roomIdentifier) {
     chatStorageFeedback.value = {
       state: "error",
-      message: "Open a room before syncing local chat.",
+      message: "Open a room before publishing local chat.",
     };
     return;
   }
@@ -1236,7 +1237,7 @@ async function syncLocalChat(): Promise<void> {
       message:
         error instanceof Error
           ? error.message
-          : "Local chat could not be synced.",
+          : "Local chat could not be published.",
     };
   } finally {
     chatStorageBusy.value = false;

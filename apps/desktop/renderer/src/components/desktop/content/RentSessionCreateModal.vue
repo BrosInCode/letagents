@@ -8,10 +8,14 @@
         @click.self="cancel"
       >
         <section
+          ref="dialogElement"
           class="desktop-rules-dialog rent-create-dialog"
           role="dialog"
           aria-modal="true"
           aria-labelledby="rent-create-title"
+          tabindex="-1"
+          @keydown.esc.prevent="cancel"
+          @keydown.tab="handleDialogTab"
         >
           <header class="desktop-rules-header">
             <div>
@@ -54,26 +58,27 @@
 
             <div class="rent-create-row">
               <label class="rent-create-field">
-                <span>Mode</span>
+                <span>Access level</span>
                 <select
                   v-model="mode"
                   data-testid="rent-create-mode"
                   :disabled="submitting || availableModes.length <= 1"
                 >
-                  <option v-for="opt in availableModes" :key="opt" :value="opt">{{ modeLabel(opt) }}</option>
+                  <option v-for="opt in availableModes" :key="opt" :value="opt">{{ rentalModeLabel(opt) }}</option>
                 </select>
               </label>
 
               <label class="rent-create-field">
-                <span>Continuity</span>
+                <span>Context to send</span>
                 <select
                   v-model="continuityMode"
                   data-testid="rent-create-continuity"
                   :disabled="submitting"
                 >
-                  <option value="smart_handoff">Smart handoff</option>
-                  <option value="full_transcript">Full transcript</option>
+                  <option value="smart_handoff">{{ rentalContinuityLabel("smart_handoff") }}</option>
+                  <option value="full_transcript">{{ rentalContinuityLabel("full_transcript") }}</option>
                 </select>
+                <small class="rent-create-helper">Full room transcript may include sensitive room history.</small>
               </label>
             </div>
 
@@ -108,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type {
   DesktopRentalContinuityMode,
   DesktopRentalListing,
@@ -116,6 +121,12 @@ import type {
   DesktopRentalSession,
   DesktopRentalStartInput,
 } from "../../../../../electron/ipc-types";
+import {
+  currentFocusableElement,
+  restoreFocus,
+  trapFocusInDialog,
+} from "./modal-focus";
+import { rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
 
 const props = defineProps<{
   open: boolean;
@@ -134,6 +145,8 @@ const mode = ref<DesktopRentalMode>("scoped");
 const continuityMode = ref<DesktopRentalContinuityMode>("smart_handoff");
 const submitting = ref(false);
 const errorMessage = ref<string | null>(null);
+const dialogElement = ref<HTMLElement | null>(null);
+let previousFocusElement: HTMLElement | null = null;
 
 const availableModes = computed<DesktopRentalMode[]>(() => {
   const supported = props.listing?.supportedModes ?? [];
@@ -148,12 +161,17 @@ watch(
   () => [props.open, props.listing?.id] as const,
   ([nowOpen]) => {
     if (nowOpen) {
+      previousFocusElement = currentFocusableElement();
       taskTitle.value = "";
       taskPrompt.value = "";
       mode.value = availableModes.value[0] ?? "scoped";
       continuityMode.value = "smart_handoff";
       errorMessage.value = null;
       submitting.value = false;
+      void nextTick(() => dialogElement.value?.focus({ preventScroll: true }));
+    } else {
+      restoreFocus(previousFocusElement);
+      previousFocusElement = null;
     }
   },
 );
@@ -168,7 +186,7 @@ async function submit(): Promise<void> {
 
   const bridge = window.letagentsDesktop?.rental;
   if (!bridge?.createSession) {
-    errorMessage.value = "Rent an Agent is not enabled in this build.";
+    errorMessage.value = "Rent an Agent is turned off in this desktop app.";
     return;
   }
 
@@ -196,7 +214,7 @@ async function submit(): Promise<void> {
     };
     const result = await bridge.createSession(input);
     if (isDisabledResult(result)) {
-      errorMessage.value = "Rent an Agent is not enabled in this build.";
+      errorMessage.value = "Rent an Agent is turned off in this desktop app.";
       return;
     }
     emit("created", result);
@@ -216,8 +234,8 @@ function isDisabledResult(value: unknown): boolean {
   );
 }
 
-function modeLabel(value: DesktopRentalMode): string {
-  return value === "trusted_open" ? "Trusted open" : "Scoped";
+function handleDialogTab(event: KeyboardEvent): void {
+  trapFocusInDialog(event, dialogElement.value);
 }
 </script>
 
@@ -245,6 +263,11 @@ function modeLabel(value: DesktopRentalMode): string {
 .rent-create-field > span {
   font-weight: 600;
   opacity: 0.8;
+}
+.rent-create-helper {
+  color: var(--color-text-muted, rgba(255, 255, 255, 0.58));
+  font-size: 0.76rem;
+  line-height: 1.35;
 }
 .rent-create-field input,
 .rent-create-field textarea,
