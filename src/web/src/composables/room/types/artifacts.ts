@@ -32,5 +32,5 @@ export interface RoomSharedArtifact {
   source: RoomSharedArtifactSource
   first_seen_at: string
   updated_at: string
-  linked_task_ids: string[]
+  linked_task_ids: readonly string[]
 }
