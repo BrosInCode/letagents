@@ -465,7 +465,7 @@ import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw,
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
-import { encodeRoomPathIdentifier } from "./room-shell/messages";
+import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import type {
   DesktopFocusActivityScope,
   DesktopFocusRoomBlockerState,
@@ -801,17 +801,15 @@ function focusKeyFor(focusRoom: DesktopFocusRoomInfo | null): string | null {
 }
 
 function focusRoomUrl(focusRoom: DesktopFocusRoomInfo): string {
-  const focusKey = focusRoom.focusKey || focusRoom.sourceTaskId;
   const parentRoomId =
     focusRoom.parentRoomId ||
     (props.room.kind === "focus" ? props.room.parentRoomId : props.room.identifier);
-  if (parentRoomId && focusKey) {
-    return `https://letagents.chat/in/${encodeRoomPathIdentifier(parentRoomId)}/focus/${
-      encodeURIComponent(focusKey)
-    }`;
-  }
-  const roomIdentifier = focusRoom.roomId || focusRoom.identifier;
-  return `https://letagents.chat/in/${encodeRoomPathIdentifier(roomIdentifier)}`;
+  return buildLetAgentsFocusRoomUrl({
+    roomIdentifier: focusRoom.roomId || focusRoom.identifier,
+    parentRoomId,
+    focusKey: focusRoom.focusKey,
+    sourceTaskId: focusRoom.sourceTaskId,
+  });
 }
 
 async function copyFocusRoomUrl(focusRoom: DesktopFocusRoomInfo): Promise<void> {

@@ -751,6 +751,7 @@ import SettingsRow from "../settings/SettingsRow.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import type { SettingsNavGroup, SettingsPaneId } from "../settings/types";
 import type { DesktopMcpWizardStep } from "../setup/types";
+import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 
 type SettingsFeedback = {
   message: string;
@@ -1166,11 +1167,7 @@ async function copyText(value: string): Promise<void> {
 }
 
 function roomUrl(room: DesktopAccountRoomEntry): string {
-  const value = room.roomIdentifier.trim();
-  if (!value) return "";
-  if (/^https?:\/\//i.test(value)) return value;
-  if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(value)) return `https://${value}`;
-  return value;
+  return buildLetAgentsRoomCopyValue(room.roomIdentifier);
 }
 
 function showRoomDetail(room: DesktopAccountRoomEntry): void {
