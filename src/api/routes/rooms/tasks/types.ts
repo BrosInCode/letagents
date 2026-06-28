@@ -1,8 +1,16 @@
 import type { EventEmitter } from "events";
 import type { Response } from "express";
 
-import type { Project, Task, TaskLeaseKind, TaskStatus, getTaskOwnershipState } from "../../../db.js";
+import type {
+  GitRoomBinding,
+  Project,
+  Task,
+  TaskLeaseKind,
+  TaskStatus,
+  getTaskOwnershipState,
+} from "../../../db.js";
 import type { FocusParentBoardWriteIsolationDecision } from "../../../focus-rooms/task-write-isolation.js";
+import type { EnsureTaskGitRoomResult } from "../../../github/task-git-room.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { buildTaskUpdatePatch } from "../../../tasks/ownership.js";
 
@@ -45,6 +53,7 @@ export interface RoomTaskRouteDeps {
     options?: {
       role?: RoomRole;
       authenticated?: boolean;
+      gitRoomBinding?: GitRoomBinding | null;
     }
   ): Record<string, unknown>;
   normalizeOptionalString(value: unknown): string | null;
@@ -88,5 +97,10 @@ export interface RoomTaskRouteDeps {
     req: AuthenticatedRequest;
     targetProject: Project;
   }): Promise<FocusParentBoardWriteIsolationDecision>;
+  getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
+  ensureTaskGitRoomForActiveWorkLease?(input: {
+    parentRoomId: string;
+    taskId: string;
+  }): Promise<EnsureTaskGitRoomResult>;
   emitProjectMessage(projectId: string, sender: string, text: string): Promise<unknown>;
 }

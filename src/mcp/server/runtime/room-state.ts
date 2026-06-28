@@ -25,6 +25,7 @@ export interface RoomState {
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
+  git_room?: unknown;
   joined_via: JoinedVia;
   is_local?: boolean;
 }
@@ -68,6 +69,7 @@ export function toRoomState(input: {
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
+  git_room?: unknown;
   joined_via: JoinedVia;
   is_local?: boolean;
 }): RoomState {
@@ -76,6 +78,7 @@ export function toRoomState(input: {
     project_id: input.project_id ?? null,
     code: input.code ?? null,
     display_name: input.display_name ?? null,
+    git_room: input.git_room ?? null,
     joined_via: input.joined_via,
     is_local: input.is_local ?? false,
   };
@@ -105,6 +108,7 @@ export function toPublicRoomState(state: RoomState | null): Record<string, unkno
     room_id: state.room_id,
     code: state.code ?? null,
     display_name: state.display_name ?? null,
+    git_room: state.git_room ?? null,
     joined_via: state.joined_via,
     is_local: state.is_local ?? false,
   });
@@ -119,6 +123,7 @@ export function toPublicStoredRoomSession(session: RoomSessionState | null): Rec
     room_id: session.room_id,
     code: session.code ?? null,
     display_name: session.display_name ?? null,
+    git_room: session.git_room ?? null,
     joined_via: session.joined_via,
     joined_at: session.joined_at,
     last_seen_at: session.last_seen_at,
@@ -152,6 +157,7 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
     project_id: state.project_id ?? null,
     code: state.code ?? null,
     display_name: state.display_name ?? null,
+    git_room: state.git_room ?? null,
     joined_via: state.joined_via,
     last_message_id: lastMessageId,
   });

@@ -12,7 +12,13 @@
       :recently-disconnected-agents-count="recentlyDisconnectedAgents.length"
       :humans-count="humans.length"
       :active-reasoning-sessions-count="activeReasoningSessions.length"
+      :shared-artifacts-count="props.roomArtifacts.length"
       :history-cards="historySummaryCards"
+    />
+
+    <ActivityArtifactsPanel
+      :artifacts="props.roomArtifacts"
+      :tasks="props.tasks"
     />
 
     <ActivityModeToolbar
@@ -74,6 +80,7 @@
 
 <script setup lang="ts">
 import ReasoningTraceModal from './ReasoningTraceModal.vue'
+import ActivityArtifactsPanel from './activity/ActivityArtifactsPanel.vue'
 import ActivityHistoryView from './activity/ActivityHistoryView.vue'
 import ActivityLiveView from './activity/ActivityLiveView.vue'
 import ActivityModeToolbar from './activity/ActivityModeToolbar.vue'

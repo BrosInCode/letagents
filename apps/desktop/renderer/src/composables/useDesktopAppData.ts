@@ -283,6 +283,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    if (event.type === "artifact_update") {
+      options.scheduleLiveMetadataRefresh();
+      return;
+    }
+
     if (event.type === "reasoning_update") {
       options.selectedSnapshot.value = upsertSnapshotReasoningSession(options.selectedSnapshot.value, event.session);
       options.scheduleLiveMetadataRefresh();
@@ -449,6 +454,7 @@ function createOptimisticSelectedSnapshot(
       concludedAt: focusRoom?.concludedAt || null,
       conclusionSummary: focusRoom?.conclusionSummary || null,
       conclusionDetails: focusRoom?.conclusionDetails || null,
+      gitRoom: focusRoom?.gitRoom || null,
     },
     storage: baseRootSnapshot.storage,
     focusRooms: [],
@@ -458,6 +464,7 @@ function createOptimisticSelectedSnapshot(
     presence: [],
     reasoningSessions: [],
     recentActivity: [],
+    roomArtifacts: [],
     messages: [],
     githubEvents: null,
   };

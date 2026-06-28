@@ -77,6 +77,7 @@ export function registerPresenceUpdateRoutes(
         display_name: displayName,
         owner_label: ownerLabel,
         ide_label: ideLabel,
+        repo_branch: agentSessionIdentity.identity.repo_branch,
         status: normalizedStatus as AgentPresenceStatus,
         status_text: statusText,
       });
@@ -128,6 +129,7 @@ export function registerPresenceUpdateRoutes(
         displayName,
         ownerLabel,
         ideLabel,
+        repoBranch: agentSessionIdentity.identity.repo_branch,
         status: normalizedStatus as AgentPresenceStatus,
         statusText,
       });

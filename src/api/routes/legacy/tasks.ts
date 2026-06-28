@@ -30,6 +30,7 @@ import {
   requiresTaskOwnershipGuard,
 } from "../../tasks/ownership.js";
 import type { FocusParentBoardWriteIsolationDecision } from "../../focus-rooms/task-write-isolation.js";
+import type { EnsureTaskGitRoomResult } from "../../github/task-git-room.js";
 
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
 
@@ -120,6 +121,10 @@ export interface LegacyProjectTaskRouteDeps {
     req: AuthenticatedRequest;
     targetProject: Project;
   }): Promise<FocusParentBoardWriteIsolationDecision>;
+  ensureTaskGitRoomForActiveWorkLease?(input: {
+    parentRoomId: string;
+    taskId: string;
+  }): Promise<EnsureTaskGitRoomResult>;
 }
 
 export function registerLegacyProjectTaskRoutes(
@@ -393,6 +398,12 @@ export function registerLegacyProjectTaskRoutes(
       const updated = await updateTask(projectId, taskId, updates);
       if (updated && updates.status && updates.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(projectId, updated);
+      }
+      if (updated) {
+        await deps.ensureTaskGitRoomForActiveWorkLease?.({
+          parentRoomId: projectId,
+          taskId: updated.id,
+        });
       }
       res.json(updated);
     } catch (error) {

@@ -1,4 +1,10 @@
-import type { Project, Task } from "../db.js";
+import {
+  buildManualGitHubRepoRoomBindingInput,
+  type GitRoomBinding,
+  type GitRoomSummary,
+  type Project,
+  type Task,
+} from "../db.js";
 import { isAttachmentStorageConfigured } from "../messages/attachment-storage.js";
 import {
   focusRoomBlockerStateLabel,
@@ -26,9 +32,12 @@ export function toRoomResponse(
   options?: {
     role?: RoomRole;
     authenticated?: boolean;
+    gitRoomBinding?: GitRoomBinding | null;
   }
 ): Record<string, unknown> {
   const focusSettings = project.kind === "focus" ? getFocusRoomSettings(project) : null;
+  const hasGitRoomBindingOption =
+    options && Object.prototype.hasOwnProperty.call(options, "gitRoomBinding");
 
   return {
     room_id: project.id,
@@ -50,8 +59,99 @@ export function toRoomResponse(
     conclusion_summary: project.conclusion_summary,
     conclusion_details: project.conclusion_details,
     created_at: project.created_at,
+    ...(hasGitRoomBindingOption
+      ? { git_room: formatGitRoomSummary(options.gitRoomBinding ?? null) }
+      : {}),
     ...(options?.role ? { role: options.role } : {}),
     ...(options ? { authenticated: Boolean(options.authenticated) } : {}),
+  };
+}
+
+export function formatGitRoomSummary(
+  binding: GitRoomBinding | null
+): GitRoomSummary | null {
+  if (!binding) {
+    return null;
+  }
+
+  return {
+    room_id: binding.room_id,
+    provider: binding.provider,
+    host: binding.host,
+    repository: {
+      id: binding.repository_id,
+      owner: binding.repository_owner,
+      name: binding.repository_name,
+      full_name: binding.repository_full_name,
+    },
+    ref: {
+      type: binding.ref_type,
+      name: binding.ref_name,
+      default_branch: binding.default_branch,
+      base_ref: binding.base_ref,
+      head_ref: binding.head_ref,
+      head_repository:
+        binding.head_repository_full_name &&
+        binding.head_repository_owner &&
+        binding.head_repository_name
+          ? {
+              id: binding.head_repository_id,
+              owner: binding.head_repository_owner,
+              name: binding.head_repository_name,
+              full_name: binding.head_repository_full_name,
+            }
+          : null,
+      is_default: binding.is_default,
+    },
+    visibility: binding.visibility,
+    access_mode: binding.visibility,
+    source: binding.source,
+    updated_at: binding.updated_at,
+  };
+}
+
+export function formatManualGitRoomSummaryForRoomId(
+  roomId: string
+): GitRoomSummary | null {
+  const input = buildManualGitHubRepoRoomBindingInput(roomId);
+  if (!input) {
+    return null;
+  }
+
+  const visibility = input.visibility ?? "unknown";
+  return {
+    room_id: input.room_id,
+    provider: input.provider,
+    host: input.host,
+    repository: {
+      id: input.repository_id ?? null,
+      owner: input.repository_owner,
+      name: input.repository_name,
+      full_name: input.repository_full_name,
+    },
+    ref: {
+      type: input.ref_type,
+      name: input.ref_name ?? null,
+      default_branch: input.default_branch ?? null,
+      base_ref: input.base_ref ?? null,
+      head_ref: input.head_ref ?? null,
+      head_repository:
+        input.head_repository_full_name &&
+        input.head_repository_owner &&
+        input.head_repository_name
+          ? {
+              id: input.head_repository_id ?? null,
+              owner: input.head_repository_owner,
+              name: input.head_repository_name,
+              full_name: input.head_repository_full_name,
+            }
+          : null,
+      is_default: input.is_default ?? false,
+    },
+    visibility,
+    access_mode: visibility,
+    source: input.source,
+    updated_at: null,
   };
 }
 

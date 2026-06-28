@@ -53,7 +53,8 @@
     width: 100%;
   }
 
-  .focus-facts.compact {
+  .focus-facts.compact,
+  .focus-git-facts {
     grid-template-columns: 1fr;
   }
 

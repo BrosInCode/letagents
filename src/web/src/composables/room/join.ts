@@ -10,6 +10,7 @@ import {
   fetchMessages,
   fetchParticipants,
   fetchPresence,
+  fetchRoomArtifacts,
   fetchTaskGithubStatus,
   fetchTasks,
   getGitHubEventsIdentifier,
@@ -25,6 +26,7 @@ import type {
   RoomInfo,
   RoomParticipantsPage,
   RoomReasoningSession,
+  RoomSharedArtifact,
   RoomTask,
   FocusRoomInfo,
   TaskGitHubArtifactStatus,
@@ -62,6 +64,7 @@ interface RoomJoinResponse {
   concluded_at?: string | null
   conclusion_summary?: string | null
   conclusion_details?: RoomInfo['conclusionDetails']
+  git_room?: RoomInfo['gitRoom']
 }
 
 export interface RoomBootstrap {
@@ -79,6 +82,7 @@ export interface RoomBootstrap {
     error: RoomGitHubEventsError | null
   }
   taskGithubStatus: Record<string, TaskGitHubArtifactStatus>
+  roomArtifacts: RoomSharedArtifact[]
 }
 
 export async function joinRoomSession(
@@ -117,6 +121,7 @@ export async function joinRoomSession(
     concludedAt: project.concluded_at || null,
     conclusionSummary: project.conclusion_summary || null,
     conclusionDetails: project.conclusion_details || null,
+    gitRoom: project.git_room || null,
   }
 }
 
@@ -139,6 +144,7 @@ export async function loadRoomBootstrap(
     reasoningSessions,
     githubEvents,
     taskGithubStatus,
+    roomArtifacts,
   ] = await Promise.all([
     fetchMessages(roomIdentifier),
     fetchTasks(roomIdentifier),
@@ -156,6 +162,7 @@ export async function loadRoomBootstrap(
           error: null,
         }),
     fetchTaskGithubStatus(roomIdentifier),
+    fetchRoomArtifacts(roomIdentifier),
   ])
 
   return {
@@ -168,5 +175,6 @@ export async function loadRoomBootstrap(
     reasoningSessions,
     githubEvents,
     taskGithubStatus,
+    roomArtifacts,
   }
 }

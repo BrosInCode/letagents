@@ -733,6 +733,7 @@ import {
   Wrench,
 } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
+import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
@@ -751,7 +752,6 @@ import SettingsRow from "../settings/SettingsRow.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import type { SettingsNavGroup, SettingsPaneId } from "../settings/types";
 import type { DesktopMcpWizardStep } from "../setup/types";
-import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 
 type SettingsFeedback = {
   message: string;

@@ -36,6 +36,7 @@ export interface DesktopCodexLiveSessionState {
   display_name?: string | null;
   joined_via: DesktopCodexJoinedVia;
   cwd: string;
+  repo_branch?: string | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
@@ -102,6 +103,7 @@ export interface StoredAgentSessionState {
   display_name?: string | null;
   owner_label?: string | null;
   ide_label?: string | null;
+  repo_branch?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   last_seen_at?: string | null;
@@ -744,6 +746,7 @@ export function toPublicManagedAgentSession(
     roomIdentifier: session.room_identifier || session.room_id,
     roomDisplayName: session.room_display_name ?? null,
     repoRootPath: session.cwd,
+    repoBranch: session.repo_branch ?? null,
     status: session.status,
     deliveryMode: managedAgentDeliveryMode(session),
     canStop: Boolean(activeWorkerSessionId) &&

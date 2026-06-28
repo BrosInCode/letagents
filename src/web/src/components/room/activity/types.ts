@@ -8,6 +8,7 @@ import type {
   RoomMessage,
   RoomParticipant,
   RoomReasoningSession,
+  RoomSharedArtifact,
   RoomTask,
   TaskGitHubArtifactStatus,
 } from '@/composables/useRoom'
@@ -43,6 +44,7 @@ export interface ActivityParticipant {
   actorLabel: string
   ownerLabel: string | null
   ideLabel: string | null
+  repoBranch: string | null
   activityState: ParticipantActivityState | null
   hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
@@ -68,6 +70,7 @@ export interface HistoryParticipant {
   actorLabel: string
   ownerLabel: string | null
   ideLabel: string | null
+  repoBranch: string | null
   activityState: ParticipantActivityState | null
   hasCanonicalPresence: boolean
   status: RoomAgentPresence['status'] | null
@@ -116,6 +119,7 @@ export interface ActivityViewProps {
   activityHistory: RoomActivityHistoryPage | null
   activityHistoryLoading: boolean
   activityHistoryError: string
+  roomArtifacts: readonly RoomSharedArtifact[]
   canManageParticipants: boolean
   loadActivityHistory?: (options?: {
     query?: string

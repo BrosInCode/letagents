@@ -15,6 +15,7 @@ import type {
   DesktopAppAgentSettingsStatus,
   DesktopAppAgentTraceEntry,
   DesktopChatStorageSettings,
+  DesktopGitRoomInfo,
 } from "../../ipc-types.js";
 
 export interface AppAgentActionRegistryDeps {
@@ -198,6 +199,7 @@ function toToolRoom(room: DesktopAccountRoomEntry): Record<string, unknown> {
     displayName: room.displayName,
     name: room.name,
     aliases: roomAliasCandidates(room),
+    gitRoom: toToolGitRoom(room.gitRoom),
     pinned: room.pinned,
     archived: room.archived,
     role: room.role,
@@ -211,9 +213,29 @@ function toToolRoom(room: DesktopAccountRoomEntry): Record<string, unknown> {
       name: focusRoom.name,
       sourceTaskId: focusRoom.sourceTaskId,
       focusKey: focusRoom.focusKey,
+      gitRoom: toToolGitRoom(focusRoom.gitRoom),
       lastOpenedAt: focusRoom.lastOpenedAt,
       latestMessageAt: focusRoom.latestMessageAt,
     })),
+  };
+}
+
+function toToolGitRoom(gitRoom: DesktopGitRoomInfo | null): Record<string, unknown> | null {
+  if (!gitRoom) return null;
+  return {
+    provider: gitRoom.provider,
+    host: gitRoom.host,
+    repository: gitRoom.repository.fullName,
+    refType: gitRoom.ref.type,
+    refName: gitRoom.ref.name,
+    defaultBranch: gitRoom.ref.defaultBranch,
+    baseRef: gitRoom.ref.baseRef,
+    headRef: gitRoom.ref.headRef,
+    headRepository: gitRoom.ref.headRepository?.fullName ?? null,
+    visibility: gitRoom.visibility,
+    accessMode: gitRoom.accessMode,
+    isDefault: gitRoom.isDefault,
+    source: gitRoom.source,
   };
 }
 

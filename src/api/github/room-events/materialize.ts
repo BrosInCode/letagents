@@ -1,5 +1,9 @@
 import type { GitHubWebhookPayload } from "../app.js";
 import type { RepoRoomEvent } from "../../repo-workflow.js";
+import {
+  materializeBranchLifecycleEvent,
+  materializePushEvent,
+} from "./branch.js";
 import { materializeCheckRunEvent } from "./check-run.js";
 import {
   getRepoIdentity,
@@ -26,7 +30,11 @@ export function materializeGitHubWebhookEvent(
   payload: GitHubWebhookPayload,
   deliveryId: string,
 ): MaterializedGitHubRoomEvent | null {
-  const action = payload.action;
+  const action = payload.action ?? (
+    eventName === "push" || eventName === "create" || eventName === "delete"
+      ? eventName
+      : undefined
+  );
   if (!action) {
     return null;
   }
@@ -116,6 +124,25 @@ export function materializeGitHubWebhookEvent(
       );
     case "repository":
       return materializeRepositoryEvent(
+        payload,
+        action,
+        normalizedDeliveryId,
+        actorLogin,
+        repoIdentity,
+        base,
+      );
+    case "push":
+      return materializePushEvent(
+        payload,
+        action,
+        normalizedDeliveryId,
+        actorLogin,
+        repoIdentity,
+        base,
+      );
+    case "create":
+    case "delete":
+      return materializeBranchLifecycleEvent(
         payload,
         action,
         normalizedDeliveryId,

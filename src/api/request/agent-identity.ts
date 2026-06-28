@@ -22,6 +22,7 @@ export interface ResolvedRequestAgentIdentity {
   display_name: string;
   owner_label: string;
   ide_label: string;
+  repo_branch: string | null;
 }
 
 export async function resolveRequestAgentIdentity(input: {
@@ -61,6 +62,7 @@ export async function resolveRequestAgentIdentity(input: {
       display_name: session.display_name,
       owner_label: session.owner_label,
       ide_label: session.ide_label,
+      repo_branch: session.repo_branch ?? null,
     };
   }
 
@@ -91,6 +93,7 @@ export async function resolveRequestAgentIdentity(input: {
     display_name: actorIdentity.display_name,
     owner_label: actorIdentity.owner_label,
     ide_label: ideLabel,
+    repo_branch: null,
   };
 }
 

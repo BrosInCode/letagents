@@ -14,6 +14,7 @@ export async function upsertRoomAgentPresence(input: {
   display_name: string;
   owner_label?: string | null;
   ide_label?: string | null;
+  repo_branch?: string | null;
   status: AgentPresenceStatus;
   status_text?: string | null;
 }): Promise<RoomAgentPresence> {
@@ -31,6 +32,7 @@ export async function upsertRoomAgentPresence(input: {
       display_name: input.display_name,
       owner_label: input.owner_label ?? null,
       ide_label: input.ide_label ?? null,
+      repo_branch: input.repo_branch ?? null,
       status: input.status,
       status_text: input.status_text ?? null,
       last_heartbeat_at: now,
@@ -47,6 +49,7 @@ export async function upsertRoomAgentPresence(input: {
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
+        repo_branch: input.repo_branch ?? null,
         status: input.status,
         status_text: input.status_text ?? null,
         last_heartbeat_at: now,

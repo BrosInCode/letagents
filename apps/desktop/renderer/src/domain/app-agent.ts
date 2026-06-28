@@ -8,6 +8,7 @@ import type {
   DesktopAppAgentRunResult,
   DesktopAppAgentSettingsStatus,
   DesktopAppAgentTraceEntry,
+  DesktopGitRoomInfo,
 } from "../../../electron/ipc-types";
 
 export type AppAgentSurfaceState =
@@ -91,6 +92,7 @@ export function buildAppAgentRunInput(input: {
   activeRoomIdentifier?: string | null;
   activeRoomDisplayName?: string | null;
   activeRoomPinned?: boolean | null;
+  activeRoomGitRoom?: DesktopGitRoomInfo | null;
   selectedAction?: DesktopAppAgentActionReference | null;
   confirmedAction?: DesktopAppAgentActionReference | null;
   confirmedPlan?: DesktopAppAgentActionPlan | null;
@@ -102,6 +104,7 @@ export function buildAppAgentRunInput(input: {
     activeRoomIdentifier: input.activeRoomIdentifier || null,
     activeRoomDisplayName: input.activeRoomDisplayName || null,
     activeRoomPinned: input.activeRoomPinned === true,
+    activeRoomGitRoom: input.activeRoomGitRoom || null,
     selectedAction: plainActionReference(input.selectedAction),
     confirmedAction: plainActionReference(input.confirmedAction),
     confirmedPlan: plainActionPlan(input.confirmedPlan),

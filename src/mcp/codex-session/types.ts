@@ -41,6 +41,7 @@ export interface NewCodexSessionStateInput {
   room_display_name?: string | null;
   joined_via: JoinedVia;
   cwd: string;
+  repo_branch?: string | null;
   stop_phrase: string;
   max_minutes: number;
   deadline_utc: string | null;

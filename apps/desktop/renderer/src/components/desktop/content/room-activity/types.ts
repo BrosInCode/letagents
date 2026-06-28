@@ -22,6 +22,7 @@ export interface ActivityParticipant {
   ownerLabel: string | null;
   ideLabel: string | null;
   runtime: string | null;
+  repoBranch: string | null;
   activityState: ActivityState | null;
   status: DesktopAgentPresence["status"] | null;
   statusText: string | null;

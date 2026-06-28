@@ -1,3 +1,4 @@
+export * from './types/artifacts'
 export * from './types/activity'
 export * from './types/focus'
 export * from './types/github'

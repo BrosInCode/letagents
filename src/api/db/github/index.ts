@@ -22,6 +22,7 @@ export {
 } from "./webhook-deliveries.js";
 export {
   getGitHubRoomEvents,
+  hasGitHubRoomActivationEventAfter,
   insertGitHubRoomEvent,
   updateGitHubRoomEventLinkedTaskId,
 } from "./room-events.js";

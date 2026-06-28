@@ -1,0 +1,245 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+
+const testDatabaseUrl = process.env.TEST_DB_URL;
+const requiresDatabase = !testDatabaseUrl;
+if (testDatabaseUrl) {
+  process.env.DB_URL = testDatabaseUrl;
+} else {
+  process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+}
+
+const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
+const dbModule = await import("../db.js");
+
+const db = dbClientModule?.db;
+const pool = dbClientModule?.pool;
+const {
+  buildRoomSharedArtifactIdentityKey,
+  createProjectWithName,
+  getRoomSharedArtifactByIdentityKey,
+  getRoomSharedArtifacts,
+  linkRoomSharedArtifactToTask,
+  preserveManualRoomSharedArtifactInput,
+  upsertRoomSharedArtifact,
+} = dbModule;
+const migrationsFolder = path.resolve(process.cwd(), "drizzle");
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForDatabaseReady(): Promise<void> {
+  if (!pool) {
+    throw new Error("DB-backed room shared artifact tests require TEST_DB_URL");
+  }
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      await pool.query("select 1");
+      return;
+    } catch (error) {
+      lastError = error;
+      await sleep(250);
+    }
+  }
+
+  throw lastError ?? new Error("database did not become ready in time");
+}
+
+async function resetDatabase(): Promise<void> {
+  if (!db || !pool) {
+    throw new Error("DB-backed room shared artifact tests require TEST_DB_URL");
+  }
+
+  await waitForDatabaseReady();
+  await pool.query("DROP SCHEMA IF EXISTS public CASCADE");
+  await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
+  await pool.query("CREATE SCHEMA public");
+  await migrate(db, { migrationsFolder });
+}
+
+if (!requiresDatabase) {
+  test.beforeEach(async () => {
+    await resetDatabase();
+  });
+
+  test.after(async () => {
+    await pool?.end();
+  });
+}
+
+test("buildRoomSharedArtifactIdentityKey prefers durable artifact identifiers", () => {
+  assert.equal(
+    buildRoomSharedArtifactIdentityKey({
+      provider: "github",
+      kind: "pull_request",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+      number: 42,
+      ref: "codex/git-rooms",
+    }),
+    "github:pull_request:url:https://github.com/BrosInCode/letagents/pull/42"
+  );
+
+  assert.equal(
+    buildRoomSharedArtifactIdentityKey({
+      provider: "github",
+      kind: "branch",
+      ref: "codex/git-rooms",
+    }),
+    "github:branch:ref:codex/git-rooms"
+  );
+});
+
+test("preserveManualRoomSharedArtifactInput does not downgrade richer existing artifacts", () => {
+  const result = preserveManualRoomSharedArtifactInput({
+    source: "manual",
+    artifact: {
+      provider: "github",
+      kind: "pull_request",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+    },
+    existing: {
+      artifact_id: "PR_kwDOExample",
+      artifact_number: 42,
+      title: "Add Git Rooms",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+      ref: "codex/git-rooms",
+      state: "open",
+      source: "github_event",
+    },
+  });
+
+  assert.equal(result.source, "github_event");
+  assert.deepEqual(result.artifact, {
+    provider: "github",
+    kind: "pull_request",
+    id: "PR_kwDOExample",
+    number: 42,
+    title: "Add Git Rooms",
+    url: "https://github.com/BrosInCode/letagents/pull/42",
+    ref: "codex/git-rooms",
+    state: "open",
+  });
+});
+
+test(
+  "getRoomSharedArtifacts applies task filter before limiting and returns all linked task IDs",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room shared artifact tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName ||
+      !getRoomSharedArtifacts ||
+      !linkRoomSharedArtifactToTask ||
+      !upsertRoomSharedArtifact
+    ) {
+      throw new Error("DB-backed room shared artifact tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "branch",
+        ref: "aaa-unrelated",
+        title: "Unrelated branch",
+      },
+      source: "manual",
+    });
+    const targetArtifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "pull_request",
+        number: 42,
+        title: "Visible linked PR",
+      },
+      source: "manual",
+    });
+    await linkRoomSharedArtifactToTask({
+      room_id: room.id,
+      artifact_identity_key: targetArtifact.identity_key,
+      task_id: "task_7",
+      source: "manual",
+    });
+    await linkRoomSharedArtifactToTask({
+      room_id: room.id,
+      artifact_identity_key: targetArtifact.identity_key,
+      task_id: "task_9",
+      source: "manual",
+    });
+
+    const artifacts = await getRoomSharedArtifacts({
+      room_id: room.id,
+      task_id: "task_7",
+      limit: 1,
+    });
+
+    assert.equal(artifacts.length, 1);
+    assert.equal(artifacts[0]?.identity_key, targetArtifact.identity_key);
+    assert.deepEqual(artifacts[0]?.linked_task_ids, ["task_7", "task_9"]);
+  }
+);
+
+test(
+  "manual artifact publish preserves richer existing webhook metadata",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room shared artifact tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName ||
+      !getRoomSharedArtifactByIdentityKey ||
+      !upsertRoomSharedArtifact
+    ) {
+      throw new Error("DB-backed room shared artifact tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const webhookArtifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "pull_request",
+        id: "PR_kwDOExample",
+        number: 42,
+        title: "Add Git Rooms",
+        url: "https://github.com/BrosInCode/letagents/pull/42",
+        ref: "codex/git-rooms",
+        state: "open",
+      },
+      source: "github_event",
+    });
+
+    const manualArtifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "pull_request",
+        url: "https://github.com/BrosInCode/letagents/pull/42",
+      },
+      source: "manual",
+    });
+    const hydrated = await getRoomSharedArtifactByIdentityKey({
+      room_id: room.id,
+      identity_key: webhookArtifact.identity_key,
+    });
+
+    assert.equal(manualArtifact.identity_key, webhookArtifact.identity_key);
+    assert.equal(hydrated?.source, "github_event");
+    assert.equal(hydrated?.artifact_id, "PR_kwDOExample");
+    assert.equal(hydrated?.artifact_number, 42);
+    assert.equal(hydrated?.title, "Add Git Rooms");
+    assert.equal(hydrated?.ref, "codex/git-rooms");
+    assert.equal(hydrated?.state, "open");
+  }
+);

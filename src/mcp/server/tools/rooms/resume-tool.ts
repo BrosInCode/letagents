@@ -6,7 +6,7 @@ import {
   ensureAgentIdentity,
   getStoredCurrentRoom,
   getStoredRoomSession,
-  joinRoomIdentifier,
+  joinRoomIdentifierWithoutImplicitGitRefCreate,
   toPublicAgentIdentity,
   toPublicRoomState,
   toRepoRoomAuthRequiredResult,
@@ -34,7 +34,10 @@ export function registerRoomResumeTool(server: McpServer): void {
       }
 
       try {
-        const joined = await joinRoomIdentifier(savedRoom.room_id, savedRoom.joined_via);
+        const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
+          savedRoom.room_id,
+          savedRoom.joined_via
+        );
         const agentIdentity = await ensureAgentIdentity();
 
         return jsonToolResponse(

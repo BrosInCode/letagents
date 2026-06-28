@@ -1,5 +1,6 @@
 import type {
   DesktopAccountRoomEntry,
+  DesktopGitRoomInfo,
   DesktopRoomSnapshot,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
@@ -211,17 +212,18 @@ function roomEntryKey(entry: RoomEntry): string {
 }
 
 function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][number]): RoomEntry {
+  const gitMeta = gitRoomSidebarMeta(focusRoom.gitRoom);
   return {
     id: `room:focus:${focusRoom.roomId}`,
     type: "room",
     kind: "focus",
     roomIdentifier: focusRoom.identifier,
     title: focusRoom.displayName,
-    meta: focusRoom.code || focusRoom.sourceTaskId || "Focus room",
-    sectionLabel: "Focus room",
-    headline: "Focused work should stay close to the room it came from.",
-    description:
-      "A focus room gives one thread of work more space, without losing the connection back to the main room.",
+    meta: gitMeta?.meta || focusRoom.code || focusRoom.sourceTaskId || "Focus room",
+    sectionLabel: gitMeta ? "Git Room" : "Focus room",
+    headline: gitMeta?.headline || "Focused work should stay close to the room it came from.",
+    description: gitMeta?.description
+      || "A focus room gives one thread of work more space, without losing the connection back to the main room.",
     latestMessageId: null,
     latestMessageAt: null,
     hasUnread: false,
@@ -241,19 +243,20 @@ function accountRoomToGroup(room: DesktopAccountRoomEntry): ProjectGroup {
 }
 
 function accountFocusRoomToEntry(room: DesktopAccountRoomEntry["focusRooms"][number]): RoomEntry {
+  const gitMeta = gitRoomSidebarMeta(room.gitRoom);
   return {
     id: `room:focus:${room.roomIdentifier}`,
     type: "room",
     kind: "focus",
     roomIdentifier: room.roomIdentifier,
     title: room.displayName,
-    meta: room.focusStatus === "concluded"
+    meta: gitMeta?.meta || (room.focusStatus === "concluded"
       ? "Concluded"
-      : room.sourceTaskId || room.focusKey || "Focus room",
-    sectionLabel: "Focus room",
-    headline: "Focused work should stay close to the room it came from.",
-    description:
-      "A focus room gives one thread of work more space, without losing the connection back to the main room.",
+      : room.sourceTaskId || room.focusKey || "Focus room"),
+    sectionLabel: gitMeta ? "Git Room" : "Focus room",
+    headline: gitMeta?.headline || "Focused work should stay close to the room it came from.",
+    description: gitMeta?.description
+      || "A focus room gives one thread of work more space, without losing the connection back to the main room.",
     latestMessageId: room.latestMessageId,
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
@@ -263,16 +266,18 @@ function accountFocusRoomToEntry(room: DesktopAccountRoomEntry["focusRooms"][num
 }
 
 function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
+  const gitMeta = gitRoomSidebarMeta(room.gitRoom);
   return {
     id: rootRoomEntryId(room.roomIdentifier),
     type: "room",
     kind: "parent",
     roomIdentifier: room.roomIdentifier,
     title: room.displayName,
-    meta: accountRoomMeta(room),
-    sectionLabel: "Account room",
-    headline: "Open this room from your account history.",
-    description: "Rooms from your account are available across devices, with focus rooms grouped underneath.",
+    meta: gitMeta?.meta || accountRoomMeta(room),
+    sectionLabel: gitMeta ? "Git Room" : "Account room",
+    headline: gitMeta?.headline || "Open this room from your account history.",
+    description: gitMeta?.description
+      || "Rooms from your account are available across devices, with focus rooms grouped underneath.",
     latestMessageId: room.latestMessageId,
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
@@ -303,4 +308,37 @@ function accountRoomMeta(room: DesktopAccountRoomEntry): string {
   if (room.source === "recent") return "Recent";
   if (room.source === "focus") return "Focus room";
   return "Account room";
+}
+
+function gitRoomSidebarMeta(gitRoom: DesktopGitRoomInfo | null): {
+  meta: string;
+  headline: string;
+  description: string;
+} | null {
+  if (!gitRoom) return null;
+
+  const refType = gitRoom.ref.type === "default_branch"
+    ? "Default branch"
+    : gitRoom.ref.type === "pull_request"
+      ? "Pull request"
+      : gitRoom.ref.type === "branch"
+        ? "Branch"
+        : "Tag";
+  return {
+    meta: `${refType} · ${gitRoomRefLabel(gitRoom)}`,
+    headline: gitRoom.repository.fullName,
+    description: gitRoom.accessMode === "private" ? "Private Git Room" : "Git Room",
+  };
+}
+
+function gitRoomRefLabel(gitRoom: DesktopGitRoomInfo): string {
+  const ref = gitRoom.ref;
+  if (
+    ref.name
+    && ref.headRepository?.fullName
+    && ref.headRepository.fullName !== gitRoom.repository.fullName
+  ) {
+    return `${ref.headRepository.owner}:${ref.name}`;
+  }
+  return ref.name || ref.defaultBranch || ref.type.replace("_", " ");
 }

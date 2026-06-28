@@ -3,7 +3,14 @@ import type { Express } from "express";
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
 import {
   assignProjectAdminIfRoomHasNoAdmins,
+  getGitRoomBindingForRoom,
+  getGitRoomBindingsForRooms,
   getProjectById,
+  getRoomSharedArtifactByIdentityKey,
+  getRoomSharedArtifacts,
+  linkRoomSharedArtifactToTask,
+  updateProjectDisplayName,
+  upsertRoomSharedArtifact,
 } from "../db.js";
 import { toGitHubWebhookId } from "../github/app-sync.js";
 import {
@@ -11,10 +18,12 @@ import {
   isRepoBackedProject,
   isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
-  requireAdmin,
-  requireParticipant,
+  requireGitRoomAdmin as requireAdmin,
+  requireGitRoomParticipant as requireParticipant,
   resolveGitHubRoomEntryDecision,
-  resolveProjectRole,
+  resolveGitRoomProjectRole as resolveProjectRole,
+  resolveProjectRepoRoomAccessDecision,
+  resolveProjectRoomEntryDecision,
   resolveRepoRoomAccessDecision,
 } from "../rooms/access.js";
 import {
@@ -67,6 +76,10 @@ import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
 } from "../routes/rental/renter/index.js";
+import {
+  registerRoomArtifactRoutes,
+  type RoomArtifactRouteDeps,
+} from "../routes/rooms/artifacts.js";
 import {
   registerRoomEntryRoutes,
   type RoomEntryRouteDeps,
@@ -122,7 +135,10 @@ import {
 } from "../rental/sessions.js";
 import { provisionRentalRoomForProvider } from "../rental/room-projection.js";
 import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
+import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
+  artifactEvents,
+  githubRoomEvents,
   messageEvents,
   reasoningEvents,
   taskEvents,
@@ -143,8 +159,11 @@ import {
 
 export function registerApiRoutes(app: Express): void {
   const roomEntryRouteDeps = {
+    getProjectById,
+    getGitRoomBindingForRoom,
     isRepoBackedRoomId,
     resolveGitHubRoomEntryDecision,
+    resolveProjectRoomEntryDecision,
   } satisfies RoomEntryRouteDeps;
 
   registerWebRoutes(app);
@@ -157,7 +176,7 @@ export function registerApiRoutes(app: Express): void {
     requireAdmin,
     requireParticipant,
     getProjectAccessRoomId,
-    isRepoBackedProject,
+    resolveProjectRepoRoomAccessDecision,
   };
 
   const legacyProjectRouteDeps = {
@@ -166,11 +185,13 @@ export function registerApiRoutes(app: Express): void {
     isRepoBackedRoomId,
     isRepoBackedProject,
     resolveRepoRoomAccessDecision,
+    resolveProjectRepoRoomAccessDecision,
     replyRepoRoomAccessDecision,
     resolveProjectRole,
     requireAdmin,
     rememberHumanRoomParticipant,
     rememberAccountRoom: upsertAccountRoomRecent,
+    getGitRoomBindingForRoom,
   } satisfies LegacyProjectRouteDeps;
 
   const legacyProjectMessageRouteDeps = {
@@ -201,9 +222,12 @@ export function registerApiRoutes(app: Express): void {
         req,
         targetProjectId: targetProject.id,
       }),
+    ensureTaskGitRoomForActiveWorkLease,
   } satisfies LegacyProjectTaskRouteDeps;
 
   const roomMessageRouteDeps = {
+    artifactEvents,
+    githubRoomEvents,
     messageEvents,
     taskEvents,
     reasoningEvents,
@@ -241,6 +265,8 @@ export function registerApiRoutes(app: Express): void {
     requireAdmin,
     requireParticipant,
     resolveProjectRole,
+    getGitRoomBindingForRoom,
+    getGitRoomBindingsForRooms,
     toRoomResponse,
     normalizeOptionalString,
     enforceFocusRoomConclusion: (input) => enforceTaskCoordinationMutation({
@@ -271,6 +297,8 @@ export function registerApiRoutes(app: Express): void {
         req,
         targetProjectId: targetProject.id,
       }),
+    getGitRoomBindingForRoom,
+    ensureTaskGitRoomForActiveWorkLease,
     emitProjectMessage,
   } satisfies RoomTaskRouteDeps;
 
@@ -281,11 +309,24 @@ export function registerApiRoutes(app: Express): void {
     getProjectAccessRoomId,
   } satisfies RoomEventRouteDeps;
 
+  const roomArtifactRouteDeps = {
+    artifactEvents,
+    resolveCanonicalRoomRequestId,
+    resolveRoomOrReply,
+    requireParticipant,
+    getRoomSharedArtifactByIdentityKey,
+    getRoomSharedArtifacts,
+    linkRoomSharedArtifactToTask,
+    upsertRoomSharedArtifact,
+  } satisfies RoomArtifactRouteDeps;
+
   const roomMetadataRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
+    updateProjectDisplayName,
     resolveProjectRole,
+    getGitRoomBindingForRoom,
     toRoomResponse,
   } satisfies RoomMetadataRouteDeps;
 
@@ -296,7 +337,9 @@ export function registerApiRoutes(app: Express): void {
     replyRepoRoomAccessDecision,
     resolveRoomOrReply,
     getProjectAccessRoomId,
+    getGitRoomBindingForRoom,
     isRepoBackedProject,
+    resolveProjectRepoRoomAccessDecision,
     resolveProjectRole,
     rememberHumanRoomParticipant,
     rememberAccountRoom: upsertAccountRoomRecent,
@@ -336,6 +379,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomFocusRoutes(app, roomFocusRouteDeps);
   registerRoomTaskRoutes(app, roomTaskRouteDeps);
   registerRoomEventRoutes(app, roomEventRouteDeps);
+  registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,

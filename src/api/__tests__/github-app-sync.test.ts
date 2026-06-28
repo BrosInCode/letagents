@@ -112,6 +112,8 @@ test("syncGitHubAppRepositoryFromPayload falls back to existing installation and
       id: " 987 ",
       full_name: "BrosInCode/letagents",
       name: "letagents",
+      default_branch: "staging",
+      private: true,
     },
     null
   );
@@ -136,6 +138,8 @@ test("syncGitHubAppRepositoryFromPayload falls back to existing installation and
       room_id: "github.com/brosincode/letagents",
       owner_login: "BrosInCode",
       repo_name: "letagents",
+      default_branch: "staging",
+      visibility: "private",
     },
   ]);
 });

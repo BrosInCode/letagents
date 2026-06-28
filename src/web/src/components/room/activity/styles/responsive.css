@@ -19,6 +19,7 @@
   }
 
   .activity-toolbar-row,
+  .activity-artifacts-header,
   .activity-history-toolbar,
   .activity-roster-header,
   .activity-group-header,
@@ -32,6 +33,10 @@
   .activity-reasoning-meta {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .activity-artifact-list {
+    grid-template-columns: 1fr;
   }
 
   .activity-roster-seen {

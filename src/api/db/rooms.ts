@@ -3,6 +3,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { isInviteCode, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
+import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
 import { id_sequences, room_aliases, rooms } from "./schema.js";
 import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, type RoomSequenceExecutor } from "./utils.js";
 import { toProject, toRoomAlias } from "./mappers.js";
@@ -35,6 +36,7 @@ export async function createProject(): Promise<Project> {
         focus_activity_scope: null,
         focus_github_event_routing: null,
         focus_archived_at: null,
+        git_lifecycle_event_order_at: null,
         concluded_at: null,
         conclusion_summary: null,
         conclusion_details: null,
@@ -70,6 +72,7 @@ export async function getOrCreateCanonicalRoom(
 ): Promise<{ room: Project; created: boolean }> {
   const existing = await getProjectById(canonicalId);
   if (existing) {
+    await ensureGitHubRepoRoomBinding(existing.id);
     return { room: existing, created: false };
   }
 
@@ -82,37 +85,125 @@ export async function getOrCreateCanonicalRoom(
         .delete(id_sequences)
         .where(inArray(id_sequences.name, getRoomScopedSequenceNames(canonicalId)));
     });
+    const room = {
+      id: canonicalId,
+      code: null,
+      display_name,
+      name: canonicalId,
+      kind: "main",
+      parent_room_id: null,
+      focus_key: null,
+      source_task_id: null,
+      focus_status: null,
+      focus_parent_visibility: null,
+      focus_activity_scope: null,
+      focus_github_event_routing: null,
+      focus_archived_at: null,
+      git_lifecycle_event_order_at: null,
+      concluded_at: null,
+      conclusion_summary: null,
+      conclusion_details: null,
+      created_at,
+    } satisfies Project;
+    await ensureGitHubRepoRoomBinding(room.id);
     return {
-      room: {
-        id: canonicalId,
-        code: null,
-        display_name,
-        name: canonicalId,
-        kind: "main",
-        parent_room_id: null,
-        focus_key: null,
-        source_task_id: null,
-        focus_status: null,
-        focus_parent_visibility: null,
-        focus_activity_scope: null,
-        focus_github_event_routing: null,
-        focus_archived_at: null,
-        concluded_at: null,
-        conclusion_summary: null,
-        conclusion_details: null,
-        created_at,
-      },
+      room,
       created: true,
     };
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       const retried = await getProjectById(canonicalId);
       if (retried) {
+        await ensureGitHubRepoRoomBinding(retried.id);
         return { room: retried, created: false };
       }
     }
     throw error;
   }
+}
+
+export async function getOrCreateGitChildRoom(input: {
+  roomId: string;
+  parentRoomId: string;
+  focusKey: string;
+  displayName?: string | null;
+}): Promise<{ room: Project; created: boolean }> {
+  const existing = await getProjectById(input.roomId);
+  if (existing) {
+    return { room: existing, created: false };
+  }
+
+  const parent = await getProjectById(input.parentRoomId);
+  if (!parent) {
+    throw new Error(`Parent room '${input.parentRoomId}' does not exist`);
+  }
+
+  const created_at = new Date().toISOString();
+  const display_name = input.displayName?.trim() || generateRoomDisplayName(input.roomId);
+  try {
+    const created = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(rooms)
+        .values({
+          id: input.roomId,
+          display_name,
+          kind: "focus",
+          parent_room_id: parent.id,
+          focus_key: input.focusKey,
+          focus_status: "active",
+          created_at,
+        })
+        .returning();
+
+      await tx
+        .delete(id_sequences)
+        .where(inArray(id_sequences.name, getRoomScopedSequenceNames(input.roomId)));
+
+      return row;
+    });
+
+    return { room: toProject(created), created: true };
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const retriedById = await getProjectById(input.roomId);
+      if (retriedById) {
+        return { room: retriedById, created: false };
+      }
+
+      const [retriedByKey] = await db
+        .select()
+        .from(rooms)
+        .where(and(
+          eq(rooms.parent_room_id, parent.id),
+          eq(rooms.focus_key, input.focusKey),
+          eq(rooms.kind, "focus")
+        ))
+        .limit(1);
+      if (retriedByKey) {
+        return { room: toProject(retriedByKey), created: false };
+      }
+    }
+
+    throw error;
+  }
+}
+
+export async function getGitChildRoom(input: {
+  roomId: string;
+  parentRoomId: string;
+  focusKey: string;
+}): Promise<Project | undefined> {
+  const room = await getProjectById(input.roomId);
+  if (
+    !room ||
+    room.kind !== "focus" ||
+    room.parent_room_id !== input.parentRoomId ||
+    room.focus_key !== input.focusKey
+  ) {
+    return undefined;
+  }
+
+  return room;
 }
 
 export async function getProjectByName(name: string): Promise<Project | undefined> {
@@ -209,6 +300,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
         focus_activity_scope: project.focus_activity_scope,
         focus_github_event_routing: project.focus_github_event_routing,
         focus_archived_at: project.focus_archived_at,
+        git_lifecycle_event_order_at: project.git_lifecycle_event_order_at,
         concluded_at: project.concluded_at,
         conclusion_summary: project.conclusion_summary,
         conclusion_details: project.conclusion_details,

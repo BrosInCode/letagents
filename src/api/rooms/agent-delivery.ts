@@ -101,6 +101,7 @@ export async function beginRoomAgentDelivery(input: {
     display_name: identity.display_name,
     owner_label: identity.owner_label,
     ide_label: identity.ide_label,
+    repo_branch: identity.repo_branch,
     transport: input.transport,
   });
 

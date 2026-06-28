@@ -43,6 +43,7 @@ export {
   agentSessionCredentials,
   buildAgentDeliveryHeaders,
   ensureLocalWorkerAgentSession,
+  getAgentSessionRepoBranch,
   identityFromAgentSession,
   requireWorkerAgentSession,
   resolveAgentSession,
@@ -85,6 +86,7 @@ export {
   joinInviteCode,
   joinNamedRoom,
   joinRoomIdentifier,
+  joinRoomIdentifierWithoutImplicitGitRefCreate,
   normalizeJoinSessionMode,
   type JoinSessionMode,
 } from "./runtime/rooms.js";

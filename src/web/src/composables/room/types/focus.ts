@@ -1,3 +1,5 @@
+import type { GitRoomInfo } from './rooms'
+
 export type FocusParentVisibility =
   | 'summary_only'
   | 'major_activity'
@@ -87,6 +89,7 @@ export interface FocusRoomInfo {
   concluded_at: string | null
   conclusion_summary: string | null
   conclusion_details: FocusRoomConclusionDetails | null
+  git_room?: GitRoomInfo | null
   created_at: string
   role?: string
   authenticated?: boolean

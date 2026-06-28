@@ -25,6 +25,11 @@ export interface GitHubWebhookRepository {
   id: number | string;
   name: string;
   full_name: string;
+  html_url?: string;
+  default_branch?: string;
+  private?: boolean;
+  updated_at?: string | null;
+  pushed_at?: string | null;
   owner?: {
     login: string;
   };
@@ -35,12 +40,26 @@ export interface GitHubWebhookPullRequest {
   title: string;
   html_url: string;
   body?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
   draft?: boolean;
   merged?: boolean;
   state?: string;
+  base?: {
+    ref?: string;
+    sha?: string;
+  };
   head?: {
     ref?: string;
     sha?: string;
+    repo?: {
+      id?: number | string | null;
+      name?: string | null;
+      full_name?: string | null;
+      owner?: {
+        login?: string | null;
+      } | null;
+    } | null;
   };
   user?: {
     login: string;
@@ -52,6 +71,43 @@ export interface GitHubWebhookPullRequest {
 
 export interface GitHubWebhookPayload {
   action?: string;
+  ref?: string;
+  ref_type?: string;
+  before?: string;
+  after?: string;
+  created?: boolean;
+  deleted?: boolean;
+  forced?: boolean;
+  compare?: string;
+  master_branch?: string;
+  description?: string | null;
+  pusher_type?: string;
+  pusher?: {
+    name?: string;
+    email?: string;
+  };
+  head_commit?: {
+    id?: string;
+    message?: string;
+    timestamp?: string | null;
+    url?: string;
+    author?: {
+      name?: string;
+      email?: string;
+      username?: string;
+    };
+    committer?: {
+      name?: string;
+      email?: string;
+      username?: string;
+    };
+  } | null;
+  commits?: Array<{
+    id?: string;
+    message?: string;
+    timestamp?: string | null;
+    url?: string;
+  }>;
   installation?: GitHubWebhookInstallation;
   organization?: GitHubWebhookAccount;
   repository?: GitHubWebhookRepository;
@@ -63,6 +119,8 @@ export interface GitHubWebhookPayload {
     title: string;
     html_url: string;
     state?: string;
+    created_at?: string | null;
+    updated_at?: string | null;
     user?: { login: string };
     labels?: Array<{ name: string }>;
     pull_request?: { url?: string }; // present when the "issue" is actually a PR
@@ -71,6 +129,8 @@ export interface GitHubWebhookPayload {
     id: number;
     body: string;
     html_url: string;
+    created_at?: string | null;
+    updated_at?: string | null;
     user?: { login: string };
   };
   review?: {
@@ -78,6 +138,7 @@ export interface GitHubWebhookPayload {
     state: string;
     body?: string | null;
     html_url: string;
+    submitted_at?: string | null;
     user?: { login: string };
   };
   check_run?: {
@@ -87,6 +148,8 @@ export interface GitHubWebhookPayload {
     conclusion: string | null;
     html_url: string;
     head_sha?: string | null;
+    started_at?: string | null;
+    completed_at?: string | null;
     app?: { name: string };
     check_suite?: {
       id?: number | string;

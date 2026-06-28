@@ -17,19 +17,23 @@ import {
 
 export async function emitRepoRoomEventProjectionMessage(input: {
   project: Project;
+  eventProject: Project;
   roomEvent: RepoRoomEvent;
   linkedTask: Task | undefined;
   taskProjection: RepoRoomEventTaskProjection;
   isolatedFocusRoom: Project | null;
   githubRoutingContext: FocusGitHubRoutingContext;
+  messageIdBase?: string | null;
 }): Promise<void> {
   const {
     project,
+    eventProject,
     roomEvent,
     linkedTask,
     taskProjection,
     isolatedFocusRoom,
     githubRoutingContext,
+    messageIdBase,
   } = input;
 
   const message = formatRepoRoomEventMessage({
@@ -52,7 +56,15 @@ export async function emitRepoRoomEventProjectionMessage(input: {
       parent_event_kind: "major_activity",
       event_kind: "github",
       github_routing_context: githubRoutingContext,
+      client_message_id: messageIdBase ? `${messageIdBase}:task-event` : null,
+      parent_client_message_id: messageIdBase ? `${messageIdBase}:task-event-anchor` : null,
     });
+    if (eventProject.id !== linkedTaskProject.id) {
+      await emitProjectMessage(eventProject.id, "github", message, {
+        source: "github",
+        client_message_id: messageIdBase ? `${messageIdBase}:event-room` : null,
+      });
+    }
   } else if (linkedTask && isolatedFocusRoom) {
     await emitTaskAnchoredMessage(linkedTaskProject.id, "github", message, linkedTask, {
       source: "github",
@@ -60,14 +72,26 @@ export async function emitRepoRoomEventProjectionMessage(input: {
       parent_event_kind: "major_activity",
       event_kind: "github",
       github_routing_context: githubRoutingContext,
+      client_message_id: messageIdBase ? `${messageIdBase}:isolated-task-event` : null,
+      parent_client_message_id: messageIdBase ? `${messageIdBase}:isolated-task-event-anchor` : null,
     });
+    if (eventProject.id !== linkedTaskProject.id) {
+      await emitProjectMessage(eventProject.id, "github", message, {
+        source: "github",
+        client_message_id: messageIdBase ? `${messageIdBase}:event-room` : null,
+      });
+    }
   } else {
-    await emitProjectMessage(project.id, "github", message, { source: "github" });
+    await emitProjectMessage(eventProject.id, "github", message, {
+      source: "github",
+      client_message_id: messageIdBase ? `${messageIdBase}:event-room` : null,
+    });
   }
 
-  if (!isolatedFocusRoom) {
+  if (!isolatedFocusRoom && eventProject.id === project.id) {
     await emitGitHubEventToAllParentRepoFocusRooms(project.id, "github", message, {
       excludeRoomIds: linkedFocusRoom ? new Set([linkedFocusRoom.id]) : undefined,
+      client_message_id_base: messageIdBase,
     });
   }
 }

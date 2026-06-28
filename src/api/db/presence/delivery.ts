@@ -29,6 +29,7 @@ export async function markRoomAgentDeliveryConnected(input: {
   display_name: string;
   owner_label?: string | null;
   ide_label?: string | null;
+  repo_branch?: string | null;
   transport: RoomAgentDeliveryTransport;
 }): Promise<RoomAgentDeliverySession> {
   const now = new Date().toISOString();
@@ -49,6 +50,7 @@ export async function markRoomAgentDeliveryConnected(input: {
       display_name: input.display_name,
       owner_label: input.owner_label ?? null,
       ide_label: input.ide_label ?? null,
+      repo_branch: input.repo_branch ?? null,
       transport: input.transport,
       active_connection_count: 1,
       last_connected_at: now,
@@ -69,6 +71,7 @@ export async function markRoomAgentDeliveryConnected(input: {
         display_name: input.display_name,
         owner_label: input.owner_label ?? null,
         ide_label: input.ide_label ?? null,
+        repo_branch: input.repo_branch ?? null,
         transport: input.transport,
         active_connection_count: sql`CASE
           WHEN ${room_agent_delivery_sessions.updated_at} < ${staleConnectionCutoff}::timestamptz THEN 1

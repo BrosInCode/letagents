@@ -49,7 +49,7 @@
               <span class="desktop-activity-avatar" :data-state="agent.activityState || 'offline'">{{ initials(agent.label) }}</span>
               <span>
                 <strong>{{ agent.label }}</strong>
-                <small>{{ agent.statusText || agent.workLabel || agent.runtime || "Ready for room messages" }}</small>
+                <small>{{ agent.statusText || branchLabel(agent) || agent.workLabel || agent.runtime || "Ready for room messages" }}</small>
               </span>
               <span class="desktop-activity-row-meta">
                 <span class="state-pill" :data-state="agent.activityState || 'offline'">{{ connectionLabel(agent) }}</span>
@@ -129,6 +129,11 @@
               <p>{{ selectedLiveParticipant.statusText }}</p>
             </article>
 
+            <article v-if="selectedLiveParticipant.repoBranch" class="desktop-activity-inspector-row">
+              <span>Branch</span>
+              <p>{{ selectedLiveParticipant.repoBranch }}</p>
+            </article>
+
             <article class="desktop-activity-inspector-row">
               <span>Session</span>
               <p v-if="selectedLiveParticipant.livenessObservation">
@@ -192,6 +197,34 @@
 
     <div v-else class="desktop-activity-layout">
       <div class="desktop-activity-groups">
+        <section v-if="roomArtifacts.length" class="desktop-activity-group">
+          <header>
+            <div>
+              <h3>Shared artifacts</h3>
+              <p>Workflow objects linked to this room.</p>
+            </div>
+            <strong>{{ roomArtifacts.length }}</strong>
+          </header>
+
+          <article
+            v-for="artifact in roomArtifacts"
+            :key="artifact.identityKey"
+            class="desktop-activity-artifact-row"
+          >
+            <span class="desktop-activity-mini-pill">{{ artifactKindLabel(artifact.kind) }}</span>
+            <span>
+              <a v-if="artifact.url" :href="artifact.url" target="_blank" rel="noopener noreferrer">
+                {{ artifactTitle(artifact) }}
+              </a>
+              <strong v-else>{{ artifactTitle(artifact) }}</strong>
+              <small>{{ artifactMeta(artifact) }}</small>
+            </span>
+            <span v-if="artifact.linkedTaskIds.length" class="desktop-activity-row-meta">
+              <span class="desktop-activity-mini-pill">{{ artifact.linkedTaskIds.length }} task{{ artifact.linkedTaskIds.length === 1 ? "" : "s" }}</span>
+            </span>
+          </article>
+        </section>
+
         <section class="desktop-activity-group">
           <header>
             <div>
@@ -215,7 +248,10 @@
             </span>
             <span>
               <strong>{{ entry.participantDisplayName }}</strong>
-              <small>{{ entry.room?.displayName || "This room" }} · {{ entry.participantKind }}</small>
+              <small>
+                {{ entry.room?.displayName || "This room" }} · {{ entry.participantKind }}
+                <template v-if="entry.repoBranch"> · branch {{ entry.repoBranch }}</template>
+              </small>
             </span>
             <span class="desktop-activity-row-meta">
               <span class="desktop-activity-mini-pill">{{ entry.currentTasks.length }} open</span>
@@ -235,6 +271,9 @@
             <p>
               {{ selectedHistoryEntry.room?.displayName || "This room" }}
               · last active {{ formatRelativeTime(selectedHistoryEntry.lastRoomActivityAt) }}
+              <template v-if="selectedHistoryEntry.repoBranch">
+                · branch {{ selectedHistoryEntry.repoBranch }}
+              </template>
             </p>
           </div>
           <span class="state-pill" :data-state="selectedHistoryEntry.activityState || 'offline'">
@@ -300,6 +339,7 @@ import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
+  DesktopRoomSharedArtifact,
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
@@ -314,6 +354,7 @@ const props = defineProps<{
   liveClearedCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  roomArtifacts: DesktopRoomSharedArtifact[];
   tasks: DesktopTaskSummary[];
   messages: DesktopRoomMessage[];
   workers: WorkerSnapshot[];
@@ -364,10 +405,44 @@ function connectionDisplayLabel(participant: ActivityParticipant): string {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+function branchLabel(participant: ActivityParticipant): string | null {
+  return participant.repoBranch ? `Branch ${participant.repoBranch}` : null;
+}
+
 function detailSubtitle(participant: ActivityParticipant): string {
   if (participant.activityState === "active" || participant.activityState === "away") return "Reachable in chat";
   if (connectionLabel(participant) === "work update") return "Work updates available";
   return "Not reachable in chat";
+}
+
+function artifactKindLabel(kind: DesktopRoomSharedArtifact["kind"]): string {
+  switch (kind) {
+    case "pull_request":
+      return "Pull request";
+    case "merge_request":
+      return "Merge request";
+    case "check_run":
+      return "Check";
+    default:
+      return kind.charAt(0).toUpperCase() + kind.slice(1).replace(/_/g, " ");
+  }
+}
+
+function artifactTitle(artifact: DesktopRoomSharedArtifact): string {
+  if (artifact.title?.trim()) return artifact.title;
+  if (artifact.ref?.trim()) return artifact.ref;
+  if (artifact.artifactNumber !== null) return `${artifactKindLabel(artifact.kind)} #${artifact.artifactNumber}`;
+  if (artifact.artifactId?.trim()) return artifact.artifactId;
+  return artifactKindLabel(artifact.kind);
+}
+
+function artifactMeta(artifact: DesktopRoomSharedArtifact): string {
+  return [
+    artifact.provider,
+    artifact.state,
+    artifact.ref ? `ref ${artifact.ref}` : null,
+    artifact.artifactNumber !== null ? `#${artifact.artifactNumber}` : null,
+  ].filter(Boolean).join(" · ");
 }
 
 onMounted(refreshActivity);

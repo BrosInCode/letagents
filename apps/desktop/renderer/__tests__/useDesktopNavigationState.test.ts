@@ -5,6 +5,7 @@ import { ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
+  DesktopGitRoomInfo,
   DesktopRoomSnapshot,
   RepoStatus,
 } from "../../electron/ipc-types";
@@ -305,6 +306,56 @@ describe("useDesktopNavigationState", () => {
     });
   });
 
+  it("labels account Git focus rooms as Git Rooms in the sidebar", () => {
+    withLocalStorage(() => {
+      const accountRooms = ref<DesktopAccountRoomEntry[]>([
+        accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
+          focusRooms: [{
+            roomIdentifier: "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9naXQtcm9vbXM",
+            displayName: "Branch: feature/git-rooms",
+            name: "Branch: feature/git-rooms",
+            kind: "focus",
+            parentRoomId: "github.com/BrosInCode/letagents",
+            focusKey: "git:branch:ZmVhdHVyZS9naXQtcm9vbXM",
+            sourceTaskId: null,
+            focusStatus: "active",
+            role: "participant",
+            source: "join",
+            firstOpenedAt: null,
+            lastOpenedAt: null,
+            latestMessageId: null,
+            latestMessageAt: null,
+            gitRoom: gitRoom(),
+          }],
+        }),
+      ]);
+      const state = useDesktopNavigationState({
+        accountRooms,
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(null),
+        selectedRootRoomIdentifier: ref<string | null>(null),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      const focusRoom = state.projectEntries.value
+        .flatMap((project) => project.focusRooms)
+        .find((room) => room.roomIdentifier?.startsWith("git-room:"));
+      assert.equal(focusRoom?.sectionLabel, "Git Room");
+      assert.equal(focusRoom?.meta, "Branch · feature/git-rooms");
+      assert.equal(focusRoom?.headline, "BrosInCode/letagents");
+    });
+  });
+
   it("does not render cached recent rooms as sidebar room rows", () => {
     withLocalStorage(() => {
       const state = useDesktopNavigationState({
@@ -377,6 +428,7 @@ function roomSnapshot(
       concludedAt: null,
       conclusionSummary: null,
       conclusionDetails: null,
+      gitRoom: null,
     },
     storage: {
       roomIdentifier: identifier,
@@ -395,6 +447,7 @@ function roomSnapshot(
     presence: [],
     reasoningSessions: [],
     recentActivity: [],
+    roomArtifacts: [],
     messages: [],
     githubEvents: null,
   };
@@ -403,7 +456,11 @@ function roomSnapshot(
 function accountRoom(
   roomIdentifier: string,
   displayName: string,
-  options: { pinned?: boolean } = {},
+  options: {
+    pinned?: boolean;
+    focusRooms?: DesktopAccountRoomEntry["focusRooms"];
+    gitRoom?: DesktopGitRoomInfo | null;
+  } = {},
 ): DesktopAccountRoomEntry {
   return {
     roomIdentifier,
@@ -425,7 +482,33 @@ function accountRoom(
     lastOpenedAt: null,
     latestMessageId: null,
     latestMessageAt: null,
-    focusRooms: [],
+    gitRoom: options.gitRoom ?? null,
+    focusRooms: options.focusRooms || [],
+  };
+}
+
+function gitRoom(): DesktopGitRoomInfo {
+  return {
+    provider: "github",
+    host: "github.com",
+    repository: {
+      id: "1",
+      fullName: "BrosInCode/letagents",
+      owner: "BrosInCode",
+      name: "letagents",
+    },
+    ref: {
+      type: "branch",
+      name: "feature/git-rooms",
+      defaultBranch: "main",
+      baseRef: "main",
+      headRef: "feature/git-rooms",
+      headRepository: null,
+    },
+    visibility: "public",
+    accessMode: "public",
+    isDefault: false,
+    source: "webhook",
   };
 }
 

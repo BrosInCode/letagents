@@ -1,5 +1,5 @@
 import type { GitHubWebhookPayload } from "../app.js";
-import { buildDeliveryScopedKey } from "./helpers.js";
+import { buildDeliveryScopedKey, normalizeGitHubTimestamp } from "./helpers.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
@@ -19,25 +19,36 @@ export function materializeCheckRunEvent(
     return null;
   }
 
+  const semanticId = `${repoIdentity}:check_run:${payload.check_run.id}:completed`;
+  const headRef = payload.check_run.check_suite?.head_branch ?? null;
+  const headSha = payload.check_run.head_sha ?? payload.check_run.check_suite?.head_sha ?? null;
+  const providerEventAt = normalizeGitHubTimestamp(
+    payload.check_run.completed_at ?? payload.check_run.started_at
+  );
+
   return {
     event_type: "check_run",
     action,
-    idempotency_key: buildDeliveryScopedKey(
-      `${repoIdentity}:check_run:${payload.check_run.id}:completed`,
-      deliveryId,
-    ),
+    idempotency_key: buildDeliveryScopedKey(semanticId, deliveryId),
+    semantic_id: semanticId,
     github_object_id: String(payload.check_run.id),
     github_object_url: payload.check_run.html_url,
     title: payload.check_run.name,
     state: payload.check_run.conclusion ?? payload.check_run.status,
     actor_login: actorLogin,
+    provider_event_at: providerEventAt,
+    provider_object_updated_at: providerEventAt,
+    ref: headRef,
+    base_ref: null,
+    head_ref: headRef,
+    head_sha: headSha,
     metadata: {
       status: payload.check_run.status,
       conclusion: payload.check_run.conclusion,
       app_name: payload.check_run.app?.name ?? null,
       suite_id: payload.check_run.check_suite?.id ?? null,
-      head_branch: payload.check_run.check_suite?.head_branch ?? null,
-      head_sha: payload.check_run.head_sha ?? payload.check_run.check_suite?.head_sha ?? null,
+      head_branch: headRef,
+      head_sha: headSha,
     },
     roomEvent: {
       ...base,

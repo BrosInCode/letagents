@@ -8,7 +8,15 @@ import {
   type AccountRoomListEntry,
   type AccountRoomListFocusRoom,
 } from "../../account-room-membership.js";
+import {
+  getGitRoomBindingsForRooms,
+  type GitRoomBinding,
+} from "../../db.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
+import {
+  formatGitRoomSummary,
+  formatManualGitRoomSummaryForRoomId,
+} from "../../rooms/formatting.js";
 
 export interface AccountRoomRouteDeps {
   getAccountRoomsForAccount(
@@ -40,16 +48,27 @@ export interface AccountRoomRouteDeps {
     pinned?: boolean;
     archived?: boolean;
   }): Promise<{ room_id: string; pinned: boolean; archived: boolean } | null>;
+  getGitRoomBindingsForRooms?(
+    roomIds: string[]
+  ): Promise<Map<string, GitRoomBinding>>;
 }
 
 const defaultDeps: AccountRoomRouteDeps = {
   archiveAccountRoomForAccount,
   deleteAccountRoomForAccount,
+  getGitRoomBindingsForRooms,
   getAccountRoomsForAccount,
   updateAccountRoomPreferences,
 };
 
-function toAccountFocusRoomResponse(room: AccountRoomListFocusRoom): Record<string, unknown> {
+function toAccountFocusRoomResponse(
+  room: AccountRoomListFocusRoom,
+  gitRoomBinding?: GitRoomBinding
+): Record<string, unknown> {
+  const gitRoomSummary =
+    formatGitRoomSummary(gitRoomBinding ?? null) ??
+    formatManualGitRoomSummaryForRoomId(room.room_id);
+
   return {
     room_id: room.room_id,
     id: room.room_id,
@@ -66,10 +85,21 @@ function toAccountFocusRoomResponse(room: AccountRoomListFocusRoom): Record<stri
     last_opened_at: room.last_opened_at,
     latest_message_id: room.latest_message_id,
     latest_message_at: room.latest_message_at,
+    ...(gitRoomSummary
+      ? { git_room: gitRoomSummary }
+      : {}),
   };
 }
 
-function toAccountRoomResponse(room: AccountRoomListEntry): Record<string, unknown> {
+function toAccountRoomResponse(
+  room: AccountRoomListEntry,
+  gitRoomBinding?: GitRoomBinding | null,
+  gitRoomBindings?: Map<string, GitRoomBinding>
+): Record<string, unknown> {
+  const gitRoomSummary =
+    formatGitRoomSummary(gitRoomBinding ?? null) ??
+    formatManualGitRoomSummaryForRoomId(room.room_id);
+
   return {
     room_id: room.room_id,
     id: room.room_id,
@@ -91,8 +121,27 @@ function toAccountRoomResponse(room: AccountRoomListEntry): Record<string, unkno
     last_opened_at: room.last_opened_at,
     latest_message_id: room.latest_message_id,
     latest_message_at: room.latest_message_at,
-    focus_rooms: room.focus_rooms.map(toAccountFocusRoomResponse),
+    ...(gitRoomBinding !== undefined
+      ? { git_room: gitRoomSummary }
+      : {}),
+    focus_rooms: room.focus_rooms.map((focusRoom) =>
+      toAccountFocusRoomResponse(
+        focusRoom,
+        gitRoomBindings?.get(focusRoom.room_id)
+      )
+    ),
   };
+}
+
+function accountRoomBindingIds(rooms: AccountRoomListEntry[]): string[] {
+  const roomIds = new Set<string>();
+  for (const room of rooms) {
+    roomIds.add(room.room_id);
+    for (const focusRoom of room.focus_rooms) {
+      roomIds.add(focusRoom.room_id);
+    }
+  }
+  return Array.from(roomIds);
 }
 
 function accountRoomIdParam(req: AuthenticatedRequest): string {
@@ -120,8 +169,21 @@ export function registerAccountRoomRoutes(
       limit: Number.isFinite(limit) ? limit : 50,
       includeArchived: String(req.query.include_archived || "").toLowerCase() === "true",
     });
+    const gitRoomBindings = deps.getGitRoomBindingsForRooms
+      ? await deps.getGitRoomBindingsForRooms(accountRoomBindingIds(rooms))
+      : null;
 
-    res.json({ rooms: rooms.map(toAccountRoomResponse) });
+    res.json({
+      rooms: rooms.map((room) =>
+        gitRoomBindings
+          ? toAccountRoomResponse(
+              room,
+              gitRoomBindings.get(room.room_id) ?? null,
+              gitRoomBindings
+            )
+          : toAccountRoomResponse(room)
+      ),
+    });
   });
 
   app.post(/^\/account\/rooms\/(.+)\/leave$/, async (req: AuthenticatedRequest, res) => {

@@ -108,6 +108,7 @@ export function buildFallbackPresenceFromMessages(input: {
         display_name: parsed?.display_name || actorLabel,
         owner_label: getOwnerLabel(parsed?.owner_attribution),
         ide_label: parsed?.ide_label ?? null,
+        repo_branch: null,
         status: classifyPresenceStatusText(statusText),
         status_text: statusText || null,
         last_heartbeat_at: lastHeartbeatAt,
@@ -129,6 +130,7 @@ export function buildSyntheticPresenceEntry(input: {
   displayName: string;
   ownerLabel: string | null;
   ideLabel: string | null;
+  repoBranch?: string | null;
   status: AgentPresenceStatus;
   statusText: string | null;
   now?: number;
@@ -145,6 +147,7 @@ export function buildSyntheticPresenceEntry(input: {
     display_name: input.displayName,
     owner_label: input.ownerLabel,
     ide_label: input.ideLabel,
+    repo_branch: input.repoBranch ?? null,
     status: input.status,
     status_text: input.statusText,
     last_heartbeat_at: timestamp,

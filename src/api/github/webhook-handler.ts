@@ -24,6 +24,7 @@ import {
   createGitHubAppSync,
   toGitHubWebhookId,
 } from "./app-sync.js";
+import { getExistingGitHubEventRefRoom } from "./git-room-routing.js";
 import { materializeGitHubWebhookEvent } from "./room-events.js";
 import {
   handleMaterializedGitHubRoomEvent,
@@ -39,6 +40,10 @@ const {
   upsertGitHubAppRepository,
   upsertGitHubRepositoryLink,
 });
+
+interface GitHubWebhookProcessingOptions {
+  retryFailedDelivery?: boolean;
+}
 
 function clearRepoAccessCacheForWebhookPayload(payload: GitHubWebhookPayload): void {
   if (payload.repository?.full_name) {
@@ -57,7 +62,8 @@ function clearRepoAccessCacheForWebhookPayload(payload: GitHubWebhookPayload): v
 async function emitGitHubPullRequestEvent(
   project: Project,
   payload: GitHubWebhookPayload,
-  deliveryId: string
+  deliveryId: string,
+  options: GitHubWebhookProcessingOptions = {}
 ): Promise<{
   status: Exclude<GitHubWebhookDeliveryStatus, "received">;
   installationId: string | null;
@@ -89,10 +95,19 @@ async function emitGitHubPullRequestEvent(
     };
   }
 
+  const eventProject = await getExistingGitHubEventRefRoom({
+    event: materializedEvent,
+    payload,
+    repository: payload.repository,
+    githubRepoId: repositorySync.githubRepoId,
+  });
+
   return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
     deliveryId,
     installationId: repositorySync.installationId,
     githubRepoId: repositorySync.githubRepoId,
+    eventProject,
+    retryFailedDelivery: options.retryFailedDelivery,
   });
 }
 
@@ -104,7 +119,8 @@ async function handleMaterializedRepoRoomWebhook(
     installationId: string | null;
     githubRepoId: string | null;
     roomId: string | null;
-  }
+  },
+  options: GitHubWebhookProcessingOptions = {}
 ): Promise<{
   status: Exclude<GitHubWebhookDeliveryStatus, "received">;
   installationId: string | null;
@@ -131,17 +147,27 @@ async function handleMaterializedRepoRoomWebhook(
     };
   }
 
+  const eventProject = await getExistingGitHubEventRefRoom({
+    event: materializedEvent,
+    payload,
+    repository: payload.repository,
+    githubRepoId: input.githubRepoId,
+  });
+
   return handleMaterializedGitHubRoomEvent(project, materializedEvent, {
     deliveryId,
     installationId: input.installationId,
     githubRepoId: input.githubRepoId,
+    eventProject,
+    retryFailedDelivery: options.retryFailedDelivery,
   });
 }
 
 export async function handleGitHubWebhookEvent(
   eventName: string,
   payload: GitHubWebhookPayload,
-  deliveryId: string
+  deliveryId: string,
+  options: GitHubWebhookProcessingOptions = {}
 ): Promise<{
   status: Exclude<GitHubWebhookDeliveryStatus, "received">;
   installationId: string | null;
@@ -328,7 +354,7 @@ export async function handleGitHubWebhookEvent(
         };
       }
 
-      return emitGitHubPullRequestEvent(project, payload, deliveryId);
+      return emitGitHubPullRequestEvent(project, payload, deliveryId, options);
     }
 
     case "repository": {
@@ -382,6 +408,7 @@ export async function handleGitHubWebhookEvent(
             deliveryId,
             installationId: syncedInstallationId,
             githubRepoId: repositorySync.githubRepoId,
+            retryFailedDelivery: options.retryFailedDelivery,
           });
         }
 
@@ -410,11 +437,14 @@ export async function handleGitHubWebhookEvent(
     case "issue_comment":
     case "pull_request_review":
     case "check_run":
+    case "push":
+    case "create":
+    case "delete":
       return handleMaterializedRepoRoomWebhook(eventName, payload, deliveryId, {
         installationId,
         githubRepoId,
         roomId,
-      });
+      }, options);
 
     default:
       return {

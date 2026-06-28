@@ -25,6 +25,29 @@ import {
   appAgentPanelPositionFromLauncher,
 } from "../src/components/desktop/app-agent/useAppAgentPosition";
 
+const gitRoom = {
+  provider: "github",
+  host: "github.com",
+  repository: {
+    id: "repo_1",
+    fullName: "owner/repo",
+    owner: "owner",
+    name: "repo",
+  },
+  ref: {
+    type: "branch" as const,
+    name: "codex/git-rooms",
+    defaultBranch: "main",
+    baseRef: "main",
+    headRef: "codex/git-rooms",
+    headRepository: null,
+  },
+  visibility: "private" as const,
+  accessMode: "private" as const,
+  isDefault: false,
+  source: "webhook",
+};
+
 test("App Agent submit input trims prompts and includes the active room", () => {
   assert.deepEqual(
     buildAppAgentRunInput({
@@ -32,12 +55,14 @@ test("App Agent submit input trims prompts and includes the active room", () => 
       activeRoomDisplayName: "The Test Room",
       activeRoomIdentifier: "room_1",
       activeRoomPinned: false,
+      activeRoomGitRoom: gitRoom,
     }),
     {
       prompt: "Pin the LetAgents room.",
       activeRoomIdentifier: "room_1",
       activeRoomDisplayName: "The Test Room",
       activeRoomPinned: false,
+      activeRoomGitRoom: gitRoom,
       selectedAction: null,
       confirmedAction: null,
       confirmedPlan: null,

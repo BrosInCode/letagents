@@ -257,6 +257,118 @@ test("materializeGitHubWebhookEvent uses head SHA for pull_request synchronize i
     event?.idempotency_key,
     "brosincode/letagents:pr:98:sync:abc123def456:delivery:delivery-pr-sync-1"
   );
+  assert.equal(event?.semantic_id, "brosincode/letagents:pr:98:sync:abc123def456");
+  assert.equal(event?.head_sha, "abc123def456");
+});
+
+test("materializeGitHubWebhookEvent maps push into branch-scoped room events", () => {
+  const event = materializeGitHubWebhookEvent(
+    "push",
+    {
+      ref: "refs/heads/codex/git-rooms-event-spine",
+      before: "abc123abc123",
+      after: "def456def456",
+      compare: "https://github.com/BrosInCode/letagents/compare/abc123...def456",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        html_url: "https://github.com/BrosInCode/letagents",
+        owner: { login: "BrosInCode" },
+        pushed_at: "2026-06-28T10:15:00Z",
+      },
+      sender: { login: "EmmyMay" },
+      head_commit: {
+        id: "def456def456",
+        message: "task_4: wire branch events",
+        timestamp: "2026-06-28T10:14:59Z",
+      },
+      commits: [
+        {
+          id: "def456def456",
+          message: "task_4: wire branch events",
+          timestamp: "2026-06-28T10:14:59Z",
+        },
+      ],
+    },
+    "delivery-push-1"
+  );
+
+  assert.ok(event);
+  assert.equal(event?.event_type, "push");
+  assert.equal(event?.action, "push");
+  assert.equal(
+    event?.semantic_id,
+    "brosincode/letagents:push:refs/heads/codex/git-rooms-event-spine:abc123abc123:def456def456"
+  );
+  assert.equal(
+    event?.idempotency_key,
+    "brosincode/letagents:push:refs/heads/codex/git-rooms-event-spine:abc123abc123:def456def456:delivery:delivery-push-1"
+  );
+  assert.equal(event?.provider_event_at, "2026-06-28T10:14:59.000Z");
+  assert.equal(event?.ref, "refs/heads/codex/git-rooms-event-spine");
+  assert.equal(event?.head_ref, "codex/git-rooms-event-spine");
+  assert.equal(event?.head_sha, "def456def456");
+  assert.equal(event?.roomEvent?.kind, "push");
+  assert.deepEqual(buildRepoRoomEventArtifactMatches(event!.roomEvent!), [
+    {
+      provider: "github",
+      kind: "branch",
+      ref: "codex/git-rooms-event-spine",
+    },
+  ]);
+  assert.deepEqual(getRepoRoomEventReferenceTexts(event!.roomEvent!), [
+    "codex/git-rooms-event-spine",
+    "task_4: wire branch events",
+  ]);
+  assert.equal(
+    formatRepoRoomEventMessage({ event: event!.roomEvent!, linkedTaskId: "task_4" }),
+    "EmmyMay pushed def456d to branch codex/git-rooms-event-spine in BrosInCode/letagents linked to task_4 https://github.com/BrosInCode/letagents/compare/abc123...def456"
+  );
+});
+
+test("materializeGitHubWebhookEvent maps branch create without a GitHub action field", () => {
+  const event = materializeGitHubWebhookEvent(
+    "create",
+    {
+      ref: "codex/git-rooms-event-spine",
+      ref_type: "branch",
+      master_branch: "staging",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        html_url: "https://github.com/BrosInCode/letagents",
+        default_branch: "staging",
+        updated_at: "2026-06-28T11:00:00Z",
+        owner: { login: "BrosInCode" },
+      },
+      sender: { login: "EmmyMay" },
+    },
+    "delivery-create-branch-1"
+  );
+
+  assert.ok(event);
+  assert.equal(event?.event_type, "create");
+  assert.equal(event?.action, "create");
+  assert.equal(
+    event?.semantic_id,
+    "brosincode/letagents:create:branch:codex/git-rooms-event-spine"
+  );
+  assert.equal(event?.base_ref, "staging");
+  assert.equal(event?.head_ref, "codex/git-rooms-event-spine");
+  assert.equal(event?.roomEvent?.kind, "branch_ref");
+  assert.deepEqual(buildRepoRoomEventArtifactMatches(event!.roomEvent!), [
+    {
+      provider: "github",
+      kind: "branch",
+      ref: "codex/git-rooms-event-spine",
+    },
+  ]);
+  assert.equal(
+    formatRepoRoomEventMessage({ event: event!.roomEvent!, linkedTaskId: "task_4" }),
+    "EmmyMay created branch codex/git-rooms-event-spine in BrosInCode/letagents linked to task_4"
+  );
 });
 
 test("materializeGitHubWebhookEvent preserves pull request context for issue comments on PRs", () => {

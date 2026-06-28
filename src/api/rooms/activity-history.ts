@@ -33,6 +33,7 @@ export interface RoomActivityHistoryEntry {
     display_name: string;
     owner_label: string | null;
     ide_label: string | null;
+    repo_branch: string | null;
     hidden_at: string | null;
     hidden_by: string | null;
     last_live_heartbeat_at: string | null;
@@ -171,6 +172,7 @@ function buildHistorySearchText(input: {
   githubLogin: string | null;
   ownerLabel: string | null;
   ideLabel: string | null;
+  repoBranch?: string | null;
   currentTasks: ReadonlyArray<SearchableTaskLike>;
   completedTasks: ReadonlyArray<SearchableTaskLike>;
   createdTasks: ReadonlyArray<SearchableTaskLike>;
@@ -183,6 +185,7 @@ function buildHistorySearchText(input: {
     input.githubLogin,
     input.ownerLabel,
     input.ideLabel,
+    input.repoBranch,
     ...buildTaskSearchText(input.currentTasks),
     ...buildTaskSearchText(input.completedTasks),
     ...buildTaskSearchText(input.createdTasks),
@@ -195,7 +198,8 @@ function buildHistorySearchText(input: {
 function buildEntrySearchText(entry: RoomActivityHistoryEntry): string {
   const cached = (entry as RoomActivityHistoryEntryWithSearch)[SEARCH_TEXT];
   if (cached) {
-    return cached;
+    const repoBranch = normalize(entry.participant.repo_branch);
+    return repoBranch ? `${cached} ${repoBranch}` : cached;
   }
 
   return buildHistorySearchText({
@@ -206,6 +210,7 @@ function buildEntrySearchText(entry: RoomActivityHistoryEntry): string {
     githubLogin: entry.participant.github_login,
     ownerLabel: entry.participant.owner_label,
     ideLabel: entry.participant.ide_label,
+    repoBranch: entry.participant.repo_branch,
     currentTasks: entry.current_tasks,
     completedTasks: entry.completed_tasks,
     createdTasks: entry.created_tasks,
@@ -294,6 +299,7 @@ export function buildRoomActivityHistoryEntries(input: {
           display_name: participant.display_name,
           owner_label: participant.owner_label,
           ide_label: participant.ide_label,
+          repo_branch: null,
           hidden_at: participant.hidden_at,
           hidden_by: participant.hidden_by,
           last_live_heartbeat_at: participant.last_live_heartbeat_at,
@@ -323,11 +329,12 @@ export function buildRoomActivityHistoryEntries(input: {
           githubLogin: participant.github_login,
           ownerLabel: participant.owner_label,
           ideLabel: participant.ide_label,
+          repoBranch: null,
           currentTasks,
           completedTasks,
           createdTasks,
         }),
-        enumerable: false,
+        enumerable: true,
       });
 
       return entry;

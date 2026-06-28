@@ -11,10 +11,36 @@
       {{ detailCopy }}
     </p>
 
+    <section v-if="room.git_room" class="focus-audit-card focus-git-room-card">
+      <p class="focus-eyebrow">Git Room</p>
+      <div class="focus-git-room-title">
+        <GitBranchIcon :size="16" />
+        <strong>{{ gitRoomRefLabel(room.git_room) }}</strong>
+      </div>
+      <dl class="focus-git-facts">
+        <div>
+          <dt>Provider</dt>
+          <dd>{{ gitRoomProviderLabel(room.git_room) }}</dd>
+        </div>
+        <div>
+          <dt>Repository</dt>
+          <dd>{{ room.git_room.repository.full_name }}</dd>
+        </div>
+        <div>
+          <dt>Ref</dt>
+          <dd>{{ gitRoomRefTypeLabel(room.git_room) }} · {{ gitRoomRefLabel(room.git_room) }}</dd>
+        </div>
+        <div>
+          <dt>Access</dt>
+          <dd>{{ gitRoomAccessLabel(room.git_room) }}</dd>
+        </div>
+      </dl>
+    </section>
+
     <dl class="focus-facts">
       <div>
         <dt>Source task</dt>
-        <dd>{{ room.source_task_id || 'Ad-hoc room' }}</dd>
+        <dd>{{ sourceTaskLabel(room) }}</dd>
       </div>
       <div>
         <dt>Created</dt>
@@ -100,6 +126,7 @@
 </template>
 
 <script setup lang="ts">
+import GitBranchIcon from '@/components/icons/GitBranchIcon.vue'
 import type {
   FocusRoomInfo,
   FocusRoomSettings,
@@ -108,6 +135,10 @@ import {
   activityScopeLabel,
   blockerStateLabel,
   formatAuditTime,
+  gitRoomAccessLabel,
+  gitRoomProviderLabel,
+  gitRoomRefLabel,
+  gitRoomRefTypeLabel,
   githubRoutingLabel,
   parentTaskNextLabel,
   parentVisibilityLabel,
@@ -123,4 +154,9 @@ defineProps<{
 const emit = defineEmits<{
   openFocusRoom: []
 }>()
+
+function sourceTaskLabel(room: FocusRoomInfo): string {
+  if (room.source_task_id) return room.source_task_id
+  return room.git_room ? 'Git ref room' : 'Ad-hoc room'
+}
 </script>

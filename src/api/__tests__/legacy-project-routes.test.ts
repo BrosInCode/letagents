@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerLegacyProjectRoutes } = await import("../routes/legacy/projects.js");
+const {
+  buildLegacyProjectRoomResponse,
+  registerLegacyProjectRoutes,
+} = await import("../routes/legacy/projects.js");
 
 function createDeps() {
   const unused = async () => {
@@ -15,6 +18,13 @@ function createDeps() {
     isRepoBackedRoomId: () => false,
     isRepoBackedProject: () => false,
     resolveRepoRoomAccessDecision: unused,
+    resolveProjectRepoRoomAccessDecision: async () => ({
+      isRepoBacked: false,
+      roomName: null,
+      repoRoomName: null,
+      binding: null,
+      decision: { kind: "allow" as const },
+    }),
     replyRepoRoomAccessDecision: () => false,
     resolveProjectRole: unused,
     requireAdmin: unused,
@@ -48,4 +58,45 @@ test("registerLegacyProjectRoutes preserves project and agent management route o
     { method: "get", path: "/agents/me" },
     { method: "post", path: "/agents" },
   ]);
+});
+
+test("buildLegacyProjectRoomResponse adds Git Room metadata for repo rooms", () => {
+  assert.deepEqual(
+    buildLegacyProjectRoomResponse({
+      id: "github.com/brosincode/letagents",
+      code: null,
+      name: "github.com/brosincode/letagents",
+      display_name: "BrosInCode/letagents",
+    }),
+    {
+      id: "github.com/brosincode/letagents",
+      code: null,
+      name: "github.com/brosincode/letagents",
+      display_name: "BrosInCode/letagents",
+      git_room: {
+        room_id: "github.com/brosincode/letagents",
+        provider: "github",
+        host: "github.com",
+        repository: {
+          id: null,
+          owner: "brosincode",
+          name: "letagents",
+          full_name: "brosincode/letagents",
+        },
+        ref: {
+          type: "default_branch",
+          name: null,
+          default_branch: null,
+          base_ref: null,
+          head_ref: null,
+          head_repository: null,
+          is_default: true,
+        },
+        visibility: "unknown",
+        access_mode: "unknown",
+        source: "manual",
+        updated_at: null,
+      },
+    }
+  );
 });

@@ -21,6 +21,10 @@
         <strong>{{ activeReasoningSessionsCount }}</strong>
         <span>Active reasoning</span>
       </article>
+      <article class="summary-card">
+        <strong>{{ sharedArtifactsCount }}</strong>
+        <span>Shared artifacts</span>
+      </article>
     </template>
     <template v-else>
       <article
@@ -45,6 +49,7 @@ defineProps<{
   recentlyDisconnectedAgentsCount: number
   humansCount: number
   activeReasoningSessionsCount: number
+  sharedArtifactsCount: number
   historyCards: readonly ActivitySummaryCard[]
 }>()
 </script>

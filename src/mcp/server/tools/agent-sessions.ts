@@ -19,6 +19,7 @@ import {
   endStoredAgentSession,
   ensureAgentIdentity,
   getSessionLivenessRegistration,
+  getAgentSessionRepoBranch,
   getStoredAgentSession,
   getTargetRoomId,
   ensureLocalWorkerAgentSession,
@@ -55,8 +56,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Human-readable label for this worker session. Use distinct labels when one MCP process controls multiple workers."),
+      cwd: z
+        .string()
+        .optional()
+        .describe("Working directory used to detect the worker's active git branch. Defaults to the MCP server's working directory."),
     },
-    async ({ room_id, session_kind, runtime, display_name }) => {
+    async ({ room_id, session_kind, runtime, display_name, cwd }) => {
       const targetRoomId = getTargetRoomId(room_id);
       if (!targetRoomId) {
         return {
@@ -78,11 +83,13 @@ export function registerAgentSessionTools(server: McpServer): void {
       }
 
       const requestedRuntime = runtime?.trim() || detectAgentRuntimeLabel();
+      const repoBranch = getAgentSessionRepoBranch(cwd);
       if (await isLocalRoomStorageEnabled(targetRoomId)) {
         const session = await ensureLocalWorkerAgentSession(targetRoomId, {
           sessionKind: session_kind ?? "worker",
           runtime: requestedRuntime,
           displayName: display_name,
+          repoBranch,
         });
 
         return {
@@ -138,6 +145,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             display_name: display_name?.trim() || identity.display_name,
             session_kind: session_kind ?? "worker",
             runtime: requestedRuntime,
+            repo_branch: repoBranch,
             registration_liveness: getSessionLivenessRegistration(requestedRuntime),
           }),
         }
@@ -166,6 +174,7 @@ export function registerAgentSessionTools(server: McpServer): void {
         display_name: typeof created.display_name === "string" ? created.display_name : identity.display_name,
         owner_label: typeof created.owner_label === "string" ? created.owner_label : identity.owner_label,
         ide_label: typeof created.ide_label === "string" ? created.ide_label : identity.ide_label ?? detectAgentIdeLabel(),
+        repo_branch: typeof created.repo_branch === "string" ? created.repo_branch : repoBranch,
         created_at: typeof created.created_at === "string" ? created.created_at : new Date().toISOString(),
         updated_at: typeof created.updated_at === "string" ? created.updated_at : new Date().toISOString(),
         last_seen_at: typeof created.last_seen_at === "string" ? created.last_seen_at : new Date().toISOString(),

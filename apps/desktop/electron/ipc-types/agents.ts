@@ -95,6 +95,7 @@ export interface DesktopManagedAgentSession {
   roomIdentifier: string;
   roomDisplayName: string | null;
   repoRootPath: string;
+  repoBranch: string | null;
   status: DesktopManagedAgentSessionStatus;
   deliveryMode: DesktopManagedAgentDeliveryMode;
   canStop: boolean;

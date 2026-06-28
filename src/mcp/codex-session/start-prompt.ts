@@ -31,6 +31,7 @@ export function buildStartPrompt(input: {
   room_identifier: string;
   joined_via: JoinedVia;
   cwd: string;
+  repo_branch?: string | null;
   stop_phrase: string;
   token: string;
   deadline_utc: string | null;
@@ -44,6 +45,7 @@ export function buildStartPrompt(input: {
   return [
     "Run as a persistent local Codex worker for a LetAgents room.",
     `Primary working directory: ${input.cwd}. Use this repository/worktree when the room asks for implementation or repo work.`,
+    input.repo_branch ? `Active git branch at startup: ${input.repo_branch}.` : null,
     deadlineInstruction,
     "",
     "Instructions:",
@@ -63,5 +65,5 @@ export function buildStartPrompt(input: {
     "- Do not narrate hidden chain-of-thought.",
     "- Do not spam the room with keepalive messages.",
     "- Stay in the room continuously until stopped.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }

@@ -29,6 +29,8 @@ test("registerTaskTools preserves the public task tool surface", () => {
     "add_task",
     "get_board",
     "get_room_events",
+    "get_room_artifacts",
+    "publish_room_artifact",
     "claim_task",
     "update_task",
     "complete_task",

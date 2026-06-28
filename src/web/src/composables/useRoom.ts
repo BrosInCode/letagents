@@ -3,7 +3,10 @@ import {
   discardAttachmentUpload,
   stageAttachmentUpload,
 } from './room/attachments'
-import { fetchTasks, getGitHubEventsIdentifier } from './room/data'
+import {
+  fetchTasks,
+  getGitHubEventsIdentifier,
+} from './room/data'
 import { createRoomFocusActions } from './room/focusRoomActions'
 import {
   getReplyPreviewText,
@@ -48,6 +51,7 @@ import {
   reasoningSessions,
   removeReasoningSession,
   room,
+  roomArtifacts,
   taskGithubStatus,
   tasks,
   upsertReasoningSession,
@@ -110,11 +114,29 @@ const {
   refreshTaskGithubStatus,
   refreshTasksAndPresence,
   scheduleGitHubEventsRefresh,
+  scheduleRoomArtifactsRefresh,
   stopGitHubEventsRefresh,
+  stopRoomArtifactsRefresh,
 } = createRoomRefreshController({
   refreshParticipants,
   refreshPresence,
 })
+
+function scheduleGitHubRoomUpdates(roomIdentifier?: string | null) {
+  if (room.value && githubEventsSupported.value) {
+    scheduleGitHubEventsRefresh(
+      getGitHubEventsIdentifier(room.value),
+      githubEventsSupported.value,
+    )
+  }
+  if (room.value) {
+    void refreshTaskGithubStatus()
+  }
+  const targetRoomIdentifier = roomIdentifier || room.value?.identifier
+  if (targetRoomIdentifier) {
+    scheduleRoomArtifactsRefresh(targetRoomIdentifier)
+  }
+}
 
 const roomStream = createRoomStream({
   setConnectionState: (state) => {
@@ -129,21 +151,25 @@ const roomStream = createRoomStream({
     return true
   },
   onGitHubMessage: () => {
-    if (room.value && githubEventsSupported.value) {
-      scheduleGitHubEventsRefresh(
-        getGitHubEventsIdentifier(room.value),
-        githubEventsSupported.value,
-      )
-    }
-    if (room.value) {
-      void refreshTaskGithubStatus()
-    }
+    scheduleGitHubRoomUpdates()
+  },
+  onGitHubEvent: (roomIdentifier) => {
+    scheduleGitHubRoomUpdates(roomIdentifier)
   },
   onTaskLifecycleMessage: () => {
     if (!room.value) return
-    fetchTasks(room.value.identifier).then((nextTasks) => {
+    const roomIdentifier = room.value.identifier
+    scheduleRoomArtifactsRefresh(roomIdentifier)
+    fetchTasks(roomIdentifier).then((nextTasks) => {
+      if (room.value?.identifier !== roomIdentifier) return
       tasks.value = nextTasks
     })
+  },
+  onArtifactUpdate: (roomIdentifier) => {
+    const targetRoomIdentifier = roomIdentifier || room.value?.identifier
+    if (targetRoomIdentifier) {
+      scheduleRoomArtifactsRefresh(targetRoomIdentifier)
+    }
   },
   onAgentActivityMessage: () => {
     if (room.value) {
@@ -167,6 +193,7 @@ function startStreaming(roomIdentifier: string) {
 function stopStreaming() {
   roomStream.stop()
   stopGitHubEventsRefresh()
+  stopRoomArtifactsRefresh()
   stopPresenceControllers()
 }
 
@@ -226,6 +253,7 @@ export function useRoom() {
     activityHistoryLoading: readonly(activityHistoryLoading),
     activityHistoryError: readonly(activityHistoryError),
     reasoningSessions: readonly(reasoningSessions),
+    roomArtifacts: readonly(roomArtifacts),
     taskGithubStatus: readonly(taskGithubStatus),
     githubEvents: readonly(githubEvents),
     githubEventsAvailable: readonly(githubEventsAvailable),

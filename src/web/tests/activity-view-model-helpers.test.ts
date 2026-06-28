@@ -136,6 +136,13 @@ test('history helpers build room options and participant summaries', () => {
     'History Room',
   )
   assert.equal(buildHistoryParticipant(historyEntry).actorLabel, 'emmyleke')
+  const agentHistoryEntry = activityHistoryEntry({
+    participant: {
+      ...activityHistoryEntry().participant,
+      repo_branch: 'codex/git-rooms',
+    },
+  })
+  assert.equal(buildHistoryParticipant(agentHistoryEntry).repoBranch, 'codex/git-rooms')
   assert.equal(countHistoryOpenTasks([historyEntry]), 1)
 })
 
@@ -273,6 +280,7 @@ function activityHistoryEntry(overrides: Partial<RoomActivityHistoryEntry> = {})
       github_login: null,
       owner_label: null,
       ide_label: null,
+      repo_branch: null,
     },
     first_seen_at: '2026-05-28T00:00:00.000Z',
     last_seen_at: '2026-05-28T01:00:00.000Z',

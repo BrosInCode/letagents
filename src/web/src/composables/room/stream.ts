@@ -13,7 +13,9 @@ interface RoomStreamHandlers {
   setStreaming: (streaming: boolean) => void
   appendMessage: (message: RoomMessage) => boolean
   onGitHubMessage: () => void
+  onGitHubEvent: (roomIdentifier?: string | null) => void
   onTaskLifecycleMessage: () => void
+  onArtifactUpdate: (roomIdentifier?: string | null) => void
   onAgentActivityMessage: () => void
   onParticipantActivityMessage: () => void
   upsertTask: (task: RoomTask) => void
@@ -81,8 +83,31 @@ export function createRoomStream(handlers: RoomStreamHandlers) {
     eventSource.addEventListener('task_update', (event) => {
       try {
         handlers.upsertTask(JSON.parse(event.data) as RoomTask)
+        handlers.onArtifactUpdate(roomIdentifier)
       } catch {
         // Ignore malformed SSE payloads.
+      }
+    })
+
+    eventSource.addEventListener('github_event', (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        handlers.onGitHubEvent(
+          typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
+        )
+      } catch {
+        handlers.onGitHubEvent(roomIdentifier)
+      }
+    })
+
+    eventSource.addEventListener('artifact_update', (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        handlers.onArtifactUpdate(
+          typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
+        )
+      } catch {
+        handlers.onArtifactUpdate(roomIdentifier)
       }
     })
 

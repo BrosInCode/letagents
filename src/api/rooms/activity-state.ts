@@ -124,6 +124,7 @@ export function decorateRoomActivityHistoryEntriesWithPresence(input: {
           presenceEntry?.source_flags?.includes("delivery")
             ? presenceEntry.last_heartbeat_at
             : entry.participant.last_live_heartbeat_at,
+        repo_branch: presenceEntry?.repo_branch ?? entry.participant.repo_branch,
         activity_state: activityState,
         source_flags: buildRoomActivitySourceFlags([
           ...(entry.participant.source_flags ?? []),

@@ -12,7 +12,7 @@ import {
   ensureAgentIdentity,
   getPendingDeviceAuth,
   getStoredAuth,
-  joinRoomIdentifier,
+  joinRoomIdentifierWithoutImplicitGitRefCreate,
   setAuthenticatedAccountCache,
   setPendingDeviceAuth,
   setStoredAuth,
@@ -176,7 +176,11 @@ function registerPollDeviceAuthTool(server: McpServer): void {
 
       if (auto_join && roomToJoin) {
         const joinedVia: JoinedVia = looksLikeInviteCode(roomToJoin) ? "join_code" : "join_room";
-        const joined = await joinRoomIdentifier(roomToJoin, joinedVia);
+        const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
+          roomToJoin,
+          joinedVia,
+          { fallbackToRepo: true }
+        );
         joinedRoom = joined.room;
       }
 

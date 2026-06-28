@@ -13,6 +13,7 @@ import {
   resolveGitHubAppRoomIntegrationStatus,
 } from "../../github/app-installation.js";
 import { createGitHubAppSetupState } from "../../github/app-setup-state.js";
+import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 
@@ -30,7 +31,16 @@ export interface GitHubIntegrationRouteDeps {
     project: Project
   ): Promise<boolean>;
   getProjectAccessRoomId(project: Project): string;
-  isRepoBackedProject(project: Project): boolean;
+  resolveProjectRepoRoomAccessDecision(input: {
+    project: Project;
+    sessionAccount: AuthenticatedRequest["sessionAccount"];
+  }): Promise<ProjectRepoAccessDecision>;
+}
+
+interface GitHubRoomIntegrationProject {
+  project: Project;
+  accessRoomId: string;
+  repoRoomId: string;
 }
 
 async function getGitHubRoomIntegrationProject(
@@ -38,14 +48,18 @@ async function getGitHubRoomIntegrationProject(
   req: AuthenticatedRequest,
   res: Response,
   rawId: string
-): Promise<Project | null> {
+): Promise<GitHubRoomIntegrationProject | null> {
   const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
   const project = await deps.resolveRoomOrReply(roomId, res);
   if (!project) {
     return null;
   }
 
-  if (!deps.isRepoBackedProject(project)) {
+  const accessDecision = await deps.resolveProjectRepoRoomAccessDecision({
+    project,
+    sessionAccount: req.sessionAccount,
+  });
+  if (!accessDecision.isRepoBacked || !accessDecision.repoRoomName) {
     res.status(400).json({ error: "GitHub App integrations are only available for repo-backed rooms" });
     return null;
   }
@@ -54,7 +68,11 @@ async function getGitHubRoomIntegrationProject(
     return null;
   }
 
-  return project;
+  return {
+    project,
+    accessRoomId: accessDecision.roomName ?? deps.getProjectAccessRoomId(project),
+    repoRoomId: accessDecision.repoRoomName,
+  };
 }
 
 function isPlatformAdmin(req: AuthenticatedRequest): boolean {
@@ -69,12 +87,11 @@ function isPlatformAdmin(req: AuthenticatedRequest): boolean {
 }
 
 async function buildGitHubRoomIntegrationResponse(
-  deps: GitHubIntegrationRouteDeps,
+  context: GitHubRoomIntegrationProject,
   req: AuthenticatedRequest,
-  project: Project
 ): Promise<ReturnType<typeof resolveGitHubAppRoomIntegrationStatus>> {
   const config = await getGitHubAppConfig();
-  const repository = await getGitHubAppRepositoryByRoomId(deps.getProjectAccessRoomId(project));
+  const repository = await getGitHubAppRepositoryByRoomId(context.repoRoomId);
   const installation = repository
     ? await getGitHubAppInstallationById(repository.installation_id)
     : null;
@@ -95,10 +112,11 @@ export function registerGitHubIntegrationSetupRoute(
 ): void {
   app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/setup-manifest$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const project = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
-    if (!project) {
+    const context = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
+    if (!context) {
       return;
     }
+    const { project } = context;
 
     if (!(await deps.requireAdmin(req, res, project))) {
       return;
@@ -130,7 +148,10 @@ export function registerGitHubIntegrationSetupRoute(
         "pull_request_review",
         "issues",
         "issue_comment",
-        "check_run"
+        "check_run",
+        "push",
+        "create",
+        "delete"
       ]
     });
 
@@ -148,38 +169,43 @@ export function registerGitHubIntegrationRoutes(
 ): void {
   app.get(/^\/api\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const project = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
-    if (!project) {
+    const context = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
+    if (!context) {
       return;
     }
+    const { project } = context;
 
     res.json({
       room_id: project.id,
-      access_room_id: deps.getProjectAccessRoomId(project),
-      ...(await buildGitHubRoomIntegrationResponse(deps, req, project)),
+      access_room_id: context.accessRoomId,
+      repo_room_id: context.repoRoomId,
+      ...(await buildGitHubRoomIntegrationResponse(context, req)),
     });
   });
 
   app.get(/^\/rooms\/(.+)\/integrations\/github$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const project = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
-    if (!project) {
+    const context = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
+    if (!context) {
       return;
     }
+    const { project } = context;
 
     res.json({
       room_id: project.id,
-      access_room_id: deps.getProjectAccessRoomId(project),
-      ...(await buildGitHubRoomIntegrationResponse(deps, req, project)),
+      access_room_id: context.accessRoomId,
+      repo_room_id: context.repoRoomId,
+      ...(await buildGitHubRoomIntegrationResponse(context, req)),
     });
   });
 
   app.post(/^\/api\/rooms\/(.+)\/integrations\/github\/install-url$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const project = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
-    if (!project) {
+    const context = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
+    if (!context) {
       return;
     }
+    const { project } = context;
 
     if (!(await deps.requireAdmin(req, res, project))) {
       return;
@@ -207,10 +233,11 @@ export function registerGitHubIntegrationRoutes(
 
   app.post(/^\/rooms\/(.+)\/integrations\/github\/install-url$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
-    const project = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
-    if (!project) {
+    const context = await getGitHubRoomIntegrationProject(deps, req, res, rawId);
+    if (!context) {
       return;
     }
+    const { project } = context;
 
     if (!(await deps.requireAdmin(req, res, project))) {
       return;

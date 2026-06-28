@@ -4,6 +4,7 @@ import test from "node:test";
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const {
   registerGitHubWebhookRoutes,
+  shouldRetryFailedDuplicateGitHubWebhookDelivery,
   shouldSkipDuplicateGitHubWebhookDelivery,
 } = await import("../routes/github/webhooks.js");
 
@@ -74,6 +75,28 @@ test("duplicate GitHub webhooks only retry previously failed deliveries", () => 
     shouldSkipDuplicateGitHubWebhookDelivery({
       duplicate: false,
       delivery: { status: "processed" },
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldRetryFailedDuplicateGitHubWebhookDelivery({
+      duplicate: true,
+      delivery: { status: "failed" },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRetryFailedDuplicateGitHubWebhookDelivery({
+      duplicate: true,
+      delivery: { status: "processed" },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRetryFailedDuplicateGitHubWebhookDelivery({
+      duplicate: false,
+      delivery: { status: "failed" },
     }),
     false,
   );

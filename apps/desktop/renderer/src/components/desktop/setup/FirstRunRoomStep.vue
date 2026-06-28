@@ -11,7 +11,7 @@
           </svg>
         </span>
         <div>
-          <strong>Open a repo room</strong>
+          <strong>Open a Git Room</strong>
           <p>Choose a GitHub repository and open the shared room where humans and agents work together.</p>
           <button
             class="room-choice-action"
@@ -130,7 +130,7 @@ const checklist = computed(() => [
       },
   {
     title: "Choose the room",
-    copy: "Open a repo room now, or join another room with an invite code later.",
+    copy: "Open a Git Room now, or join another room with an invite code later.",
   },
 ]);
 </script>

@@ -85,6 +85,7 @@ function room(
     lastOpenedAt: null,
     latestMessageId: null,
     latestMessageAt: null,
+    gitRoom: null,
     focusRooms: [],
   };
 }

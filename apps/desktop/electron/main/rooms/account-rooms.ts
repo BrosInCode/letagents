@@ -18,6 +18,7 @@ import {
   setLocalRoomPinned,
 } from "./local-store.js";
 import { mergeDesktopAccountRoomEntries } from "./account-room-list.js";
+import { mapDesktopGitRoomPayload } from "./git-room.js";
 
 type AccountLocalRoom = {
   roomIdentifier: string;
@@ -75,6 +76,7 @@ function mapDesktopAccountFocusRoomEntry(
       typeof payload.latest_message_at === "string"
         ? payload.latest_message_at
         : null,
+    gitRoom: mapDesktopGitRoomPayload(payload.git_room),
   };
 }
 
@@ -144,6 +146,7 @@ function mapDesktopAccountRoomEntry(
       typeof payload.latest_message_at === "string"
         ? payload.latest_message_at
         : null,
+    gitRoom: mapDesktopGitRoomPayload(payload.git_room),
     focusRooms,
   };
 }

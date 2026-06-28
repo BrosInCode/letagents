@@ -116,6 +116,7 @@ function presence(overrides: Partial<DesktopAgentPresence> = {}): DesktopAgentPr
     displayName: "Blake",
     ownerLabel: null,
     ideLabel: "Codex",
+    repoBranch: null,
     status: "working",
     statusText: null,
     lastHeartbeatAt: "2026-05-28T00:00:00.000Z",

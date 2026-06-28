@@ -11,6 +11,7 @@ const emptySnapshotData: RoomSnapshotData = {
   presenceData: { presence: [] },
   reasoningData: { sessions: [], reasoning_sessions: [] },
   activityHistoryData: { entries: [] },
+  roomArtifactsData: { artifacts: [] },
   messagesData: { messages: [] },
   githubEventsData: null,
 };
@@ -41,6 +42,33 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
           parent_task_next: "move_to_review",
           next_owner: "EmmyMay",
         },
+        git_room: {
+          provider: "github",
+          host: "github.com",
+          repository: {
+            id: "1",
+            full_name: "BrosInCode/letagents",
+            owner: "BrosInCode",
+            name: "letagents",
+          },
+          ref: {
+            type: "branch",
+            name: "feature/git-rooms",
+            default_branch: "main",
+            base_ref: "main",
+            head_ref: "feature/git-rooms",
+            head_repository: {
+              id: "2",
+              full_name: "Contributor/letagents",
+              owner: "Contributor",
+              name: "letagents",
+            },
+          },
+          visibility: "private",
+          access_mode: "private",
+          is_default: false,
+          source: "webhook",
+        },
         created_at: "2026-05-12T09:00:00.000Z",
       }],
     },
@@ -69,6 +97,7 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
         display_name: "Cloud",
         owner_label: "Owner",
         ide_label: "Codex",
+        repo_branch: "feature/git-rooms",
         status: "working",
         status_text: "Refactoring",
         last_heartbeat_at: "2026-05-12T10:05:00.000Z",
@@ -101,6 +130,7 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
           display_name: "Cloud",
           kind: "agent",
           actor_label: "Cloud | Owner | Agent",
+          repo_branch: "codex/desktop-events",
           activity_state: "active",
         },
         last_room_activity_at: "2026-05-12T11:30:00.000Z",
@@ -120,6 +150,26 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
         }],
         completed_tasks: [],
       }],
+    },
+    roomArtifactsData: {
+      artifacts: [
+        {
+          room_id: "room_1",
+          identity_key: "github:branch:ref:codex/desktop-events",
+          provider: "github",
+          kind: "branch",
+          artifact_id: null,
+          artifact_number: null,
+          title: "Branch codex/desktop-events",
+          url: null,
+          ref: "codex/desktop-events",
+          state: "pushed",
+          source: "github_event",
+          first_seen_at: "2026-05-12T10:40:00.000Z",
+          updated_at: "2026-05-12T11:10:00.000Z",
+          linked_task_ids: ["task_1"],
+        },
+      ],
     },
     messagesData: {
       messages: [
@@ -182,15 +232,23 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
   assert.equal(snapshot.focusRooms[0]?.focusSettings?.github_event_routing, "off");
   assert.equal(snapshot.focusRooms[0]?.conclusionSummary, "Ready for review");
   assert.equal(snapshot.focusRooms[0]?.conclusionDetails?.parent_task_next, "move_to_review");
+  assert.equal(snapshot.focusRooms[0]?.gitRoom?.repository.fullName, "BrosInCode/letagents");
+  assert.equal(snapshot.focusRooms[0]?.gitRoom?.ref.headRepository?.owner, "Contributor");
+  assert.equal(snapshot.focusRooms[0]?.gitRoom?.accessMode, "private");
   assert.equal(snapshot.participantHiddenCount, 2);
   assert.equal(snapshot.participants[0]?.agentKey, "owner/cloud");
+  assert.equal(snapshot.presence[0]?.repoBranch, "feature/git-rooms");
   assert.equal(snapshot.presence[0]?.livenessObservation, null);
   assert.deepEqual(snapshot.reasoningSessions.map((session) => session.id), [
     "reasoning_new",
     "reasoning_old",
   ]);
   assert.equal(snapshot.recentActivity[0]?.currentTasks[0]?.workflowRefs[0]?.label, "#1");
+  assert.equal(snapshot.recentActivity[0]?.repoBranch, "codex/desktop-events");
   assert.deepEqual(snapshot.messages.map((message) => message.id), ["msg_1", "msg_2"]);
+  assert.equal(snapshot.roomArtifacts[0]?.identityKey, "github:branch:ref:codex/desktop-events");
+  assert.equal(snapshot.roomArtifacts[0]?.kind, "branch");
+  assert.deepEqual(snapshot.roomArtifacts[0]?.linkedTaskIds, ["task_1"]);
   assert.equal(snapshot.githubEvents?.githubRoomIdentifier, "github.com/BrosInCode/letagents");
   assert.equal(snapshot.githubEvents?.hasMore, true);
   assert.deepEqual(snapshot.githubEvents?.events.map((event) => event.id), ["evt_newer", "evt_older"]);

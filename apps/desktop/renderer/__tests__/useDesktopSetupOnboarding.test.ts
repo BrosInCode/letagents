@@ -200,6 +200,7 @@ function snapshotFixture(identifier: string, displayName: string): DesktopRoomSn
     presence: [],
     reasoningSessions: [],
     recentActivity: [],
+    roomArtifacts: [],
     messages: [],
     githubEvents: null,
   };

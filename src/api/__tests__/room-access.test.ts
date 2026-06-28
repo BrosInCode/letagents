@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Response } from "express";
-import type { Project } from "../db.js";
+import type { GitRoomBinding, Project } from "../db.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
@@ -14,6 +14,7 @@ const {
   requireAdmin,
   requireParticipant,
   resolveGitHubRoomEntryDecision,
+  resolveProjectRepoRoomAccessDecision,
   resolveRepoRoomAccessDecision,
 } = await import("../rooms/access.js");
 
@@ -22,6 +23,32 @@ function project(id: string, parentRoomId: string | null = null): Project {
     id,
     parent_room_id: parentRoomId,
   } as Project;
+}
+
+function gitRoomBinding(roomId: string): GitRoomBinding {
+  return {
+    room_id: roomId,
+    provider: "github",
+    host: "github.com",
+    repository_id: "repo_1",
+    repository_full_name: "BrosInCode/letagents",
+    repository_owner: "BrosInCode",
+    repository_name: "letagents",
+    ref_type: "branch",
+    ref_name: "git-rooms",
+    default_branch: "main",
+    base_ref: null,
+    head_ref: "git-rooms",
+    head_repository_id: null,
+    head_repository_full_name: null,
+    head_repository_owner: null,
+    head_repository_name: null,
+    visibility: "private",
+    is_default: false,
+    source: "manual",
+    created_at: "2026-06-28T00:00:00.000Z",
+    updated_at: "2026-06-28T00:00:00.000Z",
+  };
 }
 
 function jsonResponse() {
@@ -64,6 +91,59 @@ test("resolveRepoRoomAccessDecision allows non-repo rooms without auth", async (
     }),
     { kind: "allow" }
   );
+});
+
+test("project repo access uses locator rooms without binding lookup", async () => {
+  let bindingLookups = 0;
+  const decision = await resolveProjectRepoRoomAccessDecision(
+    {
+      project: project("github.com/BrosInCode/letagents"),
+      sessionAccount: null,
+    },
+    {
+      getGitRoomBindingForRoom: async () => {
+        bindingLookups += 1;
+        throw new Error("binding lookup should not run for locator rooms");
+      },
+      resolveRepoRoomAccessDecision: async ({ roomName }) => {
+        assert.equal(roomName, "github.com/BrosInCode/letagents");
+        return { kind: "allow" };
+      },
+    }
+  );
+
+  assert.equal(bindingLookups, 0);
+  assert.equal(decision.isRepoBacked, true);
+  assert.equal(decision.roomName, "github.com/BrosInCode/letagents");
+  assert.equal(decision.repoRoomName, "github.com/BrosInCode/letagents");
+  assert.equal(decision.binding, null);
+  assert.deepEqual(decision.decision, { kind: "allow" });
+});
+
+test("project repo access resolves binding-backed rooms to their GitHub repo", async () => {
+  const checkedRepoRooms: string[] = [];
+  const binding = gitRoomBinding("focus_27");
+
+  const decision = await resolveProjectRepoRoomAccessDecision(
+    {
+      project: project("focus_27"),
+      sessionAccount: null,
+    },
+    {
+      getGitRoomBindingForRoom: async (roomId) => (roomId === "focus_27" ? binding : null),
+      resolveRepoRoomAccessDecision: async ({ roomName }) => {
+        checkedRepoRooms.push(roomName);
+        return { kind: "auth_required" };
+      },
+    }
+  );
+
+  assert.deepEqual(checkedRepoRooms, ["github.com/BrosInCode/letagents"]);
+  assert.equal(decision.isRepoBacked, true);
+  assert.equal(decision.roomName, "focus_27");
+  assert.equal(decision.repoRoomName, "github.com/BrosInCode/letagents");
+  assert.equal(decision.binding, binding);
+  assert.deepEqual(decision.decision, { kind: "auth_required" });
 });
 
 test("replyRepoRoomAccessDecision preserves auth-required response shape", () => {

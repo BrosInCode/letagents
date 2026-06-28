@@ -19,6 +19,7 @@ import { pickLocalCodename } from "../../../../shared/codenames.js";
 import { normalizeRoomAgentSessionKind } from "../../../../shared/agent-presence.js";
 import {
   isActiveWorkerActorLabelConflict,
+  normalizeOptionalText,
   normalizeRegistrationLiveness,
   normalizeRuntime,
 } from "./helpers.js";
@@ -49,6 +50,7 @@ export function registerAgentSessionRoutes(
       agent_instance_id,
       session_kind,
       runtime,
+      repo_branch,
       registration_liveness,
     } = req.body as {
       actor_key?: string;
@@ -58,6 +60,7 @@ export function registerAgentSessionRoutes(
       agent_instance_id?: string | null;
       session_kind?: string;
       runtime?: string;
+      repo_branch?: string | null;
       registration_liveness?: unknown;
     };
 
@@ -116,6 +119,7 @@ export function registerAgentSessionRoutes(
       let offset = 0;
       const normalizedAgentInstanceId = typeof agent_instance_id === "string" ? agent_instance_id.trim() || null : null;
       const normalizedRegistrationLiveness = normalizeRegistrationLiveness(registration_liveness);
+      const normalizedRepoBranch = normalizeOptionalText(repo_branch);
       const maxRegistrationAttempts = 25;
       for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
         let sessionDisplayName = pickSessionDisplayName(offset);
@@ -135,6 +139,7 @@ export function registerAgentSessionRoutes(
             session_kind: requestedSessionKind,
             runtime: normalizeRuntime(runtime || resolvedIdeLabel),
             registration_liveness: normalizedRegistrationLiveness,
+            repo_branch: normalizedRepoBranch,
             actor_label: actorLabel,
             agent_key: agent.canonical_key,
             agent_instance_id: normalizedAgentInstanceId,

@@ -160,6 +160,7 @@
         :live-cleared-count="participantHiddenCount"
         :presence="roomPresence"
         :reasoning-sessions="reasoningSessions"
+        :room-artifacts="roomArtifacts"
         :tasks="tasks"
         :messages="visibleMessages"
         :workers="workers"
@@ -232,6 +233,7 @@ import type {
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
+  DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
   DesktopRoomMessage,
@@ -249,6 +251,7 @@ import {
   mergeDesktopManagedAgentPresence,
   preferredManagedAgentRepoRootPath,
 } from "../../../domain/managed-agents";
+import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
@@ -263,7 +266,6 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomInboxView from "./RoomInboxView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
-import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
   readGitHubEventsVisible,
   rememberGitHubEventsVisible,
@@ -298,6 +300,7 @@ const props = defineProps<{
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
+  roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
   repoStatus: RepoStatus;

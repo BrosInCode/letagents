@@ -17,6 +17,7 @@ export function saveRoomSession(input: {
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
+  git_room?: unknown;
   joined_via: JoinedVia;
   last_message_id?: string;
 }): RoomSessionState {
@@ -27,6 +28,7 @@ export function saveRoomSession(input: {
     project_id: input.project_id ?? existing?.project_id ?? null,
     code: input.code ?? existing?.code ?? null,
     display_name: input.display_name ?? existing?.display_name ?? null,
+    git_room: input.git_room !== undefined ? input.git_room : existing?.git_room ?? null,
     joined_via: input.joined_via,
     joined_at: existing?.joined_at ?? now,
     last_seen_at: now,

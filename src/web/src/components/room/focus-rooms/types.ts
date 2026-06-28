@@ -2,6 +2,7 @@ import type {
   FocusRoomConclusionDetails,
   FocusRoomInfo,
   FocusRoomSettings,
+  GitRoomInfo,
   RoomTask,
 } from '@/composables/useRoom'
 
@@ -12,6 +13,7 @@ export interface FocusRoomsViewProps {
   roomLabel: string
   roomAddress: string
   isFocusRoom: boolean
+  gitRoom: GitRoomInfo | null
   sourceTaskId: string | null
   focusKey: string | null
   focusStatus: 'active' | 'concluded' | null

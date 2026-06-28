@@ -8,6 +8,19 @@ import type {
   FocusRoomParentTaskNextAction,
   FocusRoomReviewState,
 } from '@/composables/useRoom'
+import {
+  gitRoomAccessLabel,
+  gitRoomProviderLabel,
+  gitRoomRefLabel,
+  gitRoomRefTypeLabel,
+} from '../gitRoomLabels'
+
+export {
+  gitRoomAccessLabel,
+  gitRoomProviderLabel,
+  gitRoomRefLabel,
+  gitRoomRefTypeLabel,
+}
 
 export interface FocusOption<T extends string> {
   value: T

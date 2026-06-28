@@ -33,6 +33,70 @@ export interface DesktopRoomInfo {
   concludedAt: string | null;
   conclusionSummary: string | null;
   conclusionDetails: DesktopFocusRoomConclusionDetails | null;
+  gitRoom: DesktopGitRoomInfo | null;
+}
+
+export type DesktopRoomSharedArtifactProvider =
+  | "github"
+  | "gitlab"
+  | "bitbucket"
+  | "unknown";
+export type DesktopRoomSharedArtifactKind =
+  | "issue"
+  | "branch"
+  | "pull_request"
+  | "merge_request"
+  | "review"
+  | "check_run"
+  | "merge";
+export type DesktopRoomSharedArtifactSource =
+  | "task_workflow_artifact"
+  | "github_event"
+  | "manual";
+
+export interface DesktopRoomSharedArtifact {
+  roomId: string;
+  identityKey: string;
+  provider: DesktopRoomSharedArtifactProvider;
+  kind: DesktopRoomSharedArtifactKind;
+  artifactId: string | null;
+  artifactNumber: number | null;
+  title: string | null;
+  url: string | null;
+  ref: string | null;
+  state: string | null;
+  source: DesktopRoomSharedArtifactSource;
+  firstSeenAt: string;
+  updatedAt: string;
+  linkedTaskIds: string[];
+}
+
+export type DesktopGitRoomVisibility = "public" | "private" | "unknown";
+export type DesktopGitRoomRefType = "default_branch" | "branch" | "tag" | "pull_request";
+
+export interface DesktopGitRoomRepositoryInfo {
+  id: string | null;
+  fullName: string;
+  owner: string;
+  name: string;
+}
+
+export interface DesktopGitRoomInfo {
+  provider: string;
+  host: string;
+  repository: DesktopGitRoomRepositoryInfo;
+  ref: {
+    type: DesktopGitRoomRefType;
+    name: string | null;
+    defaultBranch: string | null;
+    baseRef: string | null;
+    headRef: string | null;
+    headRepository: DesktopGitRoomRepositoryInfo | null;
+  };
+  visibility: DesktopGitRoomVisibility;
+  accessMode: DesktopGitRoomVisibility;
+  isDefault: boolean;
+  source: string;
 }
 
 export type DesktopFocusParentVisibility =
@@ -95,6 +159,7 @@ export interface DesktopFocusRoomInfo {
   concludedAt: string | null;
   conclusionSummary: string | null;
   conclusionDetails: DesktopFocusRoomConclusionDetails | null;
+  gitRoom: DesktopGitRoomInfo | null;
   createdAt: string;
 }
 
@@ -234,6 +299,7 @@ export interface DesktopRoomSnapshot {
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
+  roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
 }
@@ -345,6 +411,11 @@ export type DesktopRoomStreamEvent =
       event: DesktopGitHubRoomEvent;
     }
   | {
+      type: "artifact_update";
+      roomIdentifier: string;
+      artifactIdentityKey: string | null;
+    }
+  | {
       type: "reasoning_update";
       roomIdentifier: string;
       session: DesktopReasoningSession;
@@ -430,6 +501,7 @@ export interface DesktopAccountFocusRoomEntry {
   lastOpenedAt: string | null;
   latestMessageId: string | null;
   latestMessageAt: string | null;
+  gitRoom: DesktopGitRoomInfo | null;
 }
 
 export interface DesktopAccountRoomEntry {
@@ -452,6 +524,7 @@ export interface DesktopAccountRoomEntry {
   lastOpenedAt: string | null;
   latestMessageId: string | null;
   latestMessageAt: string | null;
+  gitRoom: DesktopGitRoomInfo | null;
   focusRooms: DesktopAccountFocusRoomEntry[];
 }
 

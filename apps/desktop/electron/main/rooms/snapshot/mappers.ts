@@ -8,12 +8,14 @@ import type {
   DesktopFocusRoomConclusionDetails,
   DesktopFocusRoomSettings,
   DesktopGitHubEventsPage,
+  DesktopRoomSharedArtifact,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopTaskSummary,
 } from "../../../ipc-types.js";
 import { mapGitHubEventsPayload } from "../events.js";
+import { mapDesktopGitRoomPayload } from "../git-room.js";
 import { mapRoomMessagePayload } from "../messages/mappers.js";
 import { mapDesktopReasoningSessionPayload } from "../reasoning/mappers.js";
 import { mapDesktopTaskSummaryPayload } from "../tasks/mappers.js";
@@ -39,6 +41,7 @@ export function mapSnapshotData(data: RoomSnapshotData) {
     presence: mapPresence(data.presenceData),
     reasoningSessions: mapReasoningSessions(data.reasoningData),
     recentActivity: mapRecentActivity(data.activityHistoryData),
+    roomArtifacts: mapRoomArtifacts(data.roomArtifactsData),
     messages: mapMessages(data.messagesData),
     githubEvents: mapGitHubEvents(data.githubEventsData),
   };
@@ -76,6 +79,7 @@ export function mapDesktopFocusRoomPayload(focusRoom: DesktopFocusRoomPayload): 
     concludedAt: focusRoom.concluded_at || null,
     conclusionSummary: focusRoom.conclusion_summary || null,
     conclusionDetails: normalizeConclusionDetails(focusRoom.conclusion_details),
+    gitRoom: mapDesktopGitRoomPayload(focusRoom.git_room),
     createdAt: focusRoom.created_at,
   };
 }
@@ -187,6 +191,7 @@ function mapPresence(data: PresenceResponse): DesktopAgentPresence[] {
     displayName: entry.display_name,
     ownerLabel: entry.owner_label || null,
     ideLabel: entry.ide_label || null,
+    repoBranch: entry.repo_branch || null,
     status: entry.status,
     statusText: entry.status_text || null,
     lastHeartbeatAt: entry.last_heartbeat_at,
@@ -245,6 +250,7 @@ function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivityEntry[
     participantActorLabel: entry.participant.actor_label || null,
     participantOwnerLabel: entry.participant.owner_label || null,
     participantIdeLabel: entry.participant.ide_label || null,
+    repoBranch: entry.participant.repo_branch || null,
     activityState: entry.participant.activity_state || null,
     firstSeenAt: entry.first_seen_at || null,
     lastSeenAt: entry.last_seen_at || null,
@@ -280,4 +286,64 @@ function mapMessages(data: MessagesResponse): DesktopRoomMessage[] {
       return leftTime - rightTime;
     })
     .map(mapRoomMessagePayload);
+}
+
+function mapRoomArtifacts(
+  data: RoomSnapshotData["roomArtifactsData"],
+): DesktopRoomSharedArtifact[] {
+  return (data.artifacts || [])
+    .flatMap((artifact): DesktopRoomSharedArtifact[] => {
+      const kind = normalizeArtifactKind(artifact.kind);
+      if (!artifact.identity_key || !artifact.room_id || !kind) return [];
+      return [{
+        roomId: artifact.room_id,
+        identityKey: artifact.identity_key,
+        provider: normalizeArtifactProvider(artifact.provider),
+        kind,
+        artifactId: artifact.artifact_id || null,
+        artifactNumber: typeof artifact.artifact_number === "number" ? artifact.artifact_number : null,
+        title: artifact.title || null,
+        url: artifact.url || null,
+        ref: artifact.ref || null,
+        state: artifact.state || null,
+        source: normalizeArtifactSource(artifact.source),
+        firstSeenAt: artifact.first_seen_at || "",
+        updatedAt: artifact.updated_at || artifact.first_seen_at || "",
+        linkedTaskIds: Array.isArray(artifact.linked_task_ids)
+          ? artifact.linked_task_ids.filter((taskId): taskId is string => typeof taskId === "string")
+          : [],
+      }];
+    })
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.updatedAt || left.firstSeenAt || "");
+      const rightTime = Date.parse(right.updatedAt || right.firstSeenAt || "");
+      return (
+        (Number.isFinite(rightTime) ? rightTime : -1) -
+        (Number.isFinite(leftTime) ? leftTime : -1)
+      );
+    });
+}
+
+function normalizeArtifactProvider(value: unknown): DesktopRoomSharedArtifact["provider"] {
+  return value === "github" || value === "gitlab" || value === "bitbucket"
+    ? value
+    : "unknown";
+}
+
+function normalizeArtifactKind(value: unknown): DesktopRoomSharedArtifact["kind"] | null {
+  return value === "issue"
+    || value === "branch"
+    || value === "pull_request"
+    || value === "merge_request"
+    || value === "review"
+    || value === "check_run"
+    || value === "merge"
+    ? value
+    : null;
+}
+
+function normalizeArtifactSource(value: unknown): DesktopRoomSharedArtifact["source"] {
+  return value === "task_workflow_artifact" || value === "github_event" || value === "manual"
+    ? value
+    : "manual";
 }

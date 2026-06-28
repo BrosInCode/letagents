@@ -138,6 +138,7 @@
           :presence="selectedSnapshot?.presence || []"
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
+          :room-artifacts="selectedSnapshot?.roomArtifacts || []"
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
           :repo-status="repoStatusValue"
@@ -210,6 +211,7 @@
       :active-room-display-name="selectedRoomInfo.displayName || activeEntry.title"
       :active-room-identifier="selectedRoomIdentifier || selectedRootRoomIdentifier"
       :active-room-pinned="activeEntry.type === 'room' && activeEntry.pinned"
+      :active-room-git-room="selectedRoomInfo.gitRoom"
       :busy="appAgentBusy"
       :result="appAgentResult"
       :settings-status="appAgentSettingsStatus"
@@ -963,6 +965,8 @@ async function runAppAgent(input: DesktopAppAgentRunInput): Promise<void> {
         input.activeRoomIdentifier || selectedRoomIdentifier.value || selectedRootRoomIdentifier.value,
       activeRoomPinned:
         input.activeRoomPinned === true || (activeEntry.value.type === "room" && activeEntry.value.pinned),
+      activeRoomGitRoom:
+        input.activeRoomGitRoom || selectedRoomInfo.value.gitRoom || null,
     };
     const result = await window.letagentsDesktop.appAgent.run(runInput);
     appAgentResult.value = result;

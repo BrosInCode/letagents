@@ -14,6 +14,7 @@
       v-model:summary="resultSummary"
       v-model:details="closeoutDetails"
       :source-task-id="sourceTaskId"
+      :git-room="gitRoom"
       :room-address="roomAddress"
       :is-concluded="isConcluded"
       :focus-context-copy="focusContextCopy"

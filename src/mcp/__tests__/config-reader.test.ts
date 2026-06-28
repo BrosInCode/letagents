@@ -43,7 +43,7 @@ describe("findLetagentsConfig", () => {
     );
 
     assert.deepEqual(findLetagentsConfig(tempDir), {
-      room: "github.com/BrosInCode/letagents",
+      room: "github.com/brosincode/letagents",
     });
   });
 
@@ -116,7 +116,19 @@ describe("findLetagentsConfig", () => {
     );
 
     assert.deepEqual(findLetagentsConfig(tempDir), {
-      room: "github.com/BrosInCode/letagents",
+      room: "github.com/brosincode/letagents",
+    });
+  });
+
+  it("preserves casing for non-GitHub room names", () => {
+    tempDir = createTempDir();
+    writeFileSync(
+      join(tempDir, ".letagents.json"),
+      JSON.stringify({ room: "DesignRoom" })
+    );
+
+    assert.deepEqual(findLetagentsConfig(tempDir), {
+      room: "DesignRoom",
     });
   });
 });
@@ -136,7 +148,7 @@ describe("getRoomFromConfig", () => {
       JSON.stringify({ room: "github.com/BrosInCode/letagents" })
     );
 
-    assert.equal(getRoomFromConfig(tempDir), "github.com/BrosInCode/letagents");
+    assert.equal(getRoomFromConfig(tempDir), "github.com/brosincode/letagents");
   });
 
   it("returns null when no config exists", () => {

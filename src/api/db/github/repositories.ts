@@ -2,10 +2,11 @@ import { eq } from "drizzle-orm";
 
 import { normalizeRoomName } from "../../rooms/routing.js";
 import { db } from "../client.js";
+import { normalizeGitRoomVisibility, upsertGitRoomBinding } from "../git-room-bindings.js";
 import { toGitHubRepositoryLink } from "../mappers.js";
 import { room_aliases, rooms, github_repositories } from "../schema.js";
-import { assertRoomAliasAvailable, getProjectById } from "../rooms.js";
-import type { GitHubRepositoryLink, Project } from "../types.js";
+import { assertRoomAliasAvailable, getOrCreateCanonicalRoom, getProjectById } from "../rooms.js";
+import type { GitHubRepositoryLink, GitRoomVisibility, Project } from "../types.js";
 
 export async function getGitHubRepositoryLinkById(
   githubRepoId: string
@@ -24,35 +25,69 @@ export async function upsertGitHubRepositoryLink(input: {
   room_id: string;
   owner_login: string;
   repo_name: string;
+  default_branch?: string | null;
+  visibility?: GitRoomVisibility | null;
 }): Promise<GitHubRepositoryLink> {
+  const { room } = await getOrCreateCanonicalRoom(input.room_id);
   const created_at = new Date().toISOString();
   const updated_at = created_at;
   const full_name = `${input.owner_login}/${input.repo_name}`;
+  const repositoryUpdate: Partial<typeof github_repositories.$inferInsert> = {
+    room_id: room.id,
+    owner_login: input.owner_login,
+    repo_name: input.repo_name,
+    full_name,
+    updated_at,
+  };
+  if (input.default_branch !== undefined) {
+    repositoryUpdate.default_branch = input.default_branch;
+  }
+  if (input.visibility !== undefined) {
+    repositoryUpdate.visibility = normalizeGitRoomVisibility(input.visibility);
+  }
 
   const [repo] = await db
     .insert(github_repositories)
     .values({
       github_repo_id: input.github_repo_id,
-      room_id: input.room_id,
+      room_id: room.id,
       owner_login: input.owner_login,
       repo_name: input.repo_name,
       full_name,
+      default_branch: input.default_branch ?? null,
+      visibility: normalizeGitRoomVisibility(input.visibility),
       created_at,
       updated_at,
     })
     .onConflictDoUpdate({
       target: github_repositories.github_repo_id,
-      set: {
-        room_id: input.room_id,
-        owner_login: input.owner_login,
-        repo_name: input.repo_name,
-        full_name,
-        updated_at,
-      },
+      set: repositoryUpdate,
     })
     .returning();
 
-  return toGitHubRepositoryLink(repo);
+  const link = toGitHubRepositoryLink(repo);
+  await upsertDefaultGitHubRoomBinding(link);
+  return link;
+}
+
+async function upsertDefaultGitHubRoomBinding(
+  link: GitHubRepositoryLink
+): Promise<void> {
+  await upsertGitRoomBinding({
+    room_id: link.room_id,
+    provider: "github",
+    host: "github.com",
+    repository_id: link.github_repo_id,
+    repository_full_name: link.full_name,
+    repository_owner: link.owner_login,
+    repository_name: link.repo_name,
+    ref_type: "default_branch",
+    ref_name: link.default_branch,
+    default_branch: link.default_branch,
+    visibility: link.visibility,
+    is_default: true,
+    source: "github_repository",
+  });
 }
 
 export async function migrateGitHubRepositoryCanonicalRoom(input: {
@@ -72,6 +107,8 @@ export async function migrateGitHubRepositoryCanonicalRoom(input: {
       room_id: nextRoomId,
       owner_login: input.owner_login,
       repo_name: input.repo_name,
+      default_branch: existing.default_branch,
+      visibility: existing.visibility,
     });
     return (await getProjectById(nextRoomId)) ?? null;
   }
@@ -114,6 +151,15 @@ export async function migrateGitHubRepositoryCanonicalRoom(input: {
         updated_at,
       })
       .where(eq(github_repositories.github_repo_id, input.github_repo_id));
+  });
+
+  await upsertDefaultGitHubRoomBinding({
+    ...existing,
+    room_id: nextRoomId,
+    owner_login: input.owner_login,
+    repo_name: input.repo_name,
+    full_name: `${input.owner_login}/${input.repo_name}`,
+    updated_at,
   });
 
   return (await getProjectById(nextRoomId)) ?? null;

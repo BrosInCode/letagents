@@ -29,6 +29,7 @@ const emptySnapshotCollections = {
   presence: [],
   reasoningSessions: [],
   recentActivity: [],
+  roomArtifacts: [],
   messages: [],
   githubEvents: null,
 };
@@ -110,6 +111,7 @@ export function createLocalReadyRoomSnapshot(input: {
     presence: [],
     reasoningSessions: [],
     recentActivity: [],
+    roomArtifacts: [],
     messages: input.messages
       .sort((left, right) =>
         Date.parse(left.timestamp || "") - Date.parse(right.timestamp || "")

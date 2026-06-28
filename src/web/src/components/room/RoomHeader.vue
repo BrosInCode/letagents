@@ -21,6 +21,12 @@
       <p>{{ subtitle }}</p>
     </div>
 
+    <GitRoomHeaderMeta
+      v-if="gitRoom && (!searchActive || !canSearch)"
+      :gitRoom="gitRoom"
+      class="header-git-room"
+    />
+
     <!-- Inline search bar -->
     <div v-show="searchActive && canSearch" class="header-search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -67,6 +73,8 @@
 
 <script setup lang="ts">
 import { computed, ref, nextTick } from 'vue'
+import GitRoomHeaderMeta from './GitRoomHeaderMeta.vue'
+import type { GitRoomInfo } from '@/composables/useRoom'
 
 type RoomTab = 'chat' | 'events' | 'board' | 'activity' | 'rooms'
 
@@ -87,6 +95,7 @@ const props = defineProps<{
   matchCount: number
   canRename?: boolean
   showEventsTab?: boolean
+  gitRoom?: GitRoomInfo | null
 }>()
 
 defineEmits<{
@@ -163,7 +172,7 @@ function closeSearch() {
   stroke-linecap: round;
 }
 
-.chat-title { flex: 1; min-width: 0; }
+.chat-title { flex: 1; min-width: 120px; }
 .chat-title-heading {
   display: flex;
   align-items: center;
@@ -245,6 +254,10 @@ function closeSearch() {
   transition: color 150ms;
 }
 .search-close:hover { color: var(--text, #fafafa); }
+
+.header-git-room {
+  flex: 0 1 auto;
+}
 
 .header-actions { display: flex; align-items: center; gap: 4px; }
 

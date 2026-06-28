@@ -26,6 +26,7 @@ export interface DesktopAgentPresence {
   displayName: string;
   ownerLabel: string | null;
   ideLabel: string | null;
+  repoBranch: string | null;
   status: "idle" | "working" | "reviewing" | "blocked";
   statusText: string | null;
   lastHeartbeatAt: string;
@@ -114,6 +115,7 @@ export interface DesktopActivityEntry {
   participantActorLabel: string | null;
   participantOwnerLabel: string | null;
   participantIdeLabel: string | null;
+  repoBranch: string | null;
   activityState: "active" | "away" | "offline" | null;
   firstSeenAt: string | null;
   lastSeenAt: string | null;

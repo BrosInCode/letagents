@@ -3,8 +3,8 @@
     <div class="focus-context-header" :data-concluded="isConcluded">
       <div class="focus-context-header-top">
         <div class="focus-context-title">
-          <p class="focus-eyebrow">Current Focus Room</p>
-          <h4>{{ sourceTaskId || 'Ad-hoc room' }}</h4>
+          <p class="focus-eyebrow">{{ gitRoom ? 'Current Git Room' : 'Current Focus Room' }}</p>
+          <h4>{{ currentRoomTitle }}</h4>
           <p>{{ focusContextCopy }}</p>
         </div>
         <div class="focus-context-actions">
@@ -17,13 +17,22 @@
         <span class="focus-metadata-item">
           <strong>Parent</strong> {{ roomAddress }}
         </span>
-        <span class="focus-metadata-item">
+        <span v-if="gitRoom" class="focus-metadata-item">
+          <strong>Repository</strong> {{ gitRoom.repository.full_name }}
+        </span>
+        <span v-if="gitRoom" class="focus-metadata-item">
+          <strong>Ref</strong> {{ gitRoomRefTypeLabel(gitRoom) }} · {{ gitRoomRefLabel(gitRoom) }}
+        </span>
+        <span v-if="gitRoom" class="focus-metadata-item">
+          <strong>Access</strong> {{ gitRoomAccessLabel(gitRoom) }}
+        </span>
+        <span v-if="!gitRoom" class="focus-metadata-item">
           <strong>Source task</strong> {{ sourceTaskId || 'Not linked yet' }}
         </span>
-        <span class="focus-metadata-item">
+        <span v-if="!gitRoom" class="focus-metadata-item">
           <strong>Status</strong> {{ focusStatusLabel }}
         </span>
-        <span class="focus-metadata-item">
+        <span v-if="!gitRoom" class="focus-metadata-item">
           <strong>Parent room</strong> {{ parentVisibilityLabel(settings.parent_visibility) }}
         </span>
       </div>
@@ -60,15 +69,23 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type {
   FocusRoomConclusionDetails,
   FocusRoomSettings,
+  GitRoomInfo,
 } from '@/composables/useRoom'
-import { parentVisibilityLabel } from './options'
+import {
+  gitRoomAccessLabel,
+  gitRoomRefLabel,
+  gitRoomRefTypeLabel,
+  parentVisibilityLabel,
+} from './options'
 import FocusSettingsForm from './FocusSettingsForm.vue'
 import FocusShareForm from './FocusShareForm.vue'
 
-defineProps<{
+const props = defineProps<{
+  gitRoom: GitRoomInfo | null
   sourceTaskId: string | null
   roomAddress: string
   isConcluded: boolean
@@ -98,4 +115,8 @@ const emit = defineEmits<{
 const settings = defineModel<FocusRoomSettings>('settings', { required: true })
 const summary = defineModel<string>('summary', { required: true })
 const details = defineModel<FocusRoomConclusionDetails>('details', { required: true })
+
+const currentRoomTitle = computed(() =>
+  props.gitRoom ? gitRoomRefLabel(props.gitRoom) : props.sourceTaskId || 'Ad-hoc room'
+)
 </script>

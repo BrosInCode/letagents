@@ -2,6 +2,7 @@ import type { GitHubWebhookPayload } from "../app.js";
 import { toGitHubRepoPullRequestRef } from "../pull-request-ref.js";
 import {
   buildDeliveryScopedKey,
+  normalizeGitHubTimestamp,
 } from "./helpers.js";
 import type {
   GitHubRepoEventBase,
@@ -53,32 +54,45 @@ export function materializePullRequestEvent(
   }
 
   const pullRequest = toGitHubRepoPullRequestRef(payload.pull_request);
-  let idempotencyKey = `${repoIdentity}:pr:${pullRequest.number}:${action}`;
+  let semanticId = `${repoIdentity}:pr:${pullRequest.number}:${action}`;
   if (action === "synchronize") {
     const headSha = payload.pull_request.head?.sha?.trim();
     if (!headSha) {
       return null;
     }
-    idempotencyKey = `${repoIdentity}:pr:${pullRequest.number}:sync:${headSha}`;
+    semanticId = `${repoIdentity}:pr:${pullRequest.number}:sync:${headSha}`;
   }
+  const headRef = payload.pull_request.head?.ref ?? null;
+  const headSha = payload.pull_request.head?.sha ?? null;
+  const baseRef = payload.pull_request.base?.ref ?? null;
+  const providerObjectUpdatedAt = normalizeGitHubTimestamp(
+    payload.pull_request.updated_at ?? payload.pull_request.created_at
+  );
 
   return {
     event_type: "pull_request",
     action,
-    idempotency_key: buildDeliveryScopedKey(idempotencyKey, deliveryId),
+    idempotency_key: buildDeliveryScopedKey(semanticId, deliveryId),
+    semantic_id: semanticId,
     github_object_id: String(pullRequest.number),
     github_object_url: pullRequest.url,
     title: pullRequest.title,
     state: getPullRequestState(payload.pull_request, action),
     actor_login: actorLogin ?? pullRequest.authorLogin ?? null,
+    provider_event_at: providerObjectUpdatedAt,
+    provider_object_updated_at: providerObjectUpdatedAt,
+    ref: headRef,
+    base_ref: baseRef,
+    head_ref: headRef,
+    head_sha: headSha,
     metadata: {
       body: pullRequest.body ?? null,
       author_login: pullRequest.authorLogin ?? null,
       draft: payload.pull_request.draft ?? null,
       merged: payload.pull_request.merged ?? null,
       merged_by_login: pullRequest.mergedByLogin ?? null,
-      head_ref: payload.pull_request.head?.ref ?? null,
-      head_sha: payload.pull_request.head?.sha ?? null,
+      head_ref: headRef,
+      head_sha: headSha,
     },
     roomEvent: {
       ...base,

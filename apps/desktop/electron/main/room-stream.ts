@@ -201,6 +201,18 @@ function handleRoomStreamFrame(
     return;
   }
 
+  if (eventName === "artifact_update") {
+    emitRoomStreamEvent({
+      type: "artifact_update",
+      roomIdentifier: eventRoomIdentifier,
+      artifactIdentityKey:
+        typeof payload.artifact_identity_key === "string"
+          ? payload.artifact_identity_key
+          : null,
+    });
+    return;
+  }
+
   if (eventName === "reasoning_update") {
     const session = payload.session;
     if (
