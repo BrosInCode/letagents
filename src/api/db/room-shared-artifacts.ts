@@ -187,6 +187,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
   artifacts: TaskWorkflowArtifact[];
   source?: RoomSharedArtifactSource;
 }): Promise<RoomSharedArtifact[]> {
+  const source = input.source ?? "task_workflow_artifact";
   const synced: RoomSharedArtifact[] = [];
   const identityKeys: string[] = [];
 
@@ -194,7 +195,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
     const sharedArtifact = await upsertRoomSharedArtifact({
       room_id: input.room_id,
       artifact,
-      source: input.source,
+      source,
     });
     synced.push(sharedArtifact);
     identityKeys.push(sharedArtifact.identity_key);
@@ -202,13 +203,14 @@ export async function syncRoomSharedArtifactsForTask(input: {
       room_id: input.room_id,
       artifact_identity_key: sharedArtifact.identity_key,
       task_id: input.task_id,
-      source: input.source,
+      source,
     });
   }
 
   const taskLinkConditions = [
     eq(room_shared_artifact_tasks.room_id, input.room_id),
     eq(room_shared_artifact_tasks.task_id, input.task_id),
+    eq(room_shared_artifact_tasks.source, source),
   ];
   await db
     .delete(room_shared_artifact_tasks)

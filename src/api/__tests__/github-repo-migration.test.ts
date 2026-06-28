@@ -16,7 +16,9 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createProjectWithName = dbModule?.createProjectWithName;
+const getGitChildRoom = dbModule?.getGitChildRoom;
 const getGitHubRepositoryLinkById = dbModule?.getGitHubRepositoryLinkById;
+const getOrCreateGitChildRoom = dbModule?.getOrCreateGitChildRoom;
 const getProjectById = dbModule?.getProjectById;
 const getRoomAlias = dbModule?.getRoomAlias;
 const migrateGitHubRepositoryCanonicalRoom = dbModule?.migrateGitHubRepositoryCanonicalRoom;
@@ -180,5 +182,57 @@ test(
     assert.equal(alias?.room_id, nextRoomId);
     assert.equal((await getGitHubRepositoryLinkById("repo-transfer"))?.room_id, nextRoomId);
     assert.equal((await getGitHubRepositoryLinkById("repo-transfer"))?.full_name, "neworg/letagents");
+  }
+);
+
+test(
+  "git child room lookup survives a repo rename with an existing generated child id",
+  { concurrency: false, skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed migration tests" : false },
+  async () => {
+    if (
+      !getGitChildRoom ||
+      !getOrCreateGitChildRoom ||
+      !getProjectById ||
+      !migrateGitHubRepositoryCanonicalRoom
+    ) {
+      throw new Error("DB-backed repo migration tests require TEST_DB_URL or DB_URL");
+    }
+
+    const oldRoomId = "github.com/brosincode/old-child-name";
+    const nextRoomId = "github.com/brosincode/letagents-child";
+    const focusKey = "git:branch:Y29kZXgvZ2l0LXJvb21z";
+    const oldChildRoomId = "git-room:github.com:brosincode/old-child-name:branch:Y29kZXgvZ2l0LXJvb21z";
+    const nextChildRoomId = "git-room:github.com:brosincode/letagents-child:branch:Y29kZXgvZ2l0LXJvb21z";
+
+    await seedInstalledRepository({
+      installationId: "inst-child-rename",
+      githubRepoId: "repo-child-rename",
+      roomId: oldRoomId,
+      ownerLogin: "brosincode",
+      repoName: "old-child-name",
+    });
+    const child = await getOrCreateGitChildRoom({
+      roomId: oldChildRoomId,
+      parentRoomId: oldRoomId,
+      focusKey,
+      displayName: "branch: codex/git-rooms",
+    });
+
+    await migrateGitHubRepositoryCanonicalRoom({
+      github_repo_id: "repo-child-rename",
+      owner_login: "brosincode",
+      repo_name: "letagents-child",
+    });
+
+    const storedChild = await getProjectById(oldChildRoomId);
+    assert.equal(storedChild?.id, oldChildRoomId);
+    assert.equal(storedChild?.parent_room_id, nextRoomId);
+
+    const lookedUpByNewLocator = await getGitChildRoom({
+      roomId: nextChildRoomId,
+      parentRoomId: nextRoomId,
+      focusKey,
+    });
+    assert.equal(lookedUpByNewLocator?.id, child.room.id);
   }
 );

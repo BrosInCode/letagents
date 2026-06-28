@@ -130,9 +130,9 @@ const accessTitle = computed(() => gitRoomAccessTitle(props.gitRoom))
   color: var(--muted, #71717a);
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1120px) {
   .git-room-meta {
-    max-width: 30vw;
+    max-width: 26vw;
   }
 
   .provider-item span,
@@ -141,7 +141,7 @@ const accessTitle = computed(() => gitRoomAccessTitle(props.gitRoom))
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 980px) {
   .git-room-meta {
     display: none;
   }

@@ -212,6 +212,27 @@
   white-space: nowrap;
 }
 
+.activity-artifacts-toggle {
+  justify-self: start;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--activity-border);
+  border-radius: 6px;
+  background: var(--activity-surface);
+  color: var(--activity-text-secondary);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.activity-artifacts-toggle:hover,
+.activity-artifacts-toggle:focus-visible {
+  border-color: rgba(96, 165, 250, 0.36);
+  color: var(--text, #fafafa);
+  outline: none;
+}
+
 .activity-empty {
   display: grid;
   place-items: center;

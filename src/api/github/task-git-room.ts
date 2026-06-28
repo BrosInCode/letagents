@@ -23,7 +23,6 @@ export type EnsureTaskGitRoomSkipReason =
 export interface EnsureTaskGitRoomResult {
   room: Project | null;
   binding: GitRoomBinding | null;
-  created: boolean;
   attached_to_focus: boolean;
   skipped?: EnsureTaskGitRoomSkipReason;
 }
@@ -137,7 +136,6 @@ export async function ensureTaskGitRoomForActiveWorkLease(
     return {
       room: null,
       binding: null,
-      created: false,
       attached_to_focus: false,
       skipped: "not_git_repo_room",
     };
@@ -150,7 +148,6 @@ export async function ensureTaskGitRoomForActiveWorkLease(
     return {
       room: null,
       binding: null,
-      created: false,
       attached_to_focus: false,
       skipped: "missing_work_lease_branch",
     };
@@ -160,7 +157,6 @@ export async function ensureTaskGitRoomForActiveWorkLease(
     return {
       room: null,
       binding: null,
-      created: false,
       attached_to_focus: false,
       skipped: "default_branch",
     };
@@ -187,16 +183,15 @@ export async function ensureTaskGitRoomForActiveWorkLease(
         focusKey: branchFocusKey,
       });
   const target = taskFocusRoom
-    ? { room: taskFocusRoom, created: false, attached_to_focus: true }
+    ? { room: taskFocusRoom, attached_to_focus: true }
     : existingBranchRoom
-      ? { room: existingBranchRoom, created: false, attached_to_focus: false }
+      ? { room: existingBranchRoom, attached_to_focus: false }
       : null;
 
   if (!target) {
     return {
       room: null,
       binding: null,
-      created: false,
       attached_to_focus: false,
       skipped: "missing_existing_branch_room",
     };
@@ -235,7 +230,6 @@ export async function ensureTaskGitRoomForActiveWorkLease(
   return {
     room: target.room,
     binding,
-    created: target.created,
     attached_to_focus: target.attached_to_focus,
   };
 }

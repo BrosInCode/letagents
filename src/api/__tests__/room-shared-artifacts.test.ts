@@ -24,6 +24,7 @@ const {
   getRoomSharedArtifacts,
   linkRoomSharedArtifactToTask,
   preserveManualRoomSharedArtifactInput,
+  syncRoomSharedArtifactsForTask,
   upsertRoomSharedArtifact,
 } = dbModule;
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
@@ -241,5 +242,94 @@ test(
     assert.equal(hydrated?.title, "Add Git Rooms");
     assert.equal(hydrated?.ref, "codex/git-rooms");
     assert.equal(hydrated?.state, "open");
+  }
+);
+
+test(
+  "workflow artifact sync preserves manual and webhook task links",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room shared artifact tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName ||
+      !getRoomSharedArtifacts ||
+      !linkRoomSharedArtifactToTask ||
+      !syncRoomSharedArtifactsForTask ||
+      !upsertRoomSharedArtifact
+    ) {
+      throw new Error("DB-backed room shared artifact tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const manualArtifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "branch",
+        ref: "manual/review",
+        title: "Manual review branch",
+      },
+      source: "manual",
+    });
+    const webhookArtifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "pull_request",
+        number: 42,
+        title: "Webhook PR",
+      },
+      source: "github_event",
+    });
+    const workflowArtifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "pull_request",
+        number: 77,
+        title: "Stale workflow PR",
+      },
+      source: "task_workflow_artifact",
+    });
+
+    await linkRoomSharedArtifactToTask({
+      room_id: room.id,
+      artifact_identity_key: manualArtifact.identity_key,
+      task_id: "task_4",
+      source: "manual",
+    });
+    await linkRoomSharedArtifactToTask({
+      room_id: room.id,
+      artifact_identity_key: webhookArtifact.identity_key,
+      task_id: "task_4",
+      source: "github_event",
+    });
+    await linkRoomSharedArtifactToTask({
+      room_id: room.id,
+      artifact_identity_key: workflowArtifact.identity_key,
+      task_id: "task_4",
+      source: "task_workflow_artifact",
+    });
+
+    await syncRoomSharedArtifactsForTask({
+      room_id: room.id,
+      task_id: "task_4",
+      artifacts: [],
+    });
+
+    const artifacts = await getRoomSharedArtifacts({
+      room_id: room.id,
+      task_id: "task_4",
+    });
+
+    assert.deepEqual(
+      artifacts.map((artifact) => artifact.identity_key).sort(),
+      [
+        manualArtifact.identity_key,
+        webhookArtifact.identity_key,
+      ].sort()
+    );
   }
 );

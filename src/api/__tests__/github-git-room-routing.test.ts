@@ -106,6 +106,12 @@ test("selectGitHubEventRefRoomTarget routes non-default pull request heads to br
         head: {
           ref: "codex/GitRooms",
           sha: "abc123",
+          repo: {
+            id: 1,
+            full_name: "BrosInCode/letagents",
+            name: "letagents",
+            owner: { login: "BrosInCode" },
+          },
         },
         base: {
           ref: "main",
@@ -293,6 +299,12 @@ test("webhook ref routing does not create missing branch rooms", async () => {
         head: {
           ref: "codex/GitRooms",
           sha: "abc123",
+          repo: {
+            id: 1,
+            full_name: "BrosInCode/letagents",
+            name: "letagents",
+            owner: { login: "BrosInCode" },
+          },
         },
       },
     },
@@ -324,7 +336,7 @@ test("webhook ref routing does not create missing branch rooms", async () => {
   assert.deepEqual(upserts, []);
 });
 
-test("webhook ref routing updates binding for existing branch rooms", async () => {
+test("webhook ref routing updates binding for existing same-repository branch rooms", async () => {
   const event = materializeGitHubWebhookEvent(
     "pull_request",
     {
@@ -344,10 +356,10 @@ test("webhook ref routing updates binding for existing branch rooms", async () =
           ref: "codex/GitRooms",
           sha: "abc123",
           repo: {
-            id: 2,
-            full_name: "Contributor/letagents",
+            id: 1,
+            full_name: "BrosInCode/letagents",
             name: "letagents",
-            owner: { login: "Contributor" },
+            owner: { login: "BrosInCode" },
           },
         },
         base: {
@@ -376,10 +388,10 @@ test("webhook ref routing updates binding for existing branch rooms", async () =
           ref: "codex/GitRooms",
           sha: "abc123",
           repo: {
-            id: 2,
-            full_name: "Contributor/letagents",
+            id: 1,
+            full_name: "BrosInCode/letagents",
             name: "letagents",
-            owner: { login: "Contributor" },
+            owner: { login: "BrosInCode" },
           },
         },
       },
@@ -415,14 +427,99 @@ test("webhook ref routing updates binding for existing branch rooms", async () =
     default_branch: "main",
     base_ref: "main",
     head_ref: "codex/GitRooms",
-    head_repository_id: "2",
-    head_repository_full_name: "Contributor/letagents",
-    head_repository_owner: "Contributor",
+    head_repository_id: "1",
+    head_repository_full_name: "BrosInCode/letagents",
+    head_repository_owner: "BrosInCode",
     head_repository_name: "letagents",
     visibility: "private",
     is_default: false,
     source: "webhook",
   }]);
+});
+
+test("webhook ref routing keeps fork pull requests in the repository room", async () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    {
+      action: "opened",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        default_branch: "main",
+        private: true,
+      },
+      pull_request: {
+        number: 42,
+        title: "task_42: fork branch routing",
+        html_url: "https://github.com/BrosInCode/letagents/pull/42",
+        head: {
+          ref: "codex/GitRooms",
+          sha: "abc123",
+          repo: {
+            id: 2,
+            full_name: "Contributor/letagents",
+            name: "letagents",
+            owner: { login: "Contributor" },
+          },
+        },
+        base: {
+          ref: "main",
+        },
+      },
+    },
+    "delivery-pr-fork-branch-room"
+  );
+  assert.ok(event);
+
+  const childLookups: unknown[] = [];
+  const upserts: unknown[] = [];
+  const result = await getExistingGitHubEventRefRoom({
+    event,
+    payload: {
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        default_branch: "main",
+        private: true,
+      },
+      pull_request: {
+        head: {
+          ref: "codex/GitRooms",
+          sha: "abc123",
+          repo: {
+            id: 2,
+            full_name: "Contributor/letagents",
+            name: "letagents",
+            owner: { login: "Contributor" },
+          },
+        },
+      },
+    },
+    repository: {
+      id: 1,
+      full_name: "BrosInCode/letagents",
+      name: "letagents",
+      default_branch: "main",
+      private: true,
+    },
+    githubRepoId: "1",
+    deps: {
+      getGitChildRoom: async (input) => {
+        childLookups.push(input);
+        return gitFocusRoom();
+      },
+      upsertGitRoomBinding: async (input) => {
+        upserts.push(input);
+        return input as never;
+      },
+    },
+  } as never);
+
+  assert.equal(result, null);
+  assert.deepEqual(childLookups, []);
+  assert.deepEqual(upserts, []);
 });
 
 test("applyGitHubRefRoomLifecycle only mutates generated git focus rooms", async () => {

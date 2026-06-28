@@ -16,14 +16,14 @@
       :history-cards="historySummaryCards"
     />
 
-    <ActivityArtifactsPanel
-      :artifacts="props.roomArtifacts"
-      :tasks="props.tasks"
-    />
-
     <ActivityModeToolbar
       v-model:active-view="activeView"
       :cleared-live-count="clearedLiveCount"
+    />
+
+    <ActivityArtifactsPanel
+      :artifacts="props.roomArtifacts"
+      :tasks="props.tasks"
     />
 
     <p v-if="activeView === 'live'" class="activity-desktop-note">

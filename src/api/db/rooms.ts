@@ -195,15 +195,24 @@ export async function getGitChildRoom(input: {
 }): Promise<Project | undefined> {
   const room = await getProjectById(input.roomId);
   if (
-    !room ||
-    room.kind !== "focus" ||
-    room.parent_room_id !== input.parentRoomId ||
-    room.focus_key !== input.focusKey
+    room?.kind === "focus" &&
+    room.parent_room_id === input.parentRoomId &&
+    room.focus_key === input.focusKey
   ) {
-    return undefined;
+    return room;
   }
 
-  return room;
+  const [fallback] = await db
+    .select()
+    .from(rooms)
+    .where(and(
+      eq(rooms.parent_room_id, input.parentRoomId),
+      eq(rooms.focus_key, input.focusKey),
+      eq(rooms.kind, "focus")
+    ))
+    .limit(1);
+
+  return fallback ? toProject(fallback) : undefined;
 }
 
 export async function getProjectByName(name: string): Promise<Project | undefined> {

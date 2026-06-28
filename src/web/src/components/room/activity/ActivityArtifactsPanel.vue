@@ -10,7 +10,7 @@
 
     <div class="activity-artifact-list">
       <article
-        v-for="artifact in artifacts"
+        v-for="artifact in visibleArtifacts"
         :key="artifact.identity_key"
         class="activity-artifact-row"
       >
@@ -45,10 +45,20 @@
         </div>
       </article>
     </div>
+
+    <button
+      v-if="canToggle"
+      class="activity-artifacts-toggle"
+      type="button"
+      @click="expanded = !expanded"
+    >
+      {{ expanded ? 'Show fewer artifacts' : `Show all ${artifacts.length} artifacts` }}
+    </button>
   </section>
 </template>
 
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import type {
   RoomSharedArtifact,
   RoomSharedArtifactKind,
@@ -59,6 +69,13 @@ const props = defineProps<{
   artifacts: readonly RoomSharedArtifact[]
   tasks: readonly RoomTask[]
 }>()
+
+const COLLAPSED_ARTIFACT_LIMIT = 5
+const expanded = ref(false)
+const canToggle = computed(() => props.artifacts.length > COLLAPSED_ARTIFACT_LIMIT)
+const visibleArtifacts = computed(() =>
+  expanded.value ? props.artifacts : props.artifacts.slice(0, COLLAPSED_ARTIFACT_LIMIT)
+)
 
 function artifactKindLabel(kind: RoomSharedArtifactKind): string {
   switch (kind) {

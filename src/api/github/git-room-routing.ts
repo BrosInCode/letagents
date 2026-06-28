@@ -238,6 +238,22 @@ function getPullRequestHeadRepository(
   };
 }
 
+function isCrossRepositoryPullRequestEvent(input: {
+  event: MaterializedGitHubRoomEvent;
+  payload: GitHubWebhookPayload;
+  repositoryFullName: string;
+}): boolean {
+  if (input.event.roomEvent?.kind !== "pull_request") {
+    return false;
+  }
+
+  const headRepository = getPullRequestHeadRepository(input.payload);
+  return Boolean(
+    !headRepository?.fullName ||
+    headRepository.fullName.toLowerCase() !== input.repositoryFullName.toLowerCase()
+  );
+}
+
 export interface GitHubEventRefRoomDeps {
   getGitChildRoom: typeof getGitChildRoom;
   upsertGitRoomBinding: typeof upsertGitRoomBinding;
@@ -269,6 +285,14 @@ export async function getExistingGitHubEventRefRoom(input: {
     defaultBranch: repository.default_branch,
   });
   if (!target) {
+    return null;
+  }
+
+  if (isCrossRepositoryPullRequestEvent({
+    event: input.event,
+    payload: input.payload,
+    repositoryFullName: repository.full_name,
+  })) {
     return null;
   }
 
