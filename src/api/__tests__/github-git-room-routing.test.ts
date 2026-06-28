@@ -657,6 +657,46 @@ test("applyGitHubRefRoomLifecycle keeps merged branch rooms visible after delete
   assert.deepEqual(calls, []);
 });
 
+test("applyGitHubRefRoomLifecycle does not reactivate concluded rooms", async () => {
+  const event = materializeGitHubWebhookEvent(
+    "create",
+    {
+      action: "create",
+      ref: "codex/GitRooms",
+      ref_type: "branch",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        default_branch: "main",
+      },
+    },
+    "delivery-create-branch-after-merge"
+  );
+  assert.ok(event);
+
+  const calls: unknown[] = [];
+  const concludedRoom = gitFocusRoom({
+    focus_status: "concluded",
+    concluded_at: "2026-06-28T10:30:00.000Z",
+    conclusion_summary: "Pull request #42 merged.",
+  });
+  const deps = {
+    claimGitRefFocusRoomLifecycleEvent: async () => concludedRoom,
+    activateFocusRoom: async (...args: unknown[]) => calls.push(["activate", args]),
+    archiveFocusRoom: async (...args: unknown[]) => calls.push(["archive", args]),
+    concludeFocusRoom: async (...args: unknown[]) => calls.push(["conclude", args]),
+  };
+
+  assert.deepEqual(
+    await applyGitHubRefRoomLifecycle(concludedRoom, event, deps, {
+      eventOrderAt: "2026-06-28T11:00:00.000Z",
+    }),
+    { mutation: "activate", applied: false, skipped: "already_concluded" }
+  );
+  assert.deepEqual(calls, []);
+});
+
 test("applyGitHubRefRoomLifecycle lets stale merged PRs conclude archived rooms", async () => {
   const event = materializeGitHubWebhookEvent(
     "pull_request",

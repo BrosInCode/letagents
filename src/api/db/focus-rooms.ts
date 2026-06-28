@@ -212,7 +212,7 @@ export async function claimGitRefFocusRoomLifecycleEvent(
       and(
         eq(rooms.id, roomId),
         eq(rooms.kind, "focus"),
-        sql`(${rooms.git_lifecycle_event_order_at} IS NULL OR ${rooms.git_lifecycle_event_order_at} <= ${eventOrderAt})`
+        sql`(${rooms.git_lifecycle_event_order_at} IS NULL OR ${rooms.git_lifecycle_event_order_at} < ${eventOrderAt})`
       )
     )
     .returning();

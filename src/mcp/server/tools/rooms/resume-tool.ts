@@ -2,10 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import {
+  ApiError,
   RepoRoomAuthRequiredError,
   ensureAgentIdentity,
   getStoredCurrentRoom,
   getStoredRoomSession,
+  parseApiErrorPayload,
   joinRoomIdentifierWithoutImplicitGitRefCreate,
   toPublicAgentIdentity,
   toPublicRoomState,
@@ -53,6 +55,22 @@ export function registerRoomResumeTool(server: McpServer): void {
       } catch (error) {
         if (error instanceof RepoRoomAuthRequiredError) {
           return jsonToolResponse(toRepoRoomAuthRequiredResult(error));
+        }
+
+        const payload = parseApiErrorPayload(error);
+        if (
+          error instanceof ApiError &&
+          error.status === 404 &&
+          payload?.code === "ROOM_NOT_FOUND"
+        ) {
+          return jsonToolResponse({
+            success: false,
+            error: "Saved room no longer exists. Join the repository room or ask a human to create the branch room again.",
+            code: "ROOM_NOT_FOUND",
+            room_id: savedRoom.room_id,
+            rejoined_from_local_state: false,
+            server_session_resumed: false,
+          });
         }
 
         throw error;

@@ -32,6 +32,17 @@ export async function insertGitHubRoomEvent(input: {
   const eventOrderAt =
     input.provider_event_at ?? input.provider_object_updated_at ?? now;
 
+  if (input.semantic_id) {
+    const [existingBySemanticId] = await db
+      .select()
+      .from(github_room_events)
+      .where(eq(github_room_events.semantic_id, input.semantic_id))
+      .limit(1);
+    if (existingBySemanticId) {
+      return { event: existingBySemanticId as GitHubRoomEvent, duplicate: true };
+    }
+  }
+
   const [created] = await db
     .insert(github_room_events)
     .values({
@@ -65,10 +76,15 @@ export async function insertGitHubRoomEvent(input: {
     return { event: created as GitHubRoomEvent, duplicate: false };
   }
 
+  const duplicateConditions = [eq(github_room_events.idempotency_key, input.idempotency_key)];
+  if (input.semantic_id) {
+    duplicateConditions.push(eq(github_room_events.semantic_id, input.semantic_id));
+  }
+
   const [existing] = await db
     .select()
     .from(github_room_events)
-    .where(eq(github_room_events.idempotency_key, input.idempotency_key))
+    .where(sql.join(duplicateConditions, sql` OR `))
     .limit(1);
 
   if (!existing) {

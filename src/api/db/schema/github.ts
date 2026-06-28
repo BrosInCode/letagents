@@ -124,9 +124,10 @@ export type GitHubRoomEventType = (typeof GITHUB_ROOM_EVENT_TYPES)[number];
 /**
  * Normalized GitHub room events.
  *
- * Each webhook delivery that produces a meaningful state change is recorded
- * here as one canonical, structured event. The idempotency_key ensures
- * duplicate deliveries never produce duplicate events.
+ * Each webhook delivery that produces a meaningful state change is normalized
+ * here as one canonical, structured event. semantic_id is the delivery-independent
+ * event identity used to suppress redelivery side effects; idempotency_key keeps
+ * the provider delivery GUID for exact-delivery retries and diagnostics.
  *
  * Agents and the API query this table instead of parsing room message text.
  *
@@ -154,13 +155,13 @@ export const github_room_events = pgTable(
     /** GitHub action: opened, closed, completed, created, etc. */
     action: text("action").notNull(),
     /**
-     * Delivery-scoped dedup key derived from repo/object identity plus the
+     * Delivery-scoped key derived from repo/object identity plus the
      * `X-GitHub-Delivery` GUID for the specific webhook instance.
      *
      * MUST include the repo full_name (or installation_id for installation events)
-     * to avoid cross-repo collisions (PR/issue numbers are repo-local), and MUST
-     * include the delivery GUID so repeated real transitions do not collapse while
-     * GitHub redeliveries still reuse the same key.
+     * to avoid cross-repo collisions (PR/issue numbers are repo-local), and includes
+     * the delivery GUID so exact delivery retries can be diagnosed separately from
+     * semantic redeliveries.
      *
      * Examples:
      *   "brosincode/letagents:pr:42:opened:delivery:8f5d..."
@@ -170,10 +171,9 @@ export const github_room_events = pgTable(
      */
     idempotency_key: text("idempotency_key").notNull().unique(),
     /**
-     * Semantic provider object/event identity without webhook-delivery scope.
-     *
-     * This preserves the durable GitHub object transition we are observing while
-     * idempotency_key remains delivery-scoped for redelivery safety.
+     * Semantic provider object/event identity without webhook-delivery scope. This
+     * is the durable event key used to keep GitHub redeliveries from replaying
+     * lifecycle and projection side effects.
      */
     semantic_id: text("semantic_id"),
     /** Parent GitHub object ID for queryability (PR number, issue number, etc.) */

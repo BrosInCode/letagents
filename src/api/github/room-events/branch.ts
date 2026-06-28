@@ -2,6 +2,7 @@ import type { GitHubWebhookPayload } from "../app.js";
 import {
   branchNameFromGitRef,
   buildDeliveryScopedKey,
+  buildTimedSemanticKey,
   isZeroSha,
   normalizeGitHubTimestamp,
   normalizeGitRef,
@@ -153,7 +154,11 @@ export function materializeBranchLifecycleEvent(
   }
 
   const refType = normalizeGitRef(payload.ref_type) ?? "ref";
-  const semanticId = `${repoIdentity}:${action}:${refType}:${ref}`;
+  const repositoryUpdatedAt = normalizeGitHubTimestamp(payload.repository.updated_at);
+  const semanticId = buildTimedSemanticKey(
+    `${repoIdentity}:${action}:${refType}:${ref}`,
+    repositoryUpdatedAt
+  );
   const objectUrl = branchOrTagUrl(payload.repository.html_url, refType, ref);
 
   return {
@@ -166,14 +171,15 @@ export function materializeBranchLifecycleEvent(
     title: `${refType} ${ref}`,
     state: action === "create" ? "created" : "deleted",
     actor_login: actorLogin,
-    provider_event_at: normalizeGitHubTimestamp(payload.repository.updated_at),
-    provider_object_updated_at: normalizeGitHubTimestamp(payload.repository.updated_at),
+    provider_event_at: null,
+    provider_object_updated_at: null,
     ref,
     base_ref: payload.repository.default_branch ?? payload.master_branch ?? null,
     head_ref: refType === "branch" ? ref : null,
     head_sha: null,
     metadata: {
       ref_type: refType,
+      repository_updated_at: repositoryUpdatedAt,
       master_branch: payload.master_branch ?? payload.repository.default_branch ?? null,
       description: payload.description ?? null,
       pusher_type: payload.pusher_type ?? null,

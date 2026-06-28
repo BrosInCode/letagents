@@ -199,6 +199,9 @@ export async function applyGitHubRefRoomLifecycle(
   }
 
   if (mutation === "activate") {
+    if (isConcludedGitRefRoom(claimedRoom)) {
+      return { mutation, applied: false, skipped: "already_concluded" };
+    }
     await deps.activateFocusRoom(room.parent_room_id, room.focus_key);
     return { mutation, applied: true };
   }

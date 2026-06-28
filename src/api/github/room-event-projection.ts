@@ -43,8 +43,11 @@ export interface GitHubRoomEventProjectionDeps {
   applyGitHubRefRoomLifecycle: typeof applyGitHubRefRoomLifecycle;
 }
 
-function githubProjectionMessageIdBase(idempotencyKey: string): string {
-  const digest = crypto.createHash("sha256").update(idempotencyKey).digest("hex");
+function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
+  const digest = crypto
+    .createHash("sha256")
+    .update(event.semantic_id ?? event.idempotency_key)
+    .digest("hex");
   return `github-event:${digest}`;
 }
 
@@ -146,7 +149,7 @@ export async function handleMaterializedGitHubRoomEvent(
     };
   }
 
-  const messageIdBase = githubProjectionMessageIdBase(event.idempotency_key);
+  const messageIdBase = githubProjectionMessageIdBase(persisted.event);
 
   if (roomEvent.kind === "check_run") {
     const taskProject = await deps.getProjectForResolvedTask(project, linkedTask);
@@ -158,7 +161,7 @@ export async function handleMaterializedGitHubRoomEvent(
         ...taskResolution,
         task: linkedTask,
       };
-      await deps.updateGitHubRoomEventLinkedTaskId(event.idempotency_key, linkedTask.id);
+      await deps.updateGitHubRoomEventLinkedTaskId(persisted.event.idempotency_key, linkedTask.id);
     }
   }
 
@@ -169,7 +172,7 @@ export async function handleMaterializedGitHubRoomEvent(
     messageIdBase,
   });
   if (!taskProjection.authoritative && linkedTask) {
-    await deps.updateGitHubRoomEventLinkedTaskId(event.idempotency_key, null);
+    await deps.updateGitHubRoomEventLinkedTaskId(persisted.event.idempotency_key, null);
   }
   linkedTask = taskProjection.task;
 

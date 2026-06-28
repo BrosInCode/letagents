@@ -49,7 +49,11 @@ async function resolveRoomGitSummary(
   const binding = deps.getGitRoomBindingForRoom
     ? await deps.getGitRoomBindingForRoom(roomId)
     : null;
-  return formatGitRoomSummary(binding) ?? formatManualGitRoomSummaryForRoomId(roomId);
+  if (binding?.visibility === "public") {
+    return formatGitRoomSummary(binding);
+  }
+
+  return formatManualGitRoomSummaryForRoomId(roomId);
 }
 
 export async function buildApiRoomResolvePayload(

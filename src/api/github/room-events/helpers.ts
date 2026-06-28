@@ -15,6 +15,10 @@ export function buildDeliveryScopedKey(baseKey: string, deliveryId: string): str
   return `${baseKey}:delivery:${deliveryId}`;
 }
 
+export function buildTimedSemanticKey(baseKey: string, timestamp: string | null | undefined): string {
+  return timestamp ? `${baseKey}:at:${timestamp}` : baseKey;
+}
+
 export function getRepoIdentity(fullName: string): string {
   return fullName.trim().toLowerCase();
 }

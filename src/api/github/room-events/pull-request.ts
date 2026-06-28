@@ -2,6 +2,7 @@ import type { GitHubWebhookPayload } from "../app.js";
 import { toGitHubRepoPullRequestRef } from "../pull-request-ref.js";
 import {
   buildDeliveryScopedKey,
+  buildTimedSemanticKey,
   normalizeGitHubTimestamp,
 } from "./helpers.js";
 import type {
@@ -68,6 +69,9 @@ export function materializePullRequestEvent(
   const providerObjectUpdatedAt = normalizeGitHubTimestamp(
     payload.pull_request.updated_at ?? payload.pull_request.created_at
   );
+  if (action !== "synchronize") {
+    semanticId = buildTimedSemanticKey(semanticId, providerObjectUpdatedAt);
+  }
 
   return {
     event_type: "pull_request",

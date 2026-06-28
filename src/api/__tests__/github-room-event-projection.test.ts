@@ -166,7 +166,7 @@ function createProjectionDeps(
 function expectedMessageIdBase(event: MaterializedGitHubRoomEvent): string {
   const digest = crypto
     .createHash("sha256")
-    .update(event.idempotency_key)
+    .update(event.semantic_id ?? event.idempotency_key)
     .digest("hex");
   return `github-event:${digest}`;
 }

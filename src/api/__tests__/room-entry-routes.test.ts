@@ -51,7 +51,7 @@ test("buildRoomEntryPath preserves the original room query string", () => {
   );
 });
 
-test("buildApiRoomResolvePayload includes persisted Git Room metadata", async () => {
+test("buildApiRoomResolvePayload includes public persisted Git Room metadata", async () => {
   const payload = await buildApiRoomResolvePayload(
     "github.com/BrosInCode/letagents",
     {
@@ -77,7 +77,7 @@ test("buildApiRoomResolvePayload includes persisted Git Room metadata", async ()
           head_repository_full_name: null,
           head_repository_owner: null,
           head_repository_name: null,
-          visibility: "private",
+          visibility: "public",
           is_default: true,
           source: "github_repository",
           created_at: "2026-04-20T00:00:00.000Z",
@@ -107,10 +107,69 @@ test("buildApiRoomResolvePayload includes persisted Git Room metadata", async ()
       head_repository: null,
       is_default: true,
     },
-    visibility: "private",
-    access_mode: "private",
+    visibility: "public",
+    access_mode: "public",
     source: "github_repository",
     updated_at: "2026-04-21T00:00:00.000Z",
+  });
+});
+
+test("buildApiRoomResolvePayload redacts private persisted Git Room metadata", async () => {
+  const payload = await buildApiRoomResolvePayload(
+    "github.com/BrosInCode/letagents",
+    {
+      getProjectById: async () => ({
+        id: "github.com/brosincode/letagents",
+      }) as never,
+      getGitRoomBindingForRoom: async (roomId) => ({
+        room_id: roomId,
+        provider: "github",
+        host: "github.com",
+        repository_id: "repo_private",
+        repository_owner: "BrosInCode",
+        repository_name: "letagents",
+        repository_full_name: "BrosInCode/letagents",
+        ref_type: "branch",
+        ref_name: "codex/private-branch",
+        default_branch: "staging",
+        base_ref: "staging",
+        head_ref: "codex/private-branch",
+        head_repository_id: "fork_private",
+        head_repository_full_name: "Contributor/letagents",
+        head_repository_owner: "Contributor",
+        head_repository_name: "letagents",
+        visibility: "private",
+        is_default: false,
+        source: "github_webhook",
+        created_at: "2026-04-20T00:00:00.000Z",
+        updated_at: "2026-04-21T00:00:00.000Z",
+      }),
+    }
+  );
+
+  assert.deepEqual(payload.git_room, {
+    room_id: "github.com/brosincode/letagents",
+    provider: "github",
+    host: "github.com",
+    repository: {
+      id: null,
+      owner: "brosincode",
+      name: "letagents",
+      full_name: "brosincode/letagents",
+    },
+    ref: {
+      type: "default_branch",
+      name: null,
+      default_branch: null,
+      base_ref: null,
+      head_ref: null,
+      head_repository: null,
+      is_default: true,
+    },
+    visibility: "unknown",
+    access_mode: "unknown",
+    source: "manual",
+    updated_at: null,
   });
 });
 

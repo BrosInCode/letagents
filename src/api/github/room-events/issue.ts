@@ -1,6 +1,6 @@
 import type { GitHubWebhookPayload } from "../app.js";
 import type { RepoIssueRef } from "../../repo-workflow.js";
-import { buildDeliveryScopedKey, normalizeGitHubTimestamp } from "./helpers.js";
+import { buildDeliveryScopedKey, buildTimedSemanticKey, normalizeGitHubTimestamp } from "./helpers.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
@@ -31,9 +31,12 @@ export function materializeIssueEvent(
   }
 
   const issue = toRepoIssueRef(payload.issue);
-  const semanticId = `${repoIdentity}:issue:${issue.number}:${action}`;
   const providerObjectUpdatedAt = normalizeGitHubTimestamp(
     payload.issue.updated_at ?? payload.issue.created_at
+  );
+  const semanticId = buildTimedSemanticKey(
+    `${repoIdentity}:issue:${issue.number}:${action}`,
+    providerObjectUpdatedAt
   );
   return {
     event_type: "issue",

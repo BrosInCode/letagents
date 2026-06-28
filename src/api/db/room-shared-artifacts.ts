@@ -35,21 +35,30 @@ export function preserveManualRoomSharedArtifactInput(input: {
   > | null;
 }): { artifact: TaskWorkflowArtifact; source: RoomSharedArtifactSource } {
   const { artifact, existing } = input;
-  if (input.source !== "manual" || !existing) {
+  if (!existing) {
     return { artifact, source: input.source };
   }
 
+  const preserveExistingValues = existing.source === "manual" && input.source !== "manual";
+  const nextValue = <T>(incoming: T | null | undefined, current: T | null | undefined): T | undefined => {
+    const first = preserveExistingValues ? current : incoming;
+    const second = preserveExistingValues ? incoming : current;
+    return first ?? second ?? undefined;
+  };
+
   return {
-    source: existing.source === "manual" ? "manual" : existing.source,
+    source: input.source === "manual" || existing.source === "manual"
+      ? existing.source
+      : input.source,
     artifact: {
       provider: artifact.provider,
       kind: artifact.kind,
-      id: artifact.id ?? existing.artifact_id ?? undefined,
-      number: artifact.number ?? existing.artifact_number ?? undefined,
-      title: artifact.title ?? existing.title ?? undefined,
-      url: artifact.url ?? existing.url ?? undefined,
-      ref: artifact.ref ?? existing.ref ?? undefined,
-      state: artifact.state ?? existing.state ?? undefined,
+      id: nextValue(artifact.id, existing.artifact_id),
+      number: nextValue(artifact.number, existing.artifact_number),
+      title: nextValue(artifact.title, existing.title),
+      url: nextValue(artifact.url, existing.url),
+      ref: nextValue(artifact.ref, existing.ref),
+      state: nextValue(artifact.state, existing.state),
     },
   };
 }
@@ -62,12 +71,10 @@ export async function upsertRoomSharedArtifact(input: {
   const now = new Date().toISOString();
   const identityKey = buildRoomSharedArtifactIdentityKey(input.artifact);
   const requestedSource = input.source ?? "task_workflow_artifact";
-  const existingArtifact = requestedSource === "manual"
-    ? await getRoomSharedArtifactByIdentityKey({
-        room_id: input.room_id,
-        identity_key: identityKey,
-      })
-    : null;
+  const existingArtifact = await getRoomSharedArtifactByIdentityKey({
+    room_id: input.room_id,
+    identity_key: identityKey,
+  });
   const { artifact, source } = preserveManualRoomSharedArtifactInput({
     artifact: input.artifact,
     source: requestedSource,

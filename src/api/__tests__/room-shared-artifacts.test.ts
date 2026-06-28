@@ -128,6 +128,72 @@ test("preserveManualRoomSharedArtifactInput does not downgrade richer existing a
   });
 });
 
+test("preserveManualRoomSharedArtifactInput does not downgrade existing manual artifacts", () => {
+  const result = preserveManualRoomSharedArtifactInput({
+    source: "github_event",
+    artifact: {
+      provider: "github",
+      kind: "pull_request",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+      title: "Automated PR title",
+    },
+    existing: {
+      artifact_id: "manual-pr",
+      artifact_number: 42,
+      title: "Curated PR title",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+      ref: "manual/ref",
+      state: "accepted",
+      source: "manual",
+    },
+  });
+
+  assert.equal(result.source, "manual");
+  assert.deepEqual(result.artifact, {
+    provider: "github",
+    kind: "pull_request",
+    id: "manual-pr",
+    number: 42,
+    title: "Curated PR title",
+    url: "https://github.com/BrosInCode/letagents/pull/42",
+    ref: "manual/ref",
+    state: "accepted",
+  });
+});
+
+test("preserveManualRoomSharedArtifactInput preserves existing fields when automation omits them", () => {
+  const result = preserveManualRoomSharedArtifactInput({
+    source: "github_event",
+    artifact: {
+      provider: "github",
+      kind: "pull_request",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+      title: "Review on PR",
+    },
+    existing: {
+      artifact_id: null,
+      artifact_number: 42,
+      title: "task_42: Git Rooms",
+      url: "https://github.com/BrosInCode/letagents/pull/42",
+      ref: "codex/git-rooms",
+      state: "open",
+      source: "github_event",
+    },
+  });
+
+  assert.equal(result.source, "github_event");
+  assert.deepEqual(result.artifact, {
+    provider: "github",
+    kind: "pull_request",
+    id: undefined,
+    number: 42,
+    title: "Review on PR",
+    url: "https://github.com/BrosInCode/letagents/pull/42",
+    ref: "codex/git-rooms",
+    state: "open",
+  });
+});
+
 test(
   "getRoomSharedArtifacts applies task filter before limiting and returns all linked task IDs",
   {

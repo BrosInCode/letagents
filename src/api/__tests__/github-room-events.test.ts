@@ -200,6 +200,7 @@ test("materializeGitHubWebhookEvent maps pull_request into a persisted room even
         title: "task_22: add webhook ingestion",
         body: "Follow-up details",
         html_url: "https://github.com/BrosInCode/letagents/pull/98",
+        updated_at: "2026-06-28T10:20:00Z",
         user: { login: "EmmyMay" },
       },
     },
@@ -210,7 +211,11 @@ test("materializeGitHubWebhookEvent maps pull_request into a persisted room even
   assert.equal(event?.event_type, "pull_request");
   assert.equal(
     event?.idempotency_key,
-    "brosincode/letagents:pr:98:opened:delivery:delivery-pr-open-1"
+    "brosincode/letagents:pr:98:opened:at:2026-06-28T10:20:00.000Z:delivery:delivery-pr-open-1"
+  );
+  assert.equal(
+    event?.semantic_id,
+    "brosincode/letagents:pr:98:opened:at:2026-06-28T10:20:00.000Z"
   );
   assert.equal(event?.state, "open");
   assert.deepEqual(event?.metadata, {
@@ -353,8 +358,10 @@ test("materializeGitHubWebhookEvent maps branch create without a GitHub action f
   assert.equal(event?.action, "create");
   assert.equal(
     event?.semantic_id,
-    "brosincode/letagents:create:branch:codex/git-rooms-event-spine"
+    "brosincode/letagents:create:branch:codex/git-rooms-event-spine:at:2026-06-28T11:00:00.000Z"
   );
+  assert.equal(event?.provider_event_at, null);
+  assert.equal(event?.provider_object_updated_at, null);
   assert.equal(event?.base_ref, "staging");
   assert.equal(event?.head_ref, "codex/git-rooms-event-spine");
   assert.equal(event?.roomEvent?.kind, "branch_ref");
