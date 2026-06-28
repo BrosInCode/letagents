@@ -1,12 +1,12 @@
 import crypto from "crypto";
-import { and, asc, desc, eq, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_sessions } from "./schema.js";
+import { accounts, agents, auth_sessions, auth_states, owner_tokens, project_admins, room_agent_delivery_sessions, room_agent_sessions } from "./schema.js";
 import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
 import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionRow, Session, SessionAccount } from "./types.js";
-import type { RoomAgentSessionKind } from "../../shared/agent-presence.js";
+import { ACTIVE_AGENT_DELIVERY_WINDOW_MS, type RoomAgentSessionKind } from "../../shared/agent-presence.js";
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
   const now = new Date();
@@ -373,6 +373,62 @@ export async function getActiveRoomAgentSessionsForWorkerIdentity(input: {
       isNull(room_agent_sessions.ended_at)
     ))
     .orderBy(desc(room_agent_sessions.last_seen_at))
+
+  return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
+}
+
+export async function endUnreachableRoomAgentSessionsForWorkerIdentity(input: {
+  room_id: string;
+  agent_key: string;
+}): Promise<RoomAgentSession[]> {
+  const now = new Date().toISOString();
+  const staleConnectionCutoff = new Date(Date.now() - ACTIVE_AGENT_DELIVERY_WINDOW_MS).toISOString();
+  const rows = await db
+    .update(room_agent_sessions)
+    .set({
+      ended_at: now,
+      updated_at: now,
+      last_seen_at: now,
+    })
+    .where(and(
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.agent_key, input.agent_key),
+      eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      isNull(room_agent_sessions.ended_at),
+      sql`EXISTS (
+        SELECT 1
+        FROM ${room_agent_delivery_sessions}
+        WHERE ${room_agent_delivery_sessions.room_id} = ${room_agent_sessions.room_id}
+          AND ${room_agent_delivery_sessions.agent_session_id} = ${room_agent_sessions.session_id}
+          AND ${room_agent_delivery_sessions.session_kind} = 'worker'
+          AND NOT COALESCE(
+            (
+              ${room_agent_delivery_sessions.active_connection_count} > 0
+              AND ${room_agent_delivery_sessions.updated_at} >= ${staleConnectionCutoff}::timestamptz
+            )
+            OR ${room_agent_delivery_sessions.reconnect_grace_expires_at} >= ${now}::timestamptz,
+            false
+          )
+      )`
+    ))
+    .returning();
+
+  const endedSessionIds = rows.map((row) => row.session_id);
+  if (endedSessionIds.length > 0) {
+    await db
+      .update(room_agent_delivery_sessions)
+      .set({
+        active_connection_count: 0,
+        last_disconnected_at: now,
+        reconnect_grace_expires_at: now,
+        updated_at: now,
+      })
+      .where(and(
+        eq(room_agent_delivery_sessions.room_id, input.room_id),
+        inArray(room_agent_delivery_sessions.agent_session_id, endedSessionIds),
+        sql`${room_agent_delivery_sessions.active_connection_count} > 0`
+      ));
+  }
 
   return rows.map((row) => toRoomAgentSession(row as RoomAgentSessionRow));
 }

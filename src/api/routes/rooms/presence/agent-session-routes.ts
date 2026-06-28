@@ -2,10 +2,12 @@ import type { Express } from "express";
 
 import {
   createRoomAgentSession,
+  endUnreachableRoomAgentSessionsForWorkerIdentity,
   endRoomAgentSession,
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getRoomParticipants,
+  setRoomParticipantsHidden,
 } from "../../../db.js";
 import {
   respondWithInternalError,
@@ -15,6 +17,7 @@ import { disconnectRoomAgentDeliverySession } from "../../../rooms/agent-deliver
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../../../shared/agent-identity.js";
+import { buildAgentRoomParticipantKey } from "../../../../shared/room-participant.js";
 import { pickLocalCodename } from "../../../../shared/codenames.js";
 import { normalizeRoomAgentSessionKind } from "../../../../shared/agent-presence.js";
 import {
@@ -92,6 +95,23 @@ export function registerAgentSessionRoutes(
         ? pickLocalCodename(agent.canonical_key).display_name
         : (requestedDisplayName || agent.display_name);
       const requestedSessionKind = normalizeRoomAgentSessionKind(session_kind || "worker");
+      if (requestedSessionKind === "worker") {
+        const endedSessions = await endUnreachableRoomAgentSessionsForWorkerIdentity({
+          room_id: project.id,
+          agent_key: agent.canonical_key,
+        });
+        if (endedSessions.length > 0) {
+          const participantKeys = endedSessions
+            .map((session) => buildAgentRoomParticipantKey(session.actor_label))
+            .filter((key): key is string => Boolean(key));
+          await setRoomParticipantsHidden({
+            room_id: project.id,
+            participant_keys: participantKeys,
+            hidden: true,
+            hidden_by: "connection_cleanup",
+          });
+        }
+      }
       const [activeParticipants, activeSessionsForIdentity] = await Promise.all([
         getRoomParticipants(project.id, { limit: 200 }),
         requestedSessionKind === "worker"
