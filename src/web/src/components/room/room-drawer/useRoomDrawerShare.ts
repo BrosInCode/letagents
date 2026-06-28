@@ -8,6 +8,34 @@ export function encodeRoomPathIdentifier(identifier: string): string {
     .join('/')
 }
 
+export function buildRoomSharePath(input: {
+  identifier?: string | null
+  projectId?: string | null
+  kind?: string | null
+  parentRoomId?: string | null
+  focusKey?: string | null
+  sourceTaskId?: string | null
+}): string {
+  const parentRoomId = input.kind === 'focus' ? input.parentRoomId?.trim() : ''
+  const focusKey = input.kind === 'focus'
+    ? input.focusKey?.trim() || input.sourceTaskId?.trim()
+    : ''
+  if (parentRoomId && focusKey) {
+    return `/in/${encodeRoomPathIdentifier(parentRoomId)}/focus/${encodeURIComponent(focusKey)}`
+  }
+
+  const identifier = input.identifier?.trim() || input.projectId?.trim()
+  return identifier ? `/in/${encodeRoomPathIdentifier(identifier)}` : ''
+}
+
+export function buildRoomShareUrl(
+  input: Parameters<typeof buildRoomSharePath>[0],
+  origin: string,
+): string {
+  const path = buildRoomSharePath(input)
+  return path ? `${origin.replace(/\/+$/, '')}${path}` : ''
+}
+
 export function useRoomDrawerShare(room: Readonly<Ref<RoomInfo | null>>) {
   const codeCopied = ref(false)
 
@@ -19,9 +47,7 @@ export function useRoomDrawerShare(room: Readonly<Ref<RoomInfo | null>>) {
   const shareValue = computed(() => {
     if (!room.value) return ''
     if (room.value.code) return room.value.code
-    const identifier = room.value.identifier || room.value.projectId
-    if (!identifier) return ''
-    return `${window.location.origin}/in/${encodeRoomPathIdentifier(identifier)}`
+    return buildRoomShareUrl(room.value, window.location.origin)
   })
 
   const shareDisplayValue = computed(() => {
@@ -44,7 +70,9 @@ export function useRoomDrawerShare(room: Readonly<Ref<RoomInfo | null>>) {
   )
 
   const parentRoomUrl = computed(() =>
-    parentRoomIdentifier.value ? `/in/${encodeRoomPathIdentifier(parentRoomIdentifier.value)}` : ''
+    parentRoomIdentifier.value
+      ? buildRoomSharePath({ identifier: parentRoomIdentifier.value })
+      : ''
   )
 
   const parentRoomDisplay = computed(() => parentRoomIdentifier.value || 'Parent room')

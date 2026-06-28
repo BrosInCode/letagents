@@ -281,6 +281,7 @@
 <script setup lang="ts">
 import { Archive, ChevronRight, Copy, House, Pin, Plus, Settings } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
 
 const props = defineProps<{
@@ -387,18 +388,10 @@ async function copyContextRoomUrl(): Promise<void> {
   const identifier = roomContextMenu.value?.entry.roomIdentifier;
   if (!identifier) return;
   try {
-    await navigator.clipboard?.writeText(roomUrl(identifier));
+    await navigator.clipboard?.writeText(buildLetAgentsRoomCopyValue(identifier));
   } finally {
     closeRoomContextMenu();
   }
-}
-
-function roomUrl(identifier: string): string {
-  const value = identifier.trim();
-  if (!value) return "";
-  if (/^https?:\/\//i.test(value)) return value;
-  if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(value)) return `https://${value}`;
-  return value;
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {

@@ -14,6 +14,11 @@ import {
   mergeRoomMessages,
 } from "../src/components/desktop/content/room-shell/messages";
 import {
+  buildLetAgentsFocusRoomUrl,
+  buildLetAgentsRoomCopyValue,
+  buildLetAgentsRoomUrl,
+} from "../src/domain/room-urls";
+import {
   readGitHubEventsVisible,
   readLiquidGlassEnabled,
   readNotificationPermission,
@@ -57,6 +62,37 @@ describe("desktop room shell helpers", () => {
     assert.equal(isHiddenChatMessage(roomMessage({ id: "status", source: "agent", text: "[status] working" })), true);
     assert.equal(isHiddenChatMessage(roomMessage({ id: "visible-agent", source: "agent", text: "working" })), false);
     assert.equal(encodeRoomPathIdentifier("github.com/BrosInCode/let agents"), "github.com/BrosInCode/let%20agents");
+  });
+
+  it("builds LetAgents URLs for repo-looking and focus room identifiers", () => {
+    assert.equal(
+      buildLetAgentsRoomUrl("github.com/brosincode/letagents"),
+      "https://letagents.chat/in/github.com/brosincode/letagents",
+    );
+    assert.equal(
+      buildLetAgentsFocusRoomUrl({
+        roomIdentifier: "focus_16",
+        parentRoomId: "github.com/brosincode/letagents",
+        focusKey: "task_42",
+      }),
+      "https://letagents.chat/in/github.com/brosincode/letagents/focus/task_42",
+    );
+    assert.equal(
+      buildLetAgentsFocusRoomUrl({ roomIdentifier: "focus_16" }),
+      "https://letagents.chat/in/focus_16",
+    );
+    assert.equal(
+      buildLetAgentsRoomCopyValue("local_389d653e-18ce-4f69-9dc0-79d6e81ba30f"),
+      "local_389d653e-18ce-4f69-9dc0-79d6e81ba30f",
+    );
+    assert.equal(
+      buildLetAgentsFocusRoomUrl({
+        roomIdentifier: "focus_local",
+        parentRoomId: "local_389d653e-18ce-4f69-9dc0-79d6e81ba30f",
+        focusKey: "task_42",
+      }),
+      "focus_local",
+    );
   });
 
   it("orders numbered server messages by id and uses timestamps for local messages", () => {

@@ -263,7 +263,7 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomInboxView from "./RoomInboxView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
-import { encodeRoomPathIdentifier } from "./room-shell/messages";
+import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
   readGitHubEventsVisible,
   rememberGitHubEventsVisible,
@@ -357,7 +357,11 @@ let managedAgentSessionsRefreshTimer: number | null = null;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let inboxReloadAfterCurrentLoad = false;
 let inboxThreadBaselinePending = false;
-const roomUrl = computed(() => `https://letagents.chat/in/${encodeRoomPathIdentifier(props.room.identifier)}`);
+const roomUrl = computed(() =>
+  buildLetAgentsRoomCopyValue(props.room.identifier, {
+    localOnly: props.storage.localRoom?.publishStatus === "local_only",
+  })
+);
 const isRepoBackedRoom = computed(() =>
   [props.room.identifier, props.room.name, props.room.displayName]
     .some((value) => value.toLowerCase().startsWith("github.com/"))

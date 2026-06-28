@@ -1,4 +1,5 @@
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+export { encodeRoomPathIdentifier } from "../../../../domain/room-urls";
 
 export function mergeRoomMessages(
   current: readonly DesktopRoomMessage[],
@@ -37,11 +38,4 @@ export function compareRoomMessages(left: DesktopRoomMessage, right: DesktopRoom
 
 export function messageNumber(messageId: string): number {
   return Number(/^msg_(\d+)$/.exec(messageId)?.[1] || 0);
-}
-
-export function encodeRoomPathIdentifier(identifier: string): string {
-  return String(identifier)
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
 }
