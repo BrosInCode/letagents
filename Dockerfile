@@ -29,7 +29,7 @@ COPY drizzle.config.ts ./
 COPY tsconfig.json ./
 COPY src/api/db/ src/api/db/
 COPY src/shared/ src/shared/
-CMD ["sh", "-c", "npx drizzle-kit push && node dist/api/focus-rooms/repair-ad-hoc-lineage.js"]
+CMD ["sh", "-c", "node dist/api/migrate.js && node dist/api/focus-rooms/repair-ad-hoc-lineage.js"]
 
 # ── Production stage ─────────────────────────────
 FROM node:22-alpine
