@@ -3,6 +3,9 @@ export type RoomEntry = {
   type: "room";
   kind: "parent" | "focus";
   roomIdentifier: string | null;
+  parentRoomId?: string | null;
+  focusKey?: string | null;
+  sourceTaskId?: string | null;
   title: string;
   meta: string;
   sectionLabel: string;
