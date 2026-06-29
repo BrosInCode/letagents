@@ -11,19 +11,11 @@ services:
       - NODE_ENV=production
       - LETAGENTS_WEB_MODE=vue
       - LETAGENTS_RENT_ENABLED=1
-    networks:
-      - pinflix-server_default
 
   migrate:
     image: ghcr.io/brosincode/letagents:latest-migrate
     container_name: letagents-migrate
     env_file:
       - .env
-    networks:
-      - pinflix-server_default
     profiles:
       - migrate
-
-networks:
-  pinflix-server_default:
-    external: true
