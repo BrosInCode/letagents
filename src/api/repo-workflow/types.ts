@@ -49,6 +49,21 @@ export interface RepoCheckRunRef {
   appName?: string | null;
 }
 
+export interface RepoPushRef {
+  ref: string;
+  refType: string;
+  beforeSha?: string | null;
+  afterSha?: string | null;
+  compareUrl?: string | null;
+  headCommitMessage?: string | null;
+}
+
+export interface RepoBranchRef {
+  ref: string;
+  refType: string;
+  defaultBranch?: string | null;
+}
+
 export interface RepoRoomEventBase {
   provider: RepoWorkflowProvider;
   action: string;
@@ -88,13 +103,25 @@ export interface RepoRepositoryEvent extends RepoRoomEventBase {
   oldFullName?: string | null;
 }
 
+export interface RepoPushEvent extends RepoRoomEventBase {
+  kind: "push";
+  push: RepoPushRef;
+}
+
+export interface RepoBranchLifecycleEvent extends RepoRoomEventBase {
+  kind: "branch_ref";
+  branch: RepoBranchRef;
+}
+
 export type RepoRoomEvent =
   | RepoPullRequestEvent
   | RepoIssueEvent
   | RepoIssueCommentEvent
   | RepoPullRequestReviewEvent
   | RepoCheckRunEvent
-  | RepoRepositoryEvent;
+  | RepoRepositoryEvent
+  | RepoPushEvent
+  | RepoBranchLifecycleEvent;
 
 export type TaskWorkflowRefProvider = RepoWorkflowProvider | "unknown";
 export type TaskWorkflowArtifactKind =

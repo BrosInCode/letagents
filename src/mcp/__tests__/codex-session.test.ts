@@ -13,7 +13,10 @@ import {
   summarizeCodexReasoningNotificationForTest,
   summarizeCodexRuntimeNotificationForTest,
   summarizeCodexRuntimeSnapshotForTest,
+  toPublicCodexLiveSession,
 } from "../codex-session.js";
+import { canReuseCodexLiveSessionForStart } from "../codex-session/session-start.js";
+import { buildStartPrompt } from "../codex-session/start-prompt.js";
 import { saveCodexLiveSession, type CodexLiveSessionState } from "../local-state.js";
 
 const baseSession: CodexLiveSessionState = {
@@ -22,6 +25,7 @@ const baseSession: CodexLiveSessionState = {
   room_identifier: "room_1",
   joined_via: "join_room",
   cwd: "/tmp/letagents",
+  repo_branch: "codex/git-rooms",
   stop_phrase: "/stop-codex-room",
   max_minutes: 0,
   deadline_utc: null,
@@ -58,6 +62,70 @@ test("isCodexAgentSessionMarker identifies Codex sessions by runtime and bridge 
   assert.equal(isCodexAgentSessionMarker({ liveness_capability: "codex_app_server_runtime_stream" }), true);
   assert.equal(isCodexAgentSessionMarker({ tool_bridge_id: "host_1:codex:agent_1" }), true);
   assert.equal(isCodexAgentSessionMarker({ runtime: "antigravity", ide_label: "Agent" }), false);
+});
+
+test("toPublicCodexLiveSession exposes startup repo branch", () => {
+  const publicSession = toPublicCodexLiveSession(baseSession);
+
+  assert.equal(publicSession.repo_branch, "codex/git-rooms");
+});
+
+test("buildStartPrompt includes active git branch when available", () => {
+  const prompt = buildStartPrompt({
+    room_identifier: "github-refroom_github.com_owner_repo_branch_codex-git-rooms",
+    joined_via: "join_room",
+    cwd: "/tmp/letagents",
+    repo_branch: "codex/git-rooms",
+    stop_phrase: "/stop-codex-room",
+    token: "LOCAL_CODEX_ROOM_test",
+    deadline_utc: null,
+    max_minutes: 0,
+  });
+
+  assert.match(prompt, /Primary working directory: \/tmp\/letagents/);
+  assert.match(prompt, /Active git branch at startup: codex\/git-rooms/);
+});
+
+test("canReuseCodexLiveSessionForStart requires the same startup branch", () => {
+  assert.equal(
+    canReuseCodexLiveSessionForStart({
+      session: baseSession,
+      roomId: "room_1",
+      cwd: "/tmp/letagents",
+      repoBranch: "codex/git-rooms",
+    }),
+    true
+  );
+
+  assert.equal(
+    canReuseCodexLiveSessionForStart({
+      session: baseSession,
+      roomId: "room_1",
+      cwd: "/tmp/letagents",
+      repoBranch: "codex/other-work",
+    }),
+    false
+  );
+
+  assert.equal(
+    canReuseCodexLiveSessionForStart({
+      session: { ...baseSession, repo_branch: null },
+      roomId: "room_1",
+      cwd: "/tmp/letagents",
+      repoBranch: "codex/git-rooms",
+    }),
+    false
+  );
+
+  assert.equal(
+    canReuseCodexLiveSessionForStart({
+      session: { ...baseSession, repo_branch: null },
+      roomId: "room_1",
+      cwd: "/tmp/letagents",
+      repoBranch: null,
+    }),
+    true
+  );
 });
 
 test("summarizeCodexRuntimeNotificationForTest maps runtime notifications to visible reasoning", () => {

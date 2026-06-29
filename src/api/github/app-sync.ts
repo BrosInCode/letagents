@@ -29,6 +29,8 @@ export interface GitHubRepositoryLinkSyncInput {
   room_id: string;
   owner_login: string;
   repo_name: string;
+  default_branch?: string | null;
+  visibility?: "public" | "private" | "unknown" | null;
 }
 
 export interface GitHubAppSyncDeps {
@@ -123,6 +125,11 @@ export function createGitHubAppSync(deps: GitHubAppSyncDeps) {
         room_id: roomId,
         owner_login: ownerLogin,
         repo_name: repository.name,
+        default_branch: repository.default_branch,
+        visibility:
+          typeof repository.private === "boolean"
+            ? repository.private ? "private" : "public"
+            : undefined,
       });
     }
 

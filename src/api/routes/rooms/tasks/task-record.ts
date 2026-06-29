@@ -213,6 +213,10 @@ export function registerTaskRecordRoutes(
       }
 
       if (updated) {
+        await deps.ensureTaskGitRoomForActiveWorkLease?.({
+          parentRoomId: project.id,
+          taskId: updated.id,
+        });
         const taskWithDetails = await attachTaskDetails(project.id, updated);
         deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
         res.json({ ...taskWithDetails, room_id: project.id });

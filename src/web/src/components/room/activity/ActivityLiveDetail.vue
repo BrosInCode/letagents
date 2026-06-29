@@ -81,6 +81,17 @@
         <span>{{ participant.livenessObservation ? 'Enriched' : 'Basic' }}</span>
       </div>
 
+      <div
+        v-if="participant.repoBranch"
+        class="activity-liveness-card"
+      >
+        <div>
+          <strong>Branch</strong>
+          <span>{{ participant.repoBranch }}</span>
+        </div>
+        <p>This worker registered from a git checkout on this branch.</p>
+      </div>
+
       <div v-if="participant.livenessObservation" class="activity-liveness-card">
         <div>
           <strong>{{ livenessCapabilityLabel(participant.livenessObservation.liveness_capability) }}</strong>

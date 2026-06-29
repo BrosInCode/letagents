@@ -1,7 +1,9 @@
 import type { Express, Response } from "express";
 
-import type { Project } from "../../db.js";
+import type { GitRoomBinding, Project } from "../../db.js";
+import { parseGitHubRefRoomId } from "../../github/git-room-routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
+import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
@@ -31,7 +33,12 @@ export interface RoomJoinRouteDeps {
     options: { allowCreate: boolean }
   ): Promise<Project | null>;
   getProjectAccessRoomId(project: Project): string;
+  getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
   isRepoBackedProject(project: Project): boolean;
+  resolveProjectRepoRoomAccessDecision(input: {
+    project: Project;
+    sessionAccount: AuthenticatedRequest["sessionAccount"];
+  }): Promise<ProjectRepoAccessDecision>;
   resolveProjectRole(
     project: Project,
     sessionAccount: AuthenticatedRequest["sessionAccount"]
@@ -55,6 +62,7 @@ export interface RoomJoinRouteDeps {
     options?: {
       role?: RoomRole;
       authenticated?: boolean;
+      gitRoomBinding?: GitRoomBinding | null;
     }
   ): Record<string, unknown>;
 }
@@ -80,6 +88,24 @@ function checkJoinRateLimit(ip: string): boolean {
   return true;
 }
 
+function getJoinAccessRoomName(roomId: string, deps: RoomJoinRouteDeps): string | null {
+  if (deps.isRepoBackedRoomId(roomId)) {
+    return roomId;
+  }
+
+  const gitRefRoom = parseGitHubRefRoomId(roomId);
+  if (gitRefRoom) {
+    return `github.com/${gitRefRoom.repositoryFullName}`;
+  }
+
+  return null;
+}
+
+function allowsJoinCreate(value: unknown): boolean {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized !== "false" && normalized !== "0";
+}
+
 export function registerRoomJoinRoutes(
   app: Express,
   deps: RoomJoinRouteDeps
@@ -101,34 +127,41 @@ export function registerRoomJoinRoutes(
       return;
     }
 
-    if (deps.isRepoBackedRoomId(roomId)) {
+    const joinAccessRoomName = getJoinAccessRoomName(roomId, deps);
+    if (joinAccessRoomName) {
       const decision = await deps.resolveRepoRoomAccessDecision({
-        roomName: roomId,
+        roomName: joinAccessRoomName,
         sessionAccount: req.sessionAccount,
       });
       if (decision.kind !== "allow") {
-        deps.replyRepoRoomAccessDecision(res, roomId, decision);
+        deps.replyRepoRoomAccessDecision(res, joinAccessRoomName, decision);
         return;
       }
     }
 
-    const project = await deps.resolveRoomOrReply(roomId, res, { allowCreate: true });
+    const project = await deps.resolveRoomOrReply(roomId, res, {
+      allowCreate: allowsJoinCreate(
+        (req.query as Record<string, unknown> | undefined)?.create
+      ),
+    });
     if (!project) return;
 
     const accessRoomId = deps.getProjectAccessRoomId(project);
-    if (accessRoomId !== roomId && deps.isRepoBackedRoomId(accessRoomId)) {
-      const decision = await deps.resolveRepoRoomAccessDecision({
-        roomName: accessRoomId,
-        sessionAccount: req.sessionAccount,
-      });
-      if (decision.kind !== "allow") {
-        deps.replyRepoRoomAccessDecision(res, accessRoomId, decision);
-        return;
-      }
+    const projectAccess = await deps.resolveProjectRepoRoomAccessDecision({
+      project,
+      sessionAccount: req.sessionAccount,
+    });
+    if (projectAccess.isRepoBacked && projectAccess.decision.kind !== "allow") {
+      deps.replyRepoRoomAccessDecision(
+        res,
+        projectAccess.roomName ?? accessRoomId,
+        projectAccess.decision
+      );
+      return;
     }
 
     if (req.sessionAccount) {
-      if (deps.isRepoBackedProject(project)) {
+      if (projectAccess.isRepoBacked) {
         await deps.resolveProjectRole(project, req.sessionAccount);
       } else {
         await deps.assignInitialProjectAdmin({
@@ -139,6 +172,14 @@ export function registerRoomJoinRoutes(
     }
 
     const role = await deps.resolveProjectRole(project, req.sessionAccount);
+    const currentRoomBinding = deps.getGitRoomBindingForRoom
+      ? await deps.getGitRoomBindingForRoom(project.id)
+      : null;
+    const parentRoomBinding =
+      !currentRoomBinding && deps.getGitRoomBindingForRoom && accessRoomId !== project.id
+        ? await deps.getGitRoomBindingForRoom(accessRoomId)
+        : null;
+    const gitRoomBinding = currentRoomBinding ?? projectAccess.binding ?? parentRoomBinding;
 
     if (req.sessionAccount) {
       await deps.rememberHumanRoomParticipant({
@@ -157,6 +198,7 @@ export function registerRoomJoinRoutes(
       ...deps.toRoomResponse(project, {
         role,
         authenticated: Boolean(req.sessionAccount),
+        gitRoomBinding,
       }),
     });
   });

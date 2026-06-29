@@ -7,7 +7,7 @@ import { jsonToolResponse } from "./response.js";
 export function registerRepoVisibilityTool(server: McpServer): void {
   server.tool(
     "check_repo_visibility",
-    "Auto-detect the current repo's git remote and check if it's public or private. Returns the canonical key, provider, visibility, and suggested room type (discoverable for public, invite for private/unknown). Useful for deciding whether to auto-join a discoverable room or create an invite room.",
+    "Auto-detect the current repo's git remote and check whether its Git Room should be public/discoverable or private/auth-gated. Returns the canonical key, provider, visibility, accessMode, and legacy roomType hint.",
     {
       cwd: z
         .string()
@@ -20,7 +20,7 @@ export function registerRepoVisibilityTool(server: McpServer): void {
       if (!result) {
         return jsonToolResponse({
           error: "Not in a git repository or no remote configured",
-          suggestion: "Use create_room to create an invite room instead",
+          suggestion: "Pass cwd inside a git repo for Git Room detection, or join/create an ad-hoc room manually.",
         });
       }
 

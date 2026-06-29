@@ -21,6 +21,7 @@ import type {
   RoomParticipant,
   RoomReasoningSession,
   RoomReasoningUpdate,
+  RoomSharedArtifact,
   RoomTask,
   TaskGitHubArtifactStatus,
 } from './types'
@@ -48,6 +49,7 @@ export const activityHistoryError = ref('')
 export const reasoningSessions = ref<RoomReasoningSession[]>([])
 export const taskGithubStatus =
   ref<Record<string, TaskGitHubArtifactStatus>>({})
+export const roomArtifacts = ref<RoomSharedArtifact[]>([])
 export const tasks = ref<RoomTask[]>([])
 export const focusRooms = ref<FocusRoomInfo[]>([])
 export const githubEvents = ref<RoomGitHubEvent[]>([])
@@ -107,6 +109,7 @@ export function resetRoomState(options: {
   messagesHasOlder.value = false
   isLoadingOlderMessages.value = false
   tasks.value = []
+  roomArtifacts.value = []
   focusRooms.value = []
   presence.value = []
   boardHandoffPresence.value = []

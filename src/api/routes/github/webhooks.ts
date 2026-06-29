@@ -29,7 +29,8 @@ export interface GitHubWebhookRouteDeps {
   handleGitHubWebhookEvent(
     eventName: string,
     payload: GitHubWebhookPayload,
-    deliveryId: string
+    deliveryId: string,
+    options?: { retryFailedDelivery?: boolean }
   ): Promise<WebhookProcessingResult>;
 }
 
@@ -38,6 +39,13 @@ export function shouldSkipDuplicateGitHubWebhookDelivery(input: {
   delivery: { status: GitHubWebhookDeliveryStatus };
 }): boolean {
   return input.duplicate && input.delivery.status !== "failed";
+}
+
+export function shouldRetryFailedDuplicateGitHubWebhookDelivery(input: {
+  duplicate: boolean;
+  delivery: { status: GitHubWebhookDeliveryStatus };
+}): boolean {
+  return input.duplicate && input.delivery.status === "failed";
 }
 
 export function registerGitHubWebhookRoutes(
@@ -92,10 +100,12 @@ export function registerGitHubWebhookRoutes(
     }
 
     try {
+      const retryFailedDelivery = shouldRetryFailedDuplicateGitHubWebhookDelivery(delivery);
       const result = await deps.handleGitHubWebhookEvent(
         metadata.eventName,
         payload,
-        metadata.deliveryId
+        metadata.deliveryId,
+        { retryFailedDelivery }
       );
       await markGitHubWebhookDeliveryProcessed(metadata.deliveryId, {
         status: result.status,

@@ -57,6 +57,7 @@ function roomSnapshot(
       concludedAt: null,
       conclusionSummary: null,
       conclusionDetails: null,
+      gitRoom: null,
     },
     storage: {
       roomIdentifier,
@@ -85,6 +86,7 @@ function roomSnapshot(
     presence: [],
     reasoningSessions: [],
     recentActivity: [],
+    roomArtifacts: [],
     messages: [roomMessage(messageId, text)],
     githubEvents: null,
   };

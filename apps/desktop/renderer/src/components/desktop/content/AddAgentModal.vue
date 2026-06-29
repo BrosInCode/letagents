@@ -156,7 +156,7 @@
               >
                 <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
                 <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
-                <small>{{ managedAgentSessionStatusLabel(session) }} - {{ session.repoRootPath }}</small>
+                <small>{{ managedAgentSessionStatusLabel(session) }} - {{ managedAgentRepoDetail(session) }}</small>
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
                     type="button"
@@ -267,6 +267,7 @@ import {
   isAgentSetupConfirmationActive,
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
+  managedAgentRepoDetail,
   managedAgentSessionDisplayName,
   managedAgentSessionMatchesRoom,
   managedAgentSessionStatusLabel,
@@ -331,7 +332,7 @@ const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
 const roomLabel = computed(() => props.roomDisplayName?.trim() || props.roomIdentifier);
 const externalJoinPrompt = computed(() =>
   isExternalMcpProviderReady(selectedProvider.value, preflight.value)
-    ? externalMcpProviderJoinPrompt(selectedProvider.value, props.roomIdentifier)
+    ? externalMcpProviderJoinPrompt(selectedProvider.value, props.roomIdentifier, props.repoRootPath)
     : null
 );
 

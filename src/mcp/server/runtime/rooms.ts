@@ -1,5 +1,10 @@
 import { getRoomFromConfig } from "../../config-reader.js";
-import { getGitRemoteIdentity } from "../../git-remote.js";
+import {
+  buildActiveGitRoomContext,
+  getGitCurrentBranch,
+  getGitDefaultBranch,
+  getGitRoomContext,
+} from "../../git-remote.js";
 import {
   encodeRoomIdPath,
   looksLikeInviteCode,
@@ -10,12 +15,14 @@ import {
   getCurrentCodexLiveSession,
   isLocalRoomStorageEnabled,
   getStoredCurrentRoom,
+  getStoredRoomSession,
 } from "../../local-state.js";
 import {
   startLocalCodexSession,
   toPublicCodexLiveSession,
 } from "../../codex-session.js";
 import {
+  ApiError,
   apiCall,
   isMissingRouteError,
 } from "./api.js";
@@ -48,13 +55,50 @@ export function getCurrentLiveSessionPayload(roomId?: string): Record<string, un
   return session ? toPublicCodexLiveSession(session) : null;
 }
 
-export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVia): Promise<{
+interface JoinRoomIdentifierOptions {
+  allowCreate?: boolean;
+}
+
+interface GeneratedGitRefRoomIdentifier {
+  repoRoom: string;
+  refType: "branch" | "tag";
+}
+
+function isNotFoundApiError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+function parseGeneratedGitRefRoomIdentifier(
+  identifier: string
+): GeneratedGitRefRoomIdentifier | null {
+  const match = /^git-room:github\.com:([^/:\s]+\/[^/:\s]+):(branch|tag):[A-Za-z0-9_-]+$/.exec(
+    identifier.trim()
+  );
+  if (!match) {
+    return null;
+  }
+
+  return {
+    repoRoom: `github.com/${match[1].toLowerCase()}`,
+    refType: match[2] as "branch" | "tag",
+  };
+}
+
+export async function joinRoomIdentifier(
+  identifier: string,
+  joinedVia: JoinedVia,
+  options: JoinRoomIdentifierOptions = {}
+): Promise<{
   room: RoomState;
   response: Record<string, unknown>;
 }> {
   const roomId = joinedVia === "join_code" ? normalizeInviteCode(identifier) : identifier.trim();
 
   if (joinedVia !== "join_code" && await isLocalRoomStorageEnabled(roomId)) {
+    if (options.allowCreate === false && !getStoredRoomSession(roomId)) {
+      throw new ApiError(404, JSON.stringify({ error: "Room not found", room_id: roomId }));
+    }
+
     const agentIdentity = await ensureAgentIdentity();
     const room = rememberRoom(
       toRoomState({
@@ -79,8 +123,9 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
   }
 
   try {
+    const createQuery = options.allowCreate === false ? "?create=false" : "";
     const response = await apiCall<Record<string, unknown>>(
-      `/rooms/${encodeRoomIdPath(roomId)}/join`,
+      `/rooms/${encodeRoomIdPath(roomId)}/join${createQuery}`,
       { method: "POST" }
     );
     const joinedRoomId =
@@ -99,6 +144,7 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
               ? joinedRoomId
               : null,
         display_name: typeof response.display_name === "string" ? response.display_name : null,
+        git_room: response.git_room ?? null,
         joined_via: joinedVia,
       })
     );
@@ -116,6 +162,9 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
     };
   } catch (error) {
     await maybeHandleRepoRoomAuthRequired(error, roomId);
+    if (options.allowCreate === false) {
+      throw error;
+    }
     if (!isMissingRouteError(error)) {
       throw error;
     }
@@ -136,6 +185,7 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
         project_id: typeof project.id === "string" ? project.id : null,
         code: typeof project.code === "string" ? project.code : legacyRoomId,
         display_name: typeof project.display_name === "string" ? project.display_name : null,
+        git_room: project.git_room ?? null,
         joined_via: joinedVia,
       })
     );
@@ -176,6 +226,7 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
             ? legacyRoomId
             : null,
       display_name: typeof project.display_name === "string" ? project.display_name : null,
+      git_room: project.git_room ?? null,
       joined_via: joinedVia,
     })
   );
@@ -192,6 +243,52 @@ export async function joinRoomIdentifier(identifier: string, joinedVia: JoinedVi
       agent_identity: toPublicAgentIdentity(agentIdentity),
     },
   };
+}
+
+async function joinExistingRoomIdentifier(
+  identifier: string,
+  joinedVia: JoinedVia
+): Promise<{
+  room: RoomState;
+  response: Record<string, unknown>;
+} | null> {
+  try {
+    return await joinRoomIdentifier(identifier, joinedVia, { allowCreate: false });
+  } catch (error) {
+    if (isNotFoundApiError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function joinRoomIdentifierWithoutImplicitGitRefCreate(
+  identifier: string,
+  joinedVia: JoinedVia,
+  options: { fallbackToRepo?: boolean } = {}
+): Promise<{
+  room: RoomState;
+  response: Record<string, unknown>;
+}> {
+  const gitRefRoom = parseGeneratedGitRefRoomIdentifier(identifier);
+  if (!gitRefRoom) {
+    return joinRoomIdentifier(identifier, joinedVia);
+  }
+
+  const joined = await joinExistingRoomIdentifier(identifier, joinedVia);
+  if (joined) {
+    return joined;
+  }
+
+  if (options.fallbackToRepo) {
+    return joinRoomIdentifier(gitRefRoom.repoRoom, joinedVia);
+  }
+
+  throw new ApiError(404, JSON.stringify({
+    error: "Room not found",
+    code: "ROOM_NOT_FOUND",
+    room_id: identifier.trim(),
+  }));
 }
 
 export async function createInviteRoom(): Promise<{
@@ -293,25 +390,61 @@ export async function autoJoinFromContext(): Promise<void> {
   try {
     const configRoom = getRoomFromConfig();
     if (configRoom) {
+      const gitContext = buildActiveGitRoomContext({
+        repoRoom: configRoom,
+        currentBranch: getGitCurrentBranch(),
+        defaultBranch: getGitDefaultBranch(),
+      });
+      if (gitContext.activeRefRoom && gitContext.currentBranch) {
+        const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoom, "config");
+        if (joinedBranchRoom) {
+          await ensureAgentIdentity();
+          console.error(`🏠 Auto-joined existing branch room '${gitContext.activeRefRoom}' (from .letagents.json + branch '${gitContext.currentBranch}')`);
+          return;
+        }
+      }
+
       await joinRoomIdentifier(configRoom, "config");
       await ensureAgentIdentity();
-      console.error(`🏠 Auto-joined room '${configRoom}' (from .letagents.json)`);
+      const branchNote = gitContext.activeRefRoom && gitContext.currentBranch
+        ? `; branch '${gitContext.currentBranch}' has no existing Git Room`
+        : "";
+      console.error(`🏠 Auto-joined room '${configRoom}' (from .letagents.json${branchNote})`);
       return;
     }
 
-    const gitRoom = getGitRemoteIdentity();
-    if (gitRoom) {
-      await joinRoomIdentifier(gitRoom, "git-remote");
+    const gitContext = getGitRoomContext();
+    if (gitContext.repoRoom) {
+      if (gitContext.activeRefRoom && gitContext.currentBranch) {
+        const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoom, "git-remote");
+        if (joinedBranchRoom) {
+          await ensureAgentIdentity();
+          console.error(`🏠 Auto-joined existing branch room '${gitContext.activeRefRoom}' (inferred from git remote and branch '${gitContext.currentBranch}' — consider adding a .letagents.json)`);
+          return;
+        }
+      }
+
+      await joinRoomIdentifier(gitContext.repoRoom, "git-remote");
       await ensureAgentIdentity();
-      console.error(`🏠 Auto-joined room '${gitRoom}' (inferred from git remote — consider adding a .letagents.json)`);
+      const branchNote = gitContext.activeRefRoom && gitContext.currentBranch
+        ? `; branch '${gitContext.currentBranch}' has no existing Git Room`
+        : "";
+      console.error(`🏠 Auto-joined room '${gitContext.repoRoom}' (inferred from git remote${branchNote} — consider adding a .letagents.json)`);
       return;
     }
 
     const savedCurrentRoom = getStoredCurrentRoom();
     if (savedCurrentRoom) {
-      await joinRoomIdentifier(savedCurrentRoom.room_id, savedCurrentRoom.joined_via);
+      const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
+        savedCurrentRoom.room_id,
+        savedCurrentRoom.joined_via,
+        { fallbackToRepo: true }
+      );
       await ensureAgentIdentity();
-      console.error(`🏠 Rejoined saved room '${savedCurrentRoom.room_id}' (from local state)`);
+      const fallbackNote = joined.room.room_id !== savedCurrentRoom.room_id
+        ? `; saved Git ref room '${savedCurrentRoom.room_id}' was missing`
+        : "";
+      console.error(`🏠 Rejoined saved room '${joined.room.room_id}' (from local state${fallbackNote})`);
       return;
     }
 

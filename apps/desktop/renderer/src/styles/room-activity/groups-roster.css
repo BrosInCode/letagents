@@ -110,6 +110,48 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
+.desktop-activity-artifact-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 54px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-activity-artifact-row > span:nth-child(2) {
+  min-width: 0;
+}
+
+.desktop-activity-artifact-row strong,
+.desktop-activity-artifact-row a {
+  display: block;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-weight: 850;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-activity-artifact-row a:hover {
+  color: #d8b4fe;
+}
+
+.desktop-activity-artifact-row small {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .desktop-activity-avatar {
   display: inline-grid;
   flex: 0 0 auto;

@@ -46,6 +46,12 @@
           {{ participant.workSignal.detail }}
         </span>
         <span
+          v-if="participant.kind === 'agent' && participant.repoBranch"
+          class="activity-work-detail"
+        >
+          branch {{ participant.repoBranch }}
+        </span>
+        <span
           v-if="activeReasoningCount(participant) > 0"
           class="activity-reasoning-pill"
         >

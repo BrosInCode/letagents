@@ -1,11 +1,15 @@
 import type { GitHubRoomEventMetadata, GitHubRoomEventType } from "../schema.js";
 
+export type { GitHubRoomEventMetadata, GitHubRoomEventType } from "../schema.js";
+
 export interface GitHubRepositoryLink {
   github_repo_id: string;
   room_id: string;
   owner_login: string;
   repo_name: string;
   full_name: string;
+  default_branch: string | null;
+  visibility: "public" | "private" | "unknown";
   created_at: string;
   updated_at: string;
 }
@@ -58,11 +62,19 @@ export interface GitHubRoomEvent {
   event_type: GitHubRoomEventType;
   action: string;
   idempotency_key: string;
+  semantic_id: string | null;
   github_object_id: string | null;
   github_object_url: string | null;
   title: string | null;
   state: string | null;
   actor_login: string | null;
+  provider_event_at: string | null;
+  provider_object_updated_at: string | null;
+  event_order_at: string;
+  ref: string | null;
+  base_ref: string | null;
+  head_ref: string | null;
+  head_sha: string | null;
   metadata: GitHubRoomEventMetadata | null;
   linked_task_id: string | null;
   created_at: string;

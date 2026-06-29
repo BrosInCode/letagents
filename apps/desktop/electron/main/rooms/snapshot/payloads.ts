@@ -45,6 +45,7 @@ export interface FocusRoomsResponse {
       parent_task_next?: "keep_open" | "move_to_review" | "mark_blocked" | "mark_done" | "follow_up" | null;
       next_owner?: string | null;
     } | null;
+    git_room?: unknown;
     created_at: string;
   }>;
 }
@@ -81,6 +82,7 @@ export interface PresenceResponse {
     display_name: string;
     owner_label: string | null;
     ide_label: string | null;
+    repo_branch?: string | null;
     status: "idle" | "working" | "reviewing" | "blocked";
     status_text: string | null;
     last_heartbeat_at: string;
@@ -151,6 +153,7 @@ export interface ActivityEntryPayload {
     actor_label?: string | null;
     owner_label?: string | null;
     ide_label?: string | null;
+    repo_branch?: string | null;
     activity_state: "active" | "away" | "offline" | null;
   };
   first_seen_at?: string | null;
@@ -180,6 +183,25 @@ export interface MessagesResponse {
   messages?: RoomMessagePayload[];
 }
 
+export interface RoomArtifactsResponse {
+  artifacts?: Array<{
+    room_id?: string | null;
+    identity_key?: string | null;
+    provider?: string | null;
+    kind?: string | null;
+    artifact_id?: string | null;
+    artifact_number?: number | null;
+    title?: string | null;
+    url?: string | null;
+    ref?: string | null;
+    state?: string | null;
+    source?: string | null;
+    first_seen_at?: string | null;
+    updated_at?: string | null;
+    linked_task_ids?: string[];
+  }>;
+}
+
 export interface RoomSnapshotData {
   focusRoomsData: FocusRoomsResponse;
   tasksData: { tasks?: DesktopTaskSummaryPayload[] };
@@ -187,6 +209,7 @@ export interface RoomSnapshotData {
   presenceData: PresenceResponse;
   reasoningData: ReasoningResponse;
   activityHistoryData: ActivityHistoryResponse;
+  roomArtifactsData: RoomArtifactsResponse;
   messagesData: MessagesResponse;
   githubEventsData: GitHubEventsResponse | null;
 }

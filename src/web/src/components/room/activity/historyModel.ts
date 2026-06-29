@@ -101,6 +101,7 @@ export function buildHistoryParticipant(entry: RoomActivityHistoryEntry): Histor
       : actorLabel,
     ownerLabel,
     ideLabel,
+    repoBranch: entry.participant.repo_branch || null,
     activityState: null,
     hasCanonicalPresence: false,
     status: null,

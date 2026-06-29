@@ -7,6 +7,7 @@ import {
   getProjectById,
   type Project,
 } from "../db.js";
+import { getOrCreateGitHubRefRoomFromId } from "../github/git-room-routing.js";
 import { isInviteCode, normalizeRoomId } from "./routing.js";
 
 export function parseFocusRoomLocator(
@@ -73,6 +74,11 @@ export async function resolveRoomOrReply(
         return null;
       }
       return found;
+    }
+
+    const gitRefRoom = await getOrCreateGitHubRefRoomFromId(roomId);
+    if (gitRefRoom) {
+      return gitRefRoom;
     }
 
     const { room } = await getOrCreateCanonicalRoom(roomId);

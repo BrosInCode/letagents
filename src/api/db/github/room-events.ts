@@ -12,16 +12,36 @@ export async function insertGitHubRoomEvent(input: {
   event_type: GitHubRoomEventType;
   action: string;
   idempotency_key: string;
+  semantic_id?: string | null;
   github_object_id?: string | null;
   github_object_url?: string | null;
   title?: string | null;
   state?: string | null;
   actor_login?: string | null;
+  provider_event_at?: string | null;
+  provider_object_updated_at?: string | null;
+  ref?: string | null;
+  base_ref?: string | null;
+  head_ref?: string | null;
+  head_sha?: string | null;
   metadata?: GitHubRoomEventMetadata | null;
   linked_task_id?: string | null;
 }): Promise<{ event: GitHubRoomEvent; duplicate: boolean }> {
   const id = `gre_${crypto.randomUUID().replace(/-/g, "")}`;
   const now = new Date().toISOString();
+  const eventOrderAt =
+    input.provider_event_at ?? input.provider_object_updated_at ?? now;
+
+  if (input.semantic_id) {
+    const [existingBySemanticId] = await db
+      .select()
+      .from(github_room_events)
+      .where(eq(github_room_events.semantic_id, input.semantic_id))
+      .limit(1);
+    if (existingBySemanticId) {
+      return { event: existingBySemanticId as GitHubRoomEvent, duplicate: true };
+    }
+  }
 
   const [created] = await db
     .insert(github_room_events)
@@ -32,11 +52,19 @@ export async function insertGitHubRoomEvent(input: {
       event_type: input.event_type,
       action: input.action,
       idempotency_key: input.idempotency_key,
+      semantic_id: input.semantic_id ?? null,
       github_object_id: input.github_object_id ?? null,
       github_object_url: input.github_object_url ?? null,
       title: input.title ?? null,
       state: input.state ?? null,
       actor_login: input.actor_login ?? null,
+      provider_event_at: input.provider_event_at ?? null,
+      provider_object_updated_at: input.provider_object_updated_at ?? null,
+      event_order_at: eventOrderAt,
+      ref: input.ref ?? null,
+      base_ref: input.base_ref ?? null,
+      head_ref: input.head_ref ?? null,
+      head_sha: input.head_sha ?? null,
       metadata: input.metadata ?? null,
       linked_task_id: input.linked_task_id ?? null,
       created_at: now,
@@ -48,10 +76,15 @@ export async function insertGitHubRoomEvent(input: {
     return { event: created as GitHubRoomEvent, duplicate: false };
   }
 
+  const duplicateConditions = [eq(github_room_events.idempotency_key, input.idempotency_key)];
+  if (input.semantic_id) {
+    duplicateConditions.push(eq(github_room_events.semantic_id, input.semantic_id));
+  }
+
   const [existing] = await db
     .select()
     .from(github_room_events)
-    .where(eq(github_room_events.idempotency_key, input.idempotency_key))
+    .where(sql.join(duplicateConditions, sql` OR `))
     .limit(1);
 
   if (!existing) {
@@ -73,6 +106,39 @@ export async function updateGitHubRoomEventLinkedTaskId(
       linked_task_id: linkedTaskId,
     })
     .where(eq(github_room_events.idempotency_key, idempotencyKey));
+}
+
+export async function hasGitHubRoomActivationEventAfter(input: {
+  room_id: string;
+  event_order_at: string;
+}): Promise<boolean> {
+  const [event] = await db
+    .select({ id: github_room_events.id })
+    .from(github_room_events)
+    .where(and(
+      eq(github_room_events.room_id, input.room_id),
+      sql`${github_room_events.event_order_at} > ${input.event_order_at}`,
+      sql`(
+        (
+          ${github_room_events.event_type} = 'push'
+          AND COALESCE(${github_room_events.state}, '') <> 'deleted'
+        )
+        OR ${github_room_events.event_type} = 'create'
+        OR (
+          ${github_room_events.event_type} = 'pull_request'
+          AND ${github_room_events.action} IN (
+            'opened',
+            'reopened',
+            'ready_for_review',
+            'synchronize',
+            'converted_to_draft'
+          )
+        )
+      )`
+    ))
+    .limit(1);
+
+  return Boolean(event);
 }
 
 export async function getGitHubRoomEvents(input: {
@@ -99,15 +165,15 @@ export async function getGitHubRoomEvents(input: {
     conditions.push(eq(github_room_events.actor_login, input.actor_login));
   }
   if (input.since) {
-    conditions.push(sql`${github_room_events.created_at} >= ${input.since}`);
+    conditions.push(sql`${github_room_events.event_order_at} >= ${input.since}`);
   }
   if (input.until) {
-    conditions.push(sql`${github_room_events.created_at} <= ${input.until}`);
+    conditions.push(sql`${github_room_events.event_order_at} <= ${input.until}`);
   }
   if (input.after) {
     const [cursorRow] = await db
       .select({
-        created_at: github_room_events.created_at,
+        event_order_at: github_room_events.event_order_at,
         id: github_room_events.id,
       })
       .from(github_room_events)
@@ -118,7 +184,7 @@ export async function getGitHubRoomEvents(input: {
       .limit(1);
     if (cursorRow) {
       conditions.push(
-        sql`(${github_room_events.created_at}, ${github_room_events.id}) < (${cursorRow.created_at}, ${cursorRow.id})`
+        sql`(${github_room_events.event_order_at}, ${github_room_events.id}) < (${cursorRow.event_order_at}, ${cursorRow.id})`
       );
     }
   }
@@ -127,7 +193,7 @@ export async function getGitHubRoomEvents(input: {
     .select()
     .from(github_room_events)
     .where(and(...conditions))
-    .orderBy(desc(github_room_events.created_at), desc(github_room_events.id))
+    .orderBy(desc(github_room_events.event_order_at), desc(github_room_events.id))
     .limit(limit + 1);
 
   const has_more = rows.length > limit;

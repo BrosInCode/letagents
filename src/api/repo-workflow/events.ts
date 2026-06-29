@@ -169,6 +169,40 @@ export function formatRepoCheckRunEventMessage(input: {
   return `Check "${input.checkRun.name}"${appLabel} ${conclusion} in ${input.repositoryFullName}${taskSuffix} ${input.checkRun.url}`;
 }
 
+export function formatRepoPushEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  push: { ref: string; refType: string; afterSha?: string | null; compareUrl?: string | null };
+  senderLogin?: string | null;
+  linkedTaskId?: string | null;
+}): string | null {
+  if (input.action !== "push") return null;
+
+  const actor = input.senderLogin || input.provider;
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
+  const shortSha = input.push.afterSha ? ` ${input.push.afterSha.slice(0, 7)}` : "";
+  const urlSuffix = input.push.compareUrl ? ` ${input.push.compareUrl}` : "";
+
+  return `${actor} pushed${shortSha} to ${input.push.refType} ${input.push.ref} in ${input.repositoryFullName}${taskSuffix}${urlSuffix}`;
+}
+
+export function formatRepoBranchLifecycleEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  branch: { ref: string; refType: string };
+  senderLogin?: string | null;
+  linkedTaskId?: string | null;
+}): string | null {
+  const actor = input.senderLogin || input.provider;
+  const action = input.action === "delete" ? "deleted" : input.action === "create" ? "created" : null;
+  if (!action) return null;
+
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
+  return `${actor} ${action} ${input.branch.refType} ${input.branch.ref} in ${input.repositoryFullName}${taskSuffix}`;
+}
+
 function isLowSignalCheckRunConclusion(conclusion: string | null | undefined): boolean {
   return ["success", "skipped", "neutral"].includes((conclusion || "").toLowerCase());
 }
@@ -216,6 +250,22 @@ export function buildRepoRoomEventArtifactMatches(event: RepoRoomEvent): TaskWor
       });
     case "repository":
       return [];
+    case "push":
+      return event.push.refType === "branch"
+        ? buildTaskWorkflowArtifactMatches({
+          provider: event.provider,
+          kind: "branch",
+          ref: event.push.ref,
+        })
+        : [];
+    case "branch_ref":
+      return event.branch.refType === "branch"
+        ? buildTaskWorkflowArtifactMatches({
+          provider: event.provider,
+          kind: "branch",
+          ref: event.branch.ref,
+        })
+        : [];
     default:
       return [];
   }
@@ -236,6 +286,10 @@ export function getRepoRoomEventReferenceTexts(
     case "check_run":
     case "repository":
       return [];
+    case "push":
+      return [event.push.ref, event.push.headCommitMessage];
+    case "branch_ref":
+      return [event.branch.ref];
     default:
       return [];
   }
@@ -311,6 +365,24 @@ export function formatRepoRoomEventMessage(input: {
         repositoryFullName: input.event.repositoryFullName,
         oldFullName: input.event.oldFullName,
         senderLogin: input.event.senderLogin,
+      });
+    case "push":
+      return formatRepoPushEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        push: input.event.push,
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
+      });
+    case "branch_ref":
+      return formatRepoBranchLifecycleEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        branch: input.event.branch,
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
       });
     default:
       return null;

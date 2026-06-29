@@ -1,6 +1,7 @@
 import type { GitHubWebhookPayload } from "../app.js";
 import {
   buildDeliveryScopedKey,
+  normalizeGitHubTimestamp,
   toGitHubId,
 } from "./helpers.js";
 import type {
@@ -47,19 +48,25 @@ export function materializeRepositoryEvent(
   }
 
   const repositoryId = toGitHubId(payload.repository.id);
+  const semanticId = `${repoIdentity}:repository:${repositoryId ?? repoIdentity}:${action}:${oldFullName.toLowerCase()}`;
+  const providerObjectUpdatedAt = normalizeGitHubTimestamp(payload.repository.updated_at);
 
   return {
     event_type: "repository",
     action,
-    idempotency_key: buildDeliveryScopedKey(
-      `${repoIdentity}:repository:${repositoryId ?? repoIdentity}:${action}:${oldFullName.toLowerCase()}`,
-      deliveryId,
-    ),
+    idempotency_key: buildDeliveryScopedKey(semanticId, deliveryId),
+    semantic_id: semanticId,
     github_object_id: repositoryId,
-    github_object_url: null,
+    github_object_url: payload.repository.html_url ?? null,
     title: payload.repository.full_name,
     state: null,
     actor_login: actorLogin,
+    provider_event_at: providerObjectUpdatedAt,
+    provider_object_updated_at: providerObjectUpdatedAt,
+    ref: null,
+    base_ref: null,
+    head_ref: null,
+    head_sha: null,
     metadata: {
       old_full_name: oldFullName,
     },

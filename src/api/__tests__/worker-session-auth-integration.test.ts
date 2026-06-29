@@ -416,6 +416,7 @@ test(
       agent_instance_id: "different-antigravity-instance",
       session_kind: "worker",
       runtime: "antigravity",
+      repo_branch: "codex/git-rooms",
     };
     const [secondRegistration, thirdRegistration] = await Promise.all([
       invoke(
@@ -433,19 +434,23 @@ test(
       session_id?: string;
       session_token?: string;
       display_name?: string;
+      repo_branch?: string | null;
     };
     assert.ok(secondSession.session_id);
     assert.notEqual(secondSession.session_id, worker.session_id);
+    assert.equal(secondSession.repo_branch, "codex/git-rooms");
 
     assert.equal(thirdRegistration.statusCode, 201, JSON.stringify(thirdRegistration.body));
     const thirdSession = thirdRegistration.body as {
       session_id?: string;
       session_token?: string;
       display_name?: string;
+      repo_branch?: string | null;
     };
     assert.ok(thirdSession.session_id);
     assert.notEqual(thirdSession.session_id, worker.session_id);
     assert.notEqual(thirdSession.session_id, secondSession.session_id);
+    assert.equal(thirdSession.repo_branch, "codex/git-rooms");
     assert.deepEqual(
       [secondSession.display_name, thirdSession.display_name].sort(),
       ["OwlSolar 1", "OwlSolar 2"]
@@ -480,6 +485,21 @@ test(
       )
     );
     assert.equal(thirdMessage.statusCode, 201);
+
+    const thirdPresence = await invoke(
+      handlers.post.get("/^\\/rooms\\/(.+)\\/presence$/"),
+      ownerTokenRequest(
+        {
+          status: "working",
+          status_text: "branch-aware worker session is active",
+          agent_session_id: thirdSession.session_id,
+          agent_session_token: thirdSession.session_token,
+        },
+        { params: { 0: room.id } }
+      )
+    );
+    assert.equal(thirdPresence.statusCode, 200);
+    assert.equal((thirdPresence.body as { repo_branch?: string | null }).repo_branch, "codex/git-rooms");
   }
 );
 

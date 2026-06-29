@@ -7,7 +7,7 @@
 // Parses the config and returns the room name if found.
 //
 // Config format:
-//   { "room": "github.com/BrosInCode/letagents" }
+//   { "room": "github.com/brosincode/letagents" }
 
 import { readFileSync, existsSync } from "fs";
 import { join, dirname, resolve } from "path";
@@ -17,6 +17,16 @@ export interface LetagentsConfig {
 }
 
 const CONFIG_FILENAME = ".letagents.json";
+
+function normalizeConfiguredRoom(room: string): string {
+  const trimmed = room.trim();
+  const githubRepoRoom = /^github\.com\/([^/:\s]+)\/([^/:\s]+)$/i.exec(trimmed);
+  if (!githubRepoRoom) {
+    return trimmed;
+  }
+
+  return `github.com/${githubRepoRoom[1].toLowerCase()}/${githubRepoRoom[2].toLowerCase()}`;
+}
 
 /**
  * Search for `.letagents.json` starting from `startDir` and walking up
@@ -39,7 +49,7 @@ export function findLetagentsConfig(
 
         // Validate required fields
         if (typeof parsed.room === "string" && parsed.room.trim() !== "") {
-          return { room: parsed.room.trim() };
+          return { room: normalizeConfiguredRoom(parsed.room) };
         }
 
         // Config exists but is malformed — log and continue

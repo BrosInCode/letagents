@@ -16,7 +16,9 @@ export interface MessageCreatedEvent {
 
 export const messageEvents = new EventEmitter();
 export const taskEvents = new EventEmitter();
+export const githubRoomEvents = new EventEmitter();
 export const reasoningEvents = new EventEmitter();
+export const artifactEvents = new EventEmitter();
 
 export async function emitProjectMessage(
   projectId: string,

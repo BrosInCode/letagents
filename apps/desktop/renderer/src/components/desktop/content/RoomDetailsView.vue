@@ -463,11 +463,12 @@
 <script setup lang="ts">
 import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
-import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import type {
   DesktopFocusActivityScope,
+  DesktopGitRoomInfo,
   DesktopFocusRoomBlockerState,
   DesktopFocusGitHubEventRouting,
   DesktopFocusParentVisibility,
@@ -691,6 +692,13 @@ const visibleTasks = computed(() => {
 const normalizedSearch = computed(() => searchQuery.value.trim().toLowerCase());
 
 const headerMeta = computed(() => {
+  if (props.room.gitRoom) {
+    return [
+      gitRoomRefTypeLabel(props.room.gitRoom),
+      gitRoomRefLabel(props.room.gitRoom),
+      props.room.gitRoom.repository.fullName,
+    ].filter(Boolean).join(" · ");
+  }
   if (props.room.kind === "focus") {
     return [
       statusLabel(props.room.focusStatus || "active"),
@@ -699,6 +707,33 @@ const headerMeta = computed(() => {
   }
   return `${openFocusRooms.value.length} open · ${concludedFocusRooms.value.length} closed · ${candidateTasks.value.length} task candidates`;
 });
+
+function gitRoomRefTypeLabel(gitRoom: DesktopGitRoomInfo): string {
+  switch (gitRoom.ref.type) {
+    case "default_branch":
+      return "Default branch";
+    case "branch":
+      return "Branch";
+    case "tag":
+      return "Tag";
+    case "pull_request":
+      return "Pull request";
+    default:
+      return "Git ref";
+  }
+}
+
+function gitRoomRefLabel(gitRoom: DesktopGitRoomInfo): string {
+  const ref = gitRoom.ref;
+  if (
+    ref.name
+    && ref.headRepository?.fullName
+    && ref.headRepository.fullName !== gitRoom.repository.fullName
+  ) {
+    return `${ref.headRepository.owner}:${ref.name}`;
+  }
+  return ref.name || ref.defaultBranch || ref.type.replace("_", " ");
+}
 
 watch(
   () => [props.focusRooms, props.tasks, props.room.kind, activeTab.value, searchQuery.value] as const,

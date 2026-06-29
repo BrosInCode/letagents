@@ -5,6 +5,7 @@ import {
   assignProjectAdmin,
   concludeFocusRoom,
   createFocusRoomFromIntent,
+  type GitRoomBinding,
   getFocusRoomByKey,
   getFocusRoomsForParent,
   getTaskById,
@@ -69,11 +70,14 @@ export interface RoomFocusRouteDeps {
     project: Project,
     sessionAccount: AuthenticatedRequest["sessionAccount"]
   ): Promise<RoomRole>;
+  getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
+  getGitRoomBindingsForRooms?(roomIds: string[]): Promise<Map<string, GitRoomBinding>>;
   toRoomResponse(
     project: Project,
     options?: {
       role?: RoomRole;
       authenticated?: boolean;
+      gitRoomBinding?: GitRoomBinding | null;
     }
   ): Record<string, unknown>;
   normalizeOptionalString(value: unknown): string | null;
@@ -119,6 +123,54 @@ async function resolveOwnerTokenWorkerWriteIdentity(input: {
   return { kind: "worker", identity: result.identity };
 }
 
+function toFocusRoomResponseOptions(input: {
+  role?: RoomRole;
+  authenticated?: boolean;
+  gitRoomBinding?: GitRoomBinding | null;
+}): {
+  role?: RoomRole;
+  authenticated?: boolean;
+  gitRoomBinding?: GitRoomBinding | null;
+} {
+  return {
+    ...(input.role ? { role: input.role } : {}),
+    ...(input.authenticated !== undefined ? { authenticated: input.authenticated } : {}),
+    ...(input.gitRoomBinding !== undefined ? { gitRoomBinding: input.gitRoomBinding } : {}),
+  };
+}
+
+async function getOptionalGitRoomBinding(
+  deps: RoomFocusRouteDeps,
+  roomId: string
+): Promise<GitRoomBinding | null | undefined> {
+  if (!deps.getGitRoomBindingForRoom) {
+    return undefined;
+  }
+
+  return (await deps.getGitRoomBindingForRoom(roomId)) ?? null;
+}
+
+export function toFocusRoomListResponse(input: {
+  project: Project;
+  focusRooms: Project[];
+  gitRoomBindings?: Map<string, GitRoomBinding> | null;
+  toRoomResponse: RoomFocusRouteDeps["toRoomResponse"];
+}): Record<string, unknown> {
+  return {
+    room_id: input.project.id,
+    focus_rooms: input.focusRooms.map((focusRoom) =>
+      input.toRoomResponse(
+        focusRoom,
+        toFocusRoomResponseOptions({
+          gitRoomBinding: input.gitRoomBindings
+            ? input.gitRoomBindings.get(focusRoom.id) ?? null
+            : undefined,
+        })
+      )
+    ),
+  };
+}
+
 export function registerRoomFocusRoutes(
   app: Express,
   deps: RoomFocusRouteDeps
@@ -140,11 +192,13 @@ export function registerRoomFocusRoutes(
     }
 
     const role = await deps.resolveProjectRole(focusRoom, req.sessionAccount);
+    const gitRoomBinding = await getOptionalGitRoomBinding(deps, focusRoom.id);
     res.json({
-      ...deps.toRoomResponse(focusRoom, {
+      ...deps.toRoomResponse(focusRoom, toFocusRoomResponseOptions({
         role,
         authenticated: Boolean(req.sessionAccount),
-      }),
+        gitRoomBinding,
+      })),
     });
   });
 
@@ -167,13 +221,15 @@ export function registerRoomFocusRoutes(
       }
 
       const role = await deps.resolveProjectRole(focusRoom, req.sessionAccount);
+      const gitRoomBinding = await getOptionalGitRoomBinding(deps, focusRoom.id);
       res.json({
         room_id: project.id,
         focus_key: focusKey,
-        focus_room: deps.toRoomResponse(focusRoom, {
+        focus_room: deps.toRoomResponse(focusRoom, toFocusRoomResponseOptions({
           role,
           authenticated: Boolean(req.sessionAccount),
-        }),
+          gitRoomBinding,
+        })),
       });
     } catch (error) {
       respondWithBadRequest(
@@ -195,10 +251,15 @@ export function registerRoomFocusRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const focusRooms = await getFocusRoomsForParent(project.id);
-    res.json({
-      room_id: project.id,
-      focus_rooms: focusRooms.map((focusRoom) => deps.toRoomResponse(focusRoom)),
-    });
+    const gitRoomBindings = deps.getGitRoomBindingsForRooms
+      ? await deps.getGitRoomBindingsForRooms(focusRooms.map((focusRoom) => focusRoom.id))
+      : null;
+    res.json(toFocusRoomListResponse({
+      project,
+      focusRooms,
+      gitRoomBindings,
+      toRoomResponse: deps.toRoomResponse,
+    }));
   });
 
   app.post(/^\/rooms\/(.+)\/focus-rooms$/, async (req: AuthenticatedRequest, res) => {
@@ -236,13 +297,15 @@ export function registerRoomFocusRoutes(
       );
 
       const role = await deps.resolveProjectRole(result.room, req.sessionAccount);
+      const gitRoomBinding = await getOptionalGitRoomBinding(deps, result.room.id);
       res.status(201).json({
         room_id: project.id,
         created: result.created,
-        focus_room: deps.toRoomResponse(result.room, {
+        focus_room: deps.toRoomResponse(result.room, toFocusRoomResponseOptions({
           role,
           authenticated: Boolean(req.sessionAccount),
-        }),
+          gitRoomBinding,
+        })),
       });
     } catch (error) {
       respondWithBadRequest(
@@ -271,14 +334,16 @@ export function registerRoomFocusRoutes(
     }
 
     const role = await deps.resolveProjectRole(result.room, req.sessionAccount);
+    const gitRoomBinding = await getOptionalGitRoomBinding(deps, result.room.id);
     res.json({
       room_id: project.id,
       focus_key: focusKey,
       archived: result.archived,
-      focus_room: deps.toRoomResponse(result.room, {
+      focus_room: deps.toRoomResponse(result.room, toFocusRoomResponseOptions({
         role,
         authenticated: Boolean(req.sessionAccount),
-      }),
+        gitRoomBinding,
+      })),
     });
   });
 
@@ -368,15 +433,17 @@ export function registerRoomFocusRoutes(
         : null;
 
       const role = await deps.resolveProjectRole(result.room, req.sessionAccount);
+      const gitRoomBinding = await getOptionalGitRoomBinding(deps, result.room.id);
       res.json({
         room_id: project.id,
         focus_key: focusKey,
         shared: result.updated,
         message,
-        focus_room: deps.toRoomResponse(result.room, {
+        focus_room: deps.toRoomResponse(result.room, toFocusRoomResponseOptions({
           role,
           authenticated: Boolean(req.sessionAccount),
-        }),
+          gitRoomBinding,
+        })),
       });
     } catch (error) {
       respondWithBadRequest(

@@ -4,7 +4,12 @@ import { join } from "path";
 import { z } from "zod";
 
 import { getRoomFromConfig } from "../../../config-reader.js";
-import { getGitRemoteIdentity } from "../../../git-remote.js";
+import {
+  buildActiveGitRoomContext,
+  getGitCurrentBranch,
+  getGitDefaultBranch,
+  getGitRoomContext,
+} from "../../../git-remote.js";
 import {
   currentAgentIdentity,
   currentAgentIdentityKey,
@@ -40,7 +45,7 @@ export function registerRoomInspectionTools(server: McpServer): void {
   server.tool(
     "check_repo",
     "Inspect the current repository context for Let Agents Chat. " +
-      "Shows the git repo root, detected .letagents.json path, auto-derived room name from git remote, " +
+      "Shows the git repo root, detected .letagents.json path, auto-derived Git Room from git remote and active branch, " +
       "and current room state. Useful for troubleshooting auto-join issues.",
     {
       cwd: z
@@ -89,8 +94,15 @@ function getRepoInspectionPayload(targetDir?: string) {
   const configDir = repoRoot ? findExistingConfig(startDir) : null;
   const configPath = configDir ? join(configDir, ".letagents.json") : null;
   const configuredRoom = repoRoot ? getRoomFromConfig(startDir) : null;
-  const derivedRoom = repoRoot ? getGitRemoteIdentity(repoRoot) : null;
-  const detectedRoom = configuredRoom || derivedRoom;
+  const gitContext = repoRoot ? getGitRoomContext(repoRoot) : null;
+  const configGitContext = configuredRoom
+    ? buildActiveGitRoomContext({
+        repoRoom: configuredRoom,
+        currentBranch: repoRoot ? getGitCurrentBranch(repoRoot) : null,
+        defaultBranch: repoRoot ? getGitDefaultBranch(repoRoot) : null,
+      })
+    : null;
+  const detectedRoom = configGitContext?.activeRoom ?? gitContext?.activeRoom ?? null;
   const currentRoomMatchesContext = Boolean(
     currentRoom && detectedRoom && currentRoom.room_id === detectedRoom
   );
@@ -102,7 +114,12 @@ function getRepoInspectionPayload(targetDir?: string) {
     config_file: configPath ?? null,
     config_contents: readConfigContents(configPath),
     configured_room_from_file: configuredRoom ?? null,
-    derived_room_from_git: derivedRoom ?? null,
+    configured_active_room_from_context: configGitContext?.activeRoom ?? null,
+    derived_room_from_git: gitContext?.activeRoom ?? null,
+    derived_repo_room_from_git: gitContext?.repoRoom ?? null,
+    derived_branch_room_from_git: gitContext?.activeRefRoom ?? null,
+    git_current_branch: gitContext?.currentBranch ?? configGitContext?.currentBranch ?? null,
+    git_default_branch: gitContext?.defaultBranch ?? configGitContext?.defaultBranch ?? null,
     detected_room_from_context: detectedRoom ?? null,
     current_room: toPublicRoomState(currentRoom),
     current_room_scope: currentRoomScope(currentRoomMatchesContext, detectedRoom),
@@ -158,5 +175,5 @@ function joinHint(input: {
   }
   return input.currentRoomMatchesContext
     ? null
-    : "Use join_room with detected_room_from_context to switch this MCP session to the repo room.";
+    : "Use join_room with detected_room_from_context to switch this MCP session to the detected Git Room.";
 }

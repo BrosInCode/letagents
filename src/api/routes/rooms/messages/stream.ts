@@ -18,6 +18,7 @@ import {
   type RentalActivityCreatedEvent,
 } from "../../../rental/activity-emitter.js";
 import { isDesktopHumanClient } from "./request-identity.js";
+import { toPublicGitHubRoomEvent } from "../events.js";
 import {
   rentalActivityPayload,
   rentalActivityStreamNames,
@@ -25,8 +26,10 @@ import {
 import { resolveParticipantRoom } from "./helpers.js";
 import type {
   MessageCreatedEvent,
+  GitHubRoomEventUpdatedEvent,
   ReasoningSessionRemovedEvent,
   ReasoningSessionUpdatedEvent,
+  RoomArtifactUpdatedEvent,
   RoomMessageRouteDeps,
   TaskUpdatedEvent,
 } from "./types.js";
@@ -96,6 +99,14 @@ export function registerMessageStreamRoute(
       res.write(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
     };
 
+    const onGitHubEventUpdated = (event: GitHubRoomEventUpdatedEvent) => {
+      if (event.projectId !== projectId) return;
+      res.write(`event: github_event\ndata: ${JSON.stringify({
+        ...toPublicGitHubRoomEvent(event.event),
+        room_id: project.id,
+      })}\n\n`);
+    };
+
     const onReasoningUpdated = (event: ReasoningSessionUpdatedEvent) => {
       if (event.projectId !== projectId) return;
       res.write(
@@ -112,6 +123,14 @@ export function registerMessageStreamRoute(
       res.write(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
     };
 
+    const onArtifactUpdated = (event: RoomArtifactUpdatedEvent) => {
+      if (event.projectId !== projectId) return;
+      res.write(`event: artifact_update\ndata: ${JSON.stringify({
+        room_id: project.id,
+        artifact_identity_key: event.artifact?.identity_key ?? null,
+      })}\n\n`);
+    };
+
     const rentalEvents = deps.rentalActivityEvents ?? rentalActivityEvents;
     const onRentalActivityCreated = (event: RentalActivityCreatedEvent) => {
       const activity = event.activity;
@@ -126,14 +145,18 @@ export function registerMessageStreamRoute(
 
     deps.messageEvents.on("message:created", onMessageCreated);
     deps.taskEvents.on("task:updated", onTaskUpdated);
+    deps.githubRoomEvents?.on("github_event:updated", onGitHubEventUpdated);
     deps.reasoningEvents.on("reasoning:updated", onReasoningUpdated);
     deps.reasoningEvents.on("reasoning:removed", onReasoningRemoved);
+    deps.artifactEvents?.on("artifact:updated", onArtifactUpdated);
     rentalEvents.on("activity:created", onRentalActivityCreated);
 
     req.on("close", () => {
       streamClosed = true;
       deps.messageEvents.off("message:created", onMessageCreated);
       deps.taskEvents.off("task:updated", onTaskUpdated);
+      deps.githubRoomEvents?.off("github_event:updated", onGitHubEventUpdated);
+      deps.artifactEvents?.off("artifact:updated", onArtifactUpdated);
       rentalEvents.off("activity:created", onRentalActivityCreated);
       if (endDelivery) {
         void endDelivery().catch((error: unknown) => {

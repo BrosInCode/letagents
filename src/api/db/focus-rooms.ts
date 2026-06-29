@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import { DEFAULT_FOCUS_ROOM_SETTINGS, type FocusRoomSettingsPatch } from "../focus-rooms/settings.js";
 import type { FocusRoomConclusionDetails } from "../focus-rooms/conclusion.js";
@@ -156,6 +156,68 @@ export async function archiveFocusRoom(
     includeArchived: true,
   });
   return current ? { room: current, archived: false } : null;
+}
+
+export async function activateFocusRoom(
+  parentRoomId: string,
+  focusKey: string
+): Promise<{ room: Project; activated: boolean } | null> {
+  const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey, {
+    includeArchived: true,
+  });
+  if (!focusRoom) {
+    return null;
+  }
+
+  if (
+    focusRoom.focus_status === "active" &&
+    !focusRoom.focus_archived_at &&
+    !focusRoom.concluded_at &&
+    !focusRoom.conclusion_summary &&
+    !focusRoom.conclusion_details
+  ) {
+    return { room: focusRoom, activated: false };
+  }
+
+  const [updated] = await db
+    .update(rooms)
+    .set({
+      focus_archived_at: null,
+      focus_status: "active",
+      concluded_at: null,
+      conclusion_summary: null,
+      conclusion_details: null,
+    })
+    .where(
+      and(
+        eq(rooms.id, focusRoom.id),
+        eq(rooms.parent_room_id, parentRoomId),
+        eq(rooms.focus_key, focusKey),
+        eq(rooms.kind, "focus")
+      )
+    )
+    .returning();
+
+  return updated ? { room: toProject(updated), activated: true } : null;
+}
+
+export async function claimGitRefFocusRoomLifecycleEvent(
+  roomId: string,
+  eventOrderAt: string
+): Promise<Project | null> {
+  const [updated] = await db
+    .update(rooms)
+    .set({ git_lifecycle_event_order_at: eventOrderAt })
+    .where(
+      and(
+        eq(rooms.id, roomId),
+        eq(rooms.kind, "focus"),
+        sql`(${rooms.git_lifecycle_event_order_at} IS NULL OR ${rooms.git_lifecycle_event_order_at} < ${eventOrderAt})`
+      )
+    )
+    .returning();
+
+  return updated ? toProject(updated) : null;
 }
 
 export async function concludeFocusRoom(

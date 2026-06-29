@@ -99,6 +99,7 @@ function codexSession(input: Partial<CodexLiveSessionState> = {}): CodexLiveSess
     room_identifier: input.room_identifier ?? input.room_id ?? "room_1",
     joined_via: input.joined_via ?? "join_room",
     cwd: input.cwd ?? "/tmp/letagents",
+    repo_branch: input.repo_branch ?? "codex/git-rooms",
     stop_phrase: input.stop_phrase ?? "/stop-codex-room",
     max_minutes: input.max_minutes ?? 0,
     deadline_utc: input.deadline_utc ?? null,
@@ -213,6 +214,11 @@ test("room session helpers preserve join metadata and update current room on tou
       room_id: "room_1",
       code: "ABCD-1234",
       display_name: "Room One",
+      git_room: {
+        provider: "github",
+        repository: { full_name: "owner/repo" },
+        ref: { type: "branch", name: "codex/git-rooms" },
+      },
       joined_via: "join_room",
       last_message_id: "msg_1",
     });
@@ -236,6 +242,11 @@ test("room session helpers preserve join metadata and update current room on tou
     assert.equal(resaved.joined_at, originalJoinedAt);
     assert.equal(resaved.code, "ABCD-1234");
     assert.equal(resaved.display_name, "Room One");
+    assert.deepEqual(resaved.git_room, {
+      provider: "github",
+      repository: { full_name: "owner/repo" },
+      ref: { type: "branch", name: "codex/git-rooms" },
+    });
     assert.equal(resaved.last_message_id, "msg_1");
 
     const touchedWithoutMessage = touchRoomSession("room_1");
@@ -266,6 +277,7 @@ test("codex live session helpers maintain per-room current sessions", () => {
     assert.deepEqual(getCurrentCodexLiveSession("room_2"), second);
     assert.deepEqual(getCurrentCodexLiveSession(), second);
     assert.deepEqual(getStoredCodexLiveSession("codex_session_1"), first);
+    assert.equal(getStoredCodexLiveSession("codex_session_1")?.repo_branch, "codex/git-rooms");
 
     const background = saveCodexLiveSession(codexSession({
       session_id: "codex_session_3",

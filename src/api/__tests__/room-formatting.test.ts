@@ -12,6 +12,8 @@ delete process.env.ATTACHMENT_S3_SECRET_ACCESS_KEY;
 delete process.env.AWS_SECRET_ACCESS_KEY;
 
 const {
+  formatGitRoomSummary,
+  formatManualGitRoomSummaryForRoomId,
   formatFocusRoomAnchorMessage,
   formatFocusRoomConclusionMessage,
   formatFocusRoomReference,
@@ -33,6 +35,7 @@ function project(overrides: Partial<Project> = {}): Project {
     focus_parent_visibility: null,
     focus_activity_scope: null,
     focus_github_event_routing: null,
+    focus_archived_at: null,
     concluded_at: null,
     conclusion_summary: null,
     conclusion_details: null,
@@ -81,6 +84,7 @@ test("toRoomResponse preserves non-focus room response shape", () => {
       focus_activity_scope: null,
       focus_github_event_routing: null,
       focus_settings: null,
+      focus_archived_at: null,
       concluded_at: null,
       conclusion_summary: null,
       conclusion_details: null,
@@ -130,6 +134,7 @@ test("toRoomResponse normalizes focus settings into flat and nested fields", () 
       activity_scope: "room",
       github_event_routing: "all_parent_repo",
     },
+    focus_archived_at: null,
     concluded_at: null,
     conclusion_summary: "Done",
     conclusion_details: null,
@@ -147,6 +152,123 @@ test("getFocusRoomSettings applies focus room defaults", () => {
       github_event_routing: "task_and_branch",
     }
   );
+});
+
+test("formatGitRoomSummary exposes header metadata without head SHA", () => {
+  assert.deepEqual(
+    formatGitRoomSummary({
+      room_id: "github.com/brosincode/letagents",
+      provider: "github",
+      host: "github.com",
+      repository_id: "repo_1",
+      repository_owner: "BrosInCode",
+      repository_name: "letagents",
+      repository_full_name: "BrosInCode/letagents",
+      ref_type: "default_branch",
+      ref_name: "staging",
+      default_branch: "staging",
+      base_ref: null,
+      head_ref: null,
+      head_repository_id: null,
+      head_repository_full_name: null,
+      head_repository_owner: null,
+      head_repository_name: null,
+      visibility: "private",
+      is_default: true,
+      source: "github_repository",
+      created_at: "2026-04-20T00:00:00.000Z",
+      updated_at: "2026-04-21T00:00:00.000Z",
+    }),
+    {
+      room_id: "github.com/brosincode/letagents",
+      provider: "github",
+      host: "github.com",
+      repository: {
+        id: "repo_1",
+        owner: "BrosInCode",
+        name: "letagents",
+        full_name: "BrosInCode/letagents",
+      },
+      ref: {
+        type: "default_branch",
+        name: "staging",
+        default_branch: "staging",
+        base_ref: null,
+        head_ref: null,
+        head_repository: null,
+        is_default: true,
+      },
+      visibility: "private",
+      access_mode: "private",
+      source: "github_repository",
+      updated_at: "2026-04-21T00:00:00.000Z",
+    }
+  );
+});
+
+test("formatGitRoomSummary preserves fork head repository identity", () => {
+  const summary = formatGitRoomSummary({
+    room_id: "focus_27",
+    provider: "github",
+    host: "github.com",
+    repository_id: "base_repo",
+    repository_owner: "BrosInCode",
+    repository_name: "letagents",
+    repository_full_name: "BrosInCode/letagents",
+    ref_type: "pull_request",
+    ref_name: "fix-login",
+    default_branch: "staging",
+    base_ref: "staging",
+    head_ref: "fix-login",
+    head_repository_id: "fork_repo",
+    head_repository_owner: "contributor",
+    head_repository_name: "letagents",
+    head_repository_full_name: "contributor/letagents",
+    visibility: "public",
+    is_default: false,
+    source: "webhook",
+    created_at: "2026-04-20T00:00:00.000Z",
+    updated_at: "2026-04-21T00:00:00.000Z",
+  });
+
+  assert.deepEqual(summary?.ref.head_repository, {
+    id: "fork_repo",
+    owner: "contributor",
+    name: "letagents",
+    full_name: "contributor/letagents",
+  });
+});
+
+test("formatManualGitRoomSummaryForRoomId derives read-only GitHub repo metadata", () => {
+  assert.deepEqual(
+    formatManualGitRoomSummaryForRoomId("github.com/brosincode/letagents"),
+    {
+      room_id: "github.com/brosincode/letagents",
+      provider: "github",
+      host: "github.com",
+      repository: {
+        id: null,
+        owner: "brosincode",
+        name: "letagents",
+        full_name: "brosincode/letagents",
+      },
+      ref: {
+        type: "default_branch",
+        name: null,
+        default_branch: null,
+        base_ref: null,
+        head_ref: null,
+        head_repository: null,
+        is_default: true,
+      },
+      visibility: "unknown",
+      access_mode: "unknown",
+      source: "manual",
+      updated_at: null,
+    }
+  );
+
+  assert.equal(formatManualGitRoomSummaryForRoomId("focus_27"), null);
 });
 
 test("focus room messages preserve task and fallback labels", () => {

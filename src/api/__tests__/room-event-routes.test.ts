@@ -74,6 +74,24 @@ test("getGitHubEventLaneRoomId keeps default focus rooms on the parent event lan
   );
 });
 
+test("getGitHubEventLaneRoomId uses generated Git Room event lanes", () => {
+  assert.equal(
+    getGitHubEventLaneRoomId(
+      project({
+        id: "git-room:github.com:owner/repo:branch:Y29kZXgvZ2l0LXJvb21z",
+        kind: "focus",
+        parent_room_id: "github.com/owner/repo",
+        focus_key: "git:branch:Y29kZXgvZ2l0LXJvb21z",
+        source_task_id: null,
+        focus_status: "active",
+        focus_github_event_routing: "task_and_branch",
+      }),
+      "github.com/owner/repo"
+    ),
+    "git-room:github.com:owner/repo:branch:Y29kZXgvZ2l0LXJvb21z"
+  );
+});
+
 test("getGitHubEventLaneRoomId keeps all-parent-repo focus rooms on the parent event lane", () => {
   assert.equal(
     getGitHubEventLaneRoomId(

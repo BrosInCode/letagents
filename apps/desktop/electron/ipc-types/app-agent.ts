@@ -1,4 +1,7 @@
-import type { DesktopAccountRoomActionResult } from "./room.js";
+import type {
+  DesktopAccountRoomActionResult,
+  DesktopGitRoomInfo,
+} from "./room.js";
 
 export type DesktopAppAgentFeedbackState =
   | "configuration_required"
@@ -37,6 +40,7 @@ export interface DesktopAppAgentRunInput {
   activeRoomIdentifier?: string | null;
   activeRoomDisplayName?: string | null;
   activeRoomPinned?: boolean | null;
+  activeRoomGitRoom?: DesktopGitRoomInfo | null;
   selectedAction?: DesktopAppAgentActionReference | null;
   confirmedAction?: DesktopAppAgentActionReference | null;
   confirmedPlan?: DesktopAppAgentActionPlan | null;

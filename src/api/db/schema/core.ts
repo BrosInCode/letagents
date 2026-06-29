@@ -29,6 +29,7 @@ export const rooms = pgTable(
     focus_activity_scope: text("focus_activity_scope").$type<FocusActivityScope>(),
     focus_github_event_routing: text("focus_github_event_routing").$type<FocusGitHubEventRouting>(),
     focus_archived_at: timestamp("focus_archived_at", { mode: "string", withTimezone: true }),
+    git_lifecycle_event_order_at: timestamp("git_lifecycle_event_order_at", { mode: "string", withTimezone: true }),
     concluded_at: timestamp("concluded_at", { mode: "string", withTimezone: true }),
     conclusion_summary: text("conclusion_summary"),
     conclusion_details: jsonb("conclusion_details").$type<FocusRoomConclusionDetails>(),

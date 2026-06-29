@@ -327,6 +327,12 @@ export function registerTaskLeaseActionRoute(
       if (nextTask.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(project.id, nextTask);
       }
+      if (newLease?.branch_ref) {
+        await deps.ensureTaskGitRoomForActiveWorkLease?.({
+          parentRoomId: project.id,
+          taskId: nextTask.id,
+        });
+      }
 
       await createCoordinationEvent({
         room_id: project.id,

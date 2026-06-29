@@ -62,6 +62,7 @@ export function mergeRoomAgentPresenceRecords(input: {
       display_name: deliverySession?.display_name ?? statusEntry?.display_name ?? actorLabel,
       owner_label: deliverySession?.owner_label ?? statusEntry?.owner_label ?? null,
       ide_label: deliverySession?.ide_label ?? statusEntry?.ide_label ?? null,
+      repo_branch: deliverySession?.repo_branch ?? statusEntry?.repo_branch ?? null,
       status,
       status_text: statusEntry?.status_text ?? null,
       last_heartbeat_at: lastSeenAt,

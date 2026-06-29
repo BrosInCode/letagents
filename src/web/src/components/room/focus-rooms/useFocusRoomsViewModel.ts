@@ -105,9 +105,13 @@ export function useFocusRoomsViewModel(
     props.focusStatus ? taskStatusLabel(props.focusStatus) : 'active'
   )
   const focusContextCopy = computed(() =>
-    isConcluded.value
-      ? 'Result shared with the parent room.'
-      : 'Keep task-specific work here, then bring the outcome back to the parent room.'
+    props.gitRoom
+      ? isConcluded.value
+        ? 'Git work has been closed; review the branch outcome before reopening it.'
+        : 'Keep branch-specific planning, code activity, and artifacts here.'
+      : isConcluded.value
+        ? 'Result shared with the parent room.'
+        : 'Keep task-specific work here, then bring the outcome back to the parent room.'
   )
   const sharePlaceholder = computed(() =>
     isConcluded.value

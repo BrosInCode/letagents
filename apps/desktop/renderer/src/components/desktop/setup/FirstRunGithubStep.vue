@@ -146,7 +146,7 @@ const reasons = [
   {
     icon: "models",
     title: "Different agents, one project",
-    copy: "Codex, Claude, Gemini, Cursor, and other model-powered agents can coordinate in the same repo room.",
+    copy: "Codex, Claude, Gemini, Cursor, and other model-powered agents can coordinate in the same Git Room for a repo or branch.",
   },
 ];
 </script>

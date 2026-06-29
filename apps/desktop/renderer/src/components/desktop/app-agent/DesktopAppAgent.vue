@@ -52,6 +52,7 @@ import type {
   DesktopAppAgentActionReference,
   DesktopAppAgentRunResult,
   DesktopAppAgentSettingsStatus,
+  DesktopGitRoomInfo,
 } from "../../../../../electron/ipc-types";
 import {
   appAgentSurfaceKicker,
@@ -70,6 +71,7 @@ const props = defineProps<{
   activeRoomDisplayName: string | null;
   activeRoomIdentifier: string | null;
   activeRoomPinned: boolean;
+  activeRoomGitRoom: DesktopGitRoomInfo | null;
   busy: boolean;
   result: DesktopAppAgentRunResult | null;
   settingsStatus: DesktopAppAgentSettingsStatus | null;
@@ -173,6 +175,7 @@ function submitPrompt(): void {
     activeRoomDisplayName: props.activeRoomDisplayName,
     activeRoomIdentifier: props.activeRoomIdentifier,
     activeRoomPinned: props.activeRoomPinned,
+    activeRoomGitRoom: props.activeRoomGitRoom,
   });
   if (!runInput) return;
   lastPrompt.value = nextPrompt;
@@ -186,6 +189,7 @@ function selectAction(action: DesktopAppAgentActionReference): void {
     activeRoomDisplayName: props.activeRoomDisplayName,
     activeRoomIdentifier: props.activeRoomIdentifier,
     activeRoomPinned: props.activeRoomPinned,
+    activeRoomGitRoom: props.activeRoomGitRoom,
     selectedAction: action,
   });
   if (runInput) emit("run", runInput);
@@ -198,6 +202,7 @@ function confirmAction(action: DesktopAppAgentActionReference): void {
     activeRoomDisplayName: props.activeRoomDisplayName,
     activeRoomIdentifier: props.activeRoomIdentifier,
     activeRoomPinned: props.activeRoomPinned,
+    activeRoomGitRoom: props.activeRoomGitRoom,
     confirmedAction: action,
   });
   if (runInput) emit("run", runInput);
@@ -210,6 +215,7 @@ function confirmPlan(plan: DesktopAppAgentActionPlan): void {
     activeRoomDisplayName: props.activeRoomDisplayName,
     activeRoomIdentifier: props.activeRoomIdentifier,
     activeRoomPinned: props.activeRoomPinned,
+    activeRoomGitRoom: props.activeRoomGitRoom,
     confirmedPlan: plan,
   });
   if (runInput) emit("run", runInput);

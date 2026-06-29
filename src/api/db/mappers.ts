@@ -2,9 +2,9 @@ import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
 import { isInviteCode } from "../rooms/routing.js";
-import { github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, rooms } from "./schema.js";
+import { github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
-import type { CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomKind, RoomParticipant, RoomParticipantRow, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
+import type { CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
   const inviteRoom = isInviteCode(row.id);
@@ -22,6 +22,7 @@ export function toProject(row: typeof rooms.$inferSelect): Project {
     focus_activity_scope: row.focus_activity_scope,
     focus_github_event_routing: row.focus_github_event_routing,
     focus_archived_at: row.focus_archived_at,
+    git_lifecycle_event_order_at: row.git_lifecycle_event_order_at,
     concluded_at: row.concluded_at,
     conclusion_summary: row.conclusion_summary,
     conclusion_details: row.conclusion_details ?? null,
@@ -46,7 +47,70 @@ export function toGitHubRepositoryLink(
     owner_login: row.owner_login,
     repo_name: row.repo_name,
     full_name: row.full_name,
+    default_branch: row.default_branch,
+    visibility: row.visibility as GitHubRepositoryLink["visibility"],
     created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function toGitRoomBinding(row: typeof room_git_bindings.$inferSelect): GitRoomBinding {
+  return {
+    room_id: row.room_id,
+    provider: row.provider,
+    host: row.host,
+    repository_id: row.repository_id,
+    repository_full_name: row.repository_full_name,
+    repository_owner: row.repository_owner,
+    repository_name: row.repository_name,
+    ref_type: row.ref_type,
+    ref_name: row.ref_name,
+    default_branch: row.default_branch,
+    base_ref: row.base_ref,
+    head_ref: row.head_ref,
+    head_repository_id: row.head_repository_id,
+    head_repository_full_name: row.head_repository_full_name,
+    head_repository_owner: row.head_repository_owner,
+    head_repository_name: row.head_repository_name,
+    visibility: row.visibility,
+    is_default: row.is_default,
+    source: row.source,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function toRoomSharedArtifact(
+  row: typeof room_shared_artifacts.$inferSelect,
+  linkedTaskIds: string[] = []
+): RoomSharedArtifact {
+  return {
+    room_id: row.room_id,
+    identity_key: row.identity_key,
+    provider: row.provider,
+    kind: row.kind,
+    artifact_id: row.artifact_id,
+    artifact_number: row.artifact_number,
+    title: row.title,
+    url: row.url,
+    ref: row.ref,
+    state: row.state,
+    source: row.source,
+    first_seen_at: row.first_seen_at,
+    updated_at: row.updated_at,
+    linked_task_ids: linkedTaskIds,
+  };
+}
+
+export function toRoomSharedArtifactTaskLink(
+  row: typeof room_shared_artifact_tasks.$inferSelect
+): RoomSharedArtifactTaskLink {
+  return {
+    room_id: row.room_id,
+    artifact_identity_key: row.artifact_identity_key,
+    task_id: row.task_id,
+    source: row.source,
+    linked_at: row.linked_at,
     updated_at: row.updated_at,
   };
 }
@@ -298,6 +362,7 @@ export function toRoomAgentPresence(row: RoomAgentPresenceRow): RoomAgentPresenc
     display_name: row.display_name,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
+    repo_branch: row.repo_branch ?? null,
     status: row.status,
     status_text: row.status_text,
     last_heartbeat_at: row.last_heartbeat_at,
@@ -348,6 +413,7 @@ export function toRoomAgentDeliverySession(row: RoomAgentDeliverySessionRow): Ro
     display_name: row.display_name,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
+    repo_branch: row.repo_branch ?? null,
     transport: row.transport,
     active_connection_count: row.active_connection_count,
     last_connected_at: row.last_connected_at,
@@ -376,6 +442,7 @@ export function toRoomAgentSession(row: RoomAgentSessionRow): RoomAgentSession {
     owner_account_id: row.owner_account_id,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
+    repo_branch: row.repo_branch ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     last_seen_at: row.last_seen_at,

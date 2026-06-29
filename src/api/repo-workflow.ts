@@ -27,11 +27,13 @@ export {
 } from "./repo-workflow/task-artifacts.js";
 export {
   buildRepoRoomEventArtifactMatches,
+  formatRepoBranchLifecycleEventMessage,
   formatRepoCheckRunEventMessage,
   formatRepoIssueCommentEventMessage,
   formatRepoIssueEventMessage,
   formatRepoPullRequestEventMessage,
   formatRepoPullRequestReviewEventMessage,
+  formatRepoPushEventMessage,
   formatRepoRepositoryEventMessage,
   formatRepoRoomEventMessage,
   getRepoRoomEventReferenceTexts,

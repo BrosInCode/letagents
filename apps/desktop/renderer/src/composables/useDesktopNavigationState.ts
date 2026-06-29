@@ -89,6 +89,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
         concludedAt: null,
         conclusionSummary: null,
         conclusionDetails: null,
+        gitRoom: null,
       };
     }
     return options.selectedSnapshot.value.room;

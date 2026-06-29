@@ -89,6 +89,56 @@
   margin: 0;
 }
 
+.focus-git-room-card {
+  gap: 10px;
+}
+
+.focus-git-room-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-primary, #ffffff);
+}
+
+.focus-git-room-title svg {
+  flex: 0 0 auto;
+  color: #93c5fd;
+}
+
+.focus-git-room-title strong {
+  min-width: 0;
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.focus-git-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.focus-git-facts div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.focus-git-facts dt {
+  color: var(--muted, #71717a);
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.focus-git-facts dd {
+  margin: 0;
+  color: var(--text, #fafafa);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .focus-audit-list {
   display: grid;
   gap: 7px;

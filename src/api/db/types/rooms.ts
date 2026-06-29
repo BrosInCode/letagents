@@ -19,6 +19,7 @@ export interface Project {
   focus_activity_scope: FocusActivityScope | null;
   focus_github_event_routing: FocusGitHubEventRouting | null;
   focus_archived_at: string | null;
+  git_lifecycle_event_order_at: string | null;
   concluded_at: string | null;
   conclusion_summary: string | null;
   conclusion_details: FocusRoomConclusionDetails | null;

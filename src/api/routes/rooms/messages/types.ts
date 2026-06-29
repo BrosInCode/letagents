@@ -4,8 +4,10 @@ import type { Request, Response } from "express";
 import type {
   Message,
   Project,
+  GitHubRoomEvent,
   ReasoningSession,
   ReasoningSessionUpdate,
+  RoomSharedArtifact,
   Task,
 } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
@@ -22,6 +24,11 @@ export interface TaskUpdatedEvent {
   task: Task;
 }
 
+export interface GitHubRoomEventUpdatedEvent {
+  projectId: string;
+  event: GitHubRoomEvent;
+}
+
 export interface ReasoningSessionUpdatedEvent {
   projectId: string;
   session: ReasoningSession;
@@ -33,10 +40,17 @@ export interface ReasoningSessionRemovedEvent {
   session_id: string;
 }
 
+export interface RoomArtifactUpdatedEvent {
+  projectId: string;
+  artifact: RoomSharedArtifact | null;
+}
+
 export interface RoomMessageRouteDeps {
   messageEvents: EventEmitter;
   taskEvents: EventEmitter;
+  githubRoomEvents?: EventEmitter;
   reasoningEvents: EventEmitter;
+  artifactEvents?: EventEmitter;
   rentalActivityEvents?: EventEmitter;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;

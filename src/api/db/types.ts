@@ -1,5 +1,7 @@
 export type * from "./types/agents.js";
+export type * from "./types/artifacts.js";
 export type * from "./types/auth.js";
+export type * from "./types/git.js";
 export type * from "./types/github.js";
 export type * from "./types/messages.js";
 export type * from "./types/reasoning.js";

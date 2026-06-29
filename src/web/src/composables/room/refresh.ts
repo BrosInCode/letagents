@@ -8,6 +8,7 @@ import {
   fetchMessages,
   fetchParticipants,
   fetchPresence,
+  fetchRoomArtifacts,
   fetchTaskGithubStatus,
   fetchTasks,
   getGitHubEventsIdentifier,
@@ -39,6 +40,7 @@ import {
   presence,
   reasoningSessions,
   room,
+  roomArtifacts,
   setLastActivityHistoryRequest,
   taskGithubStatus,
   tasks,
@@ -55,12 +57,18 @@ export function createRoomRefreshController(
   deps: RoomRefreshControllerDeps,
 ) {
   let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  let roomArtifactsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
   async function refreshTasksAndPresence(roomIdentifier: string) {
-    const next = await fetchTasksAndPresence(roomIdentifier)
+    const [next, nextArtifacts] = await Promise.all([
+      fetchTasksAndPresence(roomIdentifier),
+      fetchRoomArtifacts(roomIdentifier),
+    ])
+    if (room.value?.identifier !== roomIdentifier) return
     tasks.value = next.tasks
     presence.value = next.presence
     boardHandoffPresence.value = next.presence
+    roomArtifacts.value = nextArtifacts
   }
 
   async function loadActivityHistory(
@@ -200,6 +208,28 @@ export function createRoomRefreshController(
     }
   }
 
+  async function refreshRoomArtifacts(roomIdentifier: string): Promise<boolean> {
+    const nextArtifacts = await fetchRoomArtifacts(roomIdentifier)
+    if (room.value?.identifier !== roomIdentifier) return false
+    roomArtifacts.value = nextArtifacts
+    return true
+  }
+
+  function scheduleRoomArtifactsRefresh(roomIdentifier: string) {
+    if (roomArtifactsRefreshTimer) return
+    roomArtifactsRefreshTimer = setTimeout(() => {
+      roomArtifactsRefreshTimer = null
+      void refreshRoomArtifacts(roomIdentifier)
+    }, 350)
+  }
+
+  function stopRoomArtifactsRefresh() {
+    if (roomArtifactsRefreshTimer) {
+      clearTimeout(roomArtifactsRefreshTimer)
+      roomArtifactsRefreshTimer = null
+    }
+  }
+
   async function refreshTaskGithubStatus(): Promise<boolean> {
     if (!room.value) return false
     taskGithubStatus.value = await fetchTaskGithubStatus(room.value.identifier)
@@ -223,15 +253,22 @@ export function createRoomRefreshController(
     const roomIdentifier = room.value.identifier
     boardLoading.value = true
     try {
-      const [nextTasks, nextGithubStatus, nextPresence] = await Promise.all([
+      const [
+        nextTasks,
+        nextGithubStatus,
+        nextPresence,
+        nextArtifacts,
+      ] = await Promise.all([
         fetchTasks(roomIdentifier),
         fetchTaskGithubStatus(roomIdentifier),
         fetchPresence(roomIdentifier, HANDOFF_PRESENCE_PAGE_SIZE),
+        fetchRoomArtifacts(roomIdentifier),
       ])
       if (room.value?.identifier !== roomIdentifier) return false
       tasks.value = nextTasks
       taskGithubStatus.value = nextGithubStatus
       boardHandoffPresence.value = nextPresence
+      roomArtifacts.value = nextArtifacts
       return true
     } finally {
       boardLoading.value = false
@@ -256,6 +293,7 @@ export function createRoomRefreshController(
         nextActivityHistory,
         nextTasks,
         nextGithubStatus,
+        nextArtifacts,
       ] = await Promise.all([
         fetchMessages(roomIdentifier),
         fetchPresence(roomIdentifier),
@@ -264,6 +302,7 @@ export function createRoomRefreshController(
         fetchActivityHistory(roomIdentifier, historyRequest),
         fetchTasks(roomIdentifier),
         fetchTaskGithubStatus(roomIdentifier),
+        fetchRoomArtifacts(roomIdentifier),
       ])
       if (room.value?.identifier !== roomIdentifier) return false
       messages.value = mergeMessages(messages.value, messagePage.messages)
@@ -279,6 +318,7 @@ export function createRoomRefreshController(
       }
       tasks.value = nextTasks
       taskGithubStatus.value = nextGithubStatus
+      roomArtifacts.value = nextArtifacts
       return true
     } finally {
       activityLoading.value = false
@@ -290,13 +330,15 @@ export function createRoomRefreshController(
     const roomIdentifier = room.value.identifier
     focusRoomsLoading.value = true
     try {
-      const [nextFocusRooms, nextTasks] = await Promise.all([
+      const [nextFocusRooms, nextTasks, nextArtifacts] = await Promise.all([
         fetchFocusRooms(roomIdentifier),
         fetchTasks(roomIdentifier),
+        fetchRoomArtifacts(roomIdentifier),
       ])
       if (room.value?.identifier !== roomIdentifier) return false
       focusRooms.value = nextFocusRooms
       tasks.value = nextTasks
+      roomArtifacts.value = nextArtifacts
       return true
     } finally {
       focusRoomsLoading.value = false
@@ -316,6 +358,8 @@ export function createRoomRefreshController(
     refreshTaskGithubStatus,
     refreshTasksAndPresence,
     scheduleGitHubEventsRefresh,
+    scheduleRoomArtifactsRefresh,
     stopGitHubEventsRefresh,
+    stopRoomArtifactsRefresh,
   }
 }

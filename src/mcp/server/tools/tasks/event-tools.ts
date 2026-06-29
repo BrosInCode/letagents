@@ -14,7 +14,7 @@ export function registerTaskEventTools(server: McpServer): void {
       "Use this to check what happened in the repo without parsing chat messages.",
     {
       event_type: z.string().optional().describe(
-        "Filter by event type: pull_request, issue, issue_comment, pull_request_review, check_run, installation, installation_repositories, repository"
+        "Filter by event type: pull_request, issue, issue_comment, pull_request_review, check_run, installation, installation_repositories, repository, push, create, delete"
       ),
       object_id: z.string().optional().describe("Filter by GitHub object ID (e.g. PR number, issue number)"),
       actor: z.string().optional().describe("Filter by GitHub login of the actor"),

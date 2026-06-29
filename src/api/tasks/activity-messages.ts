@@ -16,6 +16,7 @@ import { formatTaskLifecycleStatus } from "./lifecycle-status.js";
 interface EmitProjectMessageOptions {
   source?: string;
   agent_prompt_kind?: AgentPromptKind | null;
+  client_message_id?: string | null;
 }
 
 export interface TaskActivityMessageDeps {
@@ -55,6 +56,8 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
       parent_event_kind?: FocusParentEventKind;
       event_kind?: "github";
       github_routing_context?: FocusGitHubRoutingContext;
+      client_message_id?: string | null;
+      parent_client_message_id?: string | null;
     }
   ): Promise<Message> {
     const focusRoom = await getActiveTaskFocusRoom(projectId, task.id);
@@ -62,6 +65,7 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
       return deps.emitProjectMessage(projectId, sender, text, {
         source: options?.source,
         agent_prompt_kind: options?.agent_prompt_kind ?? null,
+        client_message_id: options?.client_message_id ?? null,
       });
     }
 
@@ -74,12 +78,14 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
       return deps.emitProjectMessage(projectId, sender, text, {
         source: options?.source,
         agent_prompt_kind: options?.agent_prompt_kind ?? null,
+        client_message_id: options?.client_message_id ?? null,
       });
     }
 
     const focusMessage = await deps.emitProjectMessage(focusRoom.id, sender, text, {
       source: options?.source,
       agent_prompt_kind: options?.agent_prompt_kind ?? null,
+      client_message_id: options?.client_message_id ?? null,
     });
     const hardIsolatedGitHubEvent =
       options?.event_kind === "github" &&
@@ -98,7 +104,10 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
           task,
           focusRoom,
           activity: options?.parent_activity ?? "Activity",
-        })
+        }),
+        {
+          client_message_id: options?.parent_client_message_id ?? null,
+        }
       );
     }
 
@@ -111,6 +120,7 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
     text: string,
     options?: {
       excludeRoomIds?: Set<string>;
+      client_message_id_base?: string | null;
     }
   ): Promise<void> {
     const focusRooms = await deps.getFocusRoomsForParent(projectId);
@@ -124,7 +134,12 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
 
     await Promise.all(
       targetFocusRooms.map((focusRoom) =>
-        deps.emitProjectMessage(focusRoom.id, sender, text, { source: "github" })
+        deps.emitProjectMessage(focusRoom.id, sender, text, {
+          source: "github",
+          client_message_id: options?.client_message_id_base
+            ? `${options.client_message_id_base}:focus-broadcast`
+            : null,
+        })
       )
     );
   }
@@ -141,6 +156,8 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
       agent_prompt_kind?: AgentPromptKind | null;
       event_kind?: "github";
       github_routing_context?: FocusGitHubRoutingContext;
+      client_message_id?: string | null;
+      parent_client_message_id?: string | null;
     }
   ): Promise<Message> {
     return emitTaskAnchoredMessage(
@@ -154,6 +171,8 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
         parent_event_kind: "major_activity",
         event_kind: options?.event_kind,
         github_routing_context: options?.github_routing_context,
+        client_message_id: options?.client_message_id ?? null,
+        parent_client_message_id: options?.parent_client_message_id ?? null,
       }
     );
   }

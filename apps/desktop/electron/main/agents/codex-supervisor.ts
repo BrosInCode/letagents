@@ -11,6 +11,7 @@ import type {
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
+import { buildRepoStatus } from "../../repo-status.js";
 import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
@@ -152,6 +153,7 @@ type AgentSessionCreateResponse = {
   display_name?: string | null;
   owner_label?: string | null;
   ide_label?: string | null;
+  repo_branch?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   last_seen_at?: string | null;
@@ -312,6 +314,7 @@ function toStoredAgentSession(
     display_name: normalizeDisplayText(created.display_name, input.displayName),
     owner_label: normalizeDisplayText(created.owner_label, input.identity.owner_label),
     ide_label: normalizeDisplayText(created.ide_label, "Codex"),
+    repo_branch: normalizeDisplayText(created.repo_branch, "") || null,
     created_at: createdAt,
     updated_at: updatedAt,
     last_seen_at: normalizeDisplayText(created.last_seen_at, updatedAt),
@@ -323,6 +326,7 @@ async function registerDesktopManagedCodexWorker(input: {
   roomIdentifier: string;
   displayName: string;
   token: string;
+  repoBranch: string | null;
 }): Promise<StoredAgentSessionState> {
   const identity = await ensureDesktopManagedCodexIdentity(input.displayName);
   const actorKey = normalizeDisplayText(identity.canonical_key, "");
@@ -345,6 +349,7 @@ async function registerDesktopManagedCodexWorker(input: {
         display_name: input.displayName,
         session_kind: "worker",
         runtime,
+        repo_branch: input.repoBranch,
         registration_liveness: codexSessionLivenessRegistration(runtime, input.token),
       }),
     },
@@ -927,6 +932,9 @@ export async function startDesktopManagedAgent(
     throw new Error("Choose a local repository before starting Codex.");
   }
   const cwd = resolve(repoRootPath);
+  const repoBranch = await buildRepoStatus(cwd)
+    .then((status) => status.branch)
+    .catch(() => null);
   const codexBin = process.env.LETAGENTS_CODEX_BIN || "codex";
   const preflight = await runDesktopAgentProviderPreflight("codex", {
     roomIdentifier,
@@ -948,6 +956,7 @@ export async function startDesktopManagedAgent(
       roomIdentifier,
       displayName: suggestedDisplayName,
       token,
+      repoBranch,
     })
     : null;
   const displayName = registeredWorker?.display_name || suggestedDisplayName;
@@ -1018,6 +1027,7 @@ export async function startDesktopManagedAgent(
       display_name: displayName,
       joined_via: joinedVia,
       cwd,
+      repo_branch: repoBranch,
       stop_phrase: stopPhrase,
       max_minutes: maxMinutes,
       delivery_mode: deliveryMode,

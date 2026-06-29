@@ -62,6 +62,7 @@
         :activityHistory="activityHistory"
         :activityHistoryLoading="activityHistoryLoading"
         :activityHistoryError="activityHistoryError"
+        :roomArtifacts="roomArtifacts"
         :canManageParticipants="room?.role === 'admin'"
         :loadActivityHistory="loadActivityHistory"
         :clearDisconnectedParticipants="clearDisconnectedParticipants"
@@ -79,6 +80,7 @@
         :roomLabel="roomTitle"
         :roomAddress="focusParentAddress"
         :isFocusRoom="room?.kind === 'focus'"
+        :gitRoom="room?.gitRoom || null"
         :sourceTaskId="room?.sourceTaskId || null"
         :focusKey="room?.focusKey || null"
         :focusStatus="room?.focusStatus || null"
@@ -120,6 +122,7 @@ import type {
   RoomMessage,
   RoomParticipant,
   RoomReasoningSession,
+  RoomSharedArtifact,
   RoomTask,
   StalePromptTaskState,
   TaskGitHubArtifactStatus,
@@ -147,6 +150,7 @@ defineProps<{
   activityHistory: RoomActivityHistoryPage | null
   activityHistoryLoading: boolean
   activityHistoryError: string
+  roomArtifacts: readonly RoomSharedArtifact[]
   taskGithubStatus: Readonly<Record<string, TaskGitHubArtifactStatus>>
   githubEvents: readonly RoomGitHubEvent[]
   githubEventsAvailable: boolean

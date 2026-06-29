@@ -480,6 +480,7 @@ function presenceEntry(): DesktopAgentPresence {
     displayName: "Agent Smith",
     ownerLabel: null,
     ideLabel: null,
+    repoBranch: null,
     runtime: "codex",
     sessionKind: "worker",
     sourceFlags: ["delivery"],

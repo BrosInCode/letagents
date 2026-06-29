@@ -8,6 +8,7 @@ import type {
   DesktopRoomInfo,
 } from "../../ipc-types.js";
 import { apiFetch } from "../auth.js";
+import { mapDesktopGitRoomPayload } from "./git-room.js";
 
 export type RoomInfoPayload = {
   room_id?: string;
@@ -29,6 +30,7 @@ export type RoomInfoPayload = {
   concluded_at?: string | null;
   conclusion_summary?: string | null;
   conclusion_details?: Partial<DesktopFocusRoomConclusionDetails> | null;
+  git_room?: unknown;
 };
 
 const joinedRoomInfoCache = new Map<string, RoomInfoPayload>();
@@ -112,6 +114,7 @@ export function mapDesktopRoomInfoPayload(
     concludedAt: payload.concluded_at || null,
     conclusionSummary: payload.conclusion_summary || null,
     conclusionDetails: normalizeRoomConclusionDetails(payload.conclusion_details),
+    gitRoom: mapDesktopGitRoomPayload(payload.git_room),
   };
 }
 

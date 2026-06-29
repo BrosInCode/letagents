@@ -186,6 +186,7 @@ function roomEntryFromActiveInput(
     lastOpenedAt: null,
     latestMessageId: null,
     latestMessageAt: null,
+    gitRoom: input.activeRoomGitRoom ?? null,
     focusRooms: [],
   };
 }

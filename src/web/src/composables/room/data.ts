@@ -20,6 +20,7 @@ import type {
   RoomMessage,
   RoomParticipantsPage,
   RoomTask,
+  RoomSharedArtifact,
   TaskGitHubArtifactStatus,
 } from './types'
 
@@ -30,6 +31,9 @@ export function getGitHubEventsIdentifier(roomInfo: RoomInfo | null): string {
 
 export function getGitHubSupportIdentifier(roomInfo: RoomInfo | null): string {
   if (!roomInfo) return ''
+  if (roomInfo.gitRoom?.provider === 'github') {
+    return `${roomInfo.gitRoom.host}/${roomInfo.gitRoom.repository.full_name}`
+  }
   if (roomInfo.kind === 'focus' && roomInfo.parentRoomId) {
     return roomInfo.parentRoomId
   }
@@ -145,6 +149,17 @@ export async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   try {
     const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`)
     return data.tasks || []
+  } catch {
+    return []
+  }
+}
+
+export async function fetchRoomArtifacts(
+  roomIdentifier: string,
+): Promise<RoomSharedArtifact[]> {
+  try {
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/artifacts`)
+    return data.artifacts || []
   } catch {
     return []
   }

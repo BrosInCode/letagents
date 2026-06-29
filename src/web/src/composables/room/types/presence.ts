@@ -9,6 +9,7 @@ export interface RoomAgentPresence {
   display_name: string
   owner_label: string | null
   ide_label: string | null
+  repo_branch?: string | null
   status: 'idle' | 'working' | 'reviewing' | 'blocked'
   status_text: string | null
   last_heartbeat_at: string

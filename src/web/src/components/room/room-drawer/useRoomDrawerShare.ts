@@ -1,6 +1,9 @@
 import { computed, ref, type Ref } from 'vue'
 import type { RoomInfo } from '../../../composables/room/types'
 
+type RoomShareInput =
+  Partial<Pick<RoomInfo, 'identifier' | 'projectId' | 'parentRoomId' | 'focusKey' | 'sourceTaskId' | 'kind'>>
+
 export function encodeRoomPathIdentifier(identifier: string): string {
   return String(identifier)
     .split('/')
@@ -29,7 +32,7 @@ export function buildRoomSharePath(input: {
 }
 
 export function buildRoomShareUrl(
-  input: Parameters<typeof buildRoomSharePath>[0],
+  input: RoomShareInput,
   origin: string,
 ): string {
   const path = buildRoomSharePath(input)

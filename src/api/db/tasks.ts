@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
+import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { tasks } from "./schema.js";
 import { clampLimit, nextRoomScopedNumber, parseScopedId } from "./utils.js";
 import { toTask } from "./mappers.js";
@@ -303,6 +304,12 @@ export async function updateTask(
       updated_at: now,
     })
     .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+
+  await syncRoomSharedArtifactsForTask({
+    room_id: roomId,
+    task_id: taskId,
+    artifacts: newWorkflowArtifacts,
+  });
 
   return toTask({
     ...task,

@@ -21,6 +21,7 @@ export const room_agent_presence = pgTable(
     display_name: text("display_name").notNull(),
     owner_label: text("owner_label"),
     ide_label: text("ide_label"),
+    repo_branch: text("repo_branch"),
     status: agentPresenceStatusEnum("status").notNull().default("idle"),
     status_text: text("status_text"),
     last_heartbeat_at: timestamp("last_heartbeat_at", { mode: "string", withTimezone: true }).notNull(),
@@ -37,6 +38,9 @@ export const room_agent_presence = pgTable(
     ),
     room_agent_key_idx: index("room_agent_presence_room_agent_key_idx").on(table.room_id, table.agent_key),
     room_session_kind_idx: index("room_agent_presence_room_session_kind_idx").on(table.room_id, table.session_kind),
+    room_branch_idx: index("room_agent_presence_room_branch_idx")
+      .on(table.room_id, table.repo_branch)
+      .where(sql`${table.repo_branch} IS NOT NULL`),
   })
 );
 
@@ -58,6 +62,7 @@ export const room_agent_sessions = pgTable(
     host_label: text("host_label"),
     liveness_capability: text("liveness_capability"),
     tool_bridge_id: text("tool_bridge_id"),
+    repo_branch: text("repo_branch"),
     display_name: text("display_name").notNull(),
     owner_account_id: text("owner_account_id")
       .notNull()
@@ -82,6 +87,9 @@ export const room_agent_sessions = pgTable(
       table.agent_key,
       table.ended_at
     ),
+    room_branch_idx: index("room_agent_sessions_room_branch_idx")
+      .on(table.room_id, table.repo_branch)
+      .where(sql`${table.repo_branch} IS NOT NULL`),
   })
 );
 
@@ -136,6 +144,7 @@ export const room_agent_delivery_sessions = pgTable(
     display_name: text("display_name").notNull(),
     owner_label: text("owner_label"),
     ide_label: text("ide_label"),
+    repo_branch: text("repo_branch"),
     agent_session_id: text("agent_session_id").references(() => room_agent_sessions.session_id, {
       onDelete: "set null",
       onUpdate: "cascade",
@@ -176,6 +185,9 @@ export const room_agent_delivery_sessions = pgTable(
       table.room_id,
       table.session_kind
     ),
+    room_branch_idx: index("room_agent_delivery_sessions_room_branch_idx")
+      .on(table.room_id, table.repo_branch)
+      .where(sql`${table.repo_branch} IS NOT NULL`),
     active_count_check: check(
       "room_agent_delivery_sessions_active_connection_count_check",
       sql`${table.active_connection_count} >= 0`

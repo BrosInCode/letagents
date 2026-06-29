@@ -182,11 +182,28 @@ function toolCallPayload(payload: Record<string, string | number>): string {
   return JSON.stringify(payload);
 }
 
+function optionalRegisterPayload(input: {
+  runtime: string;
+  repoRootPath?: string | null;
+}): Record<string, string> {
+  const payload: Record<string, string> = {
+    session_kind: "worker",
+    runtime: input.runtime,
+    display_name: "<your agent name>",
+  };
+  const cwd = input.repoRootPath?.trim();
+  if (cwd) {
+    payload.cwd = cwd;
+  }
+  return payload;
+}
+
 const LETAGENTS_CODENAME_EXAMPLES = "MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor";
 
 export function externalMcpProviderJoinPrompt(
   provider: Pick<DesktopAgentProvider, "id" | "name" | "mcpTargetId"> | null | undefined,
   roomIdentifier: string | null | undefined,
+  repoRootPath?: string | null,
 ): string {
   const name = provider?.name?.trim() || "this agent";
   const runtime = provider?.mcpTargetId?.trim() || provider?.id?.trim() || name.toLowerCase().replace(/\s+/g, "-");
@@ -201,7 +218,7 @@ export function externalMcpProviderJoinPrompt(
     joinInstruction,
     `Choose a short distinct LetAgents-style agent name before doing any room work. Examples: ${LETAGENTS_CODENAME_EXAMPLES}.`,
     `Call set_agent_name with ${toolCallPayload({ name: "<your agent name>" })} before posting status or registering.`,
-    `Call register_agent_session with ${toolCallPayload({ session_kind: "worker", runtime, display_name: "<your agent name>" })}.`,
+    `Call register_agent_session with ${toolCallPayload(optionalRegisterPayload({ runtime, repoRootPath }))}.`,
     "Do not continue into the room loop until register_agent_session succeeds.",
     `Call post_status with ${toolCallPayload({ agent_session_id: "<returned agent_session_id>", status: "available in the room" })}.`,
     "Call read_messages once, then call get_board once.",
@@ -406,6 +423,7 @@ function desktopManagedAgentSessionToPresence(
     displayName,
     ownerLabel: session.ownerLabel || "Local desktop",
     ideLabel: session.ideLabel || managedAgentSessionIdeLabel(session),
+    repoBranch: session.repoBranch || null,
     status: managedAgentPresenceStatus(session),
     statusText: managedAgentSessionStatusLabel(session),
     lastHeartbeatAt: timestamp,
@@ -423,11 +441,18 @@ function desktopManagedAgentSessionToPresence(
       toolBridgeId: `desktop:${session.providerId}:${session.id}`,
       lastObservedAt: timestamp,
       lastToolCallAt: null,
-      detail: session.repoRootPath,
+      detail: managedAgentRepoDetail(session),
       createdAt: session.startedAt || timestamp,
       updatedAt: timestamp,
     },
   };
+}
+
+export function managedAgentRepoDetail(
+  session: Pick<DesktopManagedAgentSession, "repoBranch" | "repoRootPath">,
+): string {
+  const branch = session.repoBranch?.trim();
+  return branch ? `${branch} - ${session.repoRootPath}` : session.repoRootPath;
 }
 
 function mergeManagedAgentPresenceEntry(
@@ -443,6 +468,7 @@ function mergeManagedAgentPresenceEntry(
     ownerLabel: existing.ownerLabel || managed.ownerLabel,
     ideLabel: existing.ideLabel || managed.ideLabel,
     runtime: existing.runtime || managed.runtime,
+    repoBranch: existing.repoBranch || managed.repoBranch,
     status: existing.status === "idle" && managed.status !== "idle" ? managed.status : existing.status,
     statusText: existing.statusText || managed.statusText,
     lastHeartbeatAt: latestTimestampString(existing.lastHeartbeatAt, managed.lastHeartbeatAt),

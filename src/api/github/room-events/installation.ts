@@ -44,19 +44,24 @@ export function materializeInstallationEvent(
   if (!installationId) {
     return null;
   }
+  const semanticId = `installation:${installationId}:${action}`;
 
   return {
     event_type: "installation",
     action,
-    idempotency_key: buildDeliveryScopedKey(
-      `installation:${installationId}:${action}`,
-      deliveryId,
-    ),
+    idempotency_key: buildDeliveryScopedKey(semanticId, deliveryId),
+    semantic_id: semanticId,
     github_object_id: installationId,
     github_object_url: null,
     title: payload.installation?.account?.login ?? payload.organization?.login ?? null,
     state: getInstallationState(action),
     actor_login: actorLogin,
+    provider_event_at: null,
+    provider_object_updated_at: null,
+    ref: null,
+    base_ref: null,
+    head_ref: null,
+    head_sha: null,
     metadata: {
       target_login: payload.installation?.account?.login ?? payload.organization?.login ?? null,
       target_type: payload.installation?.target_type ?? null,
@@ -96,11 +101,18 @@ export function materializeInstallationRepositoriesEvent(
     event_type: "installation_repositories",
     action,
     idempotency_key: buildDeliveryScopedKey(idempotencyKey, deliveryId),
+    semantic_id: idempotencyKey,
     github_object_id: installationId,
     github_object_url: null,
     title: payload.installation?.account?.login ?? payload.organization?.login ?? null,
     state: action,
     actor_login: actorLogin,
+    provider_event_at: null,
+    provider_object_updated_at: null,
+    ref: null,
+    base_ref: null,
+    head_ref: null,
+    head_sha: null,
     metadata: {
       target_login: payload.installation?.account?.login ?? payload.organization?.login ?? null,
       repositories_added: (payload.repositories_added ?? []).map((repository) => ({

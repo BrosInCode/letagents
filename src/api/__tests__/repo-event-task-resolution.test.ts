@@ -5,6 +5,7 @@ import type { Task } from "../db.js";
 import {
   createRepoRoomEventTaskResolver,
   emptyRepoRoomEventTaskResolution,
+  getBranchWorkflowRef,
   getPullRequestWorkflowRef,
   toGitHubRoutingContext,
 } from "../github/repo-event-task-resolution.js";
@@ -80,6 +81,20 @@ function makePullRequestReviewEvent(overrides: Partial<RepoRoomEvent> = {}): Rep
       state: "approved",
       url: "https://github.com/BrosInCode/letagents/pull/252#pullrequestreview-252",
       body: null,
+    },
+    ...overrides,
+  } as RepoRoomEvent;
+}
+
+function makeBranchEvent(overrides: Partial<RepoRoomEvent> = {}): RepoRoomEvent {
+  return {
+    provider: "github",
+    kind: "branch_ref",
+    action: "create",
+    repositoryFullName: "BrosInCode/letagents",
+    branch: {
+      ref: "letagents/task_4/emmymay-wrenmoon",
+      refType: "branch",
     },
     ...overrides,
   } as RepoRoomEvent;
@@ -179,6 +194,20 @@ test("getPullRequestWorkflowRef returns workflow refs for PR-backed events only"
   assert.equal(getPullRequestWorkflowRef(pullRequestEvent), pullRequest);
   assert.equal(getPullRequestWorkflowRef(reviewEvent), pullRequest);
   assert.equal(getPullRequestWorkflowRef(makeIssueEvent()), null);
+});
+
+test("getBranchWorkflowRef returns workflow refs for branch-backed events only", () => {
+  assert.equal(getBranchWorkflowRef(makeBranchEvent()), "letagents/task_4/emmymay-wrenmoon");
+  assert.equal(
+    getBranchWorkflowRef(makeBranchEvent({
+      branch: {
+        ref: "v1.0.0",
+        refType: "tag",
+      },
+    })),
+    null
+  );
+  assert.equal(getBranchWorkflowRef(makeIssueEvent()), null);
 });
 
 test("resolveLinkedTaskForRepoRoomEvent prefers workflow artifact matches", async () => {
@@ -283,6 +312,31 @@ test("resolveLinkedTaskForRepoRoomEvent uses active lease workflow refs for pull
       projectId: "github.com/brosincode/letagents",
       workflow: {
         prUrl: "https://github.com/BrosInCode/letagents/pull/252",
+        branchRef: "letagents/task_4/emmymay-wrenmoon",
+      },
+    },
+  ]);
+  assert.deepEqual(taskByIdCalls, []);
+});
+
+test("resolveLinkedTaskForRepoRoomEvent uses active lease workflow refs for branch events", async () => {
+  const task = makeTask("task_4");
+  const { activeWorkflowLeaseCalls, resolver, taskByIdCalls } = createHarness({
+    activeWorkflowLeaseTask: task,
+  });
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(
+    project,
+    makeBranchEvent()
+  );
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByTaskReference, true);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.deepEqual(activeWorkflowLeaseCalls, [
+    {
+      projectId: "github.com/brosincode/letagents",
+      workflow: {
         branchRef: "letagents/task_4/emmymay-wrenmoon",
       },
     },

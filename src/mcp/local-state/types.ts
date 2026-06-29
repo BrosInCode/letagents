@@ -30,6 +30,7 @@ export interface RoomSessionState {
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
+  git_room?: unknown;
   joined_via: JoinedVia;
   joined_at: string;
   last_seen_at: string;
@@ -52,6 +53,7 @@ export interface CodexLiveSessionState {
   room_display_name?: string | null;
   joined_via: JoinedVia;
   cwd: string;
+  repo_branch?: string | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: "mcp_polling" | "desktop_events";
@@ -109,6 +111,7 @@ export interface StoredAgentSessionState {
   display_name: string;
   owner_label: string;
   ide_label: string;
+  repo_branch?: string | null;
   created_at: string;
   updated_at: string;
   last_seen_at: string;

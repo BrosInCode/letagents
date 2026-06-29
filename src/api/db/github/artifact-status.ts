@@ -35,7 +35,7 @@ export async function getTasksGitHubArtifactStatus(
       )
     )
     .where(eq(github_room_events.room_id, roomId))
-    .orderBy(desc(github_room_events.created_at))
+    .orderBy(desc(github_room_events.event_order_at))
     .limit(500);
 
   const statusMap = new Map<string, TaskGitHubArtifactStatus>();

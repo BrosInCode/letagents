@@ -31,6 +31,7 @@ export interface RoomActivityHistoryEntry {
     display_name: string
     owner_label: string | null
     ide_label: string | null
+    repo_branch?: string | null
     hidden_at: string | null
     hidden_by: string | null
     last_live_heartbeat_at: string | null

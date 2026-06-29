@@ -96,6 +96,7 @@ export async function applyRepoRoomEventToTask(
   input: {
     installationId: string | null;
     githubRoutingContext: FocusGitHubRoutingContext;
+    messageIdBase?: string | null;
   }
 ): Promise<RepoRoomEventTaskProjection> {
   if (!linkedTask) {
@@ -153,6 +154,12 @@ export async function applyRepoRoomEventToTask(
           parent_event_kind: "major_activity",
           event_kind: "github",
           github_routing_context: input.githubRoutingContext,
+          client_message_id: input.messageIdBase
+            ? `${input.messageIdBase}:coordination-deny`
+            : null,
+          parent_client_message_id: input.messageIdBase
+            ? `${input.messageIdBase}:coordination-deny-anchor`
+            : null,
         }
       );
       return { task: linkedTask, authoritative: false };
@@ -194,6 +201,12 @@ export async function applyRepoRoomEventToTask(
           : null,
         event_kind: "github",
         github_routing_context: input.githubRoutingContext,
+        client_message_id: input.messageIdBase
+          ? `${input.messageIdBase}:task-status`
+          : null,
+        parent_client_message_id: input.messageIdBase
+          ? `${input.messageIdBase}:task-status-anchor`
+          : null,
       });
     }
     return { task: nextTask, authoritative: true };

@@ -129,6 +129,42 @@
   display: block;
 }
 
+.focus-room-link-copy {
+  min-width: 0;
+}
+
+.focus-room-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 22px;
+  margin-bottom: 6px;
+  padding: 3px 7px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 6px;
+  background: rgba(96, 165, 250, 0.08);
+  color: #bfdbfe;
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.focus-room-kind-badge svg {
+  flex: 0 0 auto;
+}
+
+.focus-room-kind-badge span {
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .focus-task strong {
   font-size: 0.88rem;
   font-weight: 600;
@@ -146,6 +182,21 @@
   color: var(--text-tertiary, #a1a1aa);
   font-size: 0.76rem;
   line-height: 1.45;
+}
+
+.focus-task .focus-room-kind-badge {
+  display: inline-flex;
+}
+
+.focus-task .focus-room-kind-badge span {
+  display: inline;
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .focus-task small {

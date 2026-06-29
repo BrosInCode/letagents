@@ -18,6 +18,7 @@ const presence: RoomAgentPresence[] = [
     display_name: "Maple",
     owner_label: "EmmyMay",
     ide_label: "Codex",
+    repo_branch: "codex/git-rooms",
     status: "working",
     status_text: "working in focus room",
     last_heartbeat_at: "2026-04-21T11:40:00.000Z",
@@ -121,6 +122,7 @@ test("decorateRoomActivityHistoryEntriesWithPresence carries live state and cano
         display_name: "Maple",
         owner_label: "EmmyMay",
         ide_label: "Codex",
+        repo_branch: null,
         hidden_at: null,
         hidden_by: null,
         last_live_heartbeat_at: null,
@@ -140,6 +142,7 @@ test("decorateRoomActivityHistoryEntriesWithPresence carries live state and cano
   assert.equal(decorated[0]?.last_seen_at, "2026-04-21T11:39:00.000Z");
   assert.equal(decorated[0]?.last_room_activity_at, "2026-04-21T11:45:00.000Z");
   assert.equal(decorated[0]?.participant.activity_state, "active");
+  assert.equal(decorated[0]?.participant.repo_branch, "codex/git-rooms");
   assert.deepEqual(decorated[0]?.participant.source_flags, ["delivery", "presence", "tasks"]);
   assert.equal(decorated[0]?.participant.last_live_heartbeat_at, "2026-04-21T11:40:00.000Z");
 });

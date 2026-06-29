@@ -22,6 +22,7 @@ import {
   isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
+  managedAgentRepoDetail,
   managedAgentSessionMatchesRoom,
   managedAgentSessionMatchesTarget,
   managedAgentSessionDisplayName,
@@ -74,6 +75,7 @@ function session(
     roomIdentifier: "room_1",
     roomDisplayName: null,
     repoRootPath: "/tmp/repo",
+    repoBranch: null,
     status: "running",
     deliveryMode: "mcp_polling",
     canStop: true,
@@ -128,6 +130,7 @@ function presence(
     displayName: "MapleRidge",
     ownerLabel: "Local desktop",
     ideLabel: "Codex",
+    repoBranch: null,
     status: "idle",
     statusText: null,
     lastHeartbeatAt: "2026-06-14T11:59:00.000Z",
@@ -346,6 +349,16 @@ test("externalMcpProviderInstruction does not imply the desktop starts bridge-on
   assert.match(repoPrompt, /claim it with claim_task using the returned agent_session_id/);
   assert.match(repoPrompt, /wait_for_messages with \{"agent_session_id":"<returned agent_session_id>","after_message_id":"<latest seen message id>","timeout":30000\} in a loop/);
   assert.match(repoPrompt, /send_message or send_thread_message with the same agent_session_id/);
+
+  const repoAwarePrompt = externalMcpProviderJoinPrompt(
+    externalProvider,
+    "github.com/BrosInCode/letagents",
+    "/tmp/repo",
+  );
+  assert.match(
+    repoAwarePrompt,
+    /Call register_agent_session with \{"session_kind":"worker","runtime":"antigravity","display_name":"<your agent name>","cwd":"\/tmp\/repo"\}/,
+  );
   assert.match(repoPrompt, /empty wait result just means continue waiting/);
   assert.match(repoPrompt, /Do not call yourself Antigravity, Antigravity 1, Antigravity 2, or use any numbered provider label/);
 
@@ -420,6 +433,14 @@ test("managedAgentSessionStatusLabel presents idle desktop-event turns as waitin
   assert.equal(managedAgentSessionStatusLabel(session({
     status: "starting",
   })), "Starting");
+});
+
+test("managedAgentRepoDetail includes branch when available", () => {
+  assert.equal(
+    managedAgentRepoDetail(session({ repoBranch: "codex/git-rooms" })),
+    "codex/git-rooms - /tmp/repo",
+  );
+  assert.equal(managedAgentRepoDetail(session({ repoBranch: null })), "/tmp/repo");
 });
 
 test("managedAgentStopResultMessage does not hide failed stop interrupts", () => {
@@ -565,6 +586,7 @@ test("managed desktop agents become mentionable room participants", () => {
       actorLabel: "SummitGrove",
       agentSessionId: "agent_summit",
       roomIdentifier: "github.com/BrosInCode/letagents",
+      repoBranch: "codex/git-rooms",
       updatedAt: "2026-06-15T09:30:00.000Z",
     }),
   ], "github.com/brosincode/letagents");
@@ -584,6 +606,7 @@ test("managed desktop agents become reachable activity presence", () => {
       actorLabel: "SummitGrove",
       agentSessionId: "agent_summit",
       roomIdentifier: "github.com/BrosInCode/letagents",
+      repoBranch: "codex/git-rooms",
       updatedAt: "2026-06-15T09:30:00.000Z",
     }),
   ], "github.com/brosincode/letagents");
@@ -594,6 +617,7 @@ test("managed desktop agents become reachable activity presence", () => {
   assert.equal(presenceEntries[0].freshness, "active");
   assert.equal(presenceEntries[0].activityState, "active");
   assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
+  assert.equal(presenceEntries[0].livenessObservation?.detail, "codex/git-rooms - /tmp/repo");
   assert.deepEqual(presenceEntries[0].sourceFlags, ["delivery", "presence"]);
 });
 

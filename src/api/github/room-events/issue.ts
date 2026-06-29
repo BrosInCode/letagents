@@ -1,6 +1,6 @@
 import type { GitHubWebhookPayload } from "../app.js";
 import type { RepoIssueRef } from "../../repo-workflow.js";
-import { buildDeliveryScopedKey } from "./helpers.js";
+import { buildDeliveryScopedKey, buildTimedSemanticKey, normalizeGitHubTimestamp } from "./helpers.js";
 import type {
   GitHubRepoEventBase,
   MaterializedGitHubRoomEvent,
@@ -31,18 +31,29 @@ export function materializeIssueEvent(
   }
 
   const issue = toRepoIssueRef(payload.issue);
+  const providerObjectUpdatedAt = normalizeGitHubTimestamp(
+    payload.issue.updated_at ?? payload.issue.created_at
+  );
+  const semanticId = buildTimedSemanticKey(
+    `${repoIdentity}:issue:${issue.number}:${action}`,
+    providerObjectUpdatedAt
+  );
   return {
     event_type: "issue",
     action,
-    idempotency_key: buildDeliveryScopedKey(
-      `${repoIdentity}:issue:${issue.number}:${action}`,
-      deliveryId,
-    ),
+    idempotency_key: buildDeliveryScopedKey(semanticId, deliveryId),
+    semantic_id: semanticId,
     github_object_id: String(issue.number),
     github_object_url: issue.url,
     title: issue.title,
     state: payload.issue?.state ?? (action === "closed" ? "closed" : "open"),
     actor_login: actorLogin ?? payload.issue?.user?.login ?? null,
+    provider_event_at: providerObjectUpdatedAt,
+    provider_object_updated_at: providerObjectUpdatedAt,
+    ref: null,
+    base_ref: null,
+    head_ref: null,
+    head_sha: null,
     metadata: {
       labels: payload.issue?.labels?.map((label) => label.name) ?? [],
       is_pull_request: issue.isPullRequest ?? false,
@@ -68,18 +79,26 @@ export function materializeIssueCommentEvent(
   }
 
   const issue = toRepoIssueRef(payload.issue);
+  const semanticId = `${repoIdentity}:comment:${payload.comment.id}:created`;
+  const providerObjectUpdatedAt = normalizeGitHubTimestamp(
+    payload.comment.updated_at ?? payload.comment.created_at
+  );
   return {
     event_type: "issue_comment",
     action,
-    idempotency_key: buildDeliveryScopedKey(
-      `${repoIdentity}:comment:${payload.comment.id}:created`,
-      deliveryId,
-    ),
+    idempotency_key: buildDeliveryScopedKey(semanticId, deliveryId),
+    semantic_id: semanticId,
     github_object_id: String(issue.number),
     github_object_url: payload.comment.html_url,
     title: issue.title,
     state: payload.issue?.state ?? null,
     actor_login: actorLogin ?? payload.comment.user?.login ?? null,
+    provider_event_at: providerObjectUpdatedAt,
+    provider_object_updated_at: providerObjectUpdatedAt,
+    ref: null,
+    base_ref: null,
+    head_ref: null,
+    head_sha: null,
     metadata: {
       body: payload.comment.body,
       is_pull_request: issue.isPullRequest ?? false,

@@ -5,6 +5,7 @@ import {
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
 } from "../../local-state.js";
+import { getGitCurrentBranch } from "../../git-remote.js";
 import { randomUUID } from "node:crypto";
 import { normalizeAgentBaseName } from "../../../shared/codenames.js";
 import { formatOwnerAttribution } from "../../../shared/agent-identity.js";
@@ -53,6 +54,7 @@ export function toPublicAgentSession(session: StoredAgentSessionState | null): R
     display_name: session.display_name,
     owner_label: session.owner_label,
     ide_label: session.ide_label,
+    repo_branch: session.repo_branch ?? null,
     created_at: session.created_at,
     updated_at: session.updated_at,
     last_seen_at: session.last_seen_at,
@@ -133,6 +135,7 @@ export async function ensureLocalWorkerAgentSession(
     sessionKind?: "worker" | "controller";
     runtime?: string | null;
     displayName?: string | null;
+    repoBranch?: string | null;
   } = {},
 ): Promise<StoredAgentSessionState> {
   const identity = await ensureAgentIdentity();
@@ -156,11 +159,17 @@ export async function ensureLocalWorkerAgentSession(
     display_name: displayName,
     owner_label: identity.owner_label,
     ide_label: identity.ide_label ?? detectAgentIdeLabel(),
+    repo_branch: input.repoBranch ?? null,
     created_at: now,
     updated_at: now,
     last_seen_at: now,
     ended_at: null,
   });
+}
+
+export function getAgentSessionRepoBranch(cwd?: string | null): string | null {
+  const workingDir = cwd?.trim() || process.cwd();
+  return getGitCurrentBranch(workingDir);
 }
 
 export function agentSessionCredentials(agentSession: StoredAgentSessionState): {

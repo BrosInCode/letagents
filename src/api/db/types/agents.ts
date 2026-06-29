@@ -24,6 +24,7 @@ export interface RoomAgentPresence {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  repo_branch?: string | null;
   status: AgentPresenceStatus;
   status_text: string | null;
   last_heartbeat_at: string;
@@ -71,6 +72,7 @@ export interface RoomAgentDeliverySession {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  repo_branch?: string | null;
   transport: RoomAgentDeliveryTransport;
   active_connection_count: number;
   last_connected_at: string;
@@ -97,6 +99,7 @@ export interface RoomAgentSession {
   owner_account_id: string;
   owner_label: string;
   ide_label: string;
+  repo_branch?: string | null;
   created_at: string;
   updated_at: string;
   last_seen_at: string;
@@ -143,6 +146,7 @@ export interface RoomAgentPresenceRow {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  repo_branch: string | null;
   status: AgentPresenceStatus;
   status_text: string | null;
   last_heartbeat_at: string;
@@ -178,6 +182,7 @@ export interface RoomAgentDeliverySessionRow {
   display_name: string;
   owner_label: string | null;
   ide_label: string | null;
+  repo_branch: string | null;
   transport: RoomAgentDeliveryTransport;
   active_connection_count: number;
   last_connected_at: string;
@@ -205,6 +210,7 @@ export interface RoomAgentSessionRow {
   owner_account_id: string;
   owner_label: string;
   ide_label: string;
+  repo_branch: string | null;
   created_at: string;
   updated_at: string;
   last_seen_at: string;

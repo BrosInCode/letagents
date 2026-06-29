@@ -12,6 +12,8 @@ export const github_repositories = pgTable(
     owner_login: text("owner_login").notNull(),
     repo_name: text("repo_name").notNull(),
     full_name: text("full_name").notNull(),
+    default_branch: text("default_branch"),
+    visibility: text("visibility").notNull().default("unknown"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
@@ -112,6 +114,9 @@ export const GITHUB_ROOM_EVENT_TYPES = [
   "installation",
   "installation_repositories",
   "repository",
+  "push",
+  "create",
+  "delete",
 ] as const;
 
 export type GitHubRoomEventType = (typeof GITHUB_ROOM_EVENT_TYPES)[number];
@@ -119,9 +124,10 @@ export type GitHubRoomEventType = (typeof GITHUB_ROOM_EVENT_TYPES)[number];
 /**
  * Normalized GitHub room events.
  *
- * Each webhook delivery that produces a meaningful state change is recorded
- * here as one canonical, structured event. The idempotency_key ensures
- * duplicate deliveries never produce duplicate events.
+ * Each webhook delivery that produces a meaningful state change is normalized
+ * here as one canonical, structured event. semantic_id is the delivery-independent
+ * event identity used to suppress redelivery side effects; idempotency_key keeps
+ * the provider delivery GUID for exact-delivery retries and diagnostics.
  *
  * Agents and the API query this table instead of parsing room message text.
  *
@@ -149,13 +155,13 @@ export const github_room_events = pgTable(
     /** GitHub action: opened, closed, completed, created, etc. */
     action: text("action").notNull(),
     /**
-     * Delivery-scoped dedup key derived from repo/object identity plus the
+     * Delivery-scoped key derived from repo/object identity plus the
      * `X-GitHub-Delivery` GUID for the specific webhook instance.
      *
      * MUST include the repo full_name (or installation_id for installation events)
-     * to avoid cross-repo collisions (PR/issue numbers are repo-local), and MUST
-     * include the delivery GUID so repeated real transitions do not collapse while
-     * GitHub redeliveries still reuse the same key.
+     * to avoid cross-repo collisions (PR/issue numbers are repo-local), and includes
+     * the delivery GUID so exact delivery retries can be diagnosed separately from
+     * semantic redeliveries.
      *
      * Examples:
      *   "brosincode/letagents:pr:42:opened:delivery:8f5d..."
@@ -164,6 +170,12 @@ export const github_room_events = pgTable(
      *   "installation:98765:suspend:delivery:8f5d..."
      */
     idempotency_key: text("idempotency_key").notNull().unique(),
+    /**
+     * Semantic provider object/event identity without webhook-delivery scope. This
+     * is the durable event key used to keep GitHub redeliveries from replaying
+     * lifecycle and projection side effects.
+     */
+    semantic_id: text("semantic_id"),
     /** Parent GitHub object ID for queryability (PR number, issue number, etc.) */
     github_object_id: text("github_object_id"),
     /** html_url of the GitHub object */
@@ -174,6 +186,19 @@ export const github_room_events = pgTable(
     state: text("state"),
     /** GitHub login of the actor who triggered the event */
     actor_login: text("actor_login"),
+    /** GitHub event/object timestamps used to order provider activity. */
+    provider_event_at: timestamp("provider_event_at", { mode: "string", withTimezone: true }),
+    provider_object_updated_at: timestamp("provider_object_updated_at", {
+      mode: "string",
+      withTimezone: true,
+    }),
+    /** Normalized order timestamp, populated from provider time or created_at. */
+    event_order_at: timestamp("event_order_at", { mode: "string", withTimezone: true }).notNull(),
+    /** Git ref metadata for branch and PR scoped routing. */
+    ref: text("ref"),
+    base_ref: text("base_ref"),
+    head_ref: text("head_ref"),
+    head_sha: text("head_sha"),
     /** Structured payload excerpt for richer queries */
     metadata: jsonb("metadata").$type<GitHubRoomEventMetadata>(),
     /** Linked task board task, if one was resolved */
@@ -192,5 +217,13 @@ export const github_room_events = pgTable(
       table.github_object_id
     ),
     delivery_idx: index("github_room_events_delivery_id_idx").on(table.delivery_id),
+    order_idx: index("github_room_events_room_order_idx").on(
+      table.room_id,
+      table.event_order_at,
+      table.id
+    ),
+    ref_idx: index("github_room_events_room_ref_idx").on(table.room_id, table.ref),
+    head_ref_idx: index("github_room_events_room_head_ref_idx").on(table.room_id, table.head_ref),
+    head_sha_idx: index("github_room_events_room_head_sha_idx").on(table.room_id, table.head_sha),
   })
 );

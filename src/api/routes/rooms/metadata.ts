@@ -1,7 +1,7 @@
 import type { Express, Response } from "express";
 
 import {
-  updateProjectDisplayName,
+  type GitRoomBinding,
   type Project,
 } from "../../db.js";
 import {
@@ -20,15 +20,18 @@ export interface RoomMetadataRouteDeps {
     res: Response,
     project: Project
   ): Promise<boolean>;
+  updateProjectDisplayName(projectId: string, displayName: string): Promise<Project | null>;
   resolveProjectRole(
     project: Project,
     sessionAccount: AuthenticatedRequest["sessionAccount"]
   ): Promise<RoomRole>;
+  getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
   toRoomResponse(
     project: Project,
     options?: {
       role?: RoomRole;
       authenticated?: boolean;
+      gitRoomBinding?: GitRoomBinding | null;
     }
   ): Record<string, unknown>;
 }
@@ -53,17 +56,21 @@ export function registerRoomMetadataRoutes(
     }
 
     try {
-      const updated = await updateProjectDisplayName(project.id, display_name);
+      const updated = await deps.updateProjectDisplayName(project.id, display_name);
       if (!updated) {
         res.status(404).json({ error: "Room not found" });
         return;
       }
 
       const role = await deps.resolveProjectRole(updated, req.sessionAccount);
+      const gitRoomBinding = deps.getGitRoomBindingForRoom
+        ? await deps.getGitRoomBindingForRoom(updated.id)
+        : undefined;
       res.json({
         ...deps.toRoomResponse(updated, {
           role,
           authenticated: Boolean(req.sessionAccount),
+          ...(gitRoomBinding !== undefined ? { gitRoomBinding } : {}),
         }),
       });
     } catch (error) {

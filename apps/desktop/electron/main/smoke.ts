@@ -194,6 +194,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
       concludedAt: null,
       conclusionSummary: null,
       conclusionDetails: null,
+      gitRoom: null,
     },
     storage: {
       roomIdentifier: smokeRoomIdentifier,
@@ -221,6 +222,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
         displayName: "MapleRidge",
         ownerLabel: "Local desktop",
         ideLabel: "Codex",
+        repoBranch: null,
         status: "working",
         statusText: "Smoke checking local supervision",
         lastHeartbeatAt: now,
@@ -275,6 +277,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
       },
     ],
     recentActivity: [],
+    roomArtifacts: [],
     messages: [
       {
         id: "msg_smoke_1",
@@ -342,6 +345,7 @@ export function desktopSmokeAccountRooms(): DesktopAccountRoomEntry[] {
       lastOpenedAt: null,
       latestMessageId: "msg_smoke_1",
       latestMessageAt: null,
+      gitRoom: null,
       focusRooms: [],
     },
   ];

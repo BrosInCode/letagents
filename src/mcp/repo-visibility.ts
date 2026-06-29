@@ -6,8 +6,8 @@
 //
 // Used in the MCP auto-join flow:
 //   1. Detect git remote → normalize to canonical form
-//   2. Check visibility → public = discoverable room, private = invite room
-//   3. Auto-join or prompt for invite code
+//   2. Check visibility → public/private Git Room access mode
+//   3. Auto-join the active Git Room derived from repo + branch
 //
 // Rate limits (unauthenticated):
 //   - GitHub:    60 requests/hour
@@ -29,7 +29,9 @@ export interface VisibilityResult {
   provider: RepoProvider;
   /** Visibility: public, private, or unknown (if detection failed) */
   visibility: RepoVisibility;
-  /** Suggested room type based on visibility */
+  /** Git Room access mode based on repository visibility */
+  accessMode: RepoVisibility;
+  /** Backward-compatible access hint: public Git Rooms are discoverable, private/unknown need auth or an invite path */
   roomType: "discoverable" | "invite";
   /** Error message if detection failed */
   error?: string;
@@ -184,12 +186,13 @@ export async function checkRepoVisibility(
   const provider = detectProvider(canonicalKey);
   const ownerRepo = extractOwnerRepo(canonicalKey);
 
-  // Unknown provider — default to invite room (safe fallback)
+  // Unknown provider — default to an invite/private-style access hint.
   if (provider === "unknown" || !ownerRepo) {
     return {
       canonicalKey,
       provider,
       visibility: "unknown",
+      accessMode: "unknown",
       roomType: "invite",
       error: provider === "unknown"
         ? `Unknown git provider for host: ${canonicalKey.split("/")[0]}`
@@ -215,16 +218,17 @@ export async function checkRepoVisibility(
       visibility = "unknown";
   }
 
-  // Determine room type from visibility
+  // Keep roomType for older callers; accessMode is the Git Room-facing field.
   const roomType = visibility === "public" ? "discoverable" : "invite";
 
   return {
     canonicalKey,
     provider,
     visibility,
+    accessMode: visibility,
     roomType,
     ...(visibility === "unknown" && {
-      error: "Could not determine visibility — defaulting to invite room",
+      error: "Could not determine visibility — treating Git Room access as private/unknown",
     }),
   };
 }
@@ -235,7 +239,7 @@ export async function checkRepoVisibility(
 
 /**
  * Complete auto-detection: read git remote → normalize → check visibility.
- * This is the main entry point for the MCP auto-join flow.
+ * This is the main entry point for visibility checks before Git Room auto-join.
  *
  * @param cwd - Working directory to detect git remote from
  * @returns VisibilityResult or null if not in a git repo

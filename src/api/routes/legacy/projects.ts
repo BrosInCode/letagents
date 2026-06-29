@@ -10,12 +10,18 @@ import {
   getProjectById,
   registerAgentIdentity,
   rotateProjectCode,
+  type GitRoomBinding,
   type Project,
 } from "../../db.js";
 import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
 } from "../../http/helpers.js";
+import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
+import {
+  formatGitRoomSummary,
+  formatManualGitRoomSummaryForRoomId,
+} from "../../rooms/formatting.js";
 import { isInviteCode, normalizeRoomId } from "../../rooms/routing.js";
 
 export interface LegacyProjectRouteDeps {
@@ -27,6 +33,10 @@ export interface LegacyProjectRouteDeps {
     roomName: string;
     sessionAccount: AuthenticatedRequest["sessionAccount"];
   }): Promise<{ kind: "allow" } | { kind: "auth_required" } | { kind: "private_repo_no_access" }>;
+  resolveProjectRepoRoomAccessDecision(input: {
+    project: Project;
+    sessionAccount: AuthenticatedRequest["sessionAccount"];
+  }): Promise<ProjectRepoAccessDecision>;
   replyRepoRoomAccessDecision(
     res: Response,
     roomName: string,
@@ -51,6 +61,22 @@ export interface LegacyProjectRouteDeps {
     displayName?: string | null;
     source?: string | null;
   }): Promise<void>;
+  getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
+}
+
+export function buildLegacyProjectRoomResponse(
+  project: Pick<Project, "id" | "code" | "name" | "display_name">,
+  gitRoomBinding?: GitRoomBinding | null
+): Record<string, unknown> {
+  return {
+    id: project.id,
+    code: project.code,
+    name: project.name,
+    display_name: project.display_name,
+    git_room:
+      formatGitRoomSummary(gitRoomBinding ?? null) ??
+      formatManualGitRoomSummaryForRoomId(project.id),
+  };
 }
 
 export function registerLegacyProjectRoutes(
@@ -119,14 +145,31 @@ export function registerLegacyProjectRoutes(
     }
 
     const { room: project, created } = await getOrCreateCanonicalRoom(roomId);
+    const projectAccess = await deps.resolveProjectRepoRoomAccessDecision({
+      project,
+      sessionAccount: req.sessionAccount,
+    });
+    if (projectAccess.isRepoBacked && projectAccess.decision.kind !== "allow") {
+      deps.replyRepoRoomAccessDecision(
+        res,
+        projectAccess.roomName ?? project.parent_room_id ?? project.id,
+        projectAccess.decision
+      );
+      return;
+    }
 
     if (req.sessionAccount && created) {
-      if (deps.isRepoBackedProject(project)) {
+      if (projectAccess.isRepoBacked) {
         await deps.resolveProjectRole(project, req.sessionAccount);
       } else {
         await assignProjectAdmin(project.id, req.sessionAccount.account_id);
       }
     }
+
+    const currentRoomBinding = deps.getGitRoomBindingForRoom
+      ? await deps.getGitRoomBindingForRoom(project.id)
+      : null;
+    const gitRoomBinding = currentRoomBinding ?? projectAccess.binding;
 
     if (req.sessionAccount) {
       await deps.rememberHumanRoomParticipant({
@@ -141,12 +184,9 @@ export function registerLegacyProjectRoutes(
       });
     }
 
-    res.status(created ? 201 : 200).json({
-      id: project.id,
-      code: project.code,
-      name: project.name,
-      display_name: project.display_name,
-    });
+    res.status(created ? 201 : 200).json(
+      buildLegacyProjectRoomResponse(project, gitRoomBinding)
+    );
   });
 
   app.get("/projects/:id/access", async (req: AuthenticatedRequest, res) => {
@@ -157,10 +197,14 @@ export function registerLegacyProjectRoutes(
       return;
     }
 
+    const projectAccess = await deps.resolveProjectRepoRoomAccessDecision({
+      project,
+      sessionAccount: req.sessionAccount,
+    });
     const role = await deps.resolveProjectRole(project, req.sessionAccount);
     res.json({
       project_id: project.id,
-      room_type: deps.isRepoBackedProject(project) ? "discoverable" : "invite",
+      room_type: projectAccess.isRepoBacked ? "discoverable" : "invite",
       authenticated: Boolean(req.sessionAccount),
       role,
       account: req.sessionAccount

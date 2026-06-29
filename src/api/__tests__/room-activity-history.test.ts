@@ -8,7 +8,8 @@ import {
   paginateRoomActivityHistoryEntries,
   sortRoomActivityHistoryEntries,
 } from "../rooms/activity-history.js";
-import type { Project, RoomParticipant, Task } from "../db.js";
+import { decorateRoomActivityHistoryEntriesWithPresence } from "../rooms/activity-state.js";
+import type { Project, RoomAgentPresence, RoomParticipant, Task } from "../db.js";
 
 const rooms: Project[] = [
   {
@@ -178,6 +179,68 @@ test("filterRoomActivityHistoryEntries searches tasks beyond the displayed top f
   assert.equal(filterRoomActivityHistoryEntries(entries, { query: "legacy archive migration" }).length, 1);
 });
 
+test("filterRoomActivityHistoryEntries keeps full task search after repo branch decoration", () => {
+  const extendedTasks: Task[] = [
+    ...tasks,
+    ...Array.from({ length: 6 }, (_, index) => {
+      const hour = String(15 - index).padStart(2, "0");
+      return {
+        id: `task_branch_archive_${index + 1}`,
+        room_id: "github.com/BrosInCode/letagents",
+        title: index === 5 ? "Hidden branch migration" : `Branch archive ${index + 1}`,
+        description: "",
+        status: "done",
+        assignee: "Thicket | EmmyMay's agent | Codex",
+        assignee_agent_key: "emmymay/thicket",
+        created_by: "EmmyMay",
+        source_message_id: null,
+        pr_url: null,
+        workflow_artifacts: [],
+        workflow_refs: [],
+        created_at: `2026-04-21T${hour}:00:00.000Z`,
+        updated_at: `2026-04-21T${hour}:30:00.000Z`,
+      };
+    }),
+  ];
+  const entries = decorateRoomActivityHistoryEntriesWithCounts({
+    entries: decorateRoomActivityHistoryEntriesWithPresence({
+      entries: buildRoomActivityHistoryEntries({ rooms, participants, tasks: extendedTasks }),
+      presence: [
+        {
+          room_id: "github.com/BrosInCode/letagents",
+          actor_label: "Thicket | EmmyMay's agent | Codex",
+          agent_key: "emmymay/thicket",
+          agent_instance_id: null,
+          agent_session_id: "agent_session_thicket",
+          session_kind: "worker",
+          runtime: "codex",
+          display_name: "Thicket",
+          owner_label: "EmmyMay",
+          ide_label: "Codex",
+          repo_branch: "codex/history-branch",
+          status: "idle",
+          status_text: null,
+          last_heartbeat_at: "2026-04-21T12:05:00.000Z",
+          created_at: "2026-04-21T12:05:00.000Z",
+          updated_at: "2026-04-21T12:05:00.000Z",
+          freshness: "active",
+          activity_state: "active",
+          source_flags: ["delivery"],
+          liveness_observation: null,
+        } satisfies RoomAgentPresence,
+      ],
+    }),
+    messageCounts: [],
+    reasoningSessionCounts: [],
+  });
+  const thicketEntry = entries.find((entry) => entry.participant.display_name === "Thicket");
+
+  assert.ok(thicketEntry);
+  assert.equal(thicketEntry.completed_tasks.length, 5);
+  assert.equal(filterRoomActivityHistoryEntries(entries, { query: "codex/history-branch" }).length, 1);
+  assert.equal(filterRoomActivityHistoryEntries(entries, { query: "hidden branch migration" }).length, 1);
+});
+
 test("decorateRoomActivityHistoryEntriesWithCounts attaches message and reasoning totals", () => {
   const entries = decorateRoomActivityHistoryEntriesWithCounts({
     entries: buildRoomActivityHistoryEntries({ rooms, participants, tasks }),
@@ -280,6 +343,7 @@ test("sortRoomActivityHistoryEntries reorders decorated entries by last_seen_at"
         display_name: "Maple",
         owner_label: "EmmyMay",
         ide_label: "Codex",
+        repo_branch: null,
         hidden_at: null,
         hidden_by: null,
         last_live_heartbeat_at: null,
@@ -313,6 +377,7 @@ test("sortRoomActivityHistoryEntries reorders decorated entries by last_seen_at"
         display_name: "Thicket",
         owner_label: "EmmyMay",
         ide_label: "Codex",
+        repo_branch: null,
         hidden_at: null,
         hidden_by: null,
         last_live_heartbeat_at: null,

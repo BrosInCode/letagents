@@ -30,6 +30,7 @@ import {
   reasoningSessions,
   resetRoomState,
   room,
+  roomArtifacts,
   taskGithubStatus,
   tasks,
 } from './state'
@@ -76,6 +77,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       participants.value = bootstrap.participantsPage.participants
       participantHiddenCount.value = bootstrap.participantsPage.hidden_count
       reasoningSessions.value = bootstrap.reasoningSessions
+      roomArtifacts.value = bootstrap.roomArtifacts
       if (
         bootstrapActivityHistoryRequestId ===
           getActivityHistoryRequestSequence() &&

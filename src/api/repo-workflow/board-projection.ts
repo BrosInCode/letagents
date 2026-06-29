@@ -97,6 +97,8 @@ export function projectRepoRoomEvent(input: {
     case "issue_comment":
     case "check_run":
     case "repository":
+    case "push":
+    case "branch_ref":
       return null;
     default:
       return null;

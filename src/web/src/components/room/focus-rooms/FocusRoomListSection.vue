@@ -26,7 +26,15 @@
         type="button"
         @click="emit('select', focusRoom.room_id)"
       >
-        <div>
+        <div class="focus-room-link-copy">
+          <span
+            v-if="focusRoom.git_room"
+            class="focus-room-kind-badge"
+            :title="gitRoomTitle(focusRoom.git_room)"
+          >
+            <GitBranchIcon :size="13" />
+            <span>{{ gitRoomKindLabel(focusRoom.git_room) }}</span>
+          </span>
           <strong>{{ focusRoom.display_name }}</strong>
           <span>{{ roomSubtitle(focusRoom) }}</span>
         </div>
@@ -38,7 +46,8 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { FocusRoomInfo } from '@/composables/useRoom'
+import GitBranchIcon from '@/components/icons/GitBranchIcon.vue'
+import type { FocusRoomInfo, GitRoomInfo } from '@/composables/useRoom'
 
 const props = defineProps<{
   title: string
@@ -58,9 +67,41 @@ const emit = defineEmits<{
 const visible = computed(() => props.showWhenEmpty || props.rooms.length > 0)
 
 function roomSubtitle(focusRoom: FocusRoomInfo): string {
+  if (focusRoom.git_room) {
+    return `${focusRoom.git_room.repository.full_name} · ${gitRoomRefLabel(focusRoom.git_room)}`
+  }
   if (props.concluded) {
     return focusRoom.conclusion_summary || focusRoom.source_task_id || focusRoom.room_id
   }
   return focusRoom.source_task_id || 'No linked task yet'
+}
+
+function gitRoomKindLabel(gitRoom: GitRoomInfo): string {
+  switch (gitRoom.ref.type) {
+    case 'branch':
+      return 'Branch Room'
+    case 'tag':
+      return 'Tag Room'
+    case 'pull_request':
+      return 'PR Room'
+    default:
+      return 'Git Room'
+  }
+}
+
+function gitRoomRefLabel(gitRoom: GitRoomInfo): string {
+  const ref = gitRoom.ref
+  if (
+    ref.name &&
+    ref.head_repository?.full_name &&
+    ref.head_repository.full_name !== gitRoom.repository.full_name
+  ) {
+    return `${ref.head_repository.owner}:${ref.name}`
+  }
+  return ref.name || ref.default_branch || ref.type.replace('_', ' ')
+}
+
+function gitRoomTitle(gitRoom: GitRoomInfo): string {
+  return `${gitRoom.provider} ${gitRoom.repository.full_name} ${gitRoomRefLabel(gitRoom)}`
 }
 </script>

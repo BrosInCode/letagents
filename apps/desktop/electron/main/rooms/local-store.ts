@@ -452,6 +452,7 @@ export async function listLocalRoomEntries(
     lastOpenedAt: row.updated_at,
     latestMessageId: null,
     latestMessageAt: null,
+    gitRoom: null,
     focusRooms: [],
   }));
 }

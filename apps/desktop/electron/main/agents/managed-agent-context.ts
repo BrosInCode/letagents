@@ -12,6 +12,12 @@ import {
   mapDesktopTaskSummaryPayload,
   type DesktopTaskSummaryPayload,
 } from "../rooms/tasks/mappers.js";
+import {
+  compactManagedAgentRoomArtifacts,
+  managedAgentRoomArtifactsPath,
+  type CompactManagedAgentRoomArtifact,
+  type ManagedAgentRoomArtifactPayload,
+} from "./managed-agent-artifacts.js";
 export {
   buildManagedAgentContextResultPrompt,
   hasManagedAgentContextRequestLine,
@@ -477,6 +483,13 @@ async function fetchCloudTasks(roomIdentifier: string): Promise<DesktopTaskSumma
   return page.tasks;
 }
 
+async function fetchCloudRoomArtifacts(roomIdentifier: string): Promise<CompactManagedAgentRoomArtifact[]> {
+  const page = await apiFetch<{ artifacts?: ManagedAgentRoomArtifactPayload[] }>(
+    managedAgentRoomArtifactsPath(roomIdentifier),
+  );
+  return compactManagedAgentRoomArtifacts(page.artifacts);
+}
+
 async function fetchCloudTaskPage(
   roomIdentifier: string,
   options?: { limit?: number; after?: string },
@@ -649,7 +662,7 @@ async function getRoomContextSummary(
       storage,
       messages: recentMessages.messages.map(compactMessage),
       hasMore: recentMessages.has_more,
-      note: "Local storage summary includes messages only; local task context is not available yet.",
+      note: "Local storage summary includes messages only; local task and shared artifact context are not available yet.",
     };
   }
 
@@ -668,5 +681,11 @@ async function getRoomContextSummary(
   };
   const tasks = await fetchCloudTasks(roomIdentifier);
   result.tasks = tasks.slice(0, MAX_CONTEXT_TASKS).map(compactTask);
+  try {
+    result.artifacts = await fetchCloudRoomArtifacts(roomIdentifier);
+  } catch {
+    result.artifacts = [];
+    result.note = "Shared artifact summary was unavailable.";
+  }
   return result;
 }

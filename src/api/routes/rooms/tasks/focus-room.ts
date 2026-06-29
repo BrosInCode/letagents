@@ -96,6 +96,13 @@ export function registerTaskFocusRoomRoute(
         );
       }
 
+      const gitRoom = await deps.ensureTaskGitRoomForActiveWorkLease?.({
+        parentRoomId: project.id,
+        taskId: result.task.id,
+      });
+      const gitRoomBinding = gitRoom?.room?.id === result.room.id
+        ? gitRoom.binding
+        : await deps.getGitRoomBindingForRoom?.(result.room.id) ?? undefined;
       const role = await deps.resolveProjectRole(result.room, req.sessionAccount);
       res.status(result.created ? 201 : 200).json({
         room_id: project.id,
@@ -104,6 +111,7 @@ export function registerTaskFocusRoomRoute(
         focus_room: deps.toRoomResponse(result.room, {
           role,
           authenticated: Boolean(req.sessionAccount),
+          gitRoomBinding,
         }),
       });
     } catch (error) {

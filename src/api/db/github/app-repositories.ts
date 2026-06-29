@@ -74,10 +74,11 @@ export async function getGitHubAppRepositoryByFullName(
 export async function getGitHubAppRepositoryByRoomId(
   roomId: string
 ): Promise<GitHubAppRepository | undefined> {
+  const normalizedRoomId = normalizeRoomName(roomId);
   const [repository] = await db
     .select()
     .from(github_app_repositories)
-    .where(eq(github_app_repositories.room_id, roomId))
+    .where(eq(github_app_repositories.room_id, normalizedRoomId))
     .orderBy(desc(github_app_repositories.updated_at))
     .limit(1);
 

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { registerRoomFocusRoutes } = await import("../routes/rooms/focus.js");
+const { registerRoomFocusRoutes, toFocusRoomListResponse } = await import("../routes/rooms/focus.js");
+import type { GitRoomBinding, Project } from "../db.js";
 
 function createDeps() {
   const unused = async () => {
@@ -20,6 +21,55 @@ function createDeps() {
     enforceFocusRoomConclusion: unused,
     emitProjectMessage: unused,
     formatFocusRoomConclusionMessage: () => "",
+  };
+}
+
+function project(overrides: Partial<Project> = {}): Project {
+  return {
+    id: "github.com/owner/repo",
+    code: null,
+    display_name: "Repo Room",
+    name: "github.com/owner/repo",
+    kind: "main",
+    parent_room_id: null,
+    focus_key: null,
+    source_task_id: null,
+    focus_status: null,
+    focus_parent_visibility: null,
+    focus_activity_scope: null,
+    focus_github_event_routing: null,
+    focus_archived_at: null,
+    concluded_at: null,
+    conclusion_summary: null,
+    conclusion_details: null,
+    created_at: "2026-06-28T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function gitRoomBinding(roomId: string): GitRoomBinding {
+  return {
+    room_id: roomId,
+    provider: "github",
+    host: "github.com",
+    repository_id: "1",
+    repository_full_name: "BrosInCode/letagents",
+    repository_owner: "BrosInCode",
+    repository_name: "letagents",
+    ref_type: "branch",
+    ref_name: "codex/git-rooms",
+    default_branch: "main",
+    base_ref: "main",
+    head_ref: "codex/git-rooms",
+    head_repository_id: null,
+    head_repository_full_name: null,
+    head_repository_owner: null,
+    head_repository_name: null,
+    visibility: "public",
+    is_default: false,
+    source: "webhook",
+    created_at: "2026-06-28T10:00:00.000Z",
+    updated_at: "2026-06-28T10:00:00.000Z",
   };
 }
 
@@ -49,6 +99,54 @@ test("registerRoomFocusRoutes preserves canonical Focus Room route order", () =>
     { method: "post", path: "/^\\/rooms\\/(.+)\\/focus-rooms$/" },
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/focus\\/([^/]+)$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/focus\\/([^/]+)\\/conclude$/" },
+  ]);
+});
+
+test("toFocusRoomListResponse passes Git Room bindings to focus room responses", () => {
+  const gitFocusRoom = project({
+    id: "git-room:github.com:owner/repo:branch:Y29kZXgvZ2l0LXJvb21z",
+    kind: "focus",
+    parent_room_id: "github.com/owner/repo",
+    focus_key: "git:branch:Y29kZXgvZ2l0LXJvb21z",
+    focus_status: "active",
+  });
+  const taskFocusRoom = project({
+    id: "focus_1",
+    kind: "focus",
+    parent_room_id: "github.com/owner/repo",
+    focus_key: "task_1",
+    source_task_id: "task_1",
+    focus_status: "active",
+  });
+  const binding = gitRoomBinding(gitFocusRoom.id);
+  const calls: unknown[] = [];
+
+  const response = toFocusRoomListResponse({
+    project: project(),
+    focusRooms: [gitFocusRoom, taskFocusRoom],
+    gitRoomBindings: new Map([[gitFocusRoom.id, binding]]),
+    toRoomResponse: (focusRoom: Project, options?: unknown) => {
+      calls.push({ focusRoomId: focusRoom.id, options });
+      return { room_id: focusRoom.id };
+    },
+  });
+
+  assert.deepEqual(response, {
+    room_id: "github.com/owner/repo",
+    focus_rooms: [
+      { room_id: gitFocusRoom.id },
+      { room_id: taskFocusRoom.id },
+    ],
+  });
+  assert.deepEqual(calls, [
+    {
+      focusRoomId: gitFocusRoom.id,
+      options: { gitRoomBinding: binding },
+    },
+    {
+      focusRoomId: taskFocusRoom.id,
+      options: { gitRoomBinding: null },
+    },
   ]);
 });
 

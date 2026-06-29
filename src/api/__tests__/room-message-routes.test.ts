@@ -13,7 +13,9 @@ function createDeps() {
   return {
     messageEvents: new EventEmitter(),
     taskEvents: new EventEmitter(),
+    githubRoomEvents: new EventEmitter(),
     reasoningEvents: new EventEmitter(),
+    artifactEvents: new EventEmitter(),
     rentalActivityEvents: new EventEmitter(),
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
@@ -670,6 +672,175 @@ test("room streams forward rental activity and patch frames", async () => {
   assert.match(output, /event: rental_patch/);
   assert.match(output, /"patch_id":"rpatch_1"/);
   assert.doesNotMatch(output, /event: rental_usage/);
+});
+
+test("room streams forward artifact update invalidations", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {},
+    put() {},
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+
+  let closeHandler: (() => void) | null = null;
+  const req = {
+    params: { 0: "room_1" },
+    headers: { "x-letagents-desktop-client": "1" },
+    authKind: "owner_token",
+    on(event: string, handler: () => void) {
+      if (event === "close") closeHandler = handler;
+      return this;
+    },
+  };
+  const res = {
+    statusCode: 200,
+    headers: new Map<string, string>(),
+    writes: [] as string[],
+    writableEnded: false,
+    socket: { setKeepAlive() {} },
+    setHeader(name: string, value: string) {
+      this.headers.set(name, value);
+    },
+    flushHeaders() {},
+    write(chunk: string) {
+      this.writes.push(chunk);
+      return true;
+    },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.writes.push(JSON.stringify(body));
+      return this;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+  };
+
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/");
+  assert.ok(handler);
+  await handler(req, res);
+  deps.artifactEvents.emit("artifact:updated", {
+    projectId: "room_1",
+    artifact: {
+      identity_key: "github:branch:ref:codex/git-rooms",
+    },
+  });
+  closeHandler?.();
+
+  const output = res.writes.join("");
+  assert.match(output, /event: artifact_update/);
+  assert.match(output, /"artifact_identity_key":"github:branch:ref:codex\/git-rooms"/);
+});
+
+test("room streams forward redacted GitHub event updates", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {},
+    put() {},
+    delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+
+  registerRoomMessageRoutes(app as never, deps as never);
+
+  let closeHandler: (() => void) | null = null;
+  const req = {
+    params: { 0: "room_1" },
+    headers: { "x-letagents-desktop-client": "1" },
+    authKind: "owner_token",
+    on(event: string, handler: () => void) {
+      if (event === "close") closeHandler = handler;
+      return this;
+    },
+  };
+  const res = {
+    statusCode: 200,
+    headers: new Map<string, string>(),
+    writes: [] as string[],
+    writableEnded: false,
+    socket: { setKeepAlive() {} },
+    setHeader(name: string, value: string) {
+      this.headers.set(name, value);
+    },
+    flushHeaders() {},
+    write(chunk: string) {
+      this.writes.push(chunk);
+      return true;
+    },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.writes.push(JSON.stringify(body));
+      return this;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+  };
+
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/");
+  assert.ok(handler);
+  await handler(req, res);
+  deps.githubRoomEvents.emit("github_event:updated", {
+    projectId: "room_1",
+    event: {
+      id: "gre_1",
+      room_id: "room_1",
+      delivery_id: "delivery_1",
+      event_type: "pull_request",
+      action: "opened",
+      idempotency_key: "delivery_1:pull_request",
+      semantic_id: "pull_request:42",
+      github_object_id: "42",
+      github_object_url: "https://github.com/BrosInCode/letagents/pull/42",
+      title: "Track Git Room artifacts",
+      state: "open",
+      actor_login: "EmmyMay",
+      provider_event_at: "2026-06-28T10:00:00.000Z",
+      provider_object_updated_at: "2026-06-28T10:00:00.000Z",
+      event_order_at: "2026-06-28T10:00:00.000Z",
+      ref: "codex/git-rooms",
+      base_ref: "main",
+      head_ref: "codex/git-rooms",
+      head_sha: "abc123",
+      metadata: { body: "private body", draft: false },
+      linked_task_id: "task_7",
+      created_at: "2026-06-28T10:00:01.000Z",
+    },
+  });
+  closeHandler?.();
+
+  const output = res.writes.join("");
+  assert.match(output, /event: github_event/);
+  assert.match(output, /"event_type":"pull_request"/);
+  assert.match(output, /"room_id":"room_1"/);
+  assert.match(output, /"body":null/);
+  assert.match(output, /"body_redacted":true/);
+  assert.doesNotMatch(output, /private body/);
 });
 
 test("room stream does NOT forward internal/provider_only/renter_only rental activity events", async () => {

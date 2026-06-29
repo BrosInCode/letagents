@@ -94,6 +94,8 @@ test("account room route requires authentication", async () => {
 test("account room route returns parent rooms with nested focus rooms", async () => {
   const app = captureAccountRoomHandlers();
   const calls: unknown[] = [];
+  const bindingCalls: string[][] = [];
+  const branchRoomId = "git-room:github.com:owner/repo:branch:Y29kZXgvR2l0Um9vbXM";
   registerAccountRoomRoutes(app as never, {
     archiveAccountRoomForAccount: async () => {
       throw new Error("not invoked");
@@ -103,6 +105,63 @@ test("account room route returns parent rooms with nested focus rooms", async ()
     },
     updateAccountRoomPreferences: async () => {
       throw new Error("not invoked");
+    },
+    async getGitRoomBindingsForRooms(roomIds) {
+      bindingCalls.push(roomIds);
+      return new Map([
+        [
+          branchRoomId,
+          {
+            room_id: branchRoomId,
+            provider: "github",
+            host: "github.com",
+            repository_id: "repo_1",
+            repository_owner: "owner",
+            repository_name: "repo",
+            repository_full_name: "owner/repo",
+            ref_type: "branch",
+            ref_name: "codex/GitRooms",
+            default_branch: "main",
+            base_ref: "main",
+            head_ref: "codex/GitRooms",
+            head_repository_id: null,
+            head_repository_full_name: null,
+            head_repository_owner: null,
+            head_repository_name: null,
+            visibility: "public",
+            is_default: false,
+            source: "webhook",
+            created_at: "2026-05-02T11:00:00.000Z",
+            updated_at: "2026-05-02T11:00:00.000Z",
+          },
+        ],
+        [
+          "github.com/owner/repo",
+          {
+            room_id: "github.com/owner/repo",
+            provider: "github",
+            host: "github.com",
+            repository_id: "repo_1",
+            repository_owner: "owner",
+            repository_name: "repo",
+            repository_full_name: "owner/repo",
+            ref_type: "default_branch",
+            ref_name: "main",
+            default_branch: "main",
+            base_ref: null,
+            head_ref: null,
+            head_repository_id: null,
+            head_repository_full_name: null,
+            head_repository_owner: null,
+            head_repository_name: null,
+            visibility: "public",
+            is_default: true,
+            source: "github_repository",
+            created_at: "2026-05-01T10:00:00.000Z",
+            updated_at: "2026-05-01T10:00:00.000Z",
+          },
+        ],
+      ]) as never;
     },
     async getAccountRoomsForAccount(accountId, options) {
       calls.push({ accountId, options });
@@ -138,6 +197,21 @@ test("account room route returns parent rooms with nested focus rooms", async ()
               latest_message_id: "msg_3",
               latest_message_at: "2026-05-02T09:32:00.000Z",
             },
+            {
+              room_id: branchRoomId,
+              display_name: "Branch: codex/GitRooms",
+              kind: "focus",
+              parent_room_id: "github.com/owner/repo",
+              focus_key: "git:branch:Y29kZXgvR2l0Um9vbXM",
+              source_task_id: null,
+              focus_status: "active",
+              role: "admin",
+              source: null,
+              first_opened_at: null,
+              last_opened_at: null,
+              latest_message_id: "msg_12",
+              latest_message_at: "2026-05-02T10:02:00.000Z",
+            },
           ],
         },
       ];
@@ -167,6 +241,13 @@ test("account room route returns parent rooms with nested focus rooms", async ()
       },
     },
   ]);
+  assert.deepEqual(bindingCalls, [
+    [
+      "github.com/owner/repo",
+      "github.com/owner/repo/focus/task_1",
+      branchRoomId,
+    ],
+  ]);
   assert.deepEqual(res.body, {
     rooms: [
       {
@@ -190,6 +271,30 @@ test("account room route returns parent rooms with nested focus rooms", async ()
         last_opened_at: "2026-05-02T10:00:00.000Z",
         latest_message_id: "msg_14",
         latest_message_at: "2026-05-02T10:05:00.000Z",
+        git_room: {
+          room_id: "github.com/owner/repo",
+          provider: "github",
+          host: "github.com",
+          repository: {
+            id: "repo_1",
+            owner: "owner",
+            name: "repo",
+            full_name: "owner/repo",
+          },
+          ref: {
+            type: "default_branch",
+            name: "main",
+            default_branch: "main",
+            base_ref: null,
+            head_ref: null,
+            head_repository: null,
+            is_default: true,
+          },
+          visibility: "public",
+          access_mode: "public",
+          source: "github_repository",
+          updated_at: "2026-05-01T10:00:00.000Z",
+        },
         focus_rooms: [
           {
             room_id: "github.com/owner/repo/focus/task_1",
@@ -208,10 +313,139 @@ test("account room route returns parent rooms with nested focus rooms", async ()
             latest_message_id: "msg_3",
             latest_message_at: "2026-05-02T09:32:00.000Z",
           },
+          {
+            room_id: branchRoomId,
+            id: branchRoomId,
+            display_name: "Branch: codex/GitRooms",
+            name: branchRoomId,
+            kind: "focus",
+            parent_room_id: "github.com/owner/repo",
+            focus_key: "git:branch:Y29kZXgvR2l0Um9vbXM",
+            source_task_id: null,
+            focus_status: "active",
+            role: "admin",
+            source: null,
+            first_opened_at: null,
+            last_opened_at: null,
+            latest_message_id: "msg_12",
+            latest_message_at: "2026-05-02T10:02:00.000Z",
+            git_room: {
+              room_id: branchRoomId,
+              provider: "github",
+              host: "github.com",
+              repository: {
+                id: "repo_1",
+                owner: "owner",
+                name: "repo",
+                full_name: "owner/repo",
+              },
+              ref: {
+                type: "branch",
+                name: "codex/GitRooms",
+                default_branch: "main",
+                base_ref: "main",
+                head_ref: "codex/GitRooms",
+                head_repository: null,
+                is_default: false,
+              },
+              visibility: "public",
+              access_mode: "public",
+              source: "webhook",
+              updated_at: "2026-05-02T11:00:00.000Z",
+            },
+          },
         ],
       },
     ],
   });
+});
+
+test("account room route derives Git Room metadata when repo binding is missing", async () => {
+  const app = captureAccountRoomHandlers();
+  const bindingCalls: string[][] = [];
+  registerAccountRoomRoutes(app as never, {
+    archiveAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    deleteAccountRoomForAccount: async () => {
+      throw new Error("not invoked");
+    },
+    updateAccountRoomPreferences: async () => {
+      throw new Error("not invoked");
+    },
+    async getGitRoomBindingsForRooms(roomIds) {
+      bindingCalls.push(roomIds);
+      return new Map();
+    },
+    async getAccountRoomsForAccount() {
+      return [
+        {
+          room_id: "github.com/owner/repo",
+          display_name: "owner/repo",
+          kind: "main",
+          role: "participant",
+          source: "participant",
+          pinned: false,
+          archived: false,
+          can_leave: true,
+          can_delete: false,
+          delete_reason: "participant",
+          first_opened_at: "2026-05-01T10:00:00.000Z",
+          last_opened_at: "2026-05-02T10:00:00.000Z",
+          latest_message_id: null,
+          latest_message_at: null,
+          focus_rooms: [],
+        },
+      ];
+    },
+  });
+
+  const res = responseStub();
+  await app.getHandler()(
+    {
+      query: {},
+      sessionAccount: {
+        account_id: "acct_1",
+        login: "EmmyMay",
+      },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(bindingCalls, [["github.com/owner/repo"]]);
+  assert.equal(
+    (res.body as { rooms: Array<{ git_room?: { source?: string } }> })
+      .rooms[0]?.git_room?.source,
+    "manual"
+  );
+  assert.deepEqual(
+    (res.body as { rooms: Array<{ git_room?: unknown }> }).rooms[0]?.git_room,
+    {
+      room_id: "github.com/owner/repo",
+      provider: "github",
+      host: "github.com",
+      repository: {
+        id: null,
+        owner: "owner",
+        name: "repo",
+        full_name: "owner/repo",
+      },
+      ref: {
+        type: "default_branch",
+        name: null,
+        default_branch: null,
+        base_ref: null,
+        head_ref: null,
+        head_repository: null,
+        is_default: true,
+      },
+      visibility: "unknown",
+      access_mode: "unknown",
+      source: "manual",
+      updated_at: null,
+    }
+  );
 });
 
 test("leave route archives the account room", async () => {

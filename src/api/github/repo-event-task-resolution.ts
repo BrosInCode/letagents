@@ -55,6 +55,17 @@ export function getPullRequestWorkflowRef(event: RepoRoomEvent): RepoPullRequest
   }
 }
 
+export function getBranchWorkflowRef(event: RepoRoomEvent): string | null {
+  switch (event.kind) {
+    case "push":
+      return event.push.refType === "branch" ? event.push.ref || null : null;
+    case "branch_ref":
+      return event.branch.refType === "branch" ? event.branch.ref || null : null;
+    default:
+      return null;
+  }
+}
+
 function taskIdsMatch(left: string | null | undefined, right: string): boolean {
   return Boolean(left && left.toLowerCase() === right.toLowerCase());
 }
@@ -120,6 +131,45 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
   ): Promise<RepoRoomEventTaskResolution> {
     const artifactMatches = buildRepoRoomEventArtifactMatches(event);
     const referencedTaskId = extractReferencedTaskId(...getRepoRoomEventReferenceTexts(event));
+    const branchRef = getBranchWorkflowRef(event);
+
+    if (branchRef) {
+      const artifactTask = await deps.findTaskByWorkflowArtifactMatches(
+        project.id,
+        artifactMatches
+      );
+      if (artifactTask) {
+        return {
+          task: artifactTask,
+          matchedByTaskReference: taskIdsMatch(referencedTaskId, artifactTask.id),
+          matchedByWorkflowArtifact: true,
+        };
+      }
+
+      if (deps.findTaskByActiveWorkflowLease) {
+        const leaseTask = await deps.findTaskByActiveWorkflowLease(project.id, {
+          branchRef,
+        });
+        if (leaseTask) {
+          return {
+            task: leaseTask,
+            matchedByTaskReference: taskIdsMatch(referencedTaskId, leaseTask.id),
+            matchedByWorkflowArtifact: true,
+          };
+        }
+      }
+
+      if (!referencedTaskId) {
+        return emptyRepoRoomEventTaskResolution();
+      }
+
+      const task = await deps.getTaskById(project.id, referencedTaskId);
+      return {
+        task: task ?? undefined,
+        matchedByTaskReference: Boolean(task),
+        matchedByWorkflowArtifact: false,
+      };
+    }
 
     if (event.kind === "pull_request") {
       const artifactTask =

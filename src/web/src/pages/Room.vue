@@ -21,6 +21,7 @@
       :matchCount="matchCount"
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
+      :gitRoom="room?.gitRoom || null"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
@@ -61,6 +62,7 @@
       :activityHistory="activityHistory"
       :activityHistoryLoading="activityHistoryLoading"
       :activityHistoryError="activityHistoryError"
+      :roomArtifacts="roomArtifacts"
       :taskGithubStatus="taskGithubStatus"
       :githubEvents="githubEvents"
       :githubEventsAvailable="githubEventsAvailable"
@@ -176,6 +178,7 @@ const {
   activityHistory,
   activityHistoryLoading,
   activityHistoryError,
+  roomArtifacts,
   taskGithubStatus,
   githubEvents,
   githubEventsAvailable,

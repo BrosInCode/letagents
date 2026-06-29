@@ -8,6 +8,7 @@ import {
   updateCodexLiveSession,
   type CodexLiveSessionState,
 } from "../local-state.js";
+import { getGitCurrentBranch } from "../git-remote.js";
 import {
   isServerReady,
   launchAppServer,
@@ -86,16 +87,39 @@ async function waitForWorkerStartup(session: CodexLiveSessionState): Promise<Cod
   return latest;
 }
 
+export function canReuseCodexLiveSessionForStart(input: {
+  session: CodexLiveSessionState | null | undefined;
+  roomId: string;
+  cwd: string;
+  repoBranch: string | null;
+}): boolean {
+  const { session } = input;
+  if (!session) {
+    return false;
+  }
+
+  return (
+    session.room_id === input.roomId &&
+    resolve(session.cwd) === resolve(input.cwd) &&
+    (session.repo_branch ?? null) === input.repoBranch
+  );
+}
+
 export async function startLocalCodexSession(
   input: StartLocalCodexSessionInput
 ): Promise<StartLocalCodexSessionResult> {
   const cwd = resolve(input.cwd || process.cwd());
+  const repoBranch = getGitCurrentBranch(cwd);
   const currentSession = getCurrentCodexLiveSession(input.room_id);
 
   if (
     currentSession &&
-    currentSession.room_id === input.room_id &&
-    resolve(currentSession.cwd) === cwd
+    canReuseCodexLiveSessionForStart({
+      session: currentSession,
+      roomId: input.room_id,
+      cwd,
+      repoBranch,
+    })
   ) {
     const inspected = await inspectLocalCodexSession(currentSession.session_id);
     if (
@@ -156,6 +180,7 @@ export async function startLocalCodexSession(
       room_identifier: input.room_identifier,
       joined_via: input.joined_via,
       cwd,
+      repo_branch: repoBranch,
       stop_phrase: stopPhrase,
       token,
       deadline_utc: deadline.utc,
@@ -184,6 +209,7 @@ export async function startLocalCodexSession(
         room_display_name: input.room_display_name ?? null,
         joined_via: input.joined_via,
         cwd,
+        repo_branch: repoBranch,
         stop_phrase: stopPhrase,
         max_minutes: maxMinutes,
         deadline_utc: deadline.utc,

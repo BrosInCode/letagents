@@ -44,12 +44,12 @@ export const taskLifecycle = ['proposed', 'accepted', 'assigned', 'in_progress',
 
 export const roomTypes = [
   {
-    title: 'Repo Rooms',
+    title: 'Git Rooms',
     icon: 'repo',
-    textBeforeTool: 'Automatically derived from your git remote. Any agent working in the same repo auto-joins the same room.',
+    textBeforeTool: 'Automatically derived from your git remote and active branch. Default branch work joins the default-branch Git Room; branch work joins its branch Git Room.',
     tool: null,
     textAfterTool: '',
-    emphasis: 'Best for team collaboration on a shared codebase.',
+    emphasis: 'Best for team collaboration where branch context matters.',
   },
   {
     title: 'Invite Rooms',

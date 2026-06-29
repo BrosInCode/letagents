@@ -9,6 +9,7 @@ import type {
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
   DesktopChatStorageSettings,
+  DesktopGitRoomInfo,
 } from "../ipc-types.js";
 import {
   createAppActionRegistry,
@@ -47,6 +48,7 @@ function room(
     lastOpenedAt: "2026-06-16T10:00:00.000Z",
     latestMessageId: null,
     latestMessageAt: null,
+    gitRoom: null,
     focusRooms: [],
     ...overrides,
   };
@@ -63,6 +65,32 @@ function chatStorageSettings(
     localFilesPath: "/tmp/local-files",
     settingsPath: "/tmp/chat-storage.json",
     savedAt: "2026-06-17T00:00:00.000Z",
+  };
+}
+
+function gitRoomInfo(overrides: Partial<DesktopGitRoomInfo> = {}): DesktopGitRoomInfo {
+  return {
+    provider: "github",
+    host: "github.com",
+    repository: {
+      id: "repo_1",
+      fullName: "owner/repo",
+      owner: "owner",
+      name: "repo",
+    },
+    ref: {
+      type: "branch",
+      name: "codex/git-rooms",
+      defaultBranch: "main",
+      baseRef: "main",
+      headRef: "codex/git-rooms",
+      headRepository: null,
+    },
+    visibility: "private",
+    accessMode: "private",
+    isDefault: false,
+    source: "webhook",
+    ...overrides,
   };
 }
 
@@ -1313,6 +1341,59 @@ test("archive unpinned rooms includes the active visible local room", async () =
     assert.equal(result.pendingAction?.actionId, "rooms.archive_many");
     assert.equal(result.pendingPlan?.actions.length, 1);
     assert.equal(result.pendingAction?.description, "Archive The Test Room?");
+  });
+});
+
+test("App Agent active-room fallback preserves Git Room metadata", async () => {
+  const settingsPath = await tempSettingsPath();
+  await writePlainSettings(settingsPath);
+  await withSettingsEnv(settingsPath, async () => {
+    const activeGitRoom = gitRoomInfo();
+    let listedRooms: Array<Record<string, unknown>> = [];
+    const result = await runDesktopAppAgent(
+      {
+        prompt: "list the current room",
+        activeRoomIdentifier: "github.com/owner/repo",
+        activeRoomDisplayName: "owner/repo",
+        activeRoomPinned: false,
+        activeRoomGitRoom: activeGitRoom,
+      },
+      {
+        listAccountRooms: async () => [],
+        updateAccountRoom: async (roomIdentifier, updates) => ({ roomIdentifier, ...updates }),
+        runAgent: async (_input, _settings, registry, trace) => {
+          const listAction = registry.actionReference("rooms.list", {
+            includeArchived: false,
+          });
+          assert.ok(listAction);
+          const actionResult = await registry.execute(listAction, { trace });
+          listedRooms = Array.isArray(actionResult.actionResult?.rooms)
+            ? actionResult.actionResult.rooms as Array<Record<string, unknown>>
+            : [];
+          return {
+            state: "info",
+            message: "Listed the current room.",
+          };
+        },
+      },
+    );
+
+    assert.equal(result.state, "info");
+    assert.deepEqual(listedRooms[0]?.gitRoom, {
+      provider: "github",
+      host: "github.com",
+      repository: "owner/repo",
+      refType: "branch",
+      refName: "codex/git-rooms",
+      defaultBranch: "main",
+      baseRef: "main",
+      headRef: "codex/git-rooms",
+      headRepository: null,
+      visibility: "private",
+      accessMode: "private",
+      isDefault: false,
+      source: "webhook",
+    });
   });
 });
 
