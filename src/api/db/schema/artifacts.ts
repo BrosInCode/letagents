@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, integer, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import { bigint as pgBigInt, check, foreignKey, index, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 import { rooms } from "./core.js";
 
@@ -40,7 +40,7 @@ export const room_shared_artifacts = pgTable(
     provider: text("provider").notNull().$type<RoomSharedArtifactProvider>(),
     kind: text("kind").notNull().$type<RoomSharedArtifactKind>(),
     artifact_id: text("artifact_id"),
-    artifact_number: integer("artifact_number"),
+    artifact_number: pgBigInt("artifact_number", { mode: "number" }),
     title: text("title"),
     url: text("url"),
     ref: text("ref"),

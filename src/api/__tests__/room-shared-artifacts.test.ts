@@ -310,6 +310,46 @@ test(
 );
 
 test(
+  "upsertRoomSharedArtifact persists GitHub check run numbers outside integer range",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room shared artifact tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName ||
+      !getRoomSharedArtifactByIdentityKey ||
+      !upsertRoomSharedArtifact
+    ) {
+      throw new Error("DB-backed room shared artifact tests require TEST_DB_URL");
+    }
+
+    const largeSuiteId = 76648989646;
+    const room = await createProjectWithName("github.com/brosincode/letagents");
+    const artifact = await upsertRoomSharedArtifact({
+      room_id: room.id,
+      artifact: {
+        provider: "github",
+        kind: "check_run",
+        id: "84113022815",
+        number: largeSuiteId,
+        title: "deploy",
+        url: "https://github.com/BrosInCode/letagents/actions/runs/28389422373/job/84113022815",
+        state: "failure",
+      },
+      source: "github_event",
+    });
+    const hydrated = await getRoomSharedArtifactByIdentityKey({
+      room_id: room.id,
+      identity_key: artifact.identity_key,
+    });
+
+    assert.equal(artifact.artifact_number, largeSuiteId);
+    assert.equal(hydrated?.artifact_number, largeSuiteId);
+  }
+);
+
+test(
   "workflow artifact sync preserves manual and webhook task links",
   {
     concurrency: false,

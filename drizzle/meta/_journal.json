@@ -407,6 +407,13 @@
       "when": 1782950400000,
       "tag": "0057_agent_session_repo_branch",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1783036800000,
+      "tag": "0058_room_shared_artifact_number_bigint",
+      "breakpoints": true
     }
   ]
 }
