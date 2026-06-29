@@ -22,20 +22,12 @@ export interface GitHubRefRoomTarget {
 }
 
 function encodeRefForRoomId(refName: string): string {
-  return Buffer.from(refName, "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+  return Buffer.from(refName, "utf8").toString("base64url");
 }
 
 function decodeRefFromRoomId(encodedRef: string): string | null {
   try {
-    const padded = encodedRef
-      .replace(/-/g, "+")
-      .replace(/_/g, "/")
-      .padEnd(Math.ceil(encodedRef.length / 4) * 4, "=");
-    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    const decoded = Buffer.from(encodedRef, "base64url").toString("utf8");
     if (!decoded || encodeRefForRoomId(decoded) !== encodedRef) {
       return null;
     }
@@ -53,6 +45,17 @@ function normalizeRefName(value: string | null | undefined): string | null {
 function splitRepositoryFullName(fullName: string): { owner: string; name: string } {
   const [owner = "", name = ""] = fullName.split("/", 2);
   return { owner, name };
+}
+
+function refRoomTarget(
+  refType: string | null | undefined,
+  refName: string | null | undefined
+): GitHubRefRoomTarget | null {
+  const normalizedRefName = normalizeRefName(refName);
+  if (!normalizedRefName || (refType !== "branch" && refType !== "tag")) {
+    return null;
+  }
+  return { refType, refName: normalizedRefName };
 }
 
 export function buildGitHubRefRoomId(input: {
@@ -156,15 +159,9 @@ export function selectGitHubEventRefRoomTarget(input: {
   let target: GitHubRefRoomTarget | null = null;
 
   if (roomEvent?.kind === "push") {
-    const refName = normalizeRefName(roomEvent.push.ref);
-    if (refName && (roomEvent.push.refType === "branch" || roomEvent.push.refType === "tag")) {
-      target = { refType: roomEvent.push.refType, refName };
-    }
+    target = refRoomTarget(roomEvent.push.refType, roomEvent.push.ref);
   } else if (roomEvent?.kind === "branch_ref") {
-    const refName = normalizeRefName(roomEvent.branch.ref);
-    if (refName && (roomEvent.branch.refType === "branch" || roomEvent.branch.refType === "tag")) {
-      target = { refType: roomEvent.branch.refType, refName };
-    }
+    target = refRoomTarget(roomEvent.branch.refType, roomEvent.branch.ref);
   } else {
     const headRef = normalizeRefName(input.event.head_ref);
     if (headRef) {

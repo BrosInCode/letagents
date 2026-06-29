@@ -7,6 +7,9 @@ process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomArtifactRoutes } = await import("../routes/rooms/artifacts.js");
 
 type Handler = (req: Record<string, any>, res: Record<string, any>) => Promise<void>;
+const ARTIFACT_ROUTE = "^\\/rooms\\/(.+)\\/artifacts$";
+const ROOM_ID = "github.com/brosincode/letagents";
+const BRANCH_IDENTITY_KEY = "github:branch:ref:codex/git-rooms";
 
 function responseStub() {
   return {
@@ -23,52 +26,42 @@ function responseStub() {
   };
 }
 
-test("room artifact route returns shared artifacts for the canonical room", async () => {
-  let handler: Handler | undefined;
-  const app = {
-    get(path: RegExp, registeredHandler: Handler) {
-      assert.equal(path.source, "^\\/rooms\\/(.+)\\/artifacts$");
-      handler = registeredHandler;
-    },
-    post(path: RegExp, _registeredHandler: Handler) {
-      assert.equal(path.source, "^\\/rooms\\/(.+)\\/artifacts$");
-    },
+function artifactRow(overrides: Record<string, unknown> = {}) {
+  return {
+    room_id: ROOM_ID,
+    identity_key: BRANCH_IDENTITY_KEY,
+    provider: "github",
+    kind: "branch",
+    artifact_id: null,
+    artifact_number: null,
+    title: "Git Rooms branch",
+    url: null,
+    ref: "codex/git-rooms",
+    state: "open",
+    source: "manual",
+    first_seen_at: "2026-06-28T10:00:00.000Z",
+    updated_at: "2026-06-28T10:00:00.000Z",
+    linked_task_ids: [],
+    ...overrides,
   };
-  const calls: unknown[] = [];
+}
 
-  registerRoomArtifactRoutes(app as never, {
-    resolveCanonicalRoomRequestId: async (roomId) => {
+function routeDeps(calls: unknown[], overrides: Record<string, unknown> = {}) {
+  return {
+    resolveCanonicalRoomRequestId: async (roomId: string) => {
       calls.push({ resolve: roomId });
       return roomId;
     },
-    resolveRoomOrReply: async (roomId) => ({
+    resolveRoomOrReply: async (roomId: string) => ({
       id: roomId,
       display_name: "Repo Room",
     } as never),
-    requireParticipant: async (_req, _res, project) => {
+    requireParticipant: async (_req: unknown, _res: unknown, project: { id: string }) => {
       calls.push({ participant: project.id });
       return true;
     },
-    getRoomSharedArtifacts: async (input) => {
-      calls.push({ artifacts: input });
-      return [
-        {
-          room_id: input.room_id,
-          identity_key: "github:pull_request:number:42",
-          provider: "github",
-          kind: "pull_request",
-          artifact_id: null,
-          artifact_number: 42,
-          title: "Add Git Rooms",
-          url: "https://github.com/BrosInCode/letagents/pull/42",
-          ref: "codex/git-rooms",
-          state: "open",
-          source: "task_workflow_artifact",
-          first_seen_at: "2026-06-28T10:00:00.000Z",
-          updated_at: "2026-06-28T11:00:00.000Z",
-          linked_task_ids: ["task_4", "task_7"],
-        },
-      ];
+    getRoomSharedArtifacts: async () => {
+      throw new Error("unexpected list");
     },
     upsertRoomSharedArtifact: async () => {
       throw new Error("unexpected upsert");
@@ -79,9 +72,51 @@ test("room artifact route returns shared artifacts for the canonical room", asyn
     getRoomSharedArtifactByIdentityKey: async () => {
       throw new Error("unexpected hydration");
     },
-  });
+    ...overrides,
+  };
+}
 
+function registeredHandler(method: "get" | "post", deps: Record<string, unknown>): Handler {
+  let handler: Handler | undefined;
+  const app = {
+    get(path: RegExp, registeredHandler: Handler) {
+      assert.equal(path.source, ARTIFACT_ROUTE);
+      if (method === "get") {
+        handler = registeredHandler;
+      }
+    },
+    post(path: RegExp, registeredHandler: Handler) {
+      assert.equal(path.source, ARTIFACT_ROUTE);
+      if (method === "post") {
+        handler = registeredHandler;
+      }
+    },
+  };
+  registerRoomArtifactRoutes(app as never, deps as never);
   assert.ok(handler);
+  return handler;
+}
+
+test("room artifact route returns shared artifacts for the canonical room", async () => {
+  const calls: unknown[] = [];
+  const listedArtifact = artifactRow({
+    identity_key: "github:pull_request:number:42",
+    kind: "pull_request",
+    artifact_number: 42,
+    title: "Add Git Rooms",
+    url: "https://github.com/BrosInCode/letagents/pull/42",
+    ref: "codex/git-rooms",
+    source: "task_workflow_artifact",
+    updated_at: "2026-06-28T11:00:00.000Z",
+    linked_task_ids: ["task_4", "task_7"],
+  });
+  const handler = registeredHandler("get", routeDeps(calls, {
+    getRoomSharedArtifacts: async (input: any) => {
+      calls.push({ artifacts: input });
+      return [listedArtifact];
+    },
+  }));
+
   const res = responseStub();
   await handler(
     {
@@ -98,114 +133,44 @@ test("room artifact route returns shared artifacts for the canonical room", asyn
     { participant: "github.com/brosincode/letagents" },
     {
       artifacts: {
-        room_id: "github.com/brosincode/letagents",
+        room_id: ROOM_ID,
         task_id: "task_4",
         limit: 25,
       },
     },
   ]);
   assert.deepEqual(res.body, {
-    room_id: "github.com/brosincode/letagents",
-    artifacts: [
-      {
-        room_id: "github.com/brosincode/letagents",
-        identity_key: "github:pull_request:number:42",
-        provider: "github",
-        kind: "pull_request",
-        artifact_id: null,
-        artifact_number: 42,
-        title: "Add Git Rooms",
-        url: "https://github.com/BrosInCode/letagents/pull/42",
-        ref: "codex/git-rooms",
-        state: "open",
-        source: "task_workflow_artifact",
-        first_seen_at: "2026-06-28T10:00:00.000Z",
-        updated_at: "2026-06-28T11:00:00.000Z",
-        linked_task_ids: ["task_4", "task_7"],
-      },
-    ],
+    room_id: ROOM_ID,
+    artifacts: [listedArtifact],
   });
 });
 
 test("room artifact route publishes a manual artifact and links tasks", async () => {
-  let handler: Handler | undefined;
-  const app = {
-    get(path: RegExp, _registeredHandler: Handler) {
-      assert.equal(path.source, "^\\/rooms\\/(.+)\\/artifacts$");
-    },
-    post(path: RegExp, registeredHandler: Handler) {
-      assert.equal(path.source, "^\\/rooms\\/(.+)\\/artifacts$");
-      handler = registeredHandler;
-    },
-  };
   const calls: unknown[] = [];
   const artifactEvents = new EventEmitter();
   const emittedArtifactUpdates: unknown[] = [];
   artifactEvents.on("artifact:updated", (event) => {
     emittedArtifactUpdates.push(event);
   });
+  const hydratedArtifact = artifactRow({ linked_task_ids: ["task_4", "task_7"] });
 
-  registerRoomArtifactRoutes(app as never, {
+  const handler = registeredHandler("post", routeDeps(calls, {
     artifactEvents,
-    resolveCanonicalRoomRequestId: async (roomId) => {
-      calls.push({ resolve: roomId });
-      return roomId;
-    },
-    resolveRoomOrReply: async (roomId) => ({
-      id: roomId,
-      display_name: "Repo Room",
-    } as never),
-    requireParticipant: async (_req, _res, project) => {
-      calls.push({ participant: project.id });
-      return true;
-    },
-    getRoomSharedArtifacts: async () => {
-      throw new Error("unexpected list");
-    },
-    upsertRoomSharedArtifact: async (input) => {
+    upsertRoomSharedArtifact: async (input: any) => {
       calls.push({ upsert: input });
-      return {
+      return artifactRow({
         room_id: input.room_id,
-        identity_key: "github:branch:ref:codex/git-rooms",
-        provider: "github",
-        kind: "branch",
-        artifact_id: null,
-        artifact_number: null,
-        title: "Git Rooms branch",
-        url: null,
-        ref: "codex/git-rooms",
-        state: "open",
-        source: "manual",
-        first_seen_at: "2026-06-28T10:00:00.000Z",
-        updated_at: "2026-06-28T10:00:00.000Z",
-        linked_task_ids: [],
-      };
+      });
     },
-    linkRoomSharedArtifactToTask: async (input) => {
+    linkRoomSharedArtifactToTask: async (input: any) => {
       calls.push({ link: input });
     },
-    getRoomSharedArtifactByIdentityKey: async (input) => {
+    getRoomSharedArtifactByIdentityKey: async (input: any) => {
       calls.push({ hydrate: input });
-      return {
-        room_id: input.room_id,
-        identity_key: input.identity_key,
-        provider: "github",
-        kind: "branch",
-        artifact_id: null,
-        artifact_number: null,
-        title: "Git Rooms branch",
-        url: null,
-        ref: "codex/git-rooms",
-        state: "open",
-        source: "manual",
-        first_seen_at: "2026-06-28T10:00:00.000Z",
-        updated_at: "2026-06-28T10:00:00.000Z",
-        linked_task_ids: ["task_4", "task_7"],
-      };
+      return hydratedArtifact;
     },
-  });
+  }));
 
-  assert.ok(handler);
   const res = responseStub();
   await handler(
     {
@@ -246,7 +211,7 @@ test("room artifact route publishes a manual artifact and links tasks", async ()
     {
       link: {
         room_id: "github.com/brosincode/letagents",
-        artifact_identity_key: "github:branch:ref:codex/git-rooms",
+        artifact_identity_key: BRANCH_IDENTITY_KEY,
         task_id: "task_4",
         source: "manual",
       },
@@ -254,7 +219,7 @@ test("room artifact route publishes a manual artifact and links tasks", async ()
     {
       link: {
         room_id: "github.com/brosincode/letagents",
-        artifact_identity_key: "github:branch:ref:codex/git-rooms",
+        artifact_identity_key: BRANCH_IDENTITY_KEY,
         task_id: "task_7",
         source: "manual",
       },
@@ -262,48 +227,18 @@ test("room artifact route publishes a manual artifact and links tasks", async ()
     {
       hydrate: {
         room_id: "github.com/brosincode/letagents",
-        identity_key: "github:branch:ref:codex/git-rooms",
+        identity_key: BRANCH_IDENTITY_KEY,
       },
     },
   ]);
   assert.deepEqual(emittedArtifactUpdates, [
     {
-      projectId: "github.com/brosincode/letagents",
-      artifact: {
-        room_id: "github.com/brosincode/letagents",
-        identity_key: "github:branch:ref:codex/git-rooms",
-        provider: "github",
-        kind: "branch",
-        artifact_id: null,
-        artifact_number: null,
-        title: "Git Rooms branch",
-        url: null,
-        ref: "codex/git-rooms",
-        state: "open",
-        source: "manual",
-        first_seen_at: "2026-06-28T10:00:00.000Z",
-        updated_at: "2026-06-28T10:00:00.000Z",
-        linked_task_ids: ["task_4", "task_7"],
-      },
+      projectId: ROOM_ID,
+      artifact: hydratedArtifact,
     },
   ]);
   assert.deepEqual(res.body, {
-    room_id: "github.com/brosincode/letagents",
-    artifact: {
-      room_id: "github.com/brosincode/letagents",
-      identity_key: "github:branch:ref:codex/git-rooms",
-      provider: "github",
-      kind: "branch",
-      artifact_id: null,
-      artifact_number: null,
-      title: "Git Rooms branch",
-      url: null,
-      ref: "codex/git-rooms",
-      state: "open",
-      source: "manual",
-      first_seen_at: "2026-06-28T10:00:00.000Z",
-      updated_at: "2026-06-28T10:00:00.000Z",
-      linked_task_ids: ["task_4", "task_7"],
-    },
+    room_id: ROOM_ID,
+    artifact: hydratedArtifact,
   });
 });

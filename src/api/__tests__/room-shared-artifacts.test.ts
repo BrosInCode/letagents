@@ -3,6 +3,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { PR_URL, TASK_BRANCH } from "./git-room-test-helpers.js";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
@@ -28,6 +29,28 @@ const {
   upsertRoomSharedArtifact,
 } = dbModule;
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
+
+function pullRequestArtifact(overrides: Record<string, unknown> = {}) {
+  return {
+    provider: "github",
+    kind: "pull_request",
+    url: PR_URL,
+    ...overrides,
+  };
+}
+
+function existingPullRequestArtifact(overrides: Record<string, unknown> = {}) {
+  return {
+    artifact_id: "PR_kwDOExample",
+    artifact_number: 42,
+    title: "Add Git Rooms",
+    url: PR_URL,
+    ref: TASK_BRANCH,
+    state: "open",
+    source: "github_event",
+    ...overrides,
+  };
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -79,40 +102,28 @@ test("buildRoomSharedArtifactIdentityKey prefers durable artifact identifiers", 
     buildRoomSharedArtifactIdentityKey({
       provider: "github",
       kind: "pull_request",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
+      url: PR_URL,
       number: 42,
-      ref: "codex/git-rooms",
+      ref: TASK_BRANCH,
     }),
-    "github:pull_request:url:https://github.com/BrosInCode/letagents/pull/42"
+    `github:pull_request:url:${PR_URL}`
   );
 
   assert.equal(
     buildRoomSharedArtifactIdentityKey({
       provider: "github",
       kind: "branch",
-      ref: "codex/git-rooms",
+      ref: TASK_BRANCH,
     }),
-    "github:branch:ref:codex/git-rooms"
+    `github:branch:ref:${TASK_BRANCH}`
   );
 });
 
 test("preserveManualRoomSharedArtifactInput does not downgrade richer existing artifacts", () => {
   const result = preserveManualRoomSharedArtifactInput({
     source: "manual",
-    artifact: {
-      provider: "github",
-      kind: "pull_request",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
-    },
-    existing: {
-      artifact_id: "PR_kwDOExample",
-      artifact_number: 42,
-      title: "Add Git Rooms",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
-      ref: "codex/git-rooms",
-      state: "open",
-      source: "github_event",
-    },
+    artifact: pullRequestArtifact(),
+    existing: existingPullRequestArtifact(),
   });
 
   assert.equal(result.source, "github_event");
@@ -122,8 +133,8 @@ test("preserveManualRoomSharedArtifactInput does not downgrade richer existing a
     id: "PR_kwDOExample",
     number: 42,
     title: "Add Git Rooms",
-    url: "https://github.com/BrosInCode/letagents/pull/42",
-    ref: "codex/git-rooms",
+    url: PR_URL,
+    ref: TASK_BRANCH,
     state: "open",
   });
 });
@@ -131,21 +142,16 @@ test("preserveManualRoomSharedArtifactInput does not downgrade richer existing a
 test("preserveManualRoomSharedArtifactInput does not downgrade existing manual artifacts", () => {
   const result = preserveManualRoomSharedArtifactInput({
     source: "github_event",
-    artifact: {
-      provider: "github",
-      kind: "pull_request",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
+    artifact: pullRequestArtifact({
       title: "Automated PR title",
-    },
-    existing: {
+    }),
+    existing: existingPullRequestArtifact({
       artifact_id: "manual-pr",
-      artifact_number: 42,
       title: "Curated PR title",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
       ref: "manual/ref",
       state: "accepted",
       source: "manual",
-    },
+    }),
   });
 
   assert.equal(result.source, "manual");
@@ -155,7 +161,7 @@ test("preserveManualRoomSharedArtifactInput does not downgrade existing manual a
     id: "manual-pr",
     number: 42,
     title: "Curated PR title",
-    url: "https://github.com/BrosInCode/letagents/pull/42",
+    url: PR_URL,
     ref: "manual/ref",
     state: "accepted",
   });
@@ -164,21 +170,13 @@ test("preserveManualRoomSharedArtifactInput does not downgrade existing manual a
 test("preserveManualRoomSharedArtifactInput preserves existing fields when automation omits them", () => {
   const result = preserveManualRoomSharedArtifactInput({
     source: "github_event",
-    artifact: {
-      provider: "github",
-      kind: "pull_request",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
+    artifact: pullRequestArtifact({
       title: "Review on PR",
-    },
-    existing: {
+    }),
+    existing: existingPullRequestArtifact({
       artifact_id: null,
-      artifact_number: 42,
       title: "task_42: Git Rooms",
-      url: "https://github.com/BrosInCode/letagents/pull/42",
-      ref: "codex/git-rooms",
-      state: "open",
-      source: "github_event",
-    },
+    }),
   });
 
   assert.equal(result.source, "github_event");
@@ -188,8 +186,8 @@ test("preserveManualRoomSharedArtifactInput preserves existing fields when autom
     id: undefined,
     number: 42,
     title: "Review on PR",
-    url: "https://github.com/BrosInCode/letagents/pull/42",
-    ref: "codex/git-rooms",
+    url: PR_URL,
+    ref: TASK_BRANCH,
     state: "open",
   });
 });
@@ -280,8 +278,8 @@ test(
         id: "PR_kwDOExample",
         number: 42,
         title: "Add Git Rooms",
-        url: "https://github.com/BrosInCode/letagents/pull/42",
-        ref: "codex/git-rooms",
+        url: PR_URL,
+        ref: TASK_BRANCH,
         state: "open",
       },
       source: "github_event",
@@ -292,7 +290,7 @@ test(
       artifact: {
         provider: "github",
         kind: "pull_request",
-        url: "https://github.com/BrosInCode/letagents/pull/42",
+        url: PR_URL,
       },
       source: "manual",
     });
@@ -306,7 +304,7 @@ test(
     assert.equal(hydrated?.artifact_id, "PR_kwDOExample");
     assert.equal(hydrated?.artifact_number, 42);
     assert.equal(hydrated?.title, "Add Git Rooms");
-    assert.equal(hydrated?.ref, "codex/git-rooms");
+    assert.equal(hydrated?.ref, TASK_BRANCH);
     assert.equal(hydrated?.state, "open");
   }
 );
