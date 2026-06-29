@@ -15,6 +15,7 @@
         :key="msg.id"
         :message="msg"
         :roomIdentifier="roomIdentifier"
+        :messageReferences="messagesById"
         :thread="threadSummaries.get(msg.id) || null"
         :stalePromptTaskStates="stalePromptTaskStates"
         :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
@@ -79,6 +80,14 @@ const matchedIds = computed(() => {
     }
   }
   return ids
+})
+
+const messagesById = computed(() => {
+  const byId = new Map<string, RoomMessage>()
+  for (const msg of props.messages) {
+    byId.set(msg.id, msg)
+  }
+  return byId
 })
 
 interface MessageThreadSummary {

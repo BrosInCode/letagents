@@ -45,6 +45,8 @@
           :text="message.text || ''"
           :html="renderedContent"
           :messageId="message.id"
+          :messageReferences="messageReferences"
+          @scrollToMessageReference="emit('scrollToReply', $event)"
         />
         <MessageAttachments
           v-if="attachments.length"
@@ -108,6 +110,7 @@ import {
 const props = defineProps<{
   message: RoomMessage
   roomIdentifier?: string
+  messageReferences?: ReadonlyMap<string, RoomMessage>
   thread?: MessageThreadSummary | null
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   reasoningSession?: RoomReasoningSession | null
@@ -206,7 +209,9 @@ const provenanceBadge = computed<ProvenanceBadge | null>(() => {
 })
 
 const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
-const renderedContent = computed(() => renderMessageContent(props.message.text || ''))
+const renderedContent = computed(() => renderMessageContent(props.message.text || '', {
+  resolveMessageReference: (messageId) => props.messageReferences?.get(messageId) || null,
+}))
 </script>
 
 <style scoped>
