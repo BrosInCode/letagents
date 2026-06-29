@@ -5,6 +5,7 @@ import type {
   DesktopAuthStatus,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomMessage,
   DesktopRoomSnapshot,
@@ -80,11 +81,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     options.loading.value = true;
     try {
       const requestedRootRoomIdentifier = options.selectedRootRoomIdentifier.value;
+      const requestedRootPath = selectedRootPath();
       const [
         nextAppInfo,
-        nextRepoStatus,
+        loadedRootRoomContext,
         nextWorkers,
-        loadedRootRoomSnapshot,
         nextDiagnostics,
         nextAuthStatus,
         nextMcpInstallState,
@@ -92,9 +93,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextSettingsAccountRooms,
       ] = await Promise.all([
         window.letagentsDesktop.app.getInfo(),
-        window.letagentsDesktop.repos.getStatus(selectedRootPath()),
+        loadRootRoomContext({
+          roomIdentifier: requestedRootRoomIdentifier,
+          rootPath: requestedRootPath,
+        }),
         window.letagentsDesktop.workers.list(),
-        window.letagentsDesktop.room.getSnapshot(options.selectedRootRoomIdentifier.value),
         window.letagentsDesktop.diagnostics.getSnapshot(),
         window.letagentsDesktop.auth.getStatus(),
         window.letagentsDesktop.setup.getMcpInstallState(),
@@ -103,17 +106,24 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       ]);
       const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
         requestedRootRoomIdentifier,
-        loadedRootRoomSnapshot,
+        loadedRootRoomContext.snapshot,
         nextAccountRooms || nextSettingsAccountRooms || [],
       );
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
-      options.repoStatus.value = nextRepoStatus;
+      options.repoStatus.value = loadedRootRoomContext.repoStatus;
       options.workers.value = nextWorkers;
       options.rootRoomSnapshot.value = nextRootRoomSnapshot;
       options.selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
       options.rememberRootRoomSnapshot(nextRootRoomSnapshot, {
-        aliasIdentifiers: recoveredAlias ? [recoveredAlias] : undefined,
+        aliasIdentifiers: [
+          requestedRootRoomIdentifier,
+          loadedRootRoomContext.openedRoom?.roomIdentifier,
+          recoveredAlias,
+        ],
+        rootPath: loadedRootRoomContext.openedRoom?.repoPath || requestedRootPath,
+        kind: loadedRootRoomContext.openedRoom ? "project" : null,
+        meta: loadedRootRoomContext.openedRoom?.repoStatus?.branch || null,
       });
       options.diagnostics.value = nextDiagnostics;
       options.authStatus.value = nextAuthStatus;
@@ -149,6 +159,40 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     return workspaceSnapshot.access.status === "ready"
       ? workspaceSnapshot
       : snapshot;
+  }
+
+  async function loadRootRoomContext(input: {
+    roomIdentifier: string | null;
+    rootPath: string | null;
+  }): Promise<{
+    snapshot: DesktopRoomSnapshot;
+    repoStatus: RepoStatus;
+    openedRoom: DesktopRepoRoomSelection | null;
+  }> {
+    if (input.rootPath && window.letagentsDesktop.repos.openRoom) {
+      try {
+        const openedRoom = await window.letagentsDesktop.repos.openRoom(input.rootPath);
+        if (!openedRoom.error && openedRoom.snapshot) {
+          return {
+            snapshot: openedRoom.snapshot,
+            repoStatus: openedRoom.repoStatus || await window.letagentsDesktop.repos.getStatus(openedRoom.repoPath || input.rootPath),
+            openedRoom,
+          };
+        }
+      } catch {
+        // Fall back to the previous room id when path-based reopening is unavailable.
+      }
+    }
+
+    const [repoStatus, snapshot] = await Promise.all([
+      window.letagentsDesktop.repos.getStatus(input.rootPath),
+      window.letagentsDesktop.room.getSnapshot(input.roomIdentifier),
+    ]);
+    return {
+      snapshot,
+      repoStatus,
+      openedRoom: null,
+    };
   }
 
   async function refreshAccountRooms(): Promise<void> {
@@ -206,16 +250,23 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     ) {
       publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
       try {
-        const [nextRootSnapshot, nextRepoStatus] = await Promise.all([
-          window.letagentsDesktop.room.getSnapshot(roomIdentifier),
-          window.letagentsDesktop.repos.getStatus(rootPathForRoomIdentifier(roomIdentifier)),
-        ]);
+        const openedContext = await loadRootRoomContext({
+          roomIdentifier,
+          rootPath: rootPathForRoomIdentifier(roomIdentifier),
+        });
+        const nextRootSnapshot = openedContext.snapshot;
+        const nextRepoStatus = openedContext.repoStatus;
         if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
         options.repoStatus.value = nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
         options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot);
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
-        options.rememberRootRoomSnapshot(nextRootSnapshot);
+        options.rememberRootRoomSnapshot(nextRootSnapshot, {
+          aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
+          rootPath: openedContext.openedRoom?.repoPath || rootPathForRoomIdentifier(roomIdentifier),
+          kind: openedContext.openedRoom ? "project" : null,
+          meta: openedContext.openedRoom?.repoStatus?.branch || null,
+        });
         options.activeEntry.value = options.currentParentRoom.value;
       } finally {
         if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
@@ -351,17 +402,29 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   async function loadFirstRunRoomContext(): Promise<void> {
     try {
-      const [nextAppInfo, nextRepoStatus, nextRootRoomSnapshot] = await Promise.all([
+      const requestedRootRoomIdentifier = options.selectedRootRoomIdentifier.value;
+      const requestedRootPath = selectedRootPath();
+      const [nextAppInfo, loadedRootRoomContext] = await Promise.all([
         window.letagentsDesktop.app.getInfo(),
-        window.letagentsDesktop.repos.getStatus(selectedRootPath()),
-        window.letagentsDesktop.room.getSnapshot(options.selectedRootRoomIdentifier.value),
+        loadRootRoomContext({
+          roomIdentifier: requestedRootRoomIdentifier,
+          rootPath: requestedRootPath,
+        }),
       ]);
       options.appInfo.value = nextAppInfo;
-      options.repoStatus.value = nextRepoStatus;
-      options.rootRoomSnapshot.value = nextRootRoomSnapshot;
-      options.selectedSnapshot.value = nextRootRoomSnapshot;
-      options.selectedRootRoomIdentifier.value = nextRootRoomSnapshot.roomIdentifier;
-      options.rememberRootRoomSnapshot(nextRootRoomSnapshot);
+      options.repoStatus.value = loadedRootRoomContext.repoStatus;
+      options.rootRoomSnapshot.value = loadedRootRoomContext.snapshot;
+      options.selectedSnapshot.value = loadedRootRoomContext.snapshot;
+      options.selectedRootRoomIdentifier.value = loadedRootRoomContext.snapshot.roomIdentifier;
+      options.rememberRootRoomSnapshot(loadedRootRoomContext.snapshot, {
+        aliasIdentifiers: [
+          requestedRootRoomIdentifier,
+          loadedRootRoomContext.openedRoom?.roomIdentifier,
+        ],
+        rootPath: loadedRootRoomContext.openedRoom?.repoPath || requestedRootPath,
+        kind: loadedRootRoomContext.openedRoom ? "project" : null,
+        meta: loadedRootRoomContext.openedRoom?.repoStatus?.branch || null,
+      });
       options.reconcileActiveEntry();
     } catch {
       // First-run should still be usable if room preview is unavailable before auth.

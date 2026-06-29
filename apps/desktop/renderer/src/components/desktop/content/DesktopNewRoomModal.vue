@@ -66,7 +66,7 @@
               data-testid="new-room-confirm-project"
               @click="emit('confirmProject')"
             >
-              Open repository room
+              Open project room
             </button>
           </div>
         </article>

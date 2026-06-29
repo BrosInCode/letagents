@@ -65,6 +65,7 @@
       :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
       :github-events-visible="githubEventsVisible"
+      :github-events-available="githubEventsAvailable"
       :room-loading="roomLoading"
       :sending="sendingMessage"
       :send-error="sendError"
@@ -245,6 +246,10 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import {
+  isLocalGitRoom,
+  roomSupportsGitHubIntegration,
+} from "../../../domain/git-rooms";
+import {
   activeManagedAgentWorkIndicators,
   managedAgentSessionMatchesRoom,
   mergeDesktopManagedAgentParticipants,
@@ -365,10 +370,8 @@ const roomUrl = computed(() =>
     localOnly: props.storage.localRoom?.publishStatus === "local_only",
   })
 );
-const isRepoBackedRoom = computed(() =>
-  [props.room.identifier, props.room.name, props.room.displayName]
-    .some((value) => value.toLowerCase().startsWith("github.com/"))
-);
+const isGitHubIntegrationRoom = computed(() => roomSupportsGitHubIntegration(props.room));
+const localGitRoom = computed(() => isLocalGitRoom(props.room));
 const isLocalRoom = computed(() => props.storage.effectiveMode === "local");
 const messageNamespace = computed(() =>
   [
@@ -460,10 +463,12 @@ const githubRepository = computed(() =>
 );
 
 const githubEventsAvailable = computed(() =>
-  isRepoBackedRoom.value
-  || Boolean(githubStatus.value?.connected)
-  || Boolean(eventsPage.value?.events.length)
-  || props.messages.some(shouldRefreshEventsForMessage)
+  !localGitRoom.value && (
+    isGitHubIntegrationRoom.value
+    || Boolean(githubStatus.value?.connected)
+    || Boolean(eventsPage.value?.events.length)
+    || props.messages.some(shouldRefreshEventsForMessage)
+  )
 );
 
 const showEventsTab = computed(() => githubEventsVisible.value && githubEventsAvailable.value);

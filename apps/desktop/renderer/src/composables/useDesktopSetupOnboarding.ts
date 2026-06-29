@@ -157,7 +157,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
       options.authFeedback.value = result.warning
         ? `${result.warning} Room selected: ${roomLabel}.`
-        : `Repo room selected: ${roomLabel}. Open it when you are ready.`;
+        : `Project room selected: ${roomLabel}. Open it when you are ready.`;
       return true;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the repo picker.";

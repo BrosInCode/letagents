@@ -74,6 +74,7 @@ function roomSnapshot(
             createdAt: "2026-06-17T00:00:00.000Z",
             updatedAt: "2026-06-17T00:00:00.000Z",
             publishedAt: null,
+            gitRoom: null,
           }
         : null,
       databasePath: "/tmp/local-chat.sqlite",

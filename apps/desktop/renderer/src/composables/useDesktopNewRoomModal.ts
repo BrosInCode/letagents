@@ -215,6 +215,7 @@ function projectSelectionFromResult(
 function projectRoomSourceLabel(source: DesktopRepoRoomSelection["source"]): string {
   if (source === "configured") return ".letagents.json";
   if (source === "git_remote") return "Git remote";
-  if (source === "local_fallback") return "Local fallback";
+  if (source === "local_git") return "Local Git Room";
+  if (source === "local_folder") return "Local folder";
   return "Project folder";
 }

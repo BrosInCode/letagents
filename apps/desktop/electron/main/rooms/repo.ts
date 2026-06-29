@@ -17,6 +17,7 @@ import {
   createLocalRoom,
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
+  setLocalAwareRoomStorageMode,
   updateLocalRoomDisplayName,
 } from "./local-store.js";
 import {
@@ -47,16 +48,48 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
     };
   }
 
-  const selectedPath = result.filePaths[0];
+  return openRepoRoomFromPath(result.filePaths[0]);
+}
+
+export async function openRepoRoomFromPath(
+  folderPath: string,
+): Promise<DesktopRepoRoomSelection> {
+  const selectedPath = folderPath.trim();
+  if (!selectedPath) {
+    return {
+      canceled: false,
+      repoPath: null,
+      repoStatus: null,
+      roomIdentifier: null,
+      source: null,
+      snapshot: null,
+      error: "Choose a project folder.",
+      warning: null,
+    };
+  }
+
   const resolved = await resolveRoomIdentifierFromPath(selectedPath);
   const repoPath = resolved.repoRoot || selectedPath;
-  const storage = await resolveLocalAwareRoomStorageMode(resolved.roomIdentifier);
-  if (storage.effectiveMode === "local") {
+  const isLocalProjectRoom = resolved.source === "local_git" || resolved.source === "local_folder";
+
+  if (isLocalProjectRoom) {
     await createLocalRoom({
       roomIdentifier: resolved.roomIdentifier,
       displayName: basename(repoPath),
+      gitRoom: resolved.gitRoom,
     });
+    await setLocalAwareRoomStorageMode(resolved.roomIdentifier, "local");
+  } else {
+    const storage = await resolveLocalAwareRoomStorageMode(resolved.roomIdentifier);
+    if (storage.effectiveMode === "local") {
+      await createLocalRoom({
+        roomIdentifier: resolved.roomIdentifier,
+        displayName: basename(repoPath),
+        gitRoom: resolved.gitRoom,
+      });
+    }
   }
+
   return {
     canceled: false,
     repoPath,
@@ -96,6 +129,7 @@ export async function renameDesktopRoom(
       role: "local",
       authenticated: false,
       kind: "main",
+      git_room: localRoom.gitRoom,
     };
     rememberJoinedRoomInfo(localRoom.roomIdentifier, payload);
     return mapDesktopRoomInfoPayload(localRoom.roomIdentifier, payload);

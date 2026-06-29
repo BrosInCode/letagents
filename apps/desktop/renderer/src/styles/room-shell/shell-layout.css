@@ -101,39 +101,23 @@
 .desktop-room-git-meta {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  flex: 0 1 auto;
   min-width: 0;
-  max-width: min(560px, 38vw);
-  height: 30px;
-  padding: 0 7px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.035);
+  max-width: min(180px, 20vw);
+  padding-top: 2px;
   color: var(--text-secondary);
 }
 
-.desktop-room-git-badge,
 .desktop-room-git-item {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
-  height: 20px;
-  font-size: 0.68rem;
-  font-weight: 760;
+  font-size: 0.76rem;
+  font-weight: 720;
   line-height: 1;
   white-space: nowrap;
-}
-
-.desktop-room-git-badge {
-  flex: 0 0 auto;
-  padding: 0 7px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--text);
-}
-
-.desktop-room-git-item {
   flex: 0 1 auto;
   overflow: hidden;
 }
@@ -144,53 +128,15 @@
   height: 13px;
 }
 
-.desktop-room-git-provider,
-.desktop-room-git-access {
-  flex: 0 0 auto;
-}
-
-.desktop-room-git-provider svg {
-  color: rgba(255, 255, 255, 0.86);
-}
-
-.desktop-room-git-repo {
-  color: var(--text);
-  font-weight: 820;
-}
-
-.desktop-room-git-repo span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .desktop-room-git-ref {
   max-width: 154px;
+  color: rgba(255, 255, 255, 0.76);
 }
 
-.desktop-room-git-ref span,
-.desktop-room-git-provider span,
-.desktop-room-git-access span {
+.desktop-room-git-ref span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.desktop-room-provider-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 23px;
-  height: 23px;
-  min-width: 23px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.92);
-}
-
-.desktop-room-provider-icon svg {
-  width: 14px;
-  height: 14px;
 }
 
 .desktop-room-header-actions {
@@ -226,7 +172,6 @@
 
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-overflow-button,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-badge,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-git-meta,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-room-tabs {
   border-color: rgba(255, 255, 255, 0.13);
   background:
@@ -236,10 +181,6 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.13),
     0 8px 18px rgba(0, 0, 0, 0.16);
   backdrop-filter: blur(16px) saturate(1.18);
-}
-
-.desktop-room-shell[data-liquid-glass="true"] .desktop-room-git-badge {
-  background: rgba(255, 255, 255, 0.12);
 }
 
 .desktop-room-overflow-button svg {
@@ -461,12 +402,7 @@
 
 @media (max-width: 1180px) {
   .desktop-room-git-meta {
-    max-width: min(420px, 32vw);
-  }
-
-  .desktop-room-git-provider span,
-  .desktop-room-git-access span {
-    display: none;
+    max-width: min(160px, 24vw);
   }
 }
 

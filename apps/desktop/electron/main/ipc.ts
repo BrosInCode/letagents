@@ -128,6 +128,7 @@ import {
   leaveDesktopAccountRoom,
   listDesktopAccountRooms,
   openDesktopGitHubInstall,
+  openRepoRoomFromPath,
   pickRepoRoom,
   markDesktopRoomThreadRead,
   renameDesktopRoom,
@@ -677,6 +678,11 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:repos:pick-room",
     async (): Promise<DesktopRepoRoomSelection> => pickRepoRoom(),
+  );
+  targetIpcMain.handle(
+    "desktop:repos:open-room",
+    async (_event, folderPath?: string | null): Promise<DesktopRepoRoomSelection> =>
+      openRepoRoomFromPath(folderPath || ""),
   );
   targetIpcMain.handle(
     "desktop:workers:list",

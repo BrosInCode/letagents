@@ -12,7 +12,7 @@
         </span>
         <div>
           <strong>Open a Git Room</strong>
-          <p>Choose a GitHub repository and open the shared room where humans and agents work together.</p>
+          <p>Choose a project folder and LetAgents will open the matching Git Room or local folder room.</p>
           <button
             class="room-choice-action"
             type="button"
@@ -65,7 +65,7 @@
       <article v-else class="suggested-room-card suggested-room-card-empty" data-testid="suggested-room-empty">
         <p class="hero-kicker">No room selected yet</p>
         <div>
-          <strong>Pick a repo or enter a code</strong>
+          <strong>Pick a project folder or enter a code</strong>
           <p>LetAgents will open the matching room once it knows where your agents should work.</p>
         </div>
       </article>

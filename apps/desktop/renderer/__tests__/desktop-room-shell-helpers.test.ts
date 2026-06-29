@@ -19,6 +19,10 @@ import {
   buildLetAgentsRoomUrl,
 } from "../src/domain/room-urls";
 import {
+  isLocalGitRoom,
+  roomSupportsGitHubIntegration,
+} from "../src/domain/git-rooms";
+import {
   readGitHubEventsVisible,
   readLiquidGlassEnabled,
   readNotificationPermission,
@@ -86,6 +90,10 @@ describe("desktop room shell helpers", () => {
       "local_389d653e-18ce-4f69-9dc0-79d6e81ba30f",
     );
     assert.equal(
+      buildLetAgentsRoomCopyValue("git-room:local:1234567890abcdef:branch:ZmVhdHVyZQ"),
+      "git-room:local:1234567890abcdef:branch:ZmVhdHVyZQ",
+    );
+    assert.equal(
       buildLetAgentsFocusRoomUrl({
         roomIdentifier: "focus_local",
         parentRoomId: "local_389d653e-18ce-4f69-9dc0-79d6e81ba30f",
@@ -93,6 +101,48 @@ describe("desktop room shell helpers", () => {
       }),
       "focus_local",
     );
+  });
+
+  it("limits GitHub integration affordances to provider-backed Git rooms", () => {
+    assert.equal(roomSupportsGitHubIntegration(roomInfo()), true);
+    assert.equal(
+      roomSupportsGitHubIntegration(roomInfo({
+        identifier: "local-folder",
+        name: "local-folder",
+        displayName: "Local folder",
+        gitRoom: null,
+      })),
+      false,
+    );
+    const localGitRoom = roomInfo({
+      identifier: "git-room:local:1234567890abcdef:branch:ZmVhdHVyZQ",
+      name: "FBRF",
+      displayName: "FBRF",
+      gitRoom: {
+        provider: "git",
+        host: "local",
+        repository: {
+          id: "local:1234567890abcdef",
+          fullName: "FBRF",
+          owner: "local",
+          name: "FBRF",
+        },
+        ref: {
+          type: "branch",
+          name: "feature/player-3d-presentation",
+          defaultBranch: "main",
+          baseRef: "main",
+          headRef: "feature/player-3d-presentation",
+          headRepository: null,
+        },
+        visibility: "local",
+        accessMode: "local",
+        isDefault: false,
+        source: "local_git",
+      },
+    });
+    assert.equal(isLocalGitRoom(localGitRoom), true);
+    assert.equal(roomSupportsGitHubIntegration(localGitRoom), false);
   });
 
   it("orders numbered server messages by id and uses timestamps for local messages", () => {

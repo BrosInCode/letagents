@@ -95,7 +95,7 @@
                 Local
               </button>
               <button
-                v-if="storage.effectiveMode === 'local'"
+                v-if="canPublishLocalRoom"
                 type="button"
                 :disabled="storageBusy"
                 @click="$emit('publish-local-room')"
@@ -202,7 +202,12 @@
             <span class="desktop-room-row-action">Export</span>
           </button>
 
-          <div class="desktop-room-github-pill" :data-state="githubDotState" data-testid="desktop-room-github-card">
+          <div
+            v-if="githubIntegrationAvailable"
+            class="desktop-room-github-pill"
+            :data-state="githubDotState"
+            data-testid="desktop-room-github-card"
+          >
             <div class="desktop-room-github-summary">
               <span class="desktop-room-github-dot" :data-state="githubDotState" />
               <div>
@@ -239,6 +244,10 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
 } from "../../../../../../electron/ipc-types";
+import {
+  isLocalGitRoom,
+  roomSupportsGitHubIntegration,
+} from "../../../../domain/git-rooms";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -373,6 +382,12 @@ const githubFriendlyError = computed(() => {
   if (githubBridgeUpgradeNeeded.value) return null;
   return props.githubError;
 });
+
+const localGitRoom = computed(() => isLocalGitRoom(props.room));
+const canPublishLocalRoom = computed(() =>
+  props.storage.effectiveMode === "local" && !localGitRoom.value
+);
+const githubIntegrationAvailable = computed(() => roomSupportsGitHubIntegration(props.room));
 
 const githubBridgeUpgradeNeeded = computed(() => {
   return Boolean(

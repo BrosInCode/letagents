@@ -162,6 +162,7 @@ const api: DesktopApi = {
   },
   repos: {
     getStatus: (rootPath) => ipcRenderer.invoke("desktop:repos:get-status", rootPath || null),
+    openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
   },
   workers: {

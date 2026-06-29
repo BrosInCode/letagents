@@ -7,6 +7,7 @@ import {
   desktopBridgeUpgradeMessage,
   getRoomBridge,
 } from "./bridge";
+import { roomSupportsGitHubIntegration } from "../../../../domain/git-rooms";
 
 export function useDesktopRoomGitHub(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -21,7 +22,10 @@ export function useDesktopRoomGitHub(options: {
   const githubError = ref<string | null>(null);
 
   watch(
-    () => options.room.value.identifier,
+    () => [
+      options.room.value.identifier,
+      options.room.value.gitRoom?.accessMode,
+    ] as const,
     () => {
       void refreshGitHubIntegration();
     },
@@ -48,6 +52,13 @@ export function useDesktopRoomGitHub(options: {
   }
 
   async function refreshGitHubIntegration(): Promise<void> {
+    if (!roomSupportsGitHubIntegration(options.room.value)) {
+      githubStatus.value = null;
+      githubError.value = null;
+      githubLoading.value = false;
+      return;
+    }
+
     githubLoading.value = true;
     githubError.value = null;
     try {

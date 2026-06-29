@@ -71,7 +71,7 @@ export interface DesktopRoomSharedArtifact {
   linkedTaskIds: string[];
 }
 
-export type DesktopGitRoomVisibility = "public" | "private" | "unknown";
+export type DesktopGitRoomVisibility = "public" | "private" | "local" | "unknown";
 export type DesktopGitRoomRefType = "default_branch" | "branch" | "tag" | "pull_request";
 
 export interface DesktopGitRoomRepositoryInfo {
@@ -374,6 +374,7 @@ export interface DesktopLocalRoomInfo {
   createdAt: string;
   updatedAt: string;
   publishedAt: string | null;
+  gitRoom: DesktopGitRoomInfo | null;
 }
 
 export interface DesktopLocalChatSyncResult {
@@ -474,7 +475,7 @@ export interface DesktopRepoRoomSelection {
   repoPath: string | null;
   repoStatus: RepoStatus | null;
   roomIdentifier: string | null;
-  source: "configured" | "git_remote" | "local_fallback" | null;
+  source: "configured" | "git_remote" | "local_git" | "local_folder" | null;
   snapshot: DesktopRoomSnapshot | null;
   error: string | null;
   warning: string | null;
