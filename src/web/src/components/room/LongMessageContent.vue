@@ -78,69 +78,73 @@
         </section>
       </div>
 
-      <div
-        v-if="hoveredReference"
-        class="message-ref-popover"
-        :class="{ missing: !hoveredReference.loaded }"
-        :style="hoverPopoverStyle"
-        role="tooltip"
-      >
-        <strong>{{ hoveredReference.id }}</strong>
-        <span>{{ hoveredReference.preview }}</span>
-      </div>
-
-      <div
-        v-if="referenceDialogOpen"
-        class="message-ref-backdrop"
-        @click.self="closeReferenceDialog"
-      >
-        <section
-          ref="referenceDialog"
-          class="message-ref-dialog"
-          role="dialog"
-          aria-modal="true"
-          :aria-labelledby="referenceTitleId"
-          tabindex="-1"
-          @keydown.esc="closeReferenceDialog"
+      <Transition name="message-ref-popover">
+        <div
+          v-if="hoveredReference"
+          class="message-ref-popover"
+          :class="{ missing: !hoveredReference.loaded }"
+          :style="hoverPopoverStyle"
+          role="tooltip"
         >
-          <header class="message-ref-header">
-            <div>
-              <p class="message-ref-eyebrow">{{ selectedReferenceId }}</p>
-              <h2 :id="referenceTitleId">Message reference</h2>
-            </div>
-            <button class="reader-close" type="button" @click="closeReferenceDialog">
-              Close
-            </button>
-          </header>
+          <strong>{{ hoveredReference.id }}</strong>
+          <span>{{ hoveredReference.preview }}</span>
+        </div>
+      </Transition>
 
-          <div class="message-ref-content">
-            <template v-if="selectedReferenceMessage">
-              <div class="message-ref-meta">
-                <strong>{{ selectedReferenceDisplayName }}</strong>
-                <time v-if="selectedReferenceTime">{{ selectedReferenceTime }}</time>
+      <Transition name="message-ref-modal">
+        <div
+          v-if="referenceDialogOpen"
+          class="message-ref-backdrop"
+          @click.self="closeReferenceDialog"
+        >
+          <section
+            ref="referenceDialog"
+            class="message-ref-dialog"
+            role="dialog"
+            aria-modal="true"
+            :aria-labelledby="referenceTitleId"
+            tabindex="-1"
+            @keydown.esc="closeReferenceDialog"
+          >
+            <header class="message-ref-header">
+              <div>
+                <p class="message-ref-eyebrow">{{ selectedReferenceId }}</p>
+                <h2 :id="referenceTitleId">Message reference</h2>
               </div>
-              <p class="message-ref-full-text">{{ selectedReferenceMessage.text || 'Empty message' }}</p>
-            </template>
-            <p v-else class="message-ref-missing">
-              This message is not loaded in the current transcript window.
-            </p>
-          </div>
+              <button class="reader-close" type="button" @click="closeReferenceDialog">
+                Close
+              </button>
+            </header>
 
-          <footer class="message-ref-footer">
-            <button
-              v-if="selectedReferenceMessage"
-              class="reader-action"
-              type="button"
-              @click="jumpToReference"
-            >
-              Jump to message
-            </button>
-            <button class="reader-action primary" type="button" @click="closeReferenceDialog">
-              Done
-            </button>
-          </footer>
-        </section>
-      </div>
+            <div class="message-ref-content">
+              <template v-if="selectedReferenceMessage">
+                <div class="message-ref-meta">
+                  <strong>{{ selectedReferenceDisplayName }}</strong>
+                  <time v-if="selectedReferenceTime">{{ selectedReferenceTime }}</time>
+                </div>
+                <p class="message-ref-full-text">{{ selectedReferenceMessage.text || 'Empty message' }}</p>
+              </template>
+              <p v-else class="message-ref-missing">
+                This message is not loaded in the current transcript window.
+              </p>
+            </div>
+
+            <footer class="message-ref-footer">
+              <button
+                v-if="selectedReferenceMessage"
+                class="reader-action"
+                type="button"
+                @click="jumpToReference"
+              >
+                Jump to message
+              </button>
+              <button class="reader-action primary" type="button" @click="closeReferenceDialog">
+                Done
+              </button>
+            </footer>
+          </section>
+        </div>
+      </Transition>
     </Teleport>
   </div>
 </template>
@@ -271,7 +275,7 @@ function showReferencePopover(token: HTMLElement) {
   hoverPopoverStyle.value = {
     left: `${left}px`,
     top: `${showBelow ? rect.bottom + 10 : rect.top - 10}px`,
-    transform: showBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
+    '--message-ref-popover-transform': showBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
   }
 }
 
@@ -438,6 +442,25 @@ async function copyText() {
   color: var(--text, #fafafa);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
   pointer-events: none;
+  transform: var(--message-ref-popover-transform, translate(-50%, -100%)) scale(1);
+  transform-origin: center center;
+}
+
+.message-ref-popover-enter-active,
+.message-ref-popover-leave-active {
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.message-ref-popover-enter-from,
+.message-ref-popover-leave-to {
+  opacity: 0;
+  transform: var(--message-ref-popover-transform, translate(-50%, -100%)) translateY(3px) scale(0.98);
+}
+
+.message-ref-popover-enter-to,
+.message-ref-popover-leave-from {
+  opacity: 1;
+  transform: var(--message-ref-popover-transform, translate(-50%, -100%)) scale(1);
 }
 
 .message-ref-popover strong {
@@ -478,6 +501,39 @@ async function copyText() {
   border-radius: 8px;
   background: var(--bg-0, #09090b);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
+  transform: translateY(0) scale(1);
+}
+
+.message-ref-modal-enter-active,
+.message-ref-modal-leave-active {
+  transition: opacity 160ms ease;
+}
+
+.message-ref-modal-enter-active .message-ref-dialog,
+.message-ref-modal-leave-active .message-ref-dialog {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.message-ref-modal-enter-from,
+.message-ref-modal-leave-to {
+  opacity: 0;
+}
+
+.message-ref-modal-enter-from .message-ref-dialog,
+.message-ref-modal-leave-to .message-ref-dialog {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
+.message-ref-modal-enter-to,
+.message-ref-modal-leave-from {
+  opacity: 1;
+}
+
+.message-ref-modal-enter-to .message-ref-dialog,
+.message-ref-modal-leave-from .message-ref-dialog {
+  opacity: 1;
+  transform: translateY(0) scale(1);
 }
 
 .message-ref-dialog:focus {
@@ -686,6 +742,31 @@ async function copyText() {
   .reader-content,
   .message-ref-content {
     padding: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-ref-popover-enter-active,
+  .message-ref-popover-leave-active,
+  .message-ref-modal-enter-active,
+  .message-ref-modal-leave-active,
+  .message-ref-modal-enter-active .message-ref-dialog,
+  .message-ref-modal-leave-active .message-ref-dialog {
+    transition-duration: 1ms;
+  }
+
+  .message-ref-popover-enter-from,
+  .message-ref-popover-leave-to,
+  .message-ref-popover-enter-to,
+  .message-ref-popover-leave-from {
+    transform: var(--message-ref-popover-transform, translate(-50%, -100%)) scale(1);
+  }
+
+  .message-ref-modal-enter-from .message-ref-dialog,
+  .message-ref-modal-leave-to .message-ref-dialog,
+  .message-ref-modal-enter-to .message-ref-dialog,
+  .message-ref-modal-leave-from .message-ref-dialog {
+    transform: none;
   }
 }
 </style>
