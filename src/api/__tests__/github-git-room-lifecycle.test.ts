@@ -11,6 +11,7 @@ import {
   pullRequestPayload,
   pushPayload,
 } from "./git-room-test-helpers.js";
+import type { GitHubWebhookPayload } from "../github/app.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
@@ -32,8 +33,8 @@ const ORDER_10 = "2026-06-28T10:00:00.000Z";
 const ORDER_11 = "2026-06-28T11:00:00.000Z";
 const ORDER_12 = "2026-06-28T12:00:00.000Z";
 
-function event(type: string, payload: Record<string, unknown>, deliveryId: string) {
-  const materialized = materializeGitHubWebhookEvent(type, payload as never, deliveryId);
+function event(type: string, payload: GitHubWebhookPayload, deliveryId: string) {
+  const materialized = materializeGitHubWebhookEvent(type, payload, deliveryId);
   assert.ok(materialized);
   return materialized;
 }

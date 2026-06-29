@@ -1,4 +1,9 @@
 import type { GitRoomBinding, Project, TaskLease } from "../db.js";
+import type {
+  GitHubWebhookPayload,
+  GitHubWebhookPullRequest,
+  GitHubWebhookRepository,
+} from "../github/app.js";
 import type { GitHubRefRoomLifecycleDeps } from "../github/git-room-lifecycle.js";
 
 export const REPO_ID = 1;
@@ -21,7 +26,13 @@ export const TASK_BRANCH_ROOM_ID =
   "git-room:github.com:brosincode/letagents:branch:Y29kZXgvZ2l0LXJvb21z";
 export const TASK_BRANCH_FOCUS_KEY = "git:branch:Y29kZXgvZ2l0LXJvb21z";
 
-export function githubRepository(overrides: Record<string, unknown> = {}) {
+type GitHubWebhookHeadRepository = NonNullable<
+  NonNullable<GitHubWebhookPullRequest["head"]>["repo"]
+>;
+
+export function githubRepository(
+  overrides: Partial<GitHubWebhookRepository> = {}
+): GitHubWebhookRepository {
   return {
     id: REPO_ID,
     full_name: REPO_FULL_NAME,
@@ -31,7 +42,9 @@ export function githubRepository(overrides: Record<string, unknown> = {}) {
   };
 }
 
-export function githubHeadRepository(overrides: Record<string, unknown> = {}) {
+export function githubHeadRepository(
+  overrides: Partial<GitHubWebhookHeadRepository> = {}
+): GitHubWebhookHeadRepository {
   return {
     id: REPO_ID,
     full_name: REPO_FULL_NAME,
@@ -44,11 +57,14 @@ export function githubHeadRepository(overrides: Record<string, unknown> = {}) {
 export function pullRequestPayload(input: {
   action?: string;
   branch?: string;
-  headRepository?: Record<string, unknown>;
+  headRepository?: Partial<GitHubWebhookHeadRepository> | null;
   merged?: boolean;
-  repository?: Record<string, unknown>;
-} = {}) {
+  repository?: Partial<GitHubWebhookRepository>;
+} = {}): GitHubWebhookPayload {
   const action = input.action ?? "opened";
+  const headRepository = input.headRepository === null
+    ? null
+    : githubHeadRepository(input.headRepository);
   return {
     action,
     repository: githubRepository(input.repository),
@@ -63,16 +79,14 @@ export function pullRequestPayload(input: {
       head: {
         ref: input.branch ?? WEBHOOK_BRANCH,
         sha: "abc123",
-        ...(input.headRepository === undefined ? {} : {
-          repo: githubHeadRepository(input.headRepository),
-        }),
+        ...(headRepository ? { repo: headRepository } : {}),
       },
       base: { ref: DEFAULT_BRANCH },
     },
   };
 }
 
-export function pushPayload(ref: string) {
+export function pushPayload(ref: string): GitHubWebhookPayload {
   return {
     ref,
     before: "111",
@@ -81,7 +95,7 @@ export function pushPayload(ref: string) {
   };
 }
 
-export function branchRefPayload(action: string) {
+export function branchRefPayload(action: string): GitHubWebhookPayload {
   return {
     action,
     ref: WEBHOOK_BRANCH,
@@ -198,6 +212,7 @@ export function workLease(branchRef: string): TaskLease {
     created_by: "TimberCalm",
     revoked_reason: null,
     expires_at: null,
+    last_heartbeat_at: null,
     created_at: "2026-06-28T10:00:00.000Z",
     updated_at: "2026-06-28T10:00:00.000Z",
   };

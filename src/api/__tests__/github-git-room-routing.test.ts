@@ -15,7 +15,9 @@ import {
   githubRepository,
   pullRequestPayload,
   pushPayload,
+  repoBinding,
 } from "./git-room-test-helpers.js";
+import type { GitHubWebhookPayload } from "../github/app.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
@@ -28,8 +30,8 @@ const {
 } = await import("../github/git-room-routing.js");
 const { materializeGitHubWebhookEvent } = await import("../github-room-events.js");
 
-function event(type: string, payload: Record<string, unknown>, deliveryId: string) {
-  const materialized = materializeGitHubWebhookEvent(type, payload as never, deliveryId);
+function event(type: string, payload: GitHubWebhookPayload, deliveryId: string) {
+  const materialized = materializeGitHubWebhookEvent(type, payload, deliveryId);
   assert.ok(materialized);
   return materialized;
 }
@@ -105,7 +107,7 @@ test("selectGitHubEventRefRoomTarget routes non-default pull request heads to br
     selectGitHubEventRefRoomTarget({
       event: event(
         "pull_request",
-        pullRequestPayload({ headRepository: {} }),
+        pullRequestPayload(),
         "delivery-pr-branch"
       ),
       defaultBranch: DEFAULT_BRANCH,
@@ -135,7 +137,7 @@ test("selectGitHubEventRefRoomTarget can route tag pushes to tag rooms", () => {
 });
 
 test("webhook ref routing does not create missing branch rooms", async () => {
-  const payload = pullRequestPayload({ headRepository: {} });
+  const payload = pullRequestPayload();
   const childLookups: unknown[] = [];
   const upserts: unknown[] = [];
 
@@ -154,7 +156,7 @@ test("webhook ref routing does not create missing branch rooms", async () => {
         throw new Error("should not upsert a missing branch room");
       },
     },
-  } as never);
+  });
 
   assert.equal(result, null);
   assert.deepEqual(childLookups, [{
@@ -168,7 +170,6 @@ test("webhook ref routing does not create missing branch rooms", async () => {
 test("webhook ref routing updates binding for existing same-repository branch rooms", async () => {
   const payload = pullRequestPayload({
     repository: { private: true },
-    headRepository: {},
   });
   const room = gitFocusRoom();
   const upserts: unknown[] = [];
@@ -182,10 +183,10 @@ test("webhook ref routing updates binding for existing same-repository branch ro
       getGitChildRoom: async () => room,
       upsertGitRoomBinding: async (input) => {
         upserts.push(input);
-        return input as never;
+        return repoBinding(input);
       },
     },
-  } as never);
+  });
 
   assert.equal(result, room);
   assert.deepEqual(upserts, [expectedWebhookBinding(room.id)]);
@@ -215,10 +216,10 @@ test("webhook ref routing keeps fork pull requests in the repository room", asyn
       },
       upsertGitRoomBinding: async (input) => {
         upserts.push(input);
-        return input as never;
+        return repoBinding(input);
       },
     },
-  } as never);
+  });
 
   assert.equal(result, null);
   assert.deepEqual(childLookups, []);
