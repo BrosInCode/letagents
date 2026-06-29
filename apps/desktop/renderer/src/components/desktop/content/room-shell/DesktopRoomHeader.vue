@@ -27,33 +27,20 @@
           </span>
           <span class="desktop-room-title-text">{{ room.displayName }}</span>
         </h3>
-        <div v-if="room.gitRoom" class="desktop-room-git-meta" aria-label="Git Room metadata">
-          <span class="desktop-room-git-badge">Git Room</span>
-          <span class="desktop-room-git-item desktop-room-git-provider" :title="gitRoomProviderLabel">
-            <svg v-if="room.gitRoom.provider === 'github'" viewBox="0 0 16 16" aria-hidden="true">
+        <div v-if="room.gitRoom" class="desktop-room-git-meta" :aria-label="gitRoomHeaderLabel">
+          <span class="desktop-room-git-item desktop-room-git-provider" :title="gitRoomProviderLabel" aria-hidden="true">
+            <svg viewBox="0 0 16 16">
               <path
                 fill="currentColor"
                 d="M8 .2a7.9 7.9 0 0 0-2.5 15.4c.4.1.5-.2.5-.4v-1.4c-2 .4-2.5-.9-2.5-.9-.3-.8-.8-1-.8-1-.7-.5.1-.5.1-.5.7.1 1.1.8 1.1.8.7 1.1 1.8.8 2.1.6.1-.5.3-.8.5-1-1.7-.2-3.4-.8-3.4-3.8 0-.8.3-1.5.8-2.1-.1-.2-.3-1 .1-2.1 0 0 .6-.2 2.1.8A7.3 7.3 0 0 1 8 4.3c.6 0 1.3.1 1.9.3 1.4-1 2.1-.8 2.1-.8.4 1.1.1 1.9.1 2.1.5.6.8 1.3.8 2.1 0 2.9-1.8 3.6-3.4 3.8.3.2.5.7.5 1.4v2c0 .2.1.5.5.4A7.9 7.9 0 0 0 8 .2Z"
               />
             </svg>
-            <Info v-else :size="13" aria-hidden="true" />
-            <span>{{ gitRoomProviderLabel }}</span>
-          </span>
-          <span class="desktop-room-git-item desktop-room-git-repo" :title="room.gitRoom.repository.fullName">
-            <FolderGit2 :size="13" aria-hidden="true" />
-            <span>{{ room.gitRoom.repository.fullName }}</span>
           </span>
           <span class="desktop-room-git-item desktop-room-git-ref" :title="gitRoomRefTitle">
             <GitPullRequest v-if="room.gitRoom.ref.type === 'pull_request'" :size="13" aria-hidden="true" />
             <Tag v-else-if="room.gitRoom.ref.type === 'tag'" :size="13" aria-hidden="true" />
             <GitBranch v-else :size="13" aria-hidden="true" />
             <span>{{ gitRoomRefLabel }}</span>
-          </span>
-          <span class="desktop-room-git-item desktop-room-git-access" :title="gitRoomAccessTitle">
-            <Lock v-if="room.gitRoom.accessMode === 'private'" :size="13" aria-hidden="true" />
-            <Globe2 v-else-if="room.gitRoom.accessMode === 'public'" :size="13" aria-hidden="true" />
-            <Info v-else :size="13" aria-hidden="true" />
-            <span>{{ gitRoomAccessLabel }}</span>
           </span>
         </div>
         <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
@@ -216,7 +203,7 @@
 </template>
 
 <script setup lang="ts">
-import { FolderGit2, GitBranch, GitPullRequest, Globe2, Info, Lock, Tag } from "@lucide/vue";
+import { GitBranch, GitPullRequest, Tag } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DesktopGitRoomInfo, DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
@@ -270,18 +257,13 @@ const gitRoomRefTitle = computed(() => {
   return gitRoom.ref.name ? `${type}: ${gitRoom.ref.name}` : type;
 });
 
-const gitRoomAccessLabel = computed(() => {
-  switch (props.room.gitRoom?.accessMode) {
-    case "private":
-      return "Private";
-    case "public":
-      return "Public";
-    default:
-      return "Access unknown";
-  }
+const gitRoomHeaderLabel = computed(() => {
+  const gitRoom = props.room.gitRoom;
+  if (!gitRoom) return "";
+  const branch = gitRoomRefLabel.value;
+  const type = gitRoom.ref.type.replace("_", " ");
+  return branch ? `GitHub ${type} ${branch}` : `GitHub ${type}`;
 });
-
-const gitRoomAccessTitle = computed(() => `${gitRoomAccessLabel.value} repository access`);
 
 function gitRoomRefDisplayLabel(gitRoom: DesktopGitRoomInfo): string {
   const ref = gitRoom.ref;
