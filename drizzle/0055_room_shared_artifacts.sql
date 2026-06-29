@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS "room_shared_artifacts" (
   "provider" text NOT NULL,
   "kind" text NOT NULL,
   "artifact_id" text,
-  "artifact_number" integer,
+  "artifact_number" bigint,
   "title" text,
   "url" text,
   "ref" text,
@@ -80,7 +80,7 @@ task_artifacts AS (
     END AS "kind",
     NULLIF("artifact"->>'id', '') AS "artifact_id",
     CASE
-      WHEN NULLIF("artifact"->>'number', '') ~ '^[0-9]+$' THEN ("artifact"->>'number')::integer
+      WHEN NULLIF("artifact"->>'number', '') ~ '^[0-9]+$' THEN ("artifact"->>'number')::bigint
       ELSE NULL
     END AS "artifact_number",
     NULLIF("artifact"->>'title', '') AS "title",
@@ -195,7 +195,7 @@ task_artifacts AS (
     END AS "kind",
     NULLIF("artifact"->>'id', '') AS "artifact_id",
     CASE
-      WHEN NULLIF("artifact"->>'number', '') ~ '^[0-9]+$' THEN ("artifact"->>'number')::integer
+      WHEN NULLIF("artifact"->>'number', '') ~ '^[0-9]+$' THEN ("artifact"->>'number')::bigint
       ELSE NULL
     END AS "artifact_number",
     NULLIF("artifact"->>'title', '') AS "title",

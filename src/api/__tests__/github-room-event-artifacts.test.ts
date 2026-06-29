@@ -107,6 +107,52 @@ test("GitHub pull request review events index both review and pull request artif
   ]);
 });
 
+test("GitHub check run events keep large suite ids as artifact numbers", () => {
+  const event = materializeGitHubWebhookEvent(
+    "check_run",
+    {
+      action: "completed",
+      repository: {
+        id: 1,
+        full_name: "BrosInCode/letagents",
+        name: "letagents",
+        default_branch: "main",
+      },
+      check_run: {
+        id: 84113022815,
+        name: "deploy",
+        html_url: "https://github.com/BrosInCode/letagents/actions/runs/28389422373/job/84113022815",
+        status: "completed",
+        conclusion: "failure",
+        completed_at: "2026-06-29T17:12:00Z",
+        head_sha: "abc123",
+        check_suite: {
+          id: 76648989646,
+          head_branch: "staging",
+          head_sha: "abc123",
+        },
+        app: {
+          name: "GitHub Actions",
+        },
+      },
+    },
+    "delivery-check-run-artifact"
+  );
+
+  assert.ok(event);
+  assert.deepEqual(buildGitHubRoomEventArtifacts(event), [
+    {
+      provider: "github",
+      kind: "check_run",
+      id: "84113022815",
+      number: 76648989646,
+      title: "deploy",
+      url: "https://github.com/BrosInCode/letagents/actions/runs/28389422373/job/84113022815",
+      state: "failure",
+    },
+  ]);
+});
+
 test("GitHub ref events index branch artifacts without mislabeling tags", () => {
   const branchEvent = materializeGitHubWebhookEvent(
     "push",
