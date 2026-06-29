@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
+import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
 
 const emptySnapshotData: RoomSnapshotData = {
@@ -15,6 +16,36 @@ const emptySnapshotData: RoomSnapshotData = {
   messagesData: { messages: [] },
   githubEventsData: null,
 };
+
+test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", () => {
+  const gitRoom = mapDesktopGitRoomPayload({
+    provider: "git",
+    host: "local",
+    repository: {
+      id: "local:repo",
+      fullName: "FBRF",
+      owner: "local",
+      name: "FBRF",
+    },
+    ref: {
+      type: "branch",
+      name: "feature/player-3d-presentation",
+      defaultBranch: "main",
+      baseRef: "main",
+      headRef: "feature/player-3d-presentation",
+      headRepository: null,
+    },
+    visibility: "local",
+    accessMode: "local",
+    isDefault: false,
+    source: "local_git",
+  });
+
+  assert.equal(gitRoom?.repository.fullName, "FBRF");
+  assert.equal(gitRoom?.ref.name, "feature/player-3d-presentation");
+  assert.equal(gitRoom?.accessMode, "local");
+  assert.equal(gitRoom?.source, "local_git");
+});
 
 test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => {
   const data: RoomSnapshotData = {

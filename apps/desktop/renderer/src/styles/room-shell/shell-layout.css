@@ -128,16 +128,6 @@
   height: 13px;
 }
 
-.desktop-room-git-provider {
-  flex: 0 0 auto;
-}
-
-.desktop-room-git-provider svg {
-  width: 17px;
-  height: 17px;
-  color: rgba(255, 255, 255, 0.88);
-}
-
 .desktop-room-git-ref {
   max-width: 154px;
   color: rgba(255, 255, 255, 0.76);
@@ -147,23 +137,6 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.desktop-room-provider-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 23px;
-  height: 23px;
-  min-width: 23px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.92);
-}
-
-.desktop-room-provider-icon svg {
-  width: 14px;
-  height: 14px;
 }
 
 .desktop-room-header-actions {

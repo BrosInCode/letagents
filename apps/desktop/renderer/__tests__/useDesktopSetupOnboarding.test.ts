@@ -44,7 +44,7 @@ test("pickRepoRoom reports success and opens the selected repo room", async () =
     rootPath: "/Users/emmy/Projects/letagents",
     meta: "codex/desktop-codex-room-agents",
   });
-  assert.equal(state.authFeedback.value, "Repo room selected: letagents. Open it when you are ready.");
+  assert.equal(state.authFeedback.value, "Project room selected: letagents. Open it when you are ready.");
 });
 
 test("pickRepoRoom reports false when the picker is canceled", async () => {

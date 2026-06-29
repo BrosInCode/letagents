@@ -7,6 +7,8 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import type { DesktopGitRoomInfo } from "../ipc-types.js";
+
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
@@ -36,6 +38,7 @@ const {
 } = await import("../main/chat-storage/settings.js");
 const {
   addLocalTask,
+  assertLocalRoomPublishable,
   claimLocalTaskReviewLease,
   claimLocalTasksForPublish,
   cloudRoomIdentifierForStorage,
@@ -324,6 +327,10 @@ test("desktop storage resolver applies app default, room overrides, and local me
   });
   assert.equal(localOnly.publishStatus, "local_only");
   assert.equal((await resolveLocalAwareRoomStorageMode("local_only")).effectiveMode, "local");
+  assert.equal(
+    (await resolveLocalAwareRoomStorageMode("git-room:local:1234567890abcdef:branch:Zm9v")).effectiveMode,
+    "local",
+  );
 
   const forked = await createLocalRoom({
     roomIdentifier: "forked_room",
@@ -366,6 +373,52 @@ test("desktop linked local rooms keep separate local and cloud identifiers", asy
   const cloudStorage = await resolveLocalAwareRoomStorageMode(cloudRoomIdentifier);
   assert.equal(cloudStorage.effectiveMode, "cloud");
   assert.equal(cloudRoomIdentifierForStorage(cloudStorage, linked.roomIdentifier), cloudRoomIdentifier);
+});
+
+test("desktop local Git rooms persist Git metadata for snapshots and account entries", async () => {
+  const gitRoom: DesktopGitRoomInfo = {
+    provider: "git",
+    host: "local",
+    repository: {
+      id: "local:repo",
+      fullName: "FBRF",
+      owner: "local",
+      name: "FBRF",
+    },
+    ref: {
+      type: "branch",
+      name: "feature/player-3d-presentation",
+      defaultBranch: "main",
+      baseRef: "main",
+      headRef: "feature/player-3d-presentation",
+      headRepository: null,
+    },
+    visibility: "local",
+    accessMode: "local",
+    isDefault: false,
+    source: "local_git",
+  };
+
+  const room = await createLocalRoom({
+    roomIdentifier: "git-room:local:fbrf:branch:feature",
+    displayName: "FBRF",
+    gitRoom,
+  });
+
+  assert.equal(room.gitRoom?.accessMode, "local");
+  assert.equal(room.gitRoom?.ref.name, "feature/player-3d-presentation");
+
+  const persisted = await getLocalRoomIncludingArchived(room.roomIdentifier);
+  assert.equal(persisted?.gitRoom?.repository.fullName, "FBRF");
+
+  const accountEntry = (await listLocalRoomEntries())
+    .find((entry) => entry.roomIdentifier === room.roomIdentifier);
+  assert.equal(accountEntry?.gitRoom?.source, "local_git");
+  assert.equal(accountEntry?.gitRoom?.accessMode, "local");
+  assert.throws(
+    () => assertLocalRoomPublishable(room),
+    /Local Git Rooms stay local/,
+  );
 });
 
 test("desktop linked local rooms use the cloud room as the visible account identity", async () => {

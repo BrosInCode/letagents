@@ -31,6 +31,7 @@ import {
   setRoomStorageMode,
 } from "../chat-storage/settings.js";
 import {
+  assertLocalRoomPublishable,
   claimLocalTasksForPublish,
   cloudRoomIdentifierForStorage,
   getLocalRoom,
@@ -585,6 +586,7 @@ async function ensureLocalRoomPublishTarget(
   if (!localRoom) {
     throw new Error("Only local rooms can be published.");
   }
+  assertLocalRoomPublishable(localRoom);
 
   const createdRoom = await apiFetch<{ id?: string; room_id?: string }>(
     "/projects",

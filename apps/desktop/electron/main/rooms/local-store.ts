@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 
 import type {
   DesktopAccountRoomEntry,
+  DesktopGitRoomInfo,
   DesktopLocalRoomInfo,
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
@@ -16,6 +17,7 @@ import {
   resolveRoomStorageMode,
   setRoomStorageMode,
 } from "../chat-storage/settings.js";
+import { mapDesktopGitRoomPayload } from "./git-room.js";
 
 type SqliteStatement = {
   all: (...params: unknown[]) => Record<string, unknown>[];
@@ -37,6 +39,7 @@ type LocalRoomRow = {
   published_at: string | null;
   archived_at: string | null;
   pinned_at: string | null;
+  git_room_json: string | null;
 };
 
 type LocalTaskRow = {
@@ -122,7 +125,8 @@ async function getDb(): Promise<SqliteDatabase> {
         updated_at TEXT NOT NULL,
         published_at TEXT,
         archived_at TEXT,
-        pinned_at TEXT
+        pinned_at TEXT,
+        git_room_json TEXT
       );
       CREATE INDEX IF NOT EXISTS local_rooms_updated_idx
         ON local_rooms (updated_at);
@@ -165,6 +169,7 @@ async function getDb(): Promise<SqliteDatabase> {
     addColumnIfMissing(db, "local_rooms", "published_at", "TEXT");
     addColumnIfMissing(db, "local_rooms", "archived_at", "TEXT");
     addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
+    addColumnIfMissing(db, "local_rooms", "git_room_json", "TEXT");
     addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
     addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
     addColumnIfMissing(db, "local_tasks", "workflow_refs_json", "TEXT");
@@ -229,6 +234,10 @@ function mapRoomRow(row: Record<string, unknown>): LocalRoomRow {
       typeof row.pinned_at === "string" && row.pinned_at.trim()
         ? row.pinned_at
         : null,
+    git_room_json:
+      typeof row.git_room_json === "string" && row.git_room_json.trim()
+        ? row.git_room_json
+        : null,
   };
 }
 
@@ -283,6 +292,30 @@ function parseJsonArray<T>(value: string | null, fallback: T[]): T[] {
   }
 }
 
+function parseGitRoomJson(value: string | null): DesktopGitRoomInfo | null {
+  if (!value) return null;
+  try {
+    return mapDesktopGitRoomPayload(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+export function isLocalGitRoomIdentifier(identifier: string | null | undefined): boolean {
+  return /^git-room:local:/i.test(identifier?.trim() || "");
+}
+
+function isLocalOnlyRoomIdentifier(identifier: string | null | undefined): boolean {
+  const value = identifier?.trim() || "";
+  return /^local[_-]/i.test(value) || isLocalGitRoomIdentifier(value);
+}
+
+export function assertLocalRoomPublishable(room: DesktopLocalRoomInfo): void {
+  if (room.gitRoom?.accessMode === "local" || isLocalGitRoomIdentifier(room.roomIdentifier)) {
+    throw new Error("Local Git Rooms stay local until a provider is attached.");
+  }
+}
+
 function toLocalRoomInfo(row: LocalRoomRow): DesktopLocalRoomInfo {
   return {
     roomIdentifier: row.room_id,
@@ -292,6 +325,7 @@ function toLocalRoomInfo(row: LocalRoomRow): DesktopLocalRoomInfo {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     publishedAt: row.published_at,
+    gitRoom: parseGitRoomJson(row.git_room_json),
   };
 }
 
@@ -369,24 +403,27 @@ export async function createLocalRoom(input: {
   displayName?: string | null;
   roomIdentifier?: string | null;
   cloudRoomIdentifier?: string | null;
+  gitRoom?: DesktopGitRoomInfo | null;
 } = {}): Promise<DesktopLocalRoomInfo> {
   const database = await getDb();
   const now = new Date().toISOString();
   const roomId = input.roomIdentifier?.trim() || `local_${randomUUID()}`;
   const displayName = input.displayName?.trim() || "Local room";
+  const gitRoomJson = input.gitRoom ? JSON.stringify(input.gitRoom) : null;
   database
     .prepare(`
       INSERT INTO local_rooms (
-        room_id, display_name, cloud_room_id, created_at, updated_at, published_at, archived_at, pinned_at
+        room_id, display_name, cloud_room_id, created_at, updated_at, published_at, archived_at, pinned_at, git_room_json
       )
-      VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)
+      VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
       ON CONFLICT(room_id) DO UPDATE SET
         display_name = excluded.display_name,
         cloud_room_id = COALESCE(excluded.cloud_room_id, local_rooms.cloud_room_id),
+        git_room_json = COALESCE(excluded.git_room_json, local_rooms.git_room_json),
         updated_at = excluded.updated_at,
         archived_at = NULL
     `)
-    .run(roomId, displayName, input.cloudRoomIdentifier || null, now, now);
+    .run(roomId, displayName, input.cloudRoomIdentifier || null, now, now, gitRoomJson);
   const room = await getLocalRoom(roomId);
   if (!room) throw new Error("Local room could not be created.");
   return room;
@@ -429,32 +466,35 @@ export async function listLocalRoomEntries(
     `)
     .all()
     .map(mapRoomRow);
-  return rows.map((row) => ({
-    roomIdentifier:
-      options.linkedIdentity === "cloud" && row.cloud_room_id
-        ? row.cloud_room_id
-        : row.room_id,
-    displayName: row.display_name,
-    name: row.display_name,
-    kind: "main",
-    parentRoomId: null,
-    focusKey: null,
-    sourceTaskId: null,
-    focusStatus: null,
-    role: "admin",
-    source: "local",
-    pinned: Boolean(row.pinned_at),
-    archived: Boolean(row.archived_at),
-    canLeave: false,
-    canDelete: true,
-    deleteReason: null,
-    firstOpenedAt: row.created_at,
-    lastOpenedAt: row.updated_at,
-    latestMessageId: null,
-    latestMessageAt: null,
-    gitRoom: null,
-    focusRooms: [],
-  }));
+  return rows.map((row) => {
+    const room = toLocalRoomInfo(row);
+    return {
+      roomIdentifier:
+        options.linkedIdentity === "cloud" && row.cloud_room_id
+          ? row.cloud_room_id
+          : row.room_id,
+      displayName: row.display_name,
+      name: row.display_name,
+      kind: "main",
+      parentRoomId: null,
+      focusKey: null,
+      sourceTaskId: null,
+      focusStatus: null,
+      role: "admin",
+      source: "local",
+      pinned: Boolean(row.pinned_at),
+      archived: Boolean(row.archived_at),
+      canLeave: false,
+      canDelete: true,
+      deleteReason: null,
+      firstOpenedAt: row.created_at,
+      lastOpenedAt: row.updated_at,
+      latestMessageId: null,
+      latestMessageAt: null,
+      gitRoom: room.gitRoom,
+      focusRooms: [],
+    };
+  });
 }
 
 export async function archiveLocalRoom(
@@ -580,6 +620,7 @@ export async function resolveLocalAwareRoomStorageMode(
     ? await getLocalRoom(trimmedRoomIdentifier)
       || await getLocalRoomByCloudRoom(trimmedRoomIdentifier)
     : null;
+  const localIdentifier = isLocalOnlyRoomIdentifier(trimmedRoomIdentifier);
   const localOnlyRoom = Boolean(localRoom && !localRoom.cloudRoomIdentifier);
   const requestedIdentifier = resolved.roomIdentifier;
   const requestedLocalRoom = Boolean(
@@ -602,9 +643,10 @@ export async function resolveLocalAwareRoomStorageMode(
     aliasModes.find((mode) => mode.overrideMode !== "inherit")?.overrideMode
       || "inherit";
   const effectiveMode =
-    aliasOverrideMode === "cloud" && !localOnlyRoom
+    aliasOverrideMode === "cloud" && !localOnlyRoom && !localIdentifier
       ? "cloud"
-      : localOnlyRoom ||
+      : localIdentifier ||
+          localOnlyRoom ||
           requestedLocalRoom ||
           aliasOverrideMode === "local" ||
           (aliasOverrideMode === "inherit" && resolved.defaultMode === "local")

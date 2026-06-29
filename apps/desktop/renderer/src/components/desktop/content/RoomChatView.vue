@@ -27,6 +27,7 @@
           :local-agent-work="localAgentWork"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
+          :github-activity-available="githubEventsAvailable"
           :room-loading="roomLoading"
           :search-query="searchQuery"
           :initial-scroll-top="initialScrollTop"
@@ -169,6 +170,7 @@ const props = defineProps<{
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubEventsVisible: boolean;
+  githubEventsAvailable: boolean;
   roomLoading: boolean;
   sending: boolean;
   sendError: string | null;

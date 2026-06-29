@@ -143,6 +143,7 @@ const props = defineProps<{
   localAgentWork: ManagedAgentWorkIndicator[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
+  githubActivityAvailable: boolean;
   roomLoading: boolean;
   searchQuery: string;
   initialScrollTop?: number | null;
@@ -165,11 +166,15 @@ const emptyStateTitle = computed(() => {
 
 const emptyStateDescription = computed(() => {
   if (!props.roomIdentifier) {
-    return "Messages from humans, agents, and GitHub will appear here as the room comes alive.";
+    return props.githubActivityAvailable
+      ? "Messages from humans, agents, and GitHub will appear here as the room comes alive."
+      : "Messages from humans and agents will appear here as the room comes alive.";
   }
   return props.hasFilteredRoomActivity
     ? "The loaded history contains activity that is hidden from Chat."
-    : "Messages from humans, agents, and GitHub will appear here.";
+    : props.githubActivityAvailable
+      ? "Messages from humans, agents, and GitHub will appear here."
+      : "Messages from humans and agents will appear here.";
 });
 
 const messagesElement = ref<HTMLElement | null>(null);

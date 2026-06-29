@@ -16,7 +16,7 @@ function stringValue(value: unknown): string | null {
 }
 
 function visibilityValue(value: unknown): DesktopGitRoomVisibility {
-  return value === "public" || value === "private" || value === "unknown"
+  return value === "public" || value === "private" || value === "local" || value === "unknown"
     ? value
     : "unknown";
 }
@@ -29,7 +29,7 @@ function refTypeValue(value: unknown): DesktopGitRoomRefType {
 
 function mapRepository(value: unknown): DesktopGitRoomRepositoryInfo | null {
   const repo = objectValue(value);
-  const fullName = stringValue(repo?.full_name);
+  const fullName = stringValue(repo?.full_name ?? repo?.fullName);
   const owner = stringValue(repo?.owner);
   const name = stringValue(repo?.name);
   if (!repo || !fullName || !owner || !name) {
@@ -52,21 +52,22 @@ export function mapDesktopGitRoomPayload(value: unknown): DesktopGitRoomInfo | n
     return null;
   }
 
+  const provider = stringValue(payload.provider) || "git";
   return {
-    provider: stringValue(payload.provider) || "git",
-    host: stringValue(payload.host) || (payload.provider === "github" ? "github.com" : "git"),
+    provider,
+    host: stringValue(payload.host) || (provider === "github" ? "github.com" : "git"),
     repository,
     ref: {
       type: refTypeValue(ref.type),
       name: stringValue(ref.name),
-      defaultBranch: stringValue(ref.default_branch),
-      baseRef: stringValue(ref.base_ref),
-      headRef: stringValue(ref.head_ref),
-      headRepository: mapRepository(ref.head_repository),
+      defaultBranch: stringValue(ref.default_branch ?? ref.defaultBranch),
+      baseRef: stringValue(ref.base_ref ?? ref.baseRef),
+      headRef: stringValue(ref.head_ref ?? ref.headRef),
+      headRepository: mapRepository(ref.head_repository ?? ref.headRepository),
     },
     visibility: visibilityValue(payload.visibility),
-    accessMode: visibilityValue(payload.access_mode),
-    isDefault: payload.is_default === true,
+    accessMode: visibilityValue(payload.access_mode ?? payload.accessMode),
+    isDefault: payload.is_default === true || payload.isDefault === true,
     source: stringValue(payload.source) || "unknown",
   };
 }

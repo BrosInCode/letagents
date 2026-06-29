@@ -95,6 +95,7 @@ export function createLocalReadyRoomSnapshot(input: {
     role: "local",
     authenticated: false,
     kind: "main",
+    git_room: input.room.gitRoom,
   };
   return {
     roomIdentifier: input.roomIdentifier,

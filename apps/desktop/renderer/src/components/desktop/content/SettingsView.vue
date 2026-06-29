@@ -158,7 +158,7 @@
             </SettingsRow>
 
             <SettingsRow
-              v-if="activePane !== 'storage:database'"
+              v-if="activePane !== 'storage:database' && !selectedRoomIsLocalGitRoom"
               title="Publish this local room"
               description="Upload this room's local messages and tasks to LetAgents cloud. Nothing uploads until you click Publish."
               badge="manual"
@@ -177,6 +177,14 @@
                 </button>
               </template>
             </SettingsRow>
+
+            <SettingsRow
+              v-if="activePane !== 'storage:database' && selectedRoomIsLocalGitRoom"
+              title="Local Git Room"
+              description="This room stays local until you attach a provider-backed repository."
+              badge="local"
+              badge-state="away"
+            />
 
             <SettingsRow
               v-if="activePane === 'storage:sync'"
@@ -733,6 +741,7 @@ import {
   Wrench,
 } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
+import { isLocalGitRoom } from "../../../domain/git-rooms";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type {
   DesktopAccountRoomEntry,
@@ -930,6 +939,17 @@ const selectedRoomDetail = computed(() => {
   if (!selectedRoomDetailIdentifier.value) return null;
   return props.accountRooms.find((room) => room.roomIdentifier === selectedRoomDetailIdentifier.value) || null;
 });
+const selectedAccountRoom = computed(() => {
+  const selectedIdentifier = props.selectedRoomIdentifier?.trim().toLowerCase();
+  if (!selectedIdentifier) return null;
+  return props.accountRooms.find(
+    (room) => room.roomIdentifier.trim().toLowerCase() === selectedIdentifier
+  ) || null;
+});
+const selectedRoomIsLocalGitRoom = computed(() =>
+  /^git-room:local:/i.test(props.selectedRoomIdentifier || "") ||
+    Boolean(selectedAccountRoom.value && isLocalGitRoom(selectedAccountRoom.value))
+);
 
 const roomCountLabel = computed(() => {
   if (activePane.value === "rooms:left") return `${archivedRoomCount.value} left`;

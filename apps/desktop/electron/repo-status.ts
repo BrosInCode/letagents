@@ -4,7 +4,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import type { DesktopRepoRoomSelection, RepoStatus, RepoWorktreeEntry } from "./ipc-types.js";
+import type {
+  DesktopGitRoomInfo,
+  DesktopGitRoomRefType,
+  DesktopRepoRoomSelection,
+  RepoStatus,
+  RepoWorktreeEntry,
+} from "./ipc-types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +29,20 @@ async function getCurrentBranch(workspaceRoot: string): Promise<string | null> {
     const stdout = await runGit(workspaceRoot, ["branch", "--show-current"]);
     const branch = stdout.trim();
     return branch || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getDefaultBranch(workspaceRoot: string): Promise<string | null> {
+  try {
+    const stdout = await runGit(workspaceRoot, [
+      "symbolic-ref",
+      "--quiet",
+      "--short",
+      "refs/remotes/origin/HEAD",
+    ]);
+    return stdout.trim().replace(/^origin\//, "") || null;
   } catch {
     return null;
   }
@@ -122,11 +142,24 @@ function readConfiguredRoomIdentifierAt(repoRoot: string): string | null {
 
 export async function resolveRoomIdentifier(workspaceRoot: string): Promise<string | null> {
   const configured = readConfiguredRoomIdentifier(workspaceRoot);
-  if (configured) return configured;
+  const currentBranch = await getCurrentBranch(workspaceRoot);
+  const defaultBranch = await getDefaultBranch(workspaceRoot);
+  if (configured) {
+    return activeGitHubRoomIdentifier({
+      repoRoom: configured,
+      currentBranch,
+      defaultBranch,
+    }) || configured;
+  }
 
   try {
     const stdout = await runGit(workspaceRoot, ["remote", "get-url", "origin"]);
-    return normalizeGitRemoteToRoomIdentifier(stdout);
+    const repoRoom = normalizeGitRemoteToRoomIdentifier(stdout);
+    return activeGitHubRoomIdentifier({
+      repoRoom,
+      currentBranch,
+      defaultBranch,
+    }) || repoRoom;
   } catch {
     return null;
   }
@@ -148,10 +181,118 @@ function createLocalRoomIdentifier(projectPath: string): string {
   return `local-${folderName}-${pathHash}`;
 }
 
+function encodeRefForRoomId(refName: string): string {
+  return Buffer.from(refName, "utf8").toString("base64url");
+}
+
+function repoRootKey(repoRoot: string): string {
+  return createHash("sha256").update(resolve(repoRoot)).digest("hex").slice(0, 16);
+}
+
+function githubRepositoryFullNameFromRoom(repoRoom: string | null | undefined): string | null {
+  const parts = repoRoom?.trim().replace(/\/+$/, "").split("/") || [];
+  const [host, owner, repo] = parts;
+  if (host?.toLowerCase() !== "github.com" || !owner || !repo || parts.length !== 3) {
+    return null;
+  }
+  return `${owner}/${repo}`;
+}
+
+function isLikelyDefaultBranchName(branchName: string | null): boolean {
+  return branchName === "main" || branchName === "master" || branchName === "trunk";
+}
+
+function shouldUseBranchRoom(input: {
+  currentBranch: string | null;
+  defaultBranch: string | null;
+}): boolean {
+  const currentBranch = input.currentBranch?.trim() || null;
+  const defaultBranch = input.defaultBranch?.trim() || null;
+  return Boolean(
+    currentBranch && (
+      defaultBranch
+        ? currentBranch !== defaultBranch
+        : !isLikelyDefaultBranchName(currentBranch)
+    ),
+  );
+}
+
+export function buildGitHubBranchRoomIdentifier(
+  repoRoom: string | null,
+  branchName: string | null,
+): string | null {
+  const repositoryFullName = githubRepositoryFullNameFromRoom(repoRoom);
+  const refName = branchName?.trim();
+  if (!repositoryFullName || !refName) return null;
+  return `git-room:github.com:${repositoryFullName.toLowerCase()}:branch:${encodeRefForRoomId(refName)}`;
+}
+
+export function activeGitHubRoomIdentifier(input: {
+  repoRoom: string | null;
+  currentBranch: string | null;
+  defaultBranch: string | null;
+}): string | null {
+  if (!input.repoRoom) return null;
+  return shouldUseBranchRoom(input)
+    ? buildGitHubBranchRoomIdentifier(input.repoRoom, input.currentBranch)
+    : input.repoRoom;
+}
+
+export function buildLocalGitRoomIdentifier(
+  repoRoot: string,
+  activeRef: string | null,
+): string {
+  const refName = activeRef?.trim();
+  const suffix = refName
+    ? `branch:${encodeRefForRoomId(refName)}`
+    : "repo";
+  return `git-room:local:${repoRootKey(repoRoot)}:${suffix}`;
+}
+
+export function buildLocalGitRoomInfo(input: {
+  repoRoot: string;
+  currentBranch: string | null;
+  defaultBranch: string | null;
+}): DesktopGitRoomInfo {
+  const repoName = basename(resolve(input.repoRoot)) || "Repository";
+  const branchName = input.currentBranch?.trim() || null;
+  const defaultBranch = input.defaultBranch?.trim() || null;
+  const refType: DesktopGitRoomRefType = branchName ? "branch" : "default_branch";
+  return {
+    provider: "git",
+    host: "local",
+    repository: {
+      id: `local:${repoRootKey(input.repoRoot)}`,
+      fullName: repoName,
+      owner: "local",
+      name: repoName,
+    },
+    ref: {
+      type: refType,
+      name: branchName,
+      defaultBranch,
+      baseRef: defaultBranch,
+      headRef: branchName,
+      headRepository: null,
+    },
+    visibility: "local",
+    accessMode: "local",
+    isDefault: Boolean(
+      branchName && (
+        defaultBranch
+          ? branchName === defaultBranch
+          : isLikelyDefaultBranchName(branchName)
+      ),
+    ),
+    source: "local_git",
+  };
+}
+
 export async function resolveRoomIdentifierFromPath(folderPath: string): Promise<{
   repoRoot: string | null;
   roomIdentifier: string;
   source: DesktopRepoRoomSelection["source"];
+  gitRoom: DesktopGitRoomInfo | null;
   warning: string | null;
 }> {
   let repoRoot: string | null = null;
@@ -162,8 +303,9 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
     return {
       repoRoot: null,
       roomIdentifier: createLocalRoomIdentifier(folderPath),
-      source: "local_fallback",
-      warning: "This folder is not a Git repository yet. LetAgents opened a local room that you can attach to GitHub later.",
+      source: "local_folder",
+      gitRoom: null,
+      warning: "This folder is not a Git repository. LetAgents opened a plain local folder room.",
     };
   }
 
@@ -171,26 +313,57 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
     return {
       repoRoot: null,
       roomIdentifier: createLocalRoomIdentifier(folderPath),
-      source: "local_fallback",
-      warning: "This folder is not a Git repository yet. LetAgents opened a local room that you can attach to GitHub later.",
+      source: "local_folder",
+      gitRoom: null,
+      warning: "This folder is not a Git repository. LetAgents opened a plain local folder room.",
     };
   }
 
+  const [currentBranch, defaultBranch] = await Promise.all([
+    getCurrentBranch(repoRoot),
+    getDefaultBranch(repoRoot),
+  ]);
+
   const configured = readConfiguredRoomIdentifierAt(repoRoot);
-  if (configured) return { repoRoot, roomIdentifier: configured, source: "configured", warning: null };
+  if (configured) {
+    return {
+      repoRoot,
+      roomIdentifier: activeGitHubRoomIdentifier({
+        repoRoom: configured,
+        currentBranch,
+        defaultBranch,
+      }) || configured,
+      source: "configured",
+      gitRoom: null,
+      warning: null,
+    };
+  }
 
   try {
     const stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"]);
-    const roomIdentifier = normalizeGitRemoteToRoomIdentifier(stdout);
-    if (roomIdentifier) return { repoRoot, roomIdentifier, source: "git_remote", warning: null };
+    const repoRoom = normalizeGitRemoteToRoomIdentifier(stdout);
+    if (repoRoom) {
+      return {
+        repoRoot,
+        roomIdentifier: activeGitHubRoomIdentifier({
+          repoRoom,
+          currentBranch,
+          defaultBranch,
+        }) || repoRoom,
+        source: "git_remote",
+        gitRoom: null,
+        warning: null,
+      };
+    }
   } catch {
-    // Fall through to the local room fallback below.
+    // Fall through to the local Git room below.
   }
 
   return {
     repoRoot,
-    roomIdentifier: createLocalRoomIdentifier(repoRoot),
-    source: "local_fallback",
-    warning: "This repo is only on your Mac. LetAgents opened a local room; attach it to GitHub after you add a remote.",
+    roomIdentifier: buildLocalGitRoomIdentifier(repoRoot, currentBranch),
+    source: "local_git",
+    gitRoom: buildLocalGitRoomInfo({ repoRoot, currentBranch, defaultBranch }),
+    warning: null,
   };
 }

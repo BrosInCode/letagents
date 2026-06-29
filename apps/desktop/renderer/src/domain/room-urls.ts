@@ -8,7 +8,8 @@ export function encodeRoomPathIdentifier(identifier: string): string {
 }
 
 export function isLocalRoomIdentifier(identifier: string | null | undefined): boolean {
-  return /^local_/i.test(identifier?.trim() || "");
+  const value = identifier?.trim() || "";
+  return /^local[_-]/i.test(value) || /^git-room:local:/i.test(value);
 }
 
 export function buildLetAgentsRoomUrl(

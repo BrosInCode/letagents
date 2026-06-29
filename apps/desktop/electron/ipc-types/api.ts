@@ -196,6 +196,7 @@ export interface DesktopApi {
   };
   repos: {
     getStatus: (rootPath?: string | null) => Promise<RepoStatus>;
+    openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
   };
   workers: {

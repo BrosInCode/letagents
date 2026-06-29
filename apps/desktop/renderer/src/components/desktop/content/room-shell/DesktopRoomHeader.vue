@@ -17,25 +17,9 @@
       </button>
       <div class="desktop-room-heading">
         <h3 class="desktop-room-title">
-          <span v-if="!room.gitRoom && isGitHubRepoRoom" class="desktop-room-provider-icon" aria-label="GitHub repository room">
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M8 .2a7.9 7.9 0 0 0-2.5 15.4c.4.1.5-.2.5-.4v-1.4c-2 .4-2.5-.9-2.5-.9-.3-.8-.8-1-.8-1-.7-.5.1-.5.1-.5.7.1 1.1.8 1.1.8.7 1.1 1.8.8 2.1.6.1-.5.3-.8.5-1-1.7-.2-3.4-.8-3.4-3.8 0-.8.3-1.5.8-2.1-.1-.2-.3-1 .1-2.1 0 0 .6-.2 2.1.8A7.3 7.3 0 0 1 8 4.3c.6 0 1.3.1 1.9.3 1.4-1 2.1-.8 2.1-.8.4 1.1.1 1.9.1 2.1.5.6.8 1.3.8 2.1 0 2.9-1.8 3.6-3.4 3.8.3.2.5.7.5 1.4v2c0 .2.1.5.5.4A7.9 7.9 0 0 0 8 .2Z"
-              />
-            </svg>
-          </span>
           <span class="desktop-room-title-text">{{ room.displayName }}</span>
         </h3>
         <div v-if="room.gitRoom" class="desktop-room-git-meta" :aria-label="gitRoomHeaderLabel">
-          <span class="desktop-room-git-item desktop-room-git-provider" :title="gitRoomProviderLabel" aria-hidden="true">
-            <svg viewBox="0 0 16 16">
-              <path
-                fill="currentColor"
-                d="M8 .2a7.9 7.9 0 0 0-2.5 15.4c.4.1.5-.2.5-.4v-1.4c-2 .4-2.5-.9-2.5-.9-.3-.8-.8-1-.8-1-.7-.5.1-.5.1-.5.7.1 1.1.8 1.1.8.7 1.1 1.8.8 2.1.6.1-.5.3-.8.5-1-1.7-.2-3.4-.8-3.4-3.8 0-.8.3-1.5.8-2.1-.1-.2-.3-1 .1-2.1 0 0 .6-.2 2.1.8A7.3 7.3 0 0 1 8 4.3c.6 0 1.3.1 1.9.3 1.4-1 2.1-.8 2.1-.8.4 1.1.1 1.9.1 2.1.5.6.8 1.3.8 2.1 0 2.9-1.8 3.6-3.4 3.8.3.2.5.7.5 1.4v2c0 .2.1.5.5.4A7.9 7.9 0 0 0 8 .2Z"
-              />
-            </svg>
-          </span>
           <span class="desktop-room-git-item desktop-room-git-ref" :title="gitRoomRefTitle">
             <GitPullRequest v-if="room.gitRoom.ref.type === 'pull_request'" :size="13" aria-hidden="true" />
             <Tag v-else-if="room.gitRoom.ref.type === 'tag'" :size="13" aria-hidden="true" />
@@ -231,17 +215,6 @@ const overflowMenuOpen = ref(false);
 const overflowMenuRoot = ref<HTMLElement | null>(null);
 const pendingOverflowAction = ref<"find" | "settings" | null>(null);
 
-const isGitHubRepoRoom = computed(() =>
-  [props.room.identifier, props.room.name, props.room.displayName]
-    .some((value) => value.toLowerCase().startsWith("github.com/"))
-);
-
-const gitRoomProviderLabel = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  if (!gitRoom) return "";
-  return gitRoom.provider === "github" ? "GitHub" : gitRoom.host;
-});
-
 const gitRoomRefLabel = computed(() => {
   const gitRoom = props.room.gitRoom;
   return gitRoom ? gitRoomRefDisplayLabel(gitRoom) : "";
@@ -262,7 +235,7 @@ const gitRoomHeaderLabel = computed(() => {
   if (!gitRoom) return "";
   const branch = gitRoomRefLabel.value;
   const type = gitRoom.ref.type.replace("_", " ");
-  return branch ? `GitHub ${type} ${branch}` : `GitHub ${type}`;
+  return branch ? `Git ${type} ${branch}` : `Git ${type}`;
 });
 
 function gitRoomRefDisplayLabel(gitRoom: DesktopGitRoomInfo): string {

@@ -327,7 +327,11 @@ function gitRoomSidebarMeta(gitRoom: DesktopGitRoomInfo | null): {
   return {
     meta: `${refType} · ${gitRoomRefLabel(gitRoom)}`,
     headline: gitRoom.repository.fullName,
-    description: gitRoom.accessMode === "private" ? "Private Git Room" : "Git Room",
+    description: gitRoom.accessMode === "local"
+      ? "Local Git Room"
+      : gitRoom.accessMode === "private"
+        ? "Private Git Room"
+        : "Git Room",
   };
 }
 
