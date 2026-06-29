@@ -10,47 +10,43 @@
         </header>
       </div>
 
-      <Transition name="room-panel" mode="out-in">
-        <div v-if="stage === 'mcp'" key="mcp" class="first-run-stage" data-testid="first-run-stage-mcp">
-          <McpHarnessChoiceStep
-            v-if="mcpWizardStep === 'choose'"
-            :targets="mcpState.targets"
-            :selected-target-ids="selectedMcpTargetIds"
-            @select-target="$emit('select-target', $event)"
-            @select-all="$emit('select-all-targets')"
-            @clear-selection="$emit('clear-target-selection')"
-          />
-
-          <McpInstallConfirmStep
-            v-else-if="mcpWizardStep === 'install'"
-            :targets="selectedMcpTargets"
-          />
-
-          <McpInstallDoneStep v-else :targets="selectedMcpTargets" />
-        </div>
-
-        <FirstRunGithubStep
-          v-else-if="stage === 'github'"
-          key="github"
-          :auth-status="authStatus"
-          :busy="authBusy"
-          @start-auth="$emit('start-auth')"
-          @open-verification="$emit('open-verification', $event)"
-          @poll-auth="$emit('poll-auth')"
-          @sign-out="$emit('sign-out')"
+      <div v-if="stage === 'mcp'" class="first-run-stage" data-testid="first-run-stage-mcp">
+        <McpHarnessChoiceStep
+          v-if="mcpWizardStep === 'choose'"
+          :targets="mcpState.targets"
+          :selected-target-ids="selectedMcpTargetIds"
+          @select-target="$emit('select-target', $event)"
+          @select-all="$emit('select-all-targets')"
+          @clear-selection="$emit('clear-target-selection')"
         />
 
-        <FirstRunRoomStep
-          v-else
-          key="room"
-          :room-name="roomName"
-          :room-identifier="roomIdentifier"
-          :github-connected="Boolean(authStatus?.authenticated)"
-          :busy="busy"
-          @pick-repo="$emit('pick-repo')"
-          @join-room-code="$emit('join-room-code', $event)"
+        <McpInstallConfirmStep
+          v-else-if="mcpWizardStep === 'install'"
+          :targets="selectedMcpTargets"
         />
-      </Transition>
+
+        <McpInstallDoneStep v-else :targets="selectedMcpTargets" />
+      </div>
+
+      <FirstRunGithubStep
+        v-else-if="stage === 'github'"
+        :auth-status="authStatus"
+        :busy="authBusy"
+        @start-auth="$emit('start-auth')"
+        @open-verification="$emit('open-verification', $event)"
+        @poll-auth="$emit('poll-auth')"
+        @sign-out="$emit('sign-out')"
+      />
+
+      <FirstRunRoomStep
+        v-else
+        :room-name="roomName"
+        :room-identifier="roomIdentifier"
+        :github-connected="!!authStatus?.authenticated"
+        :busy="busy"
+        @pick-repo="$emit('pick-repo')"
+        @join-room-code="$emit('join-room-code', $event)"
+      />
 
       <div class="mcp-wizard-actions" data-testid="first-run-actions">
         <button
@@ -112,7 +108,7 @@
           v-else-if="stage === 'github'"
           class="primary-button"
           type="button"
-          :disabled="busy || !authStatus?.authenticated"
+          :disabled="busy"
           data-testid="first-run-to-room"
           @click="$emit('continue-to-room')"
         >
@@ -187,25 +183,26 @@ const selectedMcpTargets = computed(() => {
   return props.mcpState.targets.filter((target) => props.selectedMcpTargetIds.includes(target.id));
 });
 
+const selectedMcpTargetCount = computed(() => selectedMcpTargets.value.length);
+
 const selectedTargetLabel = computed(() => {
-  if (selectedMcpTargets.value.length === 1) return selectedMcpTargets.value[0]?.name || "your app";
-  if (selectedMcpTargets.value.length === props.mcpState.targets.length) return "all your apps";
-  return `${selectedMcpTargets.value.length} apps`;
+  if (selectedMcpTargetCount.value === 1) return selectedMcpTargets.value[0].name;
+  if (selectedMcpTargetCount.value === props.mcpState.targets.length) return "all your apps";
+  return `${selectedMcpTargetCount.value} apps`;
 });
 
 const installButtonLabel = computed(() => {
   if (props.busy) return "Installing...";
-  if (!selectedMcpTargets.value.length) return "Install LetAgents";
-  return selectedMcpTargets.value.length === 1
-    ? "Install LetAgents"
-    : `Install in ${selectedMcpTargets.value.length} apps`;
+  return selectedMcpTargetCount.value > 1
+    ? `Install in ${selectedMcpTargetCount.value} apps`
+    : "Install LetAgents";
 });
 
 const headline = computed(() => {
   if (props.stage === "github") return "Connect GitHub for private rooms.";
   if (props.stage === "room") return "Choose where agents should work.";
   if (props.mcpWizardStep === "install") return `Add LetAgents to ${selectedTargetLabel.value}.`;
-  if (props.mcpWizardStep === "done") return `${selectedTargetLabel.value} ${selectedMcpTargets.value.length === 1 ? "is" : "are"} ready.`;
+  if (props.mcpWizardStep === "done") return `${selectedTargetLabel.value} ${selectedMcpTargetCount.value === 1 ? "is" : "are"} ready.`;
   return "Bring your agent in.";
 });
 

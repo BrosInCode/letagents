@@ -40,18 +40,15 @@ interface DesktopSetupOnboardingOptions {
 
 export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions) {
   const showMcpInstaller = computed(() => {
-    if (!options.mcpInstallState.value) return false;
-    return options.activeEntry.value.id === setupEntry.id;
+    return Boolean(options.mcpInstallState.value) && options.activeEntry.value.id === setupEntry.id;
   });
 
   const showFirstRunGate = computed(() => {
-    return !options.mcpInstallState.value
-      || !options.mcpInstallState.value.completed
-      || !options.authStatus.value?.authenticated;
+    return !options.mcpInstallState.value?.completed;
   });
 
   const visibleMcpInstallState = computed<DesktopMcpInstallState>(() => {
-    return options.mcpInstallState.value || fallbackMcpInstallState;
+    return options.mcpInstallState.value ?? fallbackMcpInstallState;
   });
 
   const setupApiAvailable = computed(() => {
@@ -78,9 +75,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       options.mcpInstallState.value = nextMcpInstallState;
       options.authStatus.value = nextAuthStatus;
       await options.loadFirstRunRoomContext();
-      options.selectedMcpTargetIds.value = options.selectedMcpTargetIds.value.length
-        ? options.selectedMcpTargetIds.value
-        : defaultMcpTargetSelection(nextMcpInstallState);
+      if (!options.selectedMcpTargetIds.value.length) {
+        options.selectedMcpTargetIds.value = defaultMcpTargetSelection(nextMcpInstallState);
+      }
       options.firstRunStage.value = nextMcpInstallState.completed ? "github" : "mcp";
 
       if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
@@ -91,9 +88,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         ? `Setup could not load yet: ${error.message}. Restart the desktop window if this keeps happening.`
         : "Setup could not load yet. Restart the desktop window if this keeps happening.";
       options.mcpInstallState.value = fallbackMcpInstallState;
-      options.selectedMcpTargetIds.value = options.selectedMcpTargetIds.value.length
-        ? options.selectedMcpTargetIds.value
-        : defaultMcpTargetSelection(fallbackMcpInstallState);
+      if (!options.selectedMcpTargetIds.value.length) {
+        options.selectedMcpTargetIds.value = defaultMcpTargetSelection(fallbackMcpInstallState);
+      }
       options.firstRunStage.value = "mcp";
     } finally {
       options.loading.value = false;
@@ -127,10 +124,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpWizardStep.value = options.mcpWizardStep.value === "done" ? "install" : "choose";
   }
 
-  function selectedInstallCwd(): string | null {
-    return options.repoStatus.value?.rootPath?.trim() || null;
-  }
-
   async function pickRepoRoom(): Promise<boolean> {
     options.loading.value = true;
     options.mcpInstallFeedback.value = null;
@@ -147,12 +140,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         return false;
       }
       options.repoStatus.value = result.repoStatus;
-      const folderLabel = rootPathLabel(result.repoPath) || result.repoPath || "Selected project folder";
+      const repoPathLabel = rootPathLabel(result.repoPath);
+      const folderLabel = repoPathLabel || result.repoPath || "Selected project folder";
       options.openRoomSnapshot(result.snapshot, {
         displayName: folderLabel,
         kind: "project",
         rootPath: result.repoPath,
-        meta: result.repoStatus?.branch || rootPathLabel(result.repoPath) || result.source || null,
+        meta: result.repoStatus?.branch || repoPathLabel || result.source || null,
       });
       const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
       options.authFeedback.value = result.warning
@@ -229,9 +223,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       if (!window.letagentsDesktop?.setup) {
         throw new Error("Restart LetAgents Desktop so setup can install MCP automatically.");
       }
-      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds, {
-        cwd: selectedInstallCwd(),
-      });
+      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds);
       options.mcpInstallState.value = result.installState;
       options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
       options.mcpInstallFeedback.value = result.message;
@@ -245,7 +237,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     }
   }
 
-  async function completeMcpOnboarding(): Promise<void> {
+  function completeMcpOnboarding(): void {
     options.mcpInstallFeedback.value = null;
     options.setupLoadError.value = null;
     options.firstRunStage.value = "github";
@@ -269,15 +261,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     try {
       if (!window.letagentsDesktop?.setup) {
         throw new Error("Restart LetAgents Desktop so setup can finish.");
-      }
-      const targetIds = [...options.selectedMcpTargetIds.value];
-      const cwd = selectedInstallCwd();
-      if (targetIds.length && cwd) {
-        const result = await window.letagentsDesktop.setup.installMcpServers(targetIds, {
-          cwd,
-        });
-        options.mcpInstallState.value = result.installState;
-        options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
       }
       options.mcpInstallState.value = await window.letagentsDesktop.setup.completeMcpOnboarding();
       options.activeEntry.value = options.pinnedRoom.value;

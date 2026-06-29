@@ -15,7 +15,6 @@ import {
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { codexInstallCommand } from "./codex-install.js";
-import { agentProviderMcpInstallOptions } from "./provider-setup-options.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 
 type ExecResult = {
@@ -116,9 +115,8 @@ function firstOutputLine(result: ExecResult): string | null {
 
 async function getProviderMcpStatus(
   provider: DesktopAgentProvider,
-  input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopMcpInstallTarget["status"] | null> {
-  const state = await buildMcpInstallState(agentProviderMcpInstallOptions(input));
+  const state = await buildMcpInstallState();
   return state.targets.find((target) => target.id === provider.mcpTargetId)?.status ?? null;
 }
 
@@ -280,7 +278,7 @@ export async function runDesktopAgentProviderPreflight(
       mcpStatus: "installed",
     };
   }
-  const mcpStatus = await getProviderMcpStatus(provider, input);
+  const mcpStatus = await getProviderMcpStatus(provider);
 
   if (provider.id === "codex") {
     return codexPreflight(provider, input, mcpStatus);
@@ -333,7 +331,6 @@ export async function runDesktopAgentProviderSetup(
 
     const result = await installLetAgentsMcpServer(
       provider.mcpTargetId,
-      agentProviderMcpInstallOptions(input),
     );
     return {
       providerId,

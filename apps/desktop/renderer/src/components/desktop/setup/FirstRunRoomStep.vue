@@ -60,7 +60,7 @@
           <strong>{{ roomName }}</strong>
           <p>{{ roomIdentifier }}</p>
         </div>
-        <span>{{ roomReadyLabel }}</span>
+        <span>Ready to open</span>
       </article>
       <article v-else class="suggested-room-card suggested-room-card-empty" data-testid="suggested-room-empty">
         <p class="hero-kicker">No room selected yet</p>
@@ -103,10 +103,6 @@ const emit = defineEmits<{
 }>();
 
 const roomCode = ref("");
-
-const roomReadyLabel = computed(() => {
-  return props.roomIdentifier ? "Ready to open" : "Choose a room";
-});
 
 function submitRoomCode(): void {
   const value = roomCode.value.trim();

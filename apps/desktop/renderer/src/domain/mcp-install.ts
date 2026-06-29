@@ -48,5 +48,5 @@ export function defaultMcpTargetSelection(state: DesktopMcpInstallState): Deskto
   const installedTargets = state.targets.filter((target) => target.status === "installed").map((target) => target.id);
   if (installedTargets.length) return installedTargets;
   if (state.selectedTargetId) return [state.selectedTargetId];
-  return state.targets[0]?.id ? [state.targets[0].id] : [];
+  return state.targets[0] ? [state.targets[0].id] : [];
 }

@@ -22,12 +22,9 @@ type McpInstallStatus = DesktopMcpInstallTarget["status"];
 
 export function createLetAgentsMcpServerConfig(input: {
   apiUrl: string;
-  workspaceRoot: string;
   authToken?: string | null;
-  cwd?: string | null;
 }): LetAgentsMcpServerConfig {
   const token = input.authToken?.trim() || null;
-  const cwd = input.cwd?.trim() || input.workspaceRoot;
   const env: Record<string, string> = {
     LETAGENTS_API_URL: input.apiUrl,
   };
@@ -38,7 +35,6 @@ export function createLetAgentsMcpServerConfig(input: {
   return {
     command: "npx",
     args: ["-y", "letagents"],
-    cwd,
     env,
   };
 }
@@ -137,7 +133,7 @@ export function letAgentsMcpServerMatchesExpected(
   expected: LetAgentsMcpServerConfig,
 ): boolean {
   const env = isStringRecord(server.env) ? server.env : {};
-  const expectedEnv = isStringRecord(expected.env) ? expected.env : {};
+  const expectedEnv = expected.env || {};
   const expectedToken = expectedEnv.LETAGENTS_TOKEN?.trim() || null;
   const serverToken = env.LETAGENTS_TOKEN?.trim() || null;
 
@@ -186,25 +182,12 @@ export function getCodexTomlLetAgentsMcpInstallStatusFromRaw(
   raw: string,
   expected: LetAgentsMcpServerConfig,
 ): McpInstallStatus {
-  const serverBody = getTomlTableBody(raw, "mcp_servers.letagents");
-  if (!serverBody) return "not_installed";
+  const server = getCodexTomlLetAgentsMcpServerFromRaw(raw);
+  if (!server) return "not_installed";
 
-  const envBody = getTomlTableBody(raw, "mcp_servers.letagents.env");
-  const expectedEnv = isStringRecord(expected.env) ? expected.env : {};
-  const expectedToken = expectedEnv.LETAGENTS_TOKEN?.trim() || null;
-  const serverToken = getTomlStringValue(envBody || "", "LETAGENTS_TOKEN")?.trim()
-    || null;
-  const matchesExpected =
-    getTomlStringValue(serverBody, "command") === expected.command &&
-    JSON.stringify(getTomlStringArrayValue(serverBody, "args")) ===
-      JSON.stringify(expected.args) &&
-    getTomlStringValue(serverBody, "cwd") === expected.cwd &&
-    envBody !== null &&
-    getTomlStringValue(envBody, "LETAGENTS_API_URL") ===
-      expectedEnv.LETAGENTS_API_URL &&
-    (expectedToken ? serverToken === expectedToken : serverToken === null);
-
-  return matchesExpected ? "installed" : "needs_attention";
+  return letAgentsMcpServerMatchesExpected(server, expected)
+    ? "installed"
+    : "needs_attention";
 }
 
 export function buildCodexTomlLetAgentsMcpConfig(
@@ -215,9 +198,11 @@ export function buildCodexTomlLetAgentsMcpConfig(
     removeTomlTable(currentConfig, "mcp_servers.letagents.env"),
     "mcp_servers.letagents",
   ).trimEnd();
-  const expectedEnv = isStringRecord(expected.env) ? expected.env : {};
+  const expectedEnv = expected.env || {};
   const envEntries = Object.entries(expectedEnv)
-    .filter((entry) => entry[0] !== "LETAGENTS_API_URL" && entry[0] !== "LETAGENTS_TOKEN")
+    .filter(
+      ([key]) => key !== "LETAGENTS_API_URL" && key !== "LETAGENTS_TOKEN",
+    )
     .sort(([left], [right]) => left.localeCompare(right));
   const envLines = [
     ["LETAGENTS_API_URL", expectedEnv.LETAGENTS_API_URL || ""],
@@ -230,7 +215,7 @@ export function buildCodexTomlLetAgentsMcpConfig(
     "[mcp_servers.letagents]",
     `command = ${tomlString(expected.command || "npx")}`,
     `args = ${tomlStringArray(expected.args || ["-y", "letagents"])}`,
-    `cwd = ${tomlString(expected.cwd || "")}`,
+    ...(expected.cwd ? [`cwd = ${tomlString(expected.cwd)}`] : []),
     "",
     "[mcp_servers.letagents.env]",
     ...envLines.map(([key, value]) => `${key} = ${tomlString(value)}`),
