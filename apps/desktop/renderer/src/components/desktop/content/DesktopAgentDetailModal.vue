@@ -106,6 +106,41 @@
                   <small>{{ managedAgentSessionDisplayName(session) }}</small>
                 </div>
                 <p>{{ session.repoRootPath }}</p>
+                <div
+                  v-if="session.pendingPermissionRequests.length"
+                  class="desktop-agent-detail-permissions"
+                  data-testid="desktop-agent-detail-permissions"
+                >
+                  <article
+                    v-for="request in session.pendingPermissionRequests"
+                    :key="request.id"
+                    class="desktop-agent-detail-permission"
+                  >
+                    <span>Permission request</span>
+                    <strong>{{ request.title }}</strong>
+                    <p>{{ permissionRequestSummary(request) }}</p>
+                    <div class="desktop-agent-detail-permission-actions">
+                      <button
+                        type="button"
+                        class="desktop-agent-detail-permission-allow"
+                        :disabled="Boolean(resolvingPermissionIds[request.id])"
+                        @click="resolveManagedPermission(request, 'allow')"
+                      >
+                        <ShieldCheck :size="14" aria-hidden="true" />
+                        Allow
+                      </button>
+                      <button
+                        type="button"
+                        class="desktop-agent-detail-permission-deny"
+                        :disabled="Boolean(resolvingPermissionIds[request.id])"
+                        @click="resolveManagedPermission(request, 'deny')"
+                      >
+                        <Ban :size="14" aria-hidden="true" />
+                        Deny
+                      </button>
+                    </div>
+                  </article>
+                </div>
                 <div class="desktop-agent-detail-session-inspection">
                   <span>{{ inspectionStatusLabel(session.id) }}</span>
                   <button
@@ -177,9 +212,11 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Power, RefreshCw, Square, X } from "@lucide/vue";
+import { Ban, Power, RefreshCw, ShieldCheck, Square, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentPermissionDecisionBehavior,
+  DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopReasoningSession,
 } from "../../../../../electron/ipc-types";
@@ -229,6 +266,7 @@ const stopStatusMessage = ref<string | null>(null);
 const managedSessionError = ref<string | null>(null);
 const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectResult>>({});
 const inspectingSessionIds = ref<Record<string, boolean>>({});
+const resolvingPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let refreshTimer: number | null = null;
 let modalStateVersion = 0;
 let previousFocusElement: HTMLElement | null = null;
@@ -353,6 +391,7 @@ function clearTransientState(): void {
   managedSessionError.value = null;
   managedSessionInspections.value = {};
   inspectingSessionIds.value = {};
+  resolvingPermissionIds.value = {};
 }
 
 function resetTransientState(): void {
@@ -501,6 +540,40 @@ async function stopManagedSession(sessionId: string, stopMode: "turn" | "worker"
   }
 }
 
+async function resolveManagedPermission(
+  request: DesktopManagedAgentPermissionRequest,
+  behavior: DesktopManagedAgentPermissionDecisionBehavior,
+): Promise<void> {
+  if (resolvingPermissionIds.value[request.id]) return;
+  resolvingPermissionIds.value = {
+    ...resolvingPermissionIds.value,
+    [request.id]: behavior,
+  };
+  managedSessionError.value = null;
+  try {
+    const result = await window.letagentsDesktop.workers.resolveManagedAgentPermission({
+      requestId: request.id,
+      sessionId: request.sessionId,
+      behavior,
+      message: behavior === "deny" ? "Denied from LetAgents Desktop." : null,
+    });
+    if (result.session) {
+      managedSessions.value = [
+        result.session,
+        ...managedSessions.value.filter((session) => session.id !== result.session?.id),
+      ];
+    }
+    stopStatusMessage.value = result.message;
+  } catch (error) {
+    managedSessionError.value = error instanceof Error
+      ? error.message
+      : "Could not resolve this permission request.";
+  } finally {
+    const { [request.id]: _ignored, ...remaining } = resolvingPermissionIds.value;
+    resolvingPermissionIds.value = remaining;
+  }
+}
+
 function inspectionStatusLabel(sessionId: string): string {
   if (stoppingSessionId.value === sessionId) {
     return stoppingSessionMode.value === "worker"
@@ -533,6 +606,14 @@ function itemText(item: Record<string, unknown>): string {
   if (text) return text;
   const phase = typeof item.phase === "string" ? item.phase.trim() : "";
   return phase || "No text payload";
+}
+
+function permissionRequestSummary(request: DesktopManagedAgentPermissionRequest): string {
+  return [
+    request.toolName,
+    request.inputSummary,
+    request.description,
+  ].filter(Boolean).join(" - ") || "Tool approval required.";
 }
 
 function formatTimestamp(value: string | null | undefined): string {

@@ -15,6 +15,8 @@ import type {
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentPermissionDecisionInput,
+  DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -209,6 +211,9 @@ export interface DesktopApi {
       sessionId?: string | null,
       roomIdentifier?: string | null
     ) => Promise<DesktopManagedAgentInspectResult | null>;
+    resolveManagedAgentPermission: (
+      input: DesktopManagedAgentPermissionDecisionInput
+    ) => Promise<DesktopManagedAgentPermissionDecisionResult>;
     listAgentProviders: () => Promise<DesktopAgentProvider[]>;
     runAgentProviderPreflight: (
       providerId: DesktopAgentProviderId,

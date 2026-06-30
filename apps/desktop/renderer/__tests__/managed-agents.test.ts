@@ -87,6 +87,7 @@ function session(
     ideLabel: "Codex",
     reasoningSessionId: null,
     activeWork: null,
+    pendingPermissionRequests: [],
     startedAt: "2026-06-14T12:00:00.000Z",
     updatedAt: "2026-06-14T12:00:00.000Z",
     lastError: null,

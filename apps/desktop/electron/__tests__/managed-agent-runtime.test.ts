@@ -34,6 +34,7 @@ function session(providerId = "codex"): DesktopManagedAgentSession {
     ideLabel: "Codex",
     reasoningSessionId: null,
     activeWork: null,
+    pendingPermissionRequests: [],
     startedAt: "2026-06-30T00:00:00.000Z",
     updatedAt: "2026-06-30T00:00:00.000Z",
     lastError: null,

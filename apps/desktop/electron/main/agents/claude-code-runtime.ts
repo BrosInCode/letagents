@@ -6,6 +6,9 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentPermissionDecisionInput,
+  DesktopManagedAgentPermissionDecisionResult,
+  DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -13,6 +16,10 @@ import type {
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
+import type {
+  CanUseTool,
+  PermissionResult,
+} from "@anthropic-ai/claude-agent-sdk";
 import { buildRepoStatus } from "../../repo-status.js";
 import {
   looksLikeInviteCode,
@@ -22,8 +29,18 @@ import {
 } from "./codex-event-prompt.js";
 import { buildClaudeCodeDesktopEventPrompt } from "./claude-code-event-prompt.js";
 import {
+  buildManagedAgentPermissionRoomText,
+  createManagedAgentPermissionRequest,
+  DEFAULT_MANAGED_AGENT_PERMISSION_TIMEOUT_MS,
+  isAutoAllowedManagedAgentTool,
+  parseManagedAgentPermissionDecision,
+  removeManagedAgentPermissionRequest,
+  type ManagedAgentPermissionDecision,
+} from "./managed-agent-permissions.js";
+import {
   productionClaudeCodeRunner,
   type ClaudeCodeRunner,
+  isBlockedClaudeCodeTool,
 } from "./claude-code-runner.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
 import {
@@ -102,6 +119,17 @@ interface PublishClaudeCodeReplyInput {
   text: string | null;
 }
 
+interface PublishClaudeCodePermissionRequestInput {
+  session: DesktopClaudeCodeLiveSessionState;
+  event: ManagedRoomEvent;
+  storage: DesktopRoomStorageState;
+  request: DesktopManagedAgentPermissionRequest;
+}
+
+interface PublishClaudeCodePermissionRequestResult {
+  roomMessageId: string | null;
+}
+
 interface ClaudeCodeRuntimeDependencies {
   runner?: ClaudeCodeRunner;
   preflight?: (
@@ -111,13 +139,20 @@ interface ClaudeCodeRuntimeDependencies {
   registerWorker?: (input: RegisterClaudeCodeWorkerInput) => Promise<StoredAgentSessionState>;
   disconnectWorker?: (session: StoredAgentSessionState | null) => Promise<void>;
   publishReply?: (input: PublishClaudeCodeReplyInput) => Promise<void>;
+  publishPermissionRequest?: (
+    input: PublishClaudeCodePermissionRequestInput,
+  ) => Promise<PublishClaudeCodePermissionRequestResult>;
   resolveStorage?: (roomIdentifier: string) => Promise<DesktopRoomStorageState>;
   emitSessionUpdate?: (session: DesktopClaudeCodeLiveSessionState | null | undefined) => void;
+  permissionTimeoutMs?: number;
   now?: () => string;
 }
 
 export type DesktopClaudeCodeRuntime = DesktopManagedAgentRuntime & {
   waitForIdle(): Promise<void>;
+  resolvePermissionRequest(
+    input: DesktopManagedAgentPermissionDecisionInput,
+  ): Promise<DesktopManagedAgentPermissionDecisionResult>;
 };
 
 export function createDesktopClaudeCodeRuntime(
@@ -128,11 +163,16 @@ export function createDesktopClaudeCodeRuntime(
   const registerWorker = dependencies.registerWorker ?? registerDesktopManagedClaudeCodeWorker;
   const disconnectWorker = dependencies.disconnectWorker ?? disconnectDesktopManagedClaudeCodeWorker;
   const publishReply = dependencies.publishReply ?? publishDesktopManagedClaudeCodeReply;
+  const publishPermissionRequest =
+    dependencies.publishPermissionRequest ?? publishDesktopManagedClaudeCodePermissionRequest;
   const resolveStorage = dependencies.resolveStorage ?? resolveRoomStorageMode;
   const emitSessionUpdate = dependencies.emitSessionUpdate ?? emitClaudeCodeManagedAgentSessionUpdate;
+  const permissionTimeoutMs =
+    dependencies.permissionTimeoutMs ?? DEFAULT_MANAGED_AGENT_PERMISSION_TIMEOUT_MS;
   const now = dependencies.now ?? (() => new Date().toISOString());
   const queues = new Map<string, Promise<void>>();
   const activeTurns = new Map<string, ActiveClaudeCodeTurn>();
+  const pendingPermissionResolvers = new Map<string, (decision: ManagedAgentPermissionDecision) => void>();
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
     return listDesktopManagedClaudeCodeLiveSessions(roomIdentifier)
@@ -201,6 +241,7 @@ export function createDesktopClaudeCodeRuntime(
         type: "system",
         text: "Claude Code worker is registered and waiting for desktop-delivered room events.",
       }],
+      pending_permission_requests: [],
       started_at: startedAt,
       updated_at: startedAt,
     });
@@ -259,6 +300,9 @@ export function createDesktopClaudeCodeRuntime(
 
   function dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void {
     if (!isManagedRoomStreamEvent(event)) {
+      return;
+    }
+    if (consumePermissionDecisionEvent(event)) {
       return;
     }
 
@@ -320,6 +364,12 @@ export function createDesktopClaudeCodeRuntime(
         claudeSessionId: active.claude_session_id,
         claudeBin: active.claude_bin,
         abortController,
+        canUseTool: buildClaudeCodePermissionHandler({
+          sessionId,
+          event,
+          storage,
+          abortSignal: abortController.signal,
+        }),
       });
 
       const latest = getStoredClaudeCodeLiveSession(sessionId) ?? active;
@@ -364,6 +414,7 @@ export function createDesktopClaudeCodeRuntime(
         await stopAfterRoomStopPhrase(completed);
       }
     } finally {
+      clearPendingPermissionRequestsForSession(session.session_id);
       if (activeTurns.get(session.session_id) === activeTurn) {
         activeTurns.delete(session.session_id);
       }
@@ -429,6 +480,42 @@ export function createDesktopClaudeCodeRuntime(
     }
   }
 
+  async function resolvePermissionRequest(
+    input: DesktopManagedAgentPermissionDecisionInput,
+  ): Promise<DesktopManagedAgentPermissionDecisionResult> {
+    const requestId = input.requestId.trim();
+    if (!requestId) {
+      return {
+        requestId,
+        accepted: false,
+        message: "Permission request id is required.",
+        session: null,
+      };
+    }
+    const requestSession = findSessionWithPendingPermissionRequest(requestId, input.sessionId);
+    if (!requestSession) {
+      return {
+        requestId,
+        accepted: false,
+        message: "Permission request is no longer pending.",
+        session: null,
+      };
+    }
+    resolvePendingPermissionRequest({
+      requestId,
+      behavior: input.behavior,
+      message: input.message?.trim() || null,
+      source: "desktop",
+    });
+    const updated = getStoredClaudeCodeLiveSession(requestSession.session_id);
+    return {
+      requestId,
+      accepted: true,
+      message: input.behavior === "allow" ? "Permission allowed." : "Permission denied.",
+      session: updated ? toPublicClaudeCodeManagedAgentSession(updated) : null,
+    };
+  }
+
   return {
     providerId: "claude-code",
     listSessions,
@@ -437,7 +524,295 @@ export function createDesktopClaudeCodeRuntime(
     stop,
     dispatchRoomStreamEvent,
     waitForIdle,
+    resolvePermissionRequest,
   };
+
+  function buildClaudeCodePermissionHandler(input: {
+    sessionId: string;
+    event: ManagedRoomEvent;
+    storage: DesktopRoomStorageState;
+    abortSignal: AbortSignal;
+  }): CanUseTool {
+    return async (toolName, toolInput, options): Promise<PermissionResult> => {
+      if (isBlockedClaudeCodeTool(toolName)) {
+        return {
+          behavior: "deny",
+          message: "Managed Claude Code sessions may not call LetAgents room, rental, or provisioning tools.",
+          toolUseID: options.toolUseID,
+          decisionClassification: "user_reject",
+        };
+      }
+      if (isAutoAllowedManagedAgentTool(toolName)) {
+        return {
+          behavior: "allow",
+          toolUseID: options.toolUseID,
+        };
+      }
+      return await requestClaudeCodeToolPermission({
+        ...input,
+        toolName,
+        toolInput,
+        toolUseId: options.toolUseID,
+        title: options.title,
+        displayName: options.displayName,
+        description: options.description,
+        decisionReason: options.decisionReason,
+        permissionSignal: options.signal,
+      });
+    };
+  }
+
+  async function requestClaudeCodeToolPermission(input: {
+    sessionId: string;
+    event: ManagedRoomEvent;
+    storage: DesktopRoomStorageState;
+    abortSignal: AbortSignal;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    toolUseId: string;
+    title?: string;
+    displayName?: string;
+    description?: string;
+    decisionReason?: string;
+    permissionSignal: AbortSignal;
+  }): Promise<PermissionResult> {
+    const session = getStoredClaudeCodeLiveSession(input.sessionId);
+    if (!session) {
+      return {
+        behavior: "deny",
+        message: "Claude Code session is no longer available.",
+        toolUseID: input.toolUseId,
+        decisionClassification: "user_reject",
+      };
+    }
+    const request = createManagedAgentPermissionRequest({
+      providerId: "claude-code",
+      sessionId: session.session_id,
+      toolName: input.toolName,
+      toolInput: input.toolInput,
+      toolUseId: input.toolUseId,
+      title: input.title,
+      displayName: input.displayName,
+      description: input.description,
+      decisionReason: input.decisionReason,
+      requestedAt: now(),
+    });
+    const published = addPendingPermissionRequest(session.session_id, request);
+    if (published) {
+      emitSessionUpdate(published);
+    }
+
+    try {
+      const roomRequest = await publishPermissionRequest({
+        session: published ?? session,
+        event: input.event,
+        storage: input.storage,
+        request,
+      });
+      if (roomRequest.roomMessageId) {
+        const withRoomMessage = updateClaudeCodeLiveSession(session.session_id, (current) => ({
+          ...current,
+          pending_permission_requests: (current.pending_permission_requests ?? []).map((candidate) =>
+            candidate.id === request.id
+              ? { ...candidate, roomMessageId: roomRequest.roomMessageId }
+              : candidate
+          ),
+          updated_at: now(),
+        }));
+        emitSessionUpdate(withRoomMessage);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
+        ...current,
+        recent_items: appendRecentItem(current.recent_items, {
+          type: "permission_request",
+          status: "room_publish_failed",
+          requestId: request.id,
+          toolName: request.toolName,
+          error: detail,
+        }),
+        updated_at: now(),
+      }));
+      emitSessionUpdate(updated);
+    }
+
+    const decision = await waitForPermissionDecision({
+      request,
+      abortSignal: input.abortSignal,
+      permissionSignal: input.permissionSignal,
+    });
+    const cleared = removePendingPermissionRequest(session.session_id, request.id, decision);
+    emitSessionUpdate(cleared);
+
+    if (decision.behavior === "allow") {
+      return {
+        behavior: "allow",
+        toolUseID: input.toolUseId,
+        decisionClassification: "user_temporary",
+      };
+    }
+    return {
+      behavior: "deny",
+      message: decision.message ||
+        (decision.source === "system"
+          ? "Permission request was cancelled."
+          : "Permission denied by LetAgents Desktop."),
+      interrupt: decision.source === "system",
+      toolUseID: input.toolUseId,
+      decisionClassification: decision.source === "system" ? "user_reject" : "user_reject",
+    };
+  }
+
+  function consumePermissionDecisionEvent(event: ManagedRoomEvent): boolean {
+    if (event.type !== "message") {
+      return false;
+    }
+    if (event.message.source === "agent") {
+      return false;
+    }
+    const pendingRequests = listDesktopManagedClaudeCodeLiveSessions(event.roomIdentifier)
+      .flatMap((session) => session.pending_permission_requests ?? []);
+    const decision = parseManagedAgentPermissionDecision({
+      text: event.message.text,
+      pendingRequests,
+      replyToMessageId: event.message.replyTo?.id ?? null,
+    });
+    if (!decision) {
+      return false;
+    }
+    resolvePendingPermissionRequest(decision);
+    return true;
+  }
+
+  function waitForPermissionDecision(input: {
+    request: DesktopManagedAgentPermissionRequest;
+    abortSignal: AbortSignal;
+    permissionSignal: AbortSignal;
+  }): Promise<ManagedAgentPermissionDecision> {
+    if (input.abortSignal.aborted || input.permissionSignal.aborted) {
+      return Promise.resolve({
+        requestId: input.request.id,
+        behavior: "deny",
+        message: "Permission request was interrupted.",
+        source: "system",
+      });
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (decision: ManagedAgentPermissionDecision): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        pendingPermissionResolvers.delete(input.request.id);
+        clearTimeout(timeoutId);
+        input.abortSignal.removeEventListener("abort", abortListener);
+        input.permissionSignal.removeEventListener("abort", abortListener);
+        resolve(decision);
+      };
+      const abortListener = (): void => {
+        finish({
+          requestId: input.request.id,
+          behavior: "deny",
+          message: "Permission request was interrupted.",
+          source: "system",
+        });
+      };
+      const timeoutId = setTimeout(() => {
+        finish({
+          requestId: input.request.id,
+          behavior: "deny",
+          message: "Permission request timed out.",
+          source: "system",
+        });
+      }, permissionTimeoutMs);
+      pendingPermissionResolvers.set(input.request.id, finish);
+      input.abortSignal.addEventListener("abort", abortListener, { once: true });
+      input.permissionSignal.addEventListener("abort", abortListener, { once: true });
+    });
+  }
+
+  function resolvePendingPermissionRequest(decision: ManagedAgentPermissionDecision): void {
+    pendingPermissionResolvers.get(decision.requestId)?.(decision);
+  }
+
+  function findSessionWithPendingPermissionRequest(
+    requestId: string,
+    sessionId?: string | null,
+  ): DesktopClaudeCodeLiveSessionState | null {
+    const sessions = listDesktopManagedClaudeCodeLiveSessions();
+    return sessions.find((session) =>
+      (!sessionId || session.session_id === sessionId) &&
+      (session.pending_permission_requests ?? []).some((request) => request.id === requestId)
+    ) ?? null;
+  }
+
+  function addPendingPermissionRequest(
+    sessionId: string,
+    request: DesktopManagedAgentPermissionRequest,
+  ): DesktopClaudeCodeLiveSessionState | null {
+    return updateClaudeCodeLiveSession(sessionId, (current) => ({
+      ...current,
+      active_work: current.active_work
+        ? {
+          ...current.active_work,
+          summary: `Waiting for permission to use ${request.toolName}.`,
+        }
+        : current.active_work,
+      pending_permission_requests: [
+        ...(current.pending_permission_requests ?? []).filter((candidate) => candidate.id !== request.id),
+        request,
+      ],
+      recent_items: appendRecentItem(current.recent_items, {
+        type: "permission_request",
+        status: "pending",
+        requestId: request.id,
+        toolName: request.toolName,
+        title: request.title,
+      }),
+      updated_at: now(),
+    }));
+  }
+
+  function removePendingPermissionRequest(
+    sessionId: string,
+    requestId: string,
+    decision: ManagedAgentPermissionDecision,
+  ): DesktopClaudeCodeLiveSessionState | null {
+    return updateClaudeCodeLiveSession(sessionId, (current) => ({
+      ...current,
+      pending_permission_requests: removeManagedAgentPermissionRequest(
+        current.pending_permission_requests,
+        requestId,
+      ),
+      recent_items: appendRecentItem(current.recent_items, {
+        type: "permission_decision",
+        status: decision.behavior,
+        source: decision.source,
+        requestId,
+      }),
+      updated_at: now(),
+    }));
+  }
+
+  function clearPendingPermissionRequestsForSession(sessionId: string): void {
+    for (const request of getStoredClaudeCodeLiveSession(sessionId)?.pending_permission_requests ?? []) {
+      resolvePendingPermissionRequest({
+        requestId: request.id,
+        behavior: "deny",
+        message: "Permission request ended with the turn.",
+        source: "system",
+      });
+    }
+    const cleared = updateClaudeCodeLiveSession(sessionId, (current) => ({
+      ...current,
+      pending_permission_requests: [],
+      updated_at: now(),
+    }));
+    emitSessionUpdate(cleared);
+  }
 }
 
 function isManagedRoomStreamEvent(event: DesktopRoomStreamEvent): event is ManagedRoomEvent {
@@ -593,6 +968,55 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
       }),
     },
   );
+}
+
+async function publishDesktopManagedClaudeCodePermissionRequest(
+  input: PublishClaudeCodePermissionRequestInput,
+): Promise<PublishClaudeCodePermissionRequestResult> {
+  const workerSession = getStoredAgentSession(input.session.agent_session_id);
+  if (!workerSession?.session_id || !workerSession.session_token) {
+    return { roomMessageId: null };
+  }
+
+  const roomIdentifier = input.session.room_identifier || input.session.room_id;
+  const text = buildManagedAgentPermissionRoomText({
+    request: input.request,
+    agentDisplayName: input.session.display_name,
+  });
+  const localReply = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier,
+    storage: input.storage,
+    workerSession,
+    replyTo: null,
+    text,
+  });
+  if (localReply) {
+    const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
+    emitPersistedLocalRoomMessage(roomIdentifier, localReply);
+    return { roomMessageId: localReply.id };
+  }
+
+  const { apiFetch } = await import("../auth.js");
+  const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
+  const created = await apiFetch<{ id?: unknown }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-LetAgents-Desktop-Client": "1",
+      },
+      body: JSON.stringify({
+        text,
+        agent_session_id: workerSession.session_id,
+        agent_session_token: workerSession.session_token,
+      }),
+    },
+  );
+  return {
+    roomMessageId: typeof created.id === "string" ? created.id : null,
+  };
 }
 
 async function registerDesktopManagedClaudeCodeWorker(
@@ -895,4 +1319,12 @@ function specificAgentKey(value: string | null | undefined): string {
     return "";
   }
   return normalized;
+}
+
+function appendRecentItem(
+  items: Array<Record<string, unknown>> | null | undefined,
+  item: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  const next = [...(items ?? []), item];
+  return next.slice(Math.max(0, next.length - 12));
 }

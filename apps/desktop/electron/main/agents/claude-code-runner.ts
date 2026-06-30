@@ -1,8 +1,10 @@
 import {
   query,
+  type CanUseTool,
   type HookCallback,
   type HookJSONOutput,
   type Options,
+  type PermissionResult,
   type PreToolUseHookInput,
   type Query,
   type SDKAssistantMessage,
@@ -17,6 +19,7 @@ export interface ClaudeCodeTurnInput {
   claudeSessionId?: string | null;
   claudeBin?: string | null;
   abortController?: AbortController;
+  canUseTool?: CanUseTool;
 }
 
 export interface ClaudeCodeTurnResult {
@@ -146,6 +149,7 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
     strictMcpConfig: true,
     mcpServers: {},
     disallowedTools: [...CLAUDE_CODE_BLOCKED_TOOL_NAMES],
+    canUseTool: input.canUseTool ?? claudeCodeDefaultCanUseTool,
     hooks: {
       PreToolUse: [{
         hooks: [claudeCodePreToolUseGuard],
@@ -157,6 +161,16 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
     },
   };
 }
+
+export const CLAUDE_CODE_AUTO_ALLOWED_TOOL_NAMES = [
+  "Glob",
+  "Grep",
+  "LS",
+  "NotebookRead",
+  "Read",
+  "TodoRead",
+  "TodoWrite",
+] as const;
 
 export function isBlockedClaudeCodeTool(toolName: string | null | undefined): boolean {
   const normalized = normalizeToolName(toolName);
@@ -171,6 +185,40 @@ export function isBlockedClaudeCodeTool(toolName: string | null | undefined): bo
     tail === blocked || normalized === blocked
   );
 }
+
+export function isAutoAllowedClaudeCodeTool(toolName: string | null | undefined): boolean {
+  const tail = normalizeToolName(toolName).split("__").pop() ?? "";
+  return CLAUDE_CODE_AUTO_ALLOWED_TOOL_NAMES.some((allowed) =>
+    tail === allowed.toLowerCase() || normalizeToolName(allowed) === tail
+  );
+}
+
+export const claudeCodeDefaultCanUseTool: CanUseTool = async (
+  toolName,
+  _input,
+  options,
+): Promise<PermissionResult> => {
+  if (isBlockedClaudeCodeTool(toolName)) {
+    return {
+      behavior: "deny",
+      message: "Managed Claude Code sessions may not call LetAgents room, rental, or provisioning tools.",
+      toolUseID: options.toolUseID,
+      decisionClassification: "user_reject",
+    };
+  }
+  if (isAutoAllowedClaudeCodeTool(toolName)) {
+    return {
+      behavior: "allow",
+      toolUseID: options.toolUseID,
+    };
+  }
+  return {
+    behavior: "deny",
+    message: "Managed Claude Code needs a LetAgents Desktop approval before using this tool, but no approval bridge is available.",
+    toolUseID: options.toolUseID,
+    decisionClassification: "user_reject",
+  };
+};
 
 export const claudeCodePreToolUseGuard: HookCallback = async (
   input,

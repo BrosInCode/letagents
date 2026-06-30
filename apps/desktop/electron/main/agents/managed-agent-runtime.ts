@@ -1,6 +1,8 @@
 import type {
   DesktopManagedAgentInspectResult,
   DesktopAgentProviderId,
+  DesktopManagedAgentPermissionDecisionInput,
+  DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -18,6 +20,9 @@ export interface DesktopManagedAgentRuntime {
   ): Promise<DesktopManagedAgentInspectResult | null>;
   stop(input?: DesktopManagedAgentStopInput): Promise<DesktopManagedAgentSession | null>;
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void;
+  resolvePermissionRequest?(
+    input: DesktopManagedAgentPermissionDecisionInput,
+  ): Promise<DesktopManagedAgentPermissionDecisionResult>;
 }
 
 export class DesktopManagedAgentRuntimeRegistry {
@@ -71,6 +76,26 @@ export class DesktopManagedAgentRuntimeRegistry {
       }
     }
     return null;
+  }
+
+  async resolvePermissionRequest(
+    input: DesktopManagedAgentPermissionDecisionInput,
+  ): Promise<DesktopManagedAgentPermissionDecisionResult> {
+    for (const runtime of this.list()) {
+      if (!runtime.resolvePermissionRequest) {
+        continue;
+      }
+      const result = await runtime.resolvePermissionRequest(input);
+      if (result.accepted || result.session) {
+        return result;
+      }
+    }
+    return {
+      requestId: input.requestId,
+      accepted: false,
+      message: "Permission request is no longer pending.",
+      session: null,
+    };
   }
 
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void {

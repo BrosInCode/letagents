@@ -88,6 +88,36 @@ export interface DesktopManagedAgentActiveWork {
   summary: string | null;
 }
 
+export type DesktopManagedAgentPermissionDecisionBehavior = "allow" | "deny";
+
+export interface DesktopManagedAgentPermissionRequest {
+  id: string;
+  providerId: DesktopAgentProviderId;
+  sessionId: string;
+  toolName: string;
+  toolUseId: string | null;
+  title: string;
+  description: string | null;
+  inputSummary: string | null;
+  decisionReason: string | null;
+  roomMessageId: string | null;
+  requestedAt: string;
+}
+
+export interface DesktopManagedAgentPermissionDecisionInput {
+  requestId: string;
+  sessionId?: string | null;
+  behavior: DesktopManagedAgentPermissionDecisionBehavior;
+  message?: string | null;
+}
+
+export interface DesktopManagedAgentPermissionDecisionResult {
+  requestId: string;
+  accepted: boolean;
+  message: string;
+  session: DesktopManagedAgentSession | null;
+}
+
 export interface DesktopManagedAgentSession {
   id: string;
   providerId: DesktopAgentProviderId;
@@ -107,6 +137,7 @@ export interface DesktopManagedAgentSession {
   ideLabel: string | null;
   reasoningSessionId: string | null;
   activeWork: DesktopManagedAgentActiveWork | null;
+  pendingPermissionRequests: DesktopManagedAgentPermissionRequest[];
   startedAt: string;
   updatedAt: string;
   lastError: string | null;

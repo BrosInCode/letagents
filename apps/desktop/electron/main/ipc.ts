@@ -15,6 +15,8 @@ import type {
   DesktopAppAgentSaveSettingsInput,
   DesktopAppAgentSettingsStatus,
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentPermissionDecisionInput,
+  DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -106,6 +108,7 @@ import {
 import {
   inspectDesktopManagedAgentSession,
   listDesktopManagedAgentSessions,
+  resolveDesktopManagedAgentPermissionRequest,
   startDesktopManagedAgent,
   stopDesktopManagedAgent,
 } from "./agents/codex-supervisor.js";
@@ -710,6 +713,14 @@ export function registerDesktopIpcHandlers(
       roomIdentifier?: string | null,
     ): Promise<DesktopManagedAgentInspectResult | null> =>
       inspectDesktopManagedAgentSession(sessionId ?? null, roomIdentifier ?? null),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:resolve-managed-agent-permission",
+    async (
+      _event,
+      input: DesktopManagedAgentPermissionDecisionInput,
+    ): Promise<DesktopManagedAgentPermissionDecisionResult> =>
+      resolveDesktopManagedAgentPermissionRequest(input),
   );
   targetIpcMain.handle(
     "desktop:workers:list-agent-providers",
