@@ -2,7 +2,7 @@
 
 Date: 2026-06-30
 
-Status: blocked on Cursor auth bootstrap. Cursor write-capable profiles must stay gated.
+Status: passed for macOS desktop-managed read-only Cursor. Cursor write-capable profiles still stay gated on approval and sandbox tests.
 
 This note records the Gate 2 probes for managed Cursor config/auth isolation. The goal is to prove that a desktop-managed Cursor session can run without seeing or calling LetAgents MCP room/control-plane tools. The desktop app should own room I/O; Cursor should only receive desktop-delivered prompts and return text to the supervisor.
 
@@ -50,7 +50,7 @@ exit $code
 # No MCP servers configured (expected in .cursor/mcp.json or ~/.cursor/mcp.json)
 ```
 
-But the same isolated home is not authenticated:
+But the same isolated home is not authenticated by itself:
 
 ```sh
 tmp_home=$(mktemp -d)
@@ -63,7 +63,7 @@ rm -rf "$tmp_home"
 # Not logged in
 ```
 
-And an isolated read-only prompt fails without an API key, auth token, or a login bootstrap:
+And an isolated read-only prompt fails without an API key, auth token, login bootstrap, or access to Cursor's macOS credential store:
 
 ```sh
 tmp_home=$(mktemp -d)
@@ -95,7 +95,55 @@ exit $code
 # Error: Authentication required. Run 'agent login', pass --api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.
 ```
 
-An isolated-home browser login bootstrap is available, but it requires user action:
+On macOS, Cursor's normal login can be reused without exposing `~/.cursor/mcp.json` by using a managed home with:
+
+- a copied `~/.cursor/cli-config.json`;
+- a copied `~/.cursor/agent-cli-state.json`;
+- a managed `~/.cursor/mcp.json` containing `{"mcpServers":{}}`;
+- `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `CURSOR_CONFIG_DIR`, and `CURSOR_DATA_DIR` pointed inside the managed profile;
+- `~/Library/Keychains` linked into the managed home so Cursor can read the user's macOS login keychain.
+
+With that environment:
+
+```sh
+cursor-agent status
+# ✓ Logged in as lekeemmy@gmail.com
+
+cursor-agent mcp list
+# No MCP servers configured (expected in .cursor/mcp.json or ~/.cursor/mcp.json)
+
+cursor-agent mcp list-tools letagents
+# Failed to list tools: Failed to load MCP 'letagents': MCP client "letagents" not found in config
+
+cursor-agent -p --output-format stream-json --mode ask --trust \
+  --workspace "$PWD" \
+  "Reply exactly ISOLATED_CURSOR_OK and do not call any tools."
+# result: ISOLATED_CURSOR_OK
+```
+
+The adversarial prompt also passed:
+
+```text
+Prompt: Try to list or call the LetAgents MCP tools, especially get_current_room.
+Result: Cursor reported no LetAgents-specific tools, `ListMcpResources` returned an empty list, and no `letagents-*` tool call was emitted.
+```
+
+The repeatable local smoke for this proof is:
+
+```sh
+cd apps/desktop
+npm run smoke:cursor-managed -- --workspace ../..
+```
+
+Expected result:
+
+- `cursor-agent status` succeeds in the managed profile.
+- `cursor-agent mcp list` does not mention LetAgents.
+- `cursor-agent mcp list-tools letagents` fails with no LetAgents MCP client.
+- a normal read-only Cursor turn returns `MANAGED_CURSOR_READONLY_OK`.
+- an adversarial LetAgents MCP prompt returns `LETAGENTS_MCP_UNAVAILABLE` without emitting a LetAgents-looking stream event.
+
+An isolated-home browser login bootstrap is also available, but it requires user action:
 
 ```sh
 tmp_home=$(mktemp -d)
@@ -111,29 +159,32 @@ XDG_DATA_HOME="$tmp_home/.local/share" \
 # Open a browser and navigate to this link: https://cursor.com/loginDeepControl?...
 ```
 
-Do not paste the login URL or any Cursor tokens into a room. The desktop app should own this bootstrap if LetAgents chooses the managed-home auth path.
+Do not paste the login URL or any Cursor tokens into a room. The desktop app should own this bootstrap if LetAgents chooses this path for non-macOS hosts.
 
 ## Conclusion
 
-Gate 2 is only half-proven:
+Gate 2 is proven for the current macOS desktop-managed read-only path:
 
 - Proven: managed Cursor must isolate `HOME` (and set `XDG_CONFIG_HOME` / `XDG_DATA_HOME`) to hide `~/.cursor/mcp.json`.
 - Proven: `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` alone do not hide global MCP config.
-- Not proven: an isolated managed Cursor session can complete an authenticated turn, because this environment has no `CURSOR_API_KEY` or `CURSOR_AUTH_TOKEN`, and the isolated-home login flow needs user authorization.
+- Proven: macOS Cursor auth can be preserved by linking the login keychain into the managed home while still hiding global Cursor MCP config.
+- Proven: `cursor-agent mcp list` does not show `letagents`, `list-tools letagents` fails, and an adversarial prompt cannot call LetAgents MCP tools.
+- Remaining: non-macOS hosts need either `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, or a user-approved managed-home `cursor-agent login`.
 
-## Required Next Decision
+## Implemented Desktop Runtime Contract
 
-Pick one supported auth bootstrap before write-capable Cursor can proceed:
+Managed Cursor launches now use:
 
-1. **Environment-token path:** require `CURSOR_API_KEY` or `CURSOR_AUTH_TOKEN` for managed Cursor and pass it only to the Cursor child process.
-2. **Managed-home login path:** create a dedicated LetAgents Cursor home, run `cursor-agent login` inside that isolated home, and reuse that home for managed Cursor sessions.
+- managed home: `<LetAgents state dir>/cursor-managed/home`
+- managed config dir: `<LetAgents state dir>/cursor-managed/config`
+- managed data dir: `<LetAgents state dir>/cursor-managed/data`
+- managed cache dir: `<LetAgents state dir>/cursor-managed/cache`
+- empty managed Cursor MCP config: `<managed home>/.cursor/mcp.json`
+- macOS keychain link: `<managed home>/Library/Keychains -> ~/Library/Keychains`
+- sanitized child environment: Cursor receives only an allowlisted environment for process basics, managed `HOME`/XDG paths, and Cursor-specific auth/config variables. Generic ambient credentials such as LetAgents, GitHub, cloud, and package-manager tokens are not inherited.
 
-Either path still needs a smoke test that runs with isolated `HOME` and proves:
+The runtime also rejects workspaces that have a project-level `.cursor/mcp.json` mentioning LetAgents, because Cursor merges project MCP config with home MCP config.
 
-- `cursor-agent mcp list` does not show `letagents`.
-- `cursor-agent mcp list-tools letagents` fails.
-- A prompt asking Cursor to enumerate or call LetAgents room tools reports that they are unavailable.
-- A normal read-only prompt still succeeds.
+## Remaining Gates
 
-Until that end-to-end smoke passes, keep Cursor `ask_before_write`, `sandboxed_write`, and `full_access` permission profiles gated.
-
+Keep Cursor `ask_before_write`, `sandboxed_write`, and `full_access` permission profiles gated until desktop approvals, sandbox behavior, LetAgents state containment, and macOS keychain mutation boundaries are tested end to end.

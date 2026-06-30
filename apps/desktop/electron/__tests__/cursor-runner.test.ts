@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   applyCursorStreamEvent,
+  buildCursorChildEnv,
   buildCursorAgentArgs,
   runCursorTurn,
   type CursorStreamState,
@@ -94,6 +95,57 @@ test("Cursor runner parses a successful stream-json turn", async () => {
     result.recentItems.map((item) => item.type),
     ["system", "assistant", "result"],
   );
+});
+
+test("Cursor runner child env is allowlisted and applies managed overrides", () => {
+  const previousValues = new Map<string, string | undefined>();
+  for (const key of [
+    "AWS_ACCESS_KEY_ID",
+    "CURSOR_AUTH_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "LETAGENTS_API_URL",
+    "LETAGENTS_TOKEN",
+    "NPM_TOKEN",
+    "PATH",
+  ]) {
+    previousValues.set(key, process.env[key]);
+  }
+  process.env.AWS_ACCESS_KEY_ID = "aws-secret";
+  process.env.CURSOR_AUTH_TOKEN = "cursor-secret";
+  process.env.GH_TOKEN = "gh-secret";
+  process.env.GITHUB_TOKEN = "github-secret";
+  process.env.LETAGENTS_TOKEN = "letagents-secret";
+  process.env.LETAGENTS_API_URL = "https://letagents.example";
+  process.env.NPM_TOKEN = "npm-secret";
+  process.env.PATH = "/tmp/safe-path";
+  try {
+    const env = buildCursorChildEnv({
+      GH_TOKEN: "override-gh-secret",
+      HOME: "/tmp/managed-cursor-home",
+      CURSOR_CONFIG_DIR: "/tmp/managed-cursor-config",
+      LETAGENTS_TOKEN: "override-letagents-secret",
+    });
+
+    assert.equal(env.HOME, "/tmp/managed-cursor-home");
+    assert.equal(env.CURSOR_CONFIG_DIR, "/tmp/managed-cursor-config");
+    assert.equal(env.CURSOR_AUTH_TOKEN, "cursor-secret");
+    assert.equal(env.PATH, "/tmp/safe-path");
+    assert.equal(env.AWS_ACCESS_KEY_ID, undefined);
+    assert.equal(env.GH_TOKEN, undefined);
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.LETAGENTS_TOKEN, undefined);
+    assert.equal(env.LETAGENTS_API_URL, undefined);
+    assert.equal(env.NPM_TOKEN, undefined);
+  } finally {
+    for (const [key, value] of previousValues) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 });
 
 test("Cursor tool-call failure summary does not fail a successful turn", async () => {
