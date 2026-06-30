@@ -37,8 +37,12 @@ import { suggestLetAgentsCodename } from "./codenames.js";
 import {
   canDeliverDesktopEventToSession,
   isStopPhraseRoomStreamEvent,
-  shouldDeliverRoomStreamEventToSession,
 } from "./codex-event-routing.js";
+import {
+  isManagedRoomStreamEvent,
+  listDeliverableCodexSessionsForRoomStreamEvent,
+  type ManagedRoomEvent,
+} from "./codex-managed-agent-dispatch.js";
 import {
   buildDesktopEventPrompt,
   desktopEventPublicReplyText,
@@ -85,6 +89,7 @@ import {
   summarizeItems,
 } from "./codex-session-status.js";
 import { runDesktopAgentProviderPreflight } from "./providers.js";
+import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
 import {
   bindCodexLiveSessionToWorker,
@@ -123,11 +128,17 @@ const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const desktopEventQueues = new Map<string, Promise<void>>();
 const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
+const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
   "Codex did not get a LetAgents room worker identity. Sign into LetAgents Desktop, then try starting the agent again.";
 
-type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
+desktopManagedAgentRuntimes.register({
+  providerId: "codex",
+  listSessions: listDesktopManagedCodexAgentSessions,
+  start: startDesktopManagedCodexAgent,
+  dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
+});
 
 type AgentIdentityCreateResponse = {
   name?: string;
@@ -911,7 +922,7 @@ async function waitForWorkerStartup(
   throw new Error(failed.last_error ?? CODEX_WORKER_REGISTRATION_ERROR);
 }
 
-export function listDesktopManagedAgentSessions(
+function listDesktopManagedCodexAgentSessions(
   roomIdentifier?: string | null,
 ): DesktopManagedAgentSession[] {
   return listDesktopManagedCodexLiveSessions(roomIdentifier)
@@ -919,13 +930,15 @@ export function listDesktopManagedAgentSessions(
     .map(toPublicManagedAgentSession);
 }
 
-export async function startDesktopManagedAgent(
+export function listDesktopManagedAgentSessions(
+  roomIdentifier?: string | null,
+): DesktopManagedAgentSession[] {
+  return desktopManagedAgentRuntimes.listSessions(roomIdentifier);
+}
+
+async function startDesktopManagedCodexAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
-  if (input.providerId !== "codex") {
-    throw new Error("Only Codex can be started by the desktop supervisor in this version.");
-  }
-
   const roomIdentifier = normalizeRoomIdentifier(input.roomIdentifier);
   const repoRootPath = input.repoRootPath?.trim();
   if (!repoRootPath) {
@@ -1085,6 +1098,12 @@ export async function startDesktopManagedAgent(
   }
 }
 
+export function startDesktopManagedAgent(
+  input: DesktopManagedAgentStartInput,
+): Promise<DesktopManagedAgentStartResult> {
+  return desktopManagedAgentRuntimes.start(input);
+}
+
 export async function inspectDesktopManagedAgentSession(
   sessionId?: string | null,
   roomIdentifier?: string | null,
@@ -1196,18 +1215,20 @@ export async function inspectDesktopManagedAgentSession(
   }
 }
 
-export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamEvent): void {
-  if (event.type !== "message" && event.type !== "task_update") {
+function dispatchRoomStreamEventToCodexManagedAgents(event: DesktopRoomStreamEvent): void {
+  if (!isManagedRoomStreamEvent(event)) {
     return;
   }
 
-  const sessions = listDesktopManagedCodexLiveSessions(event.roomIdentifier)
-    .map((session) => bindCodexLiveSessionToWorker(session))
-    .filter((session) => shouldDeliverRoomStreamEventToSession(session, event));
+  const sessions = listDeliverableCodexSessionsForRoomStreamEvent(event);
 
   for (const session of sessions) {
     enqueueDesktopEventTurn(session, event);
   }
+}
+
+export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamEvent): void {
+  desktopManagedAgentRuntimes.dispatchRoomStreamEvent(event);
 }
 
 function enqueueDesktopEventTurn(

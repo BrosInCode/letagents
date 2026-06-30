@@ -82,6 +82,10 @@ const {
   addLocalChatMessage,
   getLocalChatMessages,
 } = await import("../main/rooms/messages/local-store.js");
+const {
+  isManagedRoomStreamEvent,
+  listDeliverableCodexSessionsForRoomStreamEvent,
+} = await import("../main/agents/codex-managed-agent-dispatch.js");
 
 import type { DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
 import type {
@@ -155,6 +159,31 @@ function taskSummary(
   };
 }
 
+function messageEvent(
+  overrides: Partial<Extract<DesktopRoomStreamEvent, { type: "message" }>> = {},
+): Extract<DesktopRoomStreamEvent, { type: "message" }> {
+  return {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_1",
+      sender: "EmmyMay",
+      text: "please check this",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-14T12:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_1",
+      threadReplyToId: null,
+      thread: null,
+      replyTo: null,
+    },
+    ...overrides,
+  };
+}
+
 function managedWorkerSession(
   overrides: Partial<StoredAgentSessionState> = {},
 ): StoredAgentSessionState {
@@ -216,6 +245,67 @@ test("desktop Codex runtime reasoning hides raw app-server reasoning text", () =
   assert.equal(summary.summary, "Codex raw reasoning text is streaming.");
   assert.doesNotMatch(summary.checking, /private raw reasoning/);
   assert.doesNotMatch(summary.next_action, /private raw reasoning/);
+});
+
+test("desktop Codex dispatch selects only deliverable sessions for room events", () => {
+  resetState({
+    agent_sessions: {
+      worker_deliverable: managedWorkerSession({
+        session_id: "worker_deliverable",
+        room_id: "room_1",
+        runtime: "codex:LOCAL_CODEX_ROOM_deliverable",
+      }),
+      worker_other_room: managedWorkerSession({
+        session_id: "worker_other_room",
+        room_id: "room_2",
+        runtime: "codex:LOCAL_CODEX_ROOM_other",
+      }),
+      worker_polling: managedWorkerSession({
+        session_id: "worker_polling",
+        room_id: "room_1",
+        runtime: "codex:LOCAL_CODEX_ROOM_polling",
+      }),
+    },
+  });
+  saveCodexLiveSession(liveSession({
+    session_id: "deliverable",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    token: "LOCAL_CODEX_ROOM_deliverable",
+    agent_session_id: "worker_deliverable",
+    desktop_managed: true,
+    delivery_mode: "desktop_events",
+    status: "running",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: "other_room",
+    room_id: "room_2",
+    room_identifier: "room_2",
+    token: "LOCAL_CODEX_ROOM_other",
+    agent_session_id: "worker_other_room",
+    desktop_managed: true,
+    delivery_mode: "desktop_events",
+    status: "running",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: "legacy_polling",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    token: "LOCAL_CODEX_ROOM_polling",
+    agent_session_id: "worker_polling",
+    desktop_managed: false,
+    delivery_mode: "mcp_polling",
+    status: "running",
+  }));
+
+  const event = messageEvent();
+
+  assert.equal(isManagedRoomStreamEvent(event), true);
+  assert.deepEqual(
+    listDeliverableCodexSessionsForRoomStreamEvent(event).map((session) => session.session_id),
+    ["deliverable"]
+  );
+  assert.equal(isManagedRoomStreamEvent({ type: "open", roomIdentifier: "room_1" }), false);
 });
 
 test("desktop managed worker identity and session state are persisted for room surfaces", () => {

@@ -12,15 +12,14 @@ import {
   type JoinedVia,
 } from "../../room-id.js";
 import {
-  getCurrentCodexLiveSession,
   isLocalRoomStorageEnabled,
   getStoredCurrentRoom,
   getStoredRoomSession,
 } from "../../local-state.js";
 import {
-  startLocalCodexSession,
-  toPublicCodexLiveSession,
-} from "../../codex-session.js";
+  getDefaultManagedAgentProvider,
+  toManagedAgentStartResponse,
+} from "../../managed-agent-providers.js";
 import {
   ApiError,
   apiCall,
@@ -51,8 +50,7 @@ export function normalizeJoinSessionMode(value: unknown): JoinSessionMode {
 }
 
 export function getCurrentLiveSessionPayload(roomId?: string): Record<string, unknown> | null {
-  const session = getCurrentCodexLiveSession(roomId);
-  return session ? toPublicCodexLiveSession(session) : null;
+  return getDefaultManagedAgentProvider().getCurrentLiveSessionPayload(roomId);
 }
 
 interface JoinRoomIdentifierOptions {
@@ -343,7 +341,8 @@ export async function buildJoinResponse(input: {
     return withJoinRoomAgentPrompt(basePayload);
   }
 
-  const liveSession = await startLocalCodexSession({
+  const provider = getDefaultManagedAgentProvider();
+  const liveSession = await provider.startLocalSession({
     room_id: input.joined.room.room_id,
     room_identifier: input.room_identifier,
     room_code: input.joined.room.code ?? null,
@@ -354,9 +353,7 @@ export async function buildJoinResponse(input: {
 
   return withJoinRoomAgentPrompt({
     ...basePayload,
-    local_codex_session: toPublicCodexLiveSession(liveSession.session),
-    local_codex_session_started: !liveSession.reused,
-    local_codex_session_reused: liveSession.reused,
+    ...toManagedAgentStartResponse(provider, liveSession),
   });
 }
 
