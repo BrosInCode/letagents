@@ -15,6 +15,7 @@ import { dirname } from "node:path";
 
 import type {
   DesktopManagedAgentDeliveryMode,
+  DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopManagedAgentSessionStatus,
 } from "../../ipc-types.js";
@@ -94,6 +95,7 @@ export interface DesktopClaudeCodeLiveSessionState {
   status: DesktopManagedAgentSessionStatus;
   last_error?: string | null;
   recent_items?: Array<Record<string, unknown>>;
+  pending_permission_requests?: DesktopManagedAgentPermissionRequest[];
   started_at: string;
   updated_at: string;
 }
@@ -125,6 +127,7 @@ export interface DesktopCursorLiveSessionState {
   status: DesktopManagedAgentSessionStatus;
   last_error?: string | null;
   recent_items?: Array<Record<string, unknown>>;
+  pending_permission_requests?: DesktopManagedAgentPermissionRequest[];
   started_at: string;
   updated_at: string;
 }
@@ -1106,6 +1109,7 @@ export function toPublicManagedAgentSession(
         summary: session.active_work.summary ?? null,
       }
       : null,
+    pendingPermissionRequests: [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
@@ -1211,6 +1215,7 @@ export function toPublicClaudeCodeManagedAgentSession(
         summary: session.active_work.summary ?? null,
       }
       : null,
+    pendingPermissionRequests: session.pending_permission_requests ?? [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
@@ -1316,6 +1321,7 @@ export function toPublicCursorManagedAgentSession(
         summary: session.active_work.summary ?? null,
       }
       : null,
+    pendingPermissionRequests: session.pending_permission_requests ?? [],
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,

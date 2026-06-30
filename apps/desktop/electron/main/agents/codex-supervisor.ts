@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import type {
   DesktopManagedAgentInspectResult,
+  DesktopManagedAgentPermissionDecisionInput,
+  DesktopManagedAgentPermissionDecisionResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -1916,4 +1918,10 @@ export function stopDesktopManagedAgent(
   input: DesktopManagedAgentStopInput = {},
 ): Promise<DesktopManagedAgentSession | null> {
   return desktopManagedAgentRuntimes.stop(input);
+}
+
+export function resolveDesktopManagedAgentPermissionRequest(
+  input: DesktopManagedAgentPermissionDecisionInput,
+): Promise<DesktopManagedAgentPermissionDecisionResult> {
+  return desktopManagedAgentRuntimes.resolvePermissionRequest(input);
 }
