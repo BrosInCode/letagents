@@ -147,10 +147,10 @@ test("hasDesktopManagedRuntime identifies providers the desktop can supervise di
   assert.equal(hasDesktopManagedRuntime(provider({
     id: "claude-code",
     name: "Claude Code",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "claude",
     mcpTargetId: "claude-code",
-  })), false);
+  })), true);
 });
 
 test("preferredManagedAgentRepoRootPath defaults local agents to the main checkout", () => {
@@ -306,13 +306,13 @@ test("agentProviderNeedsDesktopRepo only requires a repo for desktop-supervised 
   assert.equal(agentProviderNeedsDesktopRepo(provider({
     id: "claude-code",
     name: "Claude Code",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "claude",
     mcpTargetId: "claude-code",
-  })), false);
+  })), true);
 });
 
-test("agentAuthCommand exposes Codex sign-in command only for Codex", () => {
+test("agentAuthCommand exposes provider sign-in commands for managed runtimes", () => {
   assert.equal(agentAuthCommand(provider()), "codex login --device-auth");
   assert.equal(agentAuthCommand(provider({
     runtimeCommand: "/usr/local/bin/codex",
@@ -320,10 +320,10 @@ test("agentAuthCommand exposes Codex sign-in command only for Codex", () => {
   assert.equal(agentAuthCommand(provider({
     id: "claude-code",
     name: "Claude Code",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "claude",
     mcpTargetId: "claude-code",
-  })), null);
+  })), "claude auth login");
 });
 
 test("externalMcpProviderInstruction does not imply the desktop starts bridge-only agents", () => {

@@ -90,6 +90,7 @@ import {
 } from "./codex-session-status.js";
 import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
+import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
 import {
   bindCodexLiveSessionToWorker,
@@ -137,8 +138,11 @@ desktopManagedAgentRuntimes.register({
   providerId: "codex",
   listSessions: listDesktopManagedCodexAgentSessions,
   start: startDesktopManagedCodexAgent,
+  inspect: inspectDesktopManagedCodexAgentSession,
+  stop: stopDesktopManagedCodexAgent,
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
 });
+desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
 
 type AgentIdentityCreateResponse = {
   name?: string;
@@ -701,7 +705,7 @@ function scheduleOwnedSessionMonitor(session: DesktopCodexLiveSessionState): voi
   }
 
   const timer = setInterval(() => {
-    void inspectDesktopManagedAgentSession(session.session_id)
+    void inspectDesktopManagedCodexAgentSession(session.session_id)
       .then((status) => {
         if (!status || !status.serverReachable || isTerminalCodexSessionStatus(status.session.status)) {
           clearSessionMonitor(session.session_id);
@@ -867,7 +871,7 @@ async function waitForWorkerStartup(
 
   while (Date.now() < deadline) {
     await sleep(Math.min(STARTUP_POLL_INTERVAL_MS, Math.max(deadline - Date.now(), 0)));
-    const inspected = await inspectDesktopManagedAgentSession(session.session_id);
+    const inspected = await inspectDesktopManagedCodexAgentSession(session.session_id);
     if (!inspected) {
       continue;
     }
@@ -1104,7 +1108,7 @@ export function startDesktopManagedAgent(
   return desktopManagedAgentRuntimes.start(input);
 }
 
-export async function inspectDesktopManagedAgentSession(
+async function inspectDesktopManagedCodexAgentSession(
   sessionId?: string | null,
   roomIdentifier?: string | null,
 ): Promise<DesktopManagedAgentInspectResult | null> {
@@ -1213,6 +1217,13 @@ export async function inspectDesktopManagedAgentSession(
   } finally {
     client.close();
   }
+}
+
+export function inspectDesktopManagedAgentSession(
+  sessionId?: string | null,
+  roomIdentifier?: string | null,
+): Promise<DesktopManagedAgentInspectResult | null> {
+  return desktopManagedAgentRuntimes.inspect(sessionId, roomIdentifier);
 }
 
 function dispatchRoomStreamEventToCodexManagedAgents(event: DesktopRoomStreamEvent): void {
@@ -1766,7 +1777,7 @@ async function waitForDesktopEventTurnCompletion(
   }
 }
 
-export async function stopDesktopManagedAgent(
+async function stopDesktopManagedCodexAgent(
   input: DesktopManagedAgentStopInput = {},
 ): Promise<DesktopManagedAgentSession | null> {
   const session = findStoredSession(input.sessionId, input.roomIdentifier);
@@ -1897,4 +1908,10 @@ export async function stopDesktopManagedAgent(
   }
 
   return toPublicManagedAgentSession(bindCodexLiveSessionToWorker(updated));
+}
+
+export function stopDesktopManagedAgent(
+  input: DesktopManagedAgentStopInput = {},
+): Promise<DesktopManagedAgentSession | null> {
+  return desktopManagedAgentRuntimes.stop(input);
 }

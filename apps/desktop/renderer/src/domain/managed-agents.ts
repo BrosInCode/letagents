@@ -158,6 +158,9 @@ export function agentProviderNeedsDesktopRepo(
 export function agentAuthCommand(
   provider: Pick<DesktopAgentProvider, "id" | "runtimeCommand"> | null | undefined,
 ): string | null {
+  if (provider?.id === "claude-code") {
+    return `${provider.runtimeCommand?.trim() || "claude"} auth login`;
+  }
   if (provider?.id !== "codex") return null;
   return `${provider.runtimeCommand?.trim() || "codex"} login --device-auth`;
 }
@@ -522,6 +525,7 @@ function managedAgentSessionAgentKey(session: DesktopManagedAgentSession): strin
 
 function managedAgentSessionIdeLabel(session: Pick<DesktopManagedAgentSession, "providerId" | "runtime">): string {
   if (session.providerId === "codex") return "Codex";
+  if (session.providerId === "claude-code") return "Claude Code";
   return session.runtime || session.providerId;
 }
 

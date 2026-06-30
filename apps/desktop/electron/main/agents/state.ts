@@ -28,6 +28,8 @@ const STATE_LOCK_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 export type DesktopCodexJoinedVia = "join_code" | "join_room";
 
+export type DesktopClaudeCodeJoinedVia = "join_code" | "join_room";
+
 export interface DesktopCodexLiveSessionState {
   session_id: string;
   room_id: string;
@@ -63,6 +65,37 @@ export interface DesktopCodexLiveSessionState {
   updated_at: string;
 }
 
+export interface DesktopClaudeCodeLiveSessionState {
+  session_id: string;
+  room_id: string;
+  room_identifier: string;
+  room_display_name?: string | null;
+  display_name?: string | null;
+  joined_via: DesktopClaudeCodeJoinedVia;
+  cwd: string;
+  repo_branch?: string | null;
+  stop_phrase: string;
+  max_minutes: number;
+  delivery_mode?: DesktopManagedAgentDeliveryMode;
+  desktop_managed?: boolean;
+  deadline_utc?: string | null;
+  token: string;
+  claude_session_id?: string | null;
+  claude_bin: string;
+  agent_session_id?: string | null;
+  active_work?: {
+    kind: "message" | "task_update";
+    event_id?: string | null;
+    started_at: string;
+    summary?: string | null;
+  } | null;
+  status: DesktopManagedAgentSessionStatus;
+  last_error?: string | null;
+  recent_items?: Array<Record<string, unknown>>;
+  started_at: string;
+  updated_at: string;
+}
+
 interface SharedLetAgentsState {
   agent_identity?: StoredAgentIdentityState;
   agent_identities?: Record<string, StoredAgentIdentityState>;
@@ -71,6 +104,8 @@ interface SharedLetAgentsState {
   current_agent_session_ids?: Record<string, string>;
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, DesktopCodexLiveSessionState>;
+  current_claude_code_live_session_ids?: Record<string, string>;
+  claude_code_live_sessions?: Record<string, DesktopClaudeCodeLiveSessionState>;
 }
 
 export interface StoredAgentIdentityState {
@@ -706,6 +741,140 @@ export function updateCodexLiveSession(
   return updatedSession;
 }
 
+export function getCurrentClaudeCodeLiveSession(roomId?: string | null): DesktopClaudeCodeLiveSessionState | null {
+  const state = readAgentLocalState();
+  const sessionIds = state.current_claude_code_live_session_ids;
+  if (!sessionIds) {
+    return null;
+  }
+
+  if (roomId) {
+    const normalizedRoomId = normalizeRoomId(roomId);
+    const sessionId = Object.entries(sessionIds).find(([key]) => normalizeRoomId(key) === normalizedRoomId)?.[1];
+    if (sessionId) {
+      return state.claude_code_live_sessions?.[sessionId] ?? null;
+    }
+    return Object.values(state.claude_code_live_sessions ?? {})
+      .filter((session) =>
+        normalizeRoomId(session.room_id) === normalizedRoomId ||
+        normalizeRoomId(session.room_identifier) === normalizedRoomId
+      )
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
+  }
+
+  let best: DesktopClaudeCodeLiveSessionState | null = null;
+  for (const id of Object.values(sessionIds)) {
+    const session = state.claude_code_live_sessions?.[id];
+    if (session && (!best || session.updated_at > best.updated_at)) {
+      best = session;
+    }
+  }
+  return best;
+}
+
+export function getStoredClaudeCodeLiveSession(sessionId: string): DesktopClaudeCodeLiveSessionState | null {
+  return readAgentLocalState().claude_code_live_sessions?.[sessionId] ?? null;
+}
+
+export function listStoredClaudeCodeLiveSessions(roomId?: string | null): DesktopClaudeCodeLiveSessionState[] {
+  const normalizedRoom = normalizeRoomId(roomId) || null;
+  return Object.values(readAgentLocalState().claude_code_live_sessions ?? {})
+    .filter((session) =>
+      !normalizedRoom ||
+      normalizeRoomId(session.room_id) === normalizedRoom ||
+      normalizeRoomId(session.room_identifier) === normalizedRoom
+    )
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+}
+
+export function isDesktopManagedClaudeCodeLiveSession(session: DesktopClaudeCodeLiveSessionState): boolean {
+  return session.desktop_managed === true || Boolean(session.delivery_mode);
+}
+
+export function listDesktopManagedClaudeCodeLiveSessions(roomId?: string | null): DesktopClaudeCodeLiveSessionState[] {
+  return listStoredClaudeCodeLiveSessions(roomId).filter(isDesktopManagedClaudeCodeLiveSession);
+}
+
+export function listClaudeCodeDisplayNamesForRoom(roomId: string): string[] {
+  const normalizedRoom = normalizeRoomId(roomId);
+  if (!normalizedRoom) {
+    return [];
+  }
+
+  const state = readAgentLocalState();
+  const liveSessionNames = Object.values(state.claude_code_live_sessions ?? {})
+    .filter((session) =>
+      normalizeRoomId(session.room_id) === normalizedRoom ||
+      normalizeRoomId(session.room_identifier) === normalizedRoom
+    )
+    .map((session) => session.display_name);
+  const workerNames = Object.values(state.agent_sessions ?? {})
+    .filter((session) =>
+      normalizeRoomId(session.room_id) === normalizedRoom &&
+      session.session_kind === "worker" &&
+      !session.ended_at &&
+      isClaudeCodeAgentSession(session)
+    )
+    .flatMap((session) => [session.display_name, session.actor_label]);
+
+  return [...liveSessionNames, ...workerNames]
+    .map((name) => String(name ?? "").trim())
+    .filter(Boolean);
+}
+
+function isClaudeCodeAgentSession(session: StoredAgentSessionState): boolean {
+  const runtime = String(session.runtime ?? "").trim().toLowerCase();
+  const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
+  const livenessCapability = String(session.liveness_capability ?? "").trim().toLowerCase();
+  const toolBridgeId = String(session.tool_bridge_id ?? "").trim().toLowerCase();
+
+  return runtime === "claude-code" ||
+    runtime.startsWith("claude-code:") ||
+    ideLabel === "claude code" ||
+    livenessCapability.includes("claude") ||
+    /(^|:)claude-code(:|$)/.test(toolBridgeId);
+}
+
+export function saveClaudeCodeLiveSession(
+  session: DesktopClaudeCodeLiveSessionState,
+  makeCurrent = true,
+): DesktopClaudeCodeLiveSessionState {
+  updateAgentLocalState((state) => {
+    state.claude_code_live_sessions = state.claude_code_live_sessions ?? {};
+    state.claude_code_live_sessions[session.session_id] = session;
+    if (makeCurrent) {
+      state.current_claude_code_live_session_ids = state.current_claude_code_live_session_ids ?? {};
+      state.current_claude_code_live_session_ids[session.room_id] = session.session_id;
+    }
+    return state;
+  });
+  return session;
+}
+
+export function updateClaudeCodeLiveSession(
+  sessionId: string,
+  updater: (session: DesktopClaudeCodeLiveSessionState) => DesktopClaudeCodeLiveSessionState,
+): DesktopClaudeCodeLiveSessionState | null {
+  let updatedSession: DesktopClaudeCodeLiveSessionState | null = null;
+  updateAgentLocalState((state) => {
+    const existing = state.claude_code_live_sessions?.[sessionId];
+    if (!existing) {
+      return state;
+    }
+
+    const updated = updater(existing);
+    state.claude_code_live_sessions = state.claude_code_live_sessions ?? {};
+    state.claude_code_live_sessions[sessionId] = updated;
+    state.current_claude_code_live_session_ids = state.current_claude_code_live_session_ids ?? {};
+    if (!state.current_claude_code_live_session_ids[updated.room_id]) {
+      state.current_claude_code_live_session_ids[updated.room_id] = sessionId;
+    }
+    updatedSession = updated;
+    return state;
+  });
+  return updatedSession;
+}
+
 function nonGenericCodexName(value: string | null | undefined): string | null {
   const trimmed = String(value ?? "").trim();
   if (!trimmed || /^codex(?:\s+\d+)?$/i.test(trimmed)) {
@@ -763,6 +932,111 @@ export function toPublicManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Codex",
     reasoningSessionId: session.reasoning_session_id ?? null,
+    activeWork: session.active_work
+      ? {
+        kind: session.active_work.kind,
+        eventId: session.active_work.event_id ?? null,
+        startedAt: session.active_work.started_at,
+        summary: session.active_work.summary ?? null,
+      }
+      : null,
+    startedAt: session.started_at,
+    updatedAt: session.updated_at,
+    lastError: session.last_error ?? null,
+  };
+}
+
+function nonGenericClaudeCodeName(value: string | null | undefined): string | null {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || /^claude(?:\s+code)?(?:\s+\d+)?$/i.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+function workerHasExactClaudeCodeMarker(
+  worker: StoredAgentSessionState,
+  session: DesktopClaudeCodeLiveSessionState,
+): boolean {
+  const token = String(session.token ?? "").trim();
+  if (!token) {
+    return false;
+  }
+  const runtimeMarker = `claude-code:${token}`;
+  const instanceMarker = `desktop-claude-code:${token}`;
+  return String(worker.runtime ?? "").trim() === runtimeMarker ||
+    String(worker.agent_instance_id ?? "").trim() === instanceMarker ||
+    String(worker.tool_bridge_id ?? "").includes(runtimeMarker) ||
+    String(worker.tool_bridge_id ?? "").includes(instanceMarker);
+}
+
+function workerCanRepresentClaudeCodeSession(
+  worker: StoredAgentSessionState,
+  session: DesktopClaudeCodeLiveSessionState,
+): boolean {
+  if (
+    normalizeRoomId(worker.room_id) !== normalizeRoomId(session.room_id) ||
+    worker.session_kind !== "worker" ||
+    worker.ended_at ||
+    !isClaudeCodeAgentSession(worker)
+  ) {
+    return false;
+  }
+  return worker.session_id === session.agent_session_id ||
+    workerHasExactClaudeCodeMarker(worker, session) ||
+    sameSessionText(worker.display_name, session.display_name) ||
+    sameSessionText(worker.actor_label, session.display_name);
+}
+
+function publicDisplayNameForClaudeCodeSession(
+  session: DesktopClaudeCodeLiveSessionState,
+  workerSession: StoredAgentSessionState | null,
+): string {
+  return nonGenericClaudeCodeName(workerSession?.display_name) ||
+    nonGenericClaudeCodeName(session.display_name) ||
+    nonGenericClaudeCodeName(workerSession?.actor_label) ||
+    suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(session.room_id), session.token || session.session_id);
+}
+
+export function toPublicClaudeCodeManagedAgentSession(
+  session: DesktopClaudeCodeLiveSessionState,
+): DesktopManagedAgentSession {
+  const state = readAgentLocalState();
+  const persistedWorker = session.agent_session_id
+    ? state.agent_sessions?.[session.agent_session_id] ?? null
+    : null;
+  const persistedWorkerActive = Boolean(
+    persistedWorker &&
+    workerCanRepresentClaudeCodeSession(persistedWorker, session),
+  );
+  const activeWorkerSessionId = persistedWorkerActive ? session.agent_session_id ?? null : null;
+  const workerSession = persistedWorkerActive ? persistedWorker : null;
+  const displayName = publicDisplayNameForClaudeCodeSession(session, workerSession);
+  const deliveryMode = session.delivery_mode || "desktop_events";
+  return {
+    id: session.session_id,
+    providerId: "claude-code",
+    runtime: "claude-code",
+    roomIdentifier: session.room_identifier || session.room_id,
+    roomDisplayName: session.room_display_name ?? null,
+    repoRootPath: session.cwd,
+    repoBranch: session.repo_branch ?? null,
+    status: session.status,
+    deliveryMode,
+    canStop: Boolean(activeWorkerSessionId) &&
+      (
+        session.status === "starting" ||
+        session.status === "running" ||
+        session.status === "unknown" ||
+        (deliveryMode === "desktop_events" && session.status === "completed")
+      ),
+    agentSessionId: activeWorkerSessionId,
+    actorLabel: nonGenericClaudeCodeName(workerSession?.actor_label) ?? displayName,
+    agentKey: workerSession?.agent_key ?? "claude-code",
+    displayName,
+    ownerLabel: workerSession?.owner_label ?? "Local desktop",
+    ideLabel: workerSession?.ide_label ?? "Claude Code",
+    reasoningSessionId: session.claude_session_id ?? null,
     activeWork: session.active_work
       ? {
         kind: session.active_work.kind,
