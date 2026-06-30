@@ -213,6 +213,31 @@ test("registry stops the first runtime with a matching session", async () => {
   assert.equal(claude.stops.length, 1);
 });
 
+test("registry rejects invalid managed-agent permission behavior", async () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const claude = stubRuntime("claude-code");
+  let called = false;
+  claude.resolvePermissionRequest = async () => {
+    called = true;
+    return {
+      requestId: "perm_1",
+      accepted: true,
+      message: "should not be called",
+      session: session("claude-code"),
+    };
+  };
+  registry.register(claude);
+
+  const result = await registry.resolvePermissionRequest({
+    requestId: "perm_1",
+    behavior: "approve",
+  } as never);
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.message, "Permission behavior must be allow or deny.");
+  assert.equal(called, false);
+});
+
 test("registry rejects duplicate runtime providers", () => {
   const registry = new DesktopManagedAgentRuntimeRegistry();
   registry.register(stubRuntime("codex"));

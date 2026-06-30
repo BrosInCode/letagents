@@ -33,6 +33,7 @@ import {
   createManagedAgentPermissionRequest,
   DEFAULT_MANAGED_AGENT_PERMISSION_TIMEOUT_MS,
   isAutoAllowedManagedAgentTool,
+  isManagedAgentPermissionDecisionBehavior,
   parseManagedAgentPermissionDecision,
   removeManagedAgentPermissionRequest,
   type ManagedAgentPermissionDecision,
@@ -286,6 +287,10 @@ export function createDesktopClaudeCodeRuntime(
       activeTurn.interruptReason = "stop";
       activeTurn.abortController.abort();
     }
+    clearPendingPermissionRequestsForSession(
+      session.session_id,
+      "Permission request was cancelled because the managed agent session stopped.",
+    );
     const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -501,6 +506,14 @@ export function createDesktopClaudeCodeRuntime(
         session: null,
       };
     }
+    if (!isManagedAgentPermissionDecisionBehavior(input.behavior)) {
+      return {
+        requestId,
+        accepted: false,
+        message: "Permission behavior must be allow or deny.",
+        session: toPublicClaudeCodeManagedAgentSession(requestSession),
+      };
+    }
     resolvePendingPermissionRequest({
       requestId,
       behavior: input.behavior,
@@ -671,18 +684,28 @@ export function createDesktopClaudeCodeRuntime(
     if (event.message.source === "agent") {
       return false;
     }
-    const pendingRequests = listDesktopManagedClaudeCodeLiveSessions(event.roomIdentifier)
-      .flatMap((session) => session.pending_permission_requests ?? []);
-    const decision = parseManagedAgentPermissionDecision({
-      text: event.message.text,
-      pendingRequests,
-      replyToMessageId: event.message.replyTo?.id ?? null,
-    });
-    if (!decision) {
-      return false;
+    let sawUnauthorizedDecision = false;
+    for (const session of listDesktopManagedClaudeCodeLiveSessions(event.roomIdentifier)) {
+      const pendingRequests = session.pending_permission_requests ?? [];
+      if (!pendingRequests.length) {
+        continue;
+      }
+      const decision = parseManagedAgentPermissionDecision({
+        text: event.message.text,
+        pendingRequests,
+        replyToMessageId: event.message.replyTo?.id ?? null,
+      });
+      if (!decision) {
+        continue;
+      }
+      if (!isPermissionDecisionFromSessionOperator(session, event)) {
+        sawUnauthorizedDecision = true;
+        continue;
+      }
+      resolvePendingPermissionRequest(decision);
+      return true;
     }
-    resolvePendingPermissionRequest(decision);
-    return true;
+    return sawUnauthorizedDecision;
   }
 
   function waitForPermissionDecision(input: {
@@ -797,12 +820,15 @@ export function createDesktopClaudeCodeRuntime(
     }));
   }
 
-  function clearPendingPermissionRequestsForSession(sessionId: string): void {
+  function clearPendingPermissionRequestsForSession(
+    sessionId: string,
+    message = "Permission request ended with the turn.",
+  ): void {
     for (const request of getStoredClaudeCodeLiveSession(sessionId)?.pending_permission_requests ?? []) {
       resolvePendingPermissionRequest({
         requestId: request.id,
         behavior: "deny",
-        message: "Permission request ended with the turn.",
+        message,
         source: "system",
       });
     }
@@ -890,6 +916,32 @@ function isOwnRoomStreamEvent(
     worker.displayName,
   ].map(normalizeKey).filter(Boolean);
   return Boolean(messageNames.length && workerNames.some((key) => messageNames.includes(key)));
+}
+
+function isPermissionDecisionFromSessionOperator(
+  session: DesktopClaudeCodeLiveSessionState,
+  event: ManagedRoomEvent,
+): boolean {
+  if (event.type !== "message" || event.message.source === "agent") {
+    return false;
+  }
+
+  const worker = toPublicClaudeCodeManagedAgentSession(session);
+  const storedSession = getStoredAgentSession(session.agent_session_id);
+  const operatorKeys = [
+    worker.ownerLabel,
+    storedSession?.owner_label,
+  ].map(normalizeKey).filter(Boolean);
+  if (!operatorKeys.length) {
+    return false;
+  }
+
+  const messageKeys = [
+    event.message.sender,
+    event.message.actorLabel,
+    event.message.agentIdentity?.ownerLabel,
+  ].map(normalizeKey).filter(Boolean);
+  return operatorKeys.some((key) => messageKeys.includes(key));
 }
 
 function isStopPhraseRoomStreamEvent(

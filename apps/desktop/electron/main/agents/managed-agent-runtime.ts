@@ -81,6 +81,15 @@ export class DesktopManagedAgentRuntimeRegistry {
   async resolvePermissionRequest(
     input: DesktopManagedAgentPermissionDecisionInput,
   ): Promise<DesktopManagedAgentPermissionDecisionResult> {
+    const requestId = typeof input?.requestId === "string" ? input.requestId : "";
+    if (input?.behavior !== "allow" && input?.behavior !== "deny") {
+      return {
+        requestId,
+        accepted: false,
+        message: "Permission behavior must be allow or deny.",
+        session: null,
+      };
+    }
     for (const runtime of this.list()) {
       if (!runtime.resolvePermissionRequest) {
         continue;

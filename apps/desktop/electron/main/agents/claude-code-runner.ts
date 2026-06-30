@@ -12,6 +12,10 @@ import {
   type SDKResultMessage,
   type SDKSystemMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import {
+  isAutoAllowedManagedAgentTool,
+  MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES,
+} from "./managed-agent-permissions.js";
 
 export interface ClaudeCodeTurnInput {
   prompt: string;
@@ -162,15 +166,7 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
   };
 }
 
-export const CLAUDE_CODE_AUTO_ALLOWED_TOOL_NAMES = [
-  "Glob",
-  "Grep",
-  "LS",
-  "NotebookRead",
-  "Read",
-  "TodoRead",
-  "TodoWrite",
-] as const;
+export const CLAUDE_CODE_AUTO_ALLOWED_TOOL_NAMES = MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES;
 
 export function isBlockedClaudeCodeTool(toolName: string | null | undefined): boolean {
   const normalized = normalizeToolName(toolName);
@@ -187,10 +183,7 @@ export function isBlockedClaudeCodeTool(toolName: string | null | undefined): bo
 }
 
 export function isAutoAllowedClaudeCodeTool(toolName: string | null | undefined): boolean {
-  const tail = normalizeToolName(toolName).split("__").pop() ?? "";
-  return CLAUDE_CODE_AUTO_ALLOWED_TOOL_NAMES.some((allowed) =>
-    tail === allowed.toLowerCase() || normalizeToolName(allowed) === tail
-  );
+  return isAutoAllowedManagedAgentTool(toolName);
 }
 
 export const claudeCodeDefaultCanUseTool: CanUseTool = async (

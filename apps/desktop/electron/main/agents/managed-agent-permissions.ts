@@ -8,6 +8,16 @@ import type {
 
 export const DEFAULT_MANAGED_AGENT_PERMISSION_TIMEOUT_MS = 10 * 60_000;
 
+export const MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES = [
+  "Glob",
+  "Grep",
+  "LS",
+  "NotebookRead",
+  "Read",
+  "TodoRead",
+  "TodoWrite",
+] as const;
+
 export interface CreateManagedAgentPermissionRequestInput {
   providerId: DesktopAgentProviderId;
   sessionId: string;
@@ -50,16 +60,13 @@ export function createManagedAgentPermissionRequest(
 }
 
 export function isAutoAllowedManagedAgentTool(toolName: string | null | undefined): boolean {
-  const normalized = normalizedToolTail(toolName);
-  return [
-    "glob",
-    "grep",
-    "ls",
-    "notebookread",
-    "read",
-    "todoread",
-    "todowrite",
-  ].includes(normalized);
+  const normalized = normalizeToolName(toolName);
+  if (!normalized || normalized.includes("__")) {
+    return false;
+  }
+  return MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES.some((allowed) =>
+    normalized === normalizeToolName(allowed)
+  );
 }
 
 export function buildManagedAgentPermissionRoomText(input: {
@@ -68,7 +75,7 @@ export function buildManagedAgentPermissionRoomText(input: {
 }): string {
   const agentName = normalizeText(input.agentDisplayName) || "Managed agent";
   const lines = [
-    `Permission request ${input.request.id}`,
+    "Permission request",
     `${agentName} wants approval for: ${input.request.title}`,
     `Tool: ${input.request.toolName}`,
   ];
@@ -78,9 +85,7 @@ export function buildManagedAgentPermissionRoomText(input: {
   if (input.request.description) {
     lines.push(input.request.description);
   }
-  lines.push(
-    `Reply with "approve ${input.request.id}" or "deny ${input.request.id} <reason>", or use the local agent detail modal.`,
-  );
+  lines.push("Use the local agent detail modal to allow or deny this request.");
   return lines.join("\n");
 }
 
@@ -133,18 +138,24 @@ export function removeManagedAgentPermissionRequest(
   return (requests ?? []).filter((request) => request.id !== requestId);
 }
 
+export function isManagedAgentPermissionDecisionBehavior(
+  value: unknown,
+): value is DesktopManagedAgentPermissionDecisionBehavior {
+  return value === "allow" || value === "deny";
+}
+
 function summarizeManagedAgentToolInput(
   toolName: string | null | undefined,
   input: Record<string, unknown>,
 ): string | null {
-  const normalized = normalizedToolTail(toolName);
+  const normalized = normalizeToolName(toolName);
   const filePath = stringField(input, "file_path") || stringField(input, "path");
   if (filePath) {
-    return truncateText(filePath, 220);
+    return truncateText(redactInlineSecrets(filePath), 220);
   }
   if (normalized === "bash") {
     const command = stringField(input, "command");
-    return command ? truncateText(command, 320) : null;
+    return command ? truncateText(redactInlineSecrets(command), 320) : null;
   }
   const redacted = redactToolInput(input);
   const json = JSON.stringify(redacted);
@@ -156,7 +167,7 @@ function redactToolInput(value: unknown): unknown {
     return value.slice(0, 12).map(redactToolInput);
   }
   if (!value || typeof value !== "object") {
-    return typeof value === "string" ? truncateText(value, 220) : value;
+    return typeof value === "string" ? truncateText(redactInlineSecrets(value), 220) : value;
   }
   const output: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>).slice(0, 18)) {
@@ -173,9 +184,8 @@ function decisionBehaviorForWord(value: string | null | undefined): DesktopManag
   return /^(approve|allow|yes)$/i.test(String(value ?? "")) ? "allow" : "deny";
 }
 
-function normalizedToolTail(toolName: string | null | undefined): string {
-  const normalized = normalizeText(toolName)?.toLowerCase() ?? "";
-  return normalized.split("__").pop() ?? normalized;
+function normalizeToolName(toolName: string | null | undefined): string {
+  return normalizeText(toolName)?.toLowerCase() ?? "";
 }
 
 function stringField(input: Record<string, unknown>, key: string): string | null {
@@ -193,4 +203,13 @@ function truncateText(value: string, maxLength: number): string {
   return normalized.length <= maxLength
     ? normalized
     : `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
+}
+
+function redactInlineSecrets(value: string): string {
+  return value
+    .replace(/\b(authorization\s*[:=]\s*(?:bearer\s+)?)([^\s'"`]+)/gi, "$1[redacted]")
+    .replace(/\b((?:access[_-]?token|api[_-]?key|apikey|auth|authorization|credential|password|secret|token)=)([^\s'"`]+)/gi, "$1[redacted]")
+    .replace(/(--(?:api-key|apikey|auth|authorization|credential|key|password|secret|token)(?:=|\s+))([^\s'"`]+)/gi, "$1[redacted]")
+    .replace(/([?&](?:access[_-]?token|api[_-]?key|apikey|auth|authorization|credential|key|password|secret|token)=)([^&\s'"`]+)/gi, "$1[redacted]")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s@]+)@/gi, "$1[redacted]@");
 }
