@@ -72,6 +72,7 @@ export interface LegacyProjectMessageRouteDeps {
   ): Promise<boolean>;
   parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null;
   parseOptionalReplyToMessageId(value: unknown): string | null;
+  parseOptionalThreadRootMessageId(value: unknown): string | null;
   shouldIncludePromptOnlyMessages(req: Request): boolean;
   emitProjectMessage(
     projectId: string,
@@ -81,6 +82,7 @@ export interface LegacyProjectMessageRouteDeps {
       source?: string;
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
+      thread_root_id?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
     }
   ): Promise<Message>;
@@ -121,6 +123,7 @@ export function registerLegacyProjectMessageRoutes(
       text,
       agent_prompt_kind,
       reply_to,
+      thread_root_id,
       attachments: rawAttachments,
       agent_session_id,
       agent_session_token,
@@ -129,6 +132,7 @@ export function registerLegacyProjectMessageRoutes(
       text?: string;
       agent_prompt_kind?: string;
       reply_to?: string;
+      thread_root_id?: string;
       attachments?: unknown;
       agent_session_id?: string;
       agent_session_token?: string;
@@ -152,6 +156,7 @@ export function registerLegacyProjectMessageRoutes(
 
       const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
       const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
+      const threadRootMessageId = deps.parseOptionalThreadRootMessageId(thread_root_id);
       const attachments = normalizeMessageAttachmentReferences(rawAttachments);
       const normalizedSender = workerIdentity?.ok
         ? workerIdentity.identity.actor_label
@@ -173,6 +178,7 @@ export function registerLegacyProjectMessageRoutes(
         source,
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
+        thread_root_id: threadRootMessageId,
         attachments,
       });
       await deps.rememberRoomParticipantFromMessage({

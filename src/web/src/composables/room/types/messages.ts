@@ -6,6 +6,15 @@ export interface MessageReplyReference {
   timestamp: string
 }
 
+export interface RoomMessageThreadSummary {
+  root_message_id: string
+  reply_count: number
+  unread_count: number
+  has_unread: boolean
+  latest_reply: MessageReplyReference | null
+  last_read_message_id: string | null
+}
+
 export interface RoomMessageAttachment {
   id?: string | null
   name?: string | null
@@ -57,6 +66,9 @@ export interface RoomMessage {
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
+  thread_root_id?: string | null
+  thread_reply_to_id?: string | null
+  thread?: RoomMessageThreadSummary | null
   reply_to?: MessageReplyReference | null
   agent_identity?: {
     name: string

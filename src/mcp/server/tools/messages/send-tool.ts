@@ -35,14 +35,20 @@ function normalizeMessageId(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function replyReferenceId(message: MessageRecord | null): string | null {
-  const reply = message?.reply_to ?? message?.replyTo ?? null;
-  if (typeof reply === "string" && reply.trim()) {
-    return reply;
+function threadRootReferenceId(message: MessageRecord | null): string | null {
+  if (!message) return null;
+  const ownId = typeof message.id === "string" ? message.id.trim() : "";
+  const thread = message.thread;
+  if (thread && typeof thread === "object") {
+    const rootId = (thread as { root_message_id?: unknown; parent_id?: unknown }).root_message_id
+      ?? (thread as { parent_id?: unknown }).parent_id;
+    if (typeof rootId === "string" && rootId.trim()) {
+      return rootId.trim();
+    }
   }
-  if (reply && typeof reply === "object" && typeof (reply as { id?: unknown }).id === "string") {
-    const id = (reply as { id: string }).id.trim();
-    return id || null;
+  const rootId = typeof message.thread_root_id === "string" ? message.thread_root_id.trim() : "";
+  if (rootId && rootId !== ownId) {
+    return rootId;
   }
   return null;
 }
@@ -118,30 +124,19 @@ async function resolveThreadRootMessageId(input: {
   projectId: string | null;
   messageId: string;
 }): Promise<string> {
-  let currentId = input.messageId;
-  const seen = new Set<string>();
-  for (;;) {
-    if (seen.has(currentId)) return currentId;
-    seen.add(currentId);
-    const message = await findMessageById({ ...input, messageId: currentId });
-    const parentId = replyReferenceId(message);
-    if (!parentId) return currentId;
-    currentId = parentId;
-  }
+  const message = await findMessageById(input);
+  return threadRootReferenceId(message) ?? input.messageId;
 }
 
-function initialReplyTarget(input: SendMessageInput): {
+function initialMessageTargets(input: SendMessageInput): {
   replyTarget: string | undefined;
-  shouldResolveThreadRoot: boolean;
+  threadTarget: string | undefined;
 } {
   const replyTo = normalizeMessageId(input.reply_to);
   const threadParentId = normalizeMessageId(input.thread_parent_id);
-  if (replyTo && threadParentId && replyTo !== threadParentId) {
-    throw new Error("reply_to and thread_parent_id must match when both are provided.");
-  }
   return {
-    replyTarget: threadParentId || replyTo,
-    shouldResolveThreadRoot: Boolean(threadParentId),
+    replyTarget: replyTo || threadParentId,
+    threadTarget: threadParentId,
   };
 }
 
@@ -157,22 +152,23 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     agentSessionId: input.agent_session_id,
   });
   const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
-  const { replyTarget, shouldResolveThreadRoot } = initialReplyTarget(input);
-  const resolvedReplyTarget = replyTarget && shouldResolveThreadRoot
+  const { replyTarget, threadTarget } = initialMessageTargets(input);
+  const threadRootId = threadTarget
     ? await resolveThreadRootMessageId({
       localRoomId,
       roomId: targetRoomId,
       projectId: targetProjectId,
-      messageId: replyTarget,
+      messageId: threadTarget,
     })
-    : replyTarget;
+    : undefined;
 
   if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
     const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
     const message = await addLocalChatMessage(sqliteRoomId || localRoomId, {
       sender: identity.actor_label,
       text: input.text,
-      reply_to: resolvedReplyTarget,
+      reply_to: replyTarget,
+      thread_root_id: threadRootId,
       source: "agent",
     });
     touchCurrentRoom(message.id);
@@ -192,7 +188,8 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       body: JSON.stringify({
         sender: identity.actor_label,
         text: input.text,
-        reply_to: resolvedReplyTarget,
+        reply_to: replyTarget,
+        thread_root_id: threadRootId,
         ...agentSessionCredentials(agentSession),
       }),
     },

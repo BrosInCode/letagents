@@ -22,6 +22,8 @@ test("agent-readable messages expose thread root metadata", () => {
       id: "msg_2",
       sender: "Codex",
       text: "First thread reply",
+      thread_root_id: "msg_1",
+      thread_reply_to_id: "msg_1",
       reply_to: {
         id: "msg_1",
         sender: "EmmyMay",
@@ -33,6 +35,8 @@ test("agent-readable messages expose thread root metadata", () => {
     message({
       id: "msg_3",
       text: "Second thread reply",
+      thread_root_id: "msg_1",
+      thread_reply_to_id: "msg_1",
       reply_to: {
         id: "msg_1",
         sender: "EmmyMay",
@@ -69,6 +73,31 @@ test("agent-readable messages expose thread root metadata", () => {
   assert.equal(secondReply.thread_reply_to_id, "msg_1");
 });
 
+test("agent-readable messages do not infer threads from quote replies", () => {
+  const [parent, quoteReply] = toAgentReadableMessages([
+    message({ id: "msg_1", text: "Original message", thread_root_id: "msg_1" }),
+    message({
+      id: "msg_2",
+      sender: "Codex",
+      text: "Quote reply",
+      thread_root_id: "msg_2",
+      thread_reply_to_id: null,
+      reply_to: {
+        id: "msg_1",
+        sender: "EmmyMay",
+        text: "Original message",
+        source: "browser",
+        timestamp: "2026-06-08T00:00:00.000Z",
+      },
+    }),
+  ]) as Array<Record<string, unknown>>;
+
+  assert.equal(parent.thread, undefined);
+  assert.equal(quoteReply.thread_parent_id, undefined);
+  assert.equal(quoteReply.thread_root_id, undefined);
+  assert.equal(quoteReply.thread, undefined);
+});
+
 test("agent-readable messages resolve nested replies to the thread root when available", () => {
   const [, firstReply, nestedReply] = toAgentReadableMessages([
     message({ id: "msg_1", text: "Root topic" }),
@@ -76,6 +105,8 @@ test("agent-readable messages resolve nested replies to the thread root when ava
       id: "msg_2",
       sender: "Codex",
       text: "Thread reply",
+      thread_root_id: "msg_1",
+      thread_reply_to_id: "msg_1",
       reply_to: {
         id: "msg_1",
         sender: "EmmyMay",
@@ -88,6 +119,8 @@ test("agent-readable messages resolve nested replies to the thread root when ava
       id: "msg_3",
       sender: "Claude",
       text: "Accidental nested reply",
+      thread_root_id: "msg_1",
+      thread_reply_to_id: "msg_2",
       reply_to: {
         id: "msg_2",
         sender: "Codex",
@@ -112,38 +145,23 @@ test("agent-readable messages resolve nested replies to the thread root when ava
   });
 });
 
-test("agent-readable messages use context ancestors without returning them", () => {
-  const [nestedReply] = toAgentReadableMessages(
-    [
-      message({
-        id: "msg_3",
-        sender: "Claude",
-        text: "New poll result",
-        reply_to: {
-          id: "msg_2",
-          sender: "Codex",
-          text: "Earlier reply",
-          source: "agent",
-          timestamp: "2026-06-08T00:01:00.000Z",
-        },
-      }),
-    ],
-    [
-      message({ id: "msg_1", text: "Original topic" }),
-      message({
+test("agent-readable messages use explicit roots without returning ancestors", () => {
+  const [nestedReply] = toAgentReadableMessages([
+    message({
+      id: "msg_3",
+      sender: "Claude",
+      text: "New poll result",
+      thread_root_id: "msg_1",
+      thread_reply_to_id: "msg_2",
+      reply_to: {
         id: "msg_2",
         sender: "Codex",
         text: "Earlier reply",
-        reply_to: {
-          id: "msg_1",
-          sender: "EmmyMay",
-          text: "Original topic",
-          source: "browser",
-          timestamp: "2026-06-08T00:00:00.000Z",
-        },
-      }),
-    ],
-  ) as Array<Record<string, unknown>>;
+        source: "agent",
+        timestamp: "2026-06-08T00:01:00.000Z",
+      },
+    }),
+  ]) as Array<Record<string, unknown>>;
 
   assert.equal(nestedReply.id, "msg_3");
   assert.equal(nestedReply.thread_parent_id, "msg_1");

@@ -1,5 +1,12 @@
 <template>
-  <div class="long-message">
+  <div
+    class="long-message"
+    @click="handleReferenceClick"
+    @mouseover="handleReferenceMouseOver"
+    @mouseout="handleReferenceMouseOut"
+    @focusin="handleReferenceFocusIn"
+    @focusout="handleReferenceFocusOut"
+  >
     <div
       :id="contentId"
       class="long-message-content"
@@ -35,7 +42,9 @@
           ref="readerDialog"
           class="reader-dialog"
           role="dialog"
-          aria-modal="true"
+          :aria-modal="referenceDialogOpen ? 'false' : 'true'"
+          :aria-hidden="referenceDialogOpen ? 'true' : undefined"
+          :inert="referenceDialogOpen ? true : undefined"
           :aria-labelledby="readerTitleId"
           tabindex="-1"
           @keydown.esc="closeReader"
@@ -50,7 +59,15 @@
             </button>
           </header>
 
-          <div class="reader-content md-content" v-html="html" />
+          <div
+            class="reader-content md-content"
+            v-html="html"
+            @click="handleReferenceClick"
+            @mouseover="handleReferenceMouseOver"
+            @mouseout="handleReferenceMouseOut"
+            @focusin="handleReferenceFocusIn"
+            @focusout="handleReferenceFocusOut"
+          />
 
           <footer class="reader-footer">
             <button class="reader-action" type="button" @click="copyText">
@@ -62,23 +79,46 @@
           </footer>
         </section>
       </div>
+
+      <MessageReferencePopover
+        :reference="hoveredReference"
+        :position-style="hoverPopoverStyle"
+        :tooltip-id="referenceTooltipId"
+      />
+      <MessageReferenceDialog
+        :open="referenceDialogOpen"
+        :message-id="selectedReferenceId"
+        :message="selectedReferenceMessage"
+        :title-id="referenceTitleId"
+        :return-focus-to="referenceTrigger"
+        @close="closeReferenceDialog"
+        @jump="jumpToReference"
+      />
     </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
+import type { RoomMessage } from '@/composables/useRoom'
+import MessageReferenceDialog from './chat-message/MessageReferenceDialog.vue'
+import MessageReferencePopover from './chat-message/MessageReferencePopover.vue'
+import { useMessageReferences } from './chat-message/useMessageReferences'
 
 const props = withDefaults(defineProps<{
   text: string
   html: string
   messageId: string
+  messageReferences?: ReadonlyMap<string, RoomMessage>
   collapseAfterChars?: number
   collapseAfterLines?: number
 }>(), {
   collapseAfterChars: 1400,
   collapseAfterLines: 18,
 })
+const emit = defineEmits<{
+  scrollToMessageReference: [messageId: string]
+}>()
 
 const expanded = ref(false)
 const readerOpen = ref(false)
@@ -103,6 +143,26 @@ const safeMessageId = computed(() => {
 
 const contentId = computed(() => `message-content-${safeMessageId.value}`)
 const readerTitleId = computed(() => `message-reader-title-${safeMessageId.value}`)
+const referenceTitleId = computed(() => `message-ref-title-${safeMessageId.value}`)
+const referenceTooltipId = computed(() => `message-ref-tooltip-${safeMessageId.value}`)
+
+const {
+  selectedReferenceId,
+  selectedReferenceMessage,
+  referenceDialogOpen,
+  referenceTrigger,
+  hoveredReference,
+  hoverPopoverStyle,
+  closeReferenceDialog,
+  handleReferenceClick,
+  handleReferenceMouseOver,
+  handleReferenceMouseOut,
+  handleReferenceFocusIn,
+  handleReferenceFocusOut,
+} = useMessageReferences({
+  messageReferences: () => props.messageReferences,
+  tooltipId: referenceTooltipId.value,
+})
 
 const statsLabel = computed(() => {
   const lines = lineCount.value
@@ -119,6 +179,13 @@ function openReader() {
 }
 
 function closeReader() {
+  readerOpen.value = false
+}
+
+function jumpToReference() {
+  if (!selectedReferenceId.value) return
+  emit('scrollToMessageReference', selectedReferenceId.value)
+  closeReferenceDialog()
   readerOpen.value = false
 }
 
@@ -309,6 +376,41 @@ async function copyText() {
   background: rgba(125, 211, 252, 0.14);
   color: #7dd3fc;
   font-weight: 600;
+}
+
+.reader-content :deep(.message-ref-token),
+.long-message-content :deep(.message-ref-token) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.45em;
+  margin: 0 1px;
+  padding: 1px 6px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 6px;
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+  cursor: pointer;
+  font: inherit;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.9em;
+  line-height: 1.35;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.reader-content :deep(.message-ref-token:hover),
+.reader-content :deep(.message-ref-token:focus-visible),
+.long-message-content :deep(.message-ref-token:hover),
+.long-message-content :deep(.message-ref-token:focus-visible) {
+  border-color: rgba(147, 197, 253, 0.62);
+  background: rgba(96, 165, 250, 0.2);
+}
+
+.reader-content :deep(.message-ref-token:focus-visible),
+.long-message-content :deep(.message-ref-token:focus-visible) {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.16);
 }
 
 @media (max-width: 768px) {

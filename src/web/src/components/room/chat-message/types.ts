@@ -1,8 +1,8 @@
-import type { RoomMessage } from '@/composables/useRoom'
+import type { MessageReplyReference, RoomMessage } from '@/composables/useRoom'
 
 export interface MessageThreadSummary {
   count: number
-  latest: RoomMessage | null
+  latest: MessageReplyReference | RoomMessage | null
 }
 
 export interface ProvenanceBadge {

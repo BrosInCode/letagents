@@ -16,6 +16,7 @@ function createDeps() {
     requireParticipant: unused,
     parseOptionalAgentPromptKind: () => null,
     parseOptionalReplyToMessageId: () => null,
+    parseOptionalThreadRootMessageId: () => null,
     shouldIncludePromptOnlyMessages: () => false,
     emitProjectMessage: unused,
     rememberRoomParticipantFromMessage: unused,

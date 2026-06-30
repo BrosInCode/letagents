@@ -45,6 +45,8 @@
           :text="message.text || ''"
           :html="renderedContent"
           :messageId="message.id"
+          :messageReferences="messageReferences"
+          @scrollToMessageReference="emit('scrollToReply', $event)"
         />
         <MessageAttachments
           v-if="attachments.length"
@@ -108,6 +110,7 @@ import {
 const props = defineProps<{
   message: RoomMessage
   roomIdentifier?: string
+  messageReferences?: ReadonlyMap<string, RoomMessage>
   thread?: MessageThreadSummary | null
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   reasoningSession?: RoomReasoningSession | null

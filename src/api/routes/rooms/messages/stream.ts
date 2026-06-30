@@ -179,7 +179,9 @@ async function hydrateStreamMessage(
   const messageNumber = parseScopedId(message.id, "msg");
   if (!messageNumber) return message;
   const rootNumber = parseScopedId(message.thread_root_id, "msg");
-  const replyToNumber = message.thread_reply_to_id
+  const replyToNumber = message.reply_to?.id
+    ? parseScopedId(message.reply_to.id, "msg")
+    : message.thread_reply_to_id
     ? parseScopedId(message.thread_reply_to_id, "msg")
     : null;
   const [hydrated] = await hydrateMessageReplies(roomId, [{
