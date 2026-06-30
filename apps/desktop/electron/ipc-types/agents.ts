@@ -43,6 +43,7 @@ export interface DesktopAgentProvider {
 export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
   repoRootPath?: string | null;
+  cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
 }
 
 export interface DesktopAgentProviderPreflight {
@@ -82,6 +83,11 @@ export type DesktopManagedAgentSessionStatus =
 export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
   | "desktop_events";
+
+export type DesktopCursorMcpPolicy =
+  | "filter_letagents"
+  | "normal"
+  | "none";
 
 export interface DesktopManagedAgentActiveWork {
   kind: "message" | "task_update";
@@ -159,6 +165,7 @@ export interface DesktopManagedAgentSession {
   deliveryMode: DesktopManagedAgentDeliveryMode;
   permissionProfileId: DesktopManagedAgentPermissionProfileId;
   permissionProfile: DesktopManagedAgentPermissionProfile;
+  cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   canStop: boolean;
   agentSessionId: string | null;
   actorLabel: string | null;
@@ -181,6 +188,7 @@ export interface DesktopManagedAgentStartInput {
   repoRootPath: string;
   deliveryMode?: DesktopManagedAgentDeliveryMode;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
+  cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
 }

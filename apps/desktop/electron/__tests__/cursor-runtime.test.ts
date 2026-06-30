@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-"));
 process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
+const cursorSourceHome = join(tempDir, "cursor-source-home");
+mkdirSync(join(cursorSourceHome, ".cursor"), { recursive: true });
+writeFileSync(join(cursorSourceHome, ".cursor", "mcp.json"), '{"mcpServers":{"filesystem":{"command":"npx"}}}\n');
+process.env.LETAGENTS_CURSOR_SOURCE_HOME = cursorSourceHome;
 
 const {
   createDesktopCursorRuntime,
@@ -18,6 +22,7 @@ const {
 
 import type {
   DesktopAgentProviderPreflight,
+  DesktopAgentProviderPreflightInput,
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../ipc-types.js";
@@ -30,6 +35,7 @@ import type { StoredAgentSessionState } from "../main/agents/state.js";
 
 test.after(() => {
   delete process.env.LETAGENTS_STATE_PATH;
+  delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -121,9 +127,13 @@ function fakeRegisterWorker(input: {
 
 function createRuntimeHarness(runner: CursorRunner) {
   const published: Array<{ text: string | null; eventId: string }> = [];
+  const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   const runtime = createDesktopCursorRuntime({
     runner,
-    preflight: async () => readyPreflight(),
+    preflight: async (_providerId, input) => {
+      preflightInputs.push(input ?? {});
+      return readyPreflight();
+    },
     registerWorker: async (input) => fakeRegisterWorker(input),
     disconnectWorker: async (session) => {
       if (session) {
@@ -141,12 +151,12 @@ function createRuntimeHarness(runner: CursorRunner) {
     emitSessionUpdate: () => undefined,
     now: () => "2026-06-30T00:00:00.000Z",
   });
-  return { runtime, published };
+  return { runtime, published, preflightInputs };
 }
 
 test("Cursor runtime starts, lists, and inspects a read-only desktop worker", async () => {
   resetState();
-  const { runtime } = createRuntimeHarness({
+  const { runtime, preflightInputs } = createRuntimeHarness({
     async runTurn(): Promise<CursorTurnResult> {
       throw new Error("runTurn should not be called during start");
     },
@@ -164,6 +174,7 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(result.session.status, "completed");
   assert.equal(result.session.deliveryMode, "desktop_events");
   assert.equal(result.session.permissionProfileId, "read_only");
+  assert.equal(result.session.cursorMcpPolicy, "filter_letagents");
   assert.equal(result.session.permissionProfile.label, "Read-only");
   assert.equal(result.session.canStop, true);
   assert.equal(result.session.ideLabel, "Cursor");
@@ -174,6 +185,8 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(inspected?.serverReachable, true);
   assert.equal(inspected?.recentItems.length, 1);
   assert.equal(getStoredCursorLiveSession(result.session.id)?.permission_profile_id, "read_only");
+  assert.equal(getStoredCursorLiveSession(result.session.id)?.cursor_mcp_policy, "filter_letagents");
+  assert.equal(preflightInputs[0]?.cursorMcpPolicy, "filter_letagents");
   await assert.rejects(
     () => runtime.start({
       providerId: "cursor",
@@ -185,6 +198,39 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
     }),
     /Full access is not available for cursor/,
   );
+});
+
+test("Cursor runtime persists selected MCP policy and reuses it for event turns", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  const { runtime, preflightInputs } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      return {
+        sessionId: "cursor_session_1",
+        text: "Normal policy turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Normal policy turn complete." }],
+      };
+    },
+  });
+
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    cursorMcpPolicy: "normal",
+  });
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  assert.equal(started.session.cursorMcpPolicy, "normal");
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.cursor_mcp_policy, "normal");
+  assert.equal(preflightInputs[0]?.cursorMcpPolicy, "normal");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]?.env, {});
 });
 
 test("Cursor runtime delivers room events into ask-mode runner and persists resume state", async () => {

@@ -70,7 +70,7 @@ With `--force`, Cursor successfully called `letagents.get_current_room`.
 
 `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` alone did not hide the global LetAgents MCP config. Isolating `HOME` hid MCP config, but Cursor was no longer logged in and required `agent login` or `CURSOR_API_KEY`.
 
-Implication: managed Cursor must never run with `--force` while global MCP config is visible. The write-capable path needs either an isolated managed profile, `CURSOR_API_KEY`, or another proven mechanism that makes LetAgents room tools unavailable to Cursor.
+Implication: managed Cursor must never run with `--force` while global MCP config is visible unless the user explicitly chose normal Cursor MCP behavior and the permission profile is separately safe. The default managed policy should hide LetAgents MCP while still allowing non-LetAgents user MCP servers.
 
 ## Failure And Cancellation Semantics
 
@@ -113,4 +113,4 @@ Only after these gates pass should `cursor` be exposed as a normal `desktop_mana
 
 ## Gate 2 Follow-up
 
-See `docs/cursor-desktop-managed-gate2.md` for the config/auth isolation probe. The short version: managed Cursor now uses an isolated home with an empty managed `~/.cursor/mcp.json`; on macOS it links the login keychain into that managed home so normal Cursor auth works while LetAgents MCP stays unavailable. Write-capable Cursor remains gated on desktop approvals and sandbox behavior tests.
+See `docs/cursor-desktop-managed-gate2.md` for the config/auth isolation probe. The short version: managed Cursor now has a Cursor MCP policy selector. The default `filter_letagents` mode uses an isolated home, copies the user's Cursor MCP config, removes LetAgents-looking MCP servers, and links the macOS login keychain into that managed home so normal Cursor auth works. `none` keeps the old empty-MCP behavior. `normal` uses the user's normal Cursor MCP setup as-is and warns that Cursor may access configured MCP tools directly. Write-capable Cursor remains gated on desktop approvals and sandbox behavior tests.

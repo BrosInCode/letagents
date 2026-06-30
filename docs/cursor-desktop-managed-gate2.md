@@ -95,13 +95,15 @@ exit $code
 # Error: Authentication required. Run 'agent login', pass --api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.
 ```
 
-On macOS, Cursor's normal login can be reused without exposing `~/.cursor/mcp.json` by using a managed home with:
+On macOS, Cursor's normal login can be reused without exposing LetAgents MCP by using a managed home with:
 
 - a copied `~/.cursor/cli-config.json`;
 - a copied `~/.cursor/agent-cli-state.json`;
-- a managed `~/.cursor/mcp.json` containing `{"mcpServers":{}}`;
+- a managed `~/.cursor/mcp.json`;
 - `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `CURSOR_CONFIG_DIR`, and `CURSOR_DATA_DIR` pointed inside the managed profile;
 - `~/Library/Keychains` linked into the managed home so Cursor can read the user's macOS login keychain.
+
+The original Gate 2 probe used an empty managed MCP config. The current product default is `filter_letagents`: copy the user's Cursor MCP config into the managed profile, remove only LetAgents-looking servers, and preserve other MCP servers. Users can explicitly choose `none` for the old empty-MCP behavior or `normal` to let Cursor use its normal MCP setup as-is.
 
 With that environment:
 
@@ -135,13 +137,25 @@ cd apps/desktop
 npm run smoke:cursor-managed -- --workspace ../..
 ```
 
-Expected result:
+That default smoke uses `--mcp-policy filter_letagents`. Optional policy probes:
+
+```sh
+npm run smoke:cursor-managed -- --workspace ../.. --mcp-policy none
+npm run smoke:cursor-managed -- --workspace ../.. --mcp-policy normal
+```
+
+Expected result for `filter_letagents`:
 
 - `cursor-agent status` succeeds in the managed profile.
 - `cursor-agent mcp list` does not mention LetAgents.
 - `cursor-agent mcp list-tools letagents` fails with no LetAgents MCP client.
 - a normal read-only Cursor turn returns `MANAGED_CURSOR_READONLY_OK`.
 - an adversarial LetAgents MCP prompt returns `LETAGENTS_MCP_UNAVAILABLE` without emitting a LetAgents-looking stream event.
+
+Expected policy differences:
+
+- `none`: no MCP servers should be visible.
+- `normal`: Cursor may show LetAgents or any other configured MCP server; this mode warns but does not fail just because LetAgents is present.
 
 An isolated-home browser login bootstrap is also available, but it requires user action:
 
@@ -169,21 +183,25 @@ Gate 2 is proven for the current macOS desktop-managed read-only path:
 - Proven: `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` alone do not hide global MCP config.
 - Proven: macOS Cursor auth can be preserved by linking the login keychain into the managed home while still hiding global Cursor MCP config.
 - Proven: `cursor-agent mcp list` does not show `letagents`, `list-tools letagents` fails, and an adversarial prompt cannot call LetAgents MCP tools.
+- Current default: managed Cursor filters LetAgents MCP out of a copied user MCP config instead of disabling every non-LetAgents MCP server.
 - Remaining: non-macOS hosts need either `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, or a user-approved managed-home `cursor-agent login`.
 
 ## Implemented Desktop Runtime Contract
 
 Managed Cursor launches now use:
 
-- managed home: `<LetAgents state dir>/cursor-managed/home`
-- managed config dir: `<LetAgents state dir>/cursor-managed/config`
-- managed data dir: `<LetAgents state dir>/cursor-managed/data`
-- managed cache dir: `<LetAgents state dir>/cursor-managed/cache`
-- empty managed Cursor MCP config: `<managed home>/.cursor/mcp.json`
-- macOS keychain link: `<managed home>/Library/Keychains -> ~/Library/Keychains`
+- MCP policy selector:
+  - `filter_letagents` (default): managed profile, copied user Cursor MCP config, LetAgents-looking servers removed.
+  - `none`: managed profile, empty managed Cursor MCP config at `<managed home>/.cursor/mcp.json`.
+  - `normal`: no managed MCP override; Cursor uses the user's normal MCP setup as-is.
+- managed home for managed policies: `<LetAgents state dir>/cursor-managed/home`
+- managed config dir for managed policies: `<LetAgents state dir>/cursor-managed/config`
+- managed data dir for managed policies: `<LetAgents state dir>/cursor-managed/data`
+- managed cache dir for managed policies: `<LetAgents state dir>/cursor-managed/cache`
+- macOS keychain link for managed policies: `<managed home>/Library/Keychains -> ~/Library/Keychains`
 - sanitized child environment: Cursor receives only an allowlisted environment for process basics, managed `HOME`/XDG paths, and Cursor-specific auth/config variables. Generic ambient credentials such as LetAgents, GitHub, cloud, and package-manager tokens are not inherited.
 
-The runtime also rejects workspaces that have a project-level `.cursor/mcp.json` mentioning LetAgents, because Cursor merges project MCP config with home MCP config.
+The runtime rejects workspaces that have a project-level `.cursor/mcp.json` mentioning LetAgents for `filter_letagents` and `none`, because Cursor merges project MCP config with home MCP config. The explicit `normal` policy allows normal Cursor MCP behavior and warns that Cursor may access configured MCP tools directly.
 
 ## Remaining Gates
 

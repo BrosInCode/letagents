@@ -15,6 +15,9 @@ import {
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
   canStopManagedAgentTurn,
+  cursorMcpPolicyDescription,
+  cursorMcpPolicyOptions,
+  defaultCursorMcpPolicy,
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
@@ -36,6 +39,7 @@ import {
   mergeDesktopManagedAgentPresence,
   normalizeManagedAgentRoomIdentifier,
   preferredManagedAgentRepoRootPath,
+  shouldShowCursorMcpPolicySelector,
 } from "../src/domain/managed-agents";
 
 function provider(
@@ -175,6 +179,38 @@ test("hasDesktopManagedRuntime identifies providers the desktop can supervise di
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
   })), true);
+});
+
+test("Cursor MCP policy selector metadata defaults to filtering LetAgents", () => {
+  assert.equal(defaultCursorMcpPolicy, "filter_letagents");
+  assert.deepEqual(
+    cursorMcpPolicyOptions.map((option) => [option.id, option.label]),
+    [
+      ["filter_letagents", "Filter LetAgents"],
+      ["normal", "Normal Cursor MCPs"],
+      ["none", "No MCPs"],
+    ],
+  );
+  assert.equal(cursorMcpPolicyDescription("filter_letagents"), "Use my MCPs except LetAgents.");
+  assert.equal(cursorMcpPolicyDescription("normal"), "Use my normal Cursor MCP setup as-is.");
+});
+
+test("Cursor MCP policy selector only shows for desktop-managed Cursor", () => {
+  assert.equal(shouldShowCursorMcpPolicySelector(provider({
+    id: "cursor",
+    name: "Cursor",
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "cursor-agent",
+    mcpTargetId: "cursor",
+  })), true);
+  assert.equal(shouldShowCursorMcpPolicySelector(provider()), false);
+  assert.equal(shouldShowCursorMcpPolicySelector(provider({
+    id: "cursor",
+    name: "Cursor",
+    capabilities: ["external_mcp"],
+    runtimeCommand: "cursor-agent",
+    mcpTargetId: "cursor",
+  })), false);
 });
 
 test("preferredManagedAgentRepoRootPath defaults local agents to the main checkout", () => {

@@ -21,7 +21,7 @@ import {
   type ManagedRoomEvent,
 } from "./codex-managed-agent-dispatch.js";
 import { buildCursorDesktopEventPrompt } from "./cursor-event-prompt.js";
-import { prepareCursorManagedProfile } from "./cursor-managed-profile.js";
+import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import {
   productionCursorRunner,
   type CursorRunner,
@@ -159,15 +159,17 @@ export function createDesktopCursorRuntime(
     const repoBranch = await buildRepoStatus(cwd)
       .then((status) => status.branch)
       .catch(() => null);
+    const cursorMcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
     const preflightResult = await preflight("cursor", {
       roomIdentifier,
       repoRootPath: cwd,
+      cursorMcpPolicy,
     });
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
     const permissionProfile = assertManagedAgentPermissionProfileAvailable("cursor", input.permissionProfileId);
-    prepareCursorManagedProfile({ workspaceRoot: cwd });
+    prepareCursorManagedProfile({ workspaceRoot: cwd, mcpPolicy: cursorMcpPolicy });
 
     const token = makeCursorStopToken();
     const displayName = suggestLetAgentsCodename(listCursorDisplayNamesForRoom(roomIdentifier), token);
@@ -191,6 +193,7 @@ export function createDesktopCursorRuntime(
       max_minutes: coerceMaxMinutes(input.maxMinutes),
       delivery_mode: "desktop_events",
       permission_profile_id: permissionProfile.id,
+      cursor_mcp_policy: cursorMcpPolicy,
       desktop_managed: true,
       deadline_utc: formatDeadlineUtc(coerceMaxMinutes(input.maxMinutes)),
       token,
@@ -322,7 +325,10 @@ export function createDesktopCursorRuntime(
         cwd: active.cwd,
         cursorSessionId: active.cursor_session_id,
         cursorBin: active.cursor_bin,
-        env: prepareCursorManagedProfile({ workspaceRoot: active.cwd }).env,
+        env: prepareCursorManagedProfile({
+          workspaceRoot: active.cwd,
+          mcpPolicy: active.cursor_mcp_policy,
+        }).env,
         mode: "ask",
         abortController,
       });

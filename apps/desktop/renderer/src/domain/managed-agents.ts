@@ -4,6 +4,7 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
+  DesktopCursorMcpPolicy,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
@@ -154,6 +155,44 @@ export function agentProviderNeedsDesktopRepo(
   provider: Pick<DesktopAgentProvider, "capabilities"> | null | undefined,
 ): boolean {
   return hasDesktopManagedRuntime(provider);
+}
+
+export const defaultCursorMcpPolicy: DesktopCursorMcpPolicy = "filter_letagents";
+
+export const cursorMcpPolicyOptions: Array<{
+  id: DesktopCursorMcpPolicy;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "filter_letagents",
+    label: "Filter LetAgents",
+    description: "Use my MCPs except LetAgents.",
+  },
+  {
+    id: "normal",
+    label: "Normal Cursor MCPs",
+    description: "Use my normal Cursor MCP setup as-is.",
+  },
+  {
+    id: "none",
+    label: "No MCPs",
+    description: "Start Cursor with MCP tools disabled.",
+  },
+];
+
+export function cursorMcpPolicyDescription(
+  policy: DesktopCursorMcpPolicy | null | undefined,
+): string {
+  return cursorMcpPolicyOptions.find((option) => option.id === policy)?.description ??
+    cursorMcpPolicyOptions[0]?.description ??
+    "Use my MCPs except LetAgents.";
+}
+
+export function shouldShowCursorMcpPolicySelector(
+  provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
+): boolean {
+  return provider?.id === "cursor" && hasDesktopManagedRuntime(provider);
 }
 
 export function agentAuthCommand(
