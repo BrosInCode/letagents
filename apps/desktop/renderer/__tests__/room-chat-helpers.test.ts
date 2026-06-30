@@ -81,6 +81,21 @@ describe("room chat helpers", () => {
     assert.deepEqual(roomTimelineMessages(messages).map((message) => message.id), ["msg_1"]);
   });
 
+  it("keeps quote replies in the room timeline when no explicit thread root is present", () => {
+    const messages = [
+      roomMessage("msg_1", null),
+      roomMessage("msg_2", "msg_1", "2026-05-28T00:02:00.000Z", { threadRootId: "msg_2" }),
+      roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"),
+    ];
+
+    const summaries = buildThreadSummaries(messages);
+
+    assert.deepEqual(roomTimelineMessages(messages).map((message) => message.id), ["msg_1", "msg_2"]);
+    assert.deepEqual(threadReplies(messages, "msg_1").map((message) => message.id), ["msg_3"]);
+    assert.equal(summaries.get("msg_1")?.count, 1);
+    assert.equal(summaries.get("msg_1")?.latest?.id, "msg_3");
+  });
+
   it("merges thread summary metadata into timeline indicators", () => {
     const parent = {
       ...roomMessage("msg_1", null),
@@ -402,6 +417,7 @@ function roomMessage(
   id: string,
   replyToId: string | null,
   timestamp = "2026-05-28T00:00:00.000Z",
+  options: { threadRootId?: string } = {},
 ): DesktopRoomMessage {
   return {
     id,
@@ -413,7 +429,7 @@ function roomMessage(
     timestamp,
     actorLabel: null,
     agentIdentity: null,
-    threadRootId: replyToId || id,
+    threadRootId: options.threadRootId || replyToId || id,
     threadReplyToId: replyToId,
     thread: null,
     replyTo: replyToId

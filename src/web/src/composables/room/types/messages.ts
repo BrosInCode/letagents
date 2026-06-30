@@ -57,6 +57,8 @@ export interface RoomMessage {
   agent_prompt_kind?: string | null
   source: string | null
   timestamp: string
+  thread_root_id?: string | null
+  thread_reply_to_id?: string | null
   reply_to?: MessageReplyReference | null
   agent_identity?: {
     name: string

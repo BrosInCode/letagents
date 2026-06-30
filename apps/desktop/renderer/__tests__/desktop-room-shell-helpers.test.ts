@@ -41,6 +41,7 @@ import {
   oldestRoomHistoryCursor,
   useDesktopRoomMessages,
 } from "../src/components/desktop/content/room-shell/useDesktopRoomMessages";
+import { isThreadReplyMessage } from "../src/components/desktop/content/room-shell/threading";
 import { latestReasoningSessionForTarget } from "../src/domain/reasoning";
 
 describe("desktop room shell helpers", () => {
@@ -182,6 +183,24 @@ describe("desktop room shell helpers", () => {
     ];
 
     assert.equal(oldestRoomHistoryCursor(messages), "msg_15");
+  });
+
+  it("refreshes thread inbox only for explicit thread replies", () => {
+    const quoteReply = roomMessage({
+      id: "msg_2",
+      threadRootId: "msg_2",
+      threadReplyToId: "msg_1",
+      replyTo: messageReply("msg_1"),
+    });
+    const threadReply = roomMessage({
+      id: "msg_3",
+      threadRootId: "msg_1",
+      threadReplyToId: "msg_1",
+      replyTo: messageReply("msg_1"),
+    });
+
+    assert.equal(isThreadReplyMessage(quoteReply), false);
+    assert.equal(isThreadReplyMessage(threadReply), true);
   });
 
   it("filters GitHub chat event messages when room GitHub events are hidden", () => {
@@ -515,6 +534,16 @@ function roomMessage(overrides: Partial<DesktopRoomMessage>): DesktopRoomMessage
     thread: null,
     replyTo: null,
     ...overrides,
+  };
+}
+
+function messageReply(id: string): NonNullable<DesktopRoomMessage["replyTo"]> {
+  return {
+    id,
+    sender: "Emmy",
+    text: id,
+    source: "user",
+    timestamp: "2026-05-28T00:00:00.000Z",
   };
 }
 

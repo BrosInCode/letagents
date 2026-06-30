@@ -172,7 +172,7 @@ export function threadParentId(message: DesktopRoomMessage): string | null {
   if (message.threadRootId && message.threadRootId !== message.id) {
     return message.threadRootId;
   }
-  return message.replyTo?.id || message.threadReplyToId || null;
+  return null;
 }
 
 function timestampValue(message: DesktopRoomMessage | null | undefined): number {
