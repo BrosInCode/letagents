@@ -209,9 +209,7 @@ const provenanceBadge = computed<ProvenanceBadge | null>(() => {
 })
 
 const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
-const renderedContent = computed(() => renderMessageContent(props.message.text || '', {
-  resolveMessageReference: (messageId) => props.messageReferences?.get(messageId) || null,
-}))
+const renderedContent = computed(() => renderMessageContent(props.message.text || ''))
 </script>
 
 <style scoped>

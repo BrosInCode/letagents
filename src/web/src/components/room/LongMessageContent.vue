@@ -42,7 +42,9 @@
           ref="readerDialog"
           class="reader-dialog"
           role="dialog"
-          aria-modal="true"
+          :aria-modal="referenceDialogOpen ? 'false' : 'true'"
+          :aria-hidden="referenceDialogOpen ? 'true' : undefined"
+          :inert="referenceDialogOpen ? true : undefined"
           :aria-labelledby="readerTitleId"
           tabindex="-1"
           @keydown.esc="closeReader"
@@ -78,84 +80,30 @@
         </section>
       </div>
 
-      <Transition name="message-ref-popover">
-        <div
-          v-if="hoveredReference"
-          class="message-ref-popover"
-          :class="{ missing: !hoveredReference.loaded }"
-          :style="hoverPopoverStyle"
-          role="tooltip"
-        >
-          <strong>{{ hoveredReference.id }}</strong>
-          <span>{{ hoveredReference.preview }}</span>
-        </div>
-      </Transition>
-
-      <Transition name="message-ref-modal">
-        <div
-          v-if="referenceDialogOpen"
-          class="message-ref-backdrop"
-          @click.self="closeReferenceDialog"
-        >
-          <section
-            ref="referenceDialog"
-            class="message-ref-dialog"
-            role="dialog"
-            aria-modal="true"
-            :aria-labelledby="referenceTitleId"
-            tabindex="-1"
-            @keydown.esc="closeReferenceDialog"
-          >
-            <header class="message-ref-header">
-              <div>
-                <p class="message-ref-eyebrow">{{ selectedReferenceId }}</p>
-                <h2 :id="referenceTitleId">Message reference</h2>
-              </div>
-              <button class="reader-close" type="button" @click="closeReferenceDialog">
-                Close
-              </button>
-            </header>
-
-            <div class="message-ref-content">
-              <template v-if="selectedReferenceMessage">
-                <div class="message-ref-meta">
-                  <strong>{{ selectedReferenceDisplayName }}</strong>
-                  <time v-if="selectedReferenceTime">{{ selectedReferenceTime }}</time>
-                </div>
-                <p class="message-ref-full-text">{{ selectedReferenceMessage.text || 'Empty message' }}</p>
-              </template>
-              <p v-else class="message-ref-missing">
-                This message is not loaded in the current transcript window.
-              </p>
-            </div>
-
-            <footer class="message-ref-footer">
-              <button
-                v-if="selectedReferenceMessage"
-                class="reader-action"
-                type="button"
-                @click="jumpToReference"
-              >
-                Jump to message
-              </button>
-              <button class="reader-action primary" type="button" @click="closeReferenceDialog">
-                Done
-              </button>
-            </footer>
-          </section>
-        </div>
-      </Transition>
+      <MessageReferencePopover
+        :reference="hoveredReference"
+        :position-style="hoverPopoverStyle"
+        :tooltip-id="referenceTooltipId"
+      />
+      <MessageReferenceDialog
+        :open="referenceDialogOpen"
+        :message-id="selectedReferenceId"
+        :message="selectedReferenceMessage"
+        :title-id="referenceTitleId"
+        :return-focus-to="referenceTrigger"
+        @close="closeReferenceDialog"
+        @jump="jumpToReference"
+      />
     </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
-import {
-  type RoomMessage,
-  parseAgentIdentity,
-} from '@/composables/useRoom'
-import { formatMessageTime } from './chat-message/formatting'
+import type { RoomMessage } from '@/composables/useRoom'
+import MessageReferenceDialog from './chat-message/MessageReferenceDialog.vue'
+import MessageReferencePopover from './chat-message/MessageReferencePopover.vue'
+import { useMessageReferences } from './chat-message/useMessageReferences'
 
 const props = withDefaults(defineProps<{
   text: string
@@ -176,15 +124,6 @@ const expanded = ref(false)
 const readerOpen = ref(false)
 const copied = ref(false)
 const readerDialog = ref<HTMLElement | null>(null)
-const referenceDialog = ref<HTMLElement | null>(null)
-const selectedReferenceId = ref<string | null>(null)
-const referenceDialogOpen = ref(false)
-const hoveredReference = ref<{
-  id: string
-  preview: string
-  loaded: boolean
-} | null>(null)
-const hoverPopoverStyle = ref<Record<string, string>>({})
 
 const lineCount = computed(() => {
   if (!props.text) return 0
@@ -205,21 +144,25 @@ const safeMessageId = computed(() => {
 const contentId = computed(() => `message-content-${safeMessageId.value}`)
 const readerTitleId = computed(() => `message-reader-title-${safeMessageId.value}`)
 const referenceTitleId = computed(() => `message-ref-title-${safeMessageId.value}`)
-const selectedReferenceMessage = computed(() =>
-  selectedReferenceId.value
-    ? props.messageReferences?.get(selectedReferenceId.value) || null
-    : null
-)
-const selectedReferenceDisplayName = computed(() => {
-  const message = selectedReferenceMessage.value
-  if (!message) return 'Unknown'
-  return parseAgentIdentity(message.sender).displayName || message.sender || 'Unknown'
+const referenceTooltipId = computed(() => `message-ref-tooltip-${safeMessageId.value}`)
+
+const {
+  selectedReferenceId,
+  selectedReferenceMessage,
+  referenceDialogOpen,
+  referenceTrigger,
+  hoveredReference,
+  hoverPopoverStyle,
+  closeReferenceDialog,
+  handleReferenceClick,
+  handleReferenceMouseOver,
+  handleReferenceMouseOut,
+  handleReferenceFocusIn,
+  handleReferenceFocusOut,
+} = useMessageReferences({
+  messageReferences: () => props.messageReferences,
+  tooltipId: referenceTooltipId.value,
 })
-const selectedReferenceTime = computed(() =>
-  selectedReferenceMessage.value?.timestamp
-    ? formatMessageTime(selectedReferenceMessage.value.timestamp)
-    : ''
-)
 
 const statsLabel = computed(() => {
   const lines = lineCount.value
@@ -237,89 +180,6 @@ function openReader() {
 
 function closeReader() {
   readerOpen.value = false
-}
-
-function findReferenceToken(target: EventTarget | null): HTMLElement | null {
-  if (!(target instanceof Element)) return null
-  const token = target.closest('.message-ref-token')
-  return token instanceof HTMLElement ? token : null
-}
-
-function getReferencePreview(messageId: string): { id: string; preview: string; loaded: boolean } {
-  const message = props.messageReferences?.get(messageId) || null
-  if (!message) {
-    return {
-      id: messageId,
-      preview: 'Message is not loaded in this transcript window.',
-      loaded: false,
-    }
-  }
-
-  const sender = parseAgentIdentity(message.sender).displayName || message.sender || 'Unknown'
-  const text = (message.text || '').replace(/\s+/g, ' ').trim()
-  const preview = text.length > 180 ? `${text.slice(0, 177)}...` : text
-  return {
-    id: messageId,
-    preview: preview ? `${sender}: ${preview}` : `${sender}: empty message`,
-    loaded: true,
-  }
-}
-
-function showReferencePopover(token: HTMLElement) {
-  const messageId = token.dataset.messageRefId || ''
-  if (!messageId) return
-  const rect = token.getBoundingClientRect()
-  const left = Math.min(Math.max(rect.left + rect.width / 2, 20), window.innerWidth - 20)
-  const showBelow = rect.top < 150
-  hoveredReference.value = getReferencePreview(messageId)
-  hoverPopoverStyle.value = {
-    left: `${left}px`,
-    top: `${showBelow ? rect.bottom + 10 : rect.top - 10}px`,
-    '--message-ref-popover-transform': showBelow ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
-  }
-}
-
-function hideReferencePopover() {
-  hoveredReference.value = null
-}
-
-function handleReferenceClick(event: MouseEvent) {
-  const token = findReferenceToken(event.target)
-  if (!token) return
-  const messageId = token.dataset.messageRefId || ''
-  if (!messageId) return
-  event.preventDefault()
-  event.stopPropagation()
-  selectedReferenceId.value = messageId
-  referenceDialogOpen.value = true
-  hideReferencePopover()
-  nextTick(() => referenceDialog.value?.focus())
-}
-
-function handleReferenceMouseOver(event: MouseEvent) {
-  const token = findReferenceToken(event.target)
-  if (token) showReferencePopover(token)
-}
-
-function handleReferenceMouseOut(event: MouseEvent) {
-  const token = findReferenceToken(event.target)
-  if (!token) return
-  if (event.relatedTarget instanceof Node && token.contains(event.relatedTarget)) return
-  hideReferencePopover()
-}
-
-function handleReferenceFocusIn(event: FocusEvent) {
-  const token = findReferenceToken(event.target)
-  if (token) showReferencePopover(token)
-}
-
-function handleReferenceFocusOut(event: FocusEvent) {
-  const token = findReferenceToken(event.target)
-  if (token) hideReferencePopover()
-}
-
-function closeReferenceDialog() {
-  referenceDialogOpen.value = false
 }
 
 function jumpToReference() {
@@ -418,67 +278,6 @@ async function copyText() {
   background: rgba(9, 9, 11, 0.78);
 }
 
-.message-ref-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(9, 9, 11, 0.72);
-}
-
-.message-ref-popover {
-  position: fixed;
-  z-index: 1100;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: min(320px, calc(100vw - 24px));
-  padding: 10px 12px;
-  border: 1px solid var(--line, #27272a);
-  border-radius: 8px;
-  background: var(--bg-0, #09090b);
-  color: var(--text, #fafafa);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
-  pointer-events: none;
-  transform: var(--message-ref-popover-transform, translate(-50%, -100%)) scale(1);
-  transform-origin: center center;
-}
-
-.message-ref-popover-enter-active,
-.message-ref-popover-leave-active {
-  transition: opacity 140ms ease, transform 140ms ease;
-}
-
-.message-ref-popover-enter-from,
-.message-ref-popover-leave-to {
-  opacity: 0;
-  transform: var(--message-ref-popover-transform, translate(-50%, -100%)) translateY(3px) scale(0.98);
-}
-
-.message-ref-popover-enter-to,
-.message-ref-popover-leave-from {
-  opacity: 1;
-  transform: var(--message-ref-popover-transform, translate(-50%, -100%)) scale(1);
-}
-
-.message-ref-popover strong {
-  font-size: 0.72rem;
-  line-height: 1.2;
-  color: #93c5fd;
-}
-
-.message-ref-popover span {
-  color: var(--muted, #d4d4d8);
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
-
-.message-ref-popover.missing span {
-  color: var(--muted, #a1a1aa);
-}
-
 .reader-dialog {
   display: flex;
   flex-direction: column;
@@ -491,63 +290,12 @@ async function copyText() {
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
 }
 
-.message-ref-dialog {
-  display: flex;
-  flex-direction: column;
-  width: min(560px, 100%);
-  max-height: min(78vh, 720px);
-  overflow: hidden;
-  border: 1px solid var(--line, #27272a);
-  border-radius: 8px;
-  background: var(--bg-0, #09090b);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
-  transform: translateY(0) scale(1);
-}
-
-.message-ref-modal-enter-active,
-.message-ref-modal-leave-active {
-  transition: opacity 160ms ease;
-}
-
-.message-ref-modal-enter-active .message-ref-dialog,
-.message-ref-modal-leave-active .message-ref-dialog {
-  transition: opacity 160ms ease, transform 160ms ease;
-}
-
-.message-ref-modal-enter-from,
-.message-ref-modal-leave-to {
-  opacity: 0;
-}
-
-.message-ref-modal-enter-from .message-ref-dialog,
-.message-ref-modal-leave-to .message-ref-dialog {
-  opacity: 0;
-  transform: translateY(8px) scale(0.98);
-}
-
-.message-ref-modal-enter-to,
-.message-ref-modal-leave-from {
-  opacity: 1;
-}
-
-.message-ref-modal-enter-to .message-ref-dialog,
-.message-ref-modal-leave-from .message-ref-dialog {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.message-ref-dialog:focus {
-  outline: none;
-}
-
 .reader-dialog:focus {
   outline: none;
 }
 
 .reader-header,
-.reader-footer,
-.message-ref-header,
-.message-ref-footer {
+.reader-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -556,68 +304,24 @@ async function copyText() {
   border-bottom: 1px solid var(--line, #27272a);
 }
 
-.reader-footer,
-.message-ref-footer {
+.reader-footer {
   justify-content: flex-end;
   border-top: 1px solid var(--line, #27272a);
   border-bottom: none;
 }
 
-.reader-eyebrow,
-.message-ref-eyebrow {
+.reader-eyebrow {
   margin: 0 0 4px;
   color: var(--muted, #a1a1aa);
   font-size: 0.72rem;
   line-height: 1.2;
 }
 
-.reader-header h2,
-.message-ref-header h2 {
+.reader-header h2 {
   margin: 0;
   color: var(--text, #fafafa);
   font-size: 1rem;
   line-height: 1.2;
-}
-
-.message-ref-content {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 16px;
-  color: var(--text, #fafafa);
-}
-
-.message-ref-meta {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.message-ref-meta strong {
-  font-size: 0.82rem;
-  line-height: 1.2;
-}
-
-.message-ref-meta time {
-  color: var(--muted, #a1a1aa);
-  font-size: 0.72rem;
-  white-space: nowrap;
-}
-
-.message-ref-full-text,
-.message-ref-missing {
-  margin: 0;
-  color: var(--text, #fafafa);
-  font-size: 0.88rem;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.message-ref-missing {
-  color: var(--muted, #a1a1aa);
 }
 
 .reader-content {
@@ -700,13 +404,13 @@ async function copyText() {
 .long-message-content :deep(.message-ref-token:focus-visible) {
   border-color: rgba(147, 197, 253, 0.62);
   background: rgba(96, 165, 250, 0.2);
-  outline: none;
 }
 
-.reader-content :deep(.message-ref-token.unresolved),
-.long-message-content :deep(.message-ref-token.unresolved) {
-  border-style: dashed;
-  color: var(--muted, #a1a1aa);
+.reader-content :deep(.message-ref-token:focus-visible),
+.long-message-content :deep(.message-ref-token:focus-visible) {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.16);
 }
 
 @media (max-width: 768px) {
@@ -714,21 +418,17 @@ async function copyText() {
     max-height: 220px;
   }
 
-  .reader-backdrop,
-  .message-ref-backdrop {
+  .reader-backdrop {
     align-items: stretch;
     padding: 10px;
   }
 
-  .reader-dialog,
-  .message-ref-dialog {
+  .reader-dialog {
     max-height: calc(100vh - 20px);
   }
 
   .reader-header,
-  .reader-footer,
-  .message-ref-header,
-  .message-ref-footer {
+  .reader-footer {
     align-items: flex-start;
     flex-direction: column;
     padding: 12px;
@@ -739,34 +439,8 @@ async function copyText() {
     width: 100%;
   }
 
-  .reader-content,
-  .message-ref-content {
+  .reader-content {
     padding: 14px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .message-ref-popover-enter-active,
-  .message-ref-popover-leave-active,
-  .message-ref-modal-enter-active,
-  .message-ref-modal-leave-active,
-  .message-ref-modal-enter-active .message-ref-dialog,
-  .message-ref-modal-leave-active .message-ref-dialog {
-    transition-duration: 1ms;
-  }
-
-  .message-ref-popover-enter-from,
-  .message-ref-popover-leave-to,
-  .message-ref-popover-enter-to,
-  .message-ref-popover-leave-from {
-    transform: var(--message-ref-popover-transform, translate(-50%, -100%)) scale(1);
-  }
-
-  .message-ref-modal-enter-from .message-ref-dialog,
-  .message-ref-modal-leave-to .message-ref-dialog,
-  .message-ref-modal-enter-to .message-ref-dialog,
-  .message-ref-modal-leave-from .message-ref-dialog {
-    transform: none;
   }
 }
 </style>
