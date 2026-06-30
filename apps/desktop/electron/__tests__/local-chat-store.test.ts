@@ -670,3 +670,77 @@ test("desktop and MCP local chat writers allocate unique ids across processes", 
   });
   assert.deepEqual(ids, ["msg_1", "msg_2", "msg_3", "msg_4", "msg_5", "msg_6", "msg_7", "msg_8"]);
 });
+
+test("local chat stores keep quote-replies top-level across a process restart", async () => {
+  // Regression guard for the removed thread-root backfill: a bare quote-reply
+  // (reply_to only, no explicit thread root) must stay top-level even after the
+  // store is reopened in a fresh process — the backfill used to re-thread it on
+  // init, undoing the quote-reply fix on local rooms across every restart.
+  const stores = [
+    { name: "desktop", module: "apps/desktop/electron/main/rooms/messages/local-store.ts" },
+    { name: "mcp", module: "src/mcp/local-state/local-chat.ts" },
+  ];
+
+  for (const store of stores) {
+    const moduleUrl = pathToFileURL(join(repoRoot, store.module)).href;
+    const childEnv = {
+      ...process.env,
+      LETAGENTS_CHAT_STORAGE_SETTINGS_PATH: join(tempDir, `restart-${store.name}-storage.json`),
+      LETAGENTS_LOCAL_CHAT_DB: join(tempDir, `restart-${store.name}.sqlite`),
+    };
+
+    // Process 1: root, a bare quote-reply, and an explicit thread reply.
+    const writeCode = `
+      const { addLocalChatMessage } = await import(${JSON.stringify(moduleUrl)});
+      const root = await addLocalChatMessage("restart_room", {
+        sender: "Human", text: "root", source: "browser",
+      });
+      await addLocalChatMessage("restart_room", {
+        sender: "Agent", text: "quote reply", source: "agent", reply_to: root.id,
+      });
+      await addLocalChatMessage("restart_room", {
+        sender: "Agent", text: "thread reply", source: "agent",
+        reply_to: root.id, thread_root_id: root.id,
+      });
+      console.log("written");
+    `;
+    await execFileAsync(process.execPath, ["--import", "tsx", "-e", writeCode], {
+      cwd: process.cwd(),
+      env: childEnv,
+    });
+
+    // Process 2 (a fresh process == an app/server restart): opening the store
+    // runs schema init, then we read the raw thread roots straight from SQLite.
+    const readCode = `
+      const { getLocalChatMessages } = await import(${JSON.stringify(moduleUrl)});
+      await getLocalChatMessages("restart_room");
+      const { DatabaseSync } = await import("node:sqlite");
+      const raw = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB);
+      const rows = raw
+        .prepare("SELECT number, reply_to_number, thread_root_number FROM local_chat_messages WHERE room_id = ? ORDER BY number ASC")
+        .all("restart_room");
+      console.log(JSON.stringify(rows.map((row) => ({
+        number: Number(row.number),
+        reply_to_number: row.reply_to_number == null ? null : Number(row.reply_to_number),
+        thread_root_number: row.thread_root_number == null ? null : Number(row.thread_root_number),
+      }))));
+    `;
+    const { stdout } = await execFileAsync(process.execPath, ["--import", "tsx", "-e", readCode], {
+      cwd: process.cwd(),
+      env: childEnv,
+    });
+
+    assert.deepEqual(
+      JSON.parse(stdout.trim()),
+      [
+        { number: 1, reply_to_number: null, thread_root_number: null },
+        // quote reply: reply reference kept, NOT threaded — and it stays that
+        // way after the restart (no backfill re-threads it).
+        { number: 2, reply_to_number: 1, thread_root_number: null },
+        // explicit thread reply: remains threaded onto the root.
+        { number: 3, reply_to_number: 1, thread_root_number: 1 },
+      ],
+      `store ${store.name} must not re-thread a quote-reply across restart`,
+    );
+  }
+});
