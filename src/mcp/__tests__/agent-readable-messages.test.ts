@@ -15,7 +15,10 @@ function message(overrides: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-test("agent-readable messages expose thread root metadata", () => {
+// The next three fixtures carry no explicit thread_root_id (legacy / out-of-band
+// shape that never went through the message mappers), so they exercise the GUARDED
+// reply_to-walk fallback that still derives a thread root to preserve real threads.
+test("agent-readable messages expose thread root metadata (reply_to fallback)", () => {
   const [parent, firstReply, secondReply] = toAgentReadableMessages([
     message({ id: "msg_1", text: "Investigate this here" }),
     message({
@@ -156,5 +159,98 @@ test("agent-readable messages use context ancestors without returning them", () 
     is_thread_reply: true,
     reply_count_in_result: 1,
     latest_reply_id_in_result: "msg_3",
+  });
+});
+
+test("agent-readable messages keep a bare quote-reply top-level via its explicit thread root", () => {
+  // Post-#589 wire shape: every record carries an explicit thread_root_id. A bare
+  // quote-reply has thread_root_id === its own id plus a thread_reply_to_id chip, so
+  // it must stay top-level and must not inflate the quoted message's reply count.
+  const [quoted, quoteReply] = toAgentReadableMessages([
+    message({ id: "msg_1", text: "Original message", thread_root_id: "msg_1" }),
+    message({
+      id: "msg_2",
+      sender: "Codex",
+      text: "Quote reply",
+      thread_root_id: "msg_2",
+      thread_reply_to_id: "msg_1",
+      reply_to: {
+        id: "msg_1",
+        sender: "EmmyMay",
+        text: "Original message",
+        source: "browser",
+        timestamp: "2026-06-08T00:00:00.000Z",
+      },
+    }),
+  ]) as Array<Record<string, unknown>>;
+
+  assert.equal(quoteReply.thread_root_id, "msg_2");
+  assert.equal(quoteReply.thread_reply_to_id, "msg_1");
+  assert.deepEqual(quoteReply.thread, {
+    parent_id: "msg_2",
+    root_message_id: "msg_2",
+    reply_to_id: "msg_1",
+    is_thread_reply: false,
+    reply_count_in_result: 0,
+    latest_reply_id_in_result: null,
+  });
+  // The quoted message accrues no phantom replies from the quote.
+  assert.deepEqual(quoted.thread, {
+    parent_id: "msg_1",
+    root_message_id: "msg_1",
+    reply_to_id: null,
+    is_thread_reply: false,
+    reply_count_in_result: 0,
+    latest_reply_id_in_result: null,
+  });
+});
+
+test("agent-readable messages thread a reply that carries an explicit thread root", () => {
+  const [root, threadReply, quoteReply] = toAgentReadableMessages([
+    message({ id: "msg_1", text: "Root topic", thread_root_id: "msg_1" }),
+    message({
+      id: "msg_2",
+      sender: "Codex",
+      text: "Real thread reply",
+      thread_root_id: "msg_1",
+      thread_reply_to_id: "msg_1",
+      reply_to: {
+        id: "msg_1",
+        sender: "EmmyMay",
+        text: "Root topic",
+        source: "browser",
+        timestamp: "2026-06-08T00:00:00.000Z",
+      },
+    }),
+    message({
+      id: "msg_3",
+      sender: "Claude",
+      text: "Quote of the root",
+      thread_root_id: "msg_3",
+      thread_reply_to_id: "msg_1",
+      reply_to: {
+        id: "msg_1",
+        sender: "EmmyMay",
+        text: "Root topic",
+        source: "browser",
+        timestamp: "2026-06-08T00:00:00.000Z",
+      },
+    }),
+  ]) as Array<Record<string, unknown>>;
+
+  // Real thread reply belongs to msg_1's thread.
+  assert.equal(threadReply.thread_root_id, "msg_1");
+  assert.equal((threadReply.thread as Record<string, unknown>).is_thread_reply, true);
+  // The quote of the root stays top-level (roots at itself).
+  assert.equal(quoteReply.thread_root_id, "msg_3");
+  assert.equal((quoteReply.thread as Record<string, unknown>).is_thread_reply, false);
+  // Only the real thread reply counts toward the root — the quote does not.
+  assert.deepEqual(root.thread, {
+    parent_id: "msg_1",
+    root_message_id: "msg_1",
+    reply_to_id: null,
+    is_thread_reply: false,
+    reply_count_in_result: 1,
+    latest_reply_id_in_result: "msg_2",
   });
 });
