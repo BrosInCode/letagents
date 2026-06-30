@@ -13,8 +13,14 @@ const {
 const {
   buildClaudeCodeQueryOptions,
   claudeCodePreToolUseGuard,
+  isAutoAllowedClaudeCodeTool,
   isBlockedClaudeCodeTool,
 } = await import("../main/agents/claude-code-runner.js");
+const {
+  buildManagedAgentPermissionRoomText,
+  createManagedAgentPermissionRequest,
+  isAutoAllowedManagedAgentTool,
+} = await import("../main/agents/managed-agent-permissions.js");
 const {
   getStoredAgentSession,
   getStoredClaudeCodeLiveSession,
@@ -200,6 +206,9 @@ test("Claude Code runner options lock down ambient MCP and blocked room tools", 
   assert.equal(isBlockedClaudeCodeTool("mcp__letagents__send_message"), true);
   assert.equal(isBlockedClaudeCodeTool("mcp__letagents__rental_run_command"), true);
   assert.equal(isBlockedClaudeCodeTool("Read"), false);
+  assert.equal(isAutoAllowedClaudeCodeTool("Read"), true);
+  assert.equal(isAutoAllowedClaudeCodeTool("mcp__other__Read"), false);
+  assert.equal(isAutoAllowedManagedAgentTool("custom__grep"), false);
   const autoAllowed = await options.canUseTool?.("Read", { file_path: "/tmp/README.md" }, {
     signal: abortController.signal,
     toolUseID: "tool_read",
@@ -379,6 +388,77 @@ test("Claude Code runtime surfaces tool permission requests for desktop approval
   assert.equal(stored?.status, "completed");
 });
 
+test("Claude Code runtime ignores non-owner room permission replies without interrupting the turn", async () => {
+  resetState();
+  const permissionRequests: DesktopManagedAgentPermissionRequest[] = [];
+  const calls: ClaudeCodeTurnInput[] = [];
+  let permissionSettled = false;
+  let runtime!: ReturnType<typeof createRuntimeHarness>["runtime"];
+  const harness = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      calls.push(input);
+      const permission = input.canUseTool!("Bash", { command: "npm run build" }, {
+        signal: new AbortController().signal,
+        toolUseID: "tool_build",
+        title: "Run build",
+      });
+      permission.finally(() => {
+        permissionSettled = true;
+      }).catch(() => undefined);
+      const request = await waitFor(() => permissionRequests[0], "permission request");
+      const baseMessage = messageEvent().message;
+      runtime.dispatchRoomStreamEvent(messageEvent({
+        message: {
+          ...baseMessage,
+          id: "msg_mallory_approval",
+          sender: "Mallory",
+          text: `approve ${request.id}`,
+          timestamp: "2026-06-30T00:00:01.000Z",
+        },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(permissionSettled, false);
+      assert.equal(calls.length, 1);
+      const listed = runtime.listSessions("room_1")[0];
+      assert.equal(listed?.pendingPermissionRequests.length, 1);
+      const result = await runtime.resolvePermissionRequest({
+        requestId: request.id,
+        sessionId: listed?.id,
+        behavior: "deny",
+        message: "Owner denied.",
+      });
+      assert.equal(result.accepted, true);
+      const decision = await permission;
+      assert.equal(decision.behavior, "deny");
+      return {
+        sessionId: "claude_session_1",
+        text: "Build was not run.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Build was not run." }],
+      };
+    },
+  }, {
+    publishPermissionRequest: async (input) => {
+      permissionRequests.push(input.request);
+      return { roomMessageId: "msg_perm_room" };
+    },
+  });
+  runtime = harness.runtime;
+  await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(harness.published, [{ text: "Build was not run.", eventId: "msg_1" }]);
+});
+
 test("Claude Code runtime consumes room permission replies without preempting the active turn", async () => {
   resetState();
   const permissionRequests: DesktopManagedAgentPermissionRequest[] = [];
@@ -499,6 +579,33 @@ test("Claude Code runtime preempts an active event and redelivers the newer even
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.last_error, null);
   assert.equal(stored?.active_work, null);
+});
+
+test("managed agent permission room text omits raw ids and redacts secret command details", () => {
+  const request = createManagedAgentPermissionRequest({
+    providerId: "claude-code",
+    sessionId: "session_1",
+    toolName: "Bash",
+    toolInput: {
+      command:
+        "curl -H 'Authorization: Bearer token_123' https://user:pass@example.com/deploy?token=secret --password=s3cr3t",
+    },
+    toolUseId: "tool_bash",
+    title: "Run deploy command",
+    requestedAt: "2026-06-30T00:00:00.000Z",
+  });
+  const text = buildManagedAgentPermissionRoomText({
+    request,
+    agentDisplayName: "WarmGolden",
+  });
+
+  assert.equal(request.id.startsWith("perm_"), true);
+  assert.doesNotMatch(text, new RegExp(request.id));
+  assert.doesNotMatch(text, /approve perm_|deny perm_/i);
+  assert.doesNotMatch(text, /token_123|secret|s3cr3t|user:pass/i);
+  assert.match(request.inputSummary ?? "", /Authorization: Bearer \[redacted\]/);
+  assert.match(request.inputSummary ?? "", /token=\[redacted\]/);
+  assert.match(request.inputSummary ?? "", /--password=\[redacted\]/);
 });
 
 test("Claude Code runtime stop interrupts the worker session and disconnects the room identity", async () => {
