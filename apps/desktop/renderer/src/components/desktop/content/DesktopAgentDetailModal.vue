@@ -107,6 +107,14 @@
                 </div>
                 <p>{{ session.repoRootPath }}</p>
                 <div
+                  class="desktop-agent-detail-permission-profile"
+                  :data-risk="session.permissionProfile.risk"
+                >
+                  <span>Permissions</span>
+                  <strong>{{ managedAgentPermissionProfileLabel(session) }}</strong>
+                  <small>{{ managedAgentPermissionProfileSummary(session.permissionProfile) }}</small>
+                </div>
+                <div
                   v-if="session.pendingPermissionRequests.length"
                   class="desktop-agent-detail-permissions"
                   data-testid="desktop-agent-detail-permissions"
@@ -233,6 +241,8 @@ import {
   canStopManagedAgentTurn,
   managedAgentSessionMatchesTarget,
   managedAgentSessionDisplayName,
+  managedAgentPermissionProfileLabel,
+  managedAgentPermissionProfileSummary,
   managedAgentSessionStatusLabel,
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,

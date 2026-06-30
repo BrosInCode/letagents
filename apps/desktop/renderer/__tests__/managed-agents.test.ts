@@ -23,6 +23,9 @@ import {
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
   managedAgentRepoDetail,
+  managedAgentPermissionProfileLabel,
+  managedAgentPermissionProfileStatusLabel,
+  managedAgentPermissionProfileSummary,
   managedAgentSessionMatchesRoom,
   managedAgentSessionMatchesTarget,
   managedAgentSessionDisplayName,
@@ -45,6 +48,16 @@ function provider(
     capabilities: ["external_mcp", "desktop_managed_runtime"],
     runtimeCommand: "codex",
     mcpTargetId: "codex",
+    permissionProfiles: [{
+      id: "full_access",
+      label: "Full access",
+      description: "Trusted local access.",
+      status: "available",
+      risk: "high",
+      detail: null,
+      isDefault: true,
+    }],
+    defaultPermissionProfileId: "full_access",
     ...overrides,
   };
 }
@@ -78,6 +91,16 @@ function session(
     repoBranch: null,
     status: "running",
     deliveryMode: "mcp_polling",
+    permissionProfileId: "full_access",
+    permissionProfile: {
+      id: "full_access",
+      label: "Full access",
+      description: "Trusted local access.",
+      status: "available",
+      risk: "high",
+      detail: null,
+      isDefault: true,
+    },
     canStop: true,
     agentSessionId: "agent_1",
     actorLabel: "MapleRidge",
@@ -494,6 +517,22 @@ test("managedAgentSessionDisplayName prefers the worker codename", () => {
     actorLabel: null,
     runtime: "codex:LOCAL_CODEX_ROOM_test",
   })), "Local agent");
+});
+
+test("managed permission profile helpers present available and gated modes", () => {
+  const running = session();
+  assert.equal(managedAgentPermissionProfileLabel(running), "Full access");
+  assert.equal(managedAgentPermissionProfileStatusLabel("available"), "Available");
+  assert.equal(managedAgentPermissionProfileStatusLabel("gated"), "Gated");
+  assert.equal(managedAgentPermissionProfileSummary({
+    id: "sandboxed_write",
+    label: "Sandboxed writes",
+    description: "Waiting on sandbox tests.",
+    status: "gated",
+    risk: "medium",
+    detail: "Needs config isolation.",
+    isDefault: false,
+  }), "Gated: Needs config isolation.");
 });
 
 test("managed agent room matching follows backend room filtering semantics", () => {

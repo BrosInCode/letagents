@@ -121,6 +121,29 @@
             </section>
 
             <section
+              v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime') && selectedPermissionProfiles.length"
+              class="desktop-add-agent-permissions"
+              aria-label="Agent permissions"
+            >
+              <span>Permissions</span>
+              <div class="desktop-add-agent-permission-options">
+                <button
+                  v-for="profile in selectedPermissionProfiles"
+                  :key="profile.id"
+                  type="button"
+                  :data-selected="profile.id === selectedPermissionProfile?.id"
+                  :data-state="profile.status"
+                  :disabled="profile.status !== 'available'"
+                  @click="selectPermissionProfile(profile)"
+                >
+                  <strong>{{ profile.label }}</strong>
+                  <small>{{ permissionProfileOptionSummary(profile) }}</small>
+                </button>
+              </div>
+              <p v-if="selectedPermissionProfile">{{ permissionProfileSummary(selectedPermissionProfile) }}</p>
+            </section>
+
+            <section
               v-if="externalJoinPrompt"
               class="desktop-add-agent-external-prompt"
               data-testid="desktop-add-agent-external-prompt"
@@ -156,7 +179,10 @@
               >
                 <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
                 <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
-                <small>{{ managedAgentSessionStatusLabel(session) }} - {{ managedAgentRepoDetail(session) }}</small>
+                <small>
+                  {{ managedAgentSessionStatusLabel(session) }} - {{ managedAgentPermissionProfileLabel(session) }} -
+                  {{ managedAgentRepoDetail(session) }}
+                </small>
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
                     type="button"
@@ -214,7 +240,7 @@
                 v-else-if="hasDesktopManagedRuntime(selectedProvider)"
                 type="button"
                 class="desktop-add-agent-primary"
-                :disabled="!preflight?.canStart || startingAgent"
+                :disabled="!canStartManagedAgent || startingAgent"
                 @click="startManagedAgent"
               >
                 {{ startingAgent ? "Starting..." : activeManagedSessions.length ? "Start another" : "Start agent" }}
@@ -254,6 +280,8 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
   DesktopManagedAgentDeliveryMode,
+  DesktopManagedAgentPermissionProfile,
+  DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
 } from "../../../../../electron/ipc-types";
 import {
@@ -268,6 +296,9 @@ import {
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
   managedAgentRepoDetail,
+  managedAgentPermissionProfileLabel,
+  managedAgentPermissionProfileStatusLabel,
+  managedAgentPermissionProfileSummary,
   managedAgentSessionDisplayName,
   managedAgentSessionMatchesRoom,
   managedAgentSessionStatusLabel,
@@ -310,6 +341,7 @@ const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
 const loadError = ref<string | null>(null);
 const setupMessage = ref<string | null>(null);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
+const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
 const dialogElement = ref<HTMLElement | null>(null);
 let previousFocusElement: HTMLElement | null = null;
 let preflightRequestId = 0;
@@ -328,6 +360,23 @@ const activeManagedSessions = computed(() =>
   )
 );
 
+const selectedPermissionProfiles = computed(() => selectedProvider.value?.permissionProfiles ?? []);
+const selectedPermissionProfile = computed(() =>
+  selectedPermissionProfiles.value.find((profile) => profile.id === selectedPermissionProfileId.value) ??
+  selectedPermissionProfiles.value.find((profile) => profile.id === selectedProvider.value?.defaultPermissionProfileId) ??
+  selectedPermissionProfiles.value.find((profile) => profile.status === "available") ??
+  selectedPermissionProfiles.value[0] ??
+  null
+);
+const canStartManagedAgent = computed(() =>
+  Boolean(
+    preflight.value?.canStart &&
+    (
+      !selectedPermissionProfiles.value.length ||
+      selectedPermissionProfile.value?.status === "available"
+    )
+  )
+);
 const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
 const roomLabel = computed(() => props.roomDisplayName?.trim() || props.roomIdentifier);
 const externalJoinPrompt = computed(() =>
@@ -443,6 +492,7 @@ async function loadProviders(): Promise<void> {
       && providers.value.some((provider) => provider.id === selectedProviderId.value)
       ? selectedProviderId.value
       : providers.value.find((provider) => provider.id === "codex")?.id || providers.value[0]?.id || null;
+    syncPermissionProfileSelection();
     if (selectedProviderId.value) {
       await runPreflight();
     }
@@ -470,6 +520,7 @@ async function startManagedAgent(): Promise<void> {
       roomDisplayName: props.roomDisplayName,
       repoRootPath: props.repoRootPath,
       deliveryMode: deliveryMode.value,
+      permissionProfileId: selectedPermissionProfile.value?.id ?? null,
     });
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
@@ -517,6 +568,7 @@ async function stopManagedAgent(sessionId: string): Promise<void> {
 function selectProvider(providerId: DesktopAgentProviderId): void {
   modalStateVersion += 1;
   selectedProviderId.value = providerId;
+  syncPermissionProfileSelection();
   preflight.value = null;
   preflightRequestId += 1;
   loadingPreflight.value = false;
@@ -527,6 +579,38 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
   setupMessage.value = null;
+}
+
+function syncPermissionProfileSelection(): void {
+  const profiles = selectedPermissionProfiles.value;
+  const current = selectedPermissionProfileId.value
+    ? profiles.find((profile) => profile.id === selectedPermissionProfileId.value)
+    : null;
+  if (current?.status === "available") {
+    return;
+  }
+  const defaultId = selectedProvider.value?.defaultPermissionProfileId;
+  const next = profiles.find((profile) => profile.id === defaultId && profile.status === "available") ??
+    profiles.find((profile) => profile.status === "available") ??
+    profiles[0] ??
+    null;
+  selectedPermissionProfileId.value = next?.id ?? null;
+}
+
+function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
+  if (profile.status !== "available") return;
+  selectedPermissionProfileId.value = profile.id;
+}
+
+function permissionProfileSummary(profile: DesktopManagedAgentPermissionProfile): string {
+  return managedAgentPermissionProfileSummary(profile);
+}
+
+function permissionProfileOptionSummary(profile: DesktopManagedAgentPermissionProfile): string {
+  if (profile.status === "available") {
+    return profile.description;
+  }
+  return `${managedAgentPermissionProfileStatusLabel(profile.status)} - ${profile.detail || profile.description}`;
 }
 
 function resetTransientState(): void {

@@ -15,6 +15,10 @@ import {
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { codexInstallCommand } from "./codex-install.js";
+import {
+  defaultManagedAgentPermissionProfileId,
+  listManagedAgentPermissionProfiles,
+} from "./managed-agent-permission-profiles.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 
 type ExecResult = {
@@ -39,6 +43,8 @@ const agentProviders: DesktopAgentProvider[] = [
     ],
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
+    permissionProfiles: listManagedAgentPermissionProfiles("claude-code"),
+    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("claude-code"),
   },
   {
     id: "antigravity",
@@ -47,6 +53,8 @@ const agentProviders: DesktopAgentProvider[] = [
     capabilities: ["external_mcp"],
     runtimeCommand: null,
     mcpTargetId: "antigravity",
+    permissionProfiles: [],
+    defaultPermissionProfileId: null,
   },
   {
     id: "cursor",
@@ -60,6 +68,8 @@ const agentProviders: DesktopAgentProvider[] = [
     ],
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
+    permissionProfiles: listManagedAgentPermissionProfiles("cursor"),
+    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("cursor"),
   },
   {
     id: "codex",
@@ -75,11 +85,17 @@ const agentProviders: DesktopAgentProvider[] = [
     ],
     runtimeCommand: "codex",
     mcpTargetId: "codex",
+    permissionProfiles: listManagedAgentPermissionProfiles("codex"),
+    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("codex"),
   },
 ];
 
 export function listDesktopAgentProviders(): DesktopAgentProvider[] {
-  return agentProviders.map((provider) => ({ ...provider, capabilities: [...provider.capabilities] }));
+  return agentProviders.map((provider) => ({
+    ...provider,
+    capabilities: [...provider.capabilities],
+    permissionProfiles: provider.permissionProfiles.map((profile) => ({ ...profile })),
+  }));
 }
 
 function assertAgentProviderId(providerId: string): asserts providerId is DesktopAgentProviderId {

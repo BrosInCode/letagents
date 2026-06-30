@@ -282,6 +282,8 @@ test("Claude Code runtime starts, lists, and inspects a desktop-managed worker",
   assert.equal(result.session.providerId, "claude-code");
   assert.equal(result.session.status, "completed");
   assert.equal(result.session.deliveryMode, "desktop_events");
+  assert.equal(result.session.permissionProfileId, "ask_before_write");
+  assert.equal(result.session.permissionProfile.label, "Ask before writes");
   assert.equal(result.session.canStop, true);
   assert.equal(result.session.ideLabel, "Claude Code");
   assert.equal(runtime.listSessions("room_1").length, 1);
@@ -290,6 +292,82 @@ test("Claude Code runtime starts, lists, and inspects a desktop-managed worker",
   assert.equal(inspected?.session.providerId, "claude-code");
   assert.equal(inspected?.serverReachable, true);
   assert.equal(inspected?.recentItems.length, 1);
+  assert.equal(getStoredClaudeCodeLiveSession(result.session.id)?.permission_profile_id, "ask_before_write");
+});
+
+test("Claude Code runtime applies read-only and full-access permission profiles", async () => {
+  resetState();
+  let observedReadOnly: string | null = null;
+  let publishPermissionCalls = 0;
+  const readOnlyHarness = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      const decision = await input.canUseTool!("Bash", { command: "touch file" }, {
+        signal: new AbortController().signal,
+        toolUseID: "tool_write",
+        title: "Run write command",
+      });
+      observedReadOnly = decision.behavior;
+      return {
+        sessionId: "claude_session_readonly",
+        text: "Read-only profile checked.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Read-only profile checked." }],
+      };
+    },
+  }, {
+    publishPermissionRequest: async () => {
+      publishPermissionCalls += 1;
+      return { roomMessageId: "msg_perm" };
+    },
+  });
+  const readOnlyStarted = await readOnlyHarness.runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "read_only",
+  });
+  readOnlyHarness.runtime.dispatchRoomStreamEvent(messageEvent());
+  await readOnlyHarness.runtime.waitForIdle();
+  assert.equal(readOnlyStarted.session.permissionProfileId, "read_only");
+  assert.equal(observedReadOnly, "deny");
+  assert.equal(publishPermissionCalls, 0);
+
+  resetState();
+  let observedFullAccess: string | null = null;
+  const fullAccessHarness = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      const decision = await input.canUseTool!("Bash", { command: "npm test" }, {
+        signal: new AbortController().signal,
+        toolUseID: "tool_bash",
+        title: "Run tests",
+      });
+      observedFullAccess = decision.behavior;
+      return {
+        sessionId: "claude_session_full",
+        text: "Full access profile checked.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Full access profile checked." }],
+      };
+    },
+  }, {
+    publishPermissionRequest: async () => {
+      throw new Error("full access should not create a permission request");
+    },
+  });
+  const fullAccessStarted = await fullAccessHarness.runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "full_access",
+  });
+  fullAccessHarness.runtime.dispatchRoomStreamEvent(messageEvent());
+  await fullAccessHarness.runtime.waitForIdle();
+  assert.equal(fullAccessStarted.session.permissionProfileId, "full_access");
+  assert.equal(observedFullAccess, "allow");
 });
 
 test("Claude Code runtime delivers room events into the SDK runner and persists resume state", async () => {

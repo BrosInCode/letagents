@@ -14,6 +14,7 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 import type {
+  DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
@@ -21,6 +22,9 @@ import type {
 } from "../../ipc-types.js";
 import { getLetAgentsLocalStatePath } from "../paths.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
+import {
+  managedAgentPermissionProfileForProvider,
+} from "./managed-agent-permission-profiles.js";
 
 const STATE_LOCK_WAIT_MS = 25;
 const STATE_LOCK_TIMEOUT_MS = 2_000;
@@ -45,6 +49,7 @@ export interface DesktopCodexLiveSessionState {
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
+  permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
   desktop_managed?: boolean;
   deadline_utc?: string | null;
   token: string;
@@ -80,6 +85,7 @@ export interface DesktopClaudeCodeLiveSessionState {
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
+  permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
   desktop_managed?: boolean;
   deadline_utc?: string | null;
   token: string;
@@ -112,6 +118,7 @@ export interface DesktopCursorLiveSessionState {
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
+  permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
   desktop_managed?: boolean;
   deadline_utc?: string | null;
   token: string;
@@ -1077,6 +1084,7 @@ export function toPublicManagedAgentSession(
   );
   const activeWorkerSessionId = workerSession?.session_id ?? (persistedWorkerActive ? session.agent_session_id ?? null : null);
   const displayName = publicDisplayNameForCodexSession(session, workerSession);
+  const permissionProfile = managedAgentPermissionProfileForProvider("codex", session.permission_profile_id);
   return {
     id: session.session_id,
     providerId: "codex",
@@ -1087,6 +1095,8 @@ export function toPublicManagedAgentSession(
     repoBranch: session.repo_branch ?? null,
     status: session.status,
     deliveryMode: managedAgentDeliveryMode(session),
+    permissionProfileId: permissionProfile.id,
+    permissionProfile,
     canStop: Boolean(activeWorkerSessionId) &&
       (
         session.status === "starting" ||
@@ -1183,6 +1193,7 @@ export function toPublicClaudeCodeManagedAgentSession(
   const workerSession = persistedWorkerActive ? persistedWorker : null;
   const displayName = publicDisplayNameForClaudeCodeSession(session, workerSession);
   const deliveryMode = session.delivery_mode || "desktop_events";
+  const permissionProfile = managedAgentPermissionProfileForProvider("claude-code", session.permission_profile_id);
   return {
     id: session.session_id,
     providerId: "claude-code",
@@ -1193,6 +1204,8 @@ export function toPublicClaudeCodeManagedAgentSession(
     repoBranch: session.repo_branch ?? null,
     status: session.status,
     deliveryMode,
+    permissionProfileId: permissionProfile.id,
+    permissionProfile,
     canStop: Boolean(activeWorkerSessionId) &&
       (
         session.status === "starting" ||
@@ -1289,6 +1302,7 @@ export function toPublicCursorManagedAgentSession(
   const workerSession = persistedWorkerActive ? persistedWorker : null;
   const displayName = publicDisplayNameForCursorSession(session, workerSession);
   const deliveryMode = session.delivery_mode || "desktop_events";
+  const permissionProfile = managedAgentPermissionProfileForProvider("cursor", session.permission_profile_id);
   return {
     id: session.session_id,
     providerId: "cursor",
@@ -1299,6 +1313,8 @@ export function toPublicCursorManagedAgentSession(
     repoBranch: session.repo_branch ?? null,
     status: session.status,
     deliveryMode,
+    permissionProfileId: permissionProfile.id,
+    permissionProfile,
     canStop: Boolean(activeWorkerSessionId) &&
       (
         session.status === "starting" ||

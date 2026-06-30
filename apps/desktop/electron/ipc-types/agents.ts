@@ -36,6 +36,8 @@ export interface DesktopAgentProvider {
   capabilities: DesktopAgentProviderCapability[];
   runtimeCommand: string | null;
   mcpTargetId: DesktopMcpInstallTargetId;
+  permissionProfiles: DesktopManagedAgentPermissionProfile[];
+  defaultPermissionProfileId: DesktopManagedAgentPermissionProfileId | null;
 }
 
 export interface DesktopAgentProviderPreflightInput {
@@ -88,6 +90,33 @@ export interface DesktopManagedAgentActiveWork {
   summary: string | null;
 }
 
+export type DesktopManagedAgentPermissionProfileId =
+  | "read_only"
+  | "ask_before_write"
+  | "sandboxed_write"
+  | "full_access"
+  | (string & {});
+
+export type DesktopManagedAgentPermissionProfileStatus =
+  | "available"
+  | "gated"
+  | "unsupported";
+
+export type DesktopManagedAgentPermissionProfileRisk =
+  | "low"
+  | "medium"
+  | "high";
+
+export interface DesktopManagedAgentPermissionProfile {
+  id: DesktopManagedAgentPermissionProfileId;
+  label: string;
+  description: string;
+  status: DesktopManagedAgentPermissionProfileStatus;
+  risk: DesktopManagedAgentPermissionProfileRisk;
+  detail: string | null;
+  isDefault: boolean;
+}
+
 export type DesktopManagedAgentPermissionDecisionBehavior = "allow" | "deny";
 
 export interface DesktopManagedAgentPermissionRequest {
@@ -128,6 +157,8 @@ export interface DesktopManagedAgentSession {
   repoBranch: string | null;
   status: DesktopManagedAgentSessionStatus;
   deliveryMode: DesktopManagedAgentDeliveryMode;
+  permissionProfileId: DesktopManagedAgentPermissionProfileId;
+  permissionProfile: DesktopManagedAgentPermissionProfile;
   canStop: boolean;
   agentSessionId: string | null;
   actorLabel: string | null;
@@ -149,6 +180,7 @@ export interface DesktopManagedAgentStartInput {
   roomDisplayName?: string | null;
   repoRootPath: string;
   deliveryMode?: DesktopManagedAgentDeliveryMode;
+  permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
 }

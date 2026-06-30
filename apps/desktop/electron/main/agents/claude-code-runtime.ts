@@ -63,6 +63,10 @@ import {
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
 } from "./state.js";
+import {
+  assertManagedAgentPermissionProfileAvailable,
+  managedAgentPermissionProfileForProvider,
+} from "./managed-agent-permission-profiles.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
 import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
 
@@ -205,6 +209,7 @@ export function createDesktopClaudeCodeRuntime(
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
+    const permissionProfile = assertManagedAgentPermissionProfileAvailable("claude-code", input.permissionProfileId);
 
     const token = makeClaudeCodeStopToken();
     const displayName = suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(roomIdentifier), token);
@@ -227,6 +232,7 @@ export function createDesktopClaudeCodeRuntime(
       stop_phrase: input.stopPhrase?.trim() || DEFAULT_CLAUDE_CODE_STOP_PHRASE,
       max_minutes: coerceMaxMinutes(input.maxMinutes),
       delivery_mode: "desktop_events",
+      permission_profile_id: permissionProfile.id,
       desktop_managed: true,
       deadline_utc: formatDeadlineUtc(coerceMaxMinutes(input.maxMinutes)),
       token,
@@ -556,6 +562,22 @@ export function createDesktopClaudeCodeRuntime(
         };
       }
       if (isAutoAllowedManagedAgentTool(toolName)) {
+        return {
+          behavior: "allow",
+          toolUseID: options.toolUseID,
+        };
+      }
+      const session = getStoredClaudeCodeLiveSession(input.sessionId);
+      const profile = managedAgentPermissionProfileForProvider("claude-code", session?.permission_profile_id);
+      if (profile.id === "read_only") {
+        return {
+          behavior: "deny",
+          message: "This Claude Code managed agent is running with the read-only permission profile.",
+          toolUseID: options.toolUseID,
+          decisionClassification: "user_reject",
+        };
+      }
+      if (profile.id === "full_access") {
         return {
           behavior: "allow",
           toolUseID: options.toolUseID,

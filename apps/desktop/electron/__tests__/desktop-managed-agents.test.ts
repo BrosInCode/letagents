@@ -73,6 +73,11 @@ const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
 const { persistDesktopManagedAgentLocalReply } = await import("../main/agents/managed-agent-local-replies.js");
 const {
+  assertManagedAgentPermissionProfileAvailable,
+  listManagedAgentPermissionProfiles,
+  managedAgentPermissionProfileForProvider,
+} = await import("../main/agents/managed-agent-permission-profiles.js");
+const {
   createLocalRoom,
   resolveLocalAwareRoomStorageMode,
   setLocalAwareRoomStorageMode,
@@ -227,6 +232,40 @@ test("desktop Codex runtime reasoning summaries accumulate readable app-server d
   assert.equal(second?.summary, "Checking the desktop reasoning bridge.");
   assert.equal(second?.status, "working");
   assert.match(second?.checking ?? "", /readable reasoning summary/);
+});
+
+test("managed agent permission profiles map provider-specific available and gated modes", () => {
+  const claudeProfiles = listManagedAgentPermissionProfiles("claude-code");
+  assert.equal(claudeProfiles.find((profile) => profile.id === "ask_before_write")?.status, "available");
+  assert.equal(claudeProfiles.find((profile) => profile.id === "full_access")?.status, "available");
+
+  const cursorProfiles = listManagedAgentPermissionProfiles("cursor");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "read_only")?.status, "available");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "full_access")?.status, "gated");
+
+  const codexProfiles = listManagedAgentPermissionProfiles("codex");
+  assert.equal(codexProfiles.find((profile) => profile.id === "full_access")?.status, "available");
+  assert.equal(codexProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+
+  assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "ask_before_write");
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("cursor", "full_access"),
+    /Full access is not available for cursor/,
+  );
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("cursor", "unknown_profile"),
+    /Unknown permission profile 'unknown_profile' for cursor/,
+  );
+});
+
+test("public Codex managed session projects the selected permission profile", () => {
+  resetState();
+  const publicSession = toPublicManagedAgentSession(liveSession({
+    permission_profile_id: "full_access",
+  }));
+  assert.equal(publicSession.permissionProfileId, "full_access");
+  assert.equal(publicSession.permissionProfile.label, "Full access");
+  assert.equal(publicSession.permissionProfile.status, "available");
 });
 
 test("desktop Codex runtime reasoning hides raw app-server reasoning text", () => {
