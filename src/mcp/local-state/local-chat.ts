@@ -352,7 +352,6 @@ async function getDb(): Promise<SqliteDatabase> {
     CREATE INDEX IF NOT EXISTS local_chat_messages_thread_root_idx
       ON local_chat_messages (room_id, thread_root_number);
   `);
-  backfillLocalThreadRoots(db);
   return db;
 }
 
@@ -368,27 +367,6 @@ function addColumnIfMissing(
     if (!String(error).toLowerCase().includes("duplicate column")) {
       throw error;
     }
-  }
-}
-
-function backfillLocalThreadRoots(database: SqliteDatabase): void {
-  const rows = database
-    .prepare("SELECT * FROM local_chat_messages ORDER BY room_id ASC, number ASC")
-    .all()
-    .map(mapRow);
-  const rowsByKey = new Map(rows.map((row) => [`${row.room_id}\0${row.number}`, row]));
-  for (const row of rows) {
-    if (!row.reply_to_number || row.thread_root_number) continue;
-    const parent = rowsByKey.get(`${row.room_id}\0${row.reply_to_number}`);
-    const rootNumber = parent?.thread_root_number ?? parent?.number ?? row.reply_to_number;
-    row.thread_root_number = rootNumber;
-    database
-      .prepare(`
-        UPDATE local_chat_messages
-        SET thread_root_number = ?
-        WHERE room_id = ? AND number = ? AND thread_root_number IS NULL
-      `)
-      .run(rootNumber, row.room_id, row.number);
   }
 }
 

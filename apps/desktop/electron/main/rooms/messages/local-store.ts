@@ -188,7 +188,6 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_chat_thread_reads_reader_idx
         ON local_chat_thread_reads (reader_key);
     `);
-    backfillLocalThreadRoots(db);
     initialized = true;
   }
   return db;
@@ -237,33 +236,6 @@ function ensureLocalThreadReadsSchema(database: SqliteDatabase): void {
 function normalizeReaderKey(readerKey?: string | null): string {
   const trimmed = readerKey?.trim();
   return trimmed || "local:default";
-}
-
-function backfillLocalThreadRoots(database: SqliteDatabase): void {
-  const rows = database
-    .prepare("SELECT * FROM local_chat_messages WHERE reply_to_number IS NOT NULL")
-    .all()
-    .map(mapRow);
-  const rowsByKey = new Map(rows.map((row) => [`${row.room_id}\0${row.number}`, row]));
-  for (const row of rows) {
-    if (row.thread_root_number) continue;
-    let rootNumber = row.reply_to_number;
-    const seen = new Set<number>([row.number]);
-    while (rootNumber && !seen.has(rootNumber)) {
-      seen.add(rootNumber);
-      const parent = rowsByKey.get(`${row.room_id}\0${rootNumber}`);
-      if (!parent?.reply_to_number) break;
-      rootNumber = parent.reply_to_number;
-    }
-    if (!rootNumber) continue;
-    database
-      .prepare(`
-        UPDATE local_chat_messages
-        SET thread_root_number = ?
-        WHERE room_id = ? AND number = ? AND thread_root_number IS NULL
-      `)
-      .run(rootNumber, row.room_id, row.number);
-  }
 }
 
 function mapRow(row: Record<string, unknown>): LocalMessageRow {
