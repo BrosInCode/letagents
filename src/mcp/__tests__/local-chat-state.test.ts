@@ -75,29 +75,35 @@ test("MCP local chat state follows setting and supports message wait", async () 
   assert.deepEqual(emptyPoll.messages, []);
 });
 
-test("MCP local chat state persists thread roots for nested replies", async () => {
+test("MCP local chat keeps quote-replies top-level and only threads with an explicit thread root", async () => {
   const root = await addLocalChatMessage("thread_room", {
     sender: "Human",
     text: "root",
     source: "browser",
   });
-  const firstReply = await addLocalChatMessage("thread_room", {
+  // A bare reply_to (quote reply) must NOT spawn a thread — it stays top-level,
+  // while the reply reference itself is still preserved (the chip).
+  const quoteReply = await addLocalChatMessage("thread_room", {
     sender: "Agent",
-    text: "first",
+    text: "quote reply",
     source: "agent",
     reply_to: root.id,
   });
-  const nestedReply = await addLocalChatMessage("thread_room", {
+  // An explicit thread_root_id still threads (real thread reply, e.g. send_thread_message).
+  const threadReply = await addLocalChatMessage("thread_room", {
     sender: "Agent",
-    text: "nested",
+    text: "thread reply",
     source: "agent",
-    reply_to: firstReply.id,
+    reply_to: root.id,
+    thread_root_id: root.id,
   });
 
-  assert.equal(firstReply.thread_root_id, root.id);
-  assert.equal(firstReply.thread_reply_to_id, root.id);
-  assert.equal(nestedReply.thread_root_id, root.id);
-  assert.equal(nestedReply.thread_reply_to_id, firstReply.id);
+  // Quote reply: its own id is the thread root (i.e. top-level), reply target preserved.
+  assert.equal(quoteReply.thread_root_id, quoteReply.id);
+  assert.equal(quoteReply.thread_reply_to_id, root.id);
+  // Thread reply: belongs to the root's thread.
+  assert.equal(threadReply.thread_root_id, root.id);
+  assert.equal(threadReply.thread_reply_to_id, root.id);
 
   const db = openSqliteDb();
   const rows = db
@@ -115,8 +121,10 @@ test("MCP local chat state persists thread roots for nested replies", async () =
     thread_root_number: row.thread_root_number === null ? null : Number(row.thread_root_number),
   })), [
     { number: 1, reply_to_number: null, thread_root_number: null },
-    { number: 2, reply_to_number: 1, thread_root_number: 1 },
-    { number: 3, reply_to_number: 2, thread_root_number: 1 },
+    // quote reply: reply reference kept, but NOT threaded
+    { number: 2, reply_to_number: 1, thread_root_number: null },
+    // explicit thread reply: threaded onto the root
+    { number: 3, reply_to_number: 1, thread_root_number: 1 },
   ]);
 });
 

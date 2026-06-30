@@ -620,7 +620,7 @@ export async function addLocalChatMessage(
     }
     replyTargetRootNumber = replyTarget.thread_root_number ?? replyTarget.number;
   }
-  let threadRootNumber = explicitThreadRootNumber ?? replyTargetRootNumber;
+  let threadRootNumber = explicitThreadRootNumber;
   if (explicitThreadRootNumber) {
     const rootTarget = getLocalVisibleMessageRow(database, trimmedRoomId, explicitThreadRootNumber, false);
     if (!rootTarget) {
