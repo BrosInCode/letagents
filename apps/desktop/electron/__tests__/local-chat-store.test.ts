@@ -147,6 +147,7 @@ test("desktop local chat store scopes thread reads by reader", async () => {
     sender: "Agent",
     text: "first reply",
     reply_to: root.id,
+    thread_root_id: root.id,
     source: "agent",
   });
   await addLocalChatMessage("room_scoped_reads", {
@@ -188,6 +189,7 @@ test("desktop local chat store lists thread inbox pages with unread filtering", 
     sender: "Agent",
     text: "first reply",
     reply_to: firstRoot.id,
+    thread_root_id: firstRoot.id,
     source: "agent",
   });
   const secondRoot = await addLocalChatMessage("room_thread_inbox", {
@@ -199,6 +201,7 @@ test("desktop local chat store lists thread inbox pages with unread filtering", 
     sender: "Agent",
     text: "second reply",
     reply_to: secondRoot.id,
+    thread_root_id: secondRoot.id,
     source: "agent",
   });
 
