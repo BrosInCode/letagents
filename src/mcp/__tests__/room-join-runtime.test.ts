@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { RoomState } from "../server/runtime/room-state.js";
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-room-join-runtime-"));
 process.env.LETAGENTS_API_URL = "http://127.0.0.1:39999";
@@ -12,13 +13,90 @@ delete process.env.LETAGENTS_TOKEN;
 
 const originalFetch = globalThis.fetch;
 const {
+  buildJoinResponse,
   joinRoomIdentifier,
   joinRoomIdentifierWithoutImplicitGitRefCreate,
 } = await import("../server/runtime/rooms.js");
+const {
+  registerManagedAgentProvider,
+  resetManagedAgentProvidersForTest,
+} = await import("../managed-agent-providers.js");
 
 test.after(() => {
   globalThis.fetch = originalFetch;
   rmSync(tempDir, { recursive: true, force: true });
+});
+
+test.afterEach(() => {
+  resetManagedAgentProvidersForTest();
+});
+
+test("live joins dispatch through the default managed-agent provider while preserving Codex fields", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  registerManagedAgentProvider(
+    {
+      id: "codex",
+      displayName: "Codex",
+      responseKeys: {
+        localSession: "local_codex_session",
+        localSessionStarted: "local_codex_session_started",
+        localSessionReused: "local_codex_session_reused",
+      },
+      getCurrentLiveSessionPayload: () => null,
+      startLocalSession: async (input) => {
+        calls.push(input as unknown as Record<string, unknown>);
+        return {
+          session: {
+            session_id: "session_live",
+            room_id: input.room_id,
+            room_identifier: input.room_identifier,
+            cwd: input.cwd,
+          },
+          reused: false,
+        };
+      },
+      inspectLocalSession: async () => null,
+      stopLocalSession: async () => null,
+      toPublicLiveSession: (session) => session as Record<string, unknown>,
+    },
+    { replace: true, setDefault: true }
+  );
+
+  const room: RoomState = {
+    room_id: "room_live",
+    project_id: null,
+    code: "ROOM-LIVE",
+    display_name: "Live Room",
+    joined_via: "join_room",
+    joined_at: "2026-06-30T00:00:00.000Z",
+    last_seen_at: "2026-06-30T00:00:00.000Z",
+  };
+
+  const response = await buildJoinResponse({
+    joined: {
+      room,
+      response: { room_id: room.room_id, display_name: room.display_name },
+    },
+    room_identifier: "focus_28",
+    joined_via: "join_room",
+    session_mode: "live",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.room_id, "room_live");
+  assert.equal(calls[0]?.room_identifier, "focus_28");
+  assert.equal(calls[0]?.room_code, "ROOM-LIVE");
+  assert.equal(calls[0]?.room_display_name, "Live Room");
+  assert.equal(calls[0]?.joined_via, "join_room");
+  assert.equal(calls[0]?.cwd, process.cwd());
+  assert.deepEqual(response.local_codex_session, {
+    session_id: "session_live",
+    room_id: "room_live",
+    room_identifier: "focus_28",
+    cwd: process.cwd(),
+  });
+  assert.equal(response.local_codex_session_started, true);
+  assert.equal(response.local_codex_session_reused, false);
 });
 
 test("joinRoomIdentifier can request an existing-only room join", async () => {

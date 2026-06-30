@@ -1,12 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-  inspectLocalCodexSession,
   scheduleCodexRuntimeStreamBridgeBind,
-  startLocalCodexSession,
-  stopLocalCodexSession,
-  toPublicCodexLiveSession,
 } from "../../codex-session.js";
+import {
+  getManagedAgentProvider,
+  toManagedAgentStartResponse,
+} from "../../managed-agent-providers.js";
 import { encodeRoomIdPath, looksLikeInviteCode, normalizeInviteCode, type JoinedVia } from "../../room-id.js";
 import {
   AGENT_INSTANCE_UUID,
@@ -371,7 +371,8 @@ export function registerAgentSessionTools(server: McpServer): void {
 
       try {
         const joined = await joinRoomIdentifier(room, joinedVia);
-        const liveSession = await startLocalCodexSession({
+        const provider = getManagedAgentProvider("codex");
+        const liveSession = await provider.startLocalSession({
           room_id: joined.room.room_id,
           room_identifier: joinedVia === "join_code" ? normalizeInviteCode(room) : room.trim(),
           room_code: joined.room.code ?? null,
@@ -390,9 +391,7 @@ export function registerAgentSessionTools(server: McpServer): void {
                 await withAgentIdentity({
                   success: true,
                   room: toPublicRoomState(joined.room),
-                  local_codex_session: toPublicCodexLiveSession(liveSession.session),
-                  local_codex_session_started: !liveSession.reused,
-                  local_codex_session_reused: liveSession.reused,
+                  ...toManagedAgentStartResponse(provider, liveSession),
                 }),
                 null,
                 2
@@ -427,7 +426,8 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("Optional session id. Defaults to the current local Codex live session."),
     },
     async ({ session_id }) => {
-      const status = await inspectLocalCodexSession(session_id, currentRoom?.room_id);
+      const provider = getManagedAgentProvider("codex");
+      const status = await provider.inspectLocalSession(session_id, currentRoom?.room_id);
       if (!status) {
         return {
           content: [
@@ -446,7 +446,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             text: JSON.stringify(
               {
                 success: true,
-                session: toPublicCodexLiveSession(status.session),
+                session: provider.toPublicLiveSession(status.session),
                 server_reachable: status.server_reachable,
                 thread_status: status.thread_status,
                 turn_status: status.turn_status,
@@ -475,7 +475,8 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("If true, also terminate the spawned codex app-server process when possible."),
     },
     async ({ session_id, shutdown_server }) => {
-      const stopped = await stopLocalCodexSession({
+      const provider = getManagedAgentProvider("codex");
+      const stopped = await provider.stopLocalSession({
         session_id,
         room_id: currentRoom?.room_id,
         shutdown_server,
@@ -499,7 +500,7 @@ export function registerAgentSessionTools(server: McpServer): void {
             text: JSON.stringify(
               {
                 success: true,
-                session: toPublicCodexLiveSession(stopped),
+                session: provider.toPublicLiveSession(stopped),
               },
               null,
               2
