@@ -83,6 +83,11 @@ type AgentSessionCreateResponse = {
   ended_at?: string | null;
 };
 
+type ActiveClaudeCodeTurn = {
+  abortController: AbortController;
+  interruptReason: "preempt" | "stop" | null;
+};
+
 interface RegisterClaudeCodeWorkerInput {
   roomIdentifier: string;
   displayName: string;
@@ -127,7 +132,7 @@ export function createDesktopClaudeCodeRuntime(
   const emitSessionUpdate = dependencies.emitSessionUpdate ?? emitClaudeCodeManagedAgentSessionUpdate;
   const now = dependencies.now ?? (() => new Date().toISOString());
   const queues = new Map<string, Promise<void>>();
-  const activeTurns = new Map<string, AbortController>();
+  const activeTurns = new Map<string, ActiveClaudeCodeTurn>();
 
   function listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
     return listDesktopManagedClaudeCodeLiveSessions(roomIdentifier)
@@ -235,7 +240,11 @@ export function createDesktopClaudeCodeRuntime(
       return null;
     }
 
-    activeTurns.get(session.session_id)?.abort();
+    const activeTurn = activeTurns.get(session.session_id);
+    if (activeTurn) {
+      activeTurn.interruptReason = "stop";
+      activeTurn.abortController.abort();
+    }
     const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -264,6 +273,7 @@ export function createDesktopClaudeCodeRuntime(
     session: DesktopClaudeCodeLiveSessionState,
     event: ManagedRoomEvent,
   ): void {
+    preemptActiveTurn(session.session_id);
     const previous = queues.get(session.session_id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -298,7 +308,11 @@ export function createDesktopClaudeCodeRuntime(
     const stopAfterTurn = isStopPhraseRoomStreamEvent(session, event);
     const active = markSessionActiveForEvent(session, event);
     const abortController = new AbortController();
-    activeTurns.set(session.session_id, abortController);
+    const activeTurn: ActiveClaudeCodeTurn = {
+      abortController,
+      interruptReason: null,
+    };
+    activeTurns.set(session.session_id, activeTurn);
     try {
       const result = await runner.runTurn({
         prompt: buildClaudeCodeDesktopEventPrompt(active, event),
@@ -309,16 +323,21 @@ export function createDesktopClaudeCodeRuntime(
       });
 
       const latest = getStoredClaudeCodeLiveSession(sessionId) ?? active;
-      if (latest.status === "interrupted" && abortController.signal.aborted) {
+      if (
+        latest.status === "interrupted" &&
+        abortController.signal.aborted &&
+        activeTurn.interruptReason !== "preempt"
+      ) {
         return;
       }
 
       if (result.status === "error") {
+        const wasPreempted = abortController.signal.aborted && activeTurn.interruptReason === "preempt";
         const updated = clearSessionActiveWork(sessionId, (current) => ({
           ...current,
           claude_session_id: result.sessionId ?? current.claude_session_id ?? null,
-          status: abortController.signal.aborted ? "interrupted" : "unknown",
-          last_error: result.error,
+          status: wasPreempted ? "completed" : abortController.signal.aborted ? "interrupted" : "unknown",
+          last_error: wasPreempted ? null : result.error,
           recent_items: result.recentItems,
           updated_at: now(),
         }));
@@ -345,10 +364,19 @@ export function createDesktopClaudeCodeRuntime(
         await stopAfterRoomStopPhrase(completed);
       }
     } finally {
-      if (activeTurns.get(session.session_id) === abortController) {
+      if (activeTurns.get(session.session_id) === activeTurn) {
         activeTurns.delete(session.session_id);
       }
     }
+  }
+
+  function preemptActiveTurn(sessionId: string): void {
+    const activeTurn = activeTurns.get(sessionId);
+    if (!activeTurn || activeTurn.abortController.signal.aborted) {
+      return;
+    }
+    activeTurn.interruptReason = "preempt";
+    activeTurn.abortController.abort();
   }
 
   function markSessionActiveForEvent(

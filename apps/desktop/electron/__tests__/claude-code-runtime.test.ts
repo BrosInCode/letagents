@@ -161,6 +161,7 @@ test("Claude Code runner options lock down ambient MCP and blocked room tools", 
 
   assert.equal(options.permissionMode, "default");
   assert.equal(options.allowDangerouslySkipPermissions, undefined);
+  assert.equal(options.abortController, undefined);
   assert.equal(options.strictMcpConfig, true);
   assert.deepEqual(options.mcpServers, {});
   assert.equal(options.resume, "claude_session_1");
@@ -276,6 +277,73 @@ test("Claude Code runtime delivers room events into the SDK runner and persists 
   const stored = getStoredClaudeCodeLiveSession(started.session.id);
   assert.equal(stored?.claude_session_id, "claude_session_1");
   assert.equal(stored?.status, "completed");
+  assert.equal(stored?.active_work, null);
+});
+
+test("Claude Code runtime preempts an active event and redelivers the newer event with resume state", async () => {
+  resetState();
+  const calls: ClaudeCodeTurnInput[] = [];
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      calls.push(input);
+      if (calls.length === 1) {
+        return new Promise((resolve) => {
+          input.abortController?.signal.addEventListener("abort", () => {
+            resolve({
+              sessionId: "claude_session_1",
+              text: null,
+              status: "error",
+              error: "interrupted by newer room event",
+              recentItems: [{ type: "result", subtype: "error_during_execution" }],
+            });
+          }, { once: true });
+        });
+      }
+      return {
+        sessionId: "claude_session_1",
+        text: "Handling the newer event.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Handling the newer event." }],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  const baseMessage = messageEvent().message;
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...baseMessage,
+      id: "msg_1",
+      text: "long running request",
+    },
+  }));
+  while (calls.length < 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...baseMessage,
+      id: "msg_2",
+      text: "newer urgent request",
+    },
+  }));
+  await runtime.waitForIdle();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.abortController?.signal.aborted, true);
+  assert.equal(calls[0]?.claudeSessionId, null);
+  assert.equal(calls[1]?.claudeSessionId, "claude_session_1");
+  assert.deepEqual(published, [{ text: "Handling the newer event.", eventId: "msg_2" }]);
+  const stored = getStoredClaudeCodeLiveSession(started.session.id);
+  assert.equal(stored?.claude_session_id, "claude_session_1");
+  assert.equal(stored?.status, "completed");
+  assert.equal(stored?.last_error, null);
   assert.equal(stored?.active_work, null);
 });
 

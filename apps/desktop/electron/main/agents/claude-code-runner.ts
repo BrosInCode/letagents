@@ -65,6 +65,9 @@ export const productionClaudeCodeRunner: ClaudeCodeRunner = {
     let resultText: string | null = null;
     let errorText: string | null = null;
     const recentItems: Array<Record<string, unknown>> = [];
+    const interruptActiveQuery = (): void => {
+      void activeQuery?.interrupt().catch(() => undefined);
+    };
 
     try {
       activeQuery = query({
@@ -76,6 +79,11 @@ export const productionClaudeCodeRunner: ClaudeCodeRunner = {
           claudeBin: executable || undefined,
         }),
       });
+      if (abortController.signal.aborted) {
+        interruptActiveQuery();
+      } else {
+        abortController.signal.addEventListener("abort", interruptActiveQuery, { once: true });
+      }
 
       for await (const message of activeQuery) {
         sessionId = sessionIdFromSdkMessage(message) ?? sessionId;
@@ -123,6 +131,7 @@ export const productionClaudeCodeRunner: ClaudeCodeRunner = {
         recentItems,
       };
     } finally {
+      abortController.signal.removeEventListener("abort", interruptActiveQuery);
       activeQuery?.close();
     }
   },
@@ -132,7 +141,6 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
   return {
     cwd: input.cwd,
     resume: input.claudeSessionId?.trim() || undefined,
-    abortController: input.abortController,
     permissionMode: "default",
     pathToClaudeCodeExecutable: input.claudeBin?.trim() || undefined,
     strictMcpConfig: true,
