@@ -52,7 +52,7 @@ import type {
   DesktopSendRoomMessageResult,
   DesktopStagedAttachment,
 } from "./room.js";
-import type { DesktopMcpInstallManyResult, DesktopMcpInstallOptions, DesktopMcpInstallResult, DesktopMcpInstallState, DesktopMcpInstallTargetId } from "./setup.js";
+import type { DesktopMcpInstallManyResult, DesktopMcpInstallResult, DesktopMcpInstallState, DesktopMcpInstallTargetId } from "./setup.js";
 import type {
   DesktopReasoningSessionDetail,
 } from "./activity.js";
@@ -190,8 +190,8 @@ export interface DesktopApi {
   };
   setup: {
     getMcpInstallState: () => Promise<DesktopMcpInstallState>;
-    installMcpServer: (targetId: DesktopMcpInstallTargetId, options?: DesktopMcpInstallOptions) => Promise<DesktopMcpInstallResult>;
-    installMcpServers: (targetIds: DesktopMcpInstallTargetId[], options?: DesktopMcpInstallOptions) => Promise<DesktopMcpInstallManyResult>;
+    installMcpServer: (targetId: DesktopMcpInstallTargetId) => Promise<DesktopMcpInstallResult>;
+    installMcpServers: (targetIds: DesktopMcpInstallTargetId[]) => Promise<DesktopMcpInstallManyResult>;
     completeMcpOnboarding: () => Promise<DesktopMcpInstallState>;
   };
   repos: {

@@ -7,39 +7,32 @@ import {
   getCodexTomlLetAgentsMcpServerFromRaw,
   getCodexTomlLetAgentsMcpInstallStatusFromRaw,
   getJsonLetAgentsMcpInstallStatusFromRaw,
+  getLetAgentsMcpServerIssue,
+  isLocalDevLetAgentsApiUrl,
 } from "../main/mcp-config.js";
 
 const baseExpected = createLetAgentsMcpServerConfig({
   apiUrl: "https://letagents.chat",
-  workspaceRoot: "/work/repo",
 });
 
 const expectedWithToken = createLetAgentsMcpServerConfig({
   apiUrl: "https://letagents.chat",
-  workspaceRoot: "/work/repo",
   authToken: "letagents-token",
 });
 
-test("createLetAgentsMcpServerConfig includes auth token only when present", () => {
+test("createLetAgentsMcpServerConfig includes auth token only when present and omits cwd", () => {
   assert.deepEqual(baseExpected.env, {
     LETAGENTS_API_URL: "https://letagents.chat",
   });
-  assert.equal(baseExpected.cwd, "/work/repo");
+  assert.equal(baseExpected.cwd, undefined);
   assert.deepEqual(expectedWithToken.env, {
     LETAGENTS_API_URL: "https://letagents.chat",
     LETAGENTS_TOKEN: "letagents-token",
   });
-  assert.equal(
-    createLetAgentsMcpServerConfig({
-      apiUrl: "https://letagents.chat",
-      workspaceRoot: "/work/repo",
-      cwd: "/chosen/repo",
-    }).cwd,
-    "/chosen/repo",
-  );
+  assert.equal(expectedWithToken.cwd, undefined);
 });
 
-test("json install status requires the current cwd and token state", () => {
+test("json install status requires token state and rejects legacy cwd", () => {
   const missingTokenConfig = JSON.stringify({
     mcpServers: {
       letagents: baseExpected,
@@ -111,6 +104,68 @@ test("json install status requires the current cwd and token state", () => {
   );
 });
 
+test("json install status rejects missing API URL because runtime would fall back to local dev", () => {
+  const missingApiUrlConfig = JSON.stringify({
+    mcpServers: {
+      letagents: {
+        command: "npx",
+        args: ["-y", "letagents"],
+        env: {},
+      },
+    },
+  });
+
+  assert.equal(
+    getJsonLetAgentsMcpInstallStatusFromRaw(
+      missingApiUrlConfig,
+      baseExpected,
+    ),
+    "needs_attention",
+  );
+  const issue = getLetAgentsMcpServerIssue(
+    {
+      command: "npx",
+      args: ["-y", "letagents"],
+      env: {},
+    },
+    baseExpected,
+  );
+  assert.ok(issue);
+  assert.match(issue, /LETAGENTS_API_URL is missing/);
+});
+
+test("server issue flags stale localhost backend unless local dev is expected and healthy", () => {
+  const localServer = createLetAgentsMcpServerConfig({
+    apiUrl: "http://localhost:3001",
+  });
+  const localExpected = createLetAgentsMcpServerConfig({
+    apiUrl: "http://localhost:3001",
+  });
+
+  assert.equal(isLocalDevLetAgentsApiUrl("http://localhost:3001"), true);
+  assert.equal(isLocalDevLetAgentsApiUrl("http://[::1]:3001"), true);
+  const unhealthyIssue = getLetAgentsMcpServerIssue(localServer, baseExpected, {
+    localDevApiHealthy: false,
+  });
+  const productionMismatchIssue = getLetAgentsMcpServerIssue(
+    localServer,
+    baseExpected,
+    {
+      localDevApiHealthy: true,
+    },
+  );
+  assert.ok(unhealthyIssue);
+  assert.ok(productionMismatchIssue);
+  assert.match(unhealthyIssue, /no local API is reachable/);
+  assert.match(productionMismatchIssue, /expected https:\/\/letagents\.chat/);
+  assert.equal(
+    getLetAgentsMcpServerIssue(localServer, localExpected, {
+      localDevApiHealthy: true,
+    }),
+    null,
+  );
+});
+
 test("codex toml writer includes and removes token based on expected auth", () => {
   const existing = [
     "[profiles.default]",
@@ -131,7 +186,7 @@ test("codex toml writer includes and removes token based on expected auth", () =
     expectedWithToken,
   );
   assert.match(withToken, /\[profiles\.default\]/);
-  assert.match(withToken, /cwd = "\/work\/repo"/);
+  assert.doesNotMatch(withToken, /cwd = /);
   assert.match(withToken, /LETAGENTS_API_URL = "https:\/\/letagents\.chat"/);
   assert.match(withToken, /LETAGENTS_TOKEN = "letagents-token"/);
   assert.equal(
@@ -147,6 +202,7 @@ test("codex toml writer includes and removes token based on expected auth", () =
     baseExpected,
   );
   assert.doesNotMatch(withoutToken, /LETAGENTS_TOKEN/);
+  assert.doesNotMatch(withoutToken, /cwd = /);
   assert.equal(
     getCodexTomlLetAgentsMcpInstallStatusFromRaw(
       withoutToken,
@@ -163,7 +219,24 @@ test("codex toml writer includes and removes token based on expected auth", () =
   );
 });
 
-test("codex toml parser preserves custom command and env for auth refresh", () => {
+test("codex toml install status rejects legacy cwd", () => {
+  const legacyCwd = [
+    "[mcp_servers.letagents]",
+    'command = "npx"',
+    'args = ["-y", "letagents"]',
+    'cwd = "/one/sticky/repo"',
+    "",
+    "[mcp_servers.letagents.env]",
+    'LETAGENTS_API_URL = "https://letagents.chat"',
+  ].join("\n");
+
+  assert.equal(
+    getCodexTomlLetAgentsMcpInstallStatusFromRaw(legacyCwd, baseExpected),
+    "needs_attention",
+  );
+});
+
+test("codex toml writer preserves custom command and env while removing legacy cwd", () => {
   const current = [
     "[mcp_servers.letagents]",
     'command = "/opt/homebrew/bin/npx"',
@@ -179,7 +252,8 @@ test("codex toml parser preserves custom command and env for auth refresh", () =
   const parsed = getCodexTomlLetAgentsMcpServerFromRaw(current);
   assert.ok(parsed);
   const refreshed = buildCodexTomlLetAgentsMcpConfig(current, {
-    ...parsed,
+    command: parsed.command,
+    args: parsed.args,
     env: {
       ...parsed.env,
       LETAGENTS_API_URL: "https://letagents.chat",
@@ -188,7 +262,7 @@ test("codex toml parser preserves custom command and env for auth refresh", () =
   });
 
   assert.match(refreshed, /command = "\/opt\/homebrew\/bin\/npx"/);
-  assert.match(refreshed, /cwd = "\/custom\/repo"/);
+  assert.doesNotMatch(refreshed, /cwd = /);
   assert.match(refreshed, /PATH = "\/opt\/homebrew\/bin:\/usr\/bin"/);
   assert.match(refreshed, /LETAGENTS_API_URL = "https:\/\/letagents\.chat"/);
   assert.match(refreshed, /LETAGENTS_TOKEN = "new-token"/);

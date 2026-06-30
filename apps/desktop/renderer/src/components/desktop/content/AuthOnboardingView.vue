@@ -136,7 +136,7 @@ const title = computed(() => {
   if (props.access.status === "missing_room") return "Choose a room to begin";
   if (props.access.status === "unavailable") return "LetAgents could not load this room";
   if (props.authStatus?.authenticated) return "Refresh the room";
-  return "Connect GitHub to open this room";
+  return "Connect GitHub for this private room";
 });
 
 const description = computed(() => {

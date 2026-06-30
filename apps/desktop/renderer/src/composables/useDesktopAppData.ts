@@ -400,37 +400,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
   }
 
-  async function loadFirstRunRoomContext(): Promise<void> {
-    try {
-      const requestedRootRoomIdentifier = options.selectedRootRoomIdentifier.value;
-      const requestedRootPath = selectedRootPath();
-      const [nextAppInfo, loadedRootRoomContext] = await Promise.all([
-        window.letagentsDesktop.app.getInfo(),
-        loadRootRoomContext({
-          roomIdentifier: requestedRootRoomIdentifier,
-          rootPath: requestedRootPath,
-        }),
-      ]);
-      options.appInfo.value = nextAppInfo;
-      options.repoStatus.value = loadedRootRoomContext.repoStatus;
-      options.rootRoomSnapshot.value = loadedRootRoomContext.snapshot;
-      options.selectedSnapshot.value = loadedRootRoomContext.snapshot;
-      options.selectedRootRoomIdentifier.value = loadedRootRoomContext.snapshot.roomIdentifier;
-      options.rememberRootRoomSnapshot(loadedRootRoomContext.snapshot, {
-        aliasIdentifiers: [
-          requestedRootRoomIdentifier,
-          loadedRootRoomContext.openedRoom?.roomIdentifier,
-        ],
-        rootPath: loadedRootRoomContext.openedRoom?.repoPath || requestedRootPath,
-        kind: loadedRootRoomContext.openedRoom ? "project" : null,
-        meta: loadedRootRoomContext.openedRoom?.repoStatus?.branch || null,
-      });
-      options.reconcileActiveEntry();
-    } catch {
-      // First-run should still be usable if room preview is unavailable before auth.
-    }
-  }
-
   const repoStatusValue = computed<RepoStatus>(() => options.repoStatus.value || {
     rootPath: options.appInfo.value?.workspaceRoot || "",
     branch: null,
@@ -442,7 +411,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     handleRefreshRoom,
     handleRoomRenamed,
     handleRoomStreamEvent,
-    loadFirstRunRoomContext,
     refresh,
     refreshAccountRooms,
     refreshSelectedSnapshot,

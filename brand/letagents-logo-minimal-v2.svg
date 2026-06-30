@@ -1,0 +1,96 @@
+<svg width="1800" height="1200" viewBox="0 0 1800 1200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .wordmark { font-family: Inter, SF Pro Display, Arial, sans-serif; font-weight: 820; letter-spacing: -0.035em; }
+      .label { font-family: Inter, SF Pro Text, Arial, sans-serif; font-weight: 700; letter-spacing: 0; }
+      .caption { font-family: Inter, SF Pro Text, Arial, sans-serif; font-weight: 620; letter-spacing: 0.015em; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1200" fill="#F5F7FA"/>
+
+  <text x="112" y="104" class="caption" fill="#667085" font-size="24">LETAGENTS MINIMAL LOGO EXPLORATION</text>
+  <text x="112" y="154" class="label" fill="#111827" font-size="34">Open room + agent monogram. No gradients. One-color first.</text>
+
+  <g transform="translate(112 240)">
+    <rect width="1576" height="330" rx="32" fill="#FFFFFF" stroke="#D8DEE8"/>
+    <g transform="translate(76 58)">
+      <rect width="214" height="214" rx="46" fill="#111827"/>
+      <g transform="translate(43 43)">
+        <path d="M35 0H93C112.33 0 128 15.67 128 35V47" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+        <path d="M128 81V93C128 112.33 112.33 128 93 128H35C15.67 128 0 112.33 0 93V35C0 15.67 15.67 0 35 0" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+        <path d="M34 95L64 27L94 95" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M46 68H82" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+        <circle cx="128" cy="64" r="8" fill="#2AC49F"/>
+      </g>
+    </g>
+    <g transform="translate(350 94)">
+      <text x="0" y="84" class="wordmark" fill="#111827" font-size="116">LetAgents</text>
+      <text x="4" y="132" class="label" fill="#667085" font-size="30">project rooms for humans and agents</text>
+    </g>
+  </g>
+
+  <g transform="translate(112 660)">
+    <rect width="360" height="360" rx="32" fill="#111827"/>
+    <text x="34" y="55" class="caption" fill="#A7B0BE" font-size="20">DARK MARK</text>
+    <g transform="translate(108 118)">
+      <path d="M35 0H93C112.33 0 128 15.67 128 35V47" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+      <path d="M128 81V93C128 112.33 112.33 128 93 128H35C15.67 128 0 112.33 0 93V35C0 15.67 15.67 0 35 0" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+      <path d="M34 95L64 27L94 95" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M46 68H82" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+      <circle cx="128" cy="64" r="8" fill="#2AC49F"/>
+    </g>
+  </g>
+
+  <g transform="translate(520 660)">
+    <rect width="360" height="360" rx="32" fill="#FFFFFF" stroke="#D8DEE8"/>
+    <text x="34" y="55" class="caption" fill="#667085" font-size="20">LIGHT MARK</text>
+    <g transform="translate(108 118)">
+      <path d="M35 0H93C112.33 0 128 15.67 128 35V47" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+      <path d="M128 81V93C128 112.33 112.33 128 93 128H35C15.67 128 0 112.33 0 93V35C0 15.67 15.67 0 35 0" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+      <path d="M34 95L64 27L94 95" stroke="#111827" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M46 68H82" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+      <circle cx="128" cy="64" r="8" fill="#2AC49F"/>
+    </g>
+  </g>
+
+  <g transform="translate(928 660)">
+    <rect width="360" height="360" rx="32" fill="#FFFFFF" stroke="#D8DEE8"/>
+    <text x="34" y="55" class="caption" fill="#667085" font-size="20">ONE-COLOR</text>
+    <g transform="translate(108 118)">
+      <path d="M35 0H93C112.33 0 128 15.67 128 35V47" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+      <path d="M128 81V93C128 112.33 112.33 128 93 128H35C15.67 128 0 112.33 0 93V35C0 15.67 15.67 0 35 0" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+      <path d="M34 95L64 27L94 95" stroke="#111827" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M46 68H82" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+      <circle cx="128" cy="64" r="8" fill="#111827"/>
+    </g>
+  </g>
+
+  <g transform="translate(1336 660)">
+    <rect width="352" height="360" rx="32" fill="#FFFFFF" stroke="#D8DEE8"/>
+    <text x="34" y="55" class="caption" fill="#667085" font-size="20">SMALL SIZE TEST</text>
+    <g transform="translate(58 130)">
+      <g transform="scale(0.44)">
+        <path d="M35 0H93C112.33 0 128 15.67 128 35V47" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+        <path d="M128 81V93C128 112.33 112.33 128 93 128H35C15.67 128 0 112.33 0 93V35C0 15.67 15.67 0 35 0" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+        <path d="M34 95L64 27L94 95" stroke="#111827" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M46 68H82" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+        <circle cx="128" cy="64" r="8" fill="#111827"/>
+      </g>
+      <g transform="translate(95 8) scale(0.7)">
+        <path d="M35 0H93C112.33 0 128 15.67 128 35V47" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+        <path d="M128 81V93C128 112.33 112.33 128 93 128H35C15.67 128 0 112.33 0 93V35C0 15.67 15.67 0 35 0" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+        <path d="M34 95L64 27L94 95" stroke="#111827" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M46 68H82" stroke="#111827" stroke-width="10" stroke-linecap="round"/>
+        <circle cx="128" cy="64" r="8" fill="#111827"/>
+      </g>
+    </g>
+    <text x="58" y="265" class="caption" fill="#667085" font-size="20">24px</text>
+    <text x="154" y="265" class="caption" fill="#667085" font-size="20">48px</text>
+  </g>
+
+  <g transform="translate(112 1090)">
+    <circle cx="12" cy="12" r="12" fill="#2AC49F"/>
+    <text x="38" y="20" class="caption" fill="#475467" font-size="22">The outer line is an open project room and hidden L; the inner A stands for agents.</text>
+  </g>
+</svg>

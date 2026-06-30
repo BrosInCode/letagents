@@ -83,6 +83,117 @@
   transform: translateX(-100%);
 }
 
+.desktop-launch-splash,
+.desktop-onboarding-shell {
+  --setup-bg: #f6f7f9;
+  --setup-surface: #ffffff;
+  --setup-surface-muted: #f2f4f7;
+  --setup-text: #111827;
+  --setup-muted: #667085;
+  --setup-muted-strong: #475467;
+  --setup-border: rgba(17, 24, 39, 0.13);
+  --setup-border-strong: rgba(17, 24, 39, 0.24);
+  --setup-accent: #24b99a;
+  --setup-accent-soft: rgba(36, 185, 154, 0.12);
+  --bg: var(--setup-bg);
+  --bg-card: var(--setup-surface);
+  --bg-elevated: var(--setup-surface);
+  --text: var(--setup-text);
+  --text-secondary: var(--setup-muted-strong);
+  --text-tertiary: var(--setup-muted);
+  --border: var(--setup-border);
+  --border-strong: var(--setup-border-strong);
+  --border-accent: color-mix(in srgb, var(--setup-accent) 42%, var(--setup-border));
+  --green: #0f9f77;
+  --green-dim: rgba(15, 159, 119, 0.12);
+  --amber: #b7791f;
+  --amber-dim: rgba(183, 121, 31, 0.12);
+  --red: #dc2626;
+  --red-dim: rgba(220, 38, 38, 0.12);
+  color: var(--setup-text);
+  color-scheme: light;
+}
+
+.desktop-launch-splash {
+  display: grid;
+  min-height: 100vh;
+  overflow: hidden;
+  place-items: center;
+  padding: 32px;
+  background: var(--setup-bg);
+}
+
+.desktop-launch-splash-inner {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  color: var(--setup-text);
+  animation: launch-splash-settle 360ms var(--ease-out);
+}
+
+.desktop-launch-logo-shell {
+  display: inline-grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--setup-text) 10%, transparent);
+  border-radius: 17px;
+  background: color-mix(in srgb, var(--setup-text) 96%, var(--setup-bg));
+  color: var(--setup-bg);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--setup-bg) 18%, transparent) inset,
+    0 18px 44px color-mix(in srgb, #000 22%, transparent);
+  --letagents-logo-accent: var(--setup-accent);
+}
+
+.desktop-launch-splash-inner strong {
+  font-size: 1rem;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+
+.desktop-launch-splash-inner small {
+  color: var(--setup-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+@keyframes launch-splash-settle {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .desktop-launch-splash,
+  .desktop-onboarding-shell {
+    --setup-bg: #090a0c;
+    --setup-surface: #111315;
+    --setup-surface-muted: #171a1d;
+    --setup-text: #f4f5f7;
+    --setup-muted: #858b96;
+    --setup-muted-strong: #b0b5bf;
+    --setup-border: rgba(255, 255, 255, 0.1);
+    --setup-border-strong: rgba(255, 255, 255, 0.18);
+    --setup-accent: #2ac49f;
+    --setup-accent-soft: rgba(42, 196, 159, 0.14);
+    color-scheme: dark;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-launch-splash-inner {
+    animation: none;
+  }
+}
+
 .desktop-onboarding-shell {
   display: grid;
   height: 100vh;
@@ -91,10 +202,7 @@
   padding: 28px;
   align-items: start;
   justify-items: center;
-  background:
-    radial-gradient(circle at 18% 8%, rgba(255, 255, 255, 0.075), transparent 28%),
-    radial-gradient(circle at 86% 92%, rgba(255, 255, 255, 0.035), transparent 34%),
-    var(--bg);
+  background: var(--setup-bg);
 }
 
 .desktop-onboarding-shell .mcp-onboarding {

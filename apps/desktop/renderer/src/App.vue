@@ -1,5 +1,7 @@
 <template>
-  <main v-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
+  <FirstRunSplashView v-if="showFirstRunSplash" />
+
+  <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
       :mcp-state="visibleMcpInstallState"
@@ -10,12 +12,16 @@
       :auth-busy="authBusy || loading"
       :can-install="setupApiAvailable"
       :feedback="firstRunFeedback"
-      :room-name="repoName"
-      :room-identifier="rootRoomSnapshot?.roomIdentifier || null"
+      :room-selected="firstRunRoomSelected"
+      :selected-room-name="firstRunRoomSelected ? (rootRoomSnapshot?.room?.displayName || repoName) : null"
+      :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
+      :selected-room-access-status="firstRunRoomSelected ? (rootRoomSnapshot?.access.status || null) : null"
+      :room-needs-github-access="firstRunRoomSelected && rootRoomSnapshot?.access.status === 'auth_required' && !authStatus?.authenticated"
       @select-target="selectMcpTarget"
       @select-all-targets="selectAllMcpTargets"
       @clear-target-selection="clearMcpTargetSelection"
       @continue-mcp="continueMcpOnboarding"
+      @start-setup="startFirstRunSetup"
       @install-targets="installSelectedMcpTargets"
       @continue-to-github="completeMcpOnboarding"
       @start-auth="startAuthFlow"
@@ -23,6 +29,7 @@
       @poll-auth="pollAuthFlow"
       @sign-out="signOut"
       @continue-to-room="continueToRoomConfirmation"
+      @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
       @join-room-code="joinRoomCode"
       @back="goBackFirstRun"
@@ -266,6 +273,7 @@ import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue"
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
+import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { RoomEntry, SidebarEntry } from "./components/desktop/types";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
@@ -336,7 +344,7 @@ const mcpInstallBusy = ref(false);
 const mcpInstallFeedback = ref<string | null>(null);
 const setupLoadError = ref<string | null>(null);
 const mcpWizardStep = ref<DesktopMcpWizardStep>("choose");
-const firstRunStage = ref<FirstRunWizardStage>("mcp");
+const firstRunStage = ref<FirstRunWizardStage>("welcome");
 const {
   activeEntry,
   collapsedProjects,
@@ -716,7 +724,6 @@ const {
   handleRefreshRoom,
   handleRoomRenamed,
   handleRoomStreamEvent,
-  loadFirstRunRoomContext,
   refresh,
   refreshAccountRooms,
   refreshSelectedSnapshot,
@@ -758,9 +765,8 @@ const {
 } = useDesktopAuthFlow({
   authStatus,
   getRoomIdentifier: () => getAuthRoomIdentifier(),
-  isFirstRunGate: () => !mcpInstallState.value || !mcpInstallState.value.completed || !authStatus.value?.authenticated,
+  isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
   onFirstRunAuthorized: async () => {
-    await loadFirstRunRoomContext();
     firstRunStage.value = "room";
   },
   onAuthorized: () => refresh(),
@@ -822,6 +828,7 @@ const {
   continueMcpOnboarding,
   continueToRoomConfirmation,
   finishFirstRunOnboarding,
+  firstRunRoomSelected,
   firstRunFeedback,
   goBackFirstRun,
   goBackMcpOnboarding,
@@ -833,14 +840,15 @@ const {
   selectMcpTarget,
   setupApiAvailable,
   showFirstRunGate,
+  showFirstRunSplash,
   visibleMcpInstallState,
+  startFirstRunSetup,
 } = useDesktopSetupOnboarding({
   activeEntry,
   authFeedback,
   authStatus,
   firstRunStage,
   loading,
-  loadFirstRunRoomContext,
   mcpInstallBusy,
   mcpInstallFeedback,
   mcpInstallState,
@@ -852,6 +860,11 @@ const {
   selectedMcpTargetIds,
   setupLoadError,
 });
+
+async function startFirstRunRoomAuth(): Promise<void> {
+  firstRunStage.value = "github";
+  await startAuthFlow();
+}
 
 async function pickRepoRoomForAgent(): Promise<void> {
   openAddAgentAfterRepoPick.value = false;

@@ -662,6 +662,15 @@
             <div>
               <p class="surface-title">{{ target.name }}</p>
               <p class="surface-subtitle">{{ target.configPath }}</p>
+              <p v-if="target.configIssue" class="surface-subtitle">{{ target.configIssue }}</p>
+              <ul v-if="target.configPaths?.length" class="settings-mcp-config-paths">
+                <li v-for="configPath in target.configPaths" :key="configPath.path">
+                  <span>{{ configPath.label }}:</span>
+                  <em :data-status="configPath.status">{{ configPathStatusLabel(configPath.status) }}</em>
+                  <code>{{ configPath.path }}</code>
+                  <small v-if="configPath.issue">{{ configPath.issue }}</small>
+                </li>
+              </ul>
             </div>
             <div class="surface-meta">
               <span class="state-pill" :data-state="target.status === 'installed' ? 'installed' : 'starting'">
@@ -751,6 +760,7 @@ import type {
   DesktopAuthStatus,
   DesktopAppInfo,
   DesktopChatStorageSettings,
+  DesktopMcpInstallConfigPath,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   RepoStatus,
@@ -761,6 +771,7 @@ import SettingsRow from "../settings/SettingsRow.vue";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import type { SettingsNavGroup, SettingsPaneId } from "../settings/types";
 import type { DesktopMcpWizardStep } from "../setup/types";
+import { buildLetAgentsRoomUrl } from "../../../domain/room-urls";
 
 type SettingsFeedback = {
   message: string;
@@ -827,6 +838,14 @@ const roomSearch = ref("");
 const selectedRoomDetailIdentifier = ref<string | null>(null);
 const appAgentModelDraft = ref("");
 const appAgentApiKeyDraft = ref("");
+
+function configPathStatusLabel(
+  status: DesktopMcpInstallConfigPath["status"],
+): string {
+  if (status === "installed") return "ready";
+  if (status === "needs_attention") return "repair";
+  return "not installed";
+}
 
 const settingsNavGroups: SettingsNavGroup[] = [
   {

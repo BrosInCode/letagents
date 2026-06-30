@@ -5,11 +5,11 @@
       :key="target.id"
       class="mcp-choice-card"
       type="button"
-      :data-selected="selectedTargetIds.includes(target.id)"
+      :data-selected="selectedTargetIdSet.has(target.id)"
       :data-status="target.status"
       :data-testid="`mcp-target-${target.id}`"
       :aria-label="targetAriaLabel(target)"
-      :aria-pressed="selectedTargetIds.includes(target.id)"
+      :aria-pressed="selectedTargetIdSet.has(target.id)"
       @click="$emit('select-target', target.id)"
     >
       <span class="mcp-target-mark" aria-hidden="true">
@@ -18,12 +18,20 @@
       <span class="mcp-target-main">
         <strong>{{ target.name }}</strong>
         <small>{{ target.description }}</small>
+        <span class="mcp-target-capabilities" aria-hidden="true">
+          <span v-for="capability in targetCapabilities(target)" :key="capability">
+            {{ capability }}
+          </span>
+        </span>
+        <small v-if="target.configIssue" class="mcp-target-config-issue">
+          {{ target.configIssue }}
+        </small>
       </span>
       <span class="mcp-target-status" :data-status="target.status">
         {{ statusLabel(target.status) }}
       </span>
       <span class="mcp-choice-check" aria-hidden="true">
-        <svg v-if="selectedTargetIds.includes(target.id)" viewBox="0 0 24 24">
+        <svg v-if="selectedTargetIdSet.has(target.id)" viewBox="0 0 24 24">
           <path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
       </span>
@@ -41,10 +49,11 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import type { DesktopMcpInstallTarget, DesktopMcpInstallTargetId } from "../../../../../electron/ipc-types";
 import McpHarnessIcon from "./McpHarnessIcon.vue";
 
-defineProps<{
+const props = defineProps<{
   targets: DesktopMcpInstallTarget[];
   selectedTargetIds: DesktopMcpInstallTargetId[];
 }>();
@@ -55,6 +64,8 @@ defineEmits<{
   "clear-selection": [];
 }>();
 
+const selectedTargetIdSet = computed(() => new Set(props.selectedTargetIds));
+
 function statusLabel(status: DesktopMcpInstallTarget["status"]): string {
   if (status === "installed") return "Ready";
   if (status === "needs_attention") return "Repair";
@@ -62,6 +73,12 @@ function statusLabel(status: DesktopMcpInstallTarget["status"]): string {
 }
 
 function targetAriaLabel(target: DesktopMcpInstallTarget): string {
-  return `${target.name}. ${target.description} Status: ${statusLabel(target.status)}.`;
+  const issue = target.configIssue ? ` Issue: ${target.configIssue}.` : "";
+  return `${target.name}. ${target.description} Setup actions: ${targetCapabilities(target).join(", ")}. Status: ${statusLabel(target.status)}.${issue}`;
+}
+
+function targetCapabilities(target: DesktopMcpInstallTarget): string[] {
+  if (target.id === "codex") return ["Install CLI if missing", "Add MCP bridge"];
+  return ["Add MCP bridge"];
 }
 </script>

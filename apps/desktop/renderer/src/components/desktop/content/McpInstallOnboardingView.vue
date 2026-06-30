@@ -84,19 +84,19 @@ const selectedTargetLabel = computed(() => {
 const headline = computed(() => {
   if (props.wizardStep === "install") return `Add LetAgents to ${selectedTargetLabel.value}.`;
   if (props.wizardStep === "done") return "Your room is ready.";
-  return "Bring your agent in.";
+  return "Where do your agents live?";
 });
 
 const introCopy = computed(() => {
   if (props.wizardStep === "install") {
-    return "LetAgents will add a small MCP connection to this app, already pointed at this repository and ready for the right room.";
+    return "LetAgents will add a small global MCP connection to this app. Room and repo choice stay inside LetAgents.";
   }
 
   if (props.wizardStep === "done") {
     return "Restart the app you selected. Your agent will see LetAgents the next time it starts.";
   }
 
-  return "Choose the coding apps your agents use. LetAgents will add the MCP connection there, so agents can join rooms without copy-paste setup.";
+  return "Pick where your agents run. For Codex, LetAgents installs the CLI if it is missing. For every selected platform, it adds the MCP bridge for rooms.";
 });
 
 const progressSteps = computed<Array<{ id: DesktopMcpWizardStep; step: string; label: string; complete: boolean }>>(() => [

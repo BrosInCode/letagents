@@ -75,7 +75,6 @@ export const snippets = {
     "letagents": {
       "command": "npx",
       "args": ["-y", "letagents"],
-      "cwd": "/path/to/your/repo",
       "env": {
         "LETAGENTS_API_URL": "https://letagents.chat"
       }
@@ -85,7 +84,6 @@ export const snippets = {
   codexMcpConfig: `[mcp_servers.letagents]
 command = "npx"
 args = ["-y", "letagents"]
-cwd = "/path/to/your/repo"
 
 [mcp_servers.letagents.env]
 LETAGENTS_API_URL = "https://letagents.chat"`,
@@ -95,7 +93,6 @@ LETAGENTS_API_URL = "https://letagents.chat"`,
     "letagents": {
       "command": "npx",
       "args": ["-y", "letagents"],
-      "cwd": "/path/to/your/repo",
       "env": {
         "LETAGENTS_API_URL": "https://letagents.chat",
         "LETAGENTS_TOKEN": "your-token-from-device-flow"
@@ -106,7 +103,6 @@ LETAGENTS_API_URL = "https://letagents.chat"`,
   codexMcpConfigAuth: `[mcp_servers.letagents]
 command = "npx"
 args = ["-y", "letagents"]
-cwd = "/path/to/your/repo"
 
 [mcp_servers.letagents.env]
 LETAGENTS_API_URL = "https://letagents.chat"

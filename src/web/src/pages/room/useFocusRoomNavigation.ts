@@ -7,19 +7,16 @@ import type {
   FocusRoomSettingsPatch,
   RoomInfo,
 } from '@/composables/useRoom'
+import {
+  buildDirectRoomPath,
+  buildFocusRoomPath,
+  buildRoomSharePath,
+} from '../../domain/roomRoutes'
 
 interface RoomToast {
   error(message: string): void
   info(message: string): void
   success(message: string): void
-}
-
-export function roomRoutePath(identifier: string): string {
-  return identifier
-    .split('/')
-    .filter(Boolean)
-    .map(part => encodeURIComponent(part))
-    .join('/')
 }
 
 function openBlankFocusRoomTab(): Window | null {
@@ -63,23 +60,21 @@ export function useFocusRoomNavigation(input: {
   const sharingFocusResult = ref(false)
   const updatingFocusSettings = ref(false)
 
-  function buildFocusRoomPath(focusKey: string): string {
-    const parent = input.focusParentAddress.value
-    if (!parent || !focusKey) return ''
-    return `/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`
-  }
-
-  function buildDirectRoomPath(roomId: string | null | undefined): string {
-    return roomId ? `/in/${roomRoutePath(roomId)}` : ''
+  function buildCurrentFocusRoomPath(focusKey: string): string {
+    return buildFocusRoomPath({
+      parentRoomId: input.focusParentAddress.value,
+      focusKey,
+    })
   }
 
   function buildFocusRoomInfoPath(focusRoom: FocusRoomInfo): string {
-    const focusKey = focusRoom.focus_key || focusRoom.source_task_id
-    const parent = focusRoom.parent_room_id || input.focusParentAddress.value
-    if (parent && focusKey) {
-      return `/in/${roomRoutePath(parent)}/focus/${encodeURIComponent(focusKey)}`
-    }
-    return buildDirectRoomPath(focusRoom.room_id)
+    return buildRoomSharePath({
+      identifier: focusRoom.room_id,
+      kind: 'focus',
+      parentRoomId: focusRoom.parent_room_id || input.focusParentAddress.value,
+      focusKey: focusRoom.focus_key,
+      sourceTaskId: focusRoom.source_task_id,
+    })
   }
 
   async function openFocusRoomPath(path: string, targetWindow?: Window | null): Promise<boolean> {
@@ -118,7 +113,7 @@ export function useFocusRoomNavigation(input: {
   async function handleOpenFocusRoom(focusKey: string, targetWindow?: Window | null): Promise<boolean> {
     const path = focusKey.startsWith('focus_')
       ? buildDirectRoomPath(focusKey)
-      : buildFocusRoomPath(focusKey)
+      : buildCurrentFocusRoomPath(focusKey)
     if (!path) {
       closeFocusTargetWindow(targetWindow)
       return false
@@ -129,7 +124,7 @@ export function useFocusRoomNavigation(input: {
   async function handleOpenParentRoom() {
     const parent = input.focusParentAddress.value
     if (!parent) return
-    await input.router.push(`/in/${roomRoutePath(parent)}`)
+    await input.router.push(buildDirectRoomPath(parent))
   }
 
   async function handleFocusTask(taskId: string) {
@@ -150,7 +145,7 @@ export function useFocusRoomNavigation(input: {
         return
       }
 
-      const path = buildFocusRoomInfoPath(focusRoom) || buildFocusRoomPath(taskId)
+      const path = buildFocusRoomInfoPath(focusRoom) || buildCurrentFocusRoomPath(taskId)
       const opened = await openFocusRoomPath(path, focusWindow)
       if (!opened) {
         input.toast.error('Focus Room could not be opened.')
