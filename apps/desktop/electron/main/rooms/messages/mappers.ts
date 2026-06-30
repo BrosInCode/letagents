@@ -69,7 +69,6 @@ export function mapRoomMessagePayload(
     threadRootId:
       message.thread_root_id ||
       message.thread?.root_message_id ||
-      message.reply_to?.id ||
       message.id,
     threadReplyToId: message.thread_reply_to_id || message.reply_to?.id || null,
     thread: mapRoomMessageThreadSummary(message.thread),

@@ -173,6 +173,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       sender: identity.actor_label,
       text: input.text,
       reply_to: resolvedReplyTarget,
+      ...(shouldResolveThreadRoot ? { thread_root_id: resolvedReplyTarget } : {}),
       source: "agent",
     });
     touchCurrentRoom(message.id);
@@ -193,6 +194,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
         sender: identity.actor_label,
         text: input.text,
         reply_to: resolvedReplyTarget,
+        ...(shouldResolveThreadRoot ? { thread_root_id: resolvedReplyTarget } : {}),
         ...agentSessionCredentials(agentSession),
       }),
     },
