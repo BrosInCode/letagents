@@ -30,6 +30,8 @@ export type DesktopCodexJoinedVia = "join_code" | "join_room";
 
 export type DesktopClaudeCodeJoinedVia = "join_code" | "join_room";
 
+export type DesktopCursorJoinedVia = "join_code" | "join_room";
+
 export interface DesktopCodexLiveSessionState {
   session_id: string;
   room_id: string;
@@ -96,6 +98,37 @@ export interface DesktopClaudeCodeLiveSessionState {
   updated_at: string;
 }
 
+export interface DesktopCursorLiveSessionState {
+  session_id: string;
+  room_id: string;
+  room_identifier: string;
+  room_display_name?: string | null;
+  display_name?: string | null;
+  joined_via: DesktopCursorJoinedVia;
+  cwd: string;
+  repo_branch?: string | null;
+  stop_phrase: string;
+  max_minutes: number;
+  delivery_mode?: DesktopManagedAgentDeliveryMode;
+  desktop_managed?: boolean;
+  deadline_utc?: string | null;
+  token: string;
+  cursor_session_id?: string | null;
+  cursor_bin: string;
+  agent_session_id?: string | null;
+  active_work?: {
+    kind: "message" | "task_update";
+    event_id?: string | null;
+    started_at: string;
+    summary?: string | null;
+  } | null;
+  status: DesktopManagedAgentSessionStatus;
+  last_error?: string | null;
+  recent_items?: Array<Record<string, unknown>>;
+  started_at: string;
+  updated_at: string;
+}
+
 interface SharedLetAgentsState {
   agent_identity?: StoredAgentIdentityState;
   agent_identities?: Record<string, StoredAgentIdentityState>;
@@ -106,6 +139,8 @@ interface SharedLetAgentsState {
   codex_live_sessions?: Record<string, DesktopCodexLiveSessionState>;
   current_claude_code_live_session_ids?: Record<string, string>;
   claude_code_live_sessions?: Record<string, DesktopClaudeCodeLiveSessionState>;
+  current_cursor_live_session_ids?: Record<string, string>;
+  cursor_live_sessions?: Record<string, DesktopCursorLiveSessionState>;
 }
 
 export interface StoredAgentIdentityState {
@@ -822,6 +857,84 @@ export function listClaudeCodeDisplayNamesForRoom(roomId: string): string[] {
     .filter(Boolean);
 }
 
+export function getCurrentCursorLiveSession(roomId?: string | null): DesktopCursorLiveSessionState | null {
+  const state = readAgentLocalState();
+  const sessionIds = state.current_cursor_live_session_ids ?? {};
+  const normalizedRoomId = normalizeRoomId(roomId);
+  if (normalizedRoomId) {
+    const directId = sessionIds[normalizedRoomId] ?? sessionIds[roomId ?? ""];
+    const direct = directId ? state.cursor_live_sessions?.[directId] ?? null : null;
+    if (direct) {
+      return direct;
+    }
+    return Object.values(state.cursor_live_sessions ?? {})
+      .filter((session) =>
+        normalizeRoomId(session.room_id) === normalizedRoomId ||
+        normalizeRoomId(session.room_identifier) === normalizedRoomId
+      )
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
+  }
+
+  let best: DesktopCursorLiveSessionState | null = null;
+  for (const id of Object.values(sessionIds)) {
+    const session = state.cursor_live_sessions?.[id];
+    if (session && (!best || session.updated_at > best.updated_at)) {
+      best = session;
+    }
+  }
+  return best;
+}
+
+export function getStoredCursorLiveSession(sessionId: string): DesktopCursorLiveSessionState | null {
+  return readAgentLocalState().cursor_live_sessions?.[sessionId] ?? null;
+}
+
+export function listStoredCursorLiveSessions(roomId?: string | null): DesktopCursorLiveSessionState[] {
+  const normalizedRoom = normalizeRoomId(roomId) || null;
+  return Object.values(readAgentLocalState().cursor_live_sessions ?? {})
+    .filter((session) =>
+      !normalizedRoom ||
+      normalizeRoomId(session.room_id) === normalizedRoom ||
+      normalizeRoomId(session.room_identifier) === normalizedRoom
+    )
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+}
+
+export function isDesktopManagedCursorLiveSession(session: DesktopCursorLiveSessionState): boolean {
+  return session.desktop_managed === true || Boolean(session.delivery_mode);
+}
+
+export function listDesktopManagedCursorLiveSessions(roomId?: string | null): DesktopCursorLiveSessionState[] {
+  return listStoredCursorLiveSessions(roomId).filter(isDesktopManagedCursorLiveSession);
+}
+
+export function listCursorDisplayNamesForRoom(roomId: string): string[] {
+  const normalizedRoom = normalizeRoomId(roomId);
+  if (!normalizedRoom) {
+    return [];
+  }
+
+  const state = readAgentLocalState();
+  const liveSessionNames = Object.values(state.cursor_live_sessions ?? {})
+    .filter((session) =>
+      normalizeRoomId(session.room_id) === normalizedRoom ||
+      normalizeRoomId(session.room_identifier) === normalizedRoom
+    )
+    .map((session) => session.display_name);
+  const workerNames = Object.values(state.agent_sessions ?? {})
+    .filter((session) =>
+      normalizeRoomId(session.room_id) === normalizedRoom &&
+      session.session_kind === "worker" &&
+      !session.ended_at &&
+      isCursorAgentSession(session)
+    )
+    .flatMap((session) => [session.display_name, session.actor_label]);
+
+  return [...liveSessionNames, ...workerNames]
+    .map((name) => String(name ?? "").trim())
+    .filter(Boolean);
+}
+
 function isClaudeCodeAgentSession(session: StoredAgentSessionState): boolean {
   const runtime = String(session.runtime ?? "").trim().toLowerCase();
   const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
@@ -833,6 +946,19 @@ function isClaudeCodeAgentSession(session: StoredAgentSessionState): boolean {
     ideLabel === "claude code" ||
     livenessCapability.includes("claude") ||
     /(^|:)claude-code(:|$)/.test(toolBridgeId);
+}
+
+function isCursorAgentSession(session: StoredAgentSessionState): boolean {
+  const runtime = String(session.runtime ?? "").trim().toLowerCase();
+  const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
+  const livenessCapability = String(session.liveness_capability ?? "").trim().toLowerCase();
+  const toolBridgeId = String(session.tool_bridge_id ?? "").trim().toLowerCase();
+
+  return runtime === "cursor" ||
+    runtime.startsWith("cursor:") ||
+    ideLabel === "cursor" ||
+    livenessCapability.includes("cursor") ||
+    /(^|:)cursor(:|$)/.test(toolBridgeId);
 }
 
 export function saveClaudeCodeLiveSession(
@@ -868,6 +994,46 @@ export function updateClaudeCodeLiveSession(
     state.current_claude_code_live_session_ids = state.current_claude_code_live_session_ids ?? {};
     if (!state.current_claude_code_live_session_ids[updated.room_id]) {
       state.current_claude_code_live_session_ids[updated.room_id] = sessionId;
+    }
+    updatedSession = updated;
+    return state;
+  });
+  return updatedSession;
+}
+
+export function saveCursorLiveSession(
+  session: DesktopCursorLiveSessionState,
+  makeCurrent = true,
+): DesktopCursorLiveSessionState {
+  updateAgentLocalState((state) => {
+    state.cursor_live_sessions = state.cursor_live_sessions ?? {};
+    state.cursor_live_sessions[session.session_id] = session;
+    if (makeCurrent) {
+      state.current_cursor_live_session_ids = state.current_cursor_live_session_ids ?? {};
+      state.current_cursor_live_session_ids[session.room_id] = session.session_id;
+    }
+    return state;
+  });
+  return session;
+}
+
+export function updateCursorLiveSession(
+  sessionId: string,
+  updater: (session: DesktopCursorLiveSessionState) => DesktopCursorLiveSessionState,
+): DesktopCursorLiveSessionState | null {
+  let updatedSession: DesktopCursorLiveSessionState | null = null;
+  updateAgentLocalState((state) => {
+    const existing = state.cursor_live_sessions?.[sessionId];
+    if (!existing) {
+      return state;
+    }
+
+    const updated = updater(existing);
+    state.cursor_live_sessions = state.cursor_live_sessions ?? {};
+    state.cursor_live_sessions[sessionId] = updated;
+    state.current_cursor_live_session_ids = state.current_cursor_live_session_ids ?? {};
+    if (!state.current_cursor_live_session_ids[updated.room_id]) {
+      state.current_cursor_live_session_ids[updated.room_id] = sessionId;
     }
     updatedSession = updated;
     return state;
@@ -1037,6 +1203,111 @@ export function toPublicClaudeCodeManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Claude Code",
     reasoningSessionId: session.claude_session_id ?? null,
+    activeWork: session.active_work
+      ? {
+        kind: session.active_work.kind,
+        eventId: session.active_work.event_id ?? null,
+        startedAt: session.active_work.started_at,
+        summary: session.active_work.summary ?? null,
+      }
+      : null,
+    startedAt: session.started_at,
+    updatedAt: session.updated_at,
+    lastError: session.last_error ?? null,
+  };
+}
+
+function nonGenericCursorName(value: string | null | undefined): string | null {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || /^cursor(?:\s+\d+)?$/i.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+function workerHasExactCursorMarker(
+  worker: StoredAgentSessionState,
+  session: DesktopCursorLiveSessionState,
+): boolean {
+  const token = String(session.token ?? "").trim();
+  if (!token) {
+    return false;
+  }
+  const runtimeMarker = `cursor:${token}`;
+  const instanceMarker = `desktop-cursor:${token}`;
+  return String(worker.runtime ?? "").trim() === runtimeMarker ||
+    String(worker.agent_instance_id ?? "").trim() === instanceMarker ||
+    String(worker.tool_bridge_id ?? "").includes(runtimeMarker) ||
+    String(worker.tool_bridge_id ?? "").includes(instanceMarker);
+}
+
+function workerCanRepresentCursorSession(
+  worker: StoredAgentSessionState,
+  session: DesktopCursorLiveSessionState,
+): boolean {
+  if (
+    normalizeRoomId(worker.room_id) !== normalizeRoomId(session.room_id) ||
+    worker.session_kind !== "worker" ||
+    worker.ended_at ||
+    !isCursorAgentSession(worker)
+  ) {
+    return false;
+  }
+  return worker.session_id === session.agent_session_id ||
+    workerHasExactCursorMarker(worker, session) ||
+    sameSessionText(worker.display_name, session.display_name) ||
+    sameSessionText(worker.actor_label, session.display_name);
+}
+
+function publicDisplayNameForCursorSession(
+  session: DesktopCursorLiveSessionState,
+  workerSession: StoredAgentSessionState | null,
+): string {
+  return nonGenericCursorName(workerSession?.display_name) ||
+    nonGenericCursorName(session.display_name) ||
+    nonGenericCursorName(workerSession?.actor_label) ||
+    suggestLetAgentsCodename(listCursorDisplayNamesForRoom(session.room_id), session.token || session.session_id);
+}
+
+export function toPublicCursorManagedAgentSession(
+  session: DesktopCursorLiveSessionState,
+): DesktopManagedAgentSession {
+  const state = readAgentLocalState();
+  const persistedWorker = session.agent_session_id
+    ? state.agent_sessions?.[session.agent_session_id] ?? null
+    : null;
+  const persistedWorkerActive = Boolean(
+    persistedWorker &&
+    workerCanRepresentCursorSession(persistedWorker, session),
+  );
+  const activeWorkerSessionId = persistedWorkerActive ? session.agent_session_id ?? null : null;
+  const workerSession = persistedWorkerActive ? persistedWorker : null;
+  const displayName = publicDisplayNameForCursorSession(session, workerSession);
+  const deliveryMode = session.delivery_mode || "desktop_events";
+  return {
+    id: session.session_id,
+    providerId: "cursor",
+    runtime: "cursor",
+    roomIdentifier: session.room_identifier || session.room_id,
+    roomDisplayName: session.room_display_name ?? null,
+    repoRootPath: session.cwd,
+    repoBranch: session.repo_branch ?? null,
+    status: session.status,
+    deliveryMode,
+    canStop: Boolean(activeWorkerSessionId) &&
+      (
+        session.status === "starting" ||
+        session.status === "running" ||
+        session.status === "unknown" ||
+        (deliveryMode === "desktop_events" && session.status === "completed")
+      ),
+    agentSessionId: activeWorkerSessionId,
+    actorLabel: nonGenericCursorName(workerSession?.actor_label) ?? displayName,
+    agentKey: workerSession?.agent_key ?? "cursor",
+    displayName,
+    ownerLabel: workerSession?.owner_label ?? "Local desktop",
+    ideLabel: workerSession?.ide_label ?? "Cursor",
+    reasoningSessionId: session.cursor_session_id ?? null,
     activeWork: session.active_work
       ? {
         kind: session.active_work.kind,

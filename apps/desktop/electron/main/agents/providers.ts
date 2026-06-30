@@ -51,9 +51,14 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "cursor",
     name: "Cursor",
-    description: "Join from Cursor.",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
+    description: "Start a read-only Cursor agent here.",
+    capabilities: [
+      "external_mcp",
+      "desktop_managed_runtime",
+      "auth_preflight",
+      "turn_control",
+    ],
+    runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
   },
   {
@@ -316,6 +321,82 @@ async function claudeCodePreflight(
   };
 }
 
+async function cursorPreflight(
+  provider: DesktopAgentProvider,
+  input: DesktopAgentProviderPreflightInput,
+  mcpStatus: DesktopMcpInstallTarget["status"] | null,
+): Promise<DesktopAgentProviderPreflight> {
+  const command = process.env.LETAGENTS_CURSOR_AGENT_BIN ||
+    provider.runtimeCommand ||
+    "cursor-agent";
+  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  if (commandMissing(versionResult)) {
+    return {
+      providerId: provider.id,
+      status: "missing_runtime",
+      canStart: false,
+      message: "Cursor Agent is not installed.",
+      detail: "Install Cursor Agent before starting a local read-only Cursor room agent.",
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
+  if (!versionResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Cursor Agent could not be checked.",
+      detail: firstOutputLine(versionResult) || "The Cursor Agent command failed before returning a version.",
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
+
+  const version = firstOutputLine(versionResult);
+  const authResult = await execFileWithTimeout(command, ["status"]);
+  if (!authResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "auth_required",
+      canStart: false,
+      message: "Cursor Agent needs sign-in.",
+      detail: firstOutputLine(authResult) || "Sign in with Cursor Agent before starting a local room agent.",
+      nextAction: "authenticate",
+      version,
+      mcpStatus,
+    };
+  }
+
+  if (!input.repoRootPath?.trim()) {
+    return {
+      providerId: provider.id,
+      status: "repo_required",
+      canStart: false,
+      message: "Choose a local repository before starting Cursor.",
+      detail: "A desktop-managed Cursor agent needs a local repo or worktree for read-only analysis.",
+      nextAction: "choose_repo",
+      version,
+      mcpStatus,
+    };
+  }
+
+  return {
+    providerId: provider.id,
+    status: "ready",
+    canStart: true,
+    message: "Cursor Agent is ready to start in read-only mode.",
+    detail: mcpStatus === "installed"
+      ? "This desktop can start Cursor in ask mode. Write-capable Cursor remains gated on permissions and config isolation."
+      : "This desktop can start Cursor directly in ask mode; install the LetAgents connection only for manual Cursor joins.",
+    nextAction: null,
+    version,
+    mcpStatus,
+  };
+}
+
 export async function runDesktopAgentProviderPreflight(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
@@ -367,6 +448,9 @@ export async function runDesktopAgentProviderPreflight(
   }
   if (provider.id === "claude-code") {
     return claudeCodePreflight(provider, input, mcpStatus);
+  }
+  if (provider.id === "cursor") {
+    return cursorPreflight(provider, input, mcpStatus);
   }
 
   return bridgePreflight(provider, mcpStatus);
