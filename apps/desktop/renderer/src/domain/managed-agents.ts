@@ -4,6 +4,7 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
+  DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   RepoStatus,
@@ -317,6 +318,29 @@ export function managedAgentSessionDisplayName(
   }
 
   return "Local agent";
+}
+
+export function managedAgentPermissionProfileStatusLabel(
+  status: DesktopManagedAgentPermissionProfile["status"],
+): string {
+  if (status === "available") return "Available";
+  if (status === "gated") return "Gated";
+  return "Unsupported";
+}
+
+export function managedAgentPermissionProfileSummary(
+  profile: Pick<DesktopManagedAgentPermissionProfile, "description" | "detail" | "status">,
+): string {
+  const prefix = profile.status === "available"
+    ? ""
+    : `${managedAgentPermissionProfileStatusLabel(profile.status)}: `;
+  return `${prefix}${profile.detail?.trim() || profile.description.trim()}`;
+}
+
+export function managedAgentPermissionProfileLabel(
+  session: Pick<DesktopManagedAgentSession, "permissionProfile" | "permissionProfileId">,
+): string {
+  return session.permissionProfile?.label?.trim() || session.permissionProfileId.replace(/[_-]+/g, " ");
 }
 
 export function activeManagedAgentWorkIndicators(

@@ -94,6 +94,9 @@ import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { createDesktopCursorRuntime } from "./cursor-runtime.js";
+import {
+  assertManagedAgentPermissionProfileAvailable,
+} from "./managed-agent-permission-profiles.js";
 import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
 import {
   bindCodexLiveSessionToWorker,
@@ -957,6 +960,7 @@ async function startDesktopManagedCodexAgent(
     .then((status) => status.branch)
     .catch(() => null);
   const codexBin = process.env.LETAGENTS_CODEX_BIN || "codex";
+  const permissionProfile = assertManagedAgentPermissionProfileAvailable("codex", input.permissionProfileId);
   const preflight = await runDesktopAgentProviderPreflight("codex", {
     roomIdentifier,
     repoRootPath: cwd,
@@ -1052,6 +1056,7 @@ async function startDesktopManagedCodexAgent(
       stop_phrase: stopPhrase,
       max_minutes: maxMinutes,
       delivery_mode: deliveryMode,
+      permission_profile_id: permissionProfile.id,
       desktop_managed: true,
       deadline_utc: deadline.utc,
       token,

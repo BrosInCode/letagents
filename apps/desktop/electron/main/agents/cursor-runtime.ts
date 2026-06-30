@@ -25,6 +25,9 @@ import {
   productionCursorRunner,
   type CursorRunner,
 } from "./cursor-runner.js";
+import {
+  assertManagedAgentPermissionProfileAvailable,
+} from "./managed-agent-permission-profiles.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
 import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
@@ -162,6 +165,7 @@ export function createDesktopCursorRuntime(
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
+    const permissionProfile = assertManagedAgentPermissionProfileAvailable("cursor", input.permissionProfileId);
 
     const token = makeCursorStopToken();
     const displayName = suggestLetAgentsCodename(listCursorDisplayNamesForRoom(roomIdentifier), token);
@@ -184,6 +188,7 @@ export function createDesktopCursorRuntime(
       stop_phrase: input.stopPhrase?.trim() || DEFAULT_CURSOR_STOP_PHRASE,
       max_minutes: coerceMaxMinutes(input.maxMinutes),
       delivery_mode: "desktop_events",
+      permission_profile_id: permissionProfile.id,
       desktop_managed: true,
       deadline_utc: formatDeadlineUtc(coerceMaxMinutes(input.maxMinutes)),
       token,

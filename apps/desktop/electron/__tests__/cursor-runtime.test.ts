@@ -163,6 +163,8 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(result.session.providerId, "cursor");
   assert.equal(result.session.status, "completed");
   assert.equal(result.session.deliveryMode, "desktop_events");
+  assert.equal(result.session.permissionProfileId, "read_only");
+  assert.equal(result.session.permissionProfile.label, "Read-only");
   assert.equal(result.session.canStop, true);
   assert.equal(result.session.ideLabel, "Cursor");
   assert.equal(runtime.listSessions("room_1").length, 1);
@@ -171,6 +173,18 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(inspected?.session.providerId, "cursor");
   assert.equal(inspected?.serverReachable, true);
   assert.equal(inspected?.recentItems.length, 1);
+  assert.equal(getStoredCursorLiveSession(result.session.id)?.permission_profile_id, "read_only");
+  await assert.rejects(
+    () => runtime.start({
+      providerId: "cursor",
+      roomIdentifier: "room_1",
+      roomDisplayName: "Room One",
+      repoRootPath: tempDir,
+      deliveryMode: "desktop_events",
+      permissionProfileId: "full_access",
+    }),
+    /Full access is not available for cursor/,
+  );
 });
 
 test("Cursor runtime delivers room events into ask-mode runner and persists resume state", async () => {
