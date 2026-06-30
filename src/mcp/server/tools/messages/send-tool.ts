@@ -35,16 +35,35 @@ function normalizeMessageId(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function replyReferenceId(message: MessageRecord | null): string | null {
-  const reply = message?.reply_to ?? message?.replyTo ?? null;
-  if (typeof reply === "string" && reply.trim()) {
-    return reply;
-  }
-  if (reply && typeof reply === "object" && typeof (reply as { id?: unknown }).id === "string") {
-    const id = (reply as { id: string }).id.trim();
-    return id || null;
-  }
-  return null;
+function stringId(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function messageRecordId(message: MessageRecord | null): string | null {
+  return stringId(message?.id);
+}
+
+function explicitThreadRootId(message: MessageRecord | null): string | null {
+  const direct = stringId(message?.thread_root_id) ?? stringId(message?.threadRootId);
+  if (direct) return direct;
+
+  const thread = message?.thread;
+  if (!thread || typeof thread !== "object") return null;
+  const threadRecord = thread as MessageRecord;
+  return (
+    stringId(threadRecord.root_message_id) ??
+    stringId(threadRecord.rootMessageId) ??
+    stringId(threadRecord.parent_id) ??
+    stringId(threadRecord.parentId)
+  );
+}
+
+export function resolveMessageThreadRootId(
+  message: MessageRecord | null,
+  fallbackMessageId?: string,
+): string | null {
+  if (!message) return null;
+  return explicitThreadRootId(message) ?? messageRecordId(message) ?? normalizeMessageId(fallbackMessageId) ?? null;
 }
 
 async function findLocalMessageById(roomId: string, messageId: string): Promise<MessageRecord | null> {
@@ -117,17 +136,9 @@ async function resolveThreadRootMessageId(input: {
   roomId: string | null;
   projectId: string | null;
   messageId: string;
-}): Promise<string> {
-  let currentId = input.messageId;
-  const seen = new Set<string>();
-  for (;;) {
-    if (seen.has(currentId)) return currentId;
-    seen.add(currentId);
-    const message = await findMessageById({ ...input, messageId: currentId });
-    const parentId = replyReferenceId(message);
-    if (!parentId) return currentId;
-    currentId = parentId;
-  }
+}): Promise<string | null> {
+  const message = await findMessageById(input);
+  return resolveMessageThreadRootId(message, input.messageId);
 }
 
 function initialReplyTarget(input: SendMessageInput): {
@@ -158,14 +169,15 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
   });
   const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
   const { replyTarget, shouldResolveThreadRoot } = initialReplyTarget(input);
-  const resolvedReplyTarget = replyTarget && shouldResolveThreadRoot
+  const resolvedThreadRoot = replyTarget && shouldResolveThreadRoot
     ? await resolveThreadRootMessageId({
       localRoomId,
       roomId: targetRoomId,
       projectId: targetProjectId,
       messageId: replyTarget,
     })
-    : replyTarget;
+    : null;
+  const resolvedReplyTarget = resolvedThreadRoot || replyTarget;
 
   if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
     const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
@@ -173,7 +185,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       sender: identity.actor_label,
       text: input.text,
       reply_to: resolvedReplyTarget,
-      ...(shouldResolveThreadRoot ? { thread_root_id: resolvedReplyTarget } : {}),
+      ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
       source: "agent",
     });
     touchCurrentRoom(message.id);
@@ -194,7 +206,7 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
         sender: identity.actor_label,
         text: input.text,
         reply_to: resolvedReplyTarget,
-        ...(shouldResolveThreadRoot ? { thread_root_id: resolvedReplyTarget } : {}),
+        ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
         ...agentSessionCredentials(agentSession),
       }),
     },

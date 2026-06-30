@@ -51,36 +51,41 @@ function replyReferenceId(record: AgentReadableMessageRecord): string | null {
   return null;
 }
 
-function resolveThreadParentId(
-  record: AgentReadableMessageRecord,
-  recordsById: Map<string, AgentReadableMessageRecord>,
-): string | null {
-  const ownId = messageId(record);
-  const firstReplyId = replyReferenceId(record);
-  if (!firstReplyId) {
-    return ownId;
-  }
+function normalizedString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
-  let parentId = firstReplyId;
-  const seen = new Set<string>(ownId ? [ownId] : []);
-  while (parentId && !seen.has(parentId)) {
-    seen.add(parentId);
-    const parent = recordsById.get(parentId);
-    const nextParentId = parent ? replyReferenceId(parent) : null;
-    if (!nextParentId) break;
-    parentId = nextParentId;
-  }
-  return parentId;
+function explicitThreadRootId(record: AgentReadableMessageRecord): string | null {
+  const direct = normalizedString(record.thread_root_id) ?? normalizedString(record.threadRootId);
+  if (direct) return direct;
+
+  const thread = record.thread;
+  if (!isRecord(thread)) return null;
+  return (
+    normalizedString(thread.root_message_id) ??
+    normalizedString(thread.rootMessageId) ??
+    normalizedString(thread.parent_id) ??
+    normalizedString(thread.parentId)
+  );
+}
+
+function effectiveThreadRootId(record: AgentReadableMessageRecord): string | null {
+  return explicitThreadRootId(record) ?? messageId(record);
+}
+
+function isExplicitThreadReply(record: AgentReadableMessageRecord): boolean {
+  const id = messageId(record);
+  const rootId = explicitThreadRootId(record);
+  return Boolean(id && rootId && rootId !== id);
 }
 
 function buildThreadSummaries(
   records: AgentReadableMessageRecord[],
-  recordsById: Map<string, AgentReadableMessageRecord>,
 ): Map<string, ThreadSummary> {
   const summaries = new Map<string, ThreadSummary>();
   for (const record of records) {
-    if (!replyReferenceId(record)) continue;
-    const parentId = resolveThreadParentId(record, recordsById);
+    if (!isExplicitThreadReply(record)) continue;
+    const parentId = effectiveThreadRootId(record);
     const id = messageId(record);
     if (!parentId || !id) continue;
     const current = summaries.get(parentId) ?? { count: 0, latestReplyId: null };
@@ -94,15 +99,15 @@ function buildThreadSummaries(
 
 function withThreadMetadata(
   record: AgentReadableMessageRecord,
-  recordsById: Map<string, AgentReadableMessageRecord>,
   summaries: Map<string, ThreadSummary>,
 ): AgentReadableMessageRecord {
-  const parentId = resolveThreadParentId(record, recordsById);
+  const parentId = effectiveThreadRootId(record);
   if (!parentId) {
     return record;
   }
 
-  const replyToId = replyReferenceId(record);
+  const isThreadReply = isExplicitThreadReply(record);
+  const replyToId = isThreadReply ? replyReferenceId(record) : null;
   const summary = summaries.get(parentId) ?? { count: 0, latestReplyId: null };
   return {
     ...record,
@@ -113,7 +118,7 @@ function withThreadMetadata(
       parent_id: parentId,
       root_message_id: parentId,
       reply_to_id: replyToId,
-      is_thread_reply: Boolean(replyToId),
+      is_thread_reply: isThreadReply,
       reply_count_in_result: summary.count,
       latest_reply_id_in_result: summary.latestReplyId,
     },
@@ -122,14 +127,13 @@ function withThreadMetadata(
 
 function toAgentReadableMessage(
   message: unknown,
-  recordsById: Map<string, AgentReadableMessageRecord>,
   summaries: Map<string, ThreadSummary>,
 ): unknown {
   if (!message || typeof message !== "object") {
     return message;
   }
 
-  const record = withThreadMetadata(message as AgentReadableMessageRecord, recordsById, summaries);
+  const record = withThreadMetadata(message as AgentReadableMessageRecord, summaries);
   const kind = normalizeAgentPromptKind(record.agent_prompt_kind);
   const text = typeof record.text === "string" ? record.text : null;
 
@@ -147,14 +151,9 @@ function toAgentReadableMessage(
 
 export function toAgentReadableMessages(messages: unknown[] | undefined, contextMessages: unknown[] = []): unknown[] {
   const records = (messages ?? []).filter(isRecord);
-  const contextRecords = contextMessages.filter(isRecord);
-  const recordsById = new Map<string, AgentReadableMessageRecord>();
-  for (const record of [...contextRecords, ...records]) {
-    const id = messageId(record);
-    if (id) recordsById.set(id, record);
-  }
-  const summaries = buildThreadSummaries(records, recordsById);
-  return (messages ?? []).map((message) => toAgentReadableMessage(message, recordsById, summaries));
+  void contextMessages;
+  const summaries = buildThreadSummaries(records);
+  return (messages ?? []).map((message) => toAgentReadableMessage(message, summaries));
 }
 
 export function appendIncludePromptOnly(path: string): string {

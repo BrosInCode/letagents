@@ -26,6 +26,7 @@ const {
 const { resolveWorkerToolIdentity } = await import("../server/runtime/agent-sessions.js");
 const { registerAgentSessionTools } = await import("../server/tools/agent-sessions.js");
 const { registerPostReasoningTool } = await import("../server/tools/messages/reasoning-tool.js");
+const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerRoomResources } = await import("../server/resources.js");
 const { postCanonicalTaskAction } = await import("../server/tools/tasks/api.js");
 
@@ -125,6 +126,105 @@ test("MCP local chat keeps quote-replies top-level and only threads with an expl
     { number: 2, reply_to_number: 1, thread_root_number: null },
     // explicit thread reply: threaded onto the root
     { number: 3, reply_to_number: 1, thread_root_number: 1 },
+  ]);
+});
+
+test("MCP send_thread_message uses explicit roots instead of walking reply_to", async () => {
+  writeFileSync(settingsPath, JSON.stringify({
+    mode: "cloud",
+    defaultMode: "cloud",
+    roomOverrides: {
+      send_thread_room: "local",
+    },
+  }), "utf8");
+
+  const root = await addLocalChatMessage("send_thread_room", {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  const quoteReply = await addLocalChatMessage("send_thread_room", {
+    sender: "Agent",
+    text: "quote reply",
+    source: "agent",
+    reply_to: root.id,
+  });
+  const threadReply = await addLocalChatMessage("send_thread_room", {
+    sender: "Agent",
+    text: "thread reply",
+    source: "agent",
+    reply_to: root.id,
+    thread_root_id: root.id,
+  });
+
+  let handler: ((input: {
+    room_id?: string;
+    text: string;
+    thread_parent_id: string;
+    agent_session_id?: string;
+  }) => Promise<{ content: Array<{ text: string }> }>) | null = null;
+  const server = {
+    tool(
+      name: string,
+      _description: string,
+      _schema: Record<string, unknown>,
+      registeredHandler: typeof handler,
+    ) {
+      if (name === "send_thread_message") handler = registeredHandler;
+    },
+  };
+  registerSendMessageTool(server as never);
+
+  assert.ok(handler);
+  const quoteResponse = await handler({
+    room_id: "send_thread_room",
+    text: "thread under quote reply",
+    thread_parent_id: quoteReply.id,
+  });
+  const quoteThreadReply = JSON.parse(quoteResponse.content[0]?.text || "{}") as {
+    reply_to?: { id?: string } | null;
+    thread_root_id?: string;
+    thread_reply_to_id?: string | null;
+  };
+  assert.equal(quoteThreadReply.reply_to?.id, quoteReply.id);
+  assert.equal(quoteThreadReply.thread_root_id, quoteReply.id);
+  assert.equal(quoteThreadReply.thread_reply_to_id, quoteReply.id);
+
+  const nestedResponse = await handler({
+    room_id: "send_thread_room",
+    text: "continue existing thread",
+    thread_parent_id: threadReply.id,
+  });
+  const nestedThreadReply = JSON.parse(nestedResponse.content[0]?.text || "{}") as {
+    reply_to?: { id?: string } | null;
+    thread_root_id?: string;
+    thread_reply_to_id?: string | null;
+  };
+  assert.equal(nestedThreadReply.reply_to?.id, root.id);
+  assert.equal(nestedThreadReply.thread_root_id, root.id);
+  assert.equal(nestedThreadReply.thread_reply_to_id, root.id);
+
+  const db = openSqliteDb();
+  const rows = db
+    .prepare(`
+      SELECT number, reply_to_number, thread_root_number
+      FROM local_chat_messages
+      WHERE room_id = ?
+      ORDER BY number ASC
+    `)
+    .all("send_thread_room")
+    .map((row) => ({
+      number: Number(row.number),
+      reply_to_number: row.reply_to_number === null ? null : Number(row.reply_to_number),
+      thread_root_number: row.thread_root_number === null ? null : Number(row.thread_root_number),
+    }));
+
+  assert.deepEqual(rows, [
+    { number: 1, reply_to_number: null, thread_root_number: null },
+    { number: 2, reply_to_number: 1, thread_root_number: null },
+    { number: 3, reply_to_number: 1, thread_root_number: 1 },
+    { number: 4, reply_to_number: 2, thread_root_number: 2 },
+    { number: 5, reply_to_number: 1, thread_root_number: 1 },
   ]);
 });
 
