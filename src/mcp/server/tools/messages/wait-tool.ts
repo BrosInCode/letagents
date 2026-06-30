@@ -8,7 +8,6 @@ import {
   currentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
-  getLocalChatMessages,
   getLastMessageId,
   getRememberedRoomPresence,
   getTargetRoomId,
@@ -25,118 +24,6 @@ import {
 import { jsonToolResponse } from "./response.js";
 
 const DEFAULT_POLL_TIMEOUT_MS = 30000;
-
-type MessageRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is MessageRecord {
-  return Boolean(value && typeof value === "object");
-}
-
-function messageId(message: MessageRecord): string | null {
-  return typeof message.id === "string" && message.id.trim() ? message.id : null;
-}
-
-function replyReferenceId(message: MessageRecord): string | null {
-  const reply = message.reply_to ?? message.replyTo ?? null;
-  if (typeof reply === "string" && reply.trim()) {
-    return reply;
-  }
-  if (isRecord(reply) && typeof reply.id === "string" && reply.id.trim()) {
-    return reply.id;
-  }
-  return null;
-}
-
-async function findLocalMessageById(roomId: string, targetMessageId: string): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const result = await getLocalChatMessages(roomId, {
-      after: afterCursor,
-      include_prompt_only: true,
-    });
-    const messages = (result.messages ?? []).filter(isRecord);
-    const match = messages.find((message) => message.id === targetMessageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = messageId(lastMessage) ?? undefined;
-    if (!afterCursor) return null;
-  }
-}
-
-async function findRemoteMessageById(input: {
-  roomId: string | null;
-  projectId: string | null;
-  targetMessageId: string;
-}): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const params = new URLSearchParams();
-    if (afterCursor) params.set("after", afterCursor);
-    const queryString = params.toString();
-    const result = await roomScopedApiCall<{
-      messages?: MessageRecord[];
-      has_more?: boolean;
-    }>({
-      room_id: input.roomId,
-      project_id: input.projectId,
-      room_path: (roomId) =>
-        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(roomId)}/messages${queryString ? `?${queryString}` : ""}`),
-      project_path: (projectId) =>
-        appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages${queryString ? `?${queryString}` : ""}`),
-    });
-    const messages = (result.messages ?? []).filter(isRecord);
-    const match = messages.find((message) => message.id === input.targetMessageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = messageId(lastMessage) ?? undefined;
-    if (!afterCursor) return null;
-  }
-}
-
-async function collectThreadContextMessages(input: {
-  messages: unknown[];
-  localRoomId: string | null;
-  roomId: string | null;
-  projectId: string | null;
-}): Promise<MessageRecord[]> {
-  const records = input.messages.filter(isRecord);
-  const knownIds = new Set(records.map(messageId).filter((id): id is string => Boolean(id)));
-  const seenIds = new Set(knownIds);
-  const pendingIds = records
-    .map(replyReferenceId)
-    .filter((id): id is string => Boolean(id && !knownIds.has(id)));
-  const contextMessages: MessageRecord[] = [];
-  const useLocalStorage = Boolean(
-    input.localRoomId && await isLocalRoomStorageEnabled(input.localRoomId)
-  );
-  const localIdentifiers = useLocalStorage
-    ? await resolveLocalRoomStorageIdentifiers(input.localRoomId)
-    : { localRoomId: input.localRoomId };
-  const sqliteRoomId = localIdentifiers.localRoomId || input.localRoomId;
-
-  while (pendingIds.length > 0) {
-    const nextId = pendingIds.shift();
-    if (!nextId || seenIds.has(nextId)) continue;
-    seenIds.add(nextId);
-    const message = useLocalStorage && input.localRoomId
-      ? await findLocalMessageById(sqliteRoomId || input.localRoomId, nextId)
-      : await findRemoteMessageById({
-        roomId: input.roomId,
-        projectId: input.projectId,
-        targetMessageId: nextId,
-      });
-    if (!message) continue;
-    contextMessages.push(message);
-    const parentId = replyReferenceId(message);
-    if (parentId && !seenIds.has(parentId)) {
-      pendingIds.push(parentId);
-    }
-  }
-
-  return contextMessages;
-}
 
 export function registerWaitForMessagesTool(server: McpServer): void {
   server.tool(
@@ -179,15 +66,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
           include_prompt_only: true,
         });
         touchRoomSession(effectiveLocalRoomId, getLastMessageId(result));
-        const threadContext = await collectThreadContextMessages({
-          messages: result.messages,
-          localRoomId: effectiveLocalRoomId,
-          roomId: targetRoomId,
-          projectId: targetProjectId,
-        });
         return jsonToolResponse({
           room_id: effectiveLocalRoomId,
-          messages: toAgentReadableMessages(result.messages, threadContext),
+          messages: toAgentReadableMessages(result.messages),
         });
       }
 
@@ -255,13 +136,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         }
       }
 
-      const threadContext = await collectThreadContextMessages({
-        messages: allMessages,
-        localRoomId,
-        roomId: targetRoomId,
-        projectId: targetProjectId,
-      });
-      const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages, threadContext) };
+      const output: Record<string, unknown> = { messages: toAgentReadableMessages(allMessages) };
       if (roomIdFromResponse) {
         output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
       }

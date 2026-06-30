@@ -110,7 +110,7 @@ export async function addMessageWithCreateStatus(
       replyTargetRootNumber = replyTarget.thread_root_number ?? replyTarget.number;
     }
 
-    let threadRootNumber = explicitThreadRootNumber ?? replyTargetRootNumber;
+    let threadRootNumber = explicitThreadRootNumber;
     if (explicitThreadRootNumber) {
       const [threadRoot] = await tx
         .select(messageRowSelection)

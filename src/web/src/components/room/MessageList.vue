@@ -48,6 +48,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import { buildVisibleThreadSummaries } from './chat-message/threadSummaries'
 
 const props = defineProps<{
   messages: readonly RoomMessage[]
@@ -90,26 +91,7 @@ const messagesById = computed(() => {
   return byId
 })
 
-interface MessageThreadSummary {
-  count: number
-  latest: RoomMessage | null
-}
-
-const threadSummaries = computed(() => {
-  const summaries = new Map<string, MessageThreadSummary>()
-
-  for (const msg of props.messages) {
-    const parentId = msg.reply_to?.id
-    if (!parentId) continue
-
-    const summary = summaries.get(parentId) || { count: 0, latest: null }
-    summary.count += 1
-    summary.latest = msg
-    summaries.set(parentId, summary)
-  }
-
-  return summaries
-})
+const threadSummaries = computed(() => buildVisibleThreadSummaries(props.messages))
 
 const reasoningByAnchorMessage = computed(() => {
   const sessions = props.reasoningSessions || []

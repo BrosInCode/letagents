@@ -156,3 +156,33 @@ test(
     assert.equal(retried.message.thread?.latest_reply?.id, created.message.id);
   }
 );
+
+test(
+  "quote replies do not create thread metadata",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+  },
+  async () => {
+    if (!addMessage || !createProjectWithName || !getMessages) {
+      throw new Error("DB-backed message tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("quote-reply-room");
+    const root = await addMessage(room.id, "human", "root", { source: "browser" });
+    const quoteReply = await addMessage(room.id, "human", "quote reply", {
+      source: "browser",
+      reply_to_message_id: root.id,
+    });
+
+    assert.equal(quoteReply.reply_to?.id, root.id);
+    assert.equal(quoteReply.thread_root_id, quoteReply.id);
+    assert.equal(quoteReply.thread_reply_to_id, null);
+    assert.equal(quoteReply.thread, null);
+
+    const page = await getMessages(room.id);
+    assert.equal(page.messages[0].thread, null);
+    assert.equal(page.messages[1].reply_to?.id, root.id);
+    assert.equal(page.messages[1].thread, null);
+  }
+);

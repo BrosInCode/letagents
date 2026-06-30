@@ -56,10 +56,15 @@ async function hydrateMessageForSharedEvent(projectId: string, message: Message)
   const messageNumber = parseScopedId(message.id, "msg");
   if (!messageNumber) return message;
   const rootNumber = parseScopedId(message.thread_root_id, "msg");
+  const replyToNumber = message.reply_to?.id
+    ? parseScopedId(message.reply_to.id, "msg")
+    : message.thread_reply_to_id
+    ? parseScopedId(message.thread_reply_to_id, "msg")
+    : null;
   const [hydrated] = await hydrateMessageReplies(projectId, [{
     room_id: projectId,
     number: messageNumber,
-    reply_to_number: message.thread_reply_to_id ? parseScopedId(message.thread_reply_to_id, "msg") : null,
+    reply_to_number: replyToNumber,
     thread_root_number: rootNumber && rootNumber !== messageNumber ? rootNumber : null,
     sender: message.sender,
     text: message.text,

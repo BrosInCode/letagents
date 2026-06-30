@@ -86,12 +86,14 @@ test("MCP local chat state persists thread roots for nested replies", async () =
     text: "first",
     source: "agent",
     reply_to: root.id,
+    thread_root_id: root.id,
   });
   const nestedReply = await addLocalChatMessage("thread_room", {
     sender: "Agent",
     text: "nested",
     source: "agent",
     reply_to: firstReply.id,
+    thread_root_id: root.id,
   });
 
   assert.equal(firstReply.thread_root_id, root.id);
@@ -118,6 +120,41 @@ test("MCP local chat state persists thread roots for nested replies", async () =
     { number: 2, reply_to_number: 1, thread_root_number: 1 },
     { number: 3, reply_to_number: 2, thread_root_number: 1 },
   ]);
+});
+
+test("MCP local chat state keeps quote replies out of threads", async () => {
+  const root = await addLocalChatMessage("quote_room", {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  const quoteReply = await addLocalChatMessage("quote_room", {
+    sender: "Agent",
+    text: "quote",
+    source: "agent",
+    reply_to: root.id,
+  });
+
+  assert.equal(quoteReply.reply_to?.id, root.id);
+  assert.equal(quoteReply.thread_root_id, quoteReply.id);
+  assert.equal(quoteReply.thread_reply_to_id, null);
+
+  const db = openSqliteDb();
+  const row = db
+    .prepare(`
+      SELECT reply_to_number, thread_root_number
+      FROM local_chat_messages
+      WHERE room_id = ? AND number = ?
+    `)
+    .get("quote_room", 2);
+
+  assert.deepEqual({
+    reply_to_number: row?.reply_to_number === null ? null : Number(row?.reply_to_number),
+    thread_root_number: row?.thread_root_number === null ? null : Number(row?.thread_root_number),
+  }, {
+    reply_to_number: 1,
+    thread_root_number: null,
+  });
 });
 
 test("MCP local chat state resolves per-room overrides", async () => {
