@@ -110,3 +110,7 @@ Write-capable Cursor is blocked until LetAgents has all of the following:
 5. Runner tests for stream parsing, malformed JSON lines, missing final result, nonzero process exit, tool-call failure, resume ids, and interrupt handling.
 
 Only after these gates pass should `cursor` be exposed as a normal `desktop_managed_runtime` provider.
+
+## Gate 2 Follow-up
+
+See `docs/cursor-desktop-managed-gate2.md` for the config/auth isolation probe. The short version: managed Cursor now uses an isolated home with an empty managed `~/.cursor/mcp.json`; on macOS it links the login keychain into that managed home so normal Cursor auth works while LetAgents MCP stays unavailable. Write-capable Cursor remains gated on desktop approvals and sandbox behavior tests.

@@ -21,6 +21,7 @@ import {
   type ManagedRoomEvent,
 } from "./codex-managed-agent-dispatch.js";
 import { buildCursorDesktopEventPrompt } from "./cursor-event-prompt.js";
+import { prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import {
   productionCursorRunner,
   type CursorRunner,
@@ -166,6 +167,7 @@ export function createDesktopCursorRuntime(
       throw new Error(preflightResult.detail || preflightResult.message);
     }
     const permissionProfile = assertManagedAgentPermissionProfileAvailable("cursor", input.permissionProfileId);
+    prepareCursorManagedProfile({ workspaceRoot: cwd });
 
     const token = makeCursorStopToken();
     const displayName = suggestLetAgentsCodename(listCursorDisplayNamesForRoom(roomIdentifier), token);
@@ -320,6 +322,7 @@ export function createDesktopCursorRuntime(
         cwd: active.cwd,
         cursorSessionId: active.cursor_session_id,
         cursorBin: active.cursor_bin,
+        env: prepareCursorManagedProfile({ workspaceRoot: active.cwd }).env,
         mode: "ask",
         abortController,
       });

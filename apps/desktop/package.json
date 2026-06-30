@@ -13,6 +13,7 @@
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
+    "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
     "test": "npm run test:renderer && npm run test:electron",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
     "test:electron": "node --import tsx --test electron/__tests__/*.test.ts",

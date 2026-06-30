@@ -8,6 +8,7 @@ export interface CursorTurnInput {
   cwd: string;
   cursorSessionId?: string | null;
   cursorBin?: string | null;
+  env?: Record<string, string | undefined>;
   mode?: CursorReadOnlyMode;
   abortController?: AbortController;
 }
@@ -81,6 +82,7 @@ export async function runCursorTurn(input: CursorTurnInput): Promise<CursorTurnR
   return new Promise((resolve) => {
     const child = spawn(executable, buildCursorAgentArgs(input), {
       cwd: input.cwd,
+      env: buildCursorChildEnv(input.env),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const interrupt = (): void => {
@@ -165,6 +167,62 @@ export async function runCursorTurn(input: CursorTurnInput): Promise<CursorTurnR
       });
     });
   });
+}
+
+export function buildCursorChildEnv(
+  overrides: Record<string, string | undefined> = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  copyAllowedCursorEnv(env, process.env);
+  copyAllowedCursorEnv(env, overrides);
+  return env;
+}
+
+const CURSOR_CHILD_ENV_ALLOWLIST = new Set([
+  "COMSPEC",
+  "CURSOR_API_KEY",
+  "CURSOR_AUTH_TOKEN",
+  "CURSOR_CONFIG_DIR",
+  "CURSOR_DATA_DIR",
+  "FORCE_COLOR",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOCALAPPDATA",
+  "LOGNAME",
+  "NODE_COMPILE_CACHE",
+  "NODE_EXTRA_CA_CERTS",
+  "NO_COLOR",
+  "PATH",
+  "PATHEXT",
+  "Path",
+  "SHELL",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "SystemRoot",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+]);
+
+function copyAllowedCursorEnv(
+  destination: NodeJS.ProcessEnv,
+  source: Record<string, string | undefined>,
+): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && CURSOR_CHILD_ENV_ALLOWLIST.has(key)) {
+      destination[key] = value;
+    }
+  }
 }
 
 export function applyCursorStreamEvent(state: CursorStreamState, event: CursorStreamEvent): void {

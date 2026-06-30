@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { resolve } from "node:path";
 
 import type {
   DesktopAgentProvider,
@@ -15,6 +16,8 @@ import {
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { codexInstallCommand } from "./codex-install.js";
+import { prepareCursorManagedProfile } from "./cursor-managed-profile.js";
+import { buildCursorChildEnv } from "./cursor-runner.js";
 import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
@@ -26,6 +29,11 @@ type ExecResult = {
   stdout: string;
   stderr: string;
   errorCode: string | null;
+};
+
+type ExecOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
 };
 
 const COMMAND_TIMEOUT_MS = 8_000;
@@ -112,17 +120,30 @@ function findAgentProvider(providerId: DesktopAgentProviderId): DesktopAgentProv
   return provider;
 }
 
-async function execFileWithTimeout(command: string, args: string[]): Promise<ExecResult> {
+async function execFileWithTimeout(
+  command: string,
+  args: string[],
+  options: ExecOptions = {},
+): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const child = execFile(command, args, { timeout: COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
-      const nodeError = error as NodeJS.ErrnoException | null;
-      resolve({
-        ok: !error,
-        stdout: String(stdout || ""),
-        stderr: String(stderr || ""),
-        errorCode: nodeError?.code ? String(nodeError.code) : null,
-      });
-    });
+    const child = execFile(
+      command,
+      args,
+      {
+        timeout: COMMAND_TIMEOUT_MS,
+        cwd: options.cwd,
+        env: options.env,
+      },
+      (error, stdout, stderr) => {
+        const nodeError = error as NodeJS.ErrnoException | null;
+        resolve({
+          ok: !error,
+          stdout: String(stdout || ""),
+          stderr: String(stderr || ""),
+          errorCode: nodeError?.code ? String(nodeError.code) : null,
+        });
+      },
+    );
     child.stdin?.end();
   });
 }
@@ -372,7 +393,24 @@ async function cursorPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(command, ["status"]);
+  const workspaceRoot = input.repoRootPath?.trim() ? resolve(input.repoRootPath.trim()) : null;
+  let managedProfile;
+  try {
+    managedProfile = prepareCursorManagedProfile({ workspaceRoot });
+  } catch (error) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Cursor managed profile could not be prepared.",
+      detail: error instanceof Error ? error.message : String(error),
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+  const managedEnv = buildCursorChildEnv(managedProfile.env);
+  const authResult = await execFileWithTimeout(command, ["status"], { env: managedEnv });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -386,7 +424,7 @@ async function cursorPreflight(
     };
   }
 
-  if (!input.repoRootPath?.trim()) {
+  if (!workspaceRoot) {
     return {
       providerId: provider.id,
       status: "repo_required",
@@ -399,18 +437,51 @@ async function cursorPreflight(
     };
   }
 
+  const mcpResult = await execFileWithTimeout(command, ["mcp", "list"], {
+    cwd: workspaceRoot,
+    env: managedEnv,
+  });
+  if (!mcpResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Cursor managed MCP isolation could not be checked.",
+      detail: firstOutputLine(mcpResult) || "Cursor failed while listing MCP servers under the managed profile.",
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+  if (mentionsLetAgentsMcp(mcpResult)) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Cursor can still see LetAgents MCP.",
+      detail: "Managed Cursor must not expose LetAgents room tools. Remove project-level LetAgents MCP config or repair the managed profile.",
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+
   return {
     providerId: provider.id,
     status: "ready",
     canStart: true,
     message: "Cursor Agent is ready to start in read-only mode.",
     detail: mcpStatus === "installed"
-      ? "This desktop can start Cursor in ask mode. Write-capable Cursor remains gated on permissions and config isolation."
-      : "This desktop can start Cursor directly in ask mode; install the LetAgents connection only for manual Cursor joins.",
+      ? "This desktop can start Cursor in ask mode using an isolated managed profile. Write-capable Cursor remains gated on permissions tests."
+      : "This desktop can start Cursor directly in ask mode with managed profile isolation; install the LetAgents connection only for manual Cursor joins.",
     nextAction: null,
     version,
     mcpStatus,
   };
+}
+
+function mentionsLetAgentsMcp(result: ExecResult): boolean {
+  return `${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents");
 }
 
 export async function runDesktopAgentProviderPreflight(

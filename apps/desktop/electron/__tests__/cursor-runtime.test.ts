@@ -214,6 +214,9 @@ test("Cursor runtime delivers room events into ask-mode runner and persists resu
 
   assert.equal(prompts.length, 1);
   assert.equal(prompts[0]?.mode, "ask");
+  assert.equal(prompts[0]?.env?.HOME, join(tempDir, "cursor-managed", "home"));
+  assert.equal(prompts[0]?.env?.CURSOR_CONFIG_DIR, join(tempDir, "cursor-managed", "config", "cursor"));
+  assert.equal(prompts[0]?.env?.CURSOR_DATA_DIR, join(tempDir, "cursor-managed", "data", "cursor"));
   assert.match(prompts[0]?.prompt ?? "", /Cursor read-only prototype/);
   assert.match(prompts[0]?.prompt ?? "", /Do not call LetAgents MCP room tools/);
   assert.match(prompts[0]?.prompt ?? "", /must not edit files/);
