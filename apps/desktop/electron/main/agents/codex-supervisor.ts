@@ -91,6 +91,7 @@ import {
 import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
+import { createDesktopCursorRuntime } from "./cursor-runtime.js";
 import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
 import {
   bindCodexLiveSessionToWorker,
@@ -143,6 +144,7 @@ desktopManagedAgentRuntimes.register({
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
 });
 desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
+desktopManagedAgentRuntimes.register(createDesktopCursorRuntime());
 
 type AgentIdentityCreateResponse = {
   name?: string;
