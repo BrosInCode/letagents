@@ -31,9 +31,14 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "claude-code",
     name: "Claude Code",
-    description: "Join from Claude Code.",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
+    description: "Start a Claude Code agent here.",
+    capabilities: [
+      "external_mcp",
+      "desktop_managed_runtime",
+      "auth_preflight",
+      "turn_control",
+    ],
+    runtimeCommand: "claude",
     mcpTargetId: "claude-code",
   },
   {
@@ -236,6 +241,83 @@ async function codexPreflight(
   };
 }
 
+async function claudeCodePreflight(
+  provider: DesktopAgentProvider,
+  input: DesktopAgentProviderPreflightInput,
+  mcpStatus: DesktopMcpInstallTarget["status"] | null,
+): Promise<DesktopAgentProviderPreflight> {
+  const command = process.env.LETAGENTS_CLAUDE_CODE_BIN ||
+    process.env.LETAGENTS_CLAUDE_BIN ||
+    provider.runtimeCommand ||
+    "claude";
+  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  if (commandMissing(versionResult)) {
+    return {
+      providerId: provider.id,
+      status: "missing_runtime",
+      canStart: false,
+      message: "Claude Code is not installed.",
+      detail: "Install the official Claude Code runtime before starting a local Claude Code room agent.",
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
+  if (!versionResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Claude Code could not be checked.",
+      detail: firstOutputLine(versionResult) || "The Claude Code command failed before returning a version.",
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
+
+  const version = firstOutputLine(versionResult);
+  const authResult = await execFileWithTimeout(command, ["auth", "status"]);
+  if (!authResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "auth_required",
+      canStart: false,
+      message: "Claude Code needs sign-in.",
+      detail: firstOutputLine(authResult) || "Sign in with Claude Code before starting a local room agent.",
+      nextAction: "authenticate",
+      version,
+      mcpStatus,
+    };
+  }
+
+  if (!input.repoRootPath?.trim()) {
+    return {
+      providerId: provider.id,
+      status: "repo_required",
+      canStart: false,
+      message: "Choose a local repository before starting Claude Code.",
+      detail: "A desktop-managed Claude Code agent needs a local repo or worktree for code actions.",
+      nextAction: "choose_repo",
+      version,
+      mcpStatus,
+    };
+  }
+
+  return {
+    providerId: provider.id,
+    status: "ready",
+    canStart: true,
+    message: "Claude Code is ready to start.",
+    detail: mcpStatus === "installed"
+      ? "This desktop can start and monitor a local Claude Code agent."
+      : "This desktop can start Claude Code directly; install the LetAgents connection only for manual Claude Code joins.",
+    nextAction: null,
+    version,
+    mcpStatus,
+  };
+}
+
 export async function runDesktopAgentProviderPreflight(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
@@ -284,6 +366,9 @@ export async function runDesktopAgentProviderPreflight(
 
   if (provider.id === "codex") {
     return codexPreflight(provider, input, mcpStatus);
+  }
+  if (provider.id === "claude-code") {
+    return claudeCodePreflight(provider, input, mcpStatus);
   }
 
   return bridgePreflight(provider, mcpStatus);

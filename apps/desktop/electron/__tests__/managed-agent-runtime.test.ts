@@ -6,9 +6,11 @@ import {
   type DesktopManagedAgentRuntime,
 } from "../main/agents/managed-agent-runtime.js";
 import type {
+  DesktopManagedAgentInspectResult,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
+  DesktopManagedAgentStopInput,
   DesktopRoomStreamEvent,
 } from "../ipc-types.js";
 
@@ -41,17 +43,47 @@ function session(providerId = "codex"): DesktopManagedAgentSession {
 function stubRuntime(providerId = "codex"): DesktopManagedAgentRuntime & {
   events: DesktopRoomStreamEvent[];
   starts: DesktopManagedAgentStartInput[];
+  inspections: Array<{ sessionId?: string | null; roomIdentifier?: string | null }>;
+  stops: DesktopManagedAgentStopInput[];
+  failDispatch: boolean;
 } {
   const instance = {
     providerId,
     events: [] as DesktopRoomStreamEvent[],
     starts: [] as DesktopManagedAgentStartInput[],
+    inspections: [] as Array<{ sessionId?: string | null; roomIdentifier?: string | null }>,
+    stops: [] as DesktopManagedAgentStopInput[],
+    failDispatch: false,
     listSessions: () => [session(providerId)],
     start: async (input: DesktopManagedAgentStartInput): Promise<DesktopManagedAgentStartResult> => {
       instance.starts.push(input);
       return { session: session(input.providerId), reused: false, message: "started" };
     },
+    inspect: async (
+      sessionId?: string | null,
+      roomIdentifier?: string | null,
+    ): Promise<DesktopManagedAgentInspectResult | null> => {
+      instance.inspections.push({ sessionId, roomIdentifier });
+      if (sessionId && sessionId !== `session_${providerId}`) {
+        return null;
+      }
+      return {
+        session: session(providerId),
+        serverReachable: true,
+        recentItems: [],
+      };
+    },
+    stop: async (input: DesktopManagedAgentStopInput = {}): Promise<DesktopManagedAgentSession | null> => {
+      instance.stops.push(input);
+      if (input.sessionId && input.sessionId !== `session_${providerId}`) {
+        return null;
+      }
+      return session(providerId);
+    },
     dispatchRoomStreamEvent: (event: DesktopRoomStreamEvent) => {
+      if (instance.failDispatch) {
+        throw new Error(`${providerId} dispatch failed`);
+      }
       instance.events.push(event);
     },
   };
@@ -117,6 +149,67 @@ test("registry dispatches room stream events to every registered runtime", () =>
 
   assert.equal(codex.events.length, 1);
   assert.equal(claude.events.length, 1);
+});
+
+test("registry isolates room stream dispatch failures by runtime", () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const codex = stubRuntime("codex");
+  const claude = stubRuntime("claude-code");
+  codex.failDispatch = true;
+  registry.register(codex);
+  registry.register(claude);
+  const event: DesktopRoomStreamEvent = {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_1",
+      sender: "EmmyMay",
+      text: "hello",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-30T00:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_1",
+      threadReplyToId: null,
+      thread: null,
+      replyTo: null,
+    },
+  };
+
+  registry.dispatchRoomStreamEvent(event);
+
+  assert.equal(codex.events.length, 0);
+  assert.equal(claude.events.length, 1);
+});
+
+test("registry inspects the first runtime with a matching session", async () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const codex = stubRuntime("codex");
+  const claude = stubRuntime("claude-code");
+  registry.register(codex);
+  registry.register(claude);
+
+  const result = await registry.inspect("session_claude-code", "room_1");
+
+  assert.equal(result?.session.providerId, "claude-code");
+  assert.equal(codex.inspections.length, 1);
+  assert.equal(claude.inspections.length, 1);
+});
+
+test("registry stops the first runtime with a matching session", async () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const codex = stubRuntime("codex");
+  const claude = stubRuntime("claude-code");
+  registry.register(codex);
+  registry.register(claude);
+
+  const result = await registry.stop({ sessionId: "session_claude-code" });
+
+  assert.equal(result?.providerId, "claude-code");
+  assert.equal(codex.stops.length, 1);
+  assert.equal(claude.stops.length, 1);
 });
 
 test("registry rejects duplicate runtime providers", () => {

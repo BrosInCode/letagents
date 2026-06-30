@@ -1,8 +1,10 @@
 import type {
+  DesktopManagedAgentInspectResult,
   DesktopAgentProviderId,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
+  DesktopManagedAgentStopInput,
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 
@@ -10,6 +12,11 @@ export interface DesktopManagedAgentRuntime {
   providerId: DesktopAgentProviderId;
   listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[];
   start(input: DesktopManagedAgentStartInput): Promise<DesktopManagedAgentStartResult>;
+  inspect(
+    sessionId?: string | null,
+    roomIdentifier?: string | null,
+  ): Promise<DesktopManagedAgentInspectResult | null>;
+  stop(input?: DesktopManagedAgentStopInput): Promise<DesktopManagedAgentSession | null>;
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void;
 }
 
@@ -43,9 +50,39 @@ export class DesktopManagedAgentRuntimeRegistry {
     return this.get(input.providerId).start(input);
   }
 
+  async inspect(
+    sessionId?: string | null,
+    roomIdentifier?: string | null,
+  ): Promise<DesktopManagedAgentInspectResult | null> {
+    for (const runtime of this.list()) {
+      const result = await runtime.inspect(sessionId, roomIdentifier);
+      if (result) {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  async stop(input: DesktopManagedAgentStopInput = {}): Promise<DesktopManagedAgentSession | null> {
+    for (const runtime of this.list()) {
+      const result = await runtime.stop(input);
+      if (result) {
+        return result;
+      }
+    }
+    return null;
+  }
+
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void {
     for (const runtime of this.list()) {
-      runtime.dispatchRoomStreamEvent(event);
+      try {
+        runtime.dispatchRoomStreamEvent(event);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `Desktop managed runtime '${runtime.providerId}' failed to receive a room event: ${detail}`,
+        );
+      }
     }
   }
 }

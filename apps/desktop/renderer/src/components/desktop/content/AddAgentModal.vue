@@ -233,7 +233,7 @@
                 v-else-if="preflight?.status === 'ready' && hasDesktopManagedRuntime(selectedProvider)"
                 class="desktop-add-agent-confirmation"
               >
-                Starts a Codex agent for this room.
+                Starts a {{ selectedProvider?.name || "local" }} agent for this room.
               </span>
             </div>
 
