@@ -15,14 +15,27 @@
         <small>{{ subtitle }}</small>
       </span>
     </div>
-    <p>LetAgents will add the LetAgents connection to {{ targetLabel }}.</p>
-    <p class="mcp-install-note">LetAgents updates the app's local connection settings. Your code stays on this machine.</p>
+    <p>{{ actionCopy }}</p>
+    <p class="mcp-install-note">{{ noteCopy }}</p>
+    <ul class="mcp-config-paths" aria-label="Config paths">
+      <li v-for="configPath in configPaths" :key="configPath.path" :data-status="configPath.status">
+        <span class="mcp-config-path-heading">
+          <span>{{ configPath.label }}</span>
+          <em :data-status="configPath.status">{{ configPathStatusLabel(configPath.status) }}</em>
+        </span>
+        <code>{{ configPath.path }}</code>
+        <small v-if="configPath.issue">{{ configPath.issue }}</small>
+      </li>
+    </ul>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
-import type { DesktopMcpInstallTarget } from "../../../../../electron/ipc-types";
+import type {
+  DesktopMcpInstallConfigPath,
+  DesktopMcpInstallTarget,
+} from "../../../../../electron/ipc-types";
 import McpHarnessIcon from "./McpHarnessIcon.vue";
 
 const props = defineProps<{
@@ -42,5 +55,45 @@ const subtitle = computed(() => {
 const targetLabel = computed(() => {
   if (props.targets.length === 1) return props.targets[0]?.name || "this app";
   return "these apps";
+});
+
+const includesCodex = computed(() => {
+  return props.targets.some((target) => target.id === "codex");
+});
+
+const configPaths = computed<DesktopMcpInstallConfigPath[]>(() => {
+  return props.targets.flatMap((target) =>
+    target.configPaths?.length
+      ? target.configPaths
+      : [{
+          path: target.configPath,
+          label: target.name,
+          status: target.status,
+          hasLetAgents: target.status !== "not_installed",
+          issue: target.configIssue,
+        }]
+  );
+});
+
+function configPathStatusLabel(
+  status: DesktopMcpInstallConfigPath["status"],
+): string {
+  if (status === "installed") return "Ready";
+  if (status === "needs_attention") return "Repair";
+  return "Not installed";
+}
+
+const actionCopy = computed(() => {
+  if (includesCodex.value) {
+    return `LetAgents will install Codex CLI if it is missing, then add the MCP connection to ${targetLabel.value}.`;
+  }
+  return `LetAgents will add the MCP connection to ${targetLabel.value}.`;
+});
+
+const noteCopy = computed(() => {
+  if (includesCodex.value) {
+    return "LetAgents updates local CLI and MCP settings. Your code stays on this machine.";
+  }
+  return "LetAgents updates the app's local MCP settings. Your code stays on this machine.";
 });
 </script>

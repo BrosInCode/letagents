@@ -12,9 +12,7 @@
   .first-run-github-step,
   .first-run-room-step,
   .mcp-selected-app,
-  .mcp-onboarding .mcp-choice-card,
-  .first-run-github-step,
-  .first-run-room-step {
+  .mcp-onboarding .mcp-choice-card {
     grid-template-columns: 1fr;
   }
 
@@ -116,10 +114,38 @@
     width: 100%;
   }
 
+  .first-run-wizard[data-stage="welcome"] {
+    min-height: calc(100vh - 32px);
+  }
+
+  .first-run-welcome {
+    width: min(420px, 100%);
+    gap: 24px;
+  }
+
+  .first-run-welcome-brand {
+    gap: 12px;
+  }
+
+  .first-run-welcome-mark {
+    width: 96px;
+    height: 96px;
+    padding: 17px;
+    border-radius: 22px;
+  }
+
+  .first-run-welcome h1 {
+    font-size: 3.2rem;
+  }
+
+  .first-run-welcome .primary-button {
+    margin-left: 0;
+  }
+
   .first-run-card {
     min-height: 0;
-    padding: 24px;
-    border-radius: 18px;
+    padding: 0;
+    border-radius: 0;
   }
 
   .first-run-card .mcp-wizard-header h1 {
@@ -164,7 +190,7 @@
   .first-run-card .mcp-target-mark {
     width: 52px;
     height: 52px;
-    border-radius: 16px;
+    border-radius: 12px;
   }
 
   .first-run-card .mcp-harness-icon {

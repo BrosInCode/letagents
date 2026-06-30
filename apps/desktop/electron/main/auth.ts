@@ -10,8 +10,7 @@ import type {
   DesktopAuthStatus,
   DesktopPendingDeviceAuth,
 } from "../ipc-types.js";
-import { resolveRoomIdentifier } from "../repo-status.js";
-import { apiUrl, workspaceRoot } from "./paths.js";
+import { apiUrl } from "./paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
 type ApiErrorPayload = {
@@ -239,11 +238,11 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
     }>("/auth/session");
     const account = normalizeAuthAccount(session.account);
     if (session.authenticated && account) {
-      await updateStoredAuth({ account });
-      return buildAuthStatus({ storedAuth: await readStoredAuth(), account });
+      const nextAuth = await updateStoredAuth({ account });
+      return buildAuthStatus({ storedAuth: nextAuth, account });
     }
 
-    await updateStoredAuth({
+    const nextAuth = await updateStoredAuth({
       token: null,
       ownerTokenId: null,
       oauthTokenExpiresAt: null,
@@ -251,7 +250,7 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
     });
     authInvalidatedHandler?.();
     return buildAuthStatus({
-      storedAuth: await readStoredAuth(),
+      storedAuth: nextAuth,
       error: "Your saved sign-in expired. Connect again to open private rooms.",
     });
   } catch (error) {
@@ -306,8 +305,7 @@ export async function apiFetch<T>(
 export async function startDeviceAuthFlow(
   roomIdentifier?: string | null,
 ): Promise<DesktopAuthStartResult> {
-  const trimmedRoomIdentifier =
-    roomIdentifier?.trim() || (await resolveRoomIdentifier(workspaceRoot));
+  const trimmedRoomIdentifier = roomIdentifier?.trim() || null;
   const path = trimmedRoomIdentifier
     ? `/auth/device/start?room_id=${encodeURIComponent(trimmedRoomIdentifier)}`
     : "/auth/device/start";

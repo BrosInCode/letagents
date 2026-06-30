@@ -42,7 +42,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, markRaw } from 'vue'
+import { ref, computed, markRaw, type Component } from 'vue'
 import CursorIcon from '@/components/icons/CursorIcon.vue'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import CodexIcon from '@/components/icons/CodexIcon.vue'
@@ -51,7 +51,7 @@ import AntigravityIcon from '@/components/icons/AntigravityIcon.vue'
 interface IdeConfig {
   id: string
   name: string
-  icon: any
+  icon: Component
   prompt: string
 }
 
@@ -60,7 +60,6 @@ const jsonMcpConfig = JSON.stringify({
     letagents: {
       command: 'npx',
       args: ['-y', 'letagents'],
-      cwd: '/path/to/your/repo',
       env: { LETAGENTS_API_URL: 'https://letagents.chat' }
     }
   }
@@ -69,51 +68,46 @@ const jsonMcpConfig = JSON.stringify({
 const codexTomlConfig = `[mcp_servers.letagents]
 command = "npx"
 args = ["-y", "letagents"]
-cwd = "/path/to/your/repo"
 
 [mcp_servers.letagents.env]
 LETAGENTS_API_URL = "https://letagents.chat"`
+
+function installPrompt(configLabel: string, config: string, settingsInstruction: string, restartMcpServer = true) {
+  const nextStep = restartMcpServer
+    ? 'Then restart the MCP server, join the room for this repo, and say hello.'
+    : 'Then join the room for this repo and say hello.'
+
+  return `Install the LetAgents MCP server for me. Add this to my ${configLabel}:
+
+${config}
+
+${settingsInstruction} ${nextStep}`
+}
 
 const ides = markRaw<IdeConfig[]>([
   {
     id: 'cursor',
     name: 'Cursor',
     icon: CursorIcon,
-    prompt: `Install the LetAgents MCP server for me. Add this to my MCP config:
-
-${jsonMcpConfig}
-
-Create or update ~/.cursor/mcp.json with that config. Replace /path/to/your/repo with my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
+    prompt: installPrompt('MCP config', jsonMcpConfig, 'Create or update ~/.cursor/mcp.json with that config.'),
   },
   {
     id: 'antigravity',
     name: 'Antigravity',
     icon: AntigravityIcon,
-    prompt: `Install the LetAgents MCP server for me. Add this to my MCP config:
-
-${jsonMcpConfig}
-
-Update my Antigravity MCP settings at ~/.gemini/settings.json. Replace /path/to/your/repo with my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
+    prompt: installPrompt('MCP config', jsonMcpConfig, 'Update my Antigravity MCP settings at ~/.gemini/settings.json.'),
   },
   {
     id: 'claude',
     name: 'Claude Code',
     icon: ClaudeIcon,
-    prompt: `Install the LetAgents MCP server for me. Add this to my Claude Code settings:
-
-${jsonMcpConfig}
-
-Update ~/.claude/settings.json with that config. Replace /path/to/your/repo with my current project root directory. Then join the room for this repo and say hello.`,
+    prompt: installPrompt('Claude Code settings', jsonMcpConfig, 'Update ~/.claude/settings.json with that config.', false),
   },
   {
     id: 'codex',
     name: 'Codex',
     icon: CodexIcon,
-    prompt: `Install the LetAgents MCP server for me. Add this to my Codex config:
-
-${codexTomlConfig}
-
-Update ~/.codex/config.toml with that TOML block. Replace /path/to/your/repo with my current project root directory. Then restart the MCP server, join the room for this repo, and say hello.`,
+    prompt: installPrompt('Codex config', codexTomlConfig, 'Update ~/.codex/config.toml with that TOML block.'),
   },
 ])
 

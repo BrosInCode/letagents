@@ -10,10 +10,7 @@
   padding: 30px;
   border: 1px solid var(--border);
   border-radius: var(--radius-2xl);
-  background:
-    radial-gradient(circle at 16% 12%, rgba(255, 255, 255, 0.08), transparent 30%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
-    var(--bg-card);
+  background: var(--bg-card);
   animation: room-shell-enter var(--duration-normal) var(--ease-out);
 }
 
@@ -31,9 +28,9 @@
 .auth-copy h1 {
   max-width: 720px;
   margin: 0;
-  font-size: clamp(2.1rem, 5vw, 4.2rem);
-  line-height: 0.98;
-  letter-spacing: -0.07em;
+  font-size: clamp(2rem, 4vw, 3.55rem);
+  line-height: 1.04;
+  letter-spacing: 0;
 }
 
 .auth-copy p:not(.hero-kicker),
@@ -53,7 +50,7 @@
 .auth-step-card {
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  background: rgba(10, 10, 10, 0.44);
+  background: rgba(255, 255, 255, 0.025);
 }
 
 .auth-action-card {

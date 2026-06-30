@@ -236,6 +236,92 @@
   font-size: 1.08rem;
 }
 
+.mcp-target-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.mcp-target-capabilities span {
+  display: inline-grid;
+  place-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.mcp-target-config-issue {
+  color: var(--warning, #d99a2b);
+}
+
+.mcp-config-paths {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-config-paths li {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-tertiary);
+}
+
+.mcp-config-paths li[data-status="needs_attention"] {
+  border-color: color-mix(in srgb, var(--warning, #d99a2b) 55%, transparent);
+}
+
+.mcp-config-path-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mcp-config-path-heading span {
+  color: var(--text-secondary);
+  font-weight: 800;
+}
+
+.mcp-config-path-heading em {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.mcp-config-path-heading em[data-status="installed"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.mcp-config-path-heading em[data-status="needs_attention"] {
+  color: var(--warning, #d99a2b);
+  border-color: color-mix(in srgb, var(--warning, #d99a2b) 50%, transparent);
+}
+
+.mcp-config-paths code {
+  white-space: normal;
+  word-break: break-word;
+}
+
 .mcp-install-step,
 .mcp-done-step {
   display: grid;

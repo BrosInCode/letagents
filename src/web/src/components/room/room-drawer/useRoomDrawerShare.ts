@@ -1,43 +1,12 @@
 import { computed, ref, type Ref } from 'vue'
 import type { RoomInfo } from '../../../composables/room/types'
+import { buildRoomSharePath, buildRoomShareUrl } from '../../../domain/roomRoutes'
 
-type RoomShareInput =
-  Partial<Pick<RoomInfo, 'identifier' | 'projectId' | 'parentRoomId' | 'focusKey' | 'sourceTaskId' | 'kind'>>
-
-export function encodeRoomPathIdentifier(identifier: string): string {
-  return String(identifier)
-    .split('/')
-    .map(s => encodeURIComponent(s))
-    .join('/')
-}
-
-export function buildRoomSharePath(input: {
-  identifier?: string | null
-  projectId?: string | null
-  kind?: string | null
-  parentRoomId?: string | null
-  focusKey?: string | null
-  sourceTaskId?: string | null
-}): string {
-  const parentRoomId = input.kind === 'focus' ? input.parentRoomId?.trim() : ''
-  const focusKey = input.kind === 'focus'
-    ? input.focusKey?.trim() || input.sourceTaskId?.trim()
-    : ''
-  if (parentRoomId && focusKey) {
-    return `/in/${encodeRoomPathIdentifier(parentRoomId)}/focus/${encodeURIComponent(focusKey)}`
-  }
-
-  const identifier = input.identifier?.trim() || input.projectId?.trim()
-  return identifier ? `/in/${encodeRoomPathIdentifier(identifier)}` : ''
-}
-
-export function buildRoomShareUrl(
-  input: RoomShareInput,
-  origin: string,
-): string {
-  const path = buildRoomSharePath(input)
-  return path ? `${origin.replace(/\/+$/, '')}${path}` : ''
-}
+export {
+  buildRoomSharePath,
+  buildRoomShareUrl,
+  encodeRoomPathIdentifier,
+} from '../../../domain/roomRoutes'
 
 export function useRoomDrawerShare(room: Readonly<Ref<RoomInfo | null>>) {
   const codeCopied = ref(false)

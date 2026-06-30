@@ -22,12 +22,9 @@ type McpInstallStatus = DesktopMcpInstallTarget["status"];
 
 export function createLetAgentsMcpServerConfig(input: {
   apiUrl: string;
-  workspaceRoot: string;
   authToken?: string | null;
-  cwd?: string | null;
 }): LetAgentsMcpServerConfig {
   const token = input.authToken?.trim() || null;
-  const cwd = input.cwd?.trim() || input.workspaceRoot;
   const env: Record<string, string> = {
     LETAGENTS_API_URL: input.apiUrl,
   };
@@ -38,7 +35,6 @@ export function createLetAgentsMcpServerConfig(input: {
   return {
     command: "npx",
     args: ["-y", "letagents"],
-    cwd,
     env,
   };
 }
@@ -136,19 +132,67 @@ export function letAgentsMcpServerMatchesExpected(
   server: LetAgentsMcpServerConfig,
   expected: LetAgentsMcpServerConfig,
 ): boolean {
+  return !getLetAgentsMcpServerIssue(server, expected);
+}
+
+export function isLocalDevLetAgentsApiUrl(value: string | null | undefined): boolean {
+  const raw = value?.trim();
+  if (!raw) return false;
+  try {
+    const url = new URL(raw);
+    const hostname = url.hostname.replace(/^\[|\]$/g, "");
+    return (
+      ["localhost", "127.0.0.1", "::1"].includes(hostname) &&
+      (!url.port || url.port === "3001")
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function getLetAgentsMcpServerIssue(
+  server: LetAgentsMcpServerConfig,
+  expected: LetAgentsMcpServerConfig,
+  options: { localDevApiHealthy?: boolean | null } = {},
+): string | null {
   const env = isStringRecord(server.env) ? server.env : {};
-  const expectedEnv = isStringRecord(expected.env) ? expected.env : {};
+  const expectedEnv = expected.env || {};
   const expectedToken = expectedEnv.LETAGENTS_TOKEN?.trim() || null;
   const serverToken = env.LETAGENTS_TOKEN?.trim() || null;
+  const serverApiUrl = env.LETAGENTS_API_URL?.trim() || null;
+  const expectedApiUrl = expectedEnv.LETAGENTS_API_URL?.trim() || null;
+  const usesLocalDevApi = isLocalDevLetAgentsApiUrl(serverApiUrl);
 
-  return (
-    server.command === expected.command &&
-    Array.isArray(server.args) &&
-    JSON.stringify(server.args) === JSON.stringify(expected.args) &&
-    server.cwd === expected.cwd &&
-    env.LETAGENTS_API_URL === expectedEnv.LETAGENTS_API_URL &&
-    (expectedToken ? serverToken === expectedToken : serverToken === null)
-  );
+  if (server.command !== expected.command) {
+    return "Command should be npx.";
+  }
+  if (
+    !Array.isArray(server.args) ||
+    JSON.stringify(server.args) !== JSON.stringify(expected.args)
+  ) {
+    return "Arguments should run the letagents package.";
+  }
+  if (server.cwd !== expected.cwd) {
+    return "Legacy global cwd is set and should be removed.";
+  }
+  if (!serverApiUrl) {
+    return "LETAGENTS_API_URL is missing; the MCP runtime would fall back to a local dev backend.";
+  }
+  if (usesLocalDevApi && options.localDevApiHealthy === false) {
+    return `Uses local dev backend ${serverApiUrl}, but no local API is reachable.`;
+  }
+  if (serverApiUrl !== expectedApiUrl) {
+    if (usesLocalDevApi) {
+      return `Uses local dev backend ${serverApiUrl}; expected ${expectedApiUrl}.`;
+    }
+    return `Uses ${serverApiUrl}; expected ${expectedApiUrl}.`;
+  }
+  if (expectedToken ? serverToken !== expectedToken : serverToken !== null) {
+    return expectedToken
+      ? "LETAGENTS_TOKEN is missing or stale."
+      : "LETAGENTS_TOKEN should be removed for unauthenticated setup.";
+  }
+  return null;
 }
 
 export function getJsonLetAgentsMcpInstallStatusFromRaw(
@@ -158,9 +202,9 @@ export function getJsonLetAgentsMcpInstallStatusFromRaw(
   const server = getJsonLetAgentsMcpServerFromRaw(raw);
   if (!server) return "not_installed";
 
-  return letAgentsMcpServerMatchesExpected(server, expected)
-    ? "installed"
-    : "needs_attention";
+  return getLetAgentsMcpServerIssue(server, expected)
+    ? "needs_attention"
+    : "installed";
 }
 
 export function getCodexTomlLetAgentsMcpServerFromRaw(
@@ -186,25 +230,12 @@ export function getCodexTomlLetAgentsMcpInstallStatusFromRaw(
   raw: string,
   expected: LetAgentsMcpServerConfig,
 ): McpInstallStatus {
-  const serverBody = getTomlTableBody(raw, "mcp_servers.letagents");
-  if (!serverBody) return "not_installed";
+  const server = getCodexTomlLetAgentsMcpServerFromRaw(raw);
+  if (!server) return "not_installed";
 
-  const envBody = getTomlTableBody(raw, "mcp_servers.letagents.env");
-  const expectedEnv = isStringRecord(expected.env) ? expected.env : {};
-  const expectedToken = expectedEnv.LETAGENTS_TOKEN?.trim() || null;
-  const serverToken = getTomlStringValue(envBody || "", "LETAGENTS_TOKEN")?.trim()
-    || null;
-  const matchesExpected =
-    getTomlStringValue(serverBody, "command") === expected.command &&
-    JSON.stringify(getTomlStringArrayValue(serverBody, "args")) ===
-      JSON.stringify(expected.args) &&
-    getTomlStringValue(serverBody, "cwd") === expected.cwd &&
-    envBody !== null &&
-    getTomlStringValue(envBody, "LETAGENTS_API_URL") ===
-      expectedEnv.LETAGENTS_API_URL &&
-    (expectedToken ? serverToken === expectedToken : serverToken === null);
-
-  return matchesExpected ? "installed" : "needs_attention";
+  return getLetAgentsMcpServerIssue(server, expected)
+    ? "needs_attention"
+    : "installed";
 }
 
 export function buildCodexTomlLetAgentsMcpConfig(
@@ -215,9 +246,11 @@ export function buildCodexTomlLetAgentsMcpConfig(
     removeTomlTable(currentConfig, "mcp_servers.letagents.env"),
     "mcp_servers.letagents",
   ).trimEnd();
-  const expectedEnv = isStringRecord(expected.env) ? expected.env : {};
+  const expectedEnv = expected.env || {};
   const envEntries = Object.entries(expectedEnv)
-    .filter((entry) => entry[0] !== "LETAGENTS_API_URL" && entry[0] !== "LETAGENTS_TOKEN")
+    .filter(
+      ([key]) => key !== "LETAGENTS_API_URL" && key !== "LETAGENTS_TOKEN",
+    )
     .sort(([left], [right]) => left.localeCompare(right));
   const envLines = [
     ["LETAGENTS_API_URL", expectedEnv.LETAGENTS_API_URL || ""],
@@ -230,7 +263,7 @@ export function buildCodexTomlLetAgentsMcpConfig(
     "[mcp_servers.letagents]",
     `command = ${tomlString(expected.command || "npx")}`,
     `args = ${tomlStringArray(expected.args || ["-y", "letagents"])}`,
-    `cwd = ${tomlString(expected.cwd || "")}`,
+    ...(expected.cwd ? [`cwd = ${tomlString(expected.cwd)}`] : []),
     "",
     "[mcp_servers.letagents.env]",
     ...envLines.map(([key, value]) => `${key} = ${tomlString(value)}`),

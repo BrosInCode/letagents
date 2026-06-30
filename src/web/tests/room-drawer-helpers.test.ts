@@ -25,6 +25,16 @@ test('room drawer share helpers build canonical LetAgents URLs for repo rooms', 
   )
 })
 
+test('room drawer share helpers fall back to project id when identifier is blank', () => {
+  assert.equal(
+    buildRoomSharePath({
+      identifier: ' ',
+      projectId: 'github.com/brosincode/fallback',
+    }),
+    '/in/github.com/brosincode/fallback',
+  )
+})
+
 test('room drawer share helpers build parent focus routes when metadata is available', () => {
   assert.equal(
     buildRoomSharePath({

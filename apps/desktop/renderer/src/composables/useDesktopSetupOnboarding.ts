@@ -1,8 +1,9 @@
-import { computed, type ComputedRef, type Ref } from "vue";
+import { computed, ref, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAuthStatus,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopRoomAccess,
   DesktopRoomSnapshot,
   RepoStatus,
 } from "../../../electron/ipc-types";
@@ -25,7 +26,6 @@ interface DesktopSetupOnboardingOptions {
   authStatus: Ref<DesktopAuthStatus | null>;
   firstRunStage: Ref<FirstRunWizardStage>;
   loading: Ref<boolean>;
-  loadFirstRunRoomContext: () => Promise<void>;
   mcpInstallBusy: Ref<boolean>;
   mcpInstallFeedback: Ref<string | null>;
   mcpInstallState: Ref<DesktopMcpInstallState | null>;
@@ -39,19 +39,19 @@ interface DesktopSetupOnboardingOptions {
 }
 
 export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions) {
-  const showMcpInstaller = computed(() => {
-    if (!options.mcpInstallState.value) return false;
-    return options.activeEntry.value.id === setupEntry.id;
-  });
+  const firstRunRoomSelected = ref(false);
 
   const showFirstRunGate = computed(() => {
-    return !options.mcpInstallState.value
-      || !options.mcpInstallState.value.completed
-      || !options.authStatus.value?.authenticated;
+    const installState = options.mcpInstallState.value;
+    return installState !== null && !installState.completed;
+  });
+
+  const showFirstRunSplash = computed(() => {
+    return options.mcpInstallState.value === null && !options.setupLoadError.value;
   });
 
   const visibleMcpInstallState = computed<DesktopMcpInstallState>(() => {
-    return options.mcpInstallState.value || fallbackMcpInstallState;
+    return options.mcpInstallState.value ?? fallbackMcpInstallState;
   });
 
   const setupApiAvailable = computed(() => {
@@ -77,13 +77,12 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       ]);
       options.mcpInstallState.value = nextMcpInstallState;
       options.authStatus.value = nextAuthStatus;
-      await options.loadFirstRunRoomContext();
-      options.selectedMcpTargetIds.value = options.selectedMcpTargetIds.value.length
-        ? options.selectedMcpTargetIds.value
-        : defaultMcpTargetSelection(nextMcpInstallState);
-      options.firstRunStage.value = nextMcpInstallState.completed ? "github" : "mcp";
+      if (!options.selectedMcpTargetIds.value.length) {
+        options.selectedMcpTargetIds.value = defaultMcpTargetSelection(nextMcpInstallState);
+      }
+      options.firstRunStage.value = nextMcpInstallState.completed ? "github" : "welcome";
 
-      if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
+      if (nextMcpInstallState.completed) {
         await options.refresh();
       }
     } catch (error) {
@@ -91,10 +90,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         ? `Setup could not load yet: ${error.message}. Restart the desktop window if this keeps happening.`
         : "Setup could not load yet. Restart the desktop window if this keeps happening.";
       options.mcpInstallState.value = fallbackMcpInstallState;
-      options.selectedMcpTargetIds.value = options.selectedMcpTargetIds.value.length
-        ? options.selectedMcpTargetIds.value
-        : defaultMcpTargetSelection(fallbackMcpInstallState);
-      options.firstRunStage.value = "mcp";
+      if (!options.selectedMcpTargetIds.value.length) {
+        options.selectedMcpTargetIds.value = defaultMcpTargetSelection(fallbackMcpInstallState);
+      }
+      options.firstRunStage.value = "welcome";
     } finally {
       options.loading.value = false;
     }
@@ -122,13 +121,18 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpWizardStep.value = "install";
   }
 
+  function startFirstRunSetup(): void {
+    options.mcpInstallFeedback.value = null;
+    options.authFeedback.value = null;
+    options.setupLoadError.value = null;
+    options.firstRunStage.value = "mcp";
+    options.mcpWizardStep.value = "choose";
+    firstRunRoomSelected.value = false;
+  }
+
   function goBackMcpOnboarding(): void {
     options.mcpInstallFeedback.value = null;
     options.mcpWizardStep.value = options.mcpWizardStep.value === "done" ? "install" : "choose";
-  }
-
-  function selectedInstallCwd(): string | null {
-    return options.repoStatus.value?.rootPath?.trim() || null;
   }
 
   async function pickRepoRoom(): Promise<boolean> {
@@ -136,6 +140,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = "Opening the repo picker...";
     options.setupLoadError.value = null;
+    firstRunRoomSelected.value = false;
     try {
       if (!window.letagentsDesktop?.repos?.pickRoom) {
         throw new Error("Restart LetAgents Desktop so the repo picker can open.");
@@ -146,18 +151,22 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         options.authFeedback.value = result.error || "LetAgents could not open a room from that folder.";
         return false;
       }
+      const repoPathLabel = rootPathLabel(result.repoPath);
+      const folderLabel = repoPathLabel || result.repoPath || "Selected project folder";
+      const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier || result.snapshot.roomIdentifier;
+      if (!canSelectFirstRunRoom(result.snapshot.access.status)) {
+        options.authFeedback.value = roomAccessFeedback(result.snapshot);
+        return false;
+      }
       options.repoStatus.value = result.repoStatus;
-      const folderLabel = rootPathLabel(result.repoPath) || result.repoPath || "Selected project folder";
       options.openRoomSnapshot(result.snapshot, {
         displayName: folderLabel,
         kind: "project",
         rootPath: result.repoPath,
-        meta: result.repoStatus?.branch || rootPathLabel(result.repoPath) || result.source || null,
+        meta: result.repoStatus?.branch || repoPathLabel || result.source || null,
       });
-      const roomLabel = result.snapshot.room?.displayName || result.roomIdentifier;
-      options.authFeedback.value = result.warning
-        ? `${result.warning} Room selected: ${roomLabel}.`
-        : `Project room selected: ${roomLabel}. Open it when you are ready.`;
+      options.authFeedback.value = firstRunRoomSelectedFeedback(result.snapshot, roomLabel, result.warning);
+      firstRunRoomSelected.value = true;
       return true;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "LetAgents could not open the repo picker.";
@@ -175,20 +184,24 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = null;
     options.setupLoadError.value = null;
+    firstRunRoomSelected.value = false;
     try {
       if (!window.letagentsDesktop?.room?.getSnapshot) {
         throw new Error("Restart LetAgents Desktop so the room can be joined.");
       }
       const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+      if (!canSelectFirstRunRoom(snapshot.access.status)) {
+        options.authFeedback.value = roomAccessFeedback(snapshot);
+        return;
+      }
       options.repoStatus.value = null;
       options.openRoomSnapshot(snapshot, {
         kind: "room",
         rootPath: null,
         meta: snapshot.room?.code || "Joined room",
       });
-      options.authFeedback.value = snapshot.access.status === "ready"
-        ? "Room selected. Open it when you are ready."
-        : snapshot.access.message;
+      options.authFeedback.value = firstRunRoomSelectedFeedback(snapshot);
+      firstRunRoomSelected.value = true;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "LetAgents could not join that room.";
     } finally {
@@ -215,6 +228,31 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     goBackMcpOnboarding();
   }
 
+  async function installCodexRuntimeIfMissing(
+    targetIds: DesktopMcpInstallTargetId[],
+  ): Promise<string | null> {
+    if (!targetIds.includes("codex")) return null;
+    const workers = window.letagentsDesktop?.workers;
+    if (!workers?.runAgentProviderPreflight || !workers?.runAgentProviderSetup) return null;
+
+    const preflight = await workers.runAgentProviderPreflight("codex", {});
+    if (preflight.nextAction !== "install_runtime") {
+      if (["auth_required", "bridge_required", "repo_required", "ready"].includes(preflight.status)) {
+        return "Codex CLI is already installed.";
+      }
+      return null;
+    }
+
+    const result = await workers.runAgentProviderSetup("codex", {
+      action: "install_runtime",
+      confirmed: true,
+    });
+    if (!result.success) {
+      throw new Error(result.message || "Codex CLI install failed.");
+    }
+    return result.message || null;
+  }
+
   async function installSelectedMcpTargets(): Promise<void> {
     const targetIds = [...options.selectedMcpTargetIds.value];
     if (!targetIds.length) {
@@ -229,12 +267,15 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       if (!window.letagentsDesktop?.setup) {
         throw new Error("Restart LetAgents Desktop so setup can install MCP automatically.");
       }
-      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds, {
-        cwd: selectedInstallCwd(),
-      });
+      const runtimeMessage = await installCodexRuntimeIfMissing(targetIds);
+      const result = await window.letagentsDesktop.setup.installMcpServers(targetIds);
       options.mcpInstallState.value = result.installState;
       options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
-      options.mcpInstallFeedback.value = result.message;
+      options.mcpInstallFeedback.value = [runtimeMessage, result.message].filter(Boolean).join(" ");
+      if (!result.success || result.targets.some((target) => target.status !== "installed")) {
+        options.mcpWizardStep.value = "install";
+        return;
+      }
       options.mcpWizardStep.value = "done";
     } catch (error) {
       options.mcpInstallFeedback.value = error instanceof Error
@@ -245,7 +286,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     }
   }
 
-  async function completeMcpOnboarding(): Promise<void> {
+  function completeMcpOnboarding(): void {
     options.mcpInstallFeedback.value = null;
     options.setupLoadError.value = null;
     options.firstRunStage.value = "github";
@@ -253,12 +294,13 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
 
   function continueToRoomConfirmation(): void {
     options.authFeedback.value = null;
-    void options.loadFirstRunRoomContext();
+    firstRunRoomSelected.value = false;
     options.firstRunStage.value = "room";
   }
 
   async function finishFirstRunOnboarding(): Promise<void> {
-    if (!options.pinnedRoom.value.roomIdentifier) {
+    const roomIdentifier = options.pinnedRoom.value.roomIdentifier;
+    if (!firstRunRoomSelected.value || !roomIdentifier) {
       options.authFeedback.value = "Choose a repo room or join with a room code first.";
       return;
     }
@@ -270,15 +312,17 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       if (!window.letagentsDesktop?.setup) {
         throw new Error("Restart LetAgents Desktop so setup can finish.");
       }
-      const targetIds = [...options.selectedMcpTargetIds.value];
-      const cwd = selectedInstallCwd();
-      if (targetIds.length && cwd) {
-        const result = await window.letagentsDesktop.setup.installMcpServers(targetIds, {
-          cwd,
-        });
-        options.mcpInstallState.value = result.installState;
-        options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
+      if (!window.letagentsDesktop?.room?.getSnapshot) {
+        throw new Error("Restart LetAgents Desktop so the selected room can be verified.");
       }
+      const snapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
+      if (snapshot.access.status !== "ready") {
+        firstRunRoomSelected.value = snapshot.access.status === "auth_required";
+        options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
+        options.authFeedback.value = roomAccessFeedback(snapshot);
+        return;
+      }
+      options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
       options.mcpInstallState.value = await window.letagentsDesktop.setup.completeMcpOnboarding();
       options.activeEntry.value = options.pinnedRoom.value;
       await options.refresh();
@@ -295,6 +339,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     continueMcpOnboarding,
     continueToRoomConfirmation,
     finishFirstRunOnboarding,
+    firstRunRoomSelected,
     firstRunFeedback,
     goBackFirstRun,
     goBackMcpOnboarding,
@@ -306,7 +351,44 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     selectMcpTarget,
     setupApiAvailable,
     showFirstRunGate,
-    showMcpInstaller,
+    showFirstRunSplash,
+    startFirstRunSetup,
     visibleMcpInstallState,
+  };
+}
+
+function canSelectFirstRunRoom(status: DesktopRoomAccess["status"]): boolean {
+  return status === "ready" || status === "auth_required";
+}
+
+function firstRunRoomSelectedFeedback(
+  snapshot: DesktopRoomSnapshot,
+  roomLabel = snapshot.room?.displayName || snapshot.roomIdentifier,
+  warning?: string | null,
+): string {
+  if (snapshot.access.status === "auth_required") {
+    return snapshot.access.message || `Room selected: ${roomLabel}. Connect GitHub before opening it.`;
+  }
+  const prefix = warning ? `${warning} ` : "";
+  return `${prefix}Room selected: ${roomLabel}. Open it when you are ready.`;
+}
+
+function roomAccessFeedback(snapshot: DesktopRoomSnapshot): string {
+  if (snapshot.access.status === "auth_required") {
+    return snapshot.access.message || "Connect GitHub before opening this private room.";
+  }
+  return snapshot.access.message || snapshot.access.title || "LetAgents could not open that room.";
+}
+
+function firstRunRoomOpenOptions(
+  snapshot: DesktopRoomSnapshot,
+  options: DesktopSetupOnboardingOptions,
+): OpenRoomOptions {
+  const rootPath = options.repoStatus.value?.rootPath || null;
+  return {
+    displayName: snapshot.room?.displayName || options.pinnedRoom.value.title,
+    kind: rootPath ? "project" : "room",
+    rootPath,
+    meta: options.repoStatus.value?.branch || snapshot.room?.code || options.pinnedRoom.value.meta || null,
   };
 }

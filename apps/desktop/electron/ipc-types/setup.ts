@@ -1,7 +1,11 @@
 export type DesktopMcpInstallTargetId = "claude-code" | "antigravity" | "cursor" | "codex";
 
-export interface DesktopMcpInstallOptions {
-  cwd?: string | null;
+export interface DesktopMcpInstallConfigPath {
+  path: string;
+  label: string;
+  status: "not_installed" | "installed" | "needs_attention";
+  hasLetAgents: boolean;
+  issue: string | null;
 }
 
 export interface DesktopMcpInstallTarget {
@@ -9,6 +13,8 @@ export interface DesktopMcpInstallTarget {
   name: string;
   description: string;
   configPath: string;
+  configPaths: DesktopMcpInstallConfigPath[];
+  configIssue: string | null;
   status: "not_installed" | "installed" | "needs_attention";
   lastInstalledAt: string | null;
   restartHint: string;

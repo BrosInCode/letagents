@@ -742,6 +742,53 @@ img.settings-profile-avatar {
   gap: 10px;
 }
 
+.settings-mcp-config-paths {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+}
+
+.settings-mcp-config-paths li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.settings-mcp-config-paths code {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.settings-mcp-config-paths em {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-size: 0.66rem;
+  font-style: normal;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.settings-mcp-config-paths em[data-status="installed"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.settings-mcp-config-paths em[data-status="needs_attention"] {
+  color: var(--warning, #d99a2b);
+  border-color: color-mix(in srgb, var(--warning, #d99a2b) 50%, transparent);
+}
+
+.settings-mcp-config-paths small {
+  color: var(--warning, #d99a2b);
+}
+
 .settings-room-row {
   display: grid;
   grid-template-columns: auto minmax(220px, 1fr) minmax(280px, auto) auto;
