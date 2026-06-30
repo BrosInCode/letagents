@@ -110,3 +110,7 @@ Write-capable Cursor is blocked until LetAgents has all of the following:
 5. Runner tests for stream parsing, malformed JSON lines, missing final result, nonzero process exit, tool-call failure, resume ids, and interrupt handling.
 
 Only after these gates pass should `cursor` be exposed as a normal `desktop_managed_runtime` provider.
+
+## Gate 2 Follow-up
+
+See `docs/cursor-desktop-managed-gate2.md` for the first config/auth isolation probe. The short version: isolating `HOME` hides the global LetAgents MCP config, but the isolated Cursor home is unauthenticated unless LetAgents provides `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN` or runs a user-approved `cursor-agent login` bootstrap inside that managed home. Write-capable Cursor remains gated until one of those auth paths is proven end to end.
