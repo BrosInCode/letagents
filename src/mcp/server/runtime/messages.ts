@@ -73,18 +73,48 @@ function resolveThreadParentId(
   return parentId;
 }
 
+function explicitThreadRootId(record: AgentReadableMessageRecord): string | null {
+  const root = record.thread_root_id ?? record.threadRootId;
+  return typeof root === "string" && root.trim() ? root : null;
+}
+
+function explicitThreadReplyToId(record: AgentReadableMessageRecord): string | null {
+  const replyTo = record.thread_reply_to_id ?? record.threadReplyToId;
+  return typeof replyTo === "string" && replyTo.trim() ? replyTo : null;
+}
+
+// A message is a thread reply IFF it carries an explicit thread root that differs
+// from its own id. `reply_to` alone is only a quote/chip reference, never proof of
+// thread membership — so a bare quote-reply (explicit root === its own id) stays
+// top-level. Records that carry NO explicit thread_root_id field at all (out-of-band
+// or legacy payloads that never went through the message mappers) fall back to
+// deriving the root from the reply_to chain so genuine threads still survive. The
+// fallback keys on field ABSENCE, never on the value equalling the own id.
+function resolveThreadRootId(
+  record: AgentReadableMessageRecord,
+  recordsById: Map<string, AgentReadableMessageRecord>,
+): string | null {
+  const explicitRoot = explicitThreadRootId(record);
+  if (explicitRoot) {
+    return explicitRoot;
+  }
+  return resolveThreadParentId(record, recordsById);
+}
+
 function buildThreadSummaries(
   records: AgentReadableMessageRecord[],
   recordsById: Map<string, AgentReadableMessageRecord>,
 ): Map<string, ThreadSummary> {
   const summaries = new Map<string, ThreadSummary>();
   for (const record of records) {
-    if (!replyReferenceId(record)) continue;
-    const parentId = resolveThreadParentId(record, recordsById);
     const id = messageId(record);
-    if (!parentId || !id) continue;
-    const current = summaries.get(parentId) ?? { count: 0, latestReplyId: null };
-    summaries.set(parentId, {
+    const rootId = resolveThreadRootId(record, recordsById);
+    // Only genuine thread replies (an explicit root different from the message
+    // itself) accrue to a thread. A bare quote-reply roots at itself and must not
+    // inflate the reply count of the message it quotes.
+    if (!id || !rootId || rootId === id) continue;
+    const current = summaries.get(rootId) ?? { count: 0, latestReplyId: null };
+    summaries.set(rootId, {
       count: current.count + 1,
       latestReplyId: id,
     });
@@ -97,23 +127,26 @@ function withThreadMetadata(
   recordsById: Map<string, AgentReadableMessageRecord>,
   summaries: Map<string, ThreadSummary>,
 ): AgentReadableMessageRecord {
-  const parentId = resolveThreadParentId(record, recordsById);
-  if (!parentId) {
+  const ownId = messageId(record);
+  const rootId = resolveThreadRootId(record, recordsById);
+  if (!rootId) {
     return record;
   }
 
-  const replyToId = replyReferenceId(record);
-  const summary = summaries.get(parentId) ?? { count: 0, latestReplyId: null };
+  // The quote/chip reference is preserved regardless of thread membership.
+  const replyToId = explicitThreadReplyToId(record) ?? replyReferenceId(record);
+  const isThreadReply = Boolean(ownId && rootId !== ownId);
+  const summary = summaries.get(rootId) ?? { count: 0, latestReplyId: null };
   return {
     ...record,
-    thread_parent_id: parentId,
-    thread_root_id: parentId,
+    thread_parent_id: rootId,
+    thread_root_id: rootId,
     thread_reply_to_id: replyToId,
     thread: {
-      parent_id: parentId,
-      root_message_id: parentId,
+      parent_id: rootId,
+      root_message_id: rootId,
       reply_to_id: replyToId,
-      is_thread_reply: Boolean(replyToId),
+      is_thread_reply: isThreadReply,
       reply_count_in_result: summary.count,
       latest_reply_id_in_result: summary.latestReplyId,
     },

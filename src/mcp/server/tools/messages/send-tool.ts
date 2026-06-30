@@ -35,14 +35,10 @@ function normalizeMessageId(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function replyReferenceId(message: MessageRecord | null): string | null {
-  const reply = message?.reply_to ?? message?.replyTo ?? null;
-  if (typeof reply === "string" && reply.trim()) {
-    return reply;
-  }
-  if (reply && typeof reply === "object" && typeof (reply as { id?: unknown }).id === "string") {
-    const id = (reply as { id: string }).id.trim();
-    return id || null;
+function explicitThreadRootId(message: MessageRecord | null): string | null {
+  const root = message?.thread_root_id ?? message?.threadRootId;
+  if (typeof root === "string" && root.trim()) {
+    return root;
   }
   return null;
 }
@@ -112,22 +108,21 @@ async function findMessageById(input: {
   });
 }
 
+// Resolve the thread root for a send_thread_message target by reading the target's
+// explicit thread_root_id (the authoritative root the message mappers already
+// populate) instead of walking reply_to. This roots a reply AT a top-level
+// quote-reply X (X.thread_root_id === X.id) rather than under the message X quoted.
+// When the target carries no explicit root (not found / hidden / out-of-band), treat
+// it as its own root — matching the prior lenient behavior, so the create-side
+// existence checks fail the same way rather than newly rejecting a valid reply.
 async function resolveThreadRootMessageId(input: {
   localRoomId: string | null;
   roomId: string | null;
   projectId: string | null;
   messageId: string;
 }): Promise<string> {
-  let currentId = input.messageId;
-  const seen = new Set<string>();
-  for (;;) {
-    if (seen.has(currentId)) return currentId;
-    seen.add(currentId);
-    const message = await findMessageById({ ...input, messageId: currentId });
-    const parentId = replyReferenceId(message);
-    if (!parentId) return currentId;
-    currentId = parentId;
-  }
+  const message = await findMessageById(input);
+  return explicitThreadRootId(message) ?? input.messageId;
 }
 
 function initialReplyTarget(input: SendMessageInput): {
@@ -158,22 +153,25 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
   });
   const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
   const { replyTarget, shouldResolveThreadRoot } = initialReplyTarget(input);
-  const resolvedReplyTarget = replyTarget && shouldResolveThreadRoot
+  // The quote/chip reference stays the literal target the caller pointed at; the
+  // thread root is resolved separately from that target's explicit thread_root_id,
+  // so a reply to a top-level quote-reply roots at it rather than under what it quoted.
+  const resolvedThreadRoot = replyTarget && shouldResolveThreadRoot
     ? await resolveThreadRootMessageId({
       localRoomId,
       roomId: targetRoomId,
       projectId: targetProjectId,
       messageId: replyTarget,
     })
-    : replyTarget;
+    : undefined;
 
   if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
     const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
     const message = await addLocalChatMessage(sqliteRoomId || localRoomId, {
       sender: identity.actor_label,
       text: input.text,
-      reply_to: resolvedReplyTarget,
-      ...(shouldResolveThreadRoot ? { thread_root_id: resolvedReplyTarget } : {}),
+      reply_to: replyTarget,
+      ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
       source: "agent",
     });
     touchCurrentRoom(message.id);
@@ -193,8 +191,8 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       body: JSON.stringify({
         sender: identity.actor_label,
         text: input.text,
-        reply_to: resolvedReplyTarget,
-        ...(shouldResolveThreadRoot ? { thread_root_id: resolvedReplyTarget } : {}),
+        reply_to: replyTarget,
+        ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
         ...agentSessionCredentials(agentSession),
       }),
     },

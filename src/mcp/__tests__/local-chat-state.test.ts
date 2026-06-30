@@ -28,6 +28,24 @@ const { registerAgentSessionTools } = await import("../server/tools/agent-sessio
 const { registerPostReasoningTool } = await import("../server/tools/messages/reasoning-tool.js");
 const { registerRoomResources } = await import("../server/resources.js");
 const { postCanonicalTaskAction } = await import("../server/tools/tasks/api.js");
+const { registerMessageTools } = await import("../server/tools/messages.js");
+const { toAgentReadableMessages } = await import("../server/runtime/messages.js");
+
+type SendToolHandler = (
+  input: Record<string, unknown>,
+) => Promise<{ content: Array<{ text: string }> }>;
+
+function captureSendThreadMessageHandler(): SendToolHandler {
+  let handler: SendToolHandler | null = null;
+  const server = {
+    tool(name: string, _description: string, _schema: Record<string, unknown>, registered: SendToolHandler) {
+      if (name === "send_thread_message") handler = registered;
+    },
+  };
+  registerMessageTools(server as never);
+  assert.ok(handler, "send_thread_message should be registered");
+  return handler;
+}
 
 function openSqliteDb() {
   const { DatabaseSync } = require("node:sqlite") as {
@@ -126,6 +144,19 @@ test("MCP local chat keeps quote-replies top-level and only threads with an expl
     // explicit thread reply: threaded onto the root
     { number: 3, reply_to_number: 1, thread_root_number: 1 },
   ]);
+
+  // The agent-readable serializer must present the bare quote reply as top-level and
+  // the explicit thread reply as a real thread member — linking storage to the read
+  // derivation (the whole point of task_5).
+  const readable = toAgentReadableMessages(
+    (await getLocalChatMessages("thread_room")).messages,
+  ) as Array<Record<string, unknown>>;
+  const readableQuote = readable.find((entry) => entry.id === quoteReply.id);
+  const readableThread = readable.find((entry) => entry.id === threadReply.id);
+  assert.equal(readableQuote?.thread_root_id, quoteReply.id);
+  assert.equal((readableQuote?.thread as Record<string, unknown>).is_thread_reply, false);
+  assert.equal(readableThread?.thread_root_id, root.id);
+  assert.equal((readableThread?.thread as Record<string, unknown>).is_thread_reply, true);
 });
 
 test("MCP local chat state resolves per-room overrides", async () => {
@@ -473,4 +504,73 @@ test("MCP local task lease actions stay local", async () => {
   assert.equal(release.task.status, "accepted");
   assert.equal(release.task.assignee, null);
   assert.equal(release.task.assignee_agent_key, null);
+});
+
+test("send_thread_message roots a reply at a top-level quote-reply, not the quoted message", async () => {
+  writeFileSync(settingsPath, JSON.stringify({
+    mode: "cloud",
+    defaultMode: "cloud",
+    roomOverrides: { send_thread_quote_room: "local" },
+  }), "utf8");
+
+  const root = await addLocalChatMessage("send_thread_quote_room", {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  // A bare quote-reply is top-level (thread_root_id === its own id).
+  const quoteReply = await addLocalChatMessage("send_thread_quote_room", {
+    sender: "Agent",
+    text: "quote of root",
+    source: "agent",
+    reply_to: root.id,
+  });
+  assert.equal(quoteReply.thread_root_id, quoteReply.id);
+
+  const sendThreadMessage = captureSendThreadMessageHandler();
+  const response = await sendThreadMessage({
+    room_id: "send_thread_quote_room",
+    text: "reply into the quote",
+    thread_parent_id: quoteReply.id,
+  });
+  const created = JSON.parse(response.content[0]?.text || "{}") as Record<string, unknown>;
+
+  // Must root at the quote-reply itself — NOT walk reply_to up to the quoted root.
+  assert.equal(created.thread_root_id, quoteReply.id);
+  assert.notEqual(created.thread_root_id, root.id);
+  assert.equal(created.thread_reply_to_id, quoteReply.id);
+});
+
+test("send_thread_message targeting an in-thread message resolves to the real thread root", async () => {
+  writeFileSync(settingsPath, JSON.stringify({
+    mode: "cloud",
+    defaultMode: "cloud",
+    roomOverrides: { send_thread_root_room: "local" },
+  }), "utf8");
+
+  const root = await addLocalChatMessage("send_thread_root_room", {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  const threadReply = await addLocalChatMessage("send_thread_root_room", {
+    sender: "Agent",
+    text: "in-thread reply",
+    source: "agent",
+    reply_to: root.id,
+    thread_root_id: root.id,
+  });
+  assert.equal(threadReply.thread_root_id, root.id);
+
+  const sendThreadMessage = captureSendThreadMessageHandler();
+  const response = await sendThreadMessage({
+    room_id: "send_thread_root_room",
+    text: "another thread reply",
+    thread_parent_id: threadReply.id,
+  });
+  const created = JSON.parse(response.content[0]?.text || "{}") as Record<string, unknown>;
+
+  // The thread root resolves to the real root; the chip points at the literal target.
+  assert.equal(created.thread_root_id, root.id);
+  assert.equal(created.thread_reply_to_id, threadReply.id);
 });
