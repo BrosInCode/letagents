@@ -1,5 +1,9 @@
 import {
   query,
+  type HookCallback,
+  type HookJSONOutput,
+  type Options,
+  type PreToolUseHookInput,
   type Query,
   type SDKAssistantMessage,
   type SDKMessage,
@@ -27,6 +31,31 @@ export interface ClaudeCodeRunner {
   runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult>;
 }
 
+export const CLAUDE_CODE_BLOCKED_TOOL_NAMES = [
+  "rental_run_command",
+  "propose",
+  "provision",
+  "wait_for_messages",
+  "read_messages",
+  "send_message",
+  "send_thread_message",
+  "post_status",
+  "claim_task",
+  "update_task",
+  "create_task",
+  "accept_task",
+  "publish_room_artifact",
+  "register_agent_session",
+  "disconnect_agent_session",
+  "join_room",
+  "join_code",
+  "join_project",
+  "create_room",
+  "create_project",
+  "start_local_codex_session",
+  "stop_local_codex_session",
+] as const;
+
 export const productionClaudeCodeRunner: ClaudeCodeRunner = {
   async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
     const abortController = input.abortController ?? new AbortController();
@@ -40,17 +69,12 @@ export const productionClaudeCodeRunner: ClaudeCodeRunner = {
     try {
       activeQuery = query({
         prompt: input.prompt,
-        options: {
-          cwd: input.cwd,
-          resume: sessionId || undefined,
+        options: buildClaudeCodeQueryOptions({
+          ...input,
           abortController,
-          permissionMode: "default",
-          pathToClaudeCodeExecutable: executable || undefined,
-          env: {
-            ...process.env,
-            CLAUDE_AGENT_SDK_CLIENT_APP: "letagents-desktop/claude-code-runtime",
-          },
-        },
+          claudeSessionId: sessionId,
+          claudeBin: executable || undefined,
+        }),
       });
 
       for await (const message of activeQuery) {
@@ -104,9 +128,85 @@ export const productionClaudeCodeRunner: ClaudeCodeRunner = {
   },
 };
 
+export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options {
+  return {
+    cwd: input.cwd,
+    resume: input.claudeSessionId?.trim() || undefined,
+    abortController: input.abortController,
+    permissionMode: "default",
+    pathToClaudeCodeExecutable: input.claudeBin?.trim() || undefined,
+    strictMcpConfig: true,
+    mcpServers: {},
+    disallowedTools: [...CLAUDE_CODE_BLOCKED_TOOL_NAMES],
+    hooks: {
+      PreToolUse: [{
+        hooks: [claudeCodePreToolUseGuard],
+      }],
+    },
+    env: {
+      ...process.env,
+      CLAUDE_AGENT_SDK_CLIENT_APP: "letagents-desktop/claude-code-runtime",
+    },
+  };
+}
+
+export function isBlockedClaudeCodeTool(toolName: string | null | undefined): boolean {
+  const normalized = normalizeToolName(toolName);
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.startsWith("mcp__letagents__")) {
+    return true;
+  }
+  const tail = normalized.split("__").pop() ?? normalized;
+  return CLAUDE_CODE_BLOCKED_TOOL_NAMES.some((blocked) =>
+    tail === blocked || normalized === blocked
+  );
+}
+
+export const claudeCodePreToolUseGuard: HookCallback = async (
+  input,
+  toolUseID,
+): Promise<HookJSONOutput> => {
+  if (!isPreToolUseInput(input) || !isBlockedClaudeCodeTool(input.tool_name)) {
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "defer",
+      },
+    };
+  }
+
+  return {
+    decision: "block",
+    reason: "LetAgents Desktop owns room coordination and blocks rental/provisioning tools in managed Claude Code sessions.",
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: "Managed Claude Code sessions may not call LetAgents room, rental, or provisioning tools.",
+    },
+    systemMessage: "Blocked a tool call that managed Claude Code sessions are not allowed to use.",
+    stopReason: `Blocked tool call: ${input.tool_name}`,
+    suppressOutput: true,
+  };
+};
+
 function sessionIdFromSdkMessage(message: SDKMessage): string | null {
   const value = (message as { session_id?: unknown }).session_id;
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function isPreToolUseInput(input: unknown): input is PreToolUseHookInput {
+  return Boolean(
+    input &&
+    typeof input === "object" &&
+    (input as { hook_event_name?: unknown }).hook_event_name === "PreToolUse" &&
+    typeof (input as { tool_name?: unknown }).tool_name === "string",
+  );
+}
+
+function normalizeToolName(toolName: string | null | undefined): string {
+  return String(toolName ?? "").trim().toLowerCase();
 }
 
 function summarizeSdkMessage(message: SDKMessage): Record<string, unknown> | null {

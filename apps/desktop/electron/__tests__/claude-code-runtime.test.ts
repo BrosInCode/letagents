@@ -11,6 +11,11 @@ const {
   createDesktopClaudeCodeRuntime,
 } = await import("../main/agents/claude-code-runtime.js");
 const {
+  buildClaudeCodeQueryOptions,
+  claudeCodePreToolUseGuard,
+  isBlockedClaudeCodeTool,
+} = await import("../main/agents/claude-code-runner.js");
+const {
   getStoredAgentSession,
   getStoredClaudeCodeLiveSession,
   saveAgentSession,
@@ -143,6 +148,71 @@ function createRuntimeHarness(runner: ClaudeCodeRunner) {
   });
   return { runtime, published };
 }
+
+test("Claude Code runner options lock down ambient MCP and blocked room tools", async () => {
+  const abortController = new AbortController();
+  const options = buildClaudeCodeQueryOptions({
+    prompt: "hello",
+    cwd: tempDir,
+    claudeSessionId: "claude_session_1",
+    claudeBin: "/usr/local/bin/claude",
+    abortController,
+  });
+
+  assert.equal(options.permissionMode, "default");
+  assert.equal(options.allowDangerouslySkipPermissions, undefined);
+  assert.equal(options.strictMcpConfig, true);
+  assert.deepEqual(options.mcpServers, {});
+  assert.equal(options.resume, "claude_session_1");
+  assert.equal(options.pathToClaudeCodeExecutable, "/usr/local/bin/claude");
+  assert.ok(options.disallowedTools?.includes("rental_run_command"));
+  assert.ok(options.disallowedTools?.includes("send_message"));
+  assert.equal("allowedTools" in options, false);
+  assert.equal(isBlockedClaudeCodeTool("mcp__letagents__send_message"), true);
+  assert.equal(isBlockedClaudeCodeTool("mcp__letagents__rental_run_command"), true);
+  assert.equal(isBlockedClaudeCodeTool("Read"), false);
+
+  const denied = await claudeCodePreToolUseGuard({
+    hook_event_name: "PreToolUse",
+    tool_name: "mcp__letagents__send_message",
+    tool_input: { text: "nope" },
+    tool_use_id: "tool_1",
+    session_id: "claude_session_1",
+    transcript_path: "/tmp/transcript.jsonl",
+    cwd: tempDir,
+  } as never, "tool_1", { signal: abortController.signal });
+  const deniedOutput = denied as {
+    decision?: string;
+    hookSpecificOutput?: { hookEventName?: string; permissionDecision?: string };
+  };
+  assert.equal(deniedOutput.decision, "block");
+  assert.equal(deniedOutput.hookSpecificOutput?.hookEventName, "PreToolUse");
+  assert.equal(
+    deniedOutput.hookSpecificOutput?.hookEventName === "PreToolUse"
+      ? deniedOutput.hookSpecificOutput.permissionDecision
+      : null,
+    "deny",
+  );
+
+  const deferred = await claudeCodePreToolUseGuard({
+    hook_event_name: "PreToolUse",
+    tool_name: "Read",
+    tool_input: { file_path: "/tmp/README.md" },
+    tool_use_id: "tool_2",
+    session_id: "claude_session_1",
+    transcript_path: "/tmp/transcript.jsonl",
+    cwd: tempDir,
+  } as never, "tool_2", { signal: abortController.signal });
+  const deferredOutput = deferred as {
+    hookSpecificOutput?: { hookEventName?: string; permissionDecision?: string };
+  };
+  assert.equal(
+    deferredOutput.hookSpecificOutput?.hookEventName === "PreToolUse"
+      ? deferredOutput.hookSpecificOutput.permissionDecision
+      : null,
+    "defer",
+  );
+});
 
 test("Claude Code runtime starts, lists, and inspects a desktop-managed worker", async () => {
   resetState();
