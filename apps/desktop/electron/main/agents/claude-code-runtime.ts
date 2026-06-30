@@ -684,7 +684,9 @@ export function createDesktopClaudeCodeRuntime(
     if (event.message.source === "agent") {
       return false;
     }
-    let sawUnauthorizedDecision = false;
+    // Room messages do not currently expose a stable authenticated account id to the desktop stream.
+    // Treat approval-looking room replies as handled so they cannot preempt the active turn, but never
+    // resolve a permission request from public room text. The trusted approval channel is desktop IPC.
     for (const session of listDesktopManagedClaudeCodeLiveSessions(event.roomIdentifier)) {
       const pendingRequests = session.pending_permission_requests ?? [];
       if (!pendingRequests.length) {
@@ -698,14 +700,9 @@ export function createDesktopClaudeCodeRuntime(
       if (!decision) {
         continue;
       }
-      if (!isPermissionDecisionFromSessionOperator(session, event)) {
-        sawUnauthorizedDecision = true;
-        continue;
-      }
-      resolvePendingPermissionRequest(decision);
       return true;
     }
-    return sawUnauthorizedDecision;
+    return false;
   }
 
   function waitForPermissionDecision(input: {
@@ -916,32 +913,6 @@ function isOwnRoomStreamEvent(
     worker.displayName,
   ].map(normalizeKey).filter(Boolean);
   return Boolean(messageNames.length && workerNames.some((key) => messageNames.includes(key)));
-}
-
-function isPermissionDecisionFromSessionOperator(
-  session: DesktopClaudeCodeLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  if (event.type !== "message" || event.message.source === "agent") {
-    return false;
-  }
-
-  const worker = toPublicClaudeCodeManagedAgentSession(session);
-  const storedSession = getStoredAgentSession(session.agent_session_id);
-  const operatorKeys = [
-    worker.ownerLabel,
-    storedSession?.owner_label,
-  ].map(normalizeKey).filter(Boolean);
-  if (!operatorKeys.length) {
-    return false;
-  }
-
-  const messageKeys = [
-    event.message.sender,
-    event.message.actorLabel,
-    event.message.agentIdentity?.ownerLabel,
-  ].map(normalizeKey).filter(Boolean);
-  return operatorKeys.some((key) => messageKeys.includes(key));
 }
 
 function isStopPhraseRoomStreamEvent(

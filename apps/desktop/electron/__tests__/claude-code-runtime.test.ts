@@ -388,7 +388,7 @@ test("Claude Code runtime surfaces tool permission requests for desktop approval
   assert.equal(stored?.status, "completed");
 });
 
-test("Claude Code runtime ignores non-owner room permission replies without interrupting the turn", async () => {
+test("Claude Code runtime ignores room permission replies without interrupting the turn", async () => {
   resetState();
   const permissionRequests: DesktopManagedAgentPermissionRequest[] = [];
   const calls: ClaudeCodeTurnInput[] = [];
@@ -410,8 +410,8 @@ test("Claude Code runtime ignores non-owner room permission replies without inte
       runtime.dispatchRoomStreamEvent(messageEvent({
         message: {
           ...baseMessage,
-          id: "msg_mallory_approval",
-          sender: "Mallory",
+          id: "msg_room_approval",
+          sender: "EmmyMay",
           text: `approve ${request.id}`,
           timestamp: "2026-06-30T00:00:01.000Z",
         },
@@ -459,7 +459,7 @@ test("Claude Code runtime ignores non-owner room permission replies without inte
   assert.deepEqual(harness.published, [{ text: "Build was not run.", eventId: "msg_1" }]);
 });
 
-test("Claude Code runtime consumes room permission replies without preempting the active turn", async () => {
+test("Claude Code runtime ignores implicit room permission replies without preempting the active turn", async () => {
   resetState();
   const permissionRequests: DesktopManagedAgentPermissionRequest[] = [];
   const calls: ClaudeCodeTurnInput[] = [];
@@ -472,6 +472,10 @@ test("Claude Code runtime consumes room permission replies without preempting th
         toolUseID: "tool_build",
         title: "Run build",
       });
+      let permissionSettled = false;
+      permission.finally(() => {
+        permissionSettled = true;
+      }).catch(() => undefined);
       const request = await waitFor(() => permissionRequests[0], "permission request");
       const baseMessage = messageEvent().message;
       runtime.dispatchRoomStreamEvent(messageEvent({
@@ -479,10 +483,27 @@ test("Claude Code runtime consumes room permission replies without preempting th
           ...baseMessage,
           id: "msg_approval",
           sender: "EmmyMay",
-          text: `approve ${request.id}`,
+          text: "approve",
+          replyTo: {
+            id: "msg_perm_room",
+            sender: "WarmGolden",
+            text: "Permission request",
+            source: "agent",
+            timestamp: "2026-06-30T00:00:00.500Z",
+          },
           timestamp: "2026-06-30T00:00:01.000Z",
         },
       }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(permissionSettled, false);
+      assert.equal(calls.length, 1);
+      const listed = runtime.listSessions("room_1")[0];
+      const result = await runtime.resolvePermissionRequest({
+        requestId: request.id,
+        sessionId: listed?.id,
+        behavior: "allow",
+      });
+      assert.equal(result.accepted, true);
       const decision = await permission;
       assert.equal(decision.behavior, "allow");
       return {
