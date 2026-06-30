@@ -292,6 +292,7 @@ import {
   watchRoomNotifications,
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
+import { isThreadReplyMessage } from "./room-shell/threading";
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
@@ -1126,10 +1127,6 @@ function shouldRefreshEventsForMessage(message: DesktopRoomMessage): boolean {
   const source = (message.source || "").toLowerCase();
   const sender = (message.sender || "").toLowerCase();
   return source === "github" || sender === "github";
-}
-
-function isThreadReplyMessage(message: DesktopRoomMessage): boolean {
-  return Boolean(message.threadReplyToId || (message.threadRootId && message.threadRootId !== message.id));
 }
 
 function repoRepositoryFromRoomIdentifier(identifier: string): string | null {
