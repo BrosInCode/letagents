@@ -8,7 +8,12 @@
     @dragleave.prevent="handleAttachmentDragLeave"
     @drop.prevent="handleAttachmentDrop"
   >
-    <div class="room-chat-layout" :data-thread-open="Boolean(activeThreadParent)">
+    <div
+      class="room-chat-layout"
+      :data-thread-open="Boolean(activeThreadParent)"
+      :data-thread-resizing="isResizingThreadPane"
+      :style="threadLayoutStyle"
+    >
       <div class="room-chat-main">
         <div v-if="isDraggingAttachment" class="room-attachment-drop-overlay" data-testid="room-attachment-drop-overlay">
           <span>Drop files to attach</span>
@@ -36,6 +41,7 @@
           @open-image="openImageViewer"
           @open-thread="openThread"
           @quote-reply="quoteReply"
+          @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
           @scroll-position="emit('scroll-position', $event)"
         />
@@ -88,52 +94,69 @@
         />
       </div>
 
-      <Transition name="room-thread-backdrop">
-        <button
-          v-if="activeThreadParent"
-          class="room-thread-backdrop"
-          type="button"
-          aria-label="Close thread"
-          @click="closeThread"
-        ></button>
-      </Transition>
+      <button
+        v-if="activeThreadParent"
+        class="room-thread-backdrop"
+        type="button"
+        aria-label="Close thread"
+        @click="closeThread"
+      ></button>
 
-      <Transition name="room-thread-drawer">
-        <RoomThreadPanel
-          v-if="activeThreadPanelParent"
-          :parent="activeThreadPanelParent"
-          :initial-thread-summary="activeThreadInitialSummary"
-          :replies="activeThreadReplies"
-          :participants="participants"
-          :room-identifier="roomIdentifier"
-          :sending="sending"
-          :send-error="sendError"
-          :attaching="threadAttaching"
-          :attachment-drafts="threadAttachmentDrafts"
-          :attachment-error="threadAttachmentError"
-          :pending-attachment-drafts="threadPendingAttachmentDrafts"
-          :has-older-replies="activeThreadHasOlder"
-          :loading-older-replies="loadingOlderThreadReplies"
-          :search-query="searchQuery"
-          :active-search-message-id="activeSearchMessageId"
-          @close="closeThread"
-          @open-image="openImageViewer"
-          @open-agent="openAgentModal"
-          @open-github-event="emit('open-github-event', $event)"
-          @jump-message="jumpToMessage"
-          @load-older-replies="loadOlderThreadReplies"
-          @pick-attachments="pickThreadAttachments"
-          @remove-attachment="removeThreadAttachment"
-          @stage-dropped-attachments="stageThreadDroppedAttachments"
-          @send-thread-message="sendThreadMessage"
-        />
-      </Transition>
+      <div
+        v-if="activeThreadParent"
+        class="room-thread-resize-handle"
+        role="separator"
+        tabindex="0"
+        aria-label="Resize thread pane"
+        aria-orientation="vertical"
+        :aria-valuemin="threadPaneMinWidth"
+        :aria-valuemax="maxThreadPaneWidth()"
+        :aria-valuenow="threadPaneWidth"
+        :data-resizing="isResizingThreadPane"
+        title="Drag to resize thread pane"
+        @pointerdown="startThreadPaneResize"
+        @keydown.left.prevent="adjustThreadPaneWidth(threadResizeStep)"
+        @keydown.right.prevent="adjustThreadPaneWidth(-threadResizeStep)"
+        @keydown.home.prevent="setThreadPaneWidth(threadPaneMinWidth)"
+        @keydown.end.prevent="setThreadPaneWidth(maxThreadPaneWidth())"
+        @dblclick="resetThreadPaneWidth"
+      ></div>
+
+      <RoomThreadPanel
+        v-if="activeThreadPanelParent"
+        :parent="activeThreadPanelParent"
+        :initial-thread-summary="activeThreadInitialSummary"
+        :replies="activeThreadReplies"
+        :participants="participants"
+        :room-identifier="roomIdentifier"
+        :sending="sending"
+        :send-error="sendError"
+        :attaching="threadAttaching"
+        :attachment-drafts="threadAttachmentDrafts"
+        :attachment-error="threadAttachmentError"
+        :pending-attachment-drafts="threadPendingAttachmentDrafts"
+        :has-older-replies="activeThreadHasOlder"
+        :loading-older-replies="loadingOlderThreadReplies"
+        :search-query="searchQuery"
+        :active-search-message-id="activeSearchMessageId"
+        @close="closeThread"
+        @open-image="openImageViewer"
+        @open-agent="openAgentModal"
+        @open-github-event="emit('open-github-event', $event)"
+        @jump-message="jumpToMessage"
+        @load-older-replies="loadOlderThreadReplies"
+        @pick-attachments="pickThreadAttachments"
+        @remove-attachment="removeThreadAttachment"
+        @stage-dropped-attachments="stageThreadDroppedAttachments"
+        @send-thread-message="sendThreadMessage"
+      />
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
+import type { CSSProperties } from "vue";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
@@ -200,11 +223,24 @@ const emit = defineEmits<{
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
 }>();
 
+interface RoomReplyTarget extends DesktopRoomMessage {
+  isSelection?: boolean;
+  sourceMessageId?: string | null;
+}
+
+const threadLayoutAnimationMs = 250;
+const threadPaneMinWidth = 320;
+const threadPaneDefaultWidth = 380;
+const threadPaneHardMaxWidth = 560;
+const threadPaneMinRoomWidth = 560;
+const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
-const replyTarget = ref<DesktopRoomMessage | null>(null);
+const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
 const transientHighlightMessageId = ref<string | null>(null);
+const threadPaneWidth = ref(threadPaneDefaultWidth);
+const isResizingThreadPane = ref(false);
 const fetchedThreadRootId = ref<string | null>(null);
 const fetchedThreadRoot = ref<DesktopRoomMessage | null>(null);
 const fetchedThreadReplies = ref<DesktopRoomMessage[]>([]);
@@ -214,8 +250,12 @@ const threadSummaryOverrides = ref(new Map<string, DesktopRoomMessageThreadSumma
 const openedThreadSummaries = ref(new Map<string, DesktopRoomMessageThreadSummary>());
 const lastMarkedThreadReadKey = ref<string | null>(null);
 let transientHighlightTimeout: number | null = null;
+let threadPaneResizeState: { startX: number; startWidth: number; cursor: string; userSelect: string } | null = null;
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
+const threadLayoutStyle = computed<CSSProperties>(() => ({
+  "--room-thread-pane-width": `${threadPaneWidth.value}px`,
+}));
 const activeThreadParent = computed(() =>
   fetchedThreadRootId.value === activeThreadParentId.value && fetchedThreadRoot.value
     ? applyThreadSummaryOverride(fetchedThreadRoot.value)
@@ -298,6 +338,7 @@ function openThread(messageId: string): void {
     threadReturnFocusElement.value = document.activeElement;
   }
   if (activeThreadParentId.value !== messageId) {
+    messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
     clearThreadAttachmentDrafts();
   }
   forgetOpenedThreadSummary(messageId);
@@ -309,17 +350,107 @@ function quoteReply(messageId: string): void {
   replyTarget.value = threadMessagesWithThreadOverrides.value.find((message) => message.id === messageId) ?? null;
 }
 
+function quoteSelectedText(messageId: string, selectedText: string): void {
+  const target = threadMessagesWithThreadOverrides.value.find((message) => message.id === messageId) ?? null;
+  const text = selectedText.trim();
+  replyTarget.value = target && text
+    ? {
+        ...target,
+        id: `selection:${target.id}`,
+        text,
+        attachments: [],
+        threadRootId: `selection:${target.id}`,
+        threadReplyToId: null,
+        thread: null,
+        replyTo: null,
+        isSelection: true,
+        sourceMessageId: target.id,
+      }
+    : null;
+}
+
 function clearReplyTarget(): void {
   replyTarget.value = null;
 }
 
 function closeThread(): void {
+  messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
   activeThreadParentId.value = null;
   clearThreadAttachmentDrafts();
   void nextTick(() => {
-    threadReturnFocusElement.value?.focus();
+    threadReturnFocusElement.value?.focus({ preventScroll: true });
     threadReturnFocusElement.value = null;
   });
+}
+
+function startThreadPaneResize(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
+  threadPaneResizeState = {
+    startX: event.clientX,
+    startWidth: threadPaneWidth.value,
+    cursor: document.body.style.cursor,
+    userSelect: document.body.style.userSelect,
+  };
+  isResizingThreadPane.value = true;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  window.addEventListener("pointermove", handleThreadPaneResize);
+  window.addEventListener("pointerup", stopThreadPaneResize);
+  window.addEventListener("pointercancel", stopThreadPaneResize);
+}
+
+function handleThreadPaneResize(event: PointerEvent): void {
+  const state = threadPaneResizeState;
+  if (!state) return;
+  event.preventDefault();
+  messageViewport.value?.preserveScrollAnchorOnNextLayout(80);
+  setThreadPaneWidth(state.startWidth + state.startX - event.clientX, false);
+}
+
+function stopThreadPaneResize(): void {
+  const state = threadPaneResizeState;
+  if (state) {
+    document.body.style.cursor = state.cursor;
+    document.body.style.userSelect = state.userSelect;
+  }
+  threadPaneResizeState = null;
+  isResizingThreadPane.value = false;
+  window.removeEventListener("pointermove", handleThreadPaneResize);
+  window.removeEventListener("pointerup", stopThreadPaneResize);
+  window.removeEventListener("pointercancel", stopThreadPaneResize);
+}
+
+function adjustThreadPaneWidth(delta: number): void {
+  setThreadPaneWidth(threadPaneWidth.value + delta);
+}
+
+function resetThreadPaneWidth(): void {
+  setThreadPaneWidth(threadPaneDefaultWidth);
+}
+
+function setThreadPaneWidth(width: number, preserveAnchor = true): void {
+  const nextWidth = clampThreadPaneWidth(width);
+  if (nextWidth === threadPaneWidth.value) return;
+  if (preserveAnchor) {
+    messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
+  }
+  threadPaneWidth.value = nextWidth;
+}
+
+function clampThreadPaneWidth(width: number): number {
+  return Math.round(Math.min(Math.max(width, threadPaneMinWidth), maxThreadPaneWidth()));
+}
+
+function maxThreadPaneWidth(): number {
+  if (typeof window === "undefined") return threadPaneHardMaxWidth;
+  const viewportLimitedMax = window.innerWidth - threadPaneMinRoomWidth;
+  return Math.max(threadPaneMinWidth, Math.min(threadPaneHardMaxWidth, viewportLimitedMax));
+}
+
+function clampThreadPaneToViewport(): void {
+  threadPaneWidth.value = clampThreadPaneWidth(threadPaneWidth.value);
 }
 
 function sendThreadMessage(
@@ -520,7 +651,11 @@ watch(
     if (activeThreadParentId.value && !activeThreadParent.value) {
       activeThreadParentId.value = null;
     }
-    if (replyTarget.value && !threadMessagesWithThreadOverrides.value.some((message) => message.id === replyTarget.value?.id)) {
+    if (
+      replyTarget.value &&
+      !replyTarget.value.isSelection &&
+      !threadMessagesWithThreadOverrides.value.some((message) => message.id === replyTarget.value?.id)
+    ) {
       clearReplyTarget();
     }
   },
@@ -534,9 +669,16 @@ watch(
   },
 );
 
+onMounted(() => {
+  clampThreadPaneToViewport();
+  window.addEventListener("resize", clampThreadPaneToViewport);
+});
+
 defineExpose({ openThread });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("resize", clampThreadPaneToViewport);
+  stopThreadPaneResize();
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);
   }

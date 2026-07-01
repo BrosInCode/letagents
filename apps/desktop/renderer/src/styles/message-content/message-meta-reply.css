@@ -13,6 +13,15 @@
   margin-bottom: 0;
 }
 
+.room-chat-message.is-compact-continuation .room-message-meta {
+  gap: 8px;
+  opacity: 0.74;
+}
+
+.room-chat-message.is-compact-continuation .room-message-author-block {
+  gap: 6px;
+}
+
 .room-message-author-block strong {
   min-width: 0;
   overflow: hidden;
@@ -47,6 +56,19 @@
   outline: 2px solid rgba(147, 197, 253, 0.62);
   outline-offset: 3px;
   border-radius: 6px;
+}
+
+.room-chat-message.is-compact-continuation .room-message-author-block strong,
+.room-chat-message.is-compact-continuation .room-message-author-button {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.room-chat-message.is-compact-continuation .room-message-owner,
+.room-chat-message.is-compact-continuation .room-message-ide,
+.room-chat-message.is-compact-continuation .room-message-provenance {
+  display: none;
 }
 
 .room-message-author-block time,
@@ -115,6 +137,10 @@
   margin-left: auto;
 }
 
+.room-chat-message.is-compact-continuation .room-message-meta-tail {
+  gap: 5px;
+}
+
 .room-message-provenance {
   color: var(--text-tertiary);
   text-transform: uppercase;
@@ -152,6 +178,11 @@
   opacity: 0;
   transform: translateY(2px);
   transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
+}
+
+.room-message-copy-action {
+  opacity: 0.72;
+  transform: none;
 }
 
 .room-message-reply-action svg {
@@ -200,6 +231,34 @@
 .room-message-context-menu button:focus-visible {
   background: rgba(255, 255, 255, 0.065);
   color: var(--text);
+}
+
+.room-selection-popover {
+  position: fixed;
+  z-index: 120;
+  transform: translateX(-50%);
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(18, 18, 18, 0.98);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34);
+}
+
+.room-selection-popover button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--text);
+  color: #080808;
+  font-size: 0.76rem;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.room-selection-popover button:hover,
+.room-selection-popover button:focus-visible {
+  background: rgba(255, 255, 255, 0.86);
 }
 
 .room-message-reply {

@@ -1,67 +1,38 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
-    <div class="desktop-composer-identity">
-      <span>{{ composerTargetLabel }}</span>
-    </div>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
-        <strong>Replying to {{ displaySender(replyTo.sender) }}</strong>
+        <strong>{{ replyHeading }}</strong>
         <span>{{ replyPreview(replyTo.text) }}</span>
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
-    <textarea
-      ref="textareaElement"
-      v-model="draft"
-      class="desktop-composer-input"
-      rows="3"
-      :placeholder="composerPlaceholder"
-      :disabled="roomLoading || !roomIdentifier"
-      data-testid="desktop-composer-input"
-      @input="handleDraftInput"
-      @keydown.down.prevent="moveMentionSelection(1)"
-      @keydown.up.prevent="moveMentionSelection(-1)"
-      @keydown.enter="handleEnterKey"
-      @keydown.escape="mentionOpen = false"
-    />
-    <DesktopAttachmentDrafts
-      :attachments="attachmentDrafts"
-      :pending-attachments="pendingAttachmentDrafts"
-      @remove="$emit('remove-attachment', $event)"
-    />
-    <div v-if="mentionOpen" class="desktop-mention-panel" data-testid="desktop-mention-panel">
+    <div class="desktop-composer-input-row">
       <button
-        v-for="(candidate, index) in mentionCandidates"
-        :key="candidate.participantKey"
-        class="desktop-mention-option"
-        :data-active="index === activeMentionIndex"
-        :data-testid="`desktop-mention-option-${candidate.participantKey}`"
+        class="desktop-composer-add-agent"
         type="button"
-        @click="insertMention(candidate.displayName)"
+        :disabled="roomLoading || !roomIdentifier"
+        :title="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
+        :aria-label="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
+        data-testid="desktop-composer-add-agent"
+        @click="$emit('open-add-agent')"
       >
-        <span>{{ candidate.displayName }}</span>
-        <small>{{ candidate.kind === 'agent' ? 'Agent' : 'Human' }}</small>
+        <Plus :size="18" aria-hidden="true" />
       </button>
-    </div>
-    <div class="desktop-composer-footer">
-      <p v-if="sendError || attachmentError" class="desktop-composer-error" data-testid="desktop-composer-error">
-        {{ sendError || attachmentError }}
-      </p>
-      <p v-else class="desktop-composer-hint">
-        <span>{{ composerHint }}</span>
-        <button
-          v-if="roomIdentifier"
-          class="desktop-composer-add-agent"
-          type="button"
-          title="Add agent to room"
-          aria-label="Add agent to room"
-          data-testid="desktop-composer-add-agent"
-          @click="$emit('open-add-agent')"
-        >
-          <Bot :size="14" aria-hidden="true" />
-          <Plus :size="12" aria-hidden="true" />
-        </button>
-      </p>
+      <textarea
+        ref="textareaElement"
+        v-model="draft"
+        class="desktop-composer-input"
+        rows="1"
+        :aria-label="composerInputLabel"
+        :disabled="roomLoading || !roomIdentifier"
+        data-testid="desktop-composer-input"
+        @input="handleDraftInput"
+        @keydown.down.prevent="moveMentionSelection(1)"
+        @keydown.up.prevent="moveMentionSelection(-1)"
+        @keydown.enter="handleEnterKey"
+        @keydown.escape="mentionOpen = false"
+      />
       <button
         class="desktop-composer-attach"
         type="button"
@@ -85,20 +56,51 @@
         {{ sending ? "Sending..." : "Send" }}
       </button>
     </div>
+    <DesktopAttachmentDrafts
+      :attachments="attachmentDrafts"
+      :pending-attachments="pendingAttachmentDrafts"
+      @remove="$emit('remove-attachment', $event)"
+    />
+    <div v-if="mentionOpen" class="desktop-mention-panel" data-testid="desktop-mention-panel">
+      <button
+        v-for="(candidate, index) in mentionCandidates"
+        :key="candidate.participantKey"
+        class="desktop-mention-option"
+        :data-active="index === activeMentionIndex"
+        :data-testid="`desktop-mention-option-${candidate.participantKey}`"
+        type="button"
+        @click="insertMention(candidate.displayName)"
+      >
+        <span>{{ candidate.displayName }}</span>
+        <small>{{ candidate.kind === 'agent' ? 'Agent' : 'Human' }}</small>
+      </button>
+    </div>
+    <div v-if="sendError || attachmentError" class="desktop-composer-footer">
+      <p class="desktop-composer-error" data-testid="desktop-composer-error">
+        {{ sendError || attachmentError }}
+      </p>
+    </div>
   </form>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Bot, Plus } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Plus } from "@lucide/vue";
 import type {
   DesktopParticipantSummary,
-  DesktopRoomMessage,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import { isMentionableRoomParticipant } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
-import { displaySender, replyPreview } from "./message-format";
+import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
+
+export interface RoomComposerReplyTarget {
+  id: string;
+  sender: string;
+  text: string;
+  isSelection?: boolean;
+  sourceMessageId?: string | null;
+}
 
 const props = defineProps<{
   attaching: boolean;
@@ -107,7 +109,7 @@ const props = defineProps<{
   initialDraft?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
-  replyTo: DesktopRoomMessage | null;
+  replyTo: RoomComposerReplyTarget | null;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sendError: string | null;
@@ -123,6 +125,7 @@ const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
 }>();
 
+const maxComposerInputHeight = 156;
 const draft = ref(props.initialDraft || "");
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const mentionQuery = ref<string | null>(null);
@@ -131,16 +134,15 @@ const activeMentionIndex = ref(0);
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
 );
-const composerTargetLabel = computed(() => props.roomIdentifier ? "Message the room" : "No room selected");
-const composerPlaceholder = computed(() => {
-  if (props.roomLoading) return "Loading room...";
-  return props.roomIdentifier ? "Message teammates and agents..." : "Choose a room to start writing";
+const composerInputLabel = computed(() => {
+  if (props.roomLoading) return "Room messages are loading";
+  return props.roomIdentifier ? "Message room" : "Choose a room before writing";
 });
-const composerHint = computed(() => {
-  if (props.roomLoading) return "Room messages and participants are loading.";
-  return props.roomIdentifier
-    ? "Use @ to bring a person or agent into the conversation."
-    : "Select a room from the sidebar to enable chat.";
+const replyHeading = computed(() => {
+  const target = props.replyTo;
+  if (!target) return "";
+  const sender = displaySender(target.sender);
+  return target.isSelection ? `Quoting selection from ${sender}` : `Replying to ${sender}`;
 });
 const mentionOpen = computed({
   get: () => mentionQuery.value !== null && mentionCandidates.value.length > 0,
@@ -162,6 +164,7 @@ watch(
     draft.value = props.initialDraft || "";
     emit("draft-change", draft.value);
     mentionQuery.value = null;
+    void nextTick(syncTextareaHeight);
   },
 );
 
@@ -174,6 +177,18 @@ watch(
   },
 );
 
+watch(
+  draft,
+  () => {
+    void nextTick(syncTextareaHeight);
+  },
+  { flush: "post" },
+);
+
+onMounted(() => {
+  void nextTick(syncTextareaHeight);
+});
+
 onBeforeUnmount(() => {
   emit("draft-change", draft.value);
 });
@@ -181,10 +196,14 @@ onBeforeUnmount(() => {
 function submitMessage(): void {
   const text = draft.value.trim();
   if (!text && props.attachmentDrafts.length === 0) return;
+  const replyTarget = props.replyTo;
+  const messageText = replyTarget?.isSelection
+    ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
+    : text;
   emit(
     "send-message",
-    text,
-    props.replyTo?.id || null,
+    messageText,
+    replyTarget?.isSelection ? null : replyTarget?.id || null,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
   );
   draft.value = "";
@@ -249,5 +268,14 @@ function insertMention(displayName: string): void {
 
 function syncDraftToShell(): void {
   emit("draft-change", draft.value);
+}
+
+function syncTextareaHeight(): void {
+  const input = textareaElement.value;
+  if (!input) return;
+  input.style.height = "auto";
+  const nextHeight = Math.min(input.scrollHeight, maxComposerInputHeight);
+  input.style.height = `${Math.max(nextHeight, 34)}px`;
+  input.style.overflowY = input.scrollHeight > maxComposerInputHeight ? "auto" : "hidden";
 }
 </script>

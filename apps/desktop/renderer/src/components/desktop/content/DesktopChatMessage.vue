@@ -7,11 +7,13 @@
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
+      'is-compact-continuation': compactWithPrevious,
     }"
     :data-owner-kind="ownerKind"
     :data-message-id="message.id"
     :data-testid="`room-message-${message.id}`"
     @contextmenu="openContextMenu"
+    @pointerup="handleSelectionPointerUp"
   >
     <div
       class="room-chat-avatar"
@@ -38,6 +40,16 @@
           </span>
         </div>
         <div class="room-message-meta-tail">
+          <button
+            class="room-message-reply-action room-message-copy-action"
+            type="button"
+            :title="copyButtonTitle"
+            :aria-label="copyButtonTitle"
+            @click="copyMessage"
+          >
+            <Check v-if="copied" :size="14" aria-hidden="true" />
+            <Copy v-else :size="14" aria-hidden="true" />
+          </button>
           <button
             class="room-message-reply-action room-message-quote-action"
             type="button"
@@ -140,19 +152,36 @@
       @pointerdown.stop
       @contextmenu.prevent.stop
     >
-      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="quoteReplyFromContext">
+      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
+        <span>Copy message</span>
+      </button>
+      <button type="button" role="menuitem" @click="quoteReplyFromContext">
         <span>Quote reply</span>
       </button>
       <button type="button" role="menuitem" @click="openThreadFromContext">
         <span>Reply in thread</span>
       </button>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="selectionPopoverOpen"
+        class="room-selection-popover"
+        :style="{ left: `${selectionPopoverPosition.x}px`, top: `${selectionPopoverPosition.y}px` }"
+        data-testid="room-selection-popover"
+        @pointerdown.stop.prevent
+      >
+        <button type="button" @click="addSelectionToChat">
+          Add to chat
+        </button>
+      </div>
+    </Teleport>
   </article>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-import { CornerUpLeft, MessageSquare } from "@lucide/vue";
+import { Check, Copy, CornerUpLeft, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
@@ -172,6 +201,7 @@ import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 
 const props = defineProps<{
   message: DesktopRoomMessage;
+  compactWithPrevious?: boolean;
   threadSummary: ThreadIndicatorSummary;
   activeThreadRoot: boolean;
   highlightQuery: string;
@@ -185,11 +215,18 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
   "open-github-event": [url: string];
+  "quote-selection": [messageId: string, text: string];
 }>();
 
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
+const copied = ref(false);
+const selectionPopoverOpen = ref(false);
+const selectionPopoverPosition = ref({ x: 0, y: 0 });
+const selectedQuoteText = ref("");
+let copyResetTimeout: number | null = null;
+let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
 const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
 const ownerAttribution = computed(() => props.message.agentIdentity?.ownerAttribution || identity.value.ownerAttribution);
@@ -210,6 +247,7 @@ const replyDisplayName = computed(() =>
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
 const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
+const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const threadIndicatorVisible = computed(() =>
   props.threadSummary.count > 0 || props.threadSummary.hasPartialHistory || props.threadSummary.loadingEarlier
 );
@@ -255,8 +293,9 @@ function openContextMenu(event: MouseEvent): void {
     return;
   }
   event.preventDefault();
+  closeSelectionPopover();
   const menuWidth = 180;
-  const menuHeight = 86;
+  const menuHeight = 122;
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -301,7 +340,138 @@ function openThreadFromContext(): void {
   emit("open-thread", props.message.id);
 }
 
+async function copyFromContext(): Promise<void> {
+  closeContextMenu();
+  await copyMessage();
+}
+
+async function copyMessage(): Promise<void> {
+  const text = messageCopyText();
+  if (!text) return;
+  const clipboard = navigator.clipboard;
+  if (!clipboard?.writeText) {
+    copied.value = false;
+    return;
+  }
+  try {
+    await clipboard.writeText(text);
+    copied.value = true;
+    if (copyResetTimeout !== null) {
+      window.clearTimeout(copyResetTimeout);
+    }
+    copyResetTimeout = window.setTimeout(() => {
+      copied.value = false;
+      copyResetTimeout = null;
+    }, 1400);
+  } catch {
+    copied.value = false;
+  }
+}
+
+function messageCopyText(): string {
+  const text = props.message.text.trim();
+  if (text) return text;
+  if (props.message.attachments.length === 1) {
+    return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
+  }
+  if (props.message.attachments.length > 1) {
+    return props.message.attachments
+      .map((attachment) => attachment.fileName || attachment.name || "attachment")
+      .join("\n");
+  }
+  return "";
+}
+
+function handleSelectionPointerUp(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  window.setTimeout(() => {
+    const selection = window.getSelection();
+    const selectedText = normalizedSelectedText(selection);
+    if (!selection || !selectedText || !selection.rangeCount) {
+      closeSelectionPopover();
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    const container = range.commonAncestorContainer;
+    const containerElement = container.nodeType === Node.ELEMENT_NODE
+      ? container as Element
+      : container.parentElement;
+    if (!article || !containerElement || !article.contains(containerElement)) {
+      closeSelectionPopover();
+      return;
+    }
+
+    const bounds = range.getBoundingClientRect();
+    if (!bounds.width && !bounds.height) {
+      closeSelectionPopover();
+      return;
+    }
+
+    selectedQuoteText.value = selectedText;
+    selectionPopoverPosition.value = {
+      x: Math.max(8, Math.min(bounds.left + bounds.width / 2, window.innerWidth - 112)),
+      y: Math.max(8, bounds.top - 42),
+    };
+    contextMenuOpen.value = false;
+    selectionPopoverOpen.value = true;
+    addSelectionOutsidePointerListener();
+    window.addEventListener("keydown", handleSelectionKeydown);
+  }, 0);
+}
+
+function addSelectionToChat(): void {
+  const text = selectedQuoteText.value.trim();
+  if (!text) return;
+  emit("quote-selection", props.message.id, text);
+  window.getSelection()?.removeAllRanges();
+  closeSelectionPopover();
+}
+
+function handleSelectionOutsidePointerDown(event: PointerEvent): void {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest(".room-selection-popover")) {
+    return;
+  }
+  closeSelectionPopover();
+}
+
+function handleSelectionKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    closeSelectionPopover();
+  }
+}
+
+function closeSelectionPopover(): void {
+  selectionPopoverOpen.value = false;
+  selectedQuoteText.value = "";
+  removeSelectionOutsidePointerListener();
+  window.removeEventListener("keydown", handleSelectionKeydown);
+}
+
+function addSelectionOutsidePointerListener(): void {
+  if (selectionOutsideListenerActive) return;
+  selectionOutsideListenerActive = true;
+  window.addEventListener("pointerdown", handleSelectionOutsidePointerDown);
+}
+
+function removeSelectionOutsidePointerListener(): void {
+  if (!selectionOutsideListenerActive) return;
+  selectionOutsideListenerActive = false;
+  window.removeEventListener("pointerdown", handleSelectionOutsidePointerDown);
+}
+
+function normalizedSelectedText(selection: Selection | null): string {
+  return selection?.toString().replace(/\r\n?/g, "\n").trim() || "";
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleContextMenuKeydown);
+  removeSelectionOutsidePointerListener();
+  window.removeEventListener("keydown", handleSelectionKeydown);
+  if (copyResetTimeout !== null) {
+    window.clearTimeout(copyResetTimeout);
+  }
 });
 </script>

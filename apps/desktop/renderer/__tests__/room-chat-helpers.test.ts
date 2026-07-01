@@ -33,6 +33,11 @@ import {
   threadReadState,
   threadReplies,
 } from "../src/components/desktop/content/room-chat/thread-utils";
+import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
+import {
+  applySelectedTextQuoteToDraft,
+  selectedTextQuoteBlock,
+} from "../src/components/desktop/content/room-chat/message-format";
 import {
   isLowSignalGitHubCheckMessage,
   parseGitHubEvent,
@@ -94,6 +99,49 @@ describe("room chat helpers", () => {
     assert.deepEqual(threadReplies(messages, "msg_1").map((message) => message.id), ["msg_3"]);
     assert.equal(summaries.get("msg_1")?.count, 1);
     assert.equal(summaries.get("msg_1")?.latest?.id, "msg_3");
+  });
+
+  it("adds date breaks and compacts short same-sender bursts", () => {
+    const messages = [
+      roomMessage("msg_1", null, "2026-05-28T12:00:00.000Z"),
+      roomMessage("msg_2", null, "2026-05-28T12:01:00.000Z"),
+      roomMessage("msg_3", null, "2026-05-29T12:00:00.000Z"),
+    ];
+
+    const entries = buildMessageTimelineEntries(messages);
+
+    assert.deepEqual(entries.map((entry) => entry.type), ["date", "message", "message", "date", "message"]);
+    assert.equal(entries[2]?.type === "message" ? entries[2].compactWithPrevious : false, true);
+    assert.equal(entries[4]?.type === "message" ? entries[4].compactWithPrevious : true, false);
+  });
+
+  it("does not compact messages across replies, attachments, or noisy senders", () => {
+    const second = roomMessage("msg_2", null, "2026-05-28T00:01:00.000Z");
+    second.attachments = [{
+      id: null,
+      name: "screen",
+      fileName: "screen.png",
+      mimeType: "image/png",
+      sizeBytes: 1,
+      url: null,
+      downloadUrl: null,
+      dataUrl: null,
+      contentBase64: null,
+    }];
+    const github = {
+      ...roomMessage("msg_3", null, "2026-05-28T00:02:00.000Z"),
+      sender: "github",
+      source: "github",
+    };
+
+    const entries = buildMessageTimelineEntries([
+      roomMessage("msg_1", null, "2026-05-28T00:00:00.000Z"),
+      second,
+      github,
+    ]);
+    const messageEntries = entries.filter((entry) => entry.type === "message");
+
+    assert.deepEqual(messageEntries.map((entry) => entry.compactWithPrevious), [false, false, false]);
   });
 
   it("merges thread summary metadata into timeline indicators", () => {
@@ -399,6 +447,17 @@ describe("room chat helpers", () => {
     assert.equal(
       renderMessageText("Hello <script> @Noether **ship** https://example.com", "ship"),
       'Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>',
+    );
+  });
+
+  it("formats selected-text quotes as the message target with optional source context", () => {
+    assert.equal(
+      selectedTextQuoteBlock("first line\n\nsecond line", "msg_42"),
+      "> first line\n>\n> second line\n\nSource message: msg_42",
+    );
+    assert.equal(
+      applySelectedTextQuoteToDraft("Adding context here", "target chunk", "msg_42"),
+      "> target chunk\n\nSource message: msg_42\n\nAdding context here",
     );
   });
 

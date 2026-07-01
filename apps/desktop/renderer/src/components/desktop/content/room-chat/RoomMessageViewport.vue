@@ -12,21 +12,33 @@
         {{ loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages" }}
       </button>
 
-      <DesktopChatMessage
-        v-for="message in messages"
-        :key="message.id"
-        :message="message"
-        :thread-summary="threadIndicatorSummary(message)"
-        :active-thread-root="message.id === activeThreadParentId"
-        :highlight-query="searchQuery"
-        :search-active="message.id === activeSearchMessageId"
-        @quote-reply="$emit('quote-reply', $event)"
-        @open-thread="$emit('open-thread', $event)"
-        @scroll-to-message="scrollToMessage"
-        @open-image="$emit('open-image', $event)"
-        @open-agent="$emit('open-agent', $event)"
-        @open-github-event="$emit('open-github-event', $event)"
-      />
+      <template v-for="entry in timelineEntries" :key="entry.id">
+        <div
+          v-if="entry.type === 'date'"
+          class="room-date-separator"
+          :datetime="entry.dateTime"
+          data-testid="room-date-separator"
+        >
+          <span>{{ entry.label }}</span>
+        </div>
+
+        <DesktopChatMessage
+          v-else
+          :message="entry.message"
+          :compact-with-previous="entry.compactWithPrevious"
+          :thread-summary="threadIndicatorSummary(entry.message)"
+          :active-thread-root="entry.message.id === activeThreadParentId"
+          :highlight-query="searchQuery"
+          :search-active="entry.message.id === activeSearchMessageId"
+          @quote-reply="$emit('quote-reply', $event)"
+          @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
+          @open-thread="$emit('open-thread', $event)"
+          @scroll-to-message="scrollToMessage"
+          @open-image="$emit('open-image', $event)"
+          @open-agent="$emit('open-agent', $event)"
+          @open-github-event="$emit('open-github-event', $event)"
+        />
+      </template>
 
       <div
         v-if="localAgentWork.length && !roomLoading"
@@ -116,6 +128,7 @@ import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
+import { buildMessageTimelineEntries } from "./timeline";
 
 interface ThreadActivityNotice {
   parentId: string;
@@ -155,6 +168,7 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "quote-reply": [messageId: string];
+  "quote-selection": [messageId: string, text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
 }>();
@@ -190,10 +204,12 @@ let shouldRestoreKeepAliveScroll = false;
 let lastKnownScrollAnchor: ScrollAnchor | null = null;
 let lastKnownScrollTop: number | null = null;
 let autoViewportBackfillFrame: number | null = null;
+let layoutAnchorRestoreFrame: number | null = null;
 let threadActivityNamespace = props.messageNamespace;
 let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
+const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages));
 
 watch(
   () => props.messages,
@@ -435,6 +451,7 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   cancelAutoFillViewport();
+  cancelLayoutAnchorRestore();
   rememberScrollAnchor();
   emitScrollPosition();
 });
@@ -458,6 +475,14 @@ function cancelAutoFillViewport(): void {
     window.cancelAnimationFrame(autoViewportBackfillFrame);
   }
   autoViewportBackfillFrame = null;
+}
+
+function cancelLayoutAnchorRestore(): void {
+  if (layoutAnchorRestoreFrame === null) return;
+  if (typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(layoutAnchorRestoreFrame);
+  }
+  layoutAnchorRestoreFrame = null;
 }
 
 function canAutoFillViewport(): boolean {
@@ -597,6 +622,48 @@ function restoreKnownScrollPosition(): boolean {
   return true;
 }
 
+function preserveScrollAnchorOnNextLayout(durationMs = 0): void {
+  const element = messagesElement.value;
+  if (!element || !isMeasurableScrollViewport(element)) return;
+  const anchor = captureScrollAnchor();
+  const scrollTop = element.scrollTop;
+  cancelLayoutAnchorRestore();
+  void nextTick(() => {
+    const startedAt = currentTimeMs();
+    const restore = (): void => {
+      const currentElement = messagesElement.value;
+      if (!currentElement || !isMeasurableScrollViewport(currentElement)) {
+        layoutAnchorRestoreFrame = null;
+        return;
+      }
+      if (!restoreScrollAnchor(anchor)) {
+        setInstantScrollTop(currentElement, scrollTop);
+        updateScrollState();
+        emitScrollPosition();
+      }
+      if (
+        durationMs <= 0 ||
+        currentTimeMs() - startedAt >= durationMs ||
+        typeof window === "undefined" ||
+        typeof window.requestAnimationFrame !== "function"
+      ) {
+        layoutAnchorRestoreFrame = null;
+        return;
+      }
+      layoutAnchorRestoreFrame = window.requestAnimationFrame(restore);
+    };
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      layoutAnchorRestoreFrame = window.requestAnimationFrame(restore);
+      return;
+    }
+    restore();
+  });
+}
+
+function currentTimeMs(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
 function captureScrollAnchor(): ScrollAnchor | null {
   const element = messagesElement.value;
   if (!element || !isMeasurableScrollViewport(element)) return null;
@@ -643,6 +710,7 @@ function threadIndicatorSummary(message: DesktopRoomMessage) {
 }
 
 defineExpose({
+  preserveScrollAnchorOnNextLayout,
   scrollToMessage,
 });
 
