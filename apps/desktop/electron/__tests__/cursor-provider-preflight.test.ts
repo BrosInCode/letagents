@@ -110,6 +110,24 @@ test("Cursor preflight blocks visible LetAgents MCP for managed MCP policies", a
   }
 });
 
+test("Cursor preflight blocks any visible MCP server for none policy", async () => {
+  const workspace = workspaceFixture("none-visible-non-letagents");
+  writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "filesystem\n");
+
+  const result = await runDesktopCursorProviderPreflight(
+    cursorProvider,
+    {
+      repoRootPath: workspace,
+      cursorMcpPolicy: "none",
+    },
+    "installed",
+  );
+
+  assert.equal(result.status, "error");
+  assert.equal(result.canStart, false);
+  assert.equal(result.message, "Cursor can still see MCP servers.");
+});
+
 test("Cursor preflight allows normal MCP policy even when LetAgents is configured", async () => {
   const workspace = workspaceFixture("normal-with-letagents");
   mkdirSync(join(workspace, ".cursor"), { recursive: true });

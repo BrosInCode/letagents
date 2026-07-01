@@ -201,8 +201,7 @@
                 <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
                 <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
                 <small>
-                  {{ managedAgentSessionStatusLabel(session) }} - {{ managedAgentPermissionProfileLabel(session) }} -
-                  {{ managedAgentRepoDetail(session) }}
+                  {{ managedAgentSessionDetail(session) }}
                 </small>
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
@@ -312,6 +311,7 @@ import {
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
   cursorMcpPolicyDescription,
+  cursorMcpPolicyLabel,
   cursorMcpPolicyOptions,
   defaultCursorMcpPolicy,
   externalMcpProviderJoinPrompt,
@@ -398,6 +398,7 @@ const selectedPermissionProfile = computed(() =>
 const canStartManagedAgent = computed(() =>
   Boolean(
     preflight.value?.canStart &&
+    !loadingPreflight.value &&
     (
       !selectedPermissionProfiles.value.length ||
       selectedPermissionProfile.value?.status === "available"
@@ -497,6 +498,7 @@ watch(
   () => selectedCursorMcpPolicy.value,
   () => {
     if (props.open && selectedProviderId.value === "cursor") {
+      preflight.value = null;
       void runPreflight();
     }
   },
@@ -656,6 +658,15 @@ function permissionProfileOptionSummary(profile: DesktopManagedAgentPermissionPr
     return profile.description;
   }
   return `${managedAgentPermissionProfileStatusLabel(profile.status)} - ${profile.detail || profile.description}`;
+}
+
+function managedAgentSessionDetail(session: DesktopManagedAgentSession): string {
+  return [
+    managedAgentSessionStatusLabel(session),
+    managedAgentPermissionProfileLabel(session),
+    session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
+    managedAgentRepoDetail(session),
+  ].filter(Boolean).join(" - ");
 }
 
 function resetTransientState(): void {

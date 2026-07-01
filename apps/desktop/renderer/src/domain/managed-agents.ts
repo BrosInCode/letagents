@@ -189,6 +189,14 @@ export function cursorMcpPolicyDescription(
     "Use my MCPs except LetAgents.";
 }
 
+export function cursorMcpPolicyLabel(
+  policy: DesktopCursorMcpPolicy | null | undefined,
+): string {
+  return cursorMcpPolicyOptions.find((option) => option.id === policy)?.label ??
+    cursorMcpPolicyOptions[0]?.label ??
+    "Filter LetAgents";
+}
+
 export function shouldShowCursorMcpPolicySelector(
   provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
 ): boolean {

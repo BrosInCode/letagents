@@ -102,6 +102,25 @@ test("Cursor managed profile writes an empty MCP config for none policy", () => 
   assert.equal(readFileSync(join(managedHome, ".cursor", "mcp.json"), "utf-8"), '{"mcpServers":{}}\n');
 });
 
+test("Cursor managed profile rejects workspace MCP servers for none policy", () => {
+  const sourceHome = join(tempDir, "source-home-none-workspace");
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  const workspace = join(tempDir, "workspace-none-with-non-letagents-mcp");
+  mkdirSync(join(workspace, ".cursor"), { recursive: true });
+  writeFileSync(join(workspace, ".cursor", "mcp.json"), '{"mcpServers":{"filesystem":{"command":"npx"}}}\n');
+
+  assert.throws(
+    () => prepareCursorManagedProfile({
+      sourceHomeDir: sourceHome,
+      homeDir: join(tempDir, "managed-home-none-reject"),
+      workspaceRoot: workspace,
+      mcpPolicy: "none",
+    }),
+    /workspace MCP config is not allowed with the No MCPs policy/,
+  );
+  assert.equal(existsSync(join(tempDir, "managed-home-none-reject")), false);
+});
+
 test("Cursor managed profile uses normal Cursor config without creating a managed profile", () => {
   const sourceHome = join(tempDir, "source-home-normal");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });

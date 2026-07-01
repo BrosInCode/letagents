@@ -16,6 +16,7 @@ import {
   agentProviderNeedsDesktopRepo,
   canStopManagedAgentTurn,
   cursorMcpPolicyDescription,
+  cursorMcpPolicyLabel,
   cursorMcpPolicyOptions,
   defaultCursorMcpPolicy,
   externalMcpProviderJoinPrompt,
@@ -193,6 +194,8 @@ test("Cursor MCP policy selector metadata defaults to filtering LetAgents", () =
   );
   assert.equal(cursorMcpPolicyDescription("filter_letagents"), "Use my MCPs except LetAgents.");
   assert.equal(cursorMcpPolicyDescription("normal"), "Use my normal Cursor MCP setup as-is.");
+  assert.equal(cursorMcpPolicyLabel("normal"), "Normal Cursor MCPs");
+  assert.equal(cursorMcpPolicyLabel(null), "Filter LetAgents");
 });
 
 test("Cursor MCP policy selector only shows for desktop-managed Cursor", () => {

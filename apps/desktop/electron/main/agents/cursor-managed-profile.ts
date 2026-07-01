@@ -37,7 +37,9 @@ export function prepareCursorManagedProfile(
 ): CursorManagedProfile {
   const mcpPolicy = normalizeCursorMcpPolicy(options.mcpPolicy);
   const workspaceRoot = normalizePath(options.workspaceRoot);
-  if (mcpPolicy !== "normal" && workspaceRoot) {
+  if (mcpPolicy === "none" && workspaceRoot) {
+    assertWorkspaceDoesNotConfigureAnyCursorMcp(workspaceRoot);
+  } else if (mcpPolicy === "filter_letagents" && workspaceRoot) {
     assertWorkspaceDoesNotConfigureLetAgentsMcp(workspaceRoot);
   }
 
@@ -110,22 +112,23 @@ export function normalizeCursorMcpPolicy(
 }
 
 export function assertWorkspaceDoesNotConfigureLetAgentsMcp(workspaceRoot: string): void {
-  const mcpPath = join(resolve(workspaceRoot), ".cursor", "mcp.json");
-  if (!existsSync(mcpPath)) {
-    return;
-  }
+  const config = readWorkspaceCursorMcpConfig(workspaceRoot);
+  if (!config) return;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Cursor workspace MCP config is invalid at ${mcpPath}: ${detail}`);
-  }
-
-  if (mcpConfigMentionsLetAgents(parsed)) {
+  if (mcpConfigMentionsLetAgents(config)) {
     throw new Error(
       "Cursor workspace MCP config exposes LetAgents. Remove .cursor/mcp.json LetAgents entries before starting a managed Cursor agent.",
+    );
+  }
+}
+
+export function assertWorkspaceDoesNotConfigureAnyCursorMcp(workspaceRoot: string): void {
+  const config = readWorkspaceCursorMcpConfig(workspaceRoot);
+  if (!config) return;
+
+  if (mcpConfigHasServers(config)) {
+    throw new Error(
+      "Cursor workspace MCP config is not allowed with the No MCPs policy. Remove .cursor/mcp.json MCP entries before starting a managed Cursor agent.",
     );
   }
 }
@@ -220,6 +223,14 @@ function mcpConfigMentionsLetAgents(value: unknown): boolean {
   return Object.entries(servers).some(([name, config]) => mcpServerMentionsLetAgents(name, config));
 }
 
+function mcpConfigHasServers(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const servers = (value as { mcpServers?: unknown }).mcpServers;
+  return Boolean(servers && typeof servers === "object" && !Array.isArray(servers) && Object.keys(servers).length);
+}
+
 function mcpServerMentionsLetAgents(name: string, config: unknown): boolean {
   const normalizedName = name.trim().toLowerCase();
   if (normalizedName === "letagents" || normalizedName.includes("letagents")) {
@@ -229,6 +240,20 @@ function mcpServerMentionsLetAgents(name: string, config: unknown): boolean {
     return JSON.stringify(config).toLowerCase().includes("letagents");
   } catch {
     return false;
+  }
+}
+
+function readWorkspaceCursorMcpConfig(workspaceRoot: string): unknown | null {
+  const mcpPath = join(resolve(workspaceRoot), ".cursor", "mcp.json");
+  if (!existsSync(mcpPath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(readFileSync(mcpPath, "utf-8"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cursor workspace MCP config is invalid at ${mcpPath}: ${detail}`);
   }
 }
 

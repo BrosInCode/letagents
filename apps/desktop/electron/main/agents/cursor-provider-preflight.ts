@@ -136,6 +136,18 @@ export async function runDesktopCursorProviderPreflight(
         mcpStatus,
       };
     }
+    if (cursorMcpPolicy === "none" && mcpListHasVisibleServers(mcpResult)) {
+      return {
+        providerId: provider.id,
+        status: "error",
+        canStart: false,
+        message: "Cursor can still see MCP servers.",
+        detail: "The No MCPs policy must not expose any Cursor MCP servers. Remove project-level MCP config or repair the managed profile.",
+        nextAction: null,
+        version,
+        mcpStatus,
+      };
+    }
   }
 
   return {
@@ -192,6 +204,16 @@ function firstOutputLine(result: ExecResult): string | null {
 
 function mentionsLetAgentsMcp(result: ExecResult): boolean {
   return `${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents");
+}
+
+function mcpListHasVisibleServers(result: ExecResult): boolean {
+  const output = `${result.stdout}\n${result.stderr}`.trim().toLowerCase();
+  return Boolean(
+    output &&
+    output !== "[]" &&
+    !output.includes("no mcp") &&
+    !output.includes("no servers"),
+  );
 }
 
 function cursorPreflightReadyDetail(
