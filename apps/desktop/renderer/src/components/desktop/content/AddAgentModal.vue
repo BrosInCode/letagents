@@ -96,7 +96,63 @@
             </section>
 
             <section
-              v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime')"
+              v-if="showOpenModelConfig"
+              class="desktop-add-agent-open-model-config"
+              data-testid="desktop-add-agent-open-model-config"
+              aria-label="Open model configuration"
+            >
+              <span>Model endpoint</span>
+              <label>
+                <small>Endpoint URL (OpenAI-compatible)</small>
+                <input
+                  v-model="openModelBaseUrl"
+                  type="url"
+                  placeholder="https://openrouter.ai/api/v1"
+                  data-testid="desktop-add-agent-open-model-base-url"
+                />
+              </label>
+              <label>
+                <small>Model</small>
+                <input
+                  v-model="openModelModel"
+                  type="text"
+                  placeholder="qwen/qwen3-coder"
+                  data-testid="desktop-add-agent-open-model-model"
+                />
+              </label>
+              <label>
+                <small>API key {{ openModelStatus?.hasApiKey ? "(saved - paste to replace)" : "(optional for local endpoints)" }}</small>
+                <input
+                  v-model="openModelApiKey"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="openModelStatus?.hasApiKey ? '••••••••' : 'sk-or-...'"
+                  data-testid="desktop-add-agent-open-model-api-key"
+                />
+              </label>
+              <div class="desktop-add-agent-open-model-config-actions">
+                <button
+                  type="button"
+                  :disabled="savingOpenModelSettings"
+                  data-testid="desktop-add-agent-open-model-save"
+                  @click="saveOpenModelSettings"
+                >
+                  {{ savingOpenModelSettings ? "Saving..." : "Save model settings" }}
+                </button>
+                <button
+                  v-if="openModelStatus?.hasApiKey"
+                  type="button"
+                  :disabled="savingOpenModelSettings"
+                  @click="clearOpenModelApiKey"
+                >
+                  Clear saved key
+                </button>
+              </div>
+              <p v-if="openModelStatus?.error">{{ openModelStatus.error }}</p>
+            </section>
+
+            <section
+              v-if="showDeliverySelector"
               class="desktop-add-agent-delivery"
               aria-label="Agent delivery mode"
             >
@@ -310,6 +366,7 @@ import type {
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
+  DesktopOpenModelSettingsStatus,
 } from "../../../../../electron/ipc-types";
 import {
   agentSetupActionButtonLabel,
@@ -336,6 +393,8 @@ import {
   managedAgentSessionStatusLabel,
   managedAgentStopResultMessage,
   shouldShowCursorMcpPolicySelector,
+  shouldShowDeliveryModeSelector,
+  shouldShowOpenModelConfig,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -375,6 +434,11 @@ const loadError = ref<string | null>(null);
 const setupMessage = ref<string | null>(null);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
 const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
+const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
+const openModelBaseUrl = ref("");
+const openModelModel = ref("");
+const openModelApiKey = ref("");
+const savingOpenModelSettings = ref(false);
 const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
 const selectedPermissionProfileIdsByProvider = ref<
   Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
@@ -471,6 +535,14 @@ const showCursorMcpPolicySelector = computed(() =>
   shouldShowCursorMcpPolicySelector(selectedProvider.value)
 );
 
+const showDeliverySelector = computed(() =>
+  shouldShowDeliveryModeSelector(selectedProvider.value)
+);
+
+const showOpenModelConfig = computed(() =>
+  shouldShowOpenModelConfig(selectedProvider.value)
+);
+
 const selectedCursorMcpPolicyDescription = computed(() =>
   cursorMcpPolicyDescription(selectedCursorMcpPolicy.value)
 );
@@ -533,6 +605,7 @@ watch(
     if (props.open && selectedProviderId.value) {
       void runPreflight();
       void loadManagedSessions();
+      void loadOpenModelSettings();
     }
   },
 );
@@ -583,6 +656,7 @@ async function loadProviders(): Promise<void> {
       : providers.value.find((provider) => provider.id === "codex")?.id || providers.value[0]?.id || null;
     syncPermissionProfileSelection();
     if (selectedProviderId.value) {
+      void loadOpenModelSettings();
       await runPreflight();
     }
   } catch (error) {
@@ -655,6 +729,62 @@ async function stopManagedAgent(sessionId: string): Promise<void> {
   }
 }
 
+async function loadOpenModelSettings(): Promise<void> {
+  if (!showOpenModelConfig.value) return;
+  const requestVersion = modalStateVersion;
+  try {
+    const status = await window.letagentsDesktop.openModel.getSettingsStatus();
+    if (!isCurrentModalState(requestVersion)) return;
+    openModelStatus.value = status;
+    openModelBaseUrl.value = status.baseUrl;
+    openModelModel.value = status.model;
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    setupMessage.value = error instanceof Error ? error.message : "Could not load open model settings.";
+  }
+}
+
+async function applyOpenModelSettings(input: {
+  baseUrl?: string | null;
+  model?: string | null;
+  apiKey?: string | null;
+}): Promise<void> {
+  if (savingOpenModelSettings.value) return;
+  const requestVersion = modalStateVersion;
+  savingOpenModelSettings.value = true;
+  setupMessage.value = null;
+  try {
+    const status = await window.letagentsDesktop.openModel.saveSettings(input);
+    if (!isCurrentModalState(requestVersion)) return;
+    openModelStatus.value = status;
+    openModelBaseUrl.value = status.baseUrl;
+    openModelModel.value = status.model;
+    openModelApiKey.value = "";
+    setupMessage.value = "Model settings saved.";
+    await runPreflight();
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    setupMessage.value = error instanceof Error ? error.message : "Could not save model settings.";
+  } finally {
+    if (isCurrentModalState(requestVersion)) {
+      savingOpenModelSettings.value = false;
+    }
+  }
+}
+
+function saveOpenModelSettings(): Promise<void> {
+  const apiKey = openModelApiKey.value.trim();
+  return applyOpenModelSettings({
+    baseUrl: openModelBaseUrl.value.trim() || null,
+    model: openModelModel.value.trim() || null,
+    ...(apiKey ? { apiKey } : {}),
+  });
+}
+
+function clearOpenModelApiKey(): Promise<void> {
+  return applyOpenModelSettings({ apiKey: null });
+}
+
 function selectProvider(providerId: DesktopAgentProviderId): void {
   modalStateVersion += 1;
   selectedProviderId.value = providerId;
@@ -712,6 +842,7 @@ function managedAgentSessionDetail(session: DesktopManagedAgentSession): string 
     managedAgentSessionStatusLabel(session),
     managedAgentPermissionProfileLabel(session),
     session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
+    session.providerId === "open-model" ? session.model || null : null,
     managedAgentRepoDetail(session),
   ].filter(Boolean).join(" - ");
 }
@@ -729,6 +860,8 @@ function resetTransientState(): void {
   setupConfirmation.value = null;
   setupMessage.value = null;
   loadError.value = null;
+  openModelApiKey.value = "";
+  savingOpenModelSettings.value = false;
 }
 
 function upsertManagedSession(session: DesktopManagedAgentSession): void {

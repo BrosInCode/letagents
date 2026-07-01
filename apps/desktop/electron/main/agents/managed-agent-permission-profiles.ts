@@ -121,10 +121,50 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   },
 ];
 
+const OPEN_MODEL_PROFILES: DesktopManagedAgentPermissionProfile[] = [
+  {
+    id: "full_access",
+    label: "Full access",
+    description: "Runs the Codex engine with the current app-server launch policy against your configured model endpoint.",
+    status: "available",
+    risk: "high",
+    detail: "Maps to approvalPolicy=never and sandboxPolicy=dangerFullAccess. Open models vary in tool-call reliability; use only with trusted repos.",
+    isDefault: true,
+  },
+  {
+    id: "ask_before_write",
+    label: "Ask before writes",
+    description: "Desktop-mediated approvals are not wired for Codex-engine managed agents yet.",
+    status: "gated",
+    risk: "medium",
+    detail: "Requires Codex app-server approval bridging before it can be enabled.",
+    isDefault: false,
+  },
+  {
+    id: "sandboxed_write",
+    label: "Sandboxed writes",
+    description: "Codex-engine managed sandbox presets need app-server contract tests before exposure.",
+    status: "gated",
+    risk: "medium",
+    detail: "The current managed launch uses full access.",
+    isDefault: false,
+  },
+  {
+    id: "read_only",
+    label: "Read-only",
+    description: "A read-only Codex-engine managed profile is not currently wired.",
+    status: "gated",
+    risk: "low",
+    detail: "Requires a Codex app-server read-only launch path.",
+    isDefault: false,
+  },
+];
+
 const PROVIDER_PERMISSION_PROFILES: Record<string, DesktopManagedAgentPermissionProfile[]> = {
   "claude-code": CLAUDE_CODE_PROFILES,
   codex: CODEX_PROFILES,
   cursor: CURSOR_PROFILES,
+  "open-model": OPEN_MODEL_PROFILES,
 };
 
 export function listManagedAgentPermissionProfiles(

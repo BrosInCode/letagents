@@ -21,6 +21,8 @@ import type {
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
   DesktopManagedAgentStopInput,
+  DesktopOpenModelSaveSettingsInput,
+  DesktopOpenModelSettingsStatus,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
 import type {
@@ -79,6 +81,10 @@ export interface DesktopApi {
     saveSettings: (input: DesktopAppAgentSaveSettingsInput) => Promise<DesktopAppAgentSettingsStatus>;
     listActions: () => Promise<DesktopAppAgentActionMetadata[]>;
     run: (input: DesktopAppAgentRunInput) => Promise<DesktopAppAgentRunResult>;
+  };
+  openModel: {
+    getSettingsStatus: () => Promise<DesktopOpenModelSettingsStatus>;
+    saveSettings: (input: DesktopOpenModelSaveSettingsInput) => Promise<DesktopOpenModelSettingsStatus>;
   };
   room: {
     listAccountRooms: (options?: DesktopAccountRoomListOptions) => Promise<DesktopAccountRoomEntry[]>;

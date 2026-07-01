@@ -44,6 +44,10 @@ export interface DesktopCodexLiveSessionState {
   room_identifier: string;
   room_display_name?: string | null;
   display_name?: string | null;
+  /** Which desktop provider owns this Codex-engine session. Absent means "codex". */
+  provider_id?: string;
+  /** Model slug for BYOK providers that override the engine's default model. */
+  model?: string | null;
   joined_via: DesktopCodexJoinedVia;
   cwd: string;
   repo_branch?: string | null;
@@ -445,6 +449,18 @@ export function listDesktopManagedCodexLiveSessions(roomId?: string | null): Des
   return dedupeDesktopManagedCodexLiveSessions(
     listStoredCodexLiveSessions(roomId).filter(isDesktopManagedCodexLiveSession),
   );
+}
+
+export function codexLiveSessionProviderId(session: DesktopCodexLiveSessionState): string {
+  return session.provider_id?.trim() || "codex";
+}
+
+export function listDesktopManagedCodexLiveSessionsForProvider(
+  providerId: string,
+  roomId?: string | null,
+): DesktopCodexLiveSessionState[] {
+  return listDesktopManagedCodexLiveSessions(roomId)
+    .filter((session) => codexLiveSessionProviderId(session) === providerId);
 }
 
 export function listCodexDisplayNamesForRoom(roomId: string): string[] {
@@ -1086,11 +1102,12 @@ export function toPublicManagedAgentSession(
   );
   const activeWorkerSessionId = workerSession?.session_id ?? (persistedWorkerActive ? session.agent_session_id ?? null : null);
   const displayName = publicDisplayNameForCodexSession(session, workerSession);
-  const permissionProfile = managedAgentPermissionProfileForProvider("codex", session.permission_profile_id);
+  const providerId = codexLiveSessionProviderId(session);
+  const permissionProfile = managedAgentPermissionProfileForProvider(providerId, session.permission_profile_id);
   return {
     id: session.session_id,
-    providerId: "codex",
-    runtime: "codex",
+    providerId,
+    runtime: providerId,
     roomIdentifier: session.room_identifier || session.room_id,
     roomDisplayName: session.room_display_name ?? null,
     repoRootPath: session.cwd,
@@ -1108,10 +1125,11 @@ export function toPublicManagedAgentSession(
       ),
     agentSessionId: activeWorkerSessionId,
     actorLabel: nonGenericCodexName(workerSession?.actor_label) ?? displayName,
-    agentKey: workerSession?.agent_key ?? "codex",
+    agentKey: workerSession?.agent_key ?? providerId,
     displayName,
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
-    ideLabel: workerSession?.ide_label ?? "Codex",
+    ideLabel: workerSession?.ide_label ?? (providerId === "open-model" ? "Open Model" : "Codex"),
+    model: session.model ?? null,
     reasoningSessionId: session.reasoning_session_id ?? null,
     activeWork: session.active_work
       ? {

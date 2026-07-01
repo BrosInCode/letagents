@@ -17,6 +17,8 @@ import type {
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
+  DesktopOpenModelSaveSettingsInput,
+  DesktopOpenModelSettingsStatus,
   DesktopManagedAgentSession,
   DesktopManagedAgentStartInput,
   DesktopManagedAgentStartResult,
@@ -177,6 +179,10 @@ import {
   listDesktopAppAgentActions,
   runDesktopAppAgent,
 } from "./app-agent/runner.js";
+import {
+  getOpenModelSettingsStatus,
+  saveOpenModelSettings,
+} from "./agents/open-model-settings.js";
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,
@@ -230,6 +236,18 @@ export function registerDesktopIpcHandlers(
       _event,
       input: DesktopAppAgentRunInput,
     ): Promise<DesktopAppAgentRunResult> => runDesktopAppAgent(input),
+  );
+  targetIpcMain.handle(
+    "desktop:open-model:get-settings-status",
+    async (): Promise<DesktopOpenModelSettingsStatus> =>
+      getOpenModelSettingsStatus(),
+  );
+  targetIpcMain.handle(
+    "desktop:open-model:save-settings",
+    async (
+      _event,
+      input: DesktopOpenModelSaveSettingsInput,
+    ): Promise<DesktopOpenModelSettingsStatus> => saveOpenModelSettings(input),
   );
 
   targetIpcMain.handle(

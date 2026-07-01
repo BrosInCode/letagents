@@ -16,6 +16,8 @@ export interface CodexAppServerLaunch {
 
 interface CodexAppServerLaunchOptions {
   trustedProjectPath?: string | null;
+  configOverrides?: string[];
+  env?: Record<string, string>;
 }
 
 function readyUrlFromServerUrl(serverUrl: string): string {
@@ -110,14 +112,21 @@ async function allocateLoopbackServerUrl(): Promise<string> {
   return `ws://${DEFAULT_SERVER_HOST}:${address.port}`;
 }
 
-export async function resolveCodexAppServerUrl(explicitServerUrl?: string | null): Promise<string> {
+export async function resolveCodexAppServerUrl(
+  explicitServerUrl?: string | null,
+  options: { dedicated?: boolean } = {},
+): Promise<string> {
   if (explicitServerUrl?.trim()) {
     return explicitServerUrl.trim();
   }
 
-  const configuredServerUrl = process.env.LETAGENTS_CODEX_SERVER_URL?.trim();
-  if (configuredServerUrl) {
-    return configuredServerUrl;
+  // Dedicated servers carry per-session launch config (e.g. BYOK model
+  // providers), so they must not reuse a shared app-server URL.
+  if (!options.dedicated) {
+    const configuredServerUrl = process.env.LETAGENTS_CODEX_SERVER_URL?.trim();
+    if (configuredServerUrl) {
+      return configuredServerUrl;
+    }
   }
 
   return allocateLoopbackServerUrl();
@@ -146,6 +155,9 @@ export function codexAppServerLaunchArgs(
       `projects.${JSON.stringify(trustedProjectPath)}.trust_level="trusted"`,
     );
   }
+  for (const override of options.configOverrides ?? []) {
+    args.push("-c", override);
+  }
   args.push("--listen", serverUrl);
   return args;
 }
@@ -158,6 +170,9 @@ export function launchCodexAppServer(
   const child = spawn(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
     detached: true,
     stdio: "ignore",
+    env: options.env && Object.keys(options.env).length
+      ? { ...process.env, ...options.env }
+      : undefined,
   });
   const exited = childExitPromise(child);
   child.unref();
