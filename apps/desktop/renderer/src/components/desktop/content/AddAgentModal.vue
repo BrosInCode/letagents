@@ -144,6 +144,27 @@
             </section>
 
             <section
+              v-if="showCursorMcpPolicySelector"
+              class="desktop-add-agent-delivery"
+              aria-label="Cursor MCP tools"
+            >
+              <span>MCP tools</span>
+              <div>
+                <button
+                  v-for="option in cursorMcpPolicyOptions"
+                  :key="option.id"
+                  type="button"
+                  :data-selected="selectedCursorMcpPolicy === option.id"
+                  :data-testid="`desktop-add-agent-cursor-mcp-${option.id}`"
+                  @click="selectedCursorMcpPolicy = option.id"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+              <p>{{ selectedCursorMcpPolicyDescription }}</p>
+            </section>
+
+            <section
               v-if="externalJoinPrompt"
               class="desktop-add-agent-external-prompt"
               data-testid="desktop-add-agent-external-prompt"
@@ -180,8 +201,7 @@
                 <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
                 <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
                 <small>
-                  {{ managedAgentSessionStatusLabel(session) }} - {{ managedAgentPermissionProfileLabel(session) }} -
-                  {{ managedAgentRepoDetail(session) }}
+                  {{ managedAgentSessionDetail(session) }}
                 </small>
                 <div class="desktop-add-agent-managed-session-actions">
                   <button
@@ -279,6 +299,7 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
+  DesktopCursorMcpPolicy,
   DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
@@ -289,6 +310,10 @@ import {
   agentSetupConfirmationMessage,
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
+  cursorMcpPolicyDescription,
+  cursorMcpPolicyLabel,
+  cursorMcpPolicyOptions,
+  defaultCursorMcpPolicy,
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
   hasDesktopManagedRuntime,
@@ -303,6 +328,7 @@ import {
   managedAgentSessionMatchesRoom,
   managedAgentSessionStatusLabel,
   managedAgentStopResultMessage,
+  shouldShowCursorMcpPolicySelector,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -341,6 +367,7 @@ const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
 const loadError = ref<string | null>(null);
 const setupMessage = ref<string | null>(null);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
+const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
 const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
 const dialogElement = ref<HTMLElement | null>(null);
 let previousFocusElement: HTMLElement | null = null;
@@ -371,6 +398,7 @@ const selectedPermissionProfile = computed(() =>
 const canStartManagedAgent = computed(() =>
   Boolean(
     preflight.value?.canStart &&
+    !loadingPreflight.value &&
     (
       !selectedPermissionProfiles.value.length ||
       selectedPermissionProfile.value?.status === "available"
@@ -429,6 +457,14 @@ const deliveryModeDescription = computed(() =>
     : "The agent app joins the room through its LetAgents connection."
 );
 
+const showCursorMcpPolicySelector = computed(() =>
+  shouldShowCursorMcpPolicySelector(selectedProvider.value)
+);
+
+const selectedCursorMcpPolicyDescription = computed(() =>
+  cursorMcpPolicyDescription(selectedCursorMcpPolicy.value)
+);
+
 watch(
   () => props.open,
   (open) => {
@@ -454,6 +490,16 @@ watch(
     if (props.open && selectedProviderId.value) {
       void runPreflight();
       void loadManagedSessions();
+    }
+  },
+);
+
+watch(
+  () => selectedCursorMcpPolicy.value,
+  () => {
+    if (props.open && selectedProviderId.value === "cursor") {
+      preflight.value = null;
+      void runPreflight();
     }
   },
 );
@@ -521,6 +567,7 @@ async function startManagedAgent(): Promise<void> {
       repoRootPath: props.repoRootPath,
       deliveryMode: deliveryMode.value,
       permissionProfileId: selectedPermissionProfile.value?.id ?? null,
+      cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,
     });
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
@@ -613,6 +660,15 @@ function permissionProfileOptionSummary(profile: DesktopManagedAgentPermissionPr
   return `${managedAgentPermissionProfileStatusLabel(profile.status)} - ${profile.detail || profile.description}`;
 }
 
+function managedAgentSessionDetail(session: DesktopManagedAgentSession): string {
+  return [
+    managedAgentSessionStatusLabel(session),
+    managedAgentPermissionProfileLabel(session),
+    session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
+    managedAgentRepoDetail(session),
+  ].filter(Boolean).join(" - ");
+}
+
 function resetTransientState(): void {
   modalStateVersion += 1;
   preflightRequestId += 1;
@@ -671,6 +727,7 @@ async function runPreflight(): Promise<void> {
       {
         roomIdentifier: props.roomIdentifier,
         repoRootPath: props.repoRootPath,
+        cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
       },
     );
     if (

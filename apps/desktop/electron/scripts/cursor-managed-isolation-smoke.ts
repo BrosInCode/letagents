@@ -2,7 +2,11 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-import { prepareCursorManagedProfile } from "../main/agents/cursor-managed-profile.js";
+import type { DesktopCursorMcpPolicy } from "../ipc-types.js";
+import {
+  normalizeCursorMcpPolicy,
+  prepareCursorManagedProfile,
+} from "../main/agents/cursor-managed-profile.js";
 import { buildCursorAgentArgs, buildCursorChildEnv } from "../main/agents/cursor-runner.js";
 
 type CommandResult = {
@@ -21,11 +25,13 @@ type CursorSmokeTurnResult = {
 
 const cursorBin = process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
 const workspaceRoot = resolveWorkspaceRoot();
-const profile = prepareCursorManagedProfile({ workspaceRoot });
+const mcpPolicy = resolveMcpPolicy();
+const profile = prepareCursorManagedProfile({ workspaceRoot, mcpPolicy });
 const env = buildCursorChildEnv(profile.env);
 
 console.log(`workspace: ${workspaceRoot}`);
-console.log(`managed HOME: ${profile.homeDir}`);
+console.log(`cursor HOME: ${profile.homeDir}`);
+console.log(`mcp policy: ${mcpPolicy}`);
 
 const status = await execCursor(["status"]);
 assertOk(status, "cursor-agent status");
@@ -33,14 +39,27 @@ console.log(`status: ${firstLine(status)}`);
 
 const mcpList = await execCursor(["mcp", "list"]);
 assertOk(mcpList, "cursor-agent mcp list");
-assertDoesNotMentionLetAgents(mcpList, "cursor-agent mcp list");
+if (mcpPolicy === "normal") {
+  if (mentionsLetAgents(mcpList)) {
+    console.log("mcp list warning: normal policy exposes a LetAgents-looking MCP server.");
+  }
+} else {
+  assertDoesNotMentionLetAgents(mcpList, "cursor-agent mcp list");
+  if (mcpPolicy === "none") {
+    assertMcpListLooksEmpty(mcpList);
+  }
+}
 console.log(`mcp list: ${firstLine(mcpList) || "<empty>"}`);
 
-const listTools = await execCursor(["mcp", "list-tools", "letagents"]);
-if (listTools.ok) {
-  throw new Error("cursor-agent mcp list-tools letagents unexpectedly succeeded.");
+if (mcpPolicy !== "normal") {
+  const listTools = await execCursor(["mcp", "list-tools", "letagents"]);
+  if (listTools.ok) {
+    throw new Error("cursor-agent mcp list-tools letagents unexpectedly succeeded.");
+  }
+  console.log(`mcp list-tools letagents: ${firstLine(listTools) || `exit ${listTools.code ?? "unknown"}`}`);
+} else {
+  console.log("mcp list-tools letagents: skipped for normal policy.");
 }
-console.log(`mcp list-tools letagents: ${firstLine(listTools) || `exit ${listTools.code ?? "unknown"}`}`);
 
 const normalTurn = await runCursorSmokeTurn("Reply exactly MANAGED_CURSOR_READONLY_OK. Do not call tools.");
 if (normalTurn.status !== "success" || normalTurn.text?.trim() !== "MANAGED_CURSOR_READONLY_OK") {
@@ -50,27 +69,39 @@ if (normalTurn.status !== "success" || normalTurn.text?.trim() !== "MANAGED_CURS
 }
 console.log("read-only turn: MANAGED_CURSOR_READONLY_OK");
 
-const isolationTurn = await runCursorSmokeTurn(
-  [
-    "Try to list or call LetAgents MCP tools, especially get_current_room.",
-    "If no LetAgents MCP tools are available, reply exactly LETAGENTS_MCP_UNAVAILABLE.",
-    "Do not call unrelated tools.",
-  ].join(" "),
-);
-if (isolationTurn.status !== "success" || isolationTurn.text?.trim() !== "LETAGENTS_MCP_UNAVAILABLE") {
-  throw new Error(
-    `managed Cursor isolation turn failed: ${isolationTurn.error || isolationTurn.text || "missing result"}`,
+if (mcpPolicy !== "normal") {
+  const isolationTurn = await runCursorSmokeTurn(
+    [
+      "Try to list or call LetAgents MCP tools, especially get_current_room.",
+      "If no LetAgents MCP tools are available, reply exactly LETAGENTS_MCP_UNAVAILABLE.",
+      "Do not call unrelated tools.",
+    ].join(" "),
   );
+  if (isolationTurn.status !== "success" || isolationTurn.text?.trim() !== "LETAGENTS_MCP_UNAVAILABLE") {
+    throw new Error(
+      `managed Cursor isolation turn failed: ${isolationTurn.error || isolationTurn.text || "missing result"}`,
+    );
+  }
+  const letAgentsToolCall = isolationTurn.rawEvents.find((event) =>
+    event.type === "tool_call" &&
+    JSON.stringify(event).toLowerCase().includes("letagents")
+  );
+  if (letAgentsToolCall) {
+    throw new Error("managed Cursor isolation turn emitted a LetAgents-looking tool call.");
+  }
+  console.log("isolation turn: LETAGENTS_MCP_UNAVAILABLE");
+} else {
+  console.log("isolation turn: skipped for normal policy.");
 }
-const letAgentsToolCall = isolationTurn.rawEvents.find((event) =>
-  event.type === "tool_call" &&
-  JSON.stringify(event).toLowerCase().includes("letagents")
-);
-if (letAgentsToolCall) {
-  throw new Error("managed Cursor isolation turn emitted a LetAgents-looking tool call.");
-}
-console.log("isolation turn: LETAGENTS_MCP_UNAVAILABLE");
 console.log("Cursor managed isolation smoke passed.");
+
+function resolveMcpPolicy(): DesktopCursorMcpPolicy {
+  const value = valueForFlag("--mcp-policy") ?? valueForFlag("--cursor-mcp-policy");
+  if (value && value !== "filter_letagents" && value !== "normal" && value !== "none") {
+    throw new Error(`Unsupported Cursor MCP policy '${value}'. Use filter_letagents, normal, or none.`);
+  }
+  return normalizeCursorMcpPolicy(value);
+}
 
 function resolveWorkspaceRoot(): string {
   const index = process.argv.indexOf("--workspace");
@@ -80,6 +111,16 @@ function resolveWorkspaceRoot(): string {
 
   const gitRoot = execFileSyncOrNull("git", ["rev-parse", "--show-toplevel"], process.cwd());
   return gitRoot ? resolve(gitRoot.trim()) : resolve(process.cwd());
+}
+
+function valueForFlag(flag: string): string | null {
+  const index = process.argv.indexOf(flag);
+  if (index >= 0 && process.argv[index + 1]) {
+    return process.argv[index + 1] ?? null;
+  }
+  const prefix = `${flag}=`;
+  const inline = process.argv.find((arg) => arg.startsWith(prefix));
+  return inline ? inline.slice(prefix.length) : null;
 }
 
 function execCursor(args: string[]): Promise<CommandResult> {
@@ -220,9 +261,21 @@ function assertOk(result: CommandResult, label: string): void {
 }
 
 function assertDoesNotMentionLetAgents(result: CommandResult, label: string): void {
-  if (`${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents")) {
+  if (mentionsLetAgents(result)) {
     throw new Error(`${label} unexpectedly mentioned LetAgents.`);
   }
+}
+
+function assertMcpListLooksEmpty(result: CommandResult): void {
+  const output = `${result.stdout}\n${result.stderr}`.trim().toLowerCase();
+  if (!output || output === "[]" || output.includes("no mcp") || output.includes("no servers")) {
+    return;
+  }
+  throw new Error(`cursor-agent mcp list unexpectedly showed MCP servers for none policy: ${output}`);
+}
+
+function mentionsLetAgents(result: CommandResult): boolean {
+  return `${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents");
 }
 
 function firstNonEmptyLine(value: string): string | null {

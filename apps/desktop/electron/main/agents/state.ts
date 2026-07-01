@@ -14,6 +14,7 @@ import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 
 import type {
+  DesktopCursorMcpPolicy,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentPermissionRequest,
@@ -119,6 +120,7 @@ export interface DesktopCursorLiveSessionState {
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
   permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
+  cursor_mcp_policy?: DesktopCursorMcpPolicy | null;
   desktop_managed?: boolean;
   deadline_utc?: string | null;
   token: string;
@@ -1303,6 +1305,7 @@ export function toPublicCursorManagedAgentSession(
   const displayName = publicDisplayNameForCursorSession(session, workerSession);
   const deliveryMode = session.delivery_mode || "desktop_events";
   const permissionProfile = managedAgentPermissionProfileForProvider("cursor", session.permission_profile_id);
+  const cursorMcpPolicy = session.cursor_mcp_policy ?? "filter_letagents";
   return {
     id: session.session_id,
     providerId: "cursor",
@@ -1315,6 +1318,7 @@ export function toPublicCursorManagedAgentSession(
     deliveryMode,
     permissionProfileId: permissionProfile.id,
     permissionProfile,
+    cursorMcpPolicy,
     canStop: Boolean(activeWorkerSessionId) &&
       (
         session.status === "starting" ||

@@ -1,5 +1,4 @@
 import { execFile, spawn } from "node:child_process";
-import { resolve } from "node:path";
 
 import type {
   DesktopAgentProvider,
@@ -16,8 +15,7 @@ import {
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { codexInstallCommand } from "./codex-install.js";
-import { prepareCursorManagedProfile } from "./cursor-managed-profile.js";
-import { buildCursorChildEnv } from "./cursor-runner.js";
+import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
 import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
@@ -358,132 +356,6 @@ async function claudeCodePreflight(
   };
 }
 
-async function cursorPreflight(
-  provider: DesktopAgentProvider,
-  input: DesktopAgentProviderPreflightInput,
-  mcpStatus: DesktopMcpInstallTarget["status"] | null,
-): Promise<DesktopAgentProviderPreflight> {
-  const command = process.env.LETAGENTS_CURSOR_AGENT_BIN ||
-    provider.runtimeCommand ||
-    "cursor-agent";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
-  if (commandMissing(versionResult)) {
-    return {
-      providerId: provider.id,
-      status: "missing_runtime",
-      canStart: false,
-      message: "Cursor Agent is not installed.",
-      detail: "Install Cursor Agent before starting a local read-only Cursor room agent.",
-      nextAction: null,
-      version: null,
-      mcpStatus,
-    };
-  }
-  if (!versionResult.ok) {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "Cursor Agent could not be checked.",
-      detail: firstOutputLine(versionResult) || "The Cursor Agent command failed before returning a version.",
-      nextAction: null,
-      version: null,
-      mcpStatus,
-    };
-  }
-
-  const version = firstOutputLine(versionResult);
-  const workspaceRoot = input.repoRootPath?.trim() ? resolve(input.repoRootPath.trim()) : null;
-  let managedProfile;
-  try {
-    managedProfile = prepareCursorManagedProfile({ workspaceRoot });
-  } catch (error) {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "Cursor managed profile could not be prepared.",
-      detail: error instanceof Error ? error.message : String(error),
-      nextAction: null,
-      version,
-      mcpStatus,
-    };
-  }
-  const managedEnv = buildCursorChildEnv(managedProfile.env);
-  const authResult = await execFileWithTimeout(command, ["status"], { env: managedEnv });
-  if (!authResult.ok) {
-    return {
-      providerId: provider.id,
-      status: "auth_required",
-      canStart: false,
-      message: "Cursor Agent needs sign-in.",
-      detail: firstOutputLine(authResult) || "Sign in with Cursor Agent before starting a local room agent.",
-      nextAction: "authenticate",
-      version,
-      mcpStatus,
-    };
-  }
-
-  if (!workspaceRoot) {
-    return {
-      providerId: provider.id,
-      status: "repo_required",
-      canStart: false,
-      message: "Choose a local repository before starting Cursor.",
-      detail: "A desktop-managed Cursor agent needs a local repo or worktree for read-only analysis.",
-      nextAction: "choose_repo",
-      version,
-      mcpStatus,
-    };
-  }
-
-  const mcpResult = await execFileWithTimeout(command, ["mcp", "list"], {
-    cwd: workspaceRoot,
-    env: managedEnv,
-  });
-  if (!mcpResult.ok) {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "Cursor managed MCP isolation could not be checked.",
-      detail: firstOutputLine(mcpResult) || "Cursor failed while listing MCP servers under the managed profile.",
-      nextAction: null,
-      version,
-      mcpStatus,
-    };
-  }
-  if (mentionsLetAgentsMcp(mcpResult)) {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "Cursor can still see LetAgents MCP.",
-      detail: "Managed Cursor must not expose LetAgents room tools. Remove project-level LetAgents MCP config or repair the managed profile.",
-      nextAction: null,
-      version,
-      mcpStatus,
-    };
-  }
-
-  return {
-    providerId: provider.id,
-    status: "ready",
-    canStart: true,
-    message: "Cursor Agent is ready to start in read-only mode.",
-    detail: mcpStatus === "installed"
-      ? "This desktop can start Cursor in ask mode using an isolated managed profile. Write-capable Cursor remains gated on permissions tests."
-      : "This desktop can start Cursor directly in ask mode with managed profile isolation; install the LetAgents connection only for manual Cursor joins.",
-    nextAction: null,
-    version,
-    mcpStatus,
-  };
-}
-
-function mentionsLetAgentsMcp(result: ExecResult): boolean {
-  return `${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents");
-}
-
 export async function runDesktopAgentProviderPreflight(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
@@ -537,7 +409,7 @@ export async function runDesktopAgentProviderPreflight(
     return claudeCodePreflight(provider, input, mcpStatus);
   }
   if (provider.id === "cursor") {
-    return cursorPreflight(provider, input, mcpStatus);
+    return runDesktopCursorProviderPreflight(provider, input, mcpStatus);
   }
 
   return bridgePreflight(provider, mcpStatus);
