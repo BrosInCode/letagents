@@ -254,6 +254,7 @@ import {
   managedAgentSessionMatchesRoom,
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
+  mergeReachableAgentPresenceParticipants,
   preferredManagedAgentRepoRootPath,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
@@ -479,11 +480,15 @@ const roomManagedAgentSessions = computed(() =>
   )
 );
 const managedAgentRepoRootPath = computed(() => preferredManagedAgentRepoRootPath(props.repoStatus));
-const roomParticipants = computed(() =>
-  mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier)
-);
 const roomPresence = computed(() =>
   mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
+);
+const roomParticipants = computed(() =>
+  mergeReachableAgentPresenceParticipants(
+    mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier),
+    roomPresence.value,
+    props.room.identifier,
+  )
 );
 const localAgentWork = computed(() =>
   activeManagedAgentWorkIndicators(roomManagedAgentSessions.value, props.room.identifier)

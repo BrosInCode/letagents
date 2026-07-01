@@ -256,7 +256,10 @@ import type {
   DesktopRoomMessageThreadSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
-import { isMentionableRoomParticipant } from "../../../../domain/participants";
+import {
+  isMentionableRoomParticipant,
+  sortMentionableRoomParticipants,
+} from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import DesktopGitHubEventCard from "../desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "../desktop-chat-message/DesktopMessageAttachments.vue";
@@ -336,9 +339,9 @@ const canSend = computed(() =>
 const mentionOpen = computed(() => mentionQuery.value !== null && mentionCandidates.value.length > 0);
 const mentionCandidates = computed(() => {
   const query = (mentionQuery.value || "").toLowerCase();
-  return props.participants
+  return sortMentionableRoomParticipants(props.participants
     .filter(isMentionableRoomParticipant)
-    .filter((participant) => participant.displayName.toLowerCase().includes(query))
+    .filter((participant) => participant.displayName.toLowerCase().includes(query)))
     .slice(0, 6);
 });
 

@@ -473,6 +473,30 @@ export function mergeDesktopManagedAgentPresence(
   return merged;
 }
 
+export function mergeReachableAgentPresenceParticipants(
+  participants: readonly DesktopParticipantSummary[],
+  presenceEntries: readonly DesktopAgentPresence[],
+  roomIdentifier: string | null | undefined,
+): DesktopParticipantSummary[] {
+  const merged = [...participants];
+  for (const presence of presenceEntries) {
+    if (!isReachableWorkerPresenceForRoom(presence, roomIdentifier)) {
+      continue;
+    }
+
+    const existingIndex = merged.findIndex((participant) =>
+      participantMatchesAgentPresence(participant, presence)
+    );
+    if (existingIndex === -1) {
+      merged.push(agentPresenceToParticipant(presence));
+      continue;
+    }
+
+    merged[existingIndex] = mergeAgentPresenceParticipant(merged[existingIndex], presence);
+  }
+  return merged;
+}
+
 function visibleManagedAgentSessionsForRoom(
   sessions: readonly DesktopManagedAgentSession[],
   roomIdentifier: string | null | undefined,
@@ -549,6 +573,91 @@ function desktopManagedAgentSessionToPresence(
       updatedAt: timestamp,
     },
   };
+}
+
+function isReachableWorkerPresenceForRoom(
+  presence: DesktopAgentPresence,
+  roomIdentifier: string | null | undefined,
+): boolean {
+  const targetRoom = normalizeManagedAgentRoomIdentifier(roomIdentifier);
+  const presenceRoom = normalizeManagedAgentRoomIdentifier(presence.roomId);
+  return Boolean(
+    targetRoom &&
+    presenceRoom === targetRoom &&
+    presence.sessionKind === "worker" &&
+    presence.freshness === "active" &&
+    presence.activityState !== "offline" &&
+    presence.sourceFlags.includes("delivery")
+  );
+}
+
+function agentPresenceToParticipant(presence: DesktopAgentPresence): DesktopParticipantSummary {
+  const timestamp = presence.lastHeartbeatAt || presence.livenessObservation?.lastObservedAt || new Date(0).toISOString();
+  return {
+    participantKey: `agent-presence:${normalizeAgentKey(presence.agentSessionId || presence.actorLabel) || presence.actorLabel}`,
+    kind: "agent",
+    displayName: presence.displayName?.trim() || presence.actorLabel,
+    actorLabel: presence.actorLabel,
+    agentKey: presence.agentKey,
+    githubLogin: null,
+    ownerLabel: presence.ownerLabel,
+    ideLabel: presence.ideLabel,
+    hiddenAt: null,
+    activityState: mentionActivityStateForPresence(presence),
+    lastSeenAt: timestamp,
+    lastRoomActivityAt: null,
+    lastLiveHeartbeatAt: timestamp,
+    sourceFlags: mergeParticipantSourceFlags([], presence.sourceFlags),
+  };
+}
+
+function mergeAgentPresenceParticipant(
+  participant: DesktopParticipantSummary,
+  presence: DesktopAgentPresence,
+): DesktopParticipantSummary {
+  const timestamp = presence.lastHeartbeatAt || presence.livenessObservation?.lastObservedAt || new Date(0).toISOString();
+  return {
+    ...participant,
+    displayName: participant.displayName || presence.displayName || presence.actorLabel,
+    actorLabel: participant.actorLabel || presence.actorLabel,
+    agentKey: participant.agentKey || presence.agentKey,
+    ownerLabel: participant.ownerLabel || presence.ownerLabel,
+    ideLabel: participant.ideLabel || presence.ideLabel,
+    hiddenAt: null,
+    activityState: participant.activityState === "offline" || participant.hiddenAt
+      ? mentionActivityStateForPresence(presence)
+      : participant.activityState || mentionActivityStateForPresence(presence),
+    lastSeenAt: latestTimestampString(participant.lastSeenAt, timestamp),
+    lastLiveHeartbeatAt: latestTimestampString(participant.lastLiveHeartbeatAt, timestamp),
+    sourceFlags: mergeParticipantSourceFlags(participant.sourceFlags, presence.sourceFlags),
+  };
+}
+
+function participantMatchesAgentPresence(
+  participant: DesktopParticipantSummary,
+  presence: DesktopAgentPresence,
+): boolean {
+  if (participant.kind !== "agent") return false;
+  if (sameNormalized(participant.actorLabel, presence.actorLabel)) return true;
+  if (sameSpecificAgentKey(participant.agentKey, presence.agentKey)) return true;
+  if (!sameNormalized(participant.displayName, presence.displayName)) return false;
+  return Boolean(
+    sameNormalized(participant.ideLabel, presence.ideLabel)
+    || sameNormalized(participant.ownerLabel, presence.ownerLabel)
+  );
+}
+
+function mentionActivityStateForPresence(
+  presence: Pick<DesktopAgentPresence, "activityState" | "status">,
+): DesktopParticipantSummary["activityState"] {
+  return presence.status === "idle" ? "away" : presence.activityState;
+}
+
+function mergeParticipantSourceFlags(
+  existing: readonly DesktopParticipantSummary["sourceFlags"][number][],
+  next: readonly DesktopParticipantSummary["sourceFlags"][number][],
+): DesktopParticipantSummary["sourceFlags"] {
+  return Array.from(new Set([...existing, ...next, "presence" as const]));
 }
 
 export function managedAgentRepoDetail(

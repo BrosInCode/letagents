@@ -90,7 +90,10 @@ import type {
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
-import { isMentionableRoomParticipant } from "../../../../domain/participants";
+import {
+  isMentionableRoomParticipant,
+  sortMentionableRoomParticipants,
+} from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 
@@ -152,9 +155,9 @@ const mentionOpen = computed({
 });
 const mentionCandidates = computed(() => {
   const query = (mentionQuery.value || "").toLowerCase();
-  return props.participants
+  return sortMentionableRoomParticipants(props.participants
     .filter(isMentionableRoomParticipant)
-    .filter((participant) => participant.displayName.toLowerCase().includes(query))
+    .filter((participant) => participant.displayName.toLowerCase().includes(query)))
     .slice(0, 6);
 });
 
