@@ -9,11 +9,27 @@ import { addLocalChatMessage } from "../rooms/messages/local-store.js";
 import { mapRoomMessagePayload } from "../rooms/messages/mappers.js";
 import type { StoredAgentSessionState } from "./state.js";
 
+export type DesktopManagedAgentReplyTarget = {
+  replyTo: string | null;
+  threadRootId: string | null;
+};
+
+export function desktopManagedAgentReplyTargetForMessage(
+  message: Pick<DesktopRoomMessage, "id" | "replyTo" | "threadRootId">,
+): DesktopManagedAgentReplyTarget {
+  const threadRootId = message.threadRootId?.trim() || null;
+  return {
+    replyTo: message.replyTo?.id ?? null,
+    threadRootId: threadRootId && threadRootId !== message.id ? threadRootId : null,
+  };
+}
+
 export async function persistDesktopManagedAgentLocalReply(input: {
   roomIdentifier: string;
   storage: DesktopRoomStorageState;
   workerSession: StoredAgentSessionState;
   replyTo: string | null;
+  threadRootId?: string | null;
   text: string;
 }): Promise<DesktopRoomMessage | null> {
   if (input.storage.effectiveMode !== "local") {
@@ -25,6 +41,7 @@ export async function persistDesktopManagedAgentLocalReply(input: {
     sender: desktopManagedAgentReplySender(input.workerSession),
     text: input.text,
     reply_to: input.replyTo,
+    thread_root_id: input.threadRootId ?? null,
     source: "agent",
   });
 
