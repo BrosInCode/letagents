@@ -5,6 +5,7 @@ import type {
   DesktopAgentProvider,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
+  DesktopManagedAgentPermissionProfileId,
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
@@ -66,7 +67,20 @@ export async function runDesktopCursorProviderPreflight(
   const version = firstOutputLine(versionResult);
   const workspaceRoot = input.repoRootPath?.trim() ? resolve(input.repoRootPath.trim()) : null;
   const cursorMcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
-  const permissionProfile = managedAgentPermissionProfileForProvider("cursor", input.permissionProfileId);
+  const requestedPermissionProfileId = normalizeRequestedPermissionProfileId(input.permissionProfileId);
+  const permissionProfile = managedAgentPermissionProfileForProvider("cursor", requestedPermissionProfileId);
+  if (requestedPermissionProfileId && permissionProfile.id !== requestedPermissionProfileId) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Cursor permission profile is unknown.",
+      detail: `Unknown permission profile '${requestedPermissionProfileId}' for Cursor.`,
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
   if (permissionProfile.status !== "available") {
     return {
       providerId: provider.id,
@@ -248,6 +262,13 @@ function mcpListHasVisibleServers(result: ExecResult): boolean {
     !output.includes("no mcp") &&
     !output.includes("no servers"),
   );
+}
+
+function normalizeRequestedPermissionProfileId(
+  value: DesktopAgentProviderPreflightInput["permissionProfileId"],
+): DesktopManagedAgentPermissionProfileId | null {
+  const normalized = String(value ?? "").trim();
+  return normalized ? normalized as DesktopManagedAgentPermissionProfileId : null;
 }
 
 function cursorHelpSupportsLaunchOptions(

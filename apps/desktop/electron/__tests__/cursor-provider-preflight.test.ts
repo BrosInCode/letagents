@@ -131,6 +131,24 @@ test("Cursor preflight blocks gated permission profiles", async () => {
   assert.equal(result.message, "Ask before writes is not available for Cursor.");
 });
 
+test("Cursor preflight blocks unknown permission profiles", async () => {
+  const workspace = workspaceFixture("unknown-permission-profile");
+
+  const result = await runDesktopCursorProviderPreflight(
+    cursorProvider,
+    {
+      repoRootPath: workspace,
+      permissionProfileId: "unknown_profile" as never,
+    },
+    "installed",
+  );
+
+  assert.equal(result.status, "error");
+  assert.equal(result.canStart, false);
+  assert.equal(result.message, "Cursor permission profile is unknown.");
+  assert.match(result.detail ?? "", /unknown_profile/);
+});
+
 test("Cursor preflight blocks visible LetAgents MCP for managed MCP policies", async () => {
   for (const policy of ["filter_letagents", "none"] as const) {
     const workspace = workspaceFixture(`blocked-${policy}`);

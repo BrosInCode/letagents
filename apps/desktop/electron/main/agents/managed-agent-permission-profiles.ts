@@ -107,7 +107,7 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Runs Cursor with writes enabled inside Cursor's sandbox.",
     status: "available",
     risk: "medium",
-    detail: "Maps to cursor-agent --force --sandbox enabled. The selected MCP tools policy still applies.",
+    detail: "Maps to cursor-agent --force --sandbox enabled. Cursor's sandbox applies to Cursor operations; selected MCP tools may have their own side effects.",
     isDefault: false,
   },
   {
@@ -116,7 +116,7 @@ const CURSOR_PROFILES: DesktopManagedAgentPermissionProfile[] = [
     description: "Runs Cursor with broad write and shell access for trusted local work.",
     status: "available",
     risk: "high",
-    detail: "Maps to cursor-agent --force --sandbox disabled. Use only for trusted repositories.",
+    detail: "Maps to cursor-agent --force --sandbox disabled. Use only for trusted repositories and trusted MCP configurations.",
     isDefault: false,
   },
 ];

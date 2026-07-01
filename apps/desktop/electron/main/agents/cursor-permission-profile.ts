@@ -42,7 +42,7 @@ export function cursorPermissionProfileRuntimeLine(
 ): string {
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
-      return "Runtime mode: Cursor sandboxed write. Cursor is launched with --force and --sandbox enabled.";
+      return "Runtime mode: Cursor sandboxed write. Cursor is launched with --force and --sandbox enabled; selected MCP tools still follow the chosen MCP policy.";
     case "full_access":
       return "Runtime mode: Cursor full access. Cursor is launched with --force and --sandbox disabled.";
     case "ask_before_write":
@@ -60,6 +60,7 @@ export function cursorPermissionProfileInstructionLines(
       return [
         "- You may edit files and run local commands when the room event requires implementation work.",
         "- Keep changes scoped to the selected repository/workspace and respect Cursor sandbox failures instead of trying to bypass them.",
+        "- The Cursor sandbox does not prove that external MCP tools are sandboxed; use only MCP tools allowed by the selected MCP policy and the human's request.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
     case "full_access":
@@ -94,9 +95,9 @@ export function cursorPermissionProfileReadyDetail(
 ): string {
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
-      return "Cursor will run with --force and Cursor sandbox enabled for write-capable local work.";
+      return "Cursor will run with --force and Cursor sandbox enabled for write-capable local work. Selected MCP tools still follow the chosen MCP policy.";
     case "full_access":
-      return "Cursor will run with --force and Cursor sandbox disabled for trusted local work.";
+      return "Cursor will run with --force and Cursor sandbox disabled for trusted local work. Selected MCP tools still follow the chosen MCP policy.";
     default:
       return "Cursor will run in ask mode for read-only local analysis.";
   }

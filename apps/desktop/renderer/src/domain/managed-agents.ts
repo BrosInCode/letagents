@@ -6,6 +6,7 @@ import type {
   DesktopAgentProviderSetupAction,
   DesktopCursorMcpPolicy,
   DesktopManagedAgentPermissionProfile,
+  DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   RepoStatus,
@@ -382,6 +383,34 @@ export function managedAgentPermissionProfileSummary(
     ? ""
     : `${managedAgentPermissionProfileStatusLabel(profile.status)}: `;
   return `${prefix}${profile.detail?.trim() || profile.description.trim()}`;
+}
+
+export type ManagedAgentPermissionProfileSelections =
+  Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>;
+
+export function managedAgentPermissionProfileSelectionForProvider(
+  provider: Pick<
+    DesktopAgentProvider,
+    "id" | "defaultPermissionProfileId" | "permissionProfiles"
+  > | null | undefined,
+  selections: ManagedAgentPermissionProfileSelections,
+): DesktopManagedAgentPermissionProfileId | null {
+  const profiles = provider?.permissionProfiles ?? [];
+  if (!provider || !profiles.length) {
+    return null;
+  }
+  const savedId = selections[provider.id];
+  const saved = savedId
+    ? profiles.find((profile) => profile.id === savedId && profile.status === "available")
+    : null;
+  const selected = saved ??
+    profiles.find((profile) =>
+      profile.id === provider.defaultPermissionProfileId && profile.status === "available"
+    ) ??
+    profiles.find((profile) => profile.status === "available") ??
+    profiles[0] ??
+    null;
+  return selected?.id ?? null;
 }
 
 export function managedAgentPermissionProfileLabel(

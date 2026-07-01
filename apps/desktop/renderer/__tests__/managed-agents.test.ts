@@ -28,6 +28,7 @@ import {
   isVisibleManagedAgentSession,
   managedAgentRepoDetail,
   managedAgentPermissionProfileLabel,
+  managedAgentPermissionProfileSelectionForProvider,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   managedAgentSessionMatchesRoom,
@@ -572,6 +573,43 @@ test("managed permission profile helpers present available and gated modes", () 
     detail: "Needs config isolation.",
     isDefault: false,
   }), "Gated: Needs config isolation.");
+});
+
+test("managed permission profile selection is scoped by provider", () => {
+  const cursorProvider = provider({
+    id: "cursor",
+    name: "Cursor",
+    defaultPermissionProfileId: "read_only",
+    permissionProfiles: [
+      {
+        id: "read_only",
+        label: "Read-only",
+        description: "Inspect only.",
+        status: "available",
+        risk: "low",
+        detail: null,
+        isDefault: true,
+      },
+      {
+        id: "full_access",
+        label: "Full access",
+        description: "Trusted local access.",
+        status: "available",
+        risk: "high",
+        detail: null,
+        isDefault: false,
+      },
+    ],
+  });
+
+  assert.equal(
+    managedAgentPermissionProfileSelectionForProvider(cursorProvider, { codex: "full_access" }),
+    "read_only",
+  );
+  assert.equal(
+    managedAgentPermissionProfileSelectionForProvider(cursorProvider, { cursor: "full_access" }),
+    "full_access",
+  );
 });
 
 test("managed agent room matching follows backend room filtering semantics", () => {

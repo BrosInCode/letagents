@@ -284,7 +284,7 @@ export function createDesktopCursorRuntime(
     session: DesktopCursorLiveSessionState,
     event: ManagedRoomEvent,
   ): void {
-    preemptActiveTurn(session.session_id);
+    preemptActiveTurnIfSafe(session);
     const previous = queues.get(session.session_id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -387,6 +387,14 @@ export function createDesktopCursorRuntime(
         activeTurns.delete(session.session_id);
       }
     }
+  }
+
+  function preemptActiveTurnIfSafe(session: DesktopCursorLiveSessionState): void {
+    const launchOptions = cursorLaunchOptionsForPermissionProfile(session.permission_profile_id);
+    if (launchOptions.force) {
+      return;
+    }
+    preemptActiveTurn(session.session_id);
   }
 
   function preemptActiveTurn(sessionId: string): void {

@@ -402,6 +402,80 @@ test("Cursor runtime preempts an active event and redelivers the newer event wit
   assert.equal(stored?.active_work, null);
 });
 
+test("Cursor runtime queues write-capable events instead of preempting active writes", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  let finishFirstTurn: (() => void) | null = null;
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      if (calls.length === 1) {
+        return new Promise((resolve) => {
+          finishFirstTurn = () => resolve({
+            sessionId: "cursor_session_write",
+            text: "First write turn complete.",
+            status: "success",
+            error: null,
+            recentItems: [{ type: "result", text: "First write turn complete." }],
+          });
+        });
+      }
+      return {
+        sessionId: "cursor_session_write",
+        text: "Second write turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Second write turn complete." }],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "full_access",
+  });
+
+  const baseMessage = messageEvent().message;
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...baseMessage,
+      id: "msg_1",
+      text: "first write request",
+    },
+  }));
+  while (calls.length < 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...baseMessage,
+      id: "msg_2",
+      text: "second write request",
+    },
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.abortController?.signal.aborted, false);
+  assert.ok(finishFirstTurn);
+  (finishFirstTurn as () => void)();
+  await runtime.waitForIdle();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.cursorSessionId, "cursor_session_write");
+  assert.deepEqual(published, [
+    { text: "First write turn complete.", eventId: "msg_1" },
+    { text: "Second write turn complete.", eventId: "msg_2" },
+  ]);
+  const stored = getStoredCursorLiveSession(started.session.id);
+  assert.equal(stored?.cursor_session_id, "cursor_session_write");
+  assert.equal(stored?.status, "completed");
+  assert.equal(stored?.last_error, null);
+  assert.equal(stored?.active_work, null);
+});
+
 test("Cursor runtime stop interrupts the worker session and disconnects the room identity", async () => {
   resetState();
   let capturedAbort: AbortController | null = null;
