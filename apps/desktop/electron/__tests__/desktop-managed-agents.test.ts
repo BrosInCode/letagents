@@ -71,7 +71,10 @@ const {
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
-const { persistDesktopManagedAgentLocalReply } = await import("../main/agents/managed-agent-local-replies.js");
+const {
+  desktopManagedAgentReplyTargetForMessage,
+  persistDesktopManagedAgentLocalReply,
+} = await import("../main/agents/managed-agent-local-replies.js");
 const {
   assertManagedAgentPermissionProfileAvailable,
   listManagedAgentPermissionProfiles,
@@ -1291,6 +1294,34 @@ test("desktop managed agent replies are persisted into local room chat", async (
   assert.equal(reply?.reply_to, null);
 });
 
+test("desktop managed agent reply targets distinguish quote replies from thread replies", () => {
+  const rootReply = {
+    id: "msg_1",
+    sender: "EmmyMay",
+    text: "Root topic",
+    source: "browser",
+    timestamp: "2026-07-01T10:00:00.000Z",
+  };
+
+  assert.deepEqual(
+    desktopManagedAgentReplyTargetForMessage({
+      id: "msg_2",
+      replyTo: rootReply,
+      threadRootId: "msg_2",
+    }),
+    { replyTo: "msg_1", threadRootId: null },
+  );
+
+  assert.deepEqual(
+    desktopManagedAgentReplyTargetForMessage({
+      id: "msg_3",
+      replyTo: rootReply,
+      threadRootId: "msg_1",
+    }),
+    { replyTo: "msg_1", threadRootId: "msg_1" },
+  );
+});
+
 test("desktop managed agent local replies stay in the source thread", async () => {
   await createLocalRoom({
     roomIdentifier: "local_thread_room",
@@ -1305,17 +1336,21 @@ test("desktop managed agent local replies stay in the source thread", async () =
   });
   const storage = await resolveLocalAwareRoomStorageMode("room_thread");
 
-  await persistDesktopManagedAgentLocalReply({
+  const result = await persistDesktopManagedAgentLocalReply({
     roomIdentifier: "room_thread",
     storage,
     workerSession: managedWorkerSession({ room_id: "room_thread" }),
     replyTo: root.id,
+    threadRootId: root.id,
     text: "Thread answer.",
   });
 
   const page = await getLocalChatMessages("local_thread_room");
   const reply = page.messages.at(-1);
+  assert.equal(result?.threadRootId, root.id);
   assert.equal(reply?.text, "Thread answer.");
+  assert.equal(reply?.thread_root_id, root.id);
+  assert.equal(reply?.thread_reply_to_id, root.id);
   assert.equal(reply?.reply_to?.id, root.id);
 });
 

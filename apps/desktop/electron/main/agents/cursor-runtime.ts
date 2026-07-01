@@ -35,7 +35,11 @@ import {
 } from "./managed-agent-permission-profiles.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
-import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
+import {
+  desktopManagedAgentReplyTargetForMessage,
+  persistDesktopManagedAgentLocalReply,
+  type DesktopManagedAgentReplyTarget,
+} from "./managed-agent-local-replies.js";
 import {
   getCurrentCursorLiveSession,
   getOrCreateDesktopHostId,
@@ -559,11 +563,11 @@ function activeWorkForEvent(
   };
 }
 
-function replyTargetForEvent(event: ManagedRoomEvent): string | null {
+function replyTargetForEvent(event: ManagedRoomEvent): DesktopManagedAgentReplyTarget {
   if (event.type !== "message") {
-    return null;
+    return { replyTo: null, threadRootId: null };
   }
-  return event.message.replyTo?.id ?? null;
+  return desktopManagedAgentReplyTargetForMessage(event.message);
 }
 
 async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput): Promise<void> {
@@ -584,11 +588,13 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
   }
 
   const roomIdentifier = input.session.room_identifier || input.session.room_id;
+  const replyTarget = replyTargetForEvent(input.event);
   const localReply = await persistDesktopManagedAgentLocalReply({
     roomIdentifier,
     storage: input.storage,
     workerSession,
-    replyTo: replyTargetForEvent(input.event),
+    replyTo: replyTarget.replyTo,
+    threadRootId: replyTarget.threadRootId,
     text,
   });
   if (localReply) {
@@ -610,7 +616,8 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
       },
       body: JSON.stringify({
         text,
-        reply_to: replyTargetForEvent(input.event),
+        reply_to: replyTarget.replyTo,
+        thread_root_id: replyTarget.threadRootId,
         agent_session_id: workerSession.session_id,
         agent_session_token: workerSession.session_token,
       }),

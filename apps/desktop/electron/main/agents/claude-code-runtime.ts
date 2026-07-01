@@ -68,7 +68,11 @@ import {
   managedAgentPermissionProfileForProvider,
 } from "./managed-agent-permission-profiles.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
-import { persistDesktopManagedAgentLocalReply } from "./managed-agent-local-replies.js";
+import {
+  desktopManagedAgentReplyTargetForMessage,
+  persistDesktopManagedAgentLocalReply,
+  type DesktopManagedAgentReplyTarget,
+} from "./managed-agent-local-replies.js";
 
 const DEFAULT_CLAUDE_CODE_STOP_PHRASE = "/stop-claude-code-room";
 
@@ -956,11 +960,11 @@ function activeWorkForEvent(
   };
 }
 
-function replyTargetForEvent(event: ManagedRoomEvent): string | null {
+function replyTargetForEvent(event: ManagedRoomEvent): DesktopManagedAgentReplyTarget {
   if (event.type !== "message") {
-    return null;
+    return { replyTo: null, threadRootId: null };
   }
-  return event.message.replyTo?.id ?? null;
+  return desktopManagedAgentReplyTargetForMessage(event.message);
 }
 
 async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeReplyInput): Promise<void> {
@@ -981,11 +985,13 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
   }
 
   const roomIdentifier = input.session.room_identifier || input.session.room_id;
+  const replyTarget = replyTargetForEvent(input.event);
   const localReply = await persistDesktopManagedAgentLocalReply({
     roomIdentifier,
     storage: input.storage,
     workerSession,
-    replyTo: replyTargetForEvent(input.event),
+    replyTo: replyTarget.replyTo,
+    threadRootId: replyTarget.threadRootId,
     text,
   });
   if (localReply) {
@@ -1007,7 +1013,8 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
       },
       body: JSON.stringify({
         text,
-        reply_to: replyTargetForEvent(input.event),
+        reply_to: replyTarget.replyTo,
+        thread_root_id: replyTarget.threadRootId,
         agent_session_id: workerSession.session_id,
         agent_session_token: workerSession.session_token,
       }),
