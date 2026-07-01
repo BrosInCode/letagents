@@ -41,11 +41,11 @@ test("Cursor runner args use read-only stream-json mode and avoid unsafe flags",
     "-p",
     "--output-format",
     "stream-json",
-    "--mode",
-    "plan",
     "--trust",
     "--workspace",
     "/tmp/repo",
+    "--mode",
+    "plan",
     "--resume",
     "cursor_session_1",
     "hello",
@@ -53,6 +53,46 @@ test("Cursor runner args use read-only stream-json mode and avoid unsafe flags",
   assert.equal(args.includes("--force"), false);
   assert.equal(args.includes("--approve-mcps"), false);
   assert.equal(args.includes("--sandbox"), false);
+});
+
+test("Cursor runner args enable explicit write profiles", () => {
+  assert.deepEqual(buildCursorAgentArgs({
+    prompt: "write safely",
+    cwd: "/tmp/repo",
+    mode: null,
+    force: true,
+    sandbox: "enabled",
+  }), [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--trust",
+    "--workspace",
+    "/tmp/repo",
+    "--force",
+    "--sandbox",
+    "enabled",
+    "write safely",
+  ]);
+
+  assert.deepEqual(buildCursorAgentArgs({
+    prompt: "write freely",
+    cwd: "/tmp/repo",
+    mode: null,
+    force: true,
+    sandbox: "disabled",
+  }), [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--trust",
+    "--workspace",
+    "/tmp/repo",
+    "--force",
+    "--sandbox",
+    "disabled",
+    "write freely",
+  ]);
 });
 
 test("Cursor runner parses a successful stream-json turn", async () => {

@@ -186,18 +186,8 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(inspected?.recentItems.length, 1);
   assert.equal(getStoredCursorLiveSession(result.session.id)?.permission_profile_id, "read_only");
   assert.equal(getStoredCursorLiveSession(result.session.id)?.cursor_mcp_policy, "filter_letagents");
+  assert.equal(preflightInputs[0]?.permissionProfileId, "read_only");
   assert.equal(preflightInputs[0]?.cursorMcpPolicy, "filter_letagents");
-  await assert.rejects(
-    () => runtime.start({
-      providerId: "cursor",
-      roomIdentifier: "room_1",
-      roomDisplayName: "Room One",
-      repoRootPath: tempDir,
-      deliveryMode: "desktop_events",
-      permissionProfileId: "full_access",
-    }),
-    /Full access is not available for cursor/,
-  );
 });
 
 test("Cursor runtime persists selected MCP policy and reuses it for event turns", async () => {
@@ -233,6 +223,75 @@ test("Cursor runtime persists selected MCP policy and reuses it for event turns"
   assert.deepEqual(calls[0]?.env, {});
 });
 
+test("Cursor runtime persists write-capable permission profiles and maps them to runner flags", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  const { runtime, preflightInputs } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      return {
+        sessionId: "cursor_session_write",
+        text: "Write-capable turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Write-capable turn complete." }],
+      };
+    },
+  });
+
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "full_access",
+  });
+  runtime.dispatchRoomStreamEvent(messageEvent({ message: { ...messageEvent().message, text: "make the change" } }));
+  await runtime.waitForIdle();
+
+  assert.equal(started.session.permissionProfileId, "full_access");
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.permission_profile_id, "full_access");
+  assert.equal(preflightInputs[0]?.permissionProfileId, "full_access");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.mode, null);
+  assert.equal(calls[0]?.force, true);
+  assert.equal(calls[0]?.sandbox, "disabled");
+  assert.match(calls[0]?.prompt ?? "", /Cursor full access/);
+});
+
+test("Cursor runtime maps sandboxed-write profile to Cursor sandbox flags", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  const { runtime } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      return {
+        sessionId: "cursor_session_sandboxed",
+        text: "Sandboxed turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  });
+
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "sandboxed_write",
+  });
+  runtime.dispatchRoomStreamEvent(messageEvent({ message: { ...messageEvent().message, text: "make a sandboxed change" } }));
+  await runtime.waitForIdle();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.mode, null);
+  assert.equal(calls[0]?.force, true);
+  assert.equal(calls[0]?.sandbox, "enabled");
+  assert.match(calls[0]?.prompt ?? "", /Cursor sandboxed write/);
+});
+
 test("Cursor runtime delivers room events into ask-mode runner and persists resume state", async () => {
   resetState();
   const prompts: CursorTurnInput[] = [];
@@ -260,10 +319,12 @@ test("Cursor runtime delivers room events into ask-mode runner and persists resu
 
   assert.equal(prompts.length, 1);
   assert.equal(prompts[0]?.mode, "ask");
+  assert.equal(prompts[0]?.force, false);
+  assert.equal(prompts[0]?.sandbox, null);
   assert.equal(prompts[0]?.env?.HOME, join(tempDir, "cursor-managed", "home"));
   assert.equal(prompts[0]?.env?.CURSOR_CONFIG_DIR, join(tempDir, "cursor-managed", "config", "cursor"));
   assert.equal(prompts[0]?.env?.CURSOR_DATA_DIR, join(tempDir, "cursor-managed", "data", "cursor"));
-  assert.match(prompts[0]?.prompt ?? "", /Cursor read-only prototype/);
+  assert.match(prompts[0]?.prompt ?? "", /Cursor read-only/);
   assert.match(prompts[0]?.prompt ?? "", /Do not call LetAgents MCP room tools/);
   assert.match(prompts[0]?.prompt ?? "", /must not edit files/);
   assert.equal(prompts[0]?.cursorSessionId, null);

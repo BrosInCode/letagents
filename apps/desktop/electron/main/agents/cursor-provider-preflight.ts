@@ -8,7 +8,12 @@ import type {
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
+import {
+  cursorLaunchOptionsForPermissionProfile,
+  cursorPermissionProfileReadyDetail,
+} from "./cursor-permission-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
+import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
 
 type ExecResult = {
   ok: boolean;
@@ -39,7 +44,7 @@ export async function runDesktopCursorProviderPreflight(
       status: "missing_runtime",
       canStart: false,
       message: "Cursor Agent is not installed.",
-      detail: "Install Cursor Agent before starting a local read-only Cursor room agent.",
+      detail: "Install Cursor Agent before starting a local Cursor room agent.",
       nextAction: null,
       version: null,
       mcpStatus,
@@ -61,6 +66,35 @@ export async function runDesktopCursorProviderPreflight(
   const version = firstOutputLine(versionResult);
   const workspaceRoot = input.repoRootPath?.trim() ? resolve(input.repoRootPath.trim()) : null;
   const cursorMcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
+  const permissionProfile = managedAgentPermissionProfileForProvider("cursor", input.permissionProfileId);
+  if (permissionProfile.status !== "available") {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: `${permissionProfile.label} is not available for Cursor.`,
+      detail: permissionProfile.detail || permissionProfile.description,
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+  const launchOptions = cursorLaunchOptionsForPermissionProfile(permissionProfile.id);
+  if (launchOptions.force || launchOptions.sandbox) {
+    const flagResult = await execFileWithTimeout(command, ["--help"]);
+    if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions)) {
+      return {
+        providerId: provider.id,
+        status: "error",
+        canStart: false,
+        message: "Cursor Agent does not support the selected permission profile.",
+        detail: "Update Cursor Agent so managed Cursor can use the required --force and --sandbox flags.",
+        nextAction: null,
+        version,
+        mcpStatus,
+      };
+    }
+  }
   let managedProfile;
   try {
     managedProfile = prepareCursorManagedProfile({
@@ -100,7 +134,7 @@ export async function runDesktopCursorProviderPreflight(
       status: "repo_required",
       canStart: false,
       message: "Choose a local repository before starting Cursor.",
-      detail: "A desktop-managed Cursor agent needs a local repo or worktree for read-only analysis.",
+      detail: "A desktop-managed Cursor agent needs a local repo or worktree.",
       nextAction: "choose_repo",
       version,
       mcpStatus,
@@ -154,8 +188,8 @@ export async function runDesktopCursorProviderPreflight(
     providerId: provider.id,
     status: "ready",
     canStart: true,
-    message: "Cursor Agent is ready to start in read-only mode.",
-    detail: cursorPreflightReadyDetail(cursorMcpPolicy, mcpStatus),
+    message: `Cursor Agent is ready to start with ${permissionProfile.label}.`,
+    detail: cursorPreflightReadyDetail(cursorMcpPolicy, mcpStatus, permissionProfile.id),
     nextAction: null,
     version,
     mcpStatus,
@@ -216,17 +250,28 @@ function mcpListHasVisibleServers(result: ExecResult): boolean {
   );
 }
 
+function cursorHelpSupportsLaunchOptions(
+  result: ExecResult,
+  launchOptions: ReturnType<typeof cursorLaunchOptionsForPermissionProfile>,
+): boolean {
+  const output = `${result.stdout}\n${result.stderr}`;
+  return (!launchOptions.force || output.includes("--force")) &&
+    (!launchOptions.sandbox || output.includes("--sandbox"));
+}
+
 function cursorPreflightReadyDetail(
   policy: ReturnType<typeof normalizeCursorMcpPolicy>,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  permissionProfileId: Parameters<typeof cursorPermissionProfileReadyDetail>[0],
 ): string {
+  const permissionDetail = cursorPermissionProfileReadyDetail(permissionProfileId);
   if (policy === "normal") {
-    return "This desktop can start Cursor in ask mode with normal Cursor MCP settings. Cursor may directly use any MCP tools configured in Cursor, including LetAgents if present.";
+    return `${permissionDetail} The normal Cursor MCP settings are enabled; Cursor may directly use any MCP tools configured in Cursor, including LetAgents if present.`;
   }
   if (policy === "none") {
-    return "This desktop can start Cursor in ask mode with MCP tools disabled in the managed profile. Write-capable Cursor remains gated on permissions tests.";
+    return `${permissionDetail} MCP tools are disabled in the managed profile.`;
   }
   return mcpStatus === "installed"
-    ? "This desktop can start Cursor in ask mode using managed MCP settings that keep user MCPs except LetAgents. Write-capable Cursor remains gated on permissions tests."
-    : "This desktop can start Cursor directly in ask mode with managed MCP settings that filter LetAgents; install the LetAgents connection only for manual Cursor joins.";
+    ? `${permissionDetail} Managed MCP settings keep user MCPs except LetAgents.`
+    : `${permissionDetail} Managed MCP settings filter LetAgents; install the LetAgents connection only for manual Cursor joins.`;
 }

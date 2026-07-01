@@ -1,12 +1,17 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-import type { DesktopCursorMcpPolicy } from "../ipc-types.js";
+import type {
+  DesktopCursorMcpPolicy,
+  DesktopManagedAgentPermissionProfileId,
+} from "../ipc-types.js";
 import {
   normalizeCursorMcpPolicy,
   prepareCursorManagedProfile,
 } from "../main/agents/cursor-managed-profile.js";
+import { cursorLaunchOptionsForPermissionProfile } from "../main/agents/cursor-permission-profile.js";
 import { buildCursorAgentArgs, buildCursorChildEnv } from "../main/agents/cursor-runner.js";
 
 type CommandResult = {
@@ -26,12 +31,15 @@ type CursorSmokeTurnResult = {
 const cursorBin = process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
 const workspaceRoot = resolveWorkspaceRoot();
 const mcpPolicy = resolveMcpPolicy();
+const permissionProfile = resolvePermissionProfile();
+const launchOptions = cursorLaunchOptionsForPermissionProfile(permissionProfile);
 const profile = prepareCursorManagedProfile({ workspaceRoot, mcpPolicy });
 const env = buildCursorChildEnv(profile.env);
 
 console.log(`workspace: ${workspaceRoot}`);
 console.log(`cursor HOME: ${profile.homeDir}`);
 console.log(`mcp policy: ${mcpPolicy}`);
+console.log(`permission profile: ${permissionProfile}`);
 
 const status = await execCursor(["status"]);
 assertOk(status, "cursor-agent status");
@@ -69,6 +77,31 @@ if (normalTurn.status !== "success" || normalTurn.text?.trim() !== "MANAGED_CURS
 }
 console.log("read-only turn: MANAGED_CURSOR_READONLY_OK");
 
+if (permissionProfile === "sandboxed_write" || permissionProfile === "full_access") {
+  const writeSmokeFile = join(workspaceRoot, ".letagents", "cursor-managed-write-smoke.txt");
+  rmSync(writeSmokeFile, { force: true });
+  mkdirSync(dirname(writeSmokeFile), { recursive: true });
+  const writeTurn = await runCursorSmokeTurn(
+    [
+      `Create or overwrite ${JSON.stringify(writeSmokeFile)} with exactly MANAGED_CURSOR_WRITE_OK.`,
+      "Then reply exactly MANAGED_CURSOR_WRITE_OK.",
+    ].join(" "),
+  );
+  try {
+    if (writeTurn.status !== "success" || !writeTurn.text?.includes("MANAGED_CURSOR_WRITE_OK")) {
+      throw new Error(
+        `managed Cursor write turn failed: ${writeTurn.error || writeTurn.text || "missing result"}`,
+      );
+    }
+    if (!existsSync(writeSmokeFile) || readFileSync(writeSmokeFile, "utf-8").trim() !== "MANAGED_CURSOR_WRITE_OK") {
+      throw new Error("managed Cursor write turn did not create the expected smoke file.");
+    }
+    console.log("write turn: MANAGED_CURSOR_WRITE_OK");
+  } finally {
+    rmSync(writeSmokeFile, { force: true });
+  }
+}
+
 if (mcpPolicy !== "normal") {
   const isolationTurn = await runCursorSmokeTurn(
     [
@@ -101,6 +134,14 @@ function resolveMcpPolicy(): DesktopCursorMcpPolicy {
     throw new Error(`Unsupported Cursor MCP policy '${value}'. Use filter_letagents, normal, or none.`);
   }
   return normalizeCursorMcpPolicy(value);
+}
+
+function resolvePermissionProfile(): DesktopManagedAgentPermissionProfileId {
+  const value = valueForFlag("--permission-profile") ?? valueForFlag("--cursor-permission-profile");
+  if (value && value !== "read_only" && value !== "sandboxed_write" && value !== "full_access") {
+    throw new Error(`Unsupported Cursor permission profile '${value}'. Use read_only, sandboxed_write, or full_access.`);
+  }
+  return (value || "read_only") as DesktopManagedAgentPermissionProfileId;
 }
 
 function resolveWorkspaceRoot(): string {
@@ -160,7 +201,9 @@ function runCursorSmokeTurn(prompt: string): Promise<CursorSmokeTurnResult> {
       buildCursorAgentArgs({
         cwd: workspaceRoot,
         env: profile.env,
-        mode: "ask",
+        mode: launchOptions.mode,
+        force: launchOptions.force,
+        sandbox: launchOptions.sandbox,
         prompt,
       }),
       {

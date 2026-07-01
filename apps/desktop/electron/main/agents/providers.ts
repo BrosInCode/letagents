@@ -65,7 +65,7 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "cursor",
     name: "Cursor",
-    description: "Start a read-only Cursor agent here.",
+    description: "Start a local Cursor agent here.",
     capabilities: [
       "external_mcp",
       "desktop_managed_runtime",

@@ -241,17 +241,16 @@ test("managed agent permission profiles map provider-specific available and gate
 
   const cursorProfiles = listManagedAgentPermissionProfiles("cursor");
   assert.equal(cursorProfiles.find((profile) => profile.id === "read_only")?.status, "available");
-  assert.equal(cursorProfiles.find((profile) => profile.id === "full_access")?.status, "gated");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "sandboxed_write")?.status, "available");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "full_access")?.status, "available");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
 
   const codexProfiles = listManagedAgentPermissionProfiles("codex");
   assert.equal(codexProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(codexProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
 
   assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "ask_before_write");
-  assert.throws(
-    () => assertManagedAgentPermissionProfileAvailable("cursor", "full_access"),
-    /Full access is not available for cursor/,
-  );
+  assert.equal(assertManagedAgentPermissionProfileAvailable("cursor", "full_access").id, "full_access");
   assert.throws(
     () => assertManagedAgentPermissionProfileAvailable("cursor", "unknown_profile"),
     /Unknown permission profile 'unknown_profile' for cursor/,

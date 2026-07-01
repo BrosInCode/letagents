@@ -43,6 +43,7 @@ export interface DesktopAgentProvider {
 export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
   repoRootPath?: string | null;
+  permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
 }
 

@@ -38,6 +38,10 @@ if (args[0] === "--version") {
   console.log("cursor-agent fake 1.0.0");
   process.exit(0);
 }
+if (args[0] === "--help") {
+  console.log("Usage: cursor-agent --force --sandbox <mode>");
+  process.exit(0);
+}
 if (args[0] === "status") {
   console.log("Logged in");
   process.exit(0);
@@ -79,6 +83,7 @@ test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
+  assert.equal(result.message, "Cursor Agent is ready to start with Read-only.");
   assert.match(result.detail ?? "", /keep user MCPs except LetAgents/);
   assert.deepEqual(
     JSON.parse(readFileSync(join(cursorManagedHome, ".cursor", "mcp.json"), "utf-8")),
@@ -88,6 +93,42 @@ test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
       },
     },
   );
+});
+
+test("Cursor preflight validates write-capable permission profile flags", async () => {
+  const workspace = workspaceFixture("full-access");
+
+  const result = await runDesktopCursorProviderPreflight(
+    cursorProvider,
+    {
+      repoRootPath: workspace,
+      permissionProfileId: "full_access",
+      cursorMcpPolicy: "filter_letagents",
+    },
+    "installed",
+  );
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.canStart, true);
+  assert.equal(result.message, "Cursor Agent is ready to start with Full access.");
+  assert.match(result.detail ?? "", /--force and Cursor sandbox disabled/);
+});
+
+test("Cursor preflight blocks gated permission profiles", async () => {
+  const workspace = workspaceFixture("gated-permission-profile");
+
+  const result = await runDesktopCursorProviderPreflight(
+    cursorProvider,
+    {
+      repoRootPath: workspace,
+      permissionProfileId: "ask_before_write",
+    },
+    "installed",
+  );
+
+  assert.equal(result.status, "error");
+  assert.equal(result.canStart, false);
+  assert.equal(result.message, "Ask before writes is not available for Cursor.");
 });
 
 test("Cursor preflight blocks visible LetAgents MCP for managed MCP policies", async () => {

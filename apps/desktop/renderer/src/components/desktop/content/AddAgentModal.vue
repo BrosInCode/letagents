@@ -495,9 +495,9 @@ watch(
 );
 
 watch(
-  () => selectedCursorMcpPolicy.value,
+  () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value] as const,
   () => {
-    if (props.open && selectedProviderId.value === "cursor") {
+    if (props.open && selectedProviderId.value) {
       preflight.value = null;
       void runPreflight();
     }
@@ -727,6 +727,7 @@ async function runPreflight(): Promise<void> {
       {
         roomIdentifier: props.roomIdentifier,
         repoRootPath: props.repoRootPath,
+        permissionProfileId: selectedPermissionProfile.value?.id ?? null,
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
       },
     );
