@@ -9,7 +9,10 @@ import type {
   DesktopRoomMessage,
   DesktopRoomMessageAttachment,
 } from "../../electron/ipc-types";
-import { isMentionableRoomParticipant } from "../src/domain/participants";
+import {
+  isMentionableRoomParticipant,
+  sortMentionableRoomParticipants,
+} from "../src/domain/participants";
 import { isIdleReasoningSession } from "../src/domain/reasoning";
 import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
@@ -404,6 +407,35 @@ describe("room chat helpers", () => {
       githubLogin: null,
       activityState: "offline",
     })), false);
+  });
+
+  it("prioritizes reachable delivery agents before applying the mention cap", () => {
+    const existingHumans = Array.from({ length: 7 }, (_, index) =>
+      participant({
+        participantKey: `human:${index}`,
+        displayName: `Human${index}`,
+        githubLogin: `human${index}`,
+      })
+    );
+    const reachableAgent = participant({
+      participantKey: "agent-presence:lumenvale",
+      kind: "agent",
+      displayName: "LumenVale",
+      actorLabel: "LumenVale",
+      agentKey: "cursor/lumenvale",
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    });
+
+    const cappedCandidates = sortMentionableRoomParticipants([
+      ...existingHumans,
+      reachableAgent,
+    ].filter(isMentionableRoomParticipant)).slice(0, 6);
+
+    assert.equal(cappedCandidates.length, 6);
+    assert.equal(cappedCandidates[0].displayName, "LumenVale");
+    assert.equal(cappedCandidates.some((candidate) => candidate.displayName === "Human6"), false);
   });
 
   it("maps GitHub room messages to desktop event cards", () => {

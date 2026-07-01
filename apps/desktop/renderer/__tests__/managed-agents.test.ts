@@ -39,10 +39,12 @@ import {
   managedAgentStopResultMessage,
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
+  mergeReachableAgentPresenceParticipants,
   normalizeManagedAgentRoomIdentifier,
   preferredManagedAgentRepoRootPath,
   shouldShowCursorMcpPolicySelector,
 } from "../src/domain/managed-agents";
+import { isMentionableRoomParticipant } from "../src/domain/participants";
 
 function provider(
   overrides: Partial<DesktopAgentProvider> = {},
@@ -713,6 +715,79 @@ test("managed desktop agents become mentionable room participants", () => {
   assert.equal(participants[0].displayName, "SummitGrove");
   assert.equal(participants[0].activityState, "active");
   assert.deepEqual(participants[0].sourceFlags, ["delivery", "presence"]);
+});
+
+test("reachable worker presence becomes mentionable when room participants lag", () => {
+  const participants = mergeReachableAgentPresenceParticipants([
+    participant({
+      participantKey: "human:emmy",
+      kind: "human",
+      displayName: "EmmyMay",
+      actorLabel: "EmmyMay",
+      agentKey: null,
+      githubLogin: "EmmyMay",
+      ownerLabel: null,
+      ideLabel: null,
+      activityState: "active",
+    }),
+  ], [
+    presence({
+      actorLabel: "LumenVale",
+      displayName: "LumenVale",
+      agentKey: "cursor/lumenvale",
+      agentSessionId: "agent_lumenvale",
+      runtime: "cursor",
+      ideLabel: "Cursor",
+      status: "working",
+      freshness: "active",
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+      lastHeartbeatAt: "2026-06-14T12:03:00.000Z",
+    }),
+  ], "ROOM_1");
+
+  assert.deepEqual(participants.map((entry) => entry.displayName), ["EmmyMay", "LumenVale"]);
+  assert.equal(participants[1].kind, "agent");
+  assert.equal(participants[1].activityState, "active");
+  assert.deepEqual(participants[1].sourceFlags, ["delivery", "presence"]);
+  assert.equal(isMentionableRoomParticipant(participants[1]), true);
+});
+
+test("reachable worker presence updates an existing hidden agent participant", () => {
+  const participants = mergeReachableAgentPresenceParticipants([
+    participant({
+      hiddenAt: "2026-06-14T12:00:00.000Z",
+      activityState: "offline",
+    }),
+  ], [
+    presence({
+      freshness: "active",
+      activityState: "away",
+      sourceFlags: ["delivery", "presence"],
+    }),
+  ], "room_1");
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].hiddenAt, null);
+  assert.equal(participants[0].activityState, "away");
+  assert.equal(isMentionableRoomParticipant(participants[0]), true);
+});
+
+test("stale or non-delivery presence does not become mentionable", () => {
+  assert.deepEqual(mergeReachableAgentPresenceParticipants([], [
+    presence({
+      freshness: "stale",
+      activityState: "offline",
+      sourceFlags: ["presence"],
+    }),
+  ], "room_1"), []);
+  assert.deepEqual(mergeReachableAgentPresenceParticipants([], [
+    presence({
+      freshness: "active",
+      activityState: "active",
+      sourceFlags: ["presence"],
+    }),
+  ], "room_1"), []);
 });
 
 test("managed desktop agents become reachable activity presence", () => {

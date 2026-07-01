@@ -55,3 +55,29 @@ export function isMentionableRoomParticipant(
 
   return true;
 }
+
+export function sortMentionableRoomParticipants<T extends Pick<
+  DesktopParticipantSummary,
+  "activityState" | "displayName" | "kind" | "sourceFlags"
+>>(participants: readonly T[]): T[] {
+  return [...participants].sort((left, right) =>
+    mentionPriority(left) - mentionPriority(right) ||
+    left.displayName.localeCompare(right.displayName)
+  );
+}
+
+function mentionPriority(
+  participant: Pick<DesktopParticipantSummary, "activityState" | "kind" | "sourceFlags">,
+): number {
+  if (participant.kind !== "agent") {
+    return 3;
+  }
+  const reachable = participant.activityState === "active" || participant.activityState === "away";
+  if (reachable && participant.sourceFlags.includes("delivery")) {
+    return 0;
+  }
+  if (reachable) {
+    return 1;
+  }
+  return 2;
+}
