@@ -1,15 +1,24 @@
+.desktop-composer-input-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+}
+
 .desktop-composer-input {
   width: 100%;
-  min-height: 26px;
-  max-height: 96px;
-  resize: vertical;
+  min-height: 34px;
+  max-height: 156px;
+  resize: none;
+  overflow-y: hidden;
   border: 0;
   outline: none;
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 0.82rem;
-  line-height: 1.28;
+  font-size: 0.86rem;
+  line-height: 1.38;
+  padding: 7px 2px;
 }
 
 .desktop-composer-input:disabled {
@@ -17,18 +26,12 @@
   opacity: 0.58;
 }
 
-.desktop-composer-input::placeholder {
-  color: var(--text-tertiary);
-}
-
 .desktop-composer-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  min-height: 22px;
 }
 
-.desktop-composer-hint,
 .desktop-composer-error {
   min-width: 0;
   margin: 0;
@@ -44,12 +47,13 @@
 }
 
 .desktop-composer-send {
-  min-height: 24px;
-  padding: 0 10px;
-  border-radius: 999px;
+  min-width: 58px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
   background: var(--text);
   color: #080808;
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   font-weight: 900;
 }
 

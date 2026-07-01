@@ -44,8 +44,10 @@
 
 .room-empty-card {
   display: grid;
+  align-self: center;
   place-items: center;
   gap: 7px;
+  width: min(100%, var(--room-chat-content-max, 920px));
   min-height: 360px;
   text-align: center;
   border: 1px dashed rgba(255, 255, 255, 0.12);
