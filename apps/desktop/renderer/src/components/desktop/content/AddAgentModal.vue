@@ -136,7 +136,10 @@
                   :disabled="profile.status !== 'available'"
                   @click="selectPermissionProfile(profile)"
                 >
-                  <strong>{{ profile.label }}</strong>
+                  <span class="desktop-add-agent-permission-option-title">
+                    <strong>{{ profile.label }}</strong>
+                    <em :data-risk="profile.risk">{{ profile.risk }}</em>
+                  </span>
                   <small>{{ permissionProfileOptionSummary(profile) }}</small>
                 </button>
               </div>
@@ -263,7 +266,7 @@
                 :disabled="!canStartManagedAgent || startingAgent"
                 @click="startManagedAgent"
               >
-                {{ startingAgent ? "Starting..." : activeManagedSessions.length ? "Start another" : "Start agent" }}
+                {{ managedAgentStartButtonLabel }}
               </button>
 
               <span v-if="activeSetupConfirmation" class="desktop-add-agent-confirmation">
@@ -271,6 +274,9 @@
               </span>
               <span v-else-if="isExternalMcpProviderReady(selectedProvider, preflight)" class="desktop-add-agent-confirmation">
                 {{ externalMcpProviderInstruction(selectedProvider) }}
+              </span>
+              <span v-else-if="selectedPermissionProfileWarning" class="desktop-add-agent-confirmation">
+                {{ selectedPermissionProfileWarning }}
               </span>
               <span v-else-if="activeManagedSessions.length" class="desktop-add-agent-confirmation">
                 Each start creates a separate local agent session.
@@ -322,6 +328,7 @@ import {
   isVisibleManagedAgentSession,
   managedAgentRepoDetail,
   managedAgentPermissionProfileLabel,
+  managedAgentPermissionProfileSelectionForProvider,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   managedAgentSessionDisplayName,
@@ -369,6 +376,9 @@ const setupMessage = ref<string | null>(null);
 const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
 const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
 const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
+const selectedPermissionProfileIdsByProvider = ref<
+  Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
+>({});
 const dialogElement = ref<HTMLElement | null>(null);
 let previousFocusElement: HTMLElement | null = null;
 let preflightRequestId = 0;
@@ -465,6 +475,39 @@ const selectedCursorMcpPolicyDescription = computed(() =>
   cursorMcpPolicyDescription(selectedCursorMcpPolicy.value)
 );
 
+const managedAgentStartButtonLabel = computed(() => {
+  if (startingAgent.value) return "Starting...";
+  if (!hasDesktopManagedRuntime(selectedProvider.value)) return "Start agent";
+  const providerName = selectedProvider.value?.name?.trim() || "agent";
+  const profileLabel = selectedPermissionProfile.value?.label?.trim();
+  const prefix = activeManagedSessions.value.length ? "Start another" : "Start";
+  return profileLabel
+    ? `${prefix} ${providerName} - ${profileLabel}`
+    : `${prefix} ${providerName}`;
+});
+
+const selectedPermissionProfileWarning = computed(() => {
+  if (!hasDesktopManagedRuntime(selectedProvider.value)) {
+    return null;
+  }
+  const profile = selectedPermissionProfile.value;
+  if (!profile || profile.status !== "available") {
+    return null;
+  }
+  const providerName = selectedProvider.value?.name?.trim() || "this agent";
+  if (profile.risk === "high") {
+    return `${profile.label} gives ${providerName} broad write and shell access. Use only with trusted repos and MCPs.`;
+  }
+  if (
+    selectedProviderId.value === "cursor" &&
+    profile.id === "sandboxed_write" &&
+    selectedCursorMcpPolicy.value !== "none"
+  ) {
+    return "Sandboxed writes still allow the selected Cursor MCP tools.";
+  }
+  return null;
+});
+
 watch(
   () => props.open,
   (open) => {
@@ -495,9 +538,9 @@ watch(
 );
 
 watch(
-  () => selectedCursorMcpPolicy.value,
+  () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value] as const,
   () => {
-    if (props.open && selectedProviderId.value === "cursor") {
+    if (props.open && selectedProviderId.value) {
       preflight.value = null;
       void runPreflight();
     }
@@ -629,24 +672,28 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
 }
 
 function syncPermissionProfileSelection(): void {
-  const profiles = selectedPermissionProfiles.value;
-  const current = selectedPermissionProfileId.value
-    ? profiles.find((profile) => profile.id === selectedPermissionProfileId.value)
-    : null;
-  if (current?.status === "available") {
-    return;
+  const nextId = managedAgentPermissionProfileSelectionForProvider(
+    selectedProvider.value,
+    selectedPermissionProfileIdsByProvider.value,
+  );
+  selectedPermissionProfileId.value = nextId;
+  if (selectedProviderId.value && nextId) {
+    selectedPermissionProfileIdsByProvider.value = {
+      ...selectedPermissionProfileIdsByProvider.value,
+      [selectedProviderId.value]: nextId,
+    };
   }
-  const defaultId = selectedProvider.value?.defaultPermissionProfileId;
-  const next = profiles.find((profile) => profile.id === defaultId && profile.status === "available") ??
-    profiles.find((profile) => profile.status === "available") ??
-    profiles[0] ??
-    null;
-  selectedPermissionProfileId.value = next?.id ?? null;
 }
 
 function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
   if (profile.status !== "available") return;
   selectedPermissionProfileId.value = profile.id;
+  if (selectedProviderId.value) {
+    selectedPermissionProfileIdsByProvider.value = {
+      ...selectedPermissionProfileIdsByProvider.value,
+      [selectedProviderId.value]: profile.id,
+    };
+  }
 }
 
 function permissionProfileSummary(profile: DesktopManagedAgentPermissionProfile): string {
@@ -727,6 +774,7 @@ async function runPreflight(): Promise<void> {
       {
         roomIdentifier: props.roomIdentifier,
         repoRootPath: props.repoRootPath,
+        permissionProfileId: selectedPermissionProfile.value?.id ?? null,
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
       },
     );

@@ -42,7 +42,7 @@ Default Agent mode is not read-only:
 - In a trusted workspace, default Agent mode created files successfully without `--force`.
 - Explicit `--sandbox enabled` still allowed file edits in the workspace.
 
-Implication: a write-capable managed Cursor runtime must wait for a desktop-owned approval path and config/auth isolation. Avoiding `--force` alone is not sufficient.
+Implication: a write-capable managed Cursor runtime needs explicit permission-profile selection plus config/auth isolation. Avoiding `--force` alone is not sufficient.
 
 ## Shell And Sandbox Behavior
 
@@ -55,7 +55,7 @@ With `--sandbox enabled`:
 - A shell write to the user's home directory was denied.
 - A shell write to `/tmp` succeeded.
 
-Implication: Cursor's sandbox is useful but not a complete permission model. Writable paths and shell behavior must be treated as runtime contracts and covered by tests before write-capable managed mode is exposed.
+Implication: Cursor's sandbox is useful but not a complete permission model. Writable paths and shell behavior must be treated as runtime contracts and covered by tests before sandboxed write is treated as lower-risk than full access.
 
 ## MCP Visibility And Room I/O
 
@@ -97,11 +97,11 @@ Proceed with a read-only Cursor desktop-managed prototype:
 - Store and resume a managed Cursor chat id per session.
 - Keep provider startability experimental/internal until gates below pass.
 
-Do not implement write-capable Cursor Agent mode yet.
+Original phase-0 decision: do not implement write-capable Cursor Agent mode until MCP/config isolation and runner behavior are proven. Gate 2 has since narrowed this: read-only remains default, `sandboxed_write` and `full_access` are explicit user choices, and `ask_before_write` remains gated until Cursor headless approval events can be bridged honestly.
 
 ## Gates Before Write-Capable Cursor
 
-Write-capable Cursor is blocked until LetAgents has all of the following:
+Write-capable Cursor was blocked until LetAgents had all of the following:
 
 1. A provider-agnostic managed-agent permission path that can surface human Allow/Deny decisions in the desktop UI or room.
 2. Config/auth isolation proving Cursor cannot see or call LetAgents room MCP tools directly.
@@ -109,8 +109,8 @@ Write-capable Cursor is blocked until LetAgents has all of the following:
 4. Sandbox behavior tests covering workspace writes, home-directory denial, `/tmp` behavior, shell command execution, and cancellation.
 5. Runner tests for stream parsing, malformed JSON lines, missing final result, nonzero process exit, tool-call failure, resume ids, and interrupt handling.
 
-Only after these gates pass should `cursor` be exposed as a normal `desktop_managed_runtime` provider.
+These gates remain the checklist for expanding Cursor beyond explicit write profiles. In particular, `ask_before_write` should not be exposed until the approval path is real rather than prompt copy.
 
 ## Gate 2 Follow-up
 
-See `docs/cursor-desktop-managed-gate2.md` for the config/auth isolation probe. The short version: managed Cursor now has a Cursor MCP policy selector. The default `filter_letagents` mode uses an isolated home, copies the user's Cursor MCP config, removes LetAgents-looking MCP servers, and links the macOS login keychain into that managed home so normal Cursor auth works. `none` keeps the old empty-MCP behavior. `normal` uses the user's normal Cursor MCP setup as-is and warns that Cursor may access configured MCP tools directly. Write-capable Cursor remains gated on desktop approvals and sandbox behavior tests.
+See `docs/cursor-desktop-managed-gate2.md` for the config/auth isolation probe. The short version: managed Cursor now has a Cursor MCP policy selector. The default `filter_letagents` mode uses an isolated home, copies the user's Cursor MCP config, removes LetAgents-looking MCP servers, and links the macOS login keychain into that managed home so normal Cursor auth works. `none` keeps the old empty-MCP behavior. `normal` uses the user's normal Cursor MCP setup as-is and warns that Cursor may access configured MCP tools directly. Cursor permission profiles are selected separately from MCP policy: `read_only` defaults to `--mode ask`, `sandboxed_write` maps to `--force --sandbox enabled`, and `full_access` maps to `--force --sandbox disabled`. The write-profile smoke proves workspace writes, not general sandbox safety for external MCP tools or every out-of-workspace side effect.

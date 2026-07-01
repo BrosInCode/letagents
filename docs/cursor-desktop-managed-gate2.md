@@ -2,7 +2,7 @@
 
 Date: 2026-06-30
 
-Status: passed for macOS desktop-managed read-only Cursor. Cursor write-capable profiles still stay gated on approval and sandbox tests.
+Status: passed for macOS desktop-managed Cursor MCP isolation and workspace-write smoke coverage. Read-only remains the default; `sandboxed_write` and `full_access` are selectable permission profiles, while `ask_before_write` stays gated until headless approval events can be bridged.
 
 This note records the Gate 2 probes for managed Cursor config/auth isolation. The goal is to prove that a desktop-managed Cursor session can run without seeing or calling LetAgents MCP room/control-plane tools. The desktop app should own room I/O; Cursor should only receive desktop-delivered prompts and return text to the supervisor.
 
@@ -103,7 +103,7 @@ On macOS, Cursor's normal login can be reused without exposing LetAgents MCP by 
 - `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `CURSOR_CONFIG_DIR`, and `CURSOR_DATA_DIR` pointed inside the managed profile;
 - `~/Library/Keychains` linked into the managed home so Cursor can read the user's macOS login keychain.
 
-The original Gate 2 probe used an empty managed MCP config. The current product default is `filter_letagents`: copy the user's Cursor MCP config into the managed profile, remove only LetAgents-looking servers, and preserve other MCP servers. Users can explicitly choose `none` for the old empty-MCP behavior or `normal` to let Cursor use its normal MCP setup as-is.
+The original Gate 2 probe used an empty managed MCP config. The current product default is `filter_letagents`: copy the user's Cursor MCP config into the managed profile, remove only LetAgents-looking servers, and preserve other MCP servers. Users can explicitly choose `none` for the old empty-MCP behavior or `normal` to let Cursor use its normal MCP setup as-is. The Cursor sandbox flag does not prove that external MCP tools are sandboxed; preserved MCP servers may have their own filesystem, network, or credential behavior.
 
 With that environment:
 
@@ -137,11 +137,13 @@ cd apps/desktop
 npm run smoke:cursor-managed -- --workspace ../..
 ```
 
-That default smoke uses `--mcp-policy filter_letagents`. Optional policy probes:
+That default smoke uses `--mcp-policy filter_letagents` and `--permission-profile read_only`. Optional policy probes:
 
 ```sh
 npm run smoke:cursor-managed -- --workspace ../.. --mcp-policy none
 npm run smoke:cursor-managed -- --workspace ../.. --mcp-policy normal
+npm run smoke:cursor-managed -- --workspace ../.. --permission-profile sandboxed_write
+npm run smoke:cursor-managed -- --workspace ../.. --permission-profile full_access
 ```
 
 Expected result for `filter_letagents`:
@@ -151,6 +153,7 @@ Expected result for `filter_letagents`:
 - `cursor-agent mcp list-tools letagents` fails with no LetAgents MCP client.
 - a normal read-only Cursor turn returns `MANAGED_CURSOR_READONLY_OK`.
 - an adversarial LetAgents MCP prompt returns `LETAGENTS_MCP_UNAVAILABLE` without emitting a LetAgents-looking stream event.
+- with `sandboxed_write` or `full_access`, an additional workspace-write smoke turn creates then removes `.letagents/cursor-managed-write-smoke.txt`.
 
 Expected policy differences:
 
@@ -177,19 +180,27 @@ Do not paste the login URL or any Cursor tokens into a room. The desktop app sho
 
 ## Conclusion
 
-Gate 2 is proven for the current macOS desktop-managed read-only path:
+Gate 2 is proven for the current macOS desktop-managed path:
 
 - Proven: managed Cursor must isolate `HOME` (and set `XDG_CONFIG_HOME` / `XDG_DATA_HOME`) to hide `~/.cursor/mcp.json`.
 - Proven: `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` alone do not hide global MCP config.
 - Proven: macOS Cursor auth can be preserved by linking the login keychain into the managed home while still hiding global Cursor MCP config.
 - Proven: `cursor-agent mcp list` does not show `letagents`, `list-tools letagents` fails, and an adversarial prompt cannot call LetAgents MCP tools.
+- Proven: write-capable profiles can complete a workspace-write smoke turn.
 - Current default: managed Cursor filters LetAgents MCP out of a copied user MCP config instead of disabling every non-LetAgents MCP server.
+- Current permission default: managed Cursor starts read-only unless the user explicitly selects `sandboxed_write` or `full_access`.
+- Not proven: general Cursor sandbox safety for external MCP tools, network behavior, all out-of-workspace paths, or user-interrupted write turns.
 - Remaining: non-macOS hosts need either `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, or a user-approved managed-home `cursor-agent login`.
 
 ## Implemented Desktop Runtime Contract
 
 Managed Cursor launches now use:
 
+- Permission profile selector:
+  - `read_only` (default): `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <repo>`.
+  - `sandboxed_write`: `cursor-agent -p --output-format stream-json --trust --workspace <repo> --force --sandbox enabled`. Cursor's sandbox applies to Cursor operations; selected MCP tools still follow the chosen MCP policy.
+  - `full_access`: `cursor-agent -p --output-format stream-json --trust --workspace <repo> --force --sandbox disabled`. Use only with trusted repositories and trusted MCP configurations.
+  - `ask_before_write`: still gated because Cursor headless approval prompts are not bridged into the desktop or room.
 - MCP policy selector:
   - `filter_letagents` (default): managed profile, copied user Cursor MCP config, LetAgents-looking servers removed.
   - `none`: managed profile, empty managed Cursor MCP config at `<managed home>/.cursor/mcp.json`, and no project-level MCP entries.
@@ -205,4 +216,4 @@ The runtime rejects workspaces that have a project-level `.cursor/mcp.json` ment
 
 ## Remaining Gates
 
-Keep Cursor `ask_before_write`, `sandboxed_write`, and `full_access` permission profiles gated until desktop approvals, sandbox behavior, LetAgents state containment, and macOS keychain mutation boundaries are tested end to end.
+Keep Cursor `ask_before_write` gated until Cursor exposes approval events cleanly enough for desktop/room Allow/Deny. Continue treating `sandboxed_write` and `full_access` as explicit user choices with high-visibility risk copy and live smoke coverage because they run with `--force`.

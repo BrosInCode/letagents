@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 export type CursorReadOnlyMode = "ask" | "plan";
+export type CursorSandboxMode = "enabled" | "disabled";
 
 export interface CursorTurnInput {
   prompt: string;
@@ -9,7 +10,9 @@ export interface CursorTurnInput {
   cursorSessionId?: string | null;
   cursorBin?: string | null;
   env?: Record<string, string | undefined>;
-  mode?: CursorReadOnlyMode;
+  mode?: CursorReadOnlyMode | null;
+  force?: boolean;
+  sandbox?: CursorSandboxMode | null;
   abortController?: AbortController;
 }
 
@@ -48,16 +51,24 @@ export const productionCursorRunner: CursorRunner = {
 };
 
 export function buildCursorAgentArgs(input: CursorTurnInput): string[] {
+  const mode = input.mode === null ? null : input.mode ?? "ask";
   const args = [
     "-p",
     "--output-format",
     "stream-json",
-    "--mode",
-    input.mode ?? "ask",
     "--trust",
     "--workspace",
     input.cwd,
   ];
+  if (mode) {
+    args.push("--mode", mode);
+  }
+  if (input.force) {
+    args.push("--force");
+  }
+  if (input.sandbox) {
+    args.push("--sandbox", input.sandbox);
+  }
   const resume = input.cursorSessionId?.trim();
   if (resume) {
     args.push("--resume", resume);

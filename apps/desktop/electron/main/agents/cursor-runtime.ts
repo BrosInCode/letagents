@@ -23,6 +23,10 @@ import {
 import { buildCursorDesktopEventPrompt } from "./cursor-event-prompt.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import {
+  cursorLaunchOptionsForPermissionProfile,
+  cursorPermissionProfileStartMessage,
+} from "./cursor-permission-profile.js";
+import {
   productionCursorRunner,
   type CursorRunner,
 } from "./cursor-runner.js";
@@ -160,15 +164,16 @@ export function createDesktopCursorRuntime(
       .then((status) => status.branch)
       .catch(() => null);
     const cursorMcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
+    const permissionProfile = assertManagedAgentPermissionProfileAvailable("cursor", input.permissionProfileId);
     const preflightResult = await preflight("cursor", {
       roomIdentifier,
       repoRootPath: cwd,
+      permissionProfileId: permissionProfile.id,
       cursorMcpPolicy,
     });
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
-    const permissionProfile = assertManagedAgentPermissionProfileAvailable("cursor", input.permissionProfileId);
     prepareCursorManagedProfile({ workspaceRoot: cwd, mcpPolicy: cursorMcpPolicy });
 
     const token = makeCursorStopToken();
@@ -205,7 +210,7 @@ export function createDesktopCursorRuntime(
       last_error: null,
       recent_items: [{
         type: "system",
-        text: "Cursor read-only worker is registered and waiting for desktop-delivered room events.",
+        text: `${permissionProfile.label} Cursor worker is registered and waiting for desktop-delivered room events.`,
       }],
       started_at: startedAt,
       updated_at: startedAt,
@@ -215,7 +220,7 @@ export function createDesktopCursorRuntime(
     return {
       session: toPublicCursorManagedAgentSession(session),
       reused: false,
-      message: "Cursor read-only agent started with desktop-delivered room events.",
+      message: cursorPermissionProfileStartMessage(permissionProfile.id),
     };
   }
 
@@ -279,7 +284,7 @@ export function createDesktopCursorRuntime(
     session: DesktopCursorLiveSessionState,
     event: ManagedRoomEvent,
   ): void {
-    preemptActiveTurn(session.session_id);
+    preemptActiveTurnIfSafe(session);
     const previous = queues.get(session.session_id) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -320,6 +325,7 @@ export function createDesktopCursorRuntime(
     };
     activeTurns.set(session.session_id, activeTurn);
     try {
+      const launchOptions = cursorLaunchOptionsForPermissionProfile(active.permission_profile_id);
       const result = await runner.runTurn({
         prompt: buildCursorDesktopEventPrompt(active, event),
         cwd: active.cwd,
@@ -329,7 +335,9 @@ export function createDesktopCursorRuntime(
           workspaceRoot: active.cwd,
           mcpPolicy: active.cursor_mcp_policy,
         }).env,
-        mode: "ask",
+        mode: launchOptions.mode,
+        force: launchOptions.force,
+        sandbox: launchOptions.sandbox,
         abortController,
       });
 
@@ -379,6 +387,14 @@ export function createDesktopCursorRuntime(
         activeTurns.delete(session.session_id);
       }
     }
+  }
+
+  function preemptActiveTurnIfSafe(session: DesktopCursorLiveSessionState): void {
+    const launchOptions = cursorLaunchOptionsForPermissionProfile(session.permission_profile_id);
+    if (launchOptions.force) {
+      return;
+    }
+    preemptActiveTurn(session.session_id);
   }
 
   function preemptActiveTurn(sessionId: string): void {

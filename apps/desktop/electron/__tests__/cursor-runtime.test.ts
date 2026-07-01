@@ -186,18 +186,8 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(inspected?.recentItems.length, 1);
   assert.equal(getStoredCursorLiveSession(result.session.id)?.permission_profile_id, "read_only");
   assert.equal(getStoredCursorLiveSession(result.session.id)?.cursor_mcp_policy, "filter_letagents");
+  assert.equal(preflightInputs[0]?.permissionProfileId, "read_only");
   assert.equal(preflightInputs[0]?.cursorMcpPolicy, "filter_letagents");
-  await assert.rejects(
-    () => runtime.start({
-      providerId: "cursor",
-      roomIdentifier: "room_1",
-      roomDisplayName: "Room One",
-      repoRootPath: tempDir,
-      deliveryMode: "desktop_events",
-      permissionProfileId: "full_access",
-    }),
-    /Full access is not available for cursor/,
-  );
 });
 
 test("Cursor runtime persists selected MCP policy and reuses it for event turns", async () => {
@@ -233,6 +223,75 @@ test("Cursor runtime persists selected MCP policy and reuses it for event turns"
   assert.deepEqual(calls[0]?.env, {});
 });
 
+test("Cursor runtime persists write-capable permission profiles and maps them to runner flags", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  const { runtime, preflightInputs } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      return {
+        sessionId: "cursor_session_write",
+        text: "Write-capable turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Write-capable turn complete." }],
+      };
+    },
+  });
+
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "full_access",
+  });
+  runtime.dispatchRoomStreamEvent(messageEvent({ message: { ...messageEvent().message, text: "make the change" } }));
+  await runtime.waitForIdle();
+
+  assert.equal(started.session.permissionProfileId, "full_access");
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.permission_profile_id, "full_access");
+  assert.equal(preflightInputs[0]?.permissionProfileId, "full_access");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.mode, null);
+  assert.equal(calls[0]?.force, true);
+  assert.equal(calls[0]?.sandbox, "disabled");
+  assert.match(calls[0]?.prompt ?? "", /Cursor full access/);
+});
+
+test("Cursor runtime maps sandboxed-write profile to Cursor sandbox flags", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  const { runtime } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      return {
+        sessionId: "cursor_session_sandboxed",
+        text: "Sandboxed turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  });
+
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "sandboxed_write",
+  });
+  runtime.dispatchRoomStreamEvent(messageEvent({ message: { ...messageEvent().message, text: "make a sandboxed change" } }));
+  await runtime.waitForIdle();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.mode, null);
+  assert.equal(calls[0]?.force, true);
+  assert.equal(calls[0]?.sandbox, "enabled");
+  assert.match(calls[0]?.prompt ?? "", /Cursor sandboxed write/);
+});
+
 test("Cursor runtime delivers room events into ask-mode runner and persists resume state", async () => {
   resetState();
   const prompts: CursorTurnInput[] = [];
@@ -260,10 +319,12 @@ test("Cursor runtime delivers room events into ask-mode runner and persists resu
 
   assert.equal(prompts.length, 1);
   assert.equal(prompts[0]?.mode, "ask");
+  assert.equal(prompts[0]?.force, false);
+  assert.equal(prompts[0]?.sandbox, null);
   assert.equal(prompts[0]?.env?.HOME, join(tempDir, "cursor-managed", "home"));
   assert.equal(prompts[0]?.env?.CURSOR_CONFIG_DIR, join(tempDir, "cursor-managed", "config", "cursor"));
   assert.equal(prompts[0]?.env?.CURSOR_DATA_DIR, join(tempDir, "cursor-managed", "data", "cursor"));
-  assert.match(prompts[0]?.prompt ?? "", /Cursor read-only prototype/);
+  assert.match(prompts[0]?.prompt ?? "", /Cursor read-only/);
   assert.match(prompts[0]?.prompt ?? "", /Do not call LetAgents MCP room tools/);
   assert.match(prompts[0]?.prompt ?? "", /must not edit files/);
   assert.equal(prompts[0]?.cursorSessionId, null);
@@ -336,6 +397,80 @@ test("Cursor runtime preempts an active event and redelivers the newer event wit
   assert.deepEqual(published, [{ text: "Handling the newer event.", eventId: "msg_2" }]);
   const stored = getStoredCursorLiveSession(started.session.id);
   assert.equal(stored?.cursor_session_id, "cursor_session_1");
+  assert.equal(stored?.status, "completed");
+  assert.equal(stored?.last_error, null);
+  assert.equal(stored?.active_work, null);
+});
+
+test("Cursor runtime queues write-capable events instead of preempting active writes", async () => {
+  resetState();
+  const calls: CursorTurnInput[] = [];
+  let finishFirstTurn: (() => void) | null = null;
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      calls.push(input);
+      if (calls.length === 1) {
+        return new Promise((resolve) => {
+          finishFirstTurn = () => resolve({
+            sessionId: "cursor_session_write",
+            text: "First write turn complete.",
+            status: "success",
+            error: null,
+            recentItems: [{ type: "result", text: "First write turn complete." }],
+          });
+        });
+      }
+      return {
+        sessionId: "cursor_session_write",
+        text: "Second write turn complete.",
+        status: "success",
+        error: null,
+        recentItems: [{ type: "result", text: "Second write turn complete." }],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    permissionProfileId: "full_access",
+  });
+
+  const baseMessage = messageEvent().message;
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...baseMessage,
+      id: "msg_1",
+      text: "first write request",
+    },
+  }));
+  while (calls.length < 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...baseMessage,
+      id: "msg_2",
+      text: "second write request",
+    },
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.abortController?.signal.aborted, false);
+  assert.ok(finishFirstTurn);
+  (finishFirstTurn as () => void)();
+  await runtime.waitForIdle();
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.cursorSessionId, "cursor_session_write");
+  assert.deepEqual(published, [
+    { text: "First write turn complete.", eventId: "msg_1" },
+    { text: "Second write turn complete.", eventId: "msg_2" },
+  ]);
+  const stored = getStoredCursorLiveSession(started.session.id);
+  assert.equal(stored?.cursor_session_id, "cursor_session_write");
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.last_error, null);
   assert.equal(stored?.active_work, null);

@@ -4,6 +4,10 @@ import type {
   DesktopTaskSummary,
 } from "../../ipc-types.js";
 import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
+import {
+  cursorPermissionProfileInstructionLines,
+  cursorPermissionProfileRuntimeLine,
+} from "./cursor-permission-profile.js";
 import type { DesktopCursorLiveSessionState } from "./state.js";
 
 export function buildCursorDesktopEventPrompt(
@@ -22,16 +26,15 @@ export function buildCursorDesktopEventPrompt(
     `Registered agent_session_id: ${session.agent_session_id || "not registered"}`,
     `Display name: ${session.display_name || "unknown"}`,
     `Runtime marker: cursor:${session.token}`,
-    "Runtime mode: Cursor read-only prototype. You are running in ask/plan mode and must not edit files.",
+    cursorPermissionProfileRuntimeLine(session.permission_profile_id),
     "",
     eventBody,
     "",
     "Instructions:",
     `- If this is a room message whose text exactly equals ${JSON.stringify(session.stop_phrase)}, stop this local worker: finish with exactly ${session.token}_DONE.`,
-    "- Decide whether this event requires a read-only response from you.",
+    "- Decide whether this event requires a response or local action from you.",
     "- The desktop app owns the LetAgents room connection for this worker. Do not call LetAgents MCP room tools, do not call wait_for_messages, and do not assume earlier thread history is already in this prompt.",
-    "- Do not edit files, run write-capable actions, or try to bypass read-only mode. If the event requires code changes, explain the needed change instead of making it.",
-    "- If action is useful, inspect/analyze locally as allowed by Cursor read-only mode and make your final answer the public room reply the desktop should publish as you.",
+    ...cursorPermissionProfileInstructionLines(session.permission_profile_id),
     "- If this message is a reply, write the final answer as the reply text; the desktop will keep it in the same thread.",
     "- For task_update events, act only when the task is unclaimed and appropriate for you, assigned or leased to you, needs your review, or contains a blocker that you can resolve. If it is assigned or leased to another worker, finish quietly.",
     `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
