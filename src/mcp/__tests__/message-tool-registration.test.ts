@@ -3,6 +3,14 @@ import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerMessageTools, registerStatusTools } from "../server/tools/messages.js";
 import { buildSendMessageRequestBody } from "../server/tools/messages/send-tool.js";
+import {
+  buildWaitForMessagesHistoryPageRequest,
+  buildWaitForMessagesRequestOptions,
+} from "../server/tools/messages/wait-tool.js";
+import {
+  LETAGENTS_AGENT_SESSION_ID_HEADER,
+  LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
+} from "../../shared/request-headers.js";
 
 type ToolRegistration = {
   name: string;
@@ -104,4 +112,47 @@ test("legacy quote replies stay free of thread_root_id in the remote post body",
 
   assert.equal(body.reply_to, "msg_7");
   assert.equal("thread_root_id" in body, false);
+});
+
+test("wait_for_messages remote requests preserve worker delivery headers", () => {
+  const deliveryHeaders = {
+    [LETAGENTS_AGENT_SESSION_ID_HEADER]: "agent_session_1",
+    [LETAGENTS_AGENT_SESSION_TOKEN_HEADER]: "token_1",
+  };
+  const signal = AbortSignal.timeout(1000);
+
+  assert.deepEqual(
+    buildWaitForMessagesRequestOptions({ deliveryHeaders, signal }),
+    {
+      headers: deliveryHeaders,
+      signal,
+    },
+  );
+
+  assert.deepEqual(
+    buildWaitForMessagesRequestOptions({ deliveryHeaders }),
+    {
+      headers: deliveryHeaders,
+    },
+  );
+});
+
+test("wait_for_messages paginated history requests preserve worker delivery headers", () => {
+  const deliveryHeaders = {
+    [LETAGENTS_AGENT_SESSION_ID_HEADER]: "agent_session_1",
+    [LETAGENTS_AGENT_SESSION_TOKEN_HEADER]: "token_1",
+  };
+
+  const request = buildWaitForMessagesHistoryPageRequest({
+    targetRoomId: "room_1",
+    targetProjectId: "project_1",
+    queryString: "after=msg_1",
+    deliveryHeaders,
+  });
+
+  assert.equal(request.room_id, "room_1");
+  assert.equal(request.project_id, "project_1");
+  assert.deepEqual(request.options, { headers: deliveryHeaders });
+  assert.equal(request.room_path("room_1"), "/rooms/room_1/messages?after=msg_1&include_prompt_only=1");
+  assert.equal(request.project_path("project_1"), "/projects/project_1/messages?after=msg_1&include_prompt_only=1");
 });

@@ -10,6 +10,8 @@ import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
+import { attachAgentMessageActivation } from "../../../rooms/activation-routing.js";
+import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
 import {
   isPromptOnlyAgentMessage,
 } from "../../../../shared/room-agent-prompts.js";
@@ -45,9 +47,10 @@ export function registerMessageStreamRoute(
 
     const projectId = project.id;
     let endDelivery: (() => Promise<void>) | null = null;
+    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
     if (!isDesktopHumanClient(req)) {
       try {
-        endDelivery = await beginRoomAgentDelivery({
+        const delivery = await beginRoomAgentDelivery({
           req,
           roomId: project.id,
           transport: "sse",
@@ -56,6 +59,8 @@ export function registerMessageStreamRoute(
             res.end();
           },
         });
+        endDelivery = delivery?.end ?? null;
+        activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
       } catch (error) {
         if (error instanceof InvalidRoomAgentDeliverySessionError) {
           res.status(401).json({ error: error.message });
@@ -78,11 +83,17 @@ export function registerMessageStreamRoute(
       try {
         const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
         if (streamClosed) return;
-        res.write(`data: ${JSON.stringify({ ...streamMessage, room_id: project.id })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          ...(activationIdentity ? attachAgentMessageActivation(streamMessage, activationIdentity) : streamMessage),
+          room_id: project.id,
+        })}\n\n`);
       } catch (error) {
         console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
         if (streamClosed) return;
-        res.write(`data: ${JSON.stringify({ ...message, room_id: project.id })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          ...(activationIdentity ? attachAgentMessageActivation(message, activationIdentity) : message),
+          room_id: project.id,
+        })}\n\n`);
       }
     };
 

@@ -11,7 +11,7 @@ import {
   upsertRoomParticipant,
 } from "../db.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
-import { resolveRequestAgentIdentity } from "../request/agent-identity.js";
+import { resolveRequestAgentIdentity, type ResolvedRequestAgentIdentity } from "../request/agent-identity.js";
 import {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
@@ -24,6 +24,11 @@ export class InvalidRoomAgentDeliverySessionError extends Error {
     super("Invalid agent session credentials.");
     this.name = "InvalidRoomAgentDeliverySessionError";
   }
+}
+
+export interface RoomAgentDeliverySession {
+  identity: ResolvedRequestAgentIdentity;
+  end: () => Promise<void>;
 }
 
 function getOptionalQueryString(value: unknown): string | null {
@@ -64,7 +69,7 @@ export async function beginRoomAgentDelivery(input: {
   roomId: string;
   transport: RoomAgentDeliveryTransport;
   onSessionDisconnected?: () => void;
-}): Promise<(() => Promise<void>) | null> {
+}): Promise<RoomAgentDeliverySession | null> {
   const agentSessionId = getOptionalHeaderString(input.req, LETAGENTS_AGENT_SESSION_ID_HEADER);
   const agentSessionToken = getOptionalHeaderString(input.req, LETAGENTS_AGENT_SESSION_TOKEN_HEADER);
   const hasAgentSessionCredentials = Boolean(agentSessionId || agentSessionToken);
@@ -149,20 +154,23 @@ export async function beginRoomAgentDelivery(input: {
   }
 
   let ended = false;
-  return async () => {
-    if (ended) {
-      return;
-    }
+  return {
+    identity,
+    end: async () => {
+      if (ended) {
+        return;
+      }
 
-    ended = true;
-    clearInterval(heartbeat);
-    if (sessionDisconnectedEvent && onSessionDisconnected) {
-      roomAgentDeliveryEvents.off(sessionDisconnectedEvent, onSessionDisconnected);
-    }
-    await markRoomAgentDeliveryDisconnected({
-      room_id: input.roomId,
-      actor_label: identity.actor_label,
-      agent_session_id: identity.agent_session_id,
-    });
+      ended = true;
+      clearInterval(heartbeat);
+      if (sessionDisconnectedEvent && onSessionDisconnected) {
+        roomAgentDeliveryEvents.off(sessionDisconnectedEvent, onSessionDisconnected);
+      }
+      await markRoomAgentDeliveryDisconnected({
+        room_id: input.roomId,
+        actor_label: identity.actor_label,
+        agent_session_id: identity.agent_session_id,
+      });
+    },
   };
 }
