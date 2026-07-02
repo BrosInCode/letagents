@@ -298,7 +298,6 @@
   align-self: center;
   width: min(100%, var(--room-chat-content-max));
   padding: 10px 0;
-  animation: message-enter 180ms var(--ease-out);
 }
 
 .room-chat-message[data-owner-kind="github"] {
