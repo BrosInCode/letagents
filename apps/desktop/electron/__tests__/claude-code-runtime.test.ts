@@ -183,12 +183,16 @@ async function waitFor<T>(
 }
 
 function assertClaudeCliPermissionResult(
-  decision: { toolUseID?: string } | null | undefined,
+  decision: { toolUseID?: string; updatedInput?: Record<string, unknown> } | null | undefined,
   toolUseID: string,
+  options: { updatedInput?: Record<string, unknown> } = {},
 ): void {
   assert.ok(decision);
   assert.equal("decisionClassification" in decision, false);
   assert.equal(decision.toolUseID, toolUseID);
+  if ("updatedInput" in options) {
+    assert.deepEqual(decision.updatedInput, options.updatedInput);
+  }
 }
 
 test("Claude Code runner options lock down ambient MCP and blocked room tools", async () => {
@@ -223,7 +227,9 @@ test("Claude Code runner options lock down ambient MCP and blocked room tools", 
     toolUseID: "tool_read",
   });
   assert.equal(autoAllowed?.behavior, "allow");
-  assertClaudeCliPermissionResult(autoAllowed, "tool_read");
+  assertClaudeCliPermissionResult(autoAllowed, "tool_read", {
+    updatedInput: { file_path: "/tmp/README.md" },
+  });
   const defaultDenied = await options.canUseTool?.("Bash", { command: "touch file" }, {
     signal: abortController.signal,
     toolUseID: "tool_bash",
@@ -362,7 +368,9 @@ test("Claude Code runtime applies read-only and full-access permission profiles"
         title: "Run tests",
       });
       observedFullAccess = decision.behavior;
-      assertClaudeCliPermissionResult(decision, "tool_bash");
+      assertClaudeCliPermissionResult(decision, "tool_bash", {
+        updatedInput: { command: "npm test" },
+      });
       return {
         sessionId: "claude_session_full",
         text: "Full access profile checked.",
@@ -453,7 +461,9 @@ test("Claude Code runtime surfaces tool permission requests for desktop approval
       const decision = await permission;
       observedDecision = decision.behavior;
       assert.equal("updatedPermissions" in decision, false);
-      assertClaudeCliPermissionResult(decision, "tool_bash");
+      assertClaudeCliPermissionResult(decision, "tool_bash", {
+        updatedInput: { command: "npm test" },
+      });
       return {
         sessionId: "claude_session_1",
         text: "Tests are approved to run.",
@@ -605,7 +615,9 @@ test("Claude Code runtime ignores implicit room permission replies without preem
       assert.equal(result.accepted, true);
       const decision = await permission;
       assert.equal(decision.behavior, "allow");
-      assertClaudeCliPermissionResult(decision, "tool_build");
+      assertClaudeCliPermissionResult(decision, "tool_build", {
+        updatedInput: { command: "npm run build" },
+      });
       return {
         sessionId: "claude_session_1",
         text: "Build permission approved.",
