@@ -178,6 +178,9 @@ export interface DesktopManagedAgentChangedFile {
   untracked: boolean;
 }
 
+export const MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME =
+  "application/vnd.letagents.managed-agent-change-summary+json";
+
 export interface DesktopManagedAgentChangeSummary {
   sessionId: string;
   providerId: DesktopAgentProviderId;

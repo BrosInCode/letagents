@@ -598,6 +598,7 @@ function publishCodexRuntimeSnapshot(
 function clearCodexRuntimeReasoningState(sessionId: string): void {
   codexRuntimeReasoningLastPost.delete(sessionId);
   codexRuntimeReasoningPostQueues.delete(sessionId);
+  codexChangeSummaryAttachmentSignatures.delete(sessionId);
 }
 
 function emitManagedAgentSessionUpdate(session: DesktopCodexLiveSessionState | null | undefined): void {
@@ -647,6 +648,7 @@ function registerProcessCleanup(): void {
     spawnedServerPids.clear();
     codexRuntimeReasoningLastPost.clear();
     codexRuntimeReasoningPostQueues.clear();
+    codexChangeSummaryAttachmentSignatures.clear();
   };
 
   process.on("exit", cleanup);
@@ -1535,9 +1537,7 @@ async function publishDesktopManagedAgentReply(input: {
     cloudRoomIdentifier,
     changeAttachmentDraft,
   );
-  if (changeAttachmentDraft && attachments.length > 0) {
-    rememberCodexChangeSummaryAttachment(input.session, changeAttachmentDraft);
-  } else if (changeAttachmentDraft) {
+  if (changeAttachmentDraft && attachments.length === 0) {
     console.warn("Could not attach Codex managed-agent working tree summary to room reply.");
   }
   await apiFetch<Record<string, unknown>>(
@@ -1558,6 +1558,9 @@ async function publishDesktopManagedAgentReply(input: {
       }),
     },
   );
+  if (changeAttachmentDraft && attachments.length > 0) {
+    rememberCodexChangeSummaryAttachment(input.session, changeAttachmentDraft);
+  }
 }
 
 async function buildDesktopManagedCodexReplyChangeAttachment(
@@ -1579,7 +1582,11 @@ async function buildDesktopManagedCodexReplyChangeAttachment(
       return null;
     }
     return buildManagedAgentChangeSummaryAttachmentDraft(summary);
-  } catch {
+  } catch (error) {
+    console.warn(
+      "Could not build Codex managed-agent working tree summary attachment.",
+      error instanceof Error ? error.message : String(error),
+    );
     return null;
   }
 }
@@ -1595,7 +1602,11 @@ async function desktopManagedCodexChangeSignature(
     const publicSession = toPublicManagedAgentSession(bindCodexLiveSessionToWorker(session));
     const summary = await buildDesktopManagedAgentChangeSummary(publicSession);
     return managedAgentChangeSummarySignature(summary);
-  } catch {
+  } catch (error) {
+    console.warn(
+      "Could not read Codex managed-agent working tree signature.",
+      error instanceof Error ? error.message : String(error),
+    );
     return null;
   }
 }
@@ -1625,7 +1636,11 @@ async function publishDesktopManagedCodexReplyChangeAttachment(
       draft.mimeType,
     );
     return [{ upload_id: staged.uploadId }];
-  } catch {
+  } catch (error) {
+    console.warn(
+      "Could not upload Codex managed-agent working tree summary attachment.",
+      error instanceof Error ? error.message : String(error),
+    );
     return [];
   }
 }
@@ -1660,9 +1675,7 @@ async function runDesktopEventTurnWithContext(input: {
   event: ManagedRoomEvent;
   prompt: string;
   allowContextRequests: boolean;
-  beforeChangeSignature?: string | null;
-}): Promise<{ session: DesktopCodexLiveSessionState; text: string | null; beforeChangeSignature: string | null }> {
-  const beforeChangeSignature = input.beforeChangeSignature ?? null;
+}): Promise<{ session: DesktopCodexLiveSessionState; text: string | null }> {
   let started = await startDesktopEventCodexTurn(input);
   queueCodexRuntimeReasoningSummary(started.session, {
     summary: "Codex worker received a room event.",
@@ -1678,7 +1691,7 @@ async function runDesktopEventTurnWithContext(input: {
   );
   let latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
   if (!input.allowContextRequests) {
-    return { session: latest, text: replyText, beforeChangeSignature };
+    return { session: latest, text: replyText };
   }
 
   for (let requestCount = 0; requestCount < DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT; requestCount += 1) {
@@ -1693,9 +1706,9 @@ async function runDesktopEventTurnWithContext(input: {
           updated_at: new Date().toISOString(),
         })) ?? latest;
         emitManagedAgentSessionUpdate(malformed);
-        return { session: malformed, text: null, beforeChangeSignature };
+        return { session: malformed, text: null };
       }
-      return { session: latest, text: replyText, beforeChangeSignature };
+      return { session: latest, text: replyText };
     }
 
     queueCodexRuntimeReasoningSummary(latest, {
@@ -1732,7 +1745,7 @@ async function runDesktopEventTurnWithContext(input: {
       updated_at: new Date().toISOString(),
     })) ?? latest;
     emitManagedAgentSessionUpdate(capped);
-    return { session: capped, text: null, beforeChangeSignature };
+    return { session: capped, text: null };
   }
   if (hasManagedAgentContextRequestLine(replyText)) {
     const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
@@ -1743,10 +1756,10 @@ async function runDesktopEventTurnWithContext(input: {
       updated_at: new Date().toISOString(),
     })) ?? latest;
     emitManagedAgentSessionUpdate(malformed);
-    return { session: malformed, text: null, beforeChangeSignature };
+    return { session: malformed, text: null };
   }
 
-  return { session: latest, text: replyText, beforeChangeSignature };
+  return { session: latest, text: replyText };
 }
 
 async function executeManagedAgentContextRequestWithTimeout(
@@ -1823,14 +1836,13 @@ async function deliverDesktopEventTurn(
       event,
       prompt,
       allowContextRequests: !stopAfterTurn,
-      beforeChangeSignature,
     });
     await publishDesktopManagedAgentReply({
       session: completed.session,
       event,
       storage,
       text: completed.text,
-      beforeChangeSignature: completed.beforeChangeSignature,
+      beforeChangeSignature,
     });
     if (stopAfterTurn) {
       stopSessionAfterRoomStopPhrase(idleSession.session_id);

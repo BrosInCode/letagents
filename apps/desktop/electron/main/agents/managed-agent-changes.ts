@@ -69,18 +69,28 @@ export async function buildDesktopManagedAgentChangeSummary(
     };
   }
 
+  let isGitRepo = false;
   try {
-    const isGitRepo = (await git(repoRootPath, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
-    if (!isGitRepo) {
-      return {
-        ...base(),
-        isGitRepo: false,
-        error: "This agent session is not attached to a Git working tree.",
-      };
-    }
+    isGitRepo = (await git(repoRootPath, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
+  } catch (error) {
+    return {
+      ...base(),
+      isGitRepo: false,
+      error: error instanceof Error ? error.message : "Could not inspect this agent's Git changes.",
+    };
+  }
 
+  if (!isGitRepo) {
+    return {
+      ...base(),
+      isGitRepo: false,
+      error: "This agent session is not attached to a Git working tree.",
+    };
+  }
+
+  try {
     const [statusOutput, unstagedNumstatOutput, stagedNumstatOutput] = await Promise.all([
-      git(repoRootPath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+      git(repoRootPath, ["status", "--porcelain=v1", "-z", "--untracked-files=normal"]),
       git(repoRootPath, ["diff", "--numstat", "-z", "--"]),
       git(repoRootPath, ["diff", "--cached", "--numstat", "-z", "--"]),
     ]);
@@ -131,7 +141,7 @@ export async function buildDesktopManagedAgentChangeSummary(
   } catch (error) {
     return {
       ...base(),
-      isGitRepo: false,
+      isGitRepo: true,
       error: error instanceof Error ? error.message : "Could not inspect this agent's Git changes.",
     };
   }

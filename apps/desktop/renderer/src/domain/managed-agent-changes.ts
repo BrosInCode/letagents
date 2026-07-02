@@ -4,9 +4,8 @@ import type {
   DesktopManagedAgentPublicChangeSummary,
   DesktopRoomMessageAttachment,
 } from "../../../electron/ipc-types";
-
-export const MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME =
-  "application/vnd.letagents.managed-agent-change-summary+json";
+import { MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME } from "../../../electron/ipc-types";
+export { MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME };
 
 interface ManagedAgentChangeSummaryAttachmentPayload {
   kind?: string;

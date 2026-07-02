@@ -4,10 +4,8 @@ import type {
   DesktopManagedAgentChangeSummary,
   DesktopManagedAgentPublicChangeSummary,
 } from "../../ipc-types.js";
+import { MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME } from "../../ipc-types.js";
 import type { RoomMessageAttachmentPayload } from "../attachments.js";
-
-export const MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME =
-  "application/vnd.letagents.managed-agent-change-summary+json";
 
 export interface ManagedAgentChangeSummaryAttachmentDraft {
   fileName: string;

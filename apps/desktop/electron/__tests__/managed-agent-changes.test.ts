@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -85,6 +85,31 @@ test("managed agent change summary keeps numstat counts for edited renamed files
     assert.equal(renamed?.status, "renamed");
     assert.equal(renamed?.staged, true);
     assert.equal(renamed?.additions, 1);
+  } finally {
+    rmSync(repo, { force: true, recursive: true });
+  }
+});
+
+test("managed agent change summary collapses untracked directories", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "letagents-managed-agent-changes-"));
+  try {
+    git(repo, ["init", "-q"]);
+    git(repo, ["config", "user.email", "agent@example.com"]);
+    git(repo, ["config", "user.name", "Agent"]);
+    writeFileSync(join(repo, "base.txt"), "base\n");
+    git(repo, ["add", "base.txt"]);
+    git(repo, ["commit", "-qm", "init"]);
+
+    mkdirSync(join(repo, "generated", "nested"), { recursive: true });
+    writeFileSync(join(repo, "generated", "a.txt"), "a\n");
+    writeFileSync(join(repo, "generated", "nested", "b.txt"), "b\n");
+
+    const summary = await buildDesktopManagedAgentChangeSummary(session(repo));
+
+    assert.equal(summary.changedFileCount, 1);
+    assert.equal(summary.untrackedFileCount, 1);
+    assert.equal(summary.files[0]?.path, "generated/");
+    assert.equal(summary.files[0]?.status, "untracked");
   } finally {
     rmSync(repo, { force: true, recursive: true });
   }

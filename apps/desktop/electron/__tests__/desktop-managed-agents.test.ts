@@ -82,7 +82,7 @@ const {
 } = await import("../main/agents/managed-agent-local-replies.js");
 const {
   MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
-} = await import("../main/agents/managed-agent-change-attachments.js");
+} = await import("../ipc-types.js");
 const {
   assertManagedAgentPermissionProfileAvailable,
   listManagedAgentPermissionProfiles,

@@ -120,7 +120,9 @@
                   :summary="managedChangeSummary(session.id)"
                   :loading="isChangeSummaryLoading(session.id)"
                   :expanded="Boolean(expandedChangeSummaryIds[session.id])"
+                  :retry-visible="Boolean(managedChangeSummary(session.id)?.error)"
                   @toggle-expanded="toggleExpandedChangeSummary(session.id)"
+                  @retry="loadManagedAgentChangeSummary(session)"
                 />
                 <div
                   v-if="session.pendingPermissionRequests.length"
