@@ -1,4 +1,6 @@
 .desktop-composer {
+  --desktop-composer-error-color: #ff8a8a;
+
   position: relative;
   display: grid;
   gap: 8px;

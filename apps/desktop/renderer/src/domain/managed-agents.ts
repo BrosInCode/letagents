@@ -107,7 +107,7 @@ export function pendingManagedAgentPermissionApprovals(
       session,
       request,
       displayName: managedAgentSessionDisplayName(session),
-      providerLabel: session.ideLabel || providerLabelForPermissionRequest(request),
+      providerLabel: session.ideLabel || String(request.providerId || "Agent"),
       title: request.title?.trim() || `Use ${request.toolName || "tool"}`,
       toolName: request.toolName?.trim() || "Tool",
       targetLabel: managedAgentPermissionRequestTargetLabel(request, session),
@@ -154,21 +154,6 @@ function specificAgentKey(value: string | null | undefined): string {
     return "";
   }
   return normalized;
-}
-
-function providerLabelForPermissionRequest(
-  request: Pick<DesktopManagedAgentPermissionRequest, "providerId">,
-): string {
-  if (request.providerId === "claude-code") {
-    return "Claude Code";
-  }
-  if (request.providerId === "cursor") {
-    return "Cursor";
-  }
-  if (request.providerId === "codex") {
-    return "Codex";
-  }
-  return String(request.providerId || "Agent");
 }
 
 export function managedAgentSessionMatchesTarget(

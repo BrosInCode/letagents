@@ -109,8 +109,8 @@
 
 .desktop-composer-permission-error {
   margin: -2px 2px 0;
-  color: #ff8a8a;
-  font-size: 0.7rem;
+  color: var(--desktop-composer-error-color);
+  font-size: 0.68rem;
 }
 
 @media (max-width: 760px) {

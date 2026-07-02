@@ -16,7 +16,7 @@ export function activityParticipantToAgentTarget(
   };
 }
 
-function ownerAttribution(ownerLabel: string | null): string | null {
+export function ownerAttribution(ownerLabel: string | null): string | null {
   const trimmed = ownerLabel?.trim();
   if (!trimmed) return null;
   return /'s agent$/i.test(trimmed) ? trimmed : `${trimmed}'s agent`;

@@ -279,6 +279,7 @@ import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomInboxView from "./RoomInboxView.vue";
+import { ownerAttribution as ownerAttributionLabel } from "./room-activity/agentTarget";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import {
@@ -1282,7 +1283,7 @@ function agentTargetForManagedSession(session: DesktopManagedAgentSession): Agen
   return {
     actorLabel: session.actorLabel,
     displayName,
-    ownerAttribution: session.ownerLabel ? `${session.ownerLabel}'s agent` : null,
+    ownerAttribution: ownerAttributionLabel(session.ownerLabel),
     ideLabel: session.ideLabel,
     sender: session.actorLabel || displayName,
     agentKey: session.agentKey,
