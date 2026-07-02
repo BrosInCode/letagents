@@ -182,6 +182,15 @@ async function waitFor<T>(
   throw new Error(`Timed out waiting for ${label}.`);
 }
 
+function assertClaudeCliPermissionResult(
+  decision: { toolUseID?: string } | null | undefined,
+  toolUseID: string,
+): void {
+  assert.ok(decision);
+  assert.equal("decisionClassification" in decision, false);
+  assert.equal(decision.toolUseID, toolUseID);
+}
+
 test("Claude Code runner options lock down ambient MCP and blocked room tools", async () => {
   const abortController = new AbortController();
   const options = buildClaudeCodeQueryOptions({
@@ -214,12 +223,20 @@ test("Claude Code runner options lock down ambient MCP and blocked room tools", 
     toolUseID: "tool_read",
   });
   assert.equal(autoAllowed?.behavior, "allow");
+  assertClaudeCliPermissionResult(autoAllowed, "tool_read");
   const defaultDenied = await options.canUseTool?.("Bash", { command: "touch file" }, {
     signal: abortController.signal,
     toolUseID: "tool_bash",
     title: "Run shell command",
   });
   assert.equal(defaultDenied?.behavior, "deny");
+  assertClaudeCliPermissionResult(defaultDenied, "tool_bash");
+  const blockedDenied = await options.canUseTool?.("mcp__letagents__send_message", { text: "nope" }, {
+    signal: abortController.signal,
+    toolUseID: "tool_room",
+  });
+  assert.equal(blockedDenied?.behavior, "deny");
+  assertClaudeCliPermissionResult(blockedDenied, "tool_room");
 
   const denied = await claudeCodePreToolUseGuard({
     hook_event_name: "PreToolUse",
@@ -307,6 +324,7 @@ test("Claude Code runtime applies read-only and full-access permission profiles"
         title: "Run write command",
       });
       observedReadOnly = decision.behavior;
+      assertClaudeCliPermissionResult(decision, "tool_write");
       return {
         sessionId: "claude_session_readonly",
         text: "Read-only profile checked.",
@@ -344,6 +362,7 @@ test("Claude Code runtime applies read-only and full-access permission profiles"
         title: "Run tests",
       });
       observedFullAccess = decision.behavior;
+      assertClaudeCliPermissionResult(decision, "tool_bash");
       return {
         sessionId: "claude_session_full",
         text: "Full access profile checked.",
@@ -434,6 +453,7 @@ test("Claude Code runtime surfaces tool permission requests for desktop approval
       const decision = await permission;
       observedDecision = decision.behavior;
       assert.equal("updatedPermissions" in decision, false);
+      assertClaudeCliPermissionResult(decision, "tool_bash");
       return {
         sessionId: "claude_session_1",
         text: "Tests are approved to run.",
@@ -508,6 +528,7 @@ test("Claude Code runtime ignores room permission replies without interrupting t
       assert.equal(result.accepted, true);
       const decision = await permission;
       assert.equal(decision.behavior, "deny");
+      assertClaudeCliPermissionResult(decision, "tool_build");
       return {
         sessionId: "claude_session_1",
         text: "Build was not run.",
@@ -584,6 +605,7 @@ test("Claude Code runtime ignores implicit room permission replies without preem
       assert.equal(result.accepted, true);
       const decision = await permission;
       assert.equal(decision.behavior, "allow");
+      assertClaudeCliPermissionResult(decision, "tool_build");
       return {
         sessionId: "claude_session_1",
         text: "Build permission approved.",

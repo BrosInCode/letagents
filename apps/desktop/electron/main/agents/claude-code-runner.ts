@@ -196,7 +196,6 @@ export const claudeCodeDefaultCanUseTool: CanUseTool = async (
       behavior: "deny",
       message: "Managed Claude Code sessions may not call LetAgents room, rental, or provisioning tools.",
       toolUseID: options.toolUseID,
-      decisionClassification: "user_reject",
     };
   }
   if (isAutoAllowedClaudeCodeTool(toolName)) {
@@ -209,7 +208,6 @@ export const claudeCodeDefaultCanUseTool: CanUseTool = async (
     behavior: "deny",
     message: "Managed Claude Code needs a LetAgents Desktop approval before using this tool, but no approval bridge is available.",
     toolUseID: options.toolUseID,
-    decisionClassification: "user_reject",
   };
 };
 
