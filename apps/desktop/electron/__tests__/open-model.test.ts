@@ -140,6 +140,12 @@ test("openModelCodexLaunch builds provider overrides and passes the key via env 
       `model_providers.letagents_open_model.env_key="${OPEN_MODEL_API_KEY_ENV}"`,
     ),
   );
+  assert.ok(
+    launch.configOverrides.includes(
+      `shell_environment_policy.exclude=["${OPEN_MODEL_API_KEY_ENV}"]`,
+    ),
+    "the API key env var must be excluded from model-run shell commands",
+  );
   for (const override of launch.configOverrides) {
     assert.doesNotMatch(override, /sk-or-secret/);
   }
@@ -155,6 +161,12 @@ test("openModelCodexLaunch omits env_key for keyless local endpoints", () => {
 
   assert.deepEqual(launch.env, {});
   assert.ok(!launch.configOverrides.some((override) => override.includes("env_key")));
+  assert.ok(
+    launch.configOverrides.includes(
+      `shell_environment_policy.exclude=["${OPEN_MODEL_API_KEY_ENV}"]`,
+    ),
+    "shell exclusion stays on even without a saved key, in case the var is exported in the desktop env",
+  );
 });
 
 test("openModelCodexLaunch refuses unconfigured settings", () => {
