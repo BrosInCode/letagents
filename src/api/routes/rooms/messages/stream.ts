@@ -10,11 +10,12 @@ import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
-import { attachAgentMessageActivation } from "../../../rooms/activation-routing.js";
+import { attachAgentMessageActivation } from "../../../../shared/activation-routing.js";
 import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
 import {
   isPromptOnlyAgentMessage,
 } from "../../../../shared/room-agent-prompts.js";
+import { resolveMessageActivationContext } from "./activation-context.js";
 import {
   rentalActivityEvents,
   type RentalActivityCreatedEvent,
@@ -82,16 +83,18 @@ export function registerMessageStreamRoute(
       }
       try {
         const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
+        const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
         if (streamClosed) return;
         res.write(`data: ${JSON.stringify({
-          ...(activationIdentity ? attachAgentMessageActivation(streamMessage, activationIdentity) : streamMessage),
+          ...(activationIdentity ? attachAgentMessageActivation(streamMessage, activationIdentity, activationContext) : streamMessage),
           room_id: project.id,
         })}\n\n`);
       } catch (error) {
         console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
+        const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
         if (streamClosed) return;
         res.write(`data: ${JSON.stringify({
-          ...(activationIdentity ? attachAgentMessageActivation(message, activationIdentity) : message),
+          ...(activationIdentity ? attachAgentMessageActivation(message, activationIdentity, activationContext) : message),
           room_id: project.id,
         })}\n\n`);
       }

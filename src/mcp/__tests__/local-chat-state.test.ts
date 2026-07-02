@@ -29,6 +29,7 @@ const { registerPostReasoningTool } = await import("../server/tools/messages/rea
 const { registerRoomResources } = await import("../server/resources.js");
 const { postCanonicalTaskAction } = await import("../server/tools/tasks/api.js");
 const { registerMessageTools } = await import("../server/tools/messages.js");
+const { localActivationContext } = await import("../server/tools/messages/wait-tool.js");
 const { toAgentReadableMessages } = await import("../server/runtime/messages.js");
 
 type SendToolHandler = (
@@ -413,18 +414,46 @@ test("MCP local task state supports board create, list, and update", async () =>
     assignee: "Local Agent",
     assignee_agent_key: "local/agent",
     pr_url: "https://github.com/BrosInCode/letagents/pull/1",
+    workflow_artifacts: [{
+      provider: "github",
+      kind: "pull_request",
+      url: "https://github.com/BrosInCode/letagents/pull/1",
+      status: "open",
+    }],
   });
   assert.equal(updated.status, "accepted");
   assert.equal(updated.assignee, "Local Agent");
   assert.equal(updated.pr_url, "https://github.com/BrosInCode/letagents/pull/1");
+  assert.deepEqual(updated.workflow_artifacts, [{
+    provider: "github",
+    kind: "pull_request",
+    url: "https://github.com/BrosInCode/letagents/pull/1",
+    status: "open",
+  }]);
+
+  const claimed = await updateLocalTask("board_room", task.id, {
+    status: "assigned",
+    assignee: "Local Agent",
+    assignee_agent_key: "local/agent",
+    actor_instance_id: "local_instance_1",
+    agent_session_id: "local_session_1",
+  });
+  assert.equal(claimed.assignee_agent_instance_id, "local_instance_1");
+  assert.equal(claimed.assignee_agent_session_id, "local_session_1");
+
+  const progressed = await updateLocalTask("board_room", task.id, {
+    status: "in_progress",
+  });
+  assert.equal(progressed.assignee_agent_instance_id, "local_instance_1");
+  assert.equal(progressed.assignee_agent_session_id, "local_session_1");
 
   const openTasks = await listLocalTasks("board_room");
   assert.deepEqual(openTasks.tasks.map((entry) => entry.id), [task.id]);
-  assert.equal((await getLocalTask("board_room", task.id))?.status, "accepted");
+  assert.equal((await getLocalTask("board_room", task.id))?.status, "in_progress");
 
   await assert.rejects(
-    () => updateLocalTask("board_room", task.id, { status: "done" }),
-    /Invalid transition: accepted -> done/,
+    () => updateLocalTask("board_room", task.id, { status: "accepted" }),
+    /Invalid transition: in_progress -> accepted/,
   );
 });
 
@@ -445,18 +474,54 @@ test("MCP local task lease actions stay local", async () => {
 
   const handoff = await postCanonicalTaskAction<{
     action: string;
-    task: { id: string; status: string; assignee: string | null; assignee_agent_key: string | null };
+    task: {
+      id: string;
+      status: string;
+      assignee: string | null;
+      assignee_agent_key: string | null;
+      assignee_agent_instance_id: string | null;
+      assignee_agent_session_id: string | null;
+    };
     released_lease: null;
     new_lease: null;
   }>("lease_room", task.id, "lease-action", {
     action: "handoff",
     target_actor_key: "local/next-agent",
+    target_actor_instance_id: "local_next_instance_1",
+    target_agent_session_id: "local_next_session_1",
   });
 
   assert.equal(handoff.action, "handoff");
   assert.equal(handoff.task.status, "assigned");
   assert.equal(handoff.task.assignee, "local/next-agent");
   assert.equal(handoff.task.assignee_agent_key, "local/next-agent");
+  assert.equal(handoff.task.assignee_agent_instance_id, "local_next_instance_1");
+  assert.equal(handoff.task.assignee_agent_session_id, "local_next_session_1");
+
+  await updateLocalTask("lease_room", task.id, { status: "in_progress" });
+  const inProgressHandoff = await postCanonicalTaskAction<{
+    action: string;
+    task: {
+      id: string;
+      status: string;
+      assignee: string | null;
+      assignee_agent_key: string | null;
+      assignee_agent_instance_id: string | null;
+      assignee_agent_session_id: string | null;
+    };
+    released_lease: null;
+    new_lease: null;
+  }>("lease_room", task.id, "lease-action", {
+    action: "handoff",
+    target_actor_key: "local/another-agent",
+    target_actor_instance_id: "local_next_instance_2",
+    target_agent_session_id: "local_next_session_2",
+  });
+  assert.equal(inProgressHandoff.task.status, "in_progress");
+  assert.equal(inProgressHandoff.task.assignee, "local/another-agent");
+  assert.equal(inProgressHandoff.task.assignee_agent_key, "local/another-agent");
+  assert.equal(inProgressHandoff.task.assignee_agent_instance_id, "local_next_instance_2");
+  assert.equal(inProgressHandoff.task.assignee_agent_session_id, "local_next_session_2");
 
   const review = await postCanonicalTaskAction<{
     action: string;
@@ -504,6 +569,45 @@ test("MCP local task lease actions stay local", async () => {
   assert.equal(release.task.status, "accepted");
   assert.equal(release.task.assignee, null);
   assert.equal(release.task.assignee_agent_key, null);
+});
+
+test("MCP local activation context ignores bare human assignees", async () => {
+  const bareTask = await addLocalTask("bare_assignee_room", {
+    title: "Bare human assignment",
+    created_by: "Agent",
+  });
+  await updateLocalTask("bare_assignee_room", bareTask.id, { status: "accepted" });
+  await updateLocalTask("bare_assignee_room", bareTask.id, {
+    status: "assigned",
+    assignee: "EmmyMay",
+  });
+
+  assert.deepEqual(await localActivationContext("bare_assignee_room"), {
+    activeTaskLeases: [],
+  });
+
+  const agentTask = await addLocalTask("agent_assignee_room", {
+    title: "Agent assignment",
+    created_by: "Agent",
+  });
+  await updateLocalTask("agent_assignee_room", agentTask.id, { status: "accepted" });
+  await updateLocalTask("agent_assignee_room", agentTask.id, {
+    status: "assigned",
+    assignee: "Local Agent",
+    assignee_agent_key: "local/agent",
+    agent_session_id: "local_session_1",
+  });
+
+  assert.deepEqual(await localActivationContext("agent_assignee_room"), {
+    activeTaskLeases: [{
+      kind: "work",
+      status: "active",
+      actor_label: "Local Agent",
+      agent_key: "local/agent",
+      agent_instance_id: null,
+      agent_session_id: "local_session_1",
+    }],
+  });
 });
 
 test("send_thread_message roots a reply at a top-level quote-reply, not the quoted message", async () => {

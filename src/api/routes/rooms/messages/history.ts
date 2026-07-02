@@ -21,8 +21,9 @@ import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
-import { attachAgentMessageActivations } from "../../../rooms/activation-routing.js";
+import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
 import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
+import { resolveMessageActivationContext } from "./activation-context.js";
 import { resolveMessageActivationIdentity } from "./activation-identity.js";
 import { isDesktopHumanClient } from "./request-identity.js";
 import { resolveParticipantRoom } from "./helpers.js";
@@ -60,9 +61,13 @@ export function registerMessageHistoryRoutes(
           account_id: accountId,
         });
 
+    const activationContext = await resolveMessageActivationContext(project.id, activationIdentity, {
+      includeTaskOwnerLeases: false,
+    });
+
     res.json({
       room_id: project.id,
-      messages: attachAgentMessageActivations(result.messages, activationIdentity),
+      messages: attachAgentMessageActivations(result.messages, activationIdentity, activationContext),
       has_more: result.has_more,
       has_older: before ? result.has_more : undefined,
     });
@@ -114,9 +119,12 @@ export function registerMessageHistoryRoutes(
       await endDelivery?.().catch((error: unknown) => {
         console.error(`[room messages poll] failed to end agent delivery for ${project.id}`, error);
       });
+      const activationContext = await resolveMessageActivationContext(project.id, activationIdentity, {
+        includeTaskOwnerLeases: false,
+      });
       res.json({
         room_id: project.id,
-        messages: attachAgentMessageActivations(existing.messages, activationIdentity),
+        messages: attachAgentMessageActivations(existing.messages, activationIdentity, activationContext),
         has_more: existing.has_more,
       });
       return;
@@ -136,12 +144,22 @@ export function registerMessageHistoryRoutes(
     }
 
     function resolveRequest(msgs: Message[], hasMore = false) {
+      void resolveRequestAsync(msgs, hasMore).catch((error: unknown) => {
+        console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Messages could not be fetched." });
+        }
+      });
+    }
+
+    async function resolveRequestAsync(msgs: Message[], hasMore = false) {
       if (settled) return;
       settled = true;
       cleanup();
+      const activationContext = await resolveMessageActivationContext(projectId, activationIdentity);
       res.json({
         room_id: projectId,
-        messages: attachAgentMessageActivations(msgs, activationIdentity),
+        messages: attachAgentMessageActivations(msgs, activationIdentity, activationContext),
         has_more: hasMore,
       });
     }
@@ -153,7 +171,9 @@ export function registerMessageHistoryRoutes(
         include_prompt_only: includePromptOnly,
         account_id: accountId,
       });
-      if (next.messages.length > 0) resolveRequest(next.messages, next.has_more);
+      if (next.messages.length > 0) {
+        resolveRequest(next.messages, next.has_more);
+      }
     }
 
     function onClientClose() {
@@ -162,7 +182,9 @@ export function registerMessageHistoryRoutes(
       cleanup();
     }
 
-    timeout = setTimeout(() => resolveRequest([]), timeoutMs);
+    timeout = setTimeout(() => {
+      resolveRequest([]);
+    }, timeoutMs);
     deps.messageEvents.on("message:created", onMessageCreated);
     req.on("close", onClientClose);
   });

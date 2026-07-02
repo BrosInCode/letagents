@@ -50,6 +50,8 @@ type LocalTaskRow = {
   status: string;
   assignee: string | null;
   assignee_agent_key: string | null;
+  assignee_agent_instance_id: string | null;
+  assignee_agent_session_id: string | null;
   created_by: string | null;
   pr_url: string | null;
   workflow_artifacts_json: string | null;
@@ -143,6 +145,8 @@ async function getDb(): Promise<SqliteDatabase> {
         status TEXT NOT NULL,
         assignee TEXT,
         assignee_agent_key TEXT,
+        assignee_agent_instance_id TEXT,
+        assignee_agent_session_id TEXT,
         created_by TEXT,
         pr_url TEXT,
         workflow_artifacts_json TEXT,
@@ -171,6 +175,8 @@ async function getDb(): Promise<SqliteDatabase> {
     addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
     addColumnIfMissing(db, "local_rooms", "git_room_json", "TEXT");
     addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
+    addColumnIfMissing(db, "local_tasks", "assignee_agent_instance_id", "TEXT");
+    addColumnIfMissing(db, "local_tasks", "assignee_agent_session_id", "TEXT");
     addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
     addColumnIfMissing(db, "local_tasks", "workflow_refs_json", "TEXT");
     addColumnIfMissing(db, "local_tasks", "sync_started_at", "TEXT");
@@ -252,6 +258,14 @@ function mapTaskRow(row: Record<string, unknown>): LocalTaskRow {
     assignee_agent_key:
       typeof row.assignee_agent_key === "string"
         ? row.assignee_agent_key
+        : null,
+    assignee_agent_instance_id:
+      typeof row.assignee_agent_instance_id === "string"
+        ? row.assignee_agent_instance_id
+        : null,
+    assignee_agent_session_id:
+      typeof row.assignee_agent_session_id === "string"
+        ? row.assignee_agent_session_id
         : null,
     created_by: typeof row.created_by === "string" ? row.created_by : null,
     pr_url: typeof row.pr_url === "string" ? row.pr_url : null,
@@ -720,10 +734,11 @@ export async function addLocalTask(
       .prepare(`
         INSERT INTO local_tasks (
           room_id, task_id, title, description, status, assignee, assignee_agent_key,
+          assignee_agent_instance_id, assignee_agent_session_id,
           created_by, pr_url, workflow_artifacts_json, workflow_refs_json,
           synced_cloud_id, sync_key, sync_started_at, sync_dirty, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'proposed', NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, NULL, 1, ?, ?)
+        VALUES (?, ?, ?, ?, 'proposed', NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, NULL, 1, ?, ?)
       `)
       .run(
         trimmedRoomId,
@@ -777,12 +792,26 @@ export async function updateLocalTask(
     patch.workflowArtifacts === undefined
       ? current.workflow_artifacts_json
       : JSON.stringify(patch.workflowArtifacts || []);
+  const nextAssigneeAgentKey =
+    patch.assigneeAgentKey === undefined
+      ? current.assignee_agent_key
+      : patch.assigneeAgentKey;
+  const nextAssigneeAgentInstanceId =
+    patch.assigneeAgentKey === undefined
+      ? current.assignee_agent_instance_id
+      : null;
+  const nextAssigneeAgentSessionId =
+    patch.assigneeAgentKey === undefined
+      ? current.assignee_agent_session_id
+      : null;
   database
     .prepare(`
       UPDATE local_tasks
       SET status = ?,
           assignee = ?,
           assignee_agent_key = ?,
+          assignee_agent_instance_id = ?,
+          assignee_agent_session_id = ?,
           pr_url = ?,
           workflow_artifacts_json = ?,
           sync_dirty = 1,
@@ -792,9 +821,9 @@ export async function updateLocalTask(
     .run(
       nextStatus,
       patch.assignee === undefined ? current.assignee : patch.assignee,
-      patch.assigneeAgentKey === undefined
-        ? current.assignee_agent_key
-        : patch.assigneeAgentKey,
+      nextAssigneeAgentKey,
+      nextAssigneeAgentInstanceId,
+      nextAssigneeAgentSessionId,
       patch.prUrl === undefined ? current.pr_url : patch.prUrl,
       workflowArtifacts,
       now,
@@ -931,16 +960,19 @@ export async function importLocalTasks(
         .prepare(`
           INSERT INTO local_tasks (
             room_id, task_id, title, description, status, assignee, assignee_agent_key,
+            assignee_agent_instance_id, assignee_agent_session_id,
             created_by, pr_url, workflow_artifacts_json, workflow_refs_json,
             synced_cloud_id, sync_key, sync_started_at, sync_dirty, created_at, updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
           ON CONFLICT(room_id, task_id) DO UPDATE SET
             title = excluded.title,
             description = excluded.description,
             status = excluded.status,
             assignee = excluded.assignee,
             assignee_agent_key = excluded.assignee_agent_key,
+            assignee_agent_instance_id = excluded.assignee_agent_instance_id,
+            assignee_agent_session_id = excluded.assignee_agent_session_id,
             pr_url = excluded.pr_url,
             workflow_artifacts_json = excluded.workflow_artifacts_json,
             workflow_refs_json = excluded.workflow_refs_json,

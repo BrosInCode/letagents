@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -11,6 +12,7 @@ import type { DesktopGitRoomInfo } from "../ipc-types.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const nodeRequire = createRequire(import.meta.url);
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-desktop-local-chat-"));
 process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
@@ -555,6 +557,73 @@ test("desktop local room task store supports board create and lifecycle updates"
     () => updateLocalTask("task_room", task.id, { status: "done" }),
     /Invalid transition: accepted -> done/,
   );
+});
+
+test("desktop local task reassignment clears stale agent session owner metadata", async () => {
+  await createLocalRoom({
+    roomIdentifier: "task_owner_handoff_room",
+    displayName: "Task Owner Handoff Room",
+  });
+  const task = await addLocalTask("task_owner_handoff_room", {
+    title: "Hand off local task",
+  });
+  await updateLocalTask("task_owner_handoff_room", task.id, { status: "accepted" });
+  await updateLocalTask("task_owner_handoff_room", task.id, {
+    status: "assigned",
+    assignee: "Old Agent",
+    assigneeAgentKey: "old/agent",
+  });
+
+  const { DatabaseSync } = nodeRequire("node:sqlite") as {
+    DatabaseSync: new (path: string) => {
+      close: () => void;
+      prepare: (sql: string) => {
+        get: (...params: unknown[]) => Record<string, unknown> | undefined;
+        run: (...params: unknown[]) => unknown;
+      };
+    };
+  };
+  const raw = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB || "");
+  try {
+    raw
+      .prepare(`
+        UPDATE local_tasks
+        SET assignee_agent_instance_id = ?,
+            assignee_agent_session_id = ?
+        WHERE room_id = ? AND task_id = ?
+      `)
+      .run("old_instance", "old_session", "task_owner_handoff_room", task.id);
+
+    await updateLocalTask("task_owner_handoff_room", task.id, {
+      status: "in_progress",
+    });
+    const progressed = raw
+      .prepare(`
+        SELECT assignee_agent_instance_id, assignee_agent_session_id
+        FROM local_tasks
+        WHERE room_id = ? AND task_id = ?
+      `)
+      .get("task_owner_handoff_room", task.id);
+    assert.equal(progressed?.assignee_agent_instance_id, "old_instance");
+    assert.equal(progressed?.assignee_agent_session_id, "old_session");
+
+    await updateLocalTask("task_owner_handoff_room", task.id, {
+      assignee: "New Agent",
+      assigneeAgentKey: "new/agent",
+    });
+    const reassigned = raw
+      .prepare(`
+        SELECT assignee_agent_key, assignee_agent_instance_id, assignee_agent_session_id
+        FROM local_tasks
+        WHERE room_id = ? AND task_id = ?
+      `)
+      .get("task_owner_handoff_room", task.id);
+    assert.equal(reassigned?.assignee_agent_key, "new/agent");
+    assert.equal(reassigned?.assignee_agent_instance_id, null);
+    assert.equal(reassigned?.assignee_agent_session_id, null);
+  } finally {
+    raw.close();
+  }
 });
 
 test("desktop local task publish claims prevent duplicate concurrent sync", async () => {

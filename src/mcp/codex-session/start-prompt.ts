@@ -54,7 +54,7 @@ export function buildStartPrompt(input: {
     "3. Pass that agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, and task tools whenever the tool accepts it.",
     "4. Do not start another live session. Join the room inline in this worker only.",
     "5. Read the room and task board before contributing so you have current context.",
-    "6. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
+    "6. Keep polling with wait_for_messages using a 30000 ms timeout. Track the latest returned message id, or last_observed_message_id when present even if messages is empty.",
     "7. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive.",
     "8. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
     "9. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
