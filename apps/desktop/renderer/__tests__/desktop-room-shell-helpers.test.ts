@@ -398,6 +398,23 @@ describe("desktop room shell helpers", () => {
     assert.equal(fallback.status, "working");
   });
 
+  it("matches reasoning sessions by agent session id when labels drift", () => {
+    const target = {
+      actorLabel: null,
+      displayName: "CometLively",
+      ideLabel: "Codex",
+      sender: "CometLively",
+      agentKey: null,
+      agentSessionId: "session_local_codex",
+    };
+    const session = {
+      ...reasoningSession("reasoning_session", "Old Codex Label", "2026-05-28T02:00:00.000Z"),
+      agentSessionId: "session_local_codex",
+    };
+
+    assert.equal(latestReasoningSessionForTarget(target, [session])?.id, "reasoning_session");
+  });
+
   it("does not cross-match multiple Codex workers through generic provider keys", () => {
     const target = {
       actorLabel: "MapleRidge",

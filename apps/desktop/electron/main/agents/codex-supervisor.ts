@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import type {
   DesktopAgentProviderId,
+  DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
@@ -15,6 +16,7 @@ import type {
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
 import { buildRepoStatus } from "../../repo-status.js";
+import { stageDesktopAttachmentBuffer } from "../attachments.js";
 import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
@@ -95,6 +97,13 @@ import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { openModelCodexLaunch } from "./open-model-launch.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
+import {
+  buildManagedAgentChangeSummaryAttachmentDraft,
+  managedAgentChangeSummaryLocalAttachmentPayload,
+  managedAgentChangeSummarySignature,
+  type ManagedAgentChangeSummaryAttachmentDraft,
+} from "./managed-agent-change-attachments.js";
+import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
 import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { createDesktopCursorRuntime } from "./cursor-runtime.js";
 import {
@@ -143,6 +152,7 @@ const sessionMonitorTimers = new Map<string, ReturnType<typeof setInterval>>();
 const desktopEventQueues = new Map<string, Promise<void>>();
 const codexRuntimeReasoningLastPost = new Map<string, { signature: string; postedAt: number }>();
 const codexRuntimeReasoningPostQueues = new Map<string, Promise<void>>();
+const codexChangeSummaryAttachmentSignatures = new Map<string, string>();
 const desktopManagedAgentRuntimes = new DesktopManagedAgentRuntimeRegistry();
 let cleanupRegistered = false;
 const CODEX_WORKER_REGISTRATION_ERROR =
@@ -588,6 +598,7 @@ function publishCodexRuntimeSnapshot(
 function clearCodexRuntimeReasoningState(sessionId: string): void {
   codexRuntimeReasoningLastPost.delete(sessionId);
   codexRuntimeReasoningPostQueues.delete(sessionId);
+  codexChangeSummaryAttachmentSignatures.delete(sessionId);
 }
 
 function emitManagedAgentSessionUpdate(session: DesktopCodexLiveSessionState | null | undefined): void {
@@ -637,6 +648,7 @@ function registerProcessCleanup(): void {
     spawnedServerPids.clear();
     codexRuntimeReasoningLastPost.clear();
     codexRuntimeReasoningPostQueues.clear();
+    codexChangeSummaryAttachmentSignatures.clear();
   };
 
   process.on("exit", cleanup);
@@ -976,6 +988,18 @@ export function listDesktopManagedAgentSessions(
   roomIdentifier?: string | null,
 ): DesktopManagedAgentSession[] {
   return desktopManagedAgentRuntimes.listSessions(roomIdentifier);
+}
+
+export async function getDesktopManagedAgentChangeSummary(
+  sessionId?: string | null,
+  roomIdentifier?: string | null,
+): Promise<DesktopManagedAgentChangeSummary | null> {
+  const targetSessionId = String(sessionId ?? "").trim();
+  if (!targetSessionId) return null;
+  const session = listDesktopManagedCodexAgentSessions(roomIdentifier)
+    .find((candidate) => candidate.id === targetSessionId);
+  if (!session) return null;
+  return buildDesktopManagedAgentChangeSummary(session);
 }
 
 interface CodexEngineProviderContext {
@@ -1468,6 +1492,7 @@ async function publishDesktopManagedAgentReply(input: {
   event: ManagedRoomEvent;
   storage: DesktopRoomStorageState;
   text: string | null;
+  beforeChangeSignature?: string | null;
 }): Promise<void> {
   const text = desktopEventPublicReplyText(input.session.token, input.text);
   if (!text) {
@@ -1487,6 +1512,9 @@ async function publishDesktopManagedAgentReply(input: {
 
   const roomIdentifier = input.session.room_identifier || input.session.room_id;
   const replyTarget = replyTargetForEvent(input.event);
+  const changeAttachmentDraft = await buildDesktopManagedCodexReplyChangeAttachment(input.session, {
+    beforeSignature: input.beforeChangeSignature ?? null,
+  });
   const localReply = await persistDesktopManagedAgentLocalReply({
     roomIdentifier,
     storage: input.storage,
@@ -1494,13 +1522,24 @@ async function publishDesktopManagedAgentReply(input: {
     replyTo: replyTarget.replyTo,
     threadRootId: replyTarget.threadRootId,
     text,
+    attachments: changeAttachmentDraft
+      ? [managedAgentChangeSummaryLocalAttachmentPayload(changeAttachmentDraft)]
+      : [],
   });
   if (localReply) {
+    rememberCodexChangeSummaryAttachment(input.session, changeAttachmentDraft);
     emitPersistedLocalRoomMessage(roomIdentifier, localReply);
     return;
   }
 
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
+  const attachments = await publishDesktopManagedCodexReplyChangeAttachment(
+    cloudRoomIdentifier,
+    changeAttachmentDraft,
+  );
+  if (changeAttachmentDraft && attachments.length === 0) {
+    console.warn("Could not attach Codex managed-agent working tree summary to room reply.");
+  }
   await apiFetch<Record<string, unknown>>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
@@ -1515,9 +1554,95 @@ async function publishDesktopManagedAgentReply(input: {
         thread_root_id: replyTarget.threadRootId,
         agent_session_id: workerSession.session_id,
         agent_session_token: workerSession.session_token,
+        attachments,
       }),
     },
   );
+  if (changeAttachmentDraft && attachments.length > 0) {
+    rememberCodexChangeSummaryAttachment(input.session, changeAttachmentDraft);
+  }
+}
+
+async function buildDesktopManagedCodexReplyChangeAttachment(
+  session: DesktopCodexLiveSessionState,
+  options: { beforeSignature?: string | null } = {},
+): Promise<ManagedAgentChangeSummaryAttachmentDraft | null> {
+  if ((session.provider_id ?? "codex") !== "codex") {
+    return null;
+  }
+
+  try {
+    const publicSession = toPublicManagedAgentSession(bindCodexLiveSessionToWorker(session));
+    const summary = await buildDesktopManagedAgentChangeSummary(publicSession);
+    const signature = managedAgentChangeSummarySignature(summary);
+    if (options.beforeSignature && options.beforeSignature === signature) {
+      return null;
+    }
+    if (codexChangeSummaryAttachmentSignatures.get(session.session_id) === signature) {
+      return null;
+    }
+    return buildManagedAgentChangeSummaryAttachmentDraft(summary);
+  } catch (error) {
+    console.warn(
+      "Could not build Codex managed-agent working tree summary attachment.",
+      error instanceof Error ? error.message : String(error),
+    );
+    return null;
+  }
+}
+
+async function desktopManagedCodexChangeSignature(
+  session: DesktopCodexLiveSessionState,
+): Promise<string | null> {
+  if ((session.provider_id ?? "codex") !== "codex") {
+    return null;
+  }
+
+  try {
+    const publicSession = toPublicManagedAgentSession(bindCodexLiveSessionToWorker(session));
+    const summary = await buildDesktopManagedAgentChangeSummary(publicSession);
+    return managedAgentChangeSummarySignature(summary);
+  } catch (error) {
+    console.warn(
+      "Could not read Codex managed-agent working tree signature.",
+      error instanceof Error ? error.message : String(error),
+    );
+    return null;
+  }
+}
+
+function rememberCodexChangeSummaryAttachment(
+  session: DesktopCodexLiveSessionState,
+  draft: ManagedAgentChangeSummaryAttachmentDraft | null,
+): void {
+  if (draft) {
+    codexChangeSummaryAttachmentSignatures.set(session.session_id, draft.signature);
+  }
+}
+
+async function publishDesktopManagedCodexReplyChangeAttachment(
+  cloudRoomIdentifier: string,
+  draft: ManagedAgentChangeSummaryAttachmentDraft | null,
+): Promise<Array<{ upload_id: string }>> {
+  if (!draft) {
+    return [];
+  }
+
+  try {
+    const staged = await stageDesktopAttachmentBuffer(
+      cloudRoomIdentifier,
+      draft.buffer,
+      draft.fileName,
+      draft.mimeType,
+    );
+    return [{ upload_id: staged.uploadId }];
+  } catch (error) {
+    console.warn(
+      "Could not upload Codex managed-agent working tree summary attachment.",
+      error instanceof Error ? error.message : String(error),
+    );
+    return [];
+  }
 }
 
 async function startDesktopEventCodexTurn(input: {
@@ -1704,6 +1829,7 @@ async function deliverDesktopEventTurn(
 
     const stopAfterTurn = isStopPhraseRoomStreamEvent(idleSession, event);
     const prompt = buildDesktopEventPrompt(bindCodexLiveSessionToWorker(idleSession), event);
+    const beforeChangeSignature = await desktopManagedCodexChangeSignature(idleSession);
     const completed = await runDesktopEventTurnWithContext({
       client,
       session: idleSession,
@@ -1716,6 +1842,7 @@ async function deliverDesktopEventTurn(
       event,
       storage,
       text: completed.text,
+      beforeChangeSignature,
     });
     if (stopAfterTurn) {
       stopSessionAfterRoomStopPhrase(idleSession.session_id);

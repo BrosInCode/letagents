@@ -114,6 +114,16 @@
                   <strong>{{ managedAgentPermissionProfileLabel(session) }}</strong>
                   <small>{{ managedAgentPermissionProfileSummary(session.permissionProfile) }}</small>
                 </div>
+                <ManagedAgentChangeSummaryCard
+                  v-if="shouldTrackManagedAgentChanges(session)"
+                  class="desktop-agent-detail-changes"
+                  :summary="managedChangeSummary(session.id)"
+                  :loading="isChangeSummaryLoading(session.id)"
+                  :expanded="Boolean(expandedChangeSummaryIds[session.id])"
+                  :retry-visible="Boolean(managedChangeSummary(session.id)?.error)"
+                  @toggle-expanded="toggleExpandedChangeSummary(session.id)"
+                  @retry="loadManagedAgentChangeSummary(session)"
+                />
                 <div
                   v-if="session.pendingPermissionRequests.length"
                   class="desktop-agent-detail-permissions"
@@ -222,6 +232,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Ban, Power, RefreshCw, ShieldCheck, Square, X } from "@lucide/vue";
 import type {
+  DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopManagedAgentPermissionRequest,
@@ -240,6 +251,7 @@ import {
   isVisibleManagedAgentSession,
   canStopManagedAgentTurn,
   managedAgentSessionMatchesTarget,
+  managedAgentSessionMatchesReasoning,
   managedAgentSessionDisplayName,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSummary,
@@ -248,6 +260,7 @@ import {
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import ManagedAgentChangeSummaryCard from "./ManagedAgentChangeSummaryCard.vue";
 import {
   currentFocusableElement,
   restoreFocus,
@@ -276,6 +289,9 @@ const stopStatusMessage = ref<string | null>(null);
 const managedSessionError = ref<string | null>(null);
 const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectResult>>({});
 const inspectingSessionIds = ref<Record<string, boolean>>({});
+const managedChangeSummaries = ref<Record<string, DesktopManagedAgentChangeSummary | null>>({});
+const loadingChangeSummaryIds = ref<Record<string, boolean>>({});
+const expandedChangeSummaryIds = ref<Record<string, boolean>>({});
 const resolvingPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let refreshTimer: number | null = null;
 let modalStateVersion = 0;
@@ -307,7 +323,11 @@ const matchingManagedSessions = computed(() => {
   const activeSessions = managedSessions.value.filter(isVisibleManagedAgentSession);
   if (!props.target) return [];
 
-  return activeSessions.filter((session) => managedAgentSessionMatchesTarget(session, props.target!));
+  const reasoningSession = latestReasoning.value;
+  return activeSessions.filter((session) =>
+    managedAgentSessionMatchesTarget(session, props.target!) ||
+    managedAgentSessionMatchesReasoning(session, reasoningSession)
+  );
 });
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
@@ -370,7 +390,7 @@ watch(
     if (props.open) {
       modalStateVersion += 1;
       clearTransientState();
-      void loadManagedSessions({ quiet: true });
+      void loadManagedSessions({ quiet: true, refreshChanges: true });
     }
   },
 );
@@ -401,6 +421,9 @@ function clearTransientState(): void {
   managedSessionError.value = null;
   managedSessionInspections.value = {};
   inspectingSessionIds.value = {};
+  managedChangeSummaries.value = {};
+  loadingChangeSummaryIds.value = {};
+  expandedChangeSummaryIds.value = {};
   resolvingPermissionIds.value = {};
 }
 
@@ -419,7 +442,7 @@ function handleDialogTab(event: KeyboardEvent): void {
   trapFocusInDialog(event, dialogElement.value);
 }
 
-async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
+async function loadManagedSessions(options: { quiet?: boolean; refreshChanges?: boolean } = {}): Promise<void> {
   if (!props.open) return;
   const requestVersion = modalStateVersion;
   if (!options.quiet) {
@@ -430,7 +453,11 @@ async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<v
     const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
     managedSessions.value = sessions;
-    await inspectMatchingManagedSessions({ quiet: options.quiet, version: requestVersion });
+    await refreshMatchingManagedSessionDetails({
+      quiet: options.quiet,
+      version: requestVersion,
+      refreshChanges: options.refreshChanges ?? !options.quiet,
+    });
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
     managedSessionError.value = error instanceof Error ? error.message : "Could not load local agent sessions.";
@@ -441,12 +468,20 @@ async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<v
   }
 }
 
-async function inspectMatchingManagedSessions(options: { quiet?: boolean; version?: number } = {}): Promise<void> {
+async function refreshMatchingManagedSessionDetails(
+  options: { quiet?: boolean; version?: number; refreshChanges?: boolean } = {},
+): Promise<void> {
   const requestVersion = options.version ?? modalStateVersion;
   if (!isCurrentModalState(requestVersion)) return;
-  await Promise.all(matchingManagedSessions.value.map((session) =>
-    inspectManagedSession(session.id, { quiet: options.quiet, version: requestVersion })
-  ));
+  await Promise.all(matchingManagedSessions.value.flatMap((session) => {
+    const tasks: Array<Promise<void>> = [
+      inspectManagedSession(session.id, { quiet: options.quiet, version: requestVersion }),
+    ];
+    if (options.refreshChanges) {
+      tasks.push(loadManagedAgentChangeSummary(session, { version: requestVersion }));
+    }
+    return tasks;
+  }));
 }
 
 async function inspectManagedSession(
@@ -485,6 +520,53 @@ async function inspectManagedSession(
     if (!isCurrentModalState(requestVersion)) return;
     const { [sessionId]: _ignored, ...remaining } = inspectingSessionIds.value;
     inspectingSessionIds.value = remaining;
+  }
+}
+
+async function loadManagedAgentChangeSummary(
+  session: DesktopManagedAgentSession,
+  options: { version?: number } = {},
+): Promise<void> {
+  const requestVersion = options.version ?? modalStateVersion;
+  if (!isCurrentModalState(requestVersion) || !shouldTrackManagedAgentChanges(session)) return;
+  if (loadingChangeSummaryIds.value[session.id]) return;
+  loadingChangeSummaryIds.value = {
+    ...loadingChangeSummaryIds.value,
+    [session.id]: true,
+  };
+  try {
+    const summary = await window.letagentsDesktop.workers.getManagedAgentChangeSummary(session.id, props.roomIdentifier);
+    if (!isCurrentModalState(requestVersion)) return;
+    managedChangeSummaries.value = {
+      ...managedChangeSummaries.value,
+      [session.id]: summary,
+    };
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    managedChangeSummaries.value = {
+      ...managedChangeSummaries.value,
+      [session.id]: {
+        sessionId: session.id,
+        providerId: session.providerId,
+        repoRootPath: session.repoRootPath,
+        repoBranch: session.repoBranch,
+        changedFileCount: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 0,
+        untrackedFileCount: 0,
+        additions: 0,
+        deletions: 0,
+        files: [],
+        hiddenFileCount: 0,
+        isGitRepo: false,
+        updatedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "Could not inspect this agent's file changes.",
+      },
+    };
+  } finally {
+    if (!isCurrentModalState(requestVersion)) return;
+    const { [session.id]: _ignored, ...remaining } = loadingChangeSummaryIds.value;
+    loadingChangeSummaryIds.value = remaining;
   }
 }
 
@@ -624,6 +706,25 @@ function permissionRequestSummary(request: DesktopManagedAgentPermissionRequest)
     request.inputSummary,
     request.description,
   ].filter(Boolean).join(" - ") || "Tool approval required.";
+}
+
+function shouldTrackManagedAgentChanges(session: DesktopManagedAgentSession): boolean {
+  return session.providerId === "codex" && Boolean(session.repoRootPath.trim());
+}
+
+function managedChangeSummary(sessionId: string): DesktopManagedAgentChangeSummary | null {
+  return managedChangeSummaries.value[sessionId] ?? null;
+}
+
+function isChangeSummaryLoading(sessionId: string): boolean {
+  return Boolean(loadingChangeSummaryIds.value[sessionId]);
+}
+
+function toggleExpandedChangeSummary(sessionId: string): void {
+  expandedChangeSummaryIds.value = {
+    ...expandedChangeSummaryIds.value,
+    [sessionId]: !expandedChangeSummaryIds.value[sessionId],
+  };
 }
 
 function formatTimestamp(value: string | null | undefined): string {

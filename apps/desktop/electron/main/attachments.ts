@@ -169,7 +169,7 @@ async function stageDesktopAttachmentFile(
   );
 }
 
-async function stageDesktopAttachmentBuffer(
+export async function stageDesktopAttachmentBuffer(
   roomIdentifier: string,
   fileBuffer: Buffer,
   fileName: string,

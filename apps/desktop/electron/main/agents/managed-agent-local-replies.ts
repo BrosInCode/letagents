@@ -7,6 +7,7 @@ import {
 } from "../rooms/local-store.js";
 import { addLocalChatMessage } from "../rooms/messages/local-store.js";
 import { mapRoomMessagePayload } from "../rooms/messages/mappers.js";
+import type { RoomMessageAttachmentPayload } from "../attachments.js";
 import type { StoredAgentSessionState } from "./state.js";
 
 export type DesktopManagedAgentReplyTarget = {
@@ -31,6 +32,7 @@ export async function persistDesktopManagedAgentLocalReply(input: {
   replyTo: string | null;
   threadRootId?: string | null;
   text: string;
+  attachments?: RoomMessageAttachmentPayload[];
 }): Promise<DesktopRoomMessage | null> {
   if (input.storage.effectiveMode !== "local") {
     return null;
@@ -43,6 +45,7 @@ export async function persistDesktopManagedAgentLocalReply(input: {
     reply_to: input.replyTo,
     thread_root_id: input.threadRootId ?? null,
     source: "agent",
+    attachments: input.attachments ?? [],
   });
 
   return mapRoomMessagePayload(localMessage);

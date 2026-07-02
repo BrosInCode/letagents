@@ -1093,6 +1093,10 @@
   line-height: 1.35;
 }
 
+.desktop-agent-detail-changes {
+  grid-column: 1 / -1;
+}
+
 .desktop-agent-detail-permission {
   display: grid;
   gap: 6px;

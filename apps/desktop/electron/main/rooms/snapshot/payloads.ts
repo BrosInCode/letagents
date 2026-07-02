@@ -117,6 +117,7 @@ export interface ReasoningSessionPayload {
   room_id?: string | null;
   actor_label?: string | null;
   agent_key?: string | null;
+  agent_session_id?: string | null;
   task_id?: string | null;
   title?: string | null;
   status?: string | null;

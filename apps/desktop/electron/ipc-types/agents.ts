@@ -156,6 +156,66 @@ export interface DesktopManagedAgentPermissionDecisionResult {
   session: DesktopManagedAgentSession | null;
 }
 
+export type DesktopManagedAgentChangeFileStatus =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "typechange"
+  | "untracked"
+  | "unknown";
+
+export interface DesktopManagedAgentChangedFile {
+  path: string;
+  previousPath: string | null;
+  status: DesktopManagedAgentChangeFileStatus;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export const MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME =
+  "application/vnd.letagents.managed-agent-change-summary+json";
+
+export interface DesktopManagedAgentChangeSummary {
+  sessionId: string;
+  providerId: DesktopAgentProviderId;
+  repoRootPath: string;
+  repoBranch: string | null;
+  changedFileCount: number;
+  stagedFileCount: number;
+  unstagedFileCount: number;
+  untrackedFileCount: number;
+  additions: number;
+  deletions: number;
+  files: DesktopManagedAgentChangedFile[];
+  hiddenFileCount: number;
+  isGitRepo: boolean;
+  updatedAt: string;
+  error: string | null;
+}
+
+export interface DesktopManagedAgentPublicChangeSummary {
+  providerId: DesktopAgentProviderId;
+  repoBranch: string | null;
+  changeScope: "working_tree";
+  changedFileCount: number;
+  stagedFileCount: number;
+  unstagedFileCount: number;
+  untrackedFileCount: number;
+  additions: number;
+  deletions: number;
+  files: DesktopManagedAgentChangedFile[];
+  hiddenFileCount: number;
+  isGitRepo: boolean;
+  updatedAt: string;
+  error: string | null;
+}
+
 export interface DesktopManagedAgentSession {
   id: string;
   providerId: DesktopAgentProviderId;

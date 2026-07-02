@@ -38,6 +38,7 @@ export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[]
 
 export function reasoningSessionAgentKeys(session: DesktopReasoningSession): string[] {
   return [
+    session.agentSessionId,
     session.actorLabel,
     actorDisplayNameKey(session.actorLabel),
     specificAgentKey(session.agentKey),

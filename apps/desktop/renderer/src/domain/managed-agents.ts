@@ -10,6 +10,7 @@ import type {
   DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
+  DesktopReasoningSession,
   RepoStatus,
 } from "../../../electron/ipc-types";
 import { normalizeAgentKey } from "./agents";
@@ -193,6 +194,15 @@ export function managedAgentSessionMatchesTarget(
     targetOwnerAttribution &&
     targetOwnerAttribution.includes(sessionOwnerLabel),
   );
+}
+
+export function managedAgentSessionMatchesReasoning(
+  session: Pick<DesktopManagedAgentSession, "agentSessionId" | "reasoningSessionId">,
+  reasoning: Pick<DesktopReasoningSession, "id" | "agentSessionId"> | null | undefined,
+): boolean {
+  if (!reasoning) return false;
+  if (session.reasoningSessionId && session.reasoningSessionId === reasoning.id) return true;
+  return Boolean(session.agentSessionId && reasoning.agentSessionId && session.agentSessionId === reasoning.agentSessionId);
 }
 
 export function isExternalMcpProviderReady(

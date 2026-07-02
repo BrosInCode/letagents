@@ -14,6 +14,7 @@ import type {
   DesktopAppAgentRunResult,
   DesktopAppAgentSaveSettingsInput,
   DesktopAppAgentSettingsStatus,
+  DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
@@ -108,6 +109,7 @@ import {
   runDesktopAgentProviderSetup,
 } from "./agents/providers.js";
 import {
+  getDesktopManagedAgentChangeSummary,
   inspectDesktopManagedAgentSession,
   listDesktopManagedAgentSessions,
   resolveDesktopManagedAgentPermissionRequest,
@@ -731,6 +733,15 @@ export function registerDesktopIpcHandlers(
       roomIdentifier?: string | null,
     ): Promise<DesktopManagedAgentInspectResult | null> =>
       inspectDesktopManagedAgentSession(sessionId ?? null, roomIdentifier ?? null),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:get-managed-agent-change-summary",
+    async (
+      _event,
+      sessionId?: string | null,
+      roomIdentifier?: string | null,
+    ): Promise<DesktopManagedAgentChangeSummary | null> =>
+      getDesktopManagedAgentChangeSummary(sessionId ?? null, roomIdentifier ?? null),
   );
   targetIpcMain.handle(
     "desktop:workers:resolve-managed-agent-permission",

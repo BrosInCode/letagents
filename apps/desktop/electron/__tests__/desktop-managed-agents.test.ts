@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,6 +80,9 @@ const {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
 } = await import("../main/agents/managed-agent-local-replies.js");
+const {
+  MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+} = await import("../ipc-types.js");
 const {
   assertManagedAgentPermissionProfileAvailable,
   listManagedAgentPermissionProfiles,
@@ -1314,6 +1318,69 @@ test("desktop managed agent replies are persisted into local room chat", async (
   assert.equal(reply?.source, "agent");
   assert.equal(reply?.sender, "StoneForge | EmmyMay's agent | Codex");
   assert.equal(reply?.reply_to, null);
+});
+
+test("desktop managed agent local replies preserve change summary attachments", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_changes_room",
+    cloudRoomIdentifier: "room_changes",
+    displayName: "Changes Room",
+  });
+  await setLocalAwareRoomStorageMode("room_changes", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_changes");
+  const payloadJson = JSON.stringify({
+    kind: "managed_agent_change_summary",
+    version: 1,
+    summary: {
+      providerId: "codex",
+      repoBranch: "main",
+      changeScope: "working_tree",
+      changedFileCount: 1,
+      stagedFileCount: 0,
+      unstagedFileCount: 1,
+      untrackedFileCount: 0,
+      additions: 3,
+      deletions: 1,
+      files: [{
+        path: "apps/desktop/App.vue",
+        previousPath: null,
+        status: "modified",
+        additions: 3,
+        deletions: 1,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      }],
+      hiddenFileCount: 0,
+      isGitRepo: true,
+      updatedAt: "2026-07-02T00:00:00.000Z",
+      error: null,
+    },
+  });
+  const payload = Buffer.from(payloadJson, "utf8").toString("base64");
+
+  const result = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "room_changes",
+    storage,
+    workerSession: managedWorkerSession({ room_id: "room_changes" }),
+    replyTo: null,
+    text: "Implemented the change.",
+    attachments: [{
+      id: "managed-agent-change-summary",
+      file_name: "agent-changes.json",
+      mime_type: MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+      size_bytes: Buffer.byteLength(payloadJson, "utf8"),
+      content_base64: payload,
+    }],
+  });
+
+  assert.equal(result?.attachments.length, 1);
+  assert.equal(result?.attachments[0]?.mimeType, MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME);
+  assert.equal(result?.attachments[0]?.contentBase64, payload);
+  const savedPayload = JSON.parse(Buffer.from(result?.attachments[0]?.contentBase64 ?? "", "base64").toString("utf8"));
+  assert.equal("sessionId" in savedPayload.summary, false);
+  assert.equal("repoRootPath" in savedPayload.summary, false);
 });
 
 test("desktop managed agent reply targets distinguish quote replies from thread replies", () => {
