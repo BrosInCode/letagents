@@ -1,4 +1,5 @@
 @import "./composer-agent-reasoning/composer-shell.css";
+@import "./composer-agent-reasoning/composer-permissions.css";
 @import "./composer-agent-reasoning/mention-panel.css";
 @import "./composer-agent-reasoning/composer-reply.css";
 @import "./composer-agent-reasoning/attachment-drafts.css";

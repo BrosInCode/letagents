@@ -31,6 +31,7 @@ import {
   managedAgentPermissionProfileSelectionForProvider,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
+  managedAgentPermissionRequestTargetLabel,
   managedAgentSessionMatchesRoom,
   managedAgentSessionMatchesTarget,
   managedAgentSessionDisplayName,
@@ -41,6 +42,7 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   normalizeManagedAgentRoomIdentifier,
+  pendingManagedAgentPermissionApprovals,
   preferredManagedAgentRepoRootPath,
   shouldShowCursorMcpPolicySelector,
 } from "../src/domain/managed-agents";
@@ -278,6 +280,80 @@ test("isDeliverableManagedAgentSession requires a registered room worker", () =>
     agentSessionId: "agent_1",
     canStop: true,
   })), true);
+});
+
+test("pendingManagedAgentPermissionApprovals derives composer approval items", () => {
+  const approvals = pendingManagedAgentPermissionApprovals([
+    session({
+      id: "managed_late",
+      displayName: "NorthForge",
+      ideLabel: "Claude Code",
+      pendingPermissionRequests: [{
+        id: "perm_late",
+        providerId: "claude-code",
+        sessionId: "managed_late",
+        toolName: "Edit",
+        toolUseId: "tool_1",
+        title: "Use Edit",
+        description: null,
+        inputSummary: "/tmp/repo/apps/desktop/electron/main/agents/providers.ts",
+        decisionReason: null,
+        roomMessageId: null,
+        requestedAt: "2026-07-01T12:00:02.000Z",
+      }],
+    }),
+    session({
+      id: "managed_early",
+      displayName: "CedarVista",
+      ideLabel: "Claude Code",
+      pendingPermissionRequests: [{
+        id: "perm_early",
+        providerId: "claude-code",
+        sessionId: "managed_early",
+        toolName: "Bash",
+        toolUseId: "tool_2",
+        title: "Run command",
+        description: "npm test",
+        inputSummary: null,
+        decisionReason: null,
+        roomMessageId: null,
+        requestedAt: "2026-07-01T12:00:01.000Z",
+      }],
+    }),
+    session({
+      id: "managed_other_room",
+      roomIdentifier: "room_2",
+      pendingPermissionRequests: [{
+        id: "perm_other",
+        providerId: "claude-code",
+        sessionId: "managed_other_room",
+        toolName: "Edit",
+        toolUseId: null,
+        title: "Use Edit",
+        description: null,
+        inputSummary: "/tmp/repo/README.md",
+        decisionReason: null,
+        roomMessageId: null,
+        requestedAt: "2026-07-01T12:00:00.000Z",
+      }],
+    }),
+  ], "room_1");
+
+  assert.deepEqual(approvals.map((approval) => approval.id), ["perm_early", "perm_late"]);
+  assert.equal(approvals[0]?.displayName, "CedarVista");
+  assert.equal(approvals[0]?.targetLabel, "npm test");
+  assert.equal(approvals[1]?.targetLabel, "apps/desktop/electron/main/agents/providers.ts");
+});
+
+test("managedAgentPermissionRequestTargetLabel keeps external targets intact", () => {
+  assert.equal(managedAgentPermissionRequestTargetLabel({
+    inputSummary: "/var/tmp/outside.txt",
+    description: null,
+  }, session()), "/var/tmp/outside.txt");
+  assert.equal(managedAgentPermissionRequestTargetLabel({
+    inputSummary: "/tmp/repo",
+    description: null,
+  }, session()), ".");
 });
 
 test("activeManagedAgentWorkIndicators only exposes running room work", () => {

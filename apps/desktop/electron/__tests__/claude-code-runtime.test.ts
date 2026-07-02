@@ -702,6 +702,8 @@ test("managed agent permission room text omits raw ids and redacts secret comman
   assert.doesNotMatch(text, new RegExp(request.id));
   assert.doesNotMatch(text, /approve perm_|deny perm_/i);
   assert.doesNotMatch(text, /token_123|secret|s3cr3t|user:pass/i);
+  assert.match(text, /approval controls near the message composer/);
+  assert.doesNotMatch(text, /Use the local agent detail modal to allow or deny/);
   assert.match(request.inputSummary ?? "", /Authorization: Bearer \[redacted\]/);
   assert.match(request.inputSummary ?? "", /token=\[redacted\]/);
   assert.match(request.inputSummary ?? "", /--password=\[redacted\]/);

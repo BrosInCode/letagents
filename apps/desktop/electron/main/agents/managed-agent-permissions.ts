@@ -85,7 +85,7 @@ export function buildManagedAgentPermissionRoomText(input: {
   if (input.request.description) {
     lines.push(input.request.description);
   }
-  lines.push("Use the local agent detail modal to allow or deny this request.");
+  lines.push("Use the approval controls near the message composer, or open the local agent detail modal for more context.");
   return lines.join("\n");
 }
 

@@ -70,8 +70,11 @@
           :attachment-error="attachmentError"
           :initial-draft="initialDraft"
           :participants="participants"
+          :permission-approvals="permissionApprovals"
+          :permission-error="permissionError"
           :pending-attachment-drafts="pendingAttachmentDrafts"
           :reply-to="replyTarget"
+          :resolving-permission-ids="resolvingPermissionIds"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
@@ -79,8 +82,10 @@
           @clear-reply="clearReplyTarget"
           @draft-change="emit('draft-change', $event)"
           @open-add-agent="emit('open-add-agent')"
+          @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
+          @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @send-message="handleComposerSend"
         />
 
@@ -159,6 +164,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } fro
 import type { CSSProperties } from "vue";
 import type {
   DesktopAgentPresence,
+  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -166,7 +172,10 @@ import type {
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
-import type { ManagedAgentWorkIndicator } from "../../../domain/managed-agents";
+import type {
+  ManagedAgentPermissionApproval,
+  ManagedAgentWorkIndicator,
+} from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import {
   isGitHubRoomMessage,
@@ -190,6 +199,8 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  permissionApprovals: ManagedAgentPermissionApproval[];
+  permissionError: string | null;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubEventsVisible: boolean;
@@ -201,6 +212,7 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
+  resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
   searchQuery: string;
@@ -217,9 +229,14 @@ const emit = defineEmits<{
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "open-agent-detail": [target: AgentModalTarget];
   "open-add-agent": [];
+  "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
+  "resolve-permission": [
+    approval: ManagedAgentPermissionApproval,
+    behavior: DesktopManagedAgentPermissionDecisionBehavior,
+  ];
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
 }>();
 
