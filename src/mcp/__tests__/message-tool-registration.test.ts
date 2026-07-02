@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerMessageTools, registerStatusTools } from "../server/tools/messages.js";
+import { buildSendMessageRequestBody } from "../server/tools/messages/send-tool.js";
 
 type ToolRegistration = {
   name: string;
@@ -66,4 +67,41 @@ test("thread-capable message tools expose thread parent inputs", () => {
   assert.ok("thread_parent_id" in sendThreadMessage.schema, "send_thread_message should require thread_parent_id");
   assert.match(sendMessage.description, /thread/i);
   assert.match(sendThreadMessage.description, /thread/i);
+});
+
+test("thread-parent sends include explicit thread root in the remote post body", () => {
+  const body = buildSendMessageRequestBody({
+    sender: "CedarVista | EmmyMay's agent | Agent",
+    text: "continuing the thread",
+    replyTarget: "msg_7",
+    resolvedThreadRoot: "msg_1",
+    credentials: {
+      agent_session_id: "agent_session_1",
+      agent_session_token: "token_1",
+    },
+  });
+
+  assert.deepEqual(body, {
+    sender: "CedarVista | EmmyMay's agent | Agent",
+    text: "continuing the thread",
+    reply_to: "msg_7",
+    thread_root_id: "msg_1",
+    agent_session_id: "agent_session_1",
+    agent_session_token: "token_1",
+  });
+});
+
+test("legacy quote replies stay free of thread_root_id in the remote post body", () => {
+  const body = buildSendMessageRequestBody({
+    sender: "CedarVista | EmmyMay's agent | Agent",
+    text: "quote reply",
+    replyTarget: "msg_7",
+    credentials: {
+      agent_session_id: "agent_session_1",
+      agent_session_token: "token_1",
+    },
+  });
+
+  assert.equal(body.reply_to, "msg_7");
+  assert.equal("thread_root_id" in body, false);
 });

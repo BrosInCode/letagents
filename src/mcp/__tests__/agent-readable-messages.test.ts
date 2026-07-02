@@ -46,8 +46,8 @@ test("agent-readable messages expose thread root metadata (reply_to fallback)", 
     }),
   ]) as Array<Record<string, unknown>>;
 
-  assert.equal(parent.thread_parent_id, "msg_1");
-  assert.equal(parent.thread_root_id, "msg_1");
+  assert.equal("thread_parent_id" in parent, false);
+  assert.equal("thread_root_id" in parent, false);
   assert.deepEqual(parent.thread, {
     parent_id: "msg_1",
     root_message_id: "msg_1",
@@ -184,8 +184,8 @@ test("agent-readable messages keep a bare quote-reply top-level via its explicit
     }),
   ]) as Array<Record<string, unknown>>;
 
-  assert.equal(quoteReply.thread_root_id, "msg_2");
-  assert.equal(quoteReply.thread_reply_to_id, "msg_1");
+  assert.equal("thread_root_id" in quoteReply, false);
+  assert.equal("thread_reply_to_id" in quoteReply, false);
   assert.deepEqual(quoteReply.thread, {
     parent_id: "msg_2",
     root_message_id: "msg_2",
@@ -242,7 +242,7 @@ test("agent-readable messages thread a reply that carries an explicit thread roo
   assert.equal(threadReply.thread_root_id, "msg_1");
   assert.equal((threadReply.thread as Record<string, unknown>).is_thread_reply, true);
   // The quote of the root stays top-level (roots at itself).
-  assert.equal(quoteReply.thread_root_id, "msg_3");
+  assert.equal("thread_root_id" in quoteReply, false);
   assert.equal((quoteReply.thread as Record<string, unknown>).is_thread_reply, false);
   // Only the real thread reply counts toward the root — the quote does not.
   assert.deepEqual(root.thread, {

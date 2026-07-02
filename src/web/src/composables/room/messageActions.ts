@@ -18,6 +18,7 @@ export function createRoomMessageActions() {
     agentPromptKind?: string | null,
     replyTo?: string | null,
     attachments: OutgoingMessageAttachment[] = [],
+    threadRootId?: string | null,
   ): Promise<boolean> {
     if (!room.value) return false
     lastSendError.value = ''
@@ -34,6 +35,12 @@ export function createRoomMessageActions() {
       }
       if (replyTo) {
         body.reply_to = replyTo
+        // A bare reply_to is a top-level quote-reply by design. Replies made to a
+        // message that lives inside a thread must carry the thread root so the
+        // reply stays in that thread instead of starting a new top-level exchange.
+        if (threadRootId) {
+          body.thread_root_id = threadRootId
+        }
       }
       if (preparedAttachments.length) {
         body.attachments = preparedAttachments

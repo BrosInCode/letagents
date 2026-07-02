@@ -1,9 +1,9 @@
 import type {
-  DesktopRoomMessage,
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
 } from "../../ipc-types.js";
 import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
+import { summarizeDesktopEventMessage } from "./desktop-event-message-summary.js";
 import type { DesktopClaudeCodeLiveSessionState } from "./state.js";
 
 export function buildClaudeCodeDesktopEventPrompt(
@@ -11,7 +11,7 @@ export function buildClaudeCodeDesktopEventPrompt(
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): string {
   const eventBody = event.type === "message"
-    ? summarizeMessageEvent(event.message)
+    ? summarizeDesktopEventMessage(event.message, { displayName: session.display_name })
     : summarizeTaskEvent(event.task);
   return [
     "Desktop-delivered LetAgents room event.",
@@ -35,22 +35,6 @@ export function buildClaudeCodeDesktopEventPrompt(
     `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
     "- Do not include hidden chain-of-thought in the final answer.",
   ].join("\n");
-}
-
-function summarizeMessageEvent(message: DesktopRoomMessage): string {
-  return [
-    `Message id: ${message.id}`,
-    `Sender: ${message.sender}`,
-    `Actor: ${message.actorLabel || message.agentIdentity?.actorLabel || "unknown"}`,
-    message.agentIdentity?.agentKey ? `Agent key: ${message.agentIdentity.agentKey}` : null,
-    message.agentIdentity?.agentSessionId ? `Agent session: ${message.agentIdentity.agentSessionId}` : null,
-    `Source: ${message.source || "room"}`,
-    `Timestamp: ${message.timestamp}`,
-    message.replyTo ? `Reply to: ${message.replyTo.id} from ${message.replyTo.sender}` : null,
-    "",
-    "Text:",
-    message.text || "(empty)",
-  ].filter((line): line is string => line !== null).join("\n");
 }
 
 function summarizeTaskEvent(task: DesktopTaskSummary): string {
