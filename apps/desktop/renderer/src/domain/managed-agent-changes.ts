@@ -1,6 +1,7 @@
 import type {
   DesktopManagedAgentChangedFile,
   DesktopManagedAgentChangeSummary,
+  DesktopManagedAgentPublicChangeSummary,
   DesktopRoomMessageAttachment,
 } from "../../../electron/ipc-types";
 
@@ -10,8 +11,12 @@ export const MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME =
 interface ManagedAgentChangeSummaryAttachmentPayload {
   kind?: string;
   version?: number;
-  summary?: DesktopManagedAgentChangeSummary;
+  summary?: DesktopManagedAgentPublicChangeSummary;
 }
+
+export type ManagedAgentChangeSummaryView =
+  | DesktopManagedAgentChangeSummary
+  | DesktopManagedAgentPublicChangeSummary;
 
 export function isManagedAgentChangeSummaryAttachment(
   attachment: Pick<DesktopRoomMessageAttachment, "mimeType">,
@@ -21,7 +26,7 @@ export function isManagedAgentChangeSummaryAttachment(
 
 export function decodeManagedAgentChangeSummaryAttachment(
   attachment: Pick<DesktopRoomMessageAttachment, "contentBase64" | "dataUrl">,
-): DesktopManagedAgentChangeSummary | null {
+): DesktopManagedAgentPublicChangeSummary | null {
   const json = attachmentJsonText(attachment);
   if (!json) return null;
   return parseManagedAgentChangeSummaryPayload(json);
@@ -29,7 +34,7 @@ export function decodeManagedAgentChangeSummaryAttachment(
 
 export async function fetchManagedAgentChangeSummaryAttachment(
   attachment: Pick<DesktopRoomMessageAttachment, "downloadUrl" | "url">,
-): Promise<DesktopManagedAgentChangeSummary | null> {
+): Promise<DesktopManagedAgentPublicChangeSummary | null> {
   const href = attachment.downloadUrl || attachment.url;
   if (!href) return null;
   const response = await fetch(href);
@@ -38,24 +43,24 @@ export async function fetchManagedAgentChangeSummaryAttachment(
 }
 
 export function managedAgentChangeSummaryTitle(
-  summary: DesktopManagedAgentChangeSummary | null,
+  summary: ManagedAgentChangeSummaryView | null,
   loading = false,
 ): string {
   if (!summary && loading) return "Checking file changes";
   if (summary?.error) return "Changes unavailable";
-  if (!summary || summary.changedFileCount === 0) return "No file changes";
-  return `Edited ${summary.changedFileCount} ${summary.changedFileCount === 1 ? "file" : "files"}`;
+  if (!summary || summary.changedFileCount === 0) return "No working tree changes";
+  return `Working tree changes: ${summary.changedFileCount} ${summary.changedFileCount === 1 ? "file" : "files"}`;
 }
 
 export function managedAgentChangeSummarySubtitle(
-  summary: DesktopManagedAgentChangeSummary | null,
+  summary: ManagedAgentChangeSummaryView | null,
   loading = false,
 ): string {
   if (!summary) return loading ? "Reading the Codex working tree..." : "Codex working tree";
   if (summary.error) return "Git summary could not be loaded.";
   const totals = [
-    summary.additions ? `+${summary.additions}` : null,
-    summary.deletions ? `-${summary.deletions}` : null,
+    summary.additions ? `tracked +${summary.additions}` : null,
+    summary.deletions ? `tracked -${summary.deletions}` : null,
     summary.untrackedFileCount ? `${summary.untrackedFileCount} untracked` : null,
     summary.stagedFileCount ? `${summary.stagedFileCount} staged` : null,
   ].filter(Boolean);
@@ -63,7 +68,7 @@ export function managedAgentChangeSummarySubtitle(
 }
 
 export function visibleManagedAgentChangedFiles(
-  summary: DesktopManagedAgentChangeSummary | null,
+  summary: ManagedAgentChangeSummaryView | null,
   expanded: boolean,
   collapsedLimit = 3,
 ): DesktopManagedAgentChangedFile[] {
@@ -72,7 +77,7 @@ export function visibleManagedAgentChangedFiles(
 }
 
 export function hiddenManagedAgentChangedFileCount(
-  summary: DesktopManagedAgentChangeSummary | null,
+  summary: ManagedAgentChangeSummaryView | null,
   expanded: boolean,
   collapsedLimit = 3,
 ): number {
@@ -113,12 +118,12 @@ function base64ToUtf8(value: string): string | null {
   }
 }
 
-function parseManagedAgentChangeSummaryPayload(json: string): DesktopManagedAgentChangeSummary | null {
+function parseManagedAgentChangeSummaryPayload(json: string): DesktopManagedAgentPublicChangeSummary | null {
   try {
     const payload = JSON.parse(json) as ManagedAgentChangeSummaryAttachmentPayload;
     if (payload.kind !== "managed_agent_change_summary") return null;
     const summary = payload.summary;
-    if (!summary || typeof summary.sessionId !== "string" || !Array.isArray(summary.files)) {
+    if (!summary || summary.changeScope !== "working_tree" || !Array.isArray(summary.files)) {
       return null;
     }
     return summary;

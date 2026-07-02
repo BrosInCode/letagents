@@ -196,6 +196,23 @@ export interface DesktopManagedAgentChangeSummary {
   error: string | null;
 }
 
+export interface DesktopManagedAgentPublicChangeSummary {
+  providerId: DesktopAgentProviderId;
+  repoBranch: string | null;
+  changeScope: "working_tree";
+  changedFileCount: number;
+  stagedFileCount: number;
+  unstagedFileCount: number;
+  untrackedFileCount: number;
+  additions: number;
+  deletions: number;
+  files: DesktopManagedAgentChangedFile[];
+  hiddenFileCount: number;
+  isGitRepo: boolean;
+  updatedAt: string;
+  error: string | null;
+}
+
 export interface DesktopManagedAgentSession {
   id: string;
   providerId: DesktopAgentProviderId;

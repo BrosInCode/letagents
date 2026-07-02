@@ -1332,10 +1332,9 @@ test("desktop managed agent local replies preserve change summary attachments", 
     kind: "managed_agent_change_summary",
     version: 1,
     summary: {
-      sessionId: "local_session_1",
       providerId: "codex",
-      repoRootPath: "/tmp/repo",
       repoBranch: "main",
+      changeScope: "working_tree",
       changedFileCount: 1,
       stagedFileCount: 0,
       unstagedFileCount: 1,
@@ -1379,6 +1378,9 @@ test("desktop managed agent local replies preserve change summary attachments", 
   assert.equal(result?.attachments.length, 1);
   assert.equal(result?.attachments[0]?.mimeType, MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME);
   assert.equal(result?.attachments[0]?.contentBase64, payload);
+  const savedPayload = JSON.parse(Buffer.from(result?.attachments[0]?.contentBase64 ?? "", "base64").toString("utf8"));
+  assert.equal("sessionId" in savedPayload.summary, false);
+  assert.equal("repoRootPath" in savedPayload.summary, false);
 });
 
 test("desktop managed agent reply targets distinguish quote replies from thread replies", () => {

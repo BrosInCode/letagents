@@ -164,25 +164,32 @@ function compareChangedFiles(a: DesktopManagedAgentChangedFile, b: DesktopManage
 }
 
 function parseNumstatOutput(output: string): ParsedNumstatFile[] {
-  return output
-    .split("\0")
-    .filter(Boolean)
-    .flatMap((record): ParsedNumstatFile[] => {
-      const firstTab = record.indexOf("\t");
-      const secondTab = firstTab >= 0 ? record.indexOf("\t", firstTab + 1) : -1;
-      if (firstTab < 0 || secondTab < 0) return [];
-      const additionsText = record.slice(0, firstTab);
-      const deletionsText = record.slice(firstTab + 1, secondTab);
-      const path = record.slice(secondTab + 1);
-      if (!path) return [];
-      const binary = additionsText === "-" || deletionsText === "-";
-      return [{
-        path,
-        additions: binary ? 0 : safeNumber(additionsText),
-        deletions: binary ? 0 : safeNumber(deletionsText),
-        binary,
-      }];
+  const records = output.split("\0");
+  const files: ParsedNumstatFile[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index] ?? "";
+    if (!record) continue;
+    const firstTab = record.indexOf("\t");
+    const secondTab = firstTab >= 0 ? record.indexOf("\t", firstTab + 1) : -1;
+    if (firstTab < 0 || secondTab < 0) continue;
+    const additionsText = record.slice(0, firstTab);
+    const deletionsText = record.slice(firstTab + 1, secondTab);
+    let path = record.slice(secondTab + 1);
+    if (!path) {
+      const nextPath = records[index + 2] ?? "";
+      path = nextPath;
+      index += nextPath ? 2 : 0;
+    }
+    if (!path) continue;
+    const binary = additionsText === "-" || deletionsText === "-";
+    files.push({
+      path,
+      additions: binary ? 0 : safeNumber(additionsText),
+      deletions: binary ? 0 : safeNumber(deletionsText),
+      binary,
     });
+  }
+  return files;
 }
 
 function parseStatusOutput(output: string): ParsedStatusFile[] {

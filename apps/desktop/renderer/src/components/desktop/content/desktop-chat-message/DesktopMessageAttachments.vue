@@ -1,60 +1,18 @@
 <template>
   <div class="room-message-attachments">
     <template v-for="attachment in attachments" :key="attachmentKey(attachment)">
-      <article
+      <ManagedAgentChangeSummaryCard
         v-if="isManagedAgentChangeSummaryAttachment(attachment)"
         class="room-message-change-attachment"
-        data-testid="room-message-change-attachment"
-      >
-        <header>
-          <span class="room-message-change-attachment-icon" aria-hidden="true">
-            <FileDiff />
-          </span>
-          <div>
-            <strong>{{ changeSummaryTitle(attachment) }}</strong>
-            <small>{{ changeSummarySubtitle(attachment) }}</small>
-          </div>
-        </header>
-
-        <ul
-          v-if="changeSummary(attachment)?.changedFileCount"
-          class="room-message-change-files"
-        >
-          <li
-            v-for="file in visibleChangeFiles(attachment)"
-            :key="file.path"
-          >
-            <span>{{ file.path }}</span>
-            <strong>
-              <b v-if="file.additions">+{{ file.additions }}</b>
-              <b v-if="file.deletions" class="room-message-change-deletions">-{{ file.deletions }}</b>
-              <em v-if="file.binary">binary</em>
-              <em v-if="!file.additions && !file.deletions && !file.binary">{{ managedAgentChangedFileStateLabel(file) }}</em>
-            </strong>
-          </li>
-        </ul>
-        <p
-          v-else
-          class="room-message-change-empty"
-        >
-          {{ changeSummaryFallbackText(attachment) }}
-        </p>
-
-        <button
-          v-if="hiddenChangeFileCount(attachment) > 0"
-          type="button"
-          class="room-message-change-show-files"
-          @click="toggleExpandedChangeSummary(attachment)"
-        >
-          {{ expandedChangeSummaryKeys[attachmentKey(attachment)] ? "Show fewer files" : `Show ${hiddenChangeFileCount(attachment)} more files` }}
-        </button>
-        <p
-          v-if="expandedChangeSummaryKeys[attachmentKey(attachment)] && backendHiddenChangeFileCount(attachment) > 0"
-          class="room-message-change-empty"
-        >
-          {{ backendHiddenChangeFileCount(attachment) }} more files are not shown here.
-        </p>
-      </article>
+        :summary="changeSummary(attachment)"
+        :loading="Boolean(loadingChangeSummaryKeys[attachmentKey(attachment)])"
+        :expanded="Boolean(expandedChangeSummaryKeys[attachmentKey(attachment)])"
+        :fallback-text="changeSummaryFallbackText(attachment)"
+        :open-href="changeSummaryOpenHref(attachment)"
+        :retry-visible="Boolean(failedChangeSummaryKeys[attachmentKey(attachment)])"
+        @toggle-expanded="toggleExpandedChangeSummary(attachment)"
+        @retry="retryChangeSummaryAttachment(attachment)"
+      />
       <button
         v-else-if="isImageAttachment(attachment)"
         class="room-message-attachment is-image"
@@ -85,9 +43,8 @@
 
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { FileDiff } from "@lucide/vue";
 import type {
-  DesktopManagedAgentChangeSummary,
+  DesktopManagedAgentPublicChangeSummary,
   DesktopRoomMessageAttachment,
 } from "../../../../../../electron/ipc-types";
 import {
@@ -101,13 +58,9 @@ import {
 import {
   decodeManagedAgentChangeSummaryAttachment,
   fetchManagedAgentChangeSummaryAttachment,
-  hiddenManagedAgentChangedFileCount,
   isManagedAgentChangeSummaryAttachment,
-  managedAgentChangedFileStateLabel,
-  managedAgentChangeSummarySubtitle,
-  managedAgentChangeSummaryTitle,
-  visibleManagedAgentChangedFiles,
 } from "../../../../domain/managed-agent-changes";
+import ManagedAgentChangeSummaryCard from "../ManagedAgentChangeSummaryCard.vue";
 
 const props = defineProps<{
   messageId: string;
@@ -118,55 +71,24 @@ defineEmits<{
   "open-image": [imageId: string];
 }>();
 
-const remoteChangeSummaries = ref<Record<string, DesktopManagedAgentChangeSummary | null>>({});
+const remoteChangeSummaries = ref<Record<string, DesktopManagedAgentPublicChangeSummary | null>>({});
 const loadingChangeSummaryKeys = ref<Record<string, boolean>>({});
 const failedChangeSummaryKeys = ref<Record<string, boolean>>({});
 const expandedChangeSummaryKeys = ref<Record<string, boolean>>({});
 
 watch(
-  () => props.attachments,
+  () => props.attachments.map(attachmentKey).join("|"),
   () => {
+    pruneChangeSummaryState();
     void loadRemoteChangeSummaryAttachments();
   },
   { immediate: true },
 );
 
-function changeSummary(attachment: DesktopRoomMessageAttachment): DesktopManagedAgentChangeSummary | null {
+function changeSummary(attachment: DesktopRoomMessageAttachment): DesktopManagedAgentPublicChangeSummary | null {
   return decodeManagedAgentChangeSummaryAttachment(attachment)
     ?? remoteChangeSummaries.value[attachmentKey(attachment)]
     ?? null;
-}
-
-function changeSummaryTitle(attachment: DesktopRoomMessageAttachment): string {
-  return managedAgentChangeSummaryTitle(
-    changeSummary(attachment),
-    Boolean(loadingChangeSummaryKeys.value[attachmentKey(attachment)]),
-  );
-}
-
-function changeSummarySubtitle(attachment: DesktopRoomMessageAttachment): string {
-  return managedAgentChangeSummarySubtitle(
-    changeSummary(attachment),
-    Boolean(loadingChangeSummaryKeys.value[attachmentKey(attachment)]),
-  );
-}
-
-function visibleChangeFiles(attachment: DesktopRoomMessageAttachment) {
-  return visibleManagedAgentChangedFiles(
-    changeSummary(attachment),
-    Boolean(expandedChangeSummaryKeys.value[attachmentKey(attachment)]),
-  );
-}
-
-function hiddenChangeFileCount(attachment: DesktopRoomMessageAttachment): number {
-  return hiddenManagedAgentChangedFileCount(
-    changeSummary(attachment),
-    Boolean(expandedChangeSummaryKeys.value[attachmentKey(attachment)]),
-  );
-}
-
-function backendHiddenChangeFileCount(attachment: DesktopRoomMessageAttachment): number {
-  return changeSummary(attachment)?.hiddenFileCount ?? 0;
 }
 
 function changeSummaryFallbackText(attachment: DesktopRoomMessageAttachment): string {
@@ -175,7 +97,12 @@ function changeSummaryFallbackText(attachment: DesktopRoomMessageAttachment): st
   if (failedChangeSummaryKeys.value[key]) return "Change summary could not be loaded.";
   const summary = changeSummary(attachment);
   if (summary?.error) return summary.error;
-  return "No file changes in this Codex working tree.";
+  return "No working tree changes in this Codex working tree.";
+}
+
+function changeSummaryOpenHref(attachment: DesktopRoomMessageAttachment): string | null {
+  const href = attachmentHref(attachment);
+  return href === "#" ? null : href;
 }
 
 function toggleExpandedChangeSummary(attachment: DesktopRoomMessageAttachment): void {
@@ -188,44 +115,69 @@ function toggleExpandedChangeSummary(attachment: DesktopRoomMessageAttachment): 
 
 async function loadRemoteChangeSummaryAttachments(): Promise<void> {
   await Promise.all(
-    props.attachments.map(async (attachment) => {
-      if (!isManagedAgentChangeSummaryAttachment(attachment)) return;
-      if (decodeManagedAgentChangeSummaryAttachment(attachment)) return;
-      const key = attachmentKey(attachment);
-      if (
-        loadingChangeSummaryKeys.value[key] ||
-        Object.prototype.hasOwnProperty.call(remoteChangeSummaries.value, key) ||
-        failedChangeSummaryKeys.value[key]
-      ) {
-        return;
-      }
+    props.attachments.map((attachment) => loadRemoteChangeSummaryAttachment(attachment)),
+  );
+}
 
-      loadingChangeSummaryKeys.value = {
-        ...loadingChangeSummaryKeys.value,
+async function retryChangeSummaryAttachment(attachment: DesktopRoomMessageAttachment): Promise<void> {
+  const key = attachmentKey(attachment);
+  const { [key]: _failed, ...remainingFailures } = failedChangeSummaryKeys.value;
+  const { [key]: _summary, ...remainingSummaries } = remoteChangeSummaries.value;
+  failedChangeSummaryKeys.value = remainingFailures;
+  remoteChangeSummaries.value = remainingSummaries;
+  await loadRemoteChangeSummaryAttachment(attachment);
+}
+
+async function loadRemoteChangeSummaryAttachment(attachment: DesktopRoomMessageAttachment): Promise<void> {
+  if (!isManagedAgentChangeSummaryAttachment(attachment)) return;
+  if (decodeManagedAgentChangeSummaryAttachment(attachment)) return;
+  const key = attachmentKey(attachment);
+  if (
+    loadingChangeSummaryKeys.value[key] ||
+    Object.prototype.hasOwnProperty.call(remoteChangeSummaries.value, key) ||
+    failedChangeSummaryKeys.value[key]
+  ) {
+    return;
+  }
+
+  loadingChangeSummaryKeys.value = {
+    ...loadingChangeSummaryKeys.value,
+    [key]: true,
+  };
+  try {
+    const summary = await fetchManagedAgentChangeSummaryAttachment(attachment);
+    remoteChangeSummaries.value = {
+      ...remoteChangeSummaries.value,
+      [key]: summary,
+    };
+    if (!summary) {
+      failedChangeSummaryKeys.value = {
+        ...failedChangeSummaryKeys.value,
         [key]: true,
       };
-      try {
-        const summary = await fetchManagedAgentChangeSummaryAttachment(attachment);
-        remoteChangeSummaries.value = {
-          ...remoteChangeSummaries.value,
-          [key]: summary,
-        };
-        if (!summary) {
-          failedChangeSummaryKeys.value = {
-            ...failedChangeSummaryKeys.value,
-            [key]: true,
-          };
-        }
-      } catch {
-        failedChangeSummaryKeys.value = {
-          ...failedChangeSummaryKeys.value,
-          [key]: true,
-        };
-      } finally {
-        const { [key]: _ignored, ...remaining } = loadingChangeSummaryKeys.value;
-        loadingChangeSummaryKeys.value = remaining;
-      }
-    }),
+    }
+  } catch {
+    failedChangeSummaryKeys.value = {
+      ...failedChangeSummaryKeys.value,
+      [key]: true,
+    };
+  } finally {
+    const { [key]: _ignored, ...remaining } = loadingChangeSummaryKeys.value;
+    loadingChangeSummaryKeys.value = remaining;
+  }
+}
+
+function pruneChangeSummaryState(): void {
+  const activeKeys = new Set(props.attachments.map(attachmentKey));
+  remoteChangeSummaries.value = pruneRecord(remoteChangeSummaries.value, activeKeys);
+  loadingChangeSummaryKeys.value = pruneRecord(loadingChangeSummaryKeys.value, activeKeys);
+  failedChangeSummaryKeys.value = pruneRecord(failedChangeSummaryKeys.value, activeKeys);
+  expandedChangeSummaryKeys.value = pruneRecord(expandedChangeSummaryKeys.value, activeKeys);
+}
+
+function pruneRecord<T>(record: Record<string, T>, activeKeys: Set<string>): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).filter(([key]) => activeKeys.has(key)),
   );
 }
 </script>

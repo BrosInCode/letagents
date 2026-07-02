@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { DesktopManagedAgentSession } from "../ipc-types.js";
+import { buildManagedAgentChangeSummaryAttachmentDraft } from "../main/agents/managed-agent-change-attachments.js";
 import { buildDesktopManagedAgentChangeSummary } from "../main/agents/managed-agent-changes.js";
 
 test("managed agent change summary reports staged, unstaged, and untracked Codex repo files", async () => {
@@ -47,6 +48,43 @@ test("managed agent change summary reports staged, unstaged, and untracked Codex
     assert.equal(untracked?.untracked, true);
     assert.equal(untracked?.status, "untracked");
     assert.equal(untracked?.additions, 0);
+
+    const attachmentDraft = buildManagedAgentChangeSummaryAttachmentDraft(summary);
+    assert.ok(attachmentDraft);
+    const attachmentPayload = JSON.parse(attachmentDraft.buffer.toString("utf8")) as {
+      summary?: Record<string, unknown>;
+    };
+    assert.equal(attachmentPayload.summary?.changeScope, "working_tree");
+    assert.equal("sessionId" in (attachmentPayload.summary ?? {}), false);
+    assert.equal("repoRootPath" in (attachmentPayload.summary ?? {}), false);
+  } finally {
+    rmSync(repo, { force: true, recursive: true });
+  }
+});
+
+test("managed agent change summary keeps numstat counts for edited renamed files", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "letagents-managed-agent-changes-"));
+  try {
+    git(repo, ["init", "-q"]);
+    git(repo, ["config", "user.email", "agent@example.com"]);
+    git(repo, ["config", "user.name", "Agent"]);
+    writeFileSync(join(repo, "old.txt"), "one\n");
+    git(repo, ["add", "old.txt"]);
+    git(repo, ["commit", "-qm", "init"]);
+
+    git(repo, ["mv", "old.txt", "new.txt"]);
+    writeFileSync(join(repo, "new.txt"), "one\ntwo\n");
+    git(repo, ["add", "new.txt"]);
+
+    const summary = await buildDesktopManagedAgentChangeSummary(session(repo));
+    const renamed = summary.files.find((file) => file.path === "new.txt");
+
+    assert.equal(summary.changedFileCount, 1);
+    assert.equal(summary.additions, 1);
+    assert.equal(renamed?.previousPath, "old.txt");
+    assert.equal(renamed?.status, "renamed");
+    assert.equal(renamed?.staged, true);
+    assert.equal(renamed?.additions, 1);
   } finally {
     rmSync(repo, { force: true, recursive: true });
   }

@@ -84,7 +84,7 @@ describe("room chat helpers", () => {
   });
 
   it("decodes managed agent change summary attachments", () => {
-    const summary = managedAgentChangeSummary();
+    const { sessionId: _sessionId, repoRootPath: _repoRootPath, ...summary } = managedAgentChangeSummary();
     const attachment: DesktopRoomMessageAttachment = {
       id: "managed-agent-change-summary",
       name: "Agent changes",
@@ -97,16 +97,20 @@ describe("room chat helpers", () => {
       contentBase64: Buffer.from(JSON.stringify({
         kind: "managed_agent_change_summary",
         version: 1,
-        summary,
+        summary: {
+          ...summary,
+          changeScope: "working_tree",
+        },
       }), "utf8").toString("base64"),
     };
 
     const decoded = decodeManagedAgentChangeSummaryAttachment(attachment);
 
     assert.equal(isManagedAgentChangeSummaryAttachment(attachment), true);
+    assert.equal("repoRootPath" in (decoded ?? {}), false);
     assert.equal(decoded?.changedFileCount, 2);
-    assert.equal(managedAgentChangeSummaryTitle(decoded), "Edited 2 files");
-    assert.equal(managedAgentChangeSummarySubtitle(decoded), "+8  -1  1 untracked");
+    assert.equal(managedAgentChangeSummaryTitle(decoded), "Working tree changes: 2 files");
+    assert.equal(managedAgentChangeSummarySubtitle(decoded), "tracked +8  tracked -1  1 untracked");
     assert.deepEqual(visibleManagedAgentChangedFiles(decoded, false).map((file) => file.path), [
       "apps/desktop/App.vue",
       "notes.md",
