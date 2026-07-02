@@ -5,6 +5,7 @@ export type DesktopAgentProviderId =
   | "antigravity"
   | "cursor"
   | "codex"
+  | "open-model"
   | (string & {});
 
 export type DesktopAgentProviderCapability =
@@ -20,6 +21,7 @@ export type DesktopAgentProviderStatus =
   | "runtime_installed"
   | "auth_required"
   | "bridge_required"
+  | "config_required"
   | "repo_required"
   | "ready"
   | "running"
@@ -167,6 +169,7 @@ export interface DesktopManagedAgentSession {
   permissionProfileId: DesktopManagedAgentPermissionProfileId;
   permissionProfile: DesktopManagedAgentPermissionProfile;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
+  model?: string | null;
   canStop: boolean;
   agentSessionId: string | null;
   actorLabel: string | null;
@@ -211,4 +214,21 @@ export interface DesktopManagedAgentInspectResult {
   session: DesktopManagedAgentSession;
   serverReachable: boolean;
   recentItems: Array<Record<string, unknown>>;
+}
+
+export interface DesktopOpenModelSettingsStatus {
+  configured: boolean;
+  hasApiKey: boolean;
+  baseUrl: string;
+  model: string;
+  savedAt: string | null;
+  settingsPath: string;
+  error: string | null;
+}
+
+export interface DesktopOpenModelSaveSettingsInput {
+  baseUrl?: string | null;
+  model?: string | null;
+  /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
+  apiKey?: string | null;
 }

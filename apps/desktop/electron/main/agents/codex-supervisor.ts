@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import type {
+  DesktopAgentProviderId,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
@@ -91,6 +92,8 @@ import {
   summarizeItems,
 } from "./codex-session-status.js";
 import { runDesktopAgentProviderPreflight } from "./providers.js";
+import { openModelCodexLaunch } from "./open-model-launch.js";
+import { readOpenModelSettings } from "./open-model-settings.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { createDesktopCursorRuntime } from "./cursor-runtime.js";
@@ -112,6 +115,7 @@ import {
   getStoredCodexLiveSession,
   listCodexDisplayNamesForRoom,
   listDesktopManagedCodexLiveSessions,
+  listDesktopManagedCodexLiveSessionsForProvider,
   listStoredCodexLiveSessions,
   markAgentSessionEnded,
   managedAgentDeliveryMode,
@@ -151,6 +155,17 @@ desktopManagedAgentRuntimes.register({
   inspect: inspectDesktopManagedCodexAgentSession,
   stop: stopDesktopManagedCodexAgent,
   dispatchRoomStreamEvent: dispatchRoomStreamEventToCodexManagedAgents,
+});
+desktopManagedAgentRuntimes.register({
+  providerId: "open-model",
+  listSessions: listDesktopManagedOpenModelAgentSessions,
+  start: startDesktopManagedOpenModelAgent,
+  // Open-model sessions live in the shared Codex-engine store: the codex
+  // runtime's inspect/stop/dispatch handle them (attribution stays correct
+  // via provider_id), so this runtime only lists and starts.
+  inspect: async () => null,
+  stop: async () => null,
+  dispatchRoomStreamEvent: () => {},
 });
 desktopManagedAgentRuntimes.register(createDesktopClaudeCodeRuntime());
 desktopManagedAgentRuntimes.register(createDesktopCursorRuntime());
@@ -353,6 +368,7 @@ async function registerDesktopManagedCodexWorker(input: {
   displayName: string;
   token: string;
   repoBranch: string | null;
+  ideLabel?: string;
 }): Promise<StoredAgentSessionState> {
   const identity = await ensureDesktopManagedCodexIdentity(input.displayName);
   const actorKey = normalizeDisplayText(identity.canonical_key, "");
@@ -360,6 +376,9 @@ async function registerDesktopManagedCodexWorker(input: {
     throw new Error("LetAgents desktop agent identity is missing an actor key.");
   }
 
+  // The runtime and instance markers stay codex-prefixed for every
+  // Codex-engine provider: worker binding matches on these exact
+  // per-token markers, and tokens are unique per session.
   const runtime = `codex:${input.token}`;
   const agentInstanceId = `desktop-codex:${input.token}`;
   const created = await apiFetch<AgentSessionCreateResponse>(
@@ -370,7 +389,7 @@ async function registerDesktopManagedCodexWorker(input: {
       body: JSON.stringify({
         actor_key: actorKey,
         actor_label: identity.actor_label,
-        ide_label: "Codex",
+        ide_label: input.ideLabel || "Codex",
         agent_instance_id: agentInstanceId,
         display_name: input.displayName,
         session_kind: "worker",
@@ -940,7 +959,15 @@ async function waitForWorkerStartup(
 function listDesktopManagedCodexAgentSessions(
   roomIdentifier?: string | null,
 ): DesktopManagedAgentSession[] {
-  return listDesktopManagedCodexLiveSessions(roomIdentifier)
+  return listDesktopManagedCodexLiveSessionsForProvider("codex", roomIdentifier)
+    .map((session) => bindCodexLiveSessionToWorker(session))
+    .map(toPublicManagedAgentSession);
+}
+
+function listDesktopManagedOpenModelAgentSessions(
+  roomIdentifier?: string | null,
+): DesktopManagedAgentSession[] {
+  return listDesktopManagedCodexLiveSessionsForProvider("open-model", roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session))
     .map(toPublicManagedAgentSession);
 }
@@ -951,21 +978,69 @@ export function listDesktopManagedAgentSessions(
   return desktopManagedAgentRuntimes.listSessions(roomIdentifier);
 }
 
-async function startDesktopManagedCodexAgent(
+interface CodexEngineProviderContext {
+  providerId: DesktopAgentProviderId;
+  providerName: string;
+  ideLabel: string;
+  model: string | null;
+  launch: {
+    configOverrides?: string[];
+    env?: Record<string, string>;
+  };
+  /** BYOK engines carry per-session launch config, so they never share an app-server. */
+  dedicatedServer: boolean;
+  /** Restrict to desktop-delivered events (no MCP polling mode). */
+  forceDesktopEvents: boolean;
+}
+
+const CODEX_ENGINE_CONTEXT: CodexEngineProviderContext = {
+  providerId: "codex",
+  providerName: "Codex",
+  ideLabel: "Codex",
+  model: null,
+  launch: {},
+  dedicatedServer: false,
+  forceDesktopEvents: false,
+};
+
+function startDesktopManagedCodexAgent(
   input: DesktopManagedAgentStartInput,
+): Promise<DesktopManagedAgentStartResult> {
+  return startDesktopManagedCodexEngineAgent(input, CODEX_ENGINE_CONTEXT);
+}
+
+async function startDesktopManagedOpenModelAgent(
+  input: DesktopManagedAgentStartInput,
+): Promise<DesktopManagedAgentStartResult> {
+  const settings = await readOpenModelSettings();
+  const launch = openModelCodexLaunch(settings);
+  return startDesktopManagedCodexEngineAgent(input, {
+    providerId: "open-model",
+    providerName: "Open Model",
+    ideLabel: "Open Model",
+    model: settings.model,
+    launch,
+    dedicatedServer: true,
+    forceDesktopEvents: true,
+  });
+}
+
+async function startDesktopManagedCodexEngineAgent(
+  input: DesktopManagedAgentStartInput,
+  engine: CodexEngineProviderContext,
 ): Promise<DesktopManagedAgentStartResult> {
   const roomIdentifier = normalizeRoomIdentifier(input.roomIdentifier);
   const repoRootPath = input.repoRootPath?.trim();
   if (!repoRootPath) {
-    throw new Error("Choose a local repository before starting Codex.");
+    throw new Error(`Choose a local repository before starting ${engine.providerName}.`);
   }
   const cwd = resolve(repoRootPath);
   const repoBranch = await buildRepoStatus(cwd)
     .then((status) => status.branch)
     .catch(() => null);
   const codexBin = process.env.LETAGENTS_CODEX_BIN || "codex";
-  const permissionProfile = assertManagedAgentPermissionProfileAvailable("codex", input.permissionProfileId);
-  const preflight = await runDesktopAgentProviderPreflight("codex", {
+  const permissionProfile = assertManagedAgentPermissionProfileAvailable(engine.providerId, input.permissionProfileId);
+  const preflight = await runDesktopAgentProviderPreflight(engine.providerId, {
     roomIdentifier,
     repoRootPath: cwd,
   });
@@ -973,8 +1048,10 @@ async function startDesktopManagedCodexAgent(
     throw new Error(preflight.detail || preflight.message);
   }
 
-  const serverUrl = await resolveCodexAppServerUrl();
-  const deliveryMode = input.deliveryMode || DEFAULT_CODEX_DELIVERY_MODE;
+  const serverUrl = await resolveCodexAppServerUrl(null, { dedicated: engine.dedicatedServer });
+  const deliveryMode = engine.forceDesktopEvents
+    ? "desktop_events"
+    : input.deliveryMode || DEFAULT_CODEX_DELIVERY_MODE;
   const stopPhrase = input.stopPhrase?.trim() || DEFAULT_CODEX_STOP_PHRASE;
   const maxMinutes = coerceMaxMinutes(input.maxMinutes);
   const token = makeCodexStopToken();
@@ -986,6 +1063,7 @@ async function startDesktopManagedCodexAgent(
       displayName: suggestedDisplayName,
       token,
       repoBranch,
+      ideLabel: engine.ideLabel,
     })
     : null;
   const displayName = registeredWorker?.display_name || suggestedDisplayName;
@@ -999,6 +1077,8 @@ async function startDesktopManagedCodexAgent(
     if (launchedServer) {
       const launch = launchCodexAppServer(serverUrl, codexBin, {
         trustedProjectPath: cwd,
+        configOverrides: engine.launch.configOverrides,
+        env: engine.launch.env,
       });
       serverPid = launch.pid;
       if (serverPid) {
@@ -1054,6 +1134,8 @@ async function startDesktopManagedCodexAgent(
       room_identifier: roomIdentifier,
       room_display_name: input.roomDisplayName ?? null,
       display_name: displayName,
+      provider_id: engine.providerId === "codex" ? undefined : engine.providerId,
+      model: engine.model,
       joined_via: joinedVia,
       cwd,
       repo_branch: repoBranch,
@@ -1080,10 +1162,10 @@ async function startDesktopManagedCodexAgent(
     runtimeNotificationSessionId = session.session_id;
 
     queueCodexRuntimeReasoningSummary(session, {
-      summary: "Codex worker is starting and joining the room.",
+      summary: `${engine.providerName} worker is starting and joining the room.`,
       status: "working",
       checking: "Desktop supervisor started a Codex app-server turn.",
-      next_action: "Waiting for Codex to publish room progress.",
+      next_action: `Waiting for ${engine.providerName} to publish room progress.`,
     });
 
     try {
@@ -1094,8 +1176,8 @@ async function startDesktopManagedCodexAgent(
         session: toPublicManagedAgentSession(verifiedSession),
         reused: false,
         message: deliveryMode === "desktop_events"
-          ? "Codex agent started with desktop-delivered room events."
-          : "Codex agent started for this room.",
+          ? `${engine.providerName} agent started with desktop-delivered room events.`
+          : `${engine.providerName} agent started for this room.`,
       };
     } catch (error) {
       killOwnedAppServer(session);

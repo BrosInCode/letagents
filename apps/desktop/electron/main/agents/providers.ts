@@ -15,6 +15,7 @@ import {
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { codexInstallCommand } from "./codex-install.js";
+import { getOpenModelSettingsStatus } from "./open-model-settings.js";
 import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
 import {
   defaultManagedAgentPermissionProfileId,
@@ -93,6 +94,22 @@ const agentProviders: DesktopAgentProvider[] = [
     mcpTargetId: "codex",
     permissionProfiles: listManagedAgentPermissionProfiles("codex"),
     defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("codex"),
+  },
+  {
+    id: "open-model",
+    name: "Open Model",
+    description: "Bring your own model API key (OpenRouter, vLLM, Ollama, ...).",
+    capabilities: [
+      "desktop_managed_runtime",
+      "installable_runtime",
+      "auth_preflight",
+      "turn_control",
+      "reasoning_stream",
+    ],
+    runtimeCommand: "codex",
+    mcpTargetId: "codex",
+    permissionProfiles: listManagedAgentPermissionProfiles("open-model"),
+    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("open-model"),
   },
 ];
 
@@ -356,6 +373,90 @@ async function claudeCodePreflight(
   };
 }
 
+async function openModelPreflight(
+  provider: DesktopAgentProvider,
+  input: DesktopAgentProviderPreflightInput,
+  mcpStatus: DesktopMcpInstallTarget["status"] | null,
+): Promise<DesktopAgentProviderPreflight> {
+  const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
+  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  if (commandMissing(versionResult)) {
+    return {
+      providerId: provider.id,
+      status: "missing_runtime",
+      canStart: false,
+      message: "The Codex CLI engine is not installed.",
+      detail: "Open Model agents run on the Codex CLI engine pointed at your model endpoint. Install it before starting one.",
+      nextAction: "install_runtime",
+      version: null,
+      mcpStatus,
+    };
+  }
+  if (!versionResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "The Codex CLI engine could not be checked.",
+      detail: firstOutputLine(versionResult) || "The Codex command failed before returning a version.",
+      nextAction: null,
+      version: null,
+      mcpStatus,
+    };
+  }
+
+  const version = firstOutputLine(versionResult);
+  const settings = await getOpenModelSettingsStatus();
+  if (settings.error) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Open model settings could not be read.",
+      detail: settings.error,
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+  if (!settings.configured) {
+    return {
+      providerId: provider.id,
+      status: "config_required",
+      canStart: false,
+      message: "Configure a model endpoint before starting an Open Model agent.",
+      detail: "Add an OpenAI-compatible endpoint URL and model below. Paste an API key if the endpoint needs one (local Ollama or vLLM usually does not).",
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+
+  if (!input.repoRootPath?.trim()) {
+    return {
+      providerId: provider.id,
+      status: "repo_required",
+      canStart: false,
+      message: "Choose a local repository before starting an Open Model agent.",
+      detail: "A desktop-managed agent needs a local repo or worktree for code actions.",
+      nextAction: "choose_repo",
+      version,
+      mcpStatus,
+    };
+  }
+
+  return {
+    providerId: provider.id,
+    status: "ready",
+    canStart: true,
+    message: "Open Model is ready to start.",
+    detail: `Runs the Codex engine with ${settings.model} via your configured endpoint${settings.hasApiKey ? " using your saved API key" : ""}.`,
+    nextAction: null,
+    version: version ? `${version} - ${settings.model}` : settings.model,
+    mcpStatus,
+  };
+}
+
 export async function runDesktopAgentProviderPreflight(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
@@ -411,18 +512,24 @@ export async function runDesktopAgentProviderPreflight(
   if (provider.id === "cursor") {
     return runDesktopCursorProviderPreflight(provider, input, mcpStatus);
   }
+  if (provider.id === "open-model") {
+    return openModelPreflight(provider, input, mcpStatus);
+  }
 
   return bridgePreflight(provider, mcpStatus);
 }
 
-async function installCodexRuntime(confirmed: boolean | undefined): Promise<DesktopAgentProviderSetupResult> {
+async function installCodexRuntime(
+  confirmed: boolean | undefined,
+  provider: DesktopAgentProvider,
+): Promise<DesktopAgentProviderSetupResult> {
   if (!confirmed) {
-    return providerSetupConfirmationResult({ id: "codex", name: "Codex" }, "install_runtime");
+    return providerSetupConfirmationResult({ id: provider.id, name: provider.name }, "install_runtime");
   }
 
   if (isDesktopSmokeCheck()) {
     return {
-      providerId: "codex",
+      providerId: provider.id,
       action: "install_runtime",
       success: true,
       message: "Codex was installed.",
@@ -447,7 +554,7 @@ async function installCodexRuntime(confirmed: boolean | undefined): Promise<Desk
   });
 
   return {
-    providerId: "codex",
+    providerId: provider.id,
     action: "install_runtime",
     success: true,
     message: "Codex was installed.",
@@ -479,8 +586,11 @@ export async function runDesktopAgentProviderSetup(
     };
   }
 
-  if (input.action === "install_runtime" && provider.id === "codex") {
-    return installCodexRuntime(input.confirmed);
+  if (
+    input.action === "install_runtime" &&
+    (provider.id === "codex" || provider.id === "open-model")
+  ) {
+    return installCodexRuntime(input.confirmed, provider);
   }
 
   throw new Error(`${provider.name} does not support ${input.action}.`);

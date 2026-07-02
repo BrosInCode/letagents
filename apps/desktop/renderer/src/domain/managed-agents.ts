@@ -259,6 +259,21 @@ export function shouldShowCursorMcpPolicySelector(
   return provider?.id === "cursor" && hasDesktopManagedRuntime(provider);
 }
 
+export function shouldShowOpenModelConfig(
+  provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
+): boolean {
+  return provider?.id === "open-model" && hasDesktopManagedRuntime(provider);
+}
+
+export function shouldShowDeliveryModeSelector(
+  provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
+): boolean {
+  // Providers without an external MCP join path (e.g. open-model) always
+  // deliver room events from the desktop app, so there is nothing to choose.
+  return hasDesktopManagedRuntime(provider) &&
+    Boolean(provider?.capabilities.includes("external_mcp"));
+}
+
 export function agentAuthCommand(
   provider: Pick<DesktopAgentProvider, "id" | "runtimeCommand"> | null | undefined,
 ): string | null {
