@@ -74,6 +74,9 @@
       :participants="roomParticipants"
       :presence="roomPresence"
       :local-agent-work="localAgentWork"
+      :permission-approvals="pendingPermissionApprovals"
+      :permission-error="composerPermissionError"
+      :resolving-permission-ids="resolvingComposerPermissionIds"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
       :search-query="searchQuery"
@@ -87,6 +90,8 @@
       @open-agent-reasoning-fallback="openAgentReasoningFallback"
       @open-agent-detail="openAgentDetail"
       @open-add-agent="openAddAgentModal"
+      @open-permission-detail="openComposerPermissionDetail"
+      @resolve-permission="resolveComposerPermission"
       @draft-change="chatDraftText = $event"
       @open-github-event="openGitHubEventFromChat"
       @scroll-position="rememberChatScrollPosition"
@@ -231,6 +236,7 @@ import type {
   DesktopAgentPresence,
   DesktopFocusRoomInfo,
   DesktopGitHubEventsPage,
+  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
@@ -251,11 +257,14 @@ import {
 } from "../../../domain/git-rooms";
 import {
   activeManagedAgentWorkIndicators,
+  managedAgentSessionDisplayName,
   managedAgentSessionMatchesRoom,
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
+  pendingManagedAgentPermissionApprovals,
   preferredManagedAgentRepoRootPath,
+  type ManagedAgentPermissionApproval,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
@@ -270,6 +279,7 @@ import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomInboxView from "./RoomInboxView.vue";
+import { ownerAttribution as ownerAttributionLabel } from "./room-activity/agentTarget";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import {
@@ -360,6 +370,8 @@ const boardSelectedTaskId = ref<string | null>(null);
 const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
+const composerPermissionError = ref<string | null>(null);
+const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let githubEventsRefreshTimer: number | null = null;
 let inboxRefreshTimer: number | null = null;
 let inboxUndoTimer: number | null = null;
@@ -493,6 +505,9 @@ const roomParticipants = computed(() =>
 const localAgentWork = computed(() =>
   activeManagedAgentWorkIndicators(roomManagedAgentSessions.value, props.room.identifier)
 );
+const pendingPermissionApprovals = computed(() =>
+  pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
+);
 const rawInboxItems = computed(() =>
   buildDesktopInboxItems({
     filter: inboxFilter.value,
@@ -530,6 +545,8 @@ watch(() => props.room.identifier, () => {
   activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
   managedAgentSessions.value = [];
+  composerPermissionError.value = null;
+  resolvingComposerPermissionIds.value = {};
   eventsTaskFilterId.value = null;
   eventsSelectedEventId.value = null;
   boardSelectedTaskId.value = null;
@@ -1223,6 +1240,55 @@ function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
     session,
     ...managedAgentSessions.value.filter((entry) => entry.id !== session.id),
   ];
+}
+
+async function resolveComposerPermission(
+  approval: ManagedAgentPermissionApproval,
+  behavior: DesktopManagedAgentPermissionDecisionBehavior,
+): Promise<void> {
+  if (resolvingComposerPermissionIds.value[approval.id]) return;
+  resolvingComposerPermissionIds.value = {
+    ...resolvingComposerPermissionIds.value,
+    [approval.id]: behavior,
+  };
+  composerPermissionError.value = null;
+  try {
+    const result = await window.letagentsDesktop.workers.resolveManagedAgentPermission({
+      requestId: approval.request.id,
+      sessionId: approval.request.sessionId,
+      behavior,
+      message: behavior === "deny" ? "Denied from LetAgents Desktop." : null,
+    });
+    if (result.session) {
+      upsertManagedAgentSession(result.session);
+    } else {
+      await refreshManagedAgentSessions();
+    }
+  } catch (error) {
+    composerPermissionError.value = error instanceof Error
+      ? error.message
+      : "Could not resolve this permission request.";
+  } finally {
+    const { [approval.id]: _ignored, ...remaining } = resolvingComposerPermissionIds.value;
+    resolvingComposerPermissionIds.value = remaining;
+  }
+}
+
+function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {
+  openAgentDetail(agentTargetForManagedSession(approval.session));
+}
+
+function agentTargetForManagedSession(session: DesktopManagedAgentSession): AgentModalTarget {
+  const displayName = managedAgentSessionDisplayName(session);
+  return {
+    actorLabel: session.actorLabel,
+    displayName,
+    ownerAttribution: ownerAttributionLabel(session.ownerLabel),
+    ideLabel: session.ideLabel,
+    sender: session.actorLabel || displayName,
+    agentKey: session.agentKey,
+    agentSessionId: session.agentSessionId,
+  };
 }
 
 function restartManagedAgentSessionsRefreshTimer(): void {

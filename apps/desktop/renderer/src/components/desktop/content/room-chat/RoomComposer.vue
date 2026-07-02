@@ -1,5 +1,57 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
+    <div
+      v-if="primaryPermissionApproval"
+      class="desktop-composer-permission-tray"
+      data-testid="desktop-composer-permission-tray"
+      aria-live="polite"
+    >
+      <div class="desktop-composer-permission-main">
+        <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
+        <div class="desktop-composer-permission-copy">
+          <strong>{{ primaryPermissionApproval.displayName }} needs approval</strong>
+          <span>
+            {{ primaryPermissionApproval.title }}
+            <template v-if="permissionOverflowCount > 0">
+              / {{ permissionOverflowCount }} more waiting
+            </template>
+          </span>
+        </div>
+      </div>
+      <p>
+        <span>{{ primaryPermissionApproval.providerLabel }}</span>
+        <span>{{ primaryPermissionApproval.toolName }}</span>
+        <span v-if="primaryPermissionApproval.targetLabel">{{ primaryPermissionApproval.targetLabel }}</span>
+      </p>
+      <div class="desktop-composer-permission-actions">
+        <button
+          type="button"
+          class="desktop-composer-permission-detail"
+          @click="$emit('open-permission-detail', primaryPermissionApproval)"
+        >
+          Details
+        </button>
+        <button
+          type="button"
+          class="desktop-composer-permission-deny"
+          :disabled="Boolean(resolvingPermissionIds[primaryPermissionApproval.id])"
+          @click="$emit('resolve-permission', primaryPermissionApproval, 'deny')"
+        >
+          {{ resolvingPermissionIds[primaryPermissionApproval.id] === 'deny' ? "Denying..." : "Deny" }}
+        </button>
+        <button
+          type="button"
+          class="desktop-composer-permission-allow"
+          :disabled="Boolean(resolvingPermissionIds[primaryPermissionApproval.id])"
+          @click="$emit('resolve-permission', primaryPermissionApproval, 'allow')"
+        >
+          {{ resolvingPermissionIds[primaryPermissionApproval.id] === 'allow' ? "Allowing..." : "Allow" }}
+        </button>
+      </div>
+    </div>
+    <div v-if="permissionError" class="desktop-composer-permission-error" role="alert">
+      {{ permissionError }}
+    </div>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
@@ -87,9 +139,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Plus } from "@lucide/vue";
 import type {
+  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
+import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import {
   isMentionableRoomParticipant,
   sortMentionableRoomParticipants,
@@ -112,7 +166,10 @@ const props = defineProps<{
   initialDraft?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
+  permissionApprovals: ManagedAgentPermissionApproval[];
+  permissionError: string | null;
   replyTo: RoomComposerReplyTarget | null;
+  resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sendError: string | null;
@@ -124,7 +181,12 @@ const emit = defineEmits<{
   "draft-change": [text: string];
   "pick-attachments": [];
   "open-add-agent": [];
+  "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "remove-attachment": [uploadId: string];
+  "resolve-permission": [
+    approval: ManagedAgentPermissionApproval,
+    behavior: DesktopManagedAgentPermissionDecisionBehavior,
+  ];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
 }>();
 
@@ -137,6 +199,8 @@ const activeMentionIndex = ref(0);
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
 );
+const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
+const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
   return props.roomIdentifier ? "Message room" : "Choose a room before writing";

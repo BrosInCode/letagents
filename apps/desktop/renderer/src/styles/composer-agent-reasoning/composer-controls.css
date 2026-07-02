@@ -35,15 +35,11 @@
 .desktop-composer-error {
   min-width: 0;
   margin: 0;
-  color: var(--text-tertiary);
+  color: var(--desktop-composer-error-color);
   font-size: 0.68rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.desktop-composer-error {
-  color: #ff8a8a;
 }
 
 .desktop-composer-send {

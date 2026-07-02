@@ -7,6 +7,7 @@ import type {
   DesktopCursorMcpPolicy,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
+  DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   RepoStatus,
@@ -77,6 +78,48 @@ export function managedAgentSessionMatchesRoom(
   return Boolean(sessionRoom && targetRoom && sessionRoom === targetRoom);
 }
 
+export function managedAgentPermissionRequestTargetLabel(
+  request: Pick<DesktopManagedAgentPermissionRequest, "inputSummary" | "description">,
+  session: Pick<DesktopManagedAgentSession, "repoRootPath">,
+): string | null {
+  const target = String(request.inputSummary || request.description || "").trim();
+  if (!target) {
+    return null;
+  }
+  const repoRoot = String(session.repoRootPath || "").trim();
+  if (repoRoot && target === repoRoot) {
+    return ".";
+  }
+  if (repoRoot && target.startsWith(`${repoRoot}/`)) {
+    return target.slice(repoRoot.length + 1);
+  }
+  return target;
+}
+
+export function pendingManagedAgentPermissionApprovals(
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+): ManagedAgentPermissionApproval[] {
+  return sessions
+    .filter((session) => managedAgentSessionMatchesRoom(session, roomIdentifier))
+    .flatMap((session) => (session.pendingPermissionRequests ?? []).map((request) => ({
+      id: request.id,
+      session,
+      request,
+      displayName: managedAgentSessionDisplayName(session),
+      providerLabel: session.ideLabel || String(request.providerId || "Agent"),
+      title: request.title?.trim() || `Use ${request.toolName || "tool"}`,
+      toolName: request.toolName?.trim() || "Tool",
+      targetLabel: managedAgentPermissionRequestTargetLabel(request, session),
+      requestedAt: request.requestedAt || session.updatedAt,
+    })))
+    .sort((left, right) =>
+      left.requestedAt.localeCompare(right.requestedAt) ||
+      left.displayName.localeCompare(right.displayName) ||
+      left.id.localeCompare(right.id)
+    );
+}
+
 export interface ManagedAgentTargetKeys {
   agentSessionId?: string | null;
   agentKey?: string | null;
@@ -91,6 +134,18 @@ export interface ManagedAgentWorkIndicator {
   displayName: string;
   summary: string;
   startedAt: string;
+}
+
+export interface ManagedAgentPermissionApproval {
+  id: string;
+  session: DesktopManagedAgentSession;
+  request: DesktopManagedAgentPermissionRequest;
+  displayName: string;
+  providerLabel: string;
+  title: string;
+  toolName: string;
+  targetLabel: string | null;
+  requestedAt: string;
 }
 
 function specificAgentKey(value: string | null | undefined): string {
