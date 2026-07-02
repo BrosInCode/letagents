@@ -98,7 +98,7 @@ const agentProviders: DesktopAgentProvider[] = [
   {
     id: "open-model",
     name: "Open Model",
-    description: "Bring your own model API key (OpenRouter, vLLM, Ollama, ...).",
+    description: "Bring your own key for any OpenAI Responses-compatible endpoint.",
     capabilities: [
       "desktop_managed_runtime",
       "installable_runtime",
@@ -425,7 +425,7 @@ async function openModelPreflight(
       status: "config_required",
       canStart: false,
       message: "Configure a model endpoint before starting an Open Model agent.",
-      detail: "Add an OpenAI-compatible endpoint URL and model below. Paste an API key if the endpoint needs one (local Ollama or vLLM usually does not).",
+      detail: "Add an endpoint URL that speaks the OpenAI Responses API (OpenRouter, vLLM, ...) and a model below. Paste an API key if the endpoint needs one (local endpoints usually do not).",
       nextAction: null,
       version,
       mcpStatus,
