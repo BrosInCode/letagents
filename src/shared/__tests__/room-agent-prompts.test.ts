@@ -38,3 +38,11 @@ test("buildRoomAgentPrompt keys thread replies off structured thread state", () 
   assert.match(prompt, /treat the message as top-level/i);
   assert.doesNotMatch(prompt, /if a message includes `thread_parent_id`/i);
 });
+
+test("buildRoomAgentPrompt describes advisory activation metadata", () => {
+  const prompt = buildRoomAgentPrompt("join");
+
+  assert.match(prompt, /activation\.for_current_agent\.decision/);
+  assert.match(prompt, /`silent` means terminate silently with no room message/);
+  assert.match(prompt, /`unclear` means use the rest of the message\/thread\/task context/);
+});

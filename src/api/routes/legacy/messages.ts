@@ -282,7 +282,7 @@ export function registerLegacyProjectMessageRoutes(
 
     let endDelivery: (() => Promise<void>) | null = null;
     try {
-      endDelivery = await beginRoomAgentDelivery({
+      const delivery = await beginRoomAgentDelivery({
         req,
         roomId: project.id,
         transport: "sse",
@@ -291,6 +291,7 @@ export function registerLegacyProjectMessageRoutes(
           res.end();
         },
       });
+      endDelivery = delivery?.end ?? null;
     } catch (error) {
       if (error instanceof InvalidRoomAgentDeliverySessionError) {
         res.status(401).json({ error: error.message });
@@ -345,12 +346,13 @@ export function registerLegacyProjectMessageRoutes(
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let endDelivery: (() => Promise<void>) | null = null;
     try {
-      endDelivery = await beginRoomAgentDelivery({
+      const delivery = await beginRoomAgentDelivery({
         req,
         roomId: project.id,
         transport: "long_poll",
         onSessionDisconnected: () => resolveRequest([]),
       });
+      endDelivery = delivery?.end ?? null;
     } catch (error) {
       if (error instanceof InvalidRoomAgentDeliverySessionError) {
         res.status(401).json({ error: error.message });

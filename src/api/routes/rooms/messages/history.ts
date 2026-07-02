@@ -21,6 +21,9 @@ import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
+import { attachAgentMessageActivations } from "../../../rooms/activation-routing.js";
+import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
+import { resolveMessageActivationIdentity } from "./activation-identity.js";
 import { isDesktopHumanClient } from "./request-identity.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type {
@@ -45,6 +48,7 @@ export function registerMessageHistoryRoutes(
     }
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const accountId = req.sessionAccount?.account_id ?? null;
+    const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
     const result = before === "latest"
       ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
       : before
@@ -58,7 +62,7 @@ export function registerMessageHistoryRoutes(
 
     res.json({
       room_id: project.id,
-      messages: result.messages,
+      messages: attachAgentMessageActivations(result.messages, activationIdentity),
       has_more: result.has_more,
       has_older: before ? result.has_more : undefined,
     });
@@ -74,17 +78,20 @@ export function registerMessageHistoryRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const accountId = req.sessionAccount?.account_id ?? null;
+    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let endDelivery: (() => Promise<void>) | null = null;
     if (!isDesktopHumanClient(req)) {
       try {
-        endDelivery = await beginRoomAgentDelivery({
+        const delivery = await beginRoomAgentDelivery({
           req,
           roomId: project.id,
           transport: "long_poll",
           onSessionDisconnected: () => resolveRequest([]),
         });
+        endDelivery = delivery?.end ?? null;
+        activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
       } catch (error) {
         if (error instanceof InvalidRoomAgentDeliverySessionError) {
           res.status(401).json({ error: error.message });
@@ -107,7 +114,11 @@ export function registerMessageHistoryRoutes(
       await endDelivery?.().catch((error: unknown) => {
         console.error(`[room messages poll] failed to end agent delivery for ${project.id}`, error);
       });
-      res.json({ room_id: project.id, messages: existing.messages, has_more: existing.has_more });
+      res.json({
+        room_id: project.id,
+        messages: attachAgentMessageActivations(existing.messages, activationIdentity),
+        has_more: existing.has_more,
+      });
       return;
     }
 
@@ -128,7 +139,11 @@ export function registerMessageHistoryRoutes(
       if (settled) return;
       settled = true;
       cleanup();
-      res.json({ room_id: projectId, messages: msgs, has_more: hasMore });
+      res.json({
+        room_id: projectId,
+        messages: attachAgentMessageActivations(msgs, activationIdentity),
+        has_more: hasMore,
+      });
     }
 
     async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {

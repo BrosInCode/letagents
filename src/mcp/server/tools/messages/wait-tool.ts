@@ -28,6 +28,42 @@ const DEFAULT_POLL_TIMEOUT_MS = 30000;
 
 type MessageRecord = Record<string, unknown>;
 
+type WaitForMessagesRemoteRequest = {
+  room_id: string | null;
+  project_id: string | null;
+  room_path: (targetRoomId: string) => string;
+  project_path: (targetProjectId: string) => string;
+  options: RequestInit;
+};
+
+export function buildWaitForMessagesRequestOptions(input: {
+  deliveryHeaders: Record<string, string>;
+  signal?: AbortSignal;
+}): RequestInit {
+  return {
+    ...(input.signal ? { signal: input.signal } : {}),
+    headers: input.deliveryHeaders,
+  };
+}
+
+export function buildWaitForMessagesHistoryPageRequest(input: {
+  targetRoomId: string | null;
+  targetProjectId: string | null;
+  queryString: string;
+  deliveryHeaders: Record<string, string>;
+}): WaitForMessagesRemoteRequest {
+  const querySuffix = input.queryString ? `?${input.queryString}` : "";
+  return {
+    room_id: input.targetRoomId,
+    project_id: input.targetProjectId,
+    room_path: (targetRoomId) =>
+      appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages${querySuffix}`),
+    project_path: (targetProjectId) =>
+      appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages${querySuffix}`),
+    options: buildWaitForMessagesRequestOptions({ deliveryHeaders: input.deliveryHeaders }),
+  };
+}
+
 function isRecord(value: unknown): value is MessageRecord {
   return Boolean(value && typeof value === "object");
 }
@@ -218,10 +254,10 @@ export function registerWaitForMessagesTool(server: McpServer): void {
           appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
         project_path: (targetProjectId) =>
           appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
-        options: {
+        options: buildWaitForMessagesRequestOptions({
+          deliveryHeaders,
           signal: AbortSignal.timeout(clientTimeout),
-          headers: deliveryHeaders,
-        },
+        }),
       });
 
       const allMessages: unknown[] = [...(firstResult.messages ?? [])];
@@ -238,14 +274,12 @@ export function registerWaitForMessagesTool(server: McpServer): void {
           const page = await roomScopedApiCall<{
             messages?: Array<{ id?: string }>;
             has_more?: boolean;
-          }>({
-            room_id: targetRoomId,
-            project_id: targetProjectId,
-            room_path: (targetRoomId) =>
-              appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages?${qs}`),
-            project_path: (targetProjectId) =>
-              appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages?${qs}`),
-          });
+          }>(buildWaitForMessagesHistoryPageRequest({
+            targetRoomId,
+            targetProjectId,
+            queryString: qs,
+            deliveryHeaders,
+          }));
 
           const msgs = page.messages ?? [];
           allMessages.push(...msgs);
