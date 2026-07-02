@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   deleteActiveBoardManager,
+  getCanonicalTask,
   getBoardIntents,
   getBoardSettings,
   patchBoardSettings,
@@ -66,6 +67,24 @@ function responseObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function activeWorkLeaseIdFromTask(value: unknown): string | null {
+  const task = responseObject(value);
+  const leases = Array.isArray(task.active_leases)
+    ? task.active_leases
+    : Array.isArray(task.activeLeases)
+      ? task.activeLeases
+      : [];
+  const workLease = leases.find((lease) => {
+    if (!lease || typeof lease !== "object") return false;
+    const candidate = lease as Record<string, unknown>;
+    return candidate.kind === "work"
+      && candidate.status === "active"
+      && typeof candidate.id === "string"
+      && candidate.id.trim().length > 0;
+  }) as Record<string, unknown> | undefined;
+  return typeof workLease?.id === "string" ? workLease.id : null;
 }
 
 export function registerBoardIntentTools(server: McpServer): void {
@@ -308,6 +327,12 @@ export function registerBoardIntentTools(server: McpServer): void {
         return taskToolError("target_agent_key is required for handoff intent.");
       }
       try {
+        const expectedLeaseId = lease_id ?? activeWorkLeaseIdFromTask(
+          await getCanonicalTask(targetRoomId, task_id)
+        );
+        if (!expectedLeaseId) {
+          return taskToolError("No active work lease exists for this task; pass lease_id if you are approving a specific lease action.");
+        }
         return await registerTypedBoardIntent({
           roomId: targetRoomId,
           actionType: "task_override",
@@ -315,7 +340,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           payload: boardIntentPayloadForLeaseAction({
             taskId: task_id,
             action,
-            leaseId: lease_id ?? null,
+            leaseId: expectedLeaseId,
             targetActorKey: target_agent_key ?? null,
             targetAgentSessionId: target_agent_session_id ?? null,
           }),

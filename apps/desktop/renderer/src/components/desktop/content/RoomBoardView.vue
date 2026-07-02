@@ -7,15 +7,32 @@
           <strong>Team tasks and agent handoffs</strong>
         </div>
         <div class="desktop-board-header-actions">
-          <div
-            class="desktop-board-manager-pill"
-            :data-mode="boardManagerMode"
-            :data-has-pending="boardPendingIntentCount > 0"
-            :title="boardManagerTitle"
-          >
-            <span class="desktop-board-manager-dot" aria-hidden="true"></span>
-            <strong>{{ boardManagerLabel }}</strong>
-            <span v-if="boardPendingIntentCount > 0">{{ boardPendingIntentCount }} pending</span>
+          <div class="desktop-board-manager-status">
+            <button
+              class="desktop-board-manager-pill"
+              type="button"
+              :data-mode="boardManagerMode"
+              :data-has-pending="boardPendingIntentCount > 0"
+              :title="boardManagerTitle"
+              :aria-expanded="boardManagerDetailsOpen"
+              aria-controls="desktop-board-manager-details"
+              @click="toggleBoardManagerDetails"
+            >
+              <span class="desktop-board-manager-dot" aria-hidden="true"></span>
+              <strong>{{ boardManagerLabel }}</strong>
+              <span v-if="boardPendingIntentCount > 0">{{ boardPendingIntentCount }} pending</span>
+            </button>
+            <div
+              v-if="boardManagerDetailsOpen"
+              id="desktop-board-manager-details"
+              class="desktop-board-manager-details"
+              role="status"
+            >
+              <div v-for="row in boardManagerDetails" :key="row.label">
+                <span>{{ row.label }}</span>
+                <strong>{{ row.value }}</strong>
+              </div>
+            </div>
           </div>
           <button
             class="desktop-board-primary-action desktop-board-add-button"
@@ -302,6 +319,7 @@ const ACTIVE_BOARD_STATUSES = ["proposed", "accepted", "assigned", "in_progress"
 const CLOSEOUT_BOARD_STATUSES = ["merged", "done", "cancelled"];
 const searchQuery = ref("");
 const activeFilter = ref<BoardFilter>("open");
+const boardManagerDetailsOpen = ref(false);
 const draggedTaskId = ref<string | null>(null);
 const dragOverStatus = ref<string | null>(null);
 const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
@@ -363,6 +381,32 @@ const boardManagerTitle = computed(() => {
   const pendingText = pending === 1 ? "1 pending intent" : `${pending} pending intents`;
   if (!settings?.activeManager) return `${boardManagerLabel.value}. ${pendingText}.`;
   return `${boardManagerLabel.value}: ${settings.activeManager.actorLabel}. ${pendingText}.`;
+});
+const boardManagerDetails = computed(() => {
+  const settings = props.boardSettings;
+  const activeManager = settings?.activeManager;
+  return [
+    {
+      label: "Mode",
+      value: boardManagerMode.value === "intent_required"
+        ? "Approval required"
+        : boardManagerMode.value === "manager_optional"
+          ? "Manager optional"
+          : "Off",
+    },
+    {
+      label: "Manager",
+      value: activeManager
+        ? `${activeManager.actorLabel} (${readableManagerRuntime(activeManager.runtimeSource)})`
+        : "None active",
+    },
+    {
+      label: "Queue",
+      value: boardPendingIntentCount.value === 1
+        ? "1 pending intent"
+        : `${boardPendingIntentCount.value} pending intents`,
+    },
+  ];
 });
 
 const visibleStatuses = computed(() =>
@@ -433,7 +477,7 @@ const emptyTaskState = computed((): { title: string; description: string; action
   if (activeFilter.value === "closeout") {
     return {
       title: "No closeout tasks",
-      description: "Merged, done, and cancelled tasks will appear here after the room finishes work.",
+      description: "Merged, done, and cancelled tasks will appear here for final closeout.",
       actionLabel: "Show open tasks",
       action: "show-open",
     };
@@ -443,7 +487,7 @@ const emptyTaskState = computed((): { title: string; description: string; action
   return closeoutTaskCount > 0
     ? {
       title: "No open tasks",
-      description: "All tasks in this room are in closeout right now. Switch to Closeout to review finished work.",
+      description: "All tasks in this room are in closeout right now. Switch to Closeout to finish or audit them.",
       actionLabel: "Show closeout",
       action: "show-closeout",
     }
@@ -615,6 +659,10 @@ function setActiveFilter(filter: string): void {
   activeFilter.value = filter as BoardFilter;
 }
 
+function toggleBoardManagerDetails(): void {
+  boardManagerDetailsOpen.value = !boardManagerDetailsOpen.value;
+}
+
 function filterCount(filter: BoardFilter): number {
   return props.tasks.filter((task) => taskMatchesFilter(task, filter)).length;
 }
@@ -624,11 +672,19 @@ function taskMatchesActiveView(task: DesktopTaskSummary): boolean {
 }
 
 function taskMatchesFilter(task: DesktopTaskSummary, filter: BoardFilter): boolean {
+  if (filter === "closeout") return CLOSEOUT_BOARD_STATUSES.includes(task.status);
+  if (!ACTIVE_BOARD_STATUSES.includes(task.status)) return false;
   if (filter === "mine") return taskMatchesLocalWorker(task);
   if (filter === "unclaimed") return taskIsUnclaimed(task);
   if (filter === "needs-review") return taskNeedsReview(task);
-  if (filter === "closeout") return CLOSEOUT_BOARD_STATUSES.includes(task.status);
-  return !["merged", "done", "cancelled"].includes(task.status);
+  return true;
+}
+
+function readableManagerRuntime(runtimeSource: string): string {
+  if (runtimeSource === "desktop_managed") return "desktop";
+  if (runtimeSource === "open_model") return "open model";
+  if (runtimeSource === "external") return "external";
+  return "unknown";
 }
 
 function taskMatchesSearch(task: DesktopTaskSummary): boolean {

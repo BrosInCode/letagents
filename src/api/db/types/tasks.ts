@@ -72,6 +72,18 @@ export interface TaskLease {
   updated_at: string;
 }
 
+export interface TaskWorkLeaseCreationInput {
+  agent_key: string;
+  actor_label: string;
+  created_by: string;
+  agent_instance_id?: string | null;
+  agent_session_id?: string | null;
+  branch_ref?: string | null;
+  pr_url?: string | null;
+  output_intent?: string | null;
+  expires_at?: string | null;
+}
+
 export interface TaskLock {
   id: string;
   room_id: string;

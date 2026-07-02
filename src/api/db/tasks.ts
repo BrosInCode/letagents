@@ -2,13 +2,14 @@ import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
-import { tasks } from "./schema.js";
+import { task_leases, tasks } from "./schema.js";
 import { clampLimit, nextRoomScopedNumber, parseScopedId } from "./utils.js";
 import { toTask } from "./mappers.js";
 import { assertConsumeBoardIntentApproval } from "./coordination/board-intents.js";
+import { createTaskLeaseRow } from "./coordination/lease-rows.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
 import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
-import type { BoardIntentConsumptionInput, Task, TaskOwnershipState, TaskRow, TaskStatus } from "./types.js";
+import type { BoardIntentConsumptionInput, Task, TaskOwnershipState, TaskRow, TaskStatus, TaskWorkLeaseCreationInput } from "./types.js";
 
 export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   proposed: ["accepted", "cancelled"],
@@ -274,7 +275,10 @@ export async function updateTask(
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
   },
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+  options?: {
+    boardIntentApproval?: BoardIntentConsumptionInput | null;
+    workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+  }
 ): Promise<Task | null> {
   const task = await getTaskRowById(roomId, taskId);
   if (!task) return null;
@@ -319,10 +323,30 @@ export async function updateTask(
       .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
   };
 
-  if (options?.boardIntentApproval) {
+  const writeWorkLeaseCreation = async (executor: Pick<typeof db, "insert">) => {
+    if (!options?.workLeaseCreation) {
+      return;
+    }
+    await executor.insert(task_leases).values(
+      createTaskLeaseRow(
+        {
+          ...options.workLeaseCreation,
+          room_id: roomId,
+          task_id: taskId,
+          kind: "work",
+        },
+        now
+      )
+    );
+  };
+
+  if (options?.boardIntentApproval || options?.workLeaseCreation) {
     await db.transaction(async (tx) => {
-      await assertConsumeBoardIntentApproval(options.boardIntentApproval!, tx);
+      if (options.boardIntentApproval) {
+        await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
+      }
       await writeTaskUpdate(tx);
+      await writeWorkLeaseCreation(tx);
     });
   } else {
     await writeTaskUpdate(db);

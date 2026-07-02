@@ -11,6 +11,7 @@ import {
   boardIntentPayloadForTaskMutation,
   type BoardIntentPayload,
 } from "../../board-intent-payloads.js";
+import type { RoomAgentSessionKind } from "../../../shared/agent-presence.js";
 import type {
   BoardIntent,
   BoardIntentActionType,
@@ -171,6 +172,7 @@ export async function getActiveBoardManager(
       and(
         eq(room_agent_sessions.room_id, board_manager_assignments.room_id),
         eq(room_agent_sessions.session_id, board_manager_assignments.agent_session_id),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         sql`${room_agent_sessions.ended_at} IS NULL`
       )
     )
@@ -224,6 +226,7 @@ export async function assignBoardManager(input: {
       and(
         eq(room_agent_sessions.room_id, input.room_id),
         eq(room_agent_sessions.session_id, input.agent_session_id),
+        eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         sql`${room_agent_sessions.ended_at} IS NULL`
       )
     )

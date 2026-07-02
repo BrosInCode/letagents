@@ -13,6 +13,7 @@ import {
   type Project,
   type Task,
   type TaskStatus,
+  type TaskWorkLeaseCreationInput,
 } from "../../db.js";
 import {
   parseLimit,
@@ -37,7 +38,11 @@ import type { EnsureTaskGitRoomResult } from "../../github/task-git-room.js";
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
 
 type TaskCoordinationGuardDecision =
-  | { kind: "allow"; boardIntentApproval?: BoardIntentConsumptionInput | null }
+  | {
+      kind: "allow";
+      boardIntentApproval?: BoardIntentConsumptionInput | null;
+      workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+    }
   | { kind: "deny"; code: string; error: string };
 
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
@@ -427,7 +432,10 @@ export function registerLegacyProjectTaskRoutes(
         projectId,
         taskId,
         updates,
-        { boardIntentApproval: coordination.boardIntentApproval ?? null }
+        {
+          boardIntentApproval: coordination.boardIntentApproval ?? null,
+          workLeaseCreation: coordination.workLeaseCreation ?? null,
+        }
       );
       if (updated && updates.status && updates.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(projectId, updated);

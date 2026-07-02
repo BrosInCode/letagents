@@ -102,6 +102,10 @@ export async function listTasks(target: TaskToolTarget, queryString: string) {
   });
 }
 
+export async function getCanonicalTask(roomId: string, taskId: string) {
+  return apiCall(taskDetailRoomPath(roomId, taskId));
+}
+
 export async function patchTask(target: TaskToolTarget, taskId: string, body: Record<string, unknown>) {
   const localRoomId = localRoomIdForTarget(target);
   if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {

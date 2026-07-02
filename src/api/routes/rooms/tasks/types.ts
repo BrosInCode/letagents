@@ -8,6 +8,7 @@ import type {
   Task,
   TaskLeaseKind,
   TaskStatus,
+  TaskWorkLeaseCreationInput,
   getTaskOwnershipState,
 } from "../../../db.js";
 import type { FocusParentBoardWriteIsolationDecision } from "../../../focus-rooms/task-write-isolation.js";
@@ -20,7 +21,11 @@ export type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"]
 export type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
 
 export type TaskCoordinationGuardDecision =
-  | { kind: "allow"; boardIntentApproval?: BoardIntentConsumptionInput | null }
+  | {
+      kind: "allow";
+      boardIntentApproval?: BoardIntentConsumptionInput | null;
+      workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+    }
   | { kind: "deny"; code: string; error: string };
 
 export type TaskAdmissionGuardDecision =

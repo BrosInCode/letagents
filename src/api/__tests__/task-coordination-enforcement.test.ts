@@ -4,7 +4,6 @@ import test from "node:test";
 import type {
   AgentIdentity,
   Task,
-  TaskLeaseKind,
   TaskOwnershipState,
 } from "../db.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
@@ -81,7 +80,6 @@ function lock(overrides: Partial<CoordinationLockLike> = {}): CoordinationLockLi
 
 function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {}) {
   const events: Array<Record<string, unknown>> = [];
-  const createdLeases: Array<Record<string, unknown>> = [];
   const workflowRefUpdates: Array<{
     roomId: string;
     leaseId: string;
@@ -104,22 +102,6 @@ function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {})
     getTasks: async () => ({ tasks, has_more: false }),
     getFocusRoomsForParent: async () => focusRooms,
     getActiveTaskLeases: async () => activeLeases,
-    createTaskLease: async (input) => {
-      createdLeases.push(input);
-      return lease({
-        id: "tl_created",
-        room_id: input.room_id,
-        task_id: input.task_id,
-        kind: input.kind as TaskLeaseKind,
-        agent_key: input.agent_key,
-        agent_instance_id: input.agent_instance_id ?? null,
-        actor_label: input.actor_label,
-        branch_ref: input.branch_ref ?? null,
-        pr_url: input.pr_url ?? null,
-        output_intent: input.output_intent ?? null,
-        expires_at: input.expires_at ?? null,
-      });
-    },
     updateTaskLeaseWorkflowRefs: async (roomId, leaseId, updates) => {
       workflowRefUpdates.push({ roomId, leaseId, updates });
     },
@@ -131,7 +113,6 @@ function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {})
   return {
     deps,
     events,
-    createdLeases,
     workflowRefUpdates,
     activeLeases,
     activeLocks,
@@ -220,9 +201,17 @@ test("enforceTaskCoordinationMutation returns approved board intent for claiming
       intent_id: "bi_approved",
       approval_token: "approval-token",
     },
+    workLeaseCreation: {
+      agent_key: actorKey,
+      agent_instance_id: "instance:dawn",
+      actor_label: actorLabel,
+      branch_ref: "letagents/task_37/emmymay-dawnwinter",
+      created_by: actorLabel,
+      output_intent: "Task 114 follow-up",
+      agent_session_id: "agent_session_1",
+    },
   });
   assert.equal(approvalChecks.length, 1);
-  assert.equal(harness.createdLeases.length, 1);
 });
 
 test("enforceTaskCoordinationMutation issues a work lease for the assigned actor", async () => {
@@ -244,23 +233,21 @@ test("enforceTaskCoordinationMutation issues a work lease for the assigned actor
     actorInstanceId: "instance:dawn",
   });
 
-  assert.deepEqual(result, { kind: "allow" });
-  assert.equal(harness.createdLeases.length, 1);
-  assert.deepEqual(harness.createdLeases[0], {
-    room_id: "focus_5",
-    task_id: "task_37",
-    kind: "work",
-    agent_key: actorKey,
-    agent_instance_id: "instance:dawn",
-    actor_label: actorLabel,
-    branch_ref: "letagents/task_37/emmymay-dawnwinter",
-    created_by: actorLabel,
-    output_intent: "Task 114 follow-up",
+  assert.deepEqual(result, {
+    kind: "allow",
+    workLeaseCreation: {
+      agent_key: actorKey,
+      agent_instance_id: "instance:dawn",
+      actor_label: actorLabel,
+      branch_ref: "letagents/task_37/emmymay-dawnwinter",
+      created_by: actorLabel,
+      output_intent: "Task 114 follow-up",
+    },
   });
   assert.equal(harness.events.length, 1);
   assert.equal(harness.events[0].event_type, "task_update");
   assert.equal(harness.events[0].decision, "allow");
-  assert.equal(harness.events[0].lease_id, "tl_created");
+  assert.equal(harness.events[0].lease_id, null);
 });
 
 test("enforceTaskCoordinationMutation binds PR URLs to an existing work lease", async () => {

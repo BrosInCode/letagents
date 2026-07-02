@@ -1,6 +1,5 @@
 import {
   createCoordinationEvent,
-  createTaskLease,
   getActiveFocusRoomForTask,
   getActiveTaskLeases,
   getActiveTaskLocks,
@@ -78,7 +77,6 @@ const taskCoordinationEnforcement = createTaskCoordinationEnforcement({
       focus_status: focusRoom.focus_status,
     })),
   getActiveTaskLeases,
-  createTaskLease,
   updateTaskLeaseWorkflowRefs,
   shouldRequireBoardIntent,
   verifyBoardIntentApproval,

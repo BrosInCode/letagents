@@ -5,6 +5,7 @@ import type {
   BoardIntentConsumptionInput,
   TaskLeaseKind,
   TaskOwnershipState,
+  TaskWorkLeaseCreationInput,
 } from "../db.js";
 import {
   boardIntentPayloadForTaskCreate,
@@ -34,7 +35,11 @@ import {
 } from "./ownership.js";
 
 export type TaskCoordinationGuardDecision =
-  | { kind: "allow"; boardIntentApproval?: BoardIntentConsumptionInput | null }
+  | {
+      kind: "allow";
+      boardIntentApproval?: BoardIntentConsumptionInput | null;
+      workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+    }
   | { kind: "deny"; code: string; error: string };
 
 export interface RecordCoordinationDecisionInput {
@@ -74,27 +79,13 @@ export interface TaskCoordinationEnforcementDeps {
   ): Promise<{ tasks: CoordinationTaskLike[]; has_more: boolean }>;
   getFocusRoomsForParent(parentRoomId: string): Promise<CoordinationFocusRoomLike[]>;
   getActiveTaskLeases(roomId: string, taskId?: string): Promise<CoordinationLeaseLike[]>;
-  createTaskLease(input: {
-    room_id: string;
-    task_id: string;
-    kind: TaskLeaseKind;
-    agent_key: string;
-    actor_label: string;
-    created_by: string;
-    agent_instance_id?: string | null;
-    agent_session_id?: string | null;
-    branch_ref?: string | null;
-    pr_url?: string | null;
-    output_intent?: string | null;
-    expires_at?: string | null;
-  }): Promise<CoordinationLeaseLike>;
   updateTaskLeaseWorkflowRefs(
     roomId: string,
     leaseId: string,
     updates: { branch_ref?: string | null; pr_url?: string | null }
   ): Promise<unknown>;
-  shouldRequireBoardIntent?(input: { room_id: string }): Promise<boolean>;
-  verifyBoardIntentApproval?(input: {
+  shouldRequireBoardIntent(input: { room_id: string }): Promise<boolean>;
+  verifyBoardIntentApproval(input: {
     room_id: string;
     action_type: BoardIntentActionType;
     payload: BoardIntentPayload;
@@ -121,6 +112,9 @@ export interface TaskCoordinationMutationInput {
   boardApprovalToken?: string | null;
 }
 
+type TaskCoordinationDenyDecision = Extract<TaskCoordinationGuardDecision, { kind: "deny" }>;
+type TaskCoordinationAllowDecision = Extract<TaskCoordinationGuardDecision, { kind: "allow" }>;
+
 function taskIsAssignedToActor(input: {
   taskOwnership: TaskOwnershipState;
   actorLabel: string;
@@ -135,6 +129,17 @@ function taskIsAssignedToActor(input: {
 }
 
 export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcementDeps) {
+  function allowDecision(input: {
+    boardIntentApproval?: BoardIntentConsumptionInput | null;
+    workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+  } = {}): TaskCoordinationAllowDecision {
+    return {
+      kind: "allow",
+      ...(input.boardIntentApproval ? { boardIntentApproval: input.boardIntentApproval } : {}),
+      ...(input.workLeaseCreation ? { workLeaseCreation: input.workLeaseCreation } : {}),
+    };
+  }
+
   async function validateOwnerTokenTaskActorKey(input: {
     req: AuthenticatedRequest;
     actorKey: string | null;
@@ -184,6 +189,28 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       lease_id: input.leaseId ?? null,
       lock_id: input.lockId ?? null,
     });
+  }
+
+  async function recordIntentDenial(input: {
+    roomId: string;
+    taskId: string | null;
+    mutation: CoordinationMutationKind;
+    actorLabel: string | null;
+    actorKey: string | null;
+    actorInstanceId: string | null;
+    decision: TaskCoordinationDenyDecision;
+  }): Promise<TaskCoordinationDenyDecision> {
+    await recordCoordinationDecision({
+      roomId: input.roomId,
+      taskId: input.taskId,
+      mutation: input.mutation,
+      decision: "deny",
+      actorLabel: input.actorLabel,
+      actorKey: input.actorKey,
+      actorInstanceId: input.actorInstanceId,
+      reason: input.decision.error,
+    });
+    return input.decision;
   }
 
   async function enforceTaskAdmissionCoordination(input: {
@@ -276,17 +303,15 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       approvalToken: input.boardApprovalToken,
     });
     if (intentDecision.kind === "deny") {
-      await recordCoordinationDecision({
+      return recordIntentDenial({
         roomId: input.projectId,
         taskId: null,
         mutation: "task_admit",
-        decision: "deny",
         actorLabel,
         actorKey,
         actorInstanceId: input.actorInstanceId,
-        reason: intentDecision.error,
+        decision: intentDecision,
       });
-      return intentDecision;
     }
 
     return intentDecision;
@@ -305,7 +330,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     await deps.updateTaskLeaseWorkflowRefs(roomId, leaseId, { pr_url: prUrl });
   }
 
-  async function issueWorkLeaseForActor(input: {
+  async function prepareWorkLeaseForActor(input: {
     roomId: string;
     taskId: string;
     actorLabel: string;
@@ -314,11 +339,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     actorSessionId: string | null;
     mutation: CoordinationMutationKind;
     outputIntent?: string | null;
-  }) {
-    const leaseInput: Parameters<TaskCoordinationEnforcementDeps["createTaskLease"]>[0] = {
-      room_id: input.roomId,
-      task_id: input.taskId,
-      kind: "work",
+    prUrl?: string | null;
+  }): Promise<TaskWorkLeaseCreationInput> {
+    const leaseInput: TaskWorkLeaseCreationInput = {
       agent_key: input.actorKey,
       agent_instance_id: input.actorInstanceId,
       actor_label: input.actorLabel,
@@ -329,11 +352,13 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       created_by: input.actorLabel,
       output_intent: input.outputIntent ?? input.mutation,
     };
+    if (input.prUrl !== undefined) {
+      leaseInput.pr_url = input.prUrl;
+    }
     if (input.actorSessionId) {
       leaseInput.agent_session_id = input.actorSessionId;
     }
 
-    const lease = await deps.createTaskLease(leaseInput);
     await recordCoordinationDecision({
       roomId: input.roomId,
       taskId: input.taskId,
@@ -342,10 +367,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       actorLabel: input.actorLabel,
       actorKey: input.actorKey,
       actorInstanceId: input.actorInstanceId,
-      leaseId: lease.id,
-      reason: `Issued ${lease.kind} lease ${lease.id} for ${input.mutation}.`,
+      reason: `Allowed ${input.mutation}; work lease will be issued with the task update.`,
     });
-    return lease;
+    return leaseInput;
   }
 
   function boardIntentActionForMutation(
@@ -373,24 +397,22 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     if (!input.actorKey && !input.actorSessionId) {
       return { kind: "allow" };
     }
-    const requiresIntent = await deps.shouldRequireBoardIntent?.({ room_id: input.roomId });
+    const requiresIntent = await deps.shouldRequireBoardIntent({ room_id: input.roomId });
     if (!requiresIntent) {
       return { kind: "allow" };
     }
-    const approval = await deps.verifyBoardIntentApproval?.({
+    const approval = await deps.verifyBoardIntentApproval({
       room_id: input.roomId,
       action_type: input.actionType,
       payload: input.payload,
       intent_id: input.intentId,
       approval_token: input.approvalToken,
     });
-    if (!approval || approval.kind === "deny") {
+    if (approval.kind === "deny") {
       return {
         kind: "deny",
-        code: approval?.kind === "deny" ? approval.code : "board_intent_required",
-        error: approval?.kind === "deny"
-          ? approval.error
-          : "Board Manager approval is required for this board action.",
+        code: approval.code,
+        error: approval.error,
       };
     }
     if (!approval.intent?.id) {
@@ -487,17 +509,15 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
 
     if (decision.kind === "allow") {
       if (intentDecision.kind === "deny") {
-        await recordCoordinationDecision({
+        return recordIntentDenial({
           roomId: input.projectId,
           taskId: input.task.id,
           mutation: classified.mutation,
-          decision: "deny",
           actorLabel,
           actorKey,
           actorInstanceId: input.actorInstanceId,
-          reason: intentDecision.error,
+          decision: intentDecision,
         });
-        return intentDecision;
       }
       await recordCoordinationDecision({
         roomId: input.projectId,
@@ -521,19 +541,17 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     if (decision.code === "missing_lease") {
       if (classified.claim && input.task.status === "accepted") {
         if (intentDecision.kind === "deny") {
-          await recordCoordinationDecision({
+          return recordIntentDenial({
             roomId: input.projectId,
             taskId: input.task.id,
             mutation: classified.mutation,
-            decision: "deny",
             actorLabel,
             actorKey,
             actorInstanceId: input.actorInstanceId,
-            reason: intentDecision.error,
+            decision: intentDecision,
           });
-          return intentDecision;
         }
-        const lease = await issueWorkLeaseForActor({
+        const workLeaseCreation = await prepareWorkLeaseForActor({
           roomId: input.projectId,
           taskId: input.task.id,
           actorLabel,
@@ -542,13 +560,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           actorSessionId: input.actorSessionId,
           mutation: classified.mutation,
           outputIntent: input.task.title,
+          prUrl: getTaskUpdatePrUrlBinding(input.updates),
         });
-        if (classified.mutation === "workflow_artifact_attach") {
-          await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
-        }
-        return boardIntentApproval
-          ? { kind: "allow", boardIntentApproval }
-          : { kind: "allow" };
+        return allowDecision({ boardIntentApproval, workLeaseCreation });
       }
 
       if (
@@ -560,19 +574,17 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         })
       ) {
         if (intentDecision.kind === "deny") {
-          await recordCoordinationDecision({
+          return recordIntentDenial({
             roomId: input.projectId,
             taskId: input.task.id,
             mutation: classified.mutation,
-            decision: "deny",
             actorLabel,
             actorKey,
             actorInstanceId: input.actorInstanceId,
-            reason: intentDecision.error,
+            decision: intentDecision,
           });
-          return intentDecision;
         }
-        const lease = await issueWorkLeaseForActor({
+        const workLeaseCreation = await prepareWorkLeaseForActor({
           roomId: input.projectId,
           taskId: input.task.id,
           actorLabel,
@@ -581,13 +593,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           actorSessionId: input.actorSessionId,
           mutation: classified.mutation,
           outputIntent: input.task.title,
+          prUrl: getTaskUpdatePrUrlBinding(input.updates),
         });
-        if (classified.mutation === "workflow_artifact_attach") {
-          await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
-        }
-        return boardIntentApproval
-          ? { kind: "allow", boardIntentApproval }
-          : { kind: "allow" };
+        return allowDecision({ boardIntentApproval, workLeaseCreation });
       }
     }
 

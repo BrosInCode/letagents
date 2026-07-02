@@ -133,7 +133,9 @@ export function registerTaskLeaseActionRoute(
       return;
     }
 
-    if (requestBody.lease_id && requestBody.lease_id.trim() !== activeWorkLease.id) {
+    const requestedLeaseId = deps.normalizeOptionalString(requestBody.lease_id);
+    const approvalLeaseId = requestedLeaseId ?? activeWorkLease.id;
+    if (requestedLeaseId && requestedLeaseId !== activeWorkLease.id) {
       res.status(409).json({
         error: `Lease ${requestBody.lease_id} is no longer the active work lease for this task`,
         code: "coordination_stale_lease_reference",
@@ -264,7 +266,7 @@ export function registerTaskLeaseActionRoute(
         const payload = boardIntentPayloadForLeaseAction({
           taskId: task.id,
           action,
-          leaseId: requestBody.lease_id ?? null,
+          leaseId: approvalLeaseId,
           targetActorKey,
           targetAgentSessionId: deps.normalizeOptionalString(requestBody.target_agent_session_id),
         });

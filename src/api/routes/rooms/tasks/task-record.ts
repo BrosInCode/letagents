@@ -214,7 +214,10 @@ export function registerTaskRecordRoutes(
         project.id,
         taskId,
         updates,
-        { boardIntentApproval: coordination.boardIntentApproval ?? null }
+        {
+          boardIntentApproval: coordination.boardIntentApproval ?? null,
+          workLeaseCreation: coordination.workLeaseCreation ?? null,
+        }
       );
       if (updated && updates.status && updates.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(project.id, updated);
