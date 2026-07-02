@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import type {
   DesktopAgentProviderId,
+  DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
@@ -15,6 +16,7 @@ import type {
 } from "../../ipc-types.js";
 import { apiFetch, readStoredAuth } from "../auth.js";
 import { buildRepoStatus } from "../../repo-status.js";
+import { stageDesktopAttachmentBuffer } from "../attachments.js";
 import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
@@ -95,6 +97,12 @@ import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { openModelCodexLaunch } from "./open-model-launch.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
+import {
+  buildManagedAgentChangeSummaryAttachmentDraft,
+  managedAgentChangeSummaryLocalAttachmentPayload,
+  type ManagedAgentChangeSummaryAttachmentDraft,
+} from "./managed-agent-change-attachments.js";
+import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
 import { createDesktopClaudeCodeRuntime } from "./claude-code-runtime.js";
 import { createDesktopCursorRuntime } from "./cursor-runtime.js";
 import {
@@ -978,6 +986,18 @@ export function listDesktopManagedAgentSessions(
   return desktopManagedAgentRuntimes.listSessions(roomIdentifier);
 }
 
+export async function getDesktopManagedAgentChangeSummary(
+  sessionId?: string | null,
+  roomIdentifier?: string | null,
+): Promise<DesktopManagedAgentChangeSummary | null> {
+  const targetSessionId = String(sessionId ?? "").trim();
+  if (!targetSessionId) return null;
+  const session = listDesktopManagedCodexAgentSessions(roomIdentifier)
+    .find((candidate) => candidate.id === targetSessionId);
+  if (!session) return null;
+  return buildDesktopManagedAgentChangeSummary(session);
+}
+
 interface CodexEngineProviderContext {
   providerId: DesktopAgentProviderId;
   providerName: string;
@@ -1487,6 +1507,7 @@ async function publishDesktopManagedAgentReply(input: {
 
   const roomIdentifier = input.session.room_identifier || input.session.room_id;
   const replyTarget = replyTargetForEvent(input.event);
+  const changeAttachmentDraft = await buildDesktopManagedCodexReplyChangeAttachment(input.session);
   const localReply = await persistDesktopManagedAgentLocalReply({
     roomIdentifier,
     storage: input.storage,
@@ -1494,6 +1515,9 @@ async function publishDesktopManagedAgentReply(input: {
     replyTo: replyTarget.replyTo,
     threadRootId: replyTarget.threadRootId,
     text,
+    attachments: changeAttachmentDraft
+      ? [managedAgentChangeSummaryLocalAttachmentPayload(changeAttachmentDraft)]
+      : [],
   });
   if (localReply) {
     emitPersistedLocalRoomMessage(roomIdentifier, localReply);
@@ -1501,6 +1525,10 @@ async function publishDesktopManagedAgentReply(input: {
   }
 
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
+  const attachments = await publishDesktopManagedCodexReplyChangeAttachment(
+    cloudRoomIdentifier,
+    changeAttachmentDraft,
+  );
   await apiFetch<Record<string, unknown>>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
@@ -1515,9 +1543,47 @@ async function publishDesktopManagedAgentReply(input: {
         thread_root_id: replyTarget.threadRootId,
         agent_session_id: workerSession.session_id,
         agent_session_token: workerSession.session_token,
+        attachments,
       }),
     },
   );
+}
+
+async function buildDesktopManagedCodexReplyChangeAttachment(
+  session: DesktopCodexLiveSessionState,
+): Promise<ManagedAgentChangeSummaryAttachmentDraft | null> {
+  if ((session.provider_id ?? "codex") !== "codex") {
+    return null;
+  }
+
+  try {
+    const publicSession = toPublicManagedAgentSession(bindCodexLiveSessionToWorker(session));
+    const summary = await buildDesktopManagedAgentChangeSummary(publicSession);
+    return buildManagedAgentChangeSummaryAttachmentDraft(summary);
+  } catch {
+    return null;
+  }
+}
+
+async function publishDesktopManagedCodexReplyChangeAttachment(
+  cloudRoomIdentifier: string,
+  draft: ManagedAgentChangeSummaryAttachmentDraft | null,
+): Promise<Array<{ upload_id: string }>> {
+  if (!draft) {
+    return [];
+  }
+
+  try {
+    const staged = await stageDesktopAttachmentBuffer(
+      cloudRoomIdentifier,
+      draft.buffer,
+      draft.fileName,
+      draft.mimeType,
+    );
+    return [{ upload_id: staged.uploadId }];
+  } catch {
+    return [];
+  }
 }
 
 async function startDesktopEventCodexTurn(input: {

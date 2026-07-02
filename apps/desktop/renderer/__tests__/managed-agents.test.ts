@@ -33,6 +33,7 @@ import {
   managedAgentPermissionProfileSummary,
   managedAgentPermissionRequestTargetLabel,
   managedAgentSessionMatchesRoom,
+  managedAgentSessionMatchesReasoning,
   managedAgentSessionMatchesTarget,
   managedAgentSessionDisplayName,
   managedAgentSessionStatusLabel,
@@ -770,6 +771,32 @@ test("managedAgentSessionMatchesTarget uses stable identity before display names
   }), {
     displayName: "MapleRidge",
     ideLabel: "Antigravity",
+  }), false);
+});
+
+test("managedAgentSessionMatchesReasoning links modal reasoning streams back to local sessions", () => {
+  assert.equal(managedAgentSessionMatchesReasoning(session({
+    agentSessionId: "agent_1",
+    reasoningSessionId: "reasoning_1",
+  }), {
+    id: "reasoning_1",
+    agentSessionId: null,
+  }), true);
+
+  assert.equal(managedAgentSessionMatchesReasoning(session({
+    agentSessionId: "agent_1",
+    reasoningSessionId: null,
+  }), {
+    id: "reasoning_other",
+    agentSessionId: "agent_1",
+  }), true);
+
+  assert.equal(managedAgentSessionMatchesReasoning(session({
+    agentSessionId: "agent_1",
+    reasoningSessionId: "reasoning_1",
+  }), {
+    id: "reasoning_other",
+    agentSessionId: "agent_other",
   }), false);
 });
 

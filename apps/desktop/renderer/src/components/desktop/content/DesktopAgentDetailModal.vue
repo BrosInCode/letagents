@@ -114,6 +114,66 @@
                   <strong>{{ managedAgentPermissionProfileLabel(session) }}</strong>
                   <small>{{ managedAgentPermissionProfileSummary(session.permissionProfile) }}</small>
                 </div>
+                <article
+                  v-if="shouldTrackManagedAgentChanges(session)"
+                  class="desktop-agent-detail-changes"
+                  data-testid="desktop-agent-detail-changes"
+                >
+                  <div class="desktop-agent-detail-changes-header">
+                    <span class="desktop-agent-detail-changes-icon" aria-hidden="true">
+                      <FileDiff />
+                    </span>
+                    <div>
+                      <strong>{{ changeSummaryTitle(session) }}</strong>
+                      <small>{{ changeSummarySubtitle(session) }}</small>
+                    </div>
+                  </div>
+
+                  <p
+                    v-if="managedChangeSummary(session.id)?.error"
+                    class="desktop-agent-detail-changes-error"
+                  >
+                    {{ managedChangeSummary(session.id)?.error }}
+                  </p>
+                  <ul
+                    v-else-if="managedChangeSummary(session.id)?.changedFileCount"
+                    class="desktop-agent-detail-changed-files"
+                  >
+                    <li
+                      v-for="file in visibleChangedFiles(session.id)"
+                      :key="file.path"
+                    >
+                      <span>{{ file.path }}</span>
+                      <strong>
+                        <b v-if="file.additions">+{{ file.additions }}</b>
+                        <b v-if="file.deletions" class="desktop-agent-detail-deletions">-{{ file.deletions }}</b>
+                        <em v-if="file.binary">binary</em>
+                        <em v-if="!file.additions && !file.deletions && !file.binary">{{ changedFileStateLabel(file) }}</em>
+                      </strong>
+                    </li>
+                  </ul>
+                  <p
+                    v-else-if="!isChangeSummaryLoading(session.id)"
+                    class="desktop-agent-detail-changes-empty"
+                  >
+                    No file changes in this Codex working tree.
+                  </p>
+
+                  <button
+                    v-if="hiddenChangedFileCount(session.id) > 0"
+                    type="button"
+                    class="desktop-agent-detail-show-files"
+                    @click="toggleExpandedChangeSummary(session.id)"
+                  >
+                    {{ expandedChangeSummaryIds[session.id] ? "Show fewer files" : `Show ${hiddenChangedFileCount(session.id)} more files` }}
+                  </button>
+                  <p
+                    v-if="expandedChangeSummaryIds[session.id] && backendHiddenChangedFileCount(session.id) > 0"
+                    class="desktop-agent-detail-changes-empty"
+                  >
+                    {{ backendHiddenChangedFileCount(session.id) }} more files are not shown here.
+                  </p>
+                </article>
                 <div
                   v-if="session.pendingPermissionRequests.length"
                   class="desktop-agent-detail-permissions"
@@ -220,8 +280,9 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Ban, Power, RefreshCw, ShieldCheck, Square, X } from "@lucide/vue";
+import { Ban, FileDiff, Power, RefreshCw, ShieldCheck, Square, X } from "@lucide/vue";
 import type {
+  DesktopManagedAgentChangeSummary,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopManagedAgentPermissionRequest,
@@ -240,6 +301,7 @@ import {
   isVisibleManagedAgentSession,
   canStopManagedAgentTurn,
   managedAgentSessionMatchesTarget,
+  managedAgentSessionMatchesReasoning,
   managedAgentSessionDisplayName,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSummary,
@@ -247,6 +309,13 @@ import {
   managedAgentStopResultNeedsAttention,
   managedAgentStopResultMessage,
 } from "../../../domain/managed-agents";
+import {
+  hiddenManagedAgentChangedFileCount,
+  managedAgentChangedFileStateLabel,
+  managedAgentChangeSummarySubtitle,
+  managedAgentChangeSummaryTitle,
+  visibleManagedAgentChangedFiles,
+} from "../../../domain/managed-agent-changes";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import {
   currentFocusableElement,
@@ -276,6 +345,9 @@ const stopStatusMessage = ref<string | null>(null);
 const managedSessionError = ref<string | null>(null);
 const managedSessionInspections = ref<Record<string, DesktopManagedAgentInspectResult>>({});
 const inspectingSessionIds = ref<Record<string, boolean>>({});
+const managedChangeSummaries = ref<Record<string, DesktopManagedAgentChangeSummary | null>>({});
+const loadingChangeSummaryIds = ref<Record<string, boolean>>({});
+const expandedChangeSummaryIds = ref<Record<string, boolean>>({});
 const resolvingPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let refreshTimer: number | null = null;
 let modalStateVersion = 0;
@@ -307,7 +379,11 @@ const matchingManagedSessions = computed(() => {
   const activeSessions = managedSessions.value.filter(isVisibleManagedAgentSession);
   if (!props.target) return [];
 
-  return activeSessions.filter((session) => managedAgentSessionMatchesTarget(session, props.target!));
+  const reasoningSession = latestReasoning.value;
+  return activeSessions.filter((session) =>
+    managedAgentSessionMatchesTarget(session, props.target!) ||
+    managedAgentSessionMatchesReasoning(session, reasoningSession)
+  );
 });
 const primaryManagedSession = computed(() =>
   matchingManagedSessions.value.find((session) => session.canStop) ?? matchingManagedSessions.value[0] ?? null
@@ -401,6 +477,9 @@ function clearTransientState(): void {
   managedSessionError.value = null;
   managedSessionInspections.value = {};
   inspectingSessionIds.value = {};
+  managedChangeSummaries.value = {};
+  loadingChangeSummaryIds.value = {};
+  expandedChangeSummaryIds.value = {};
   resolvingPermissionIds.value = {};
 }
 
@@ -430,7 +509,7 @@ async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<v
     const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
     if (!isCurrentModalState(requestVersion)) return;
     managedSessions.value = sessions;
-    await inspectMatchingManagedSessions({ quiet: options.quiet, version: requestVersion });
+    await refreshMatchingManagedSessionDetails({ quiet: options.quiet, version: requestVersion });
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
     managedSessionError.value = error instanceof Error ? error.message : "Could not load local agent sessions.";
@@ -441,12 +520,13 @@ async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<v
   }
 }
 
-async function inspectMatchingManagedSessions(options: { quiet?: boolean; version?: number } = {}): Promise<void> {
+async function refreshMatchingManagedSessionDetails(options: { quiet?: boolean; version?: number } = {}): Promise<void> {
   const requestVersion = options.version ?? modalStateVersion;
   if (!isCurrentModalState(requestVersion)) return;
-  await Promise.all(matchingManagedSessions.value.map((session) =>
-    inspectManagedSession(session.id, { quiet: options.quiet, version: requestVersion })
-  ));
+  await Promise.all(matchingManagedSessions.value.flatMap((session) => [
+    inspectManagedSession(session.id, { quiet: options.quiet, version: requestVersion }),
+    loadManagedAgentChangeSummary(session, { version: requestVersion }),
+  ]));
 }
 
 async function inspectManagedSession(
@@ -485,6 +565,53 @@ async function inspectManagedSession(
     if (!isCurrentModalState(requestVersion)) return;
     const { [sessionId]: _ignored, ...remaining } = inspectingSessionIds.value;
     inspectingSessionIds.value = remaining;
+  }
+}
+
+async function loadManagedAgentChangeSummary(
+  session: DesktopManagedAgentSession,
+  options: { version?: number } = {},
+): Promise<void> {
+  const requestVersion = options.version ?? modalStateVersion;
+  if (!isCurrentModalState(requestVersion) || !shouldTrackManagedAgentChanges(session)) return;
+  if (loadingChangeSummaryIds.value[session.id]) return;
+  loadingChangeSummaryIds.value = {
+    ...loadingChangeSummaryIds.value,
+    [session.id]: true,
+  };
+  try {
+    const summary = await window.letagentsDesktop.workers.getManagedAgentChangeSummary(session.id, props.roomIdentifier);
+    if (!isCurrentModalState(requestVersion)) return;
+    managedChangeSummaries.value = {
+      ...managedChangeSummaries.value,
+      [session.id]: summary,
+    };
+  } catch (error) {
+    if (!isCurrentModalState(requestVersion)) return;
+    managedChangeSummaries.value = {
+      ...managedChangeSummaries.value,
+      [session.id]: {
+        sessionId: session.id,
+        providerId: session.providerId,
+        repoRootPath: session.repoRootPath,
+        repoBranch: session.repoBranch,
+        changedFileCount: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 0,
+        untrackedFileCount: 0,
+        additions: 0,
+        deletions: 0,
+        files: [],
+        hiddenFileCount: 0,
+        isGitRepo: false,
+        updatedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : "Could not inspect this agent's file changes.",
+      },
+    };
+  } finally {
+    if (!isCurrentModalState(requestVersion)) return;
+    const { [session.id]: _ignored, ...remaining } = loadingChangeSummaryIds.value;
+    loadingChangeSummaryIds.value = remaining;
   }
 }
 
@@ -624,6 +751,61 @@ function permissionRequestSummary(request: DesktopManagedAgentPermissionRequest)
     request.inputSummary,
     request.description,
   ].filter(Boolean).join(" - ") || "Tool approval required.";
+}
+
+function shouldTrackManagedAgentChanges(session: DesktopManagedAgentSession): boolean {
+  return session.providerId === "codex" && Boolean(session.repoRootPath.trim());
+}
+
+function managedChangeSummary(sessionId: string): DesktopManagedAgentChangeSummary | null {
+  return managedChangeSummaries.value[sessionId] ?? null;
+}
+
+function isChangeSummaryLoading(sessionId: string): boolean {
+  return Boolean(loadingChangeSummaryIds.value[sessionId]);
+}
+
+function changeSummaryTitle(session: DesktopManagedAgentSession): string {
+  return managedAgentChangeSummaryTitle(
+    managedChangeSummary(session.id),
+    isChangeSummaryLoading(session.id),
+  );
+}
+
+function changeSummarySubtitle(session: DesktopManagedAgentSession): string {
+  return managedAgentChangeSummarySubtitle(
+    managedChangeSummary(session.id),
+    isChangeSummaryLoading(session.id),
+  );
+}
+
+function visibleChangedFiles(sessionId: string) {
+  return visibleManagedAgentChangedFiles(
+    managedChangeSummary(sessionId),
+    Boolean(expandedChangeSummaryIds.value[sessionId]),
+  );
+}
+
+function hiddenChangedFileCount(sessionId: string): number {
+  return hiddenManagedAgentChangedFileCount(
+    managedChangeSummary(sessionId),
+    Boolean(expandedChangeSummaryIds.value[sessionId]),
+  );
+}
+
+function backendHiddenChangedFileCount(sessionId: string): number {
+  return managedChangeSummary(sessionId)?.hiddenFileCount ?? 0;
+}
+
+function toggleExpandedChangeSummary(sessionId: string): void {
+  expandedChangeSummaryIds.value = {
+    ...expandedChangeSummaryIds.value,
+    [sessionId]: !expandedChangeSummaryIds.value[sessionId],
+  };
+}
+
+function changedFileStateLabel(file: Parameters<typeof managedAgentChangedFileStateLabel>[0]): string {
+  return managedAgentChangedFileStateLabel(file);
 }
 
 function formatTimestamp(value: string | null | undefined): string {

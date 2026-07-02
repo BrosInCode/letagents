@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { describe, it } from "node:test";
 import { ref } from "vue";
 
 import type {
   DesktopAgentPresence,
+  DesktopManagedAgentChangeSummary,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -14,6 +16,15 @@ import {
   sortMentionableRoomParticipants,
 } from "../src/domain/participants";
 import { isIdleReasoningSession } from "../src/domain/reasoning";
+import {
+  decodeManagedAgentChangeSummaryAttachment,
+  isManagedAgentChangeSummaryAttachment,
+  MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+  managedAgentChangedFileStateLabel,
+  managedAgentChangeSummarySubtitle,
+  managedAgentChangeSummaryTitle,
+  visibleManagedAgentChangedFiles,
+} from "../src/domain/managed-agent-changes";
 import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
   attachmentHref,
@@ -70,6 +81,37 @@ describe("room chat helpers", () => {
     assert.equal(attachmentMeta(attachment), "image/png · 1.5 KB");
     assert.equal(imageAttachmentId("msg_1", attachment), "msg_1:screen.png-1536-image/png");
     assert.equal(isImageAttachment(attachment), true);
+  });
+
+  it("decodes managed agent change summary attachments", () => {
+    const summary = managedAgentChangeSummary();
+    const attachment: DesktopRoomMessageAttachment = {
+      id: "managed-agent-change-summary",
+      name: "Agent changes",
+      fileName: "agent-changes.json",
+      mimeType: MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+      sizeBytes: 120,
+      url: null,
+      downloadUrl: null,
+      dataUrl: null,
+      contentBase64: Buffer.from(JSON.stringify({
+        kind: "managed_agent_change_summary",
+        version: 1,
+        summary,
+      }), "utf8").toString("base64"),
+    };
+
+    const decoded = decodeManagedAgentChangeSummaryAttachment(attachment);
+
+    assert.equal(isManagedAgentChangeSummaryAttachment(attachment), true);
+    assert.equal(decoded?.changedFileCount, 2);
+    assert.equal(managedAgentChangeSummaryTitle(decoded), "Edited 2 files");
+    assert.equal(managedAgentChangeSummarySubtitle(decoded), "+8  -1  1 untracked");
+    assert.deepEqual(visibleManagedAgentChangedFiles(decoded, false).map((file) => file.path), [
+      "apps/desktop/App.vue",
+      "notes.md",
+    ]);
+    assert.equal(managedAgentChangedFileStateLabel(decoded!.files[1]!), "untracked");
   });
 
   it("summarizes reply threads by parent message", () => {
@@ -532,6 +574,49 @@ function roomMessage(
           timestamp: "2026-05-28T00:00:00.000Z",
         }
       : null,
+  };
+}
+
+function managedAgentChangeSummary(): DesktopManagedAgentChangeSummary {
+  return {
+    sessionId: "local_session_1",
+    providerId: "codex",
+    repoRootPath: "/tmp/repo",
+    repoBranch: "main",
+    changedFileCount: 2,
+    stagedFileCount: 0,
+    unstagedFileCount: 1,
+    untrackedFileCount: 1,
+    additions: 8,
+    deletions: 1,
+    files: [
+      {
+        path: "apps/desktop/App.vue",
+        previousPath: null,
+        status: "modified",
+        additions: 8,
+        deletions: 1,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      },
+      {
+        path: "notes.md",
+        previousPath: null,
+        status: "untracked",
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        staged: false,
+        unstaged: false,
+        untracked: true,
+      },
+    ],
+    hiddenFileCount: 0,
+    isGitRepo: true,
+    updatedAt: "2026-07-02T00:00:00.000Z",
+    error: null,
   };
 }
 
