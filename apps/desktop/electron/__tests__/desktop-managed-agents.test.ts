@@ -93,10 +93,14 @@ const {
   isManagedRoomStreamEvent,
   listDeliverableCodexSessionsForRoomStreamEvent,
 } = await import("../main/agents/codex-managed-agent-dispatch.js");
+const { buildClaudeCodeDesktopEventPrompt } = await import("../main/agents/claude-code-event-prompt.js");
+const { buildCursorDesktopEventPrompt } = await import("../main/agents/cursor-event-prompt.js");
 
 import type { DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
 import type {
+  DesktopClaudeCodeLiveSessionState,
   DesktopCodexLiveSessionState,
+  DesktopCursorLiveSessionState,
   StoredAgentSessionState,
 } from "../main/agents/state.js";
 
@@ -1482,7 +1486,7 @@ test("desktop-delivered event prompts preserve stable agent identity context", (
 });
 
 test("desktop-delivered event prompts keep reply follow-up in the room thread", () => {
-  const prompt = buildDesktopEventPrompt(liveSession(), {
+  const prompt = buildDesktopEventPrompt(liveSession({ display_name: "MapleRidge" }), {
     type: "message",
     roomIdentifier: "room_1",
     message: {
@@ -1509,7 +1513,264 @@ test("desktop-delivered event prompts keep reply follow-up in the room thread", 
   });
 
   assert.match(prompt, /Reply to: msg_parent from MapleRidge/);
+  assert.match(prompt, /Thread root: msg_parent from MapleRidge/);
+  assert.match(prompt, /Thread reply to: msg_parent from MapleRidge/);
+  assert.match(prompt, /human reply inside a thread you are participating in/);
   assert.match(prompt, /desktop will keep it in the same thread/);
+});
+
+test("desktop-delivered event prompts mark human thread replies to human-authored roots as addressed", () => {
+  // The false-negative case: a human replies inside a thread and the reply target
+  // is another human message (the thread root). Without thread metadata this looks
+  // like a human-to-human exchange and workers answer NO_ROOM_REPLY.
+  const prompt = buildDesktopEventPrompt(liveSession({ display_name: "CedarVista" }), {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_reply",
+      sender: "EmmyMay",
+      text: "any progress on this?",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-14T12:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_root",
+      threadReplyToId: "msg_root",
+      thread: {
+        rootMessageId: "msg_root",
+        replyCount: 3,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [
+          {
+            sender: "EmmyMay",
+            source: "browser",
+            messageCount: 2,
+            latestMessageId: "msg_reply",
+          },
+          {
+            sender: "CedarVista | Local desktop | Codex",
+            source: "agent",
+            messageCount: 1,
+            latestMessageId: "msg_agent_answer",
+          },
+        ],
+        lastReadMessageId: null,
+      },
+      replyTo: {
+        id: "msg_root",
+        sender: "EmmyMay",
+        text: "please look into the flaky deploy",
+        source: "browser",
+        timestamp: "2026-06-14T11:50:00.000Z",
+      },
+    },
+  });
+
+  assert.match(prompt, /Reply to: msg_root from EmmyMay/);
+  assert.match(prompt, /Thread root: msg_root from EmmyMay/);
+  assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
+  assert.match(prompt, /human reply inside a thread you are participating in/);
+  assert.match(prompt, /Treat it as addressed to you/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+test("desktop-delivered event prompts keep top-level messages free of thread context", () => {
+  const prompt = buildDesktopEventPrompt(liveSession({ display_name: "CedarVista" }), messageEvent());
+
+  assert.doesNotMatch(prompt, /Thread root:/);
+  assert.doesNotMatch(prompt, /Thread reply to:/);
+  assert.doesNotMatch(prompt, /Thread context:/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+function claudeCodeLiveSession(
+  overrides: Partial<DesktopClaudeCodeLiveSessionState> = {},
+): DesktopClaudeCodeLiveSessionState {
+  return {
+    session_id: "claude_session_1",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    room_display_name: "Room One",
+    joined_via: "join_room",
+    cwd: "/tmp/repo",
+    stop_phrase: "/stop-claude-room",
+    max_minutes: 0,
+    delivery_mode: "desktop_events",
+    deadline_utc: null,
+    token: "LOCAL_CLAUDE_ROOM_test",
+    claude_session_id: null,
+    claude_bin: "claude",
+    agent_session_id: null,
+    status: "running",
+    last_error: null,
+    started_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function cursorLiveSession(
+  overrides: Partial<DesktopCursorLiveSessionState> = {},
+): DesktopCursorLiveSessionState {
+  return {
+    session_id: "cursor_session_1",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    room_display_name: "Room One",
+    joined_via: "join_room",
+    cwd: "/tmp/repo",
+    stop_phrase: "/stop-cursor-room",
+    max_minutes: 0,
+    delivery_mode: "desktop_events",
+    deadline_utc: null,
+    token: "LOCAL_CURSOR_ROOM_test",
+    cursor_session_id: null,
+    cursor_bin: "cursor-agent",
+    agent_session_id: null,
+    status: "running",
+    last_error: null,
+    started_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function humanThreadReplyEvent(): Extract<DesktopRoomStreamEvent, { type: "message" }> {
+  return {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_reply",
+      sender: "EmmyMay",
+      text: "any progress on this?",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-14T12:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_root",
+      threadReplyToId: "msg_root",
+      thread: {
+        rootMessageId: "msg_root",
+        replyCount: 2,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [
+          {
+            sender: "EmmyMay",
+            source: "browser",
+            messageCount: 2,
+            latestMessageId: "msg_reply",
+          },
+          {
+            sender: "CedarVista | Local desktop | Claude Code",
+            source: "agent",
+            messageCount: 1,
+            latestMessageId: "msg_agent_answer",
+          },
+        ],
+        lastReadMessageId: null,
+      },
+      replyTo: {
+        id: "msg_root",
+        sender: "EmmyMay",
+        text: "please look into the flaky deploy",
+        source: "browser",
+        timestamp: "2026-06-14T11:50:00.000Z",
+      },
+    },
+  };
+}
+
+test("Claude Code desktop event prompts include thread metadata for human thread replies", () => {
+  const prompt = buildClaudeCodeDesktopEventPrompt(
+    claudeCodeLiveSession({ display_name: "CedarVista" }),
+    humanThreadReplyEvent(),
+  );
+
+  assert.match(prompt, /Reply to: msg_root from EmmyMay/);
+  assert.match(prompt, /Thread root: msg_root from EmmyMay/);
+  assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
+  assert.match(prompt, /human reply inside a thread you are participating in/);
+  assert.match(prompt, /desktop will keep it in the same thread/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+test("Claude Code desktop event prompts keep top-level messages free of thread context", () => {
+  const prompt = buildClaudeCodeDesktopEventPrompt(
+    claudeCodeLiveSession({ display_name: "CedarVista" }),
+    messageEvent(),
+  );
+
+  assert.doesNotMatch(prompt, /Thread root:/);
+  assert.doesNotMatch(prompt, /Thread context:/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+test("Cursor desktop event prompts include thread metadata for human thread replies", () => {
+  const prompt = buildCursorDesktopEventPrompt(
+    cursorLiveSession({ display_name: "CedarVista" }),
+    humanThreadReplyEvent(),
+  );
+
+  assert.match(prompt, /Reply to: msg_root from EmmyMay/);
+  assert.match(prompt, /Thread root: msg_root from EmmyMay/);
+  assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
+  assert.match(prompt, /human reply inside a thread you are participating in/);
+  assert.match(prompt, /desktop will keep it in the same thread/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+test("Cursor desktop event prompts keep top-level messages free of thread context", () => {
+  const prompt = buildCursorDesktopEventPrompt(
+    cursorLiveSession({ display_name: "CedarVista" }),
+    messageEvent(),
+  );
+
+  assert.doesNotMatch(prompt, /Thread root:/);
+  assert.doesNotMatch(prompt, /Thread context:/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+test("desktop-delivered event prompts do not claim participation in unrelated threads", () => {
+  const prompt = buildDesktopEventPrompt(liveSession({ display_name: "CedarVista" }), {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_reply",
+      sender: "EmmyMay",
+      text: "thanks, merging now",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-14T12:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_root",
+      threadReplyToId: "msg_other",
+      thread: null,
+      replyTo: {
+        id: "msg_other",
+        sender: "MapleRidge | Local desktop | Codex",
+        text: "PR is green.",
+        source: "agent",
+        timestamp: "2026-06-14T11:59:00.000Z",
+      },
+    },
+  });
+
+  assert.match(prompt, /Thread root: msg_root/);
+  assert.match(prompt, /Thread reply to: msg_other from MapleRidge \| Local desktop \| Codex/);
+  assert.doesNotMatch(prompt, /thread you are participating in/);
+  assert.match(prompt, /reply inside an existing thread/);
+  assert.match(prompt, /Check the thread before deciding it does not involve you/);
+  assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
 test("desktop-delivered task prompts include assignment and workflow context", () => {

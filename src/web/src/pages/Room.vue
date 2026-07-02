@@ -147,6 +147,7 @@ import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
+import { messageThreadParentId } from '@/components/room/messageThreading'
 import RoomConnectionError from './room/RoomConnectionError.vue'
 import RoomMobileNav from './room/RoomMobileNav.vue'
 import RoomTabPanels from './room/RoomTabPanels.vue'
@@ -320,7 +321,11 @@ async function handleSend(
   replyTo: string | null,
   attachments: OutgoingMessageAttachment[] = [],
 ): Promise<boolean> {
-  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments)
+  // Replying to a message that lives inside a thread keeps the reply in that
+  // thread; replying to a top-level message stays a quote-reply by design.
+  const replyTarget = replyTo && selectedReply.value?.id === replyTo ? selectedReply.value : null
+  const threadRootId = replyTarget ? messageThreadParentId(replyTarget) : null
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId)
   if (sent) {
     selectedReply.value = null
     return true

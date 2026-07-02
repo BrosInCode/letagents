@@ -30,6 +30,27 @@ type SendMessageInput = {
   agent_session_id?: string;
 };
 
+type AgentSessionCredentialPayload = {
+  agent_session_id: string;
+  agent_session_token: string;
+};
+
+export function buildSendMessageRequestBody(input: {
+  sender: string;
+  text: string;
+  replyTarget?: string;
+  resolvedThreadRoot?: string;
+  credentials: AgentSessionCredentialPayload;
+}): Record<string, unknown> {
+  return {
+    sender: input.sender,
+    text: input.text,
+    reply_to: input.replyTarget,
+    ...(input.resolvedThreadRoot ? { thread_root_id: input.resolvedThreadRoot } : {}),
+    ...input.credentials,
+  };
+}
+
 function normalizeMessageId(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
@@ -188,13 +209,13 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     project_path: (targetProjectId) => `/projects/${encodeURIComponent(targetProjectId)}/messages`,
     options: {
       method: "POST",
-      body: JSON.stringify({
+      body: JSON.stringify(buildSendMessageRequestBody({
         sender: identity.actor_label,
         text: input.text,
-        reply_to: replyTarget,
-        ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
-        ...agentSessionCredentials(agentSession),
-      }),
+        replyTarget,
+        resolvedThreadRoot,
+        credentials: agentSessionCredentials(agentSession),
+      })),
     },
   });
   touchCurrentRoom(typeof (message as { id?: string }).id === "string" ? (message as { id: string }).id : undefined);

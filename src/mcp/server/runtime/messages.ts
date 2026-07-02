@@ -137,11 +137,24 @@ function withThreadMetadata(
   const replyToId = explicitThreadReplyToId(record) ?? replyReferenceId(record);
   const isThreadReply = Boolean(ownId && rootId !== ownId);
   const summary = summaries.get(rootId) ?? { count: 0, latestReplyId: null };
+  const {
+    thread_parent_id: _threadParentId,
+    thread_root_id: _threadRootId,
+    threadRootId: _threadRootIdCamel,
+    thread_reply_to_id: _threadReplyToId,
+    threadReplyToId: _threadReplyToIdCamel,
+    thread: _thread,
+    ...baseRecord
+  } = record;
   return {
-    ...record,
-    thread_parent_id: rootId,
-    thread_root_id: rootId,
-    thread_reply_to_id: replyToId,
+    ...baseRecord,
+    ...(isThreadReply
+      ? {
+        thread_parent_id: rootId,
+        thread_root_id: rootId,
+        thread_reply_to_id: replyToId,
+      }
+      : {}),
     thread: {
       parent_id: rootId,
       root_message_id: rootId,

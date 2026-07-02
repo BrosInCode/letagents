@@ -29,3 +29,12 @@ test("isPromptOnlyAgentMessage only hides empty prompt-bearing messages", () => 
 test("buildRoomAgentPrompt returns an auto reminder variant", () => {
   assert.match(buildRoomAgentPrompt("auto"), /Background reminder\./);
 });
+
+test("buildRoomAgentPrompt keys thread replies off structured thread state", () => {
+  const prompt = buildRoomAgentPrompt("join");
+
+  assert.match(prompt, /thread\.is_thread_reply === true/);
+  assert.match(prompt, /thread\.root_message_id/);
+  assert.match(prompt, /treat the message as top-level/i);
+  assert.doesNotMatch(prompt, /if a message includes `thread_parent_id`/i);
+});

@@ -153,7 +153,7 @@ test("MCP local chat keeps quote-replies top-level and only threads with an expl
   ) as Array<Record<string, unknown>>;
   const readableQuote = readable.find((entry) => entry.id === quoteReply.id);
   const readableThread = readable.find((entry) => entry.id === threadReply.id);
-  assert.equal(readableQuote?.thread_root_id, quoteReply.id);
+  assert.equal(Boolean(readableQuote && "thread_root_id" in readableQuote), false);
   assert.equal((readableQuote?.thread as Record<string, unknown>).is_thread_reply, false);
   assert.equal(readableThread?.thread_root_id, root.id);
   assert.equal((readableThread?.thread as Record<string, unknown>).is_thread_reply, true);
