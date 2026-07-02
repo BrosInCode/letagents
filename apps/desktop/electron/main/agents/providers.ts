@@ -14,6 +14,10 @@ import {
   installLetAgentsMcpServer,
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
+import {
+  firstRedactedCodexAppServerOutputLine,
+  sensitiveCodexAppServerEnvValues,
+} from "./codex-app-server.js";
 import { codexInstallCommand } from "./codex-install.js";
 import { getOpenModelSettingsStatus } from "./open-model-settings.js";
 import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
@@ -28,6 +32,7 @@ type ExecResult = {
   stdout: string;
   stderr: string;
   errorCode: string | null;
+  redactions: string[];
 };
 
 type ExecOptions = {
@@ -141,13 +146,14 @@ async function execFileWithTimeout(
   options: ExecOptions = {},
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
+    const env = options.env || process.env;
     const child = execFile(
       command,
       args,
       {
         timeout: COMMAND_TIMEOUT_MS,
         cwd: options.cwd,
-        env: options.env,
+        env,
       },
       (error, stdout, stderr) => {
         const nodeError = error as NodeJS.ErrnoException | null;
@@ -156,6 +162,7 @@ async function execFileWithTimeout(
           stdout: String(stdout || ""),
           stderr: String(stderr || ""),
           errorCode: nodeError?.code ? String(nodeError.code) : null,
+          redactions: sensitiveCodexAppServerEnvValues(env),
         });
       },
     );
@@ -168,11 +175,11 @@ function commandMissing(result: ExecResult): boolean {
 }
 
 function firstOutputLine(result: ExecResult): string | null {
-  const line = `${result.stdout}\n${result.stderr}`
-    .split(/\r?\n/)
-    .map((entry) => entry.trim())
-    .find(Boolean);
-  return line || null;
+  return firstRedactedCodexAppServerOutputLine(
+    result.stdout,
+    result.stderr,
+    result.redactions,
+  );
 }
 
 async function getProviderMcpStatus(
@@ -406,6 +413,21 @@ async function openModelPreflight(
   }
 
   const version = firstOutputLine(versionResult);
+  const appServerResult = await execFileWithTimeout(command, ["app-server", "--help"]);
+  if (!appServerResult.ok) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "The Codex app-server could not be checked.",
+      detail: firstOutputLine(appServerResult) ||
+        "Open Model agents need a Codex CLI build with app-server support. Update Codex, then try again.",
+      nextAction: "install_runtime",
+      version,
+      mcpStatus,
+    };
+  }
+
   const settings = await getOpenModelSettingsStatus();
   if (settings.error) {
     return {

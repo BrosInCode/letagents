@@ -66,7 +66,11 @@ const { suggestLetAgentsCodename } = await import("../main/agents/codenames.js")
 const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
 const {
   codexAppServerLaunchArgs,
+  firstRedactedCodexAppServerOutputLine,
   launchCodexAppServer,
+  redactCodexAppServerOutput,
+  sensitiveCodexAppServerConfigValues,
+  sensitiveCodexAppServerEnvValues,
   waitForLaunchedCodexAppServer,
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
@@ -103,6 +107,20 @@ import type {
   DesktopCursorLiveSessionState,
   StoredAgentSessionState,
 } from "../main/agents/state.js";
+
+type CodexAppServerLaunchForTest = ReturnType<typeof launchCodexAppServer>;
+type CodexAppServerExitForTest = Awaited<CodexAppServerLaunchForTest["exited"]>;
+
+async function waitForCodexLaunchExitForTest(
+  launch: CodexAppServerLaunchForTest,
+): Promise<CodexAppServerExitForTest> {
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    return await launch.exited;
+  } finally {
+    clearInterval(keepAlive);
+  }
+}
 
 test.after(() => {
   delete process.env.LETAGENTS_STATE_PATH;
@@ -2336,13 +2354,175 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
     "ws://127.0.0.1:1",
     "letagents-codex-missing-bin-for-test",
   );
-  const exit = await launch.exited;
+  const exit = await waitForCodexLaunchExitForTest(launch);
 
   assert.equal(exit.type, "error");
   if (exit.type !== "error") {
     assert.fail("Expected a spawn error from the missing Codex binary.");
   }
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
+});
+
+test("Codex app-server launcher captures early process output without leaking env secrets", async () => {
+  const bin = join(tempDir, "codex-failing-app-server");
+  const secret = "open-model-secret-for-test";
+  writeFileSync(
+    bin,
+    [
+      "#!/usr/bin/env node",
+      "const secret = process.env.LETAGENTS_OPEN_MODEL_API_KEY || '';",
+      "process.stderr.write('fatal app-server key ');",
+      "process.stderr.write(secret.slice(0, 7));",
+      "setTimeout(() => {",
+      "  process.stderr.write(secret.slice(7) + '\\n');",
+      "  process.exit(1);",
+      "}, 10);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+    env: { LETAGENTS_OPEN_MODEL_API_KEY: secret },
+  });
+  const exit = await waitForCodexLaunchExitForTest(launch);
+
+  assert.equal(exit.type, "exit");
+  assert.match(exit.output?.stderr ?? "", /fatal app-server key \[redacted\]/);
+  assert.doesNotMatch(exit.output?.stderr ?? "", new RegExp(secret));
+});
+
+test("Codex app-server launcher redacts inherited environment secrets", async () => {
+  const bin = join(tempDir, "codex-failing-app-server-inherited-env");
+  const secret = "inherited-token-secret-for-test";
+  const previousToken = process.env.LETAGENTS_TOKEN;
+  process.env.LETAGENTS_TOKEN = secret;
+  writeFileSync(
+    bin,
+    "#!/bin/sh\nprintf 'fatal inherited token %s\\n' \"$LETAGENTS_TOKEN\" >&2\nexit 1\n",
+    { mode: 0o755 },
+  );
+
+  try {
+    const launch = launchCodexAppServer("ws://127.0.0.1:1", bin);
+    const exit = await waitForCodexLaunchExitForTest(launch);
+
+    assert.equal(exit.type, "exit");
+    assert.match(exit.output?.stderr ?? "", /fatal inherited token \[redacted\]/);
+    assert.doesNotMatch(exit.output?.stderr ?? "", new RegExp(secret));
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.LETAGENTS_TOKEN;
+    } else {
+      process.env.LETAGENTS_TOKEN = previousToken;
+    }
+  }
+});
+
+test("Codex app-server launcher redacts split inherited secrets after parent exit", async () => {
+  const bin = join(tempDir, "codex-failing-app-server-late-stderr");
+  const secret = "late-inherited-token-secret-for-test";
+  const previousToken = process.env.LETAGENTS_TOKEN;
+  const lateTailScript = `setTimeout(() => { process.stderr.write(${JSON.stringify(secret.slice(7) + "\n")}); }, 100);`;
+  process.env.LETAGENTS_TOKEN = secret;
+  writeFileSync(
+    bin,
+    [
+      "#!/usr/bin/env node",
+      "const { spawn } = require('node:child_process');",
+      "const secret = process.env.LETAGENTS_TOKEN || '';",
+      "process.stderr.write('fatal late token ' + secret.slice(0, 7));",
+      "spawn(process.execPath, [",
+      "  '-e',",
+      `  ${JSON.stringify(lateTailScript)},`,
+      "], { stdio: ['ignore', 'ignore', process.stderr] });",
+      "process.exit(1);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  try {
+    const launch = launchCodexAppServer("ws://127.0.0.1:1", bin);
+    const exit = await waitForCodexLaunchExitForTest(launch);
+
+    assert.equal(exit.type, "exit");
+    assert.match(exit.output?.stderr ?? "", /fatal late token \[redacted\]/);
+    assert.doesNotMatch(exit.output?.stderr ?? "", new RegExp(secret));
+    assert.doesNotMatch(exit.output?.stderr ?? "", /late-inherited-token/);
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.LETAGENTS_TOKEN;
+    } else {
+      process.env.LETAGENTS_TOKEN = previousToken;
+    }
+  }
+});
+
+test("Codex app-server launcher suppresses partial output when stdio does not close", async () => {
+  const bin = join(tempDir, "codex-failing-app-server-held-stderr");
+  const secret = "abcdefghijklmnopqrstuvwxyz1234567890";
+  const previousToken = process.env.LETAGENTS_TOKEN;
+  process.env.LETAGENTS_TOKEN = secret;
+  writeFileSync(
+    bin,
+    [
+      "#!/usr/bin/env node",
+      "const { spawn } = require('node:child_process');",
+      "const secret = process.env.LETAGENTS_TOKEN || '';",
+      "process.stderr.write('fatal held token ' + secret.slice(0, 12));",
+      "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 800);'], {",
+      "  stdio: ['ignore', 'ignore', process.stderr],",
+      "});",
+      "process.exit(1);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  try {
+    const launch = launchCodexAppServer("ws://127.0.0.1:1", bin);
+    const exit = await waitForCodexLaunchExitForTest(launch);
+
+    assert.equal(exit.type, "exit");
+    assert.equal(exit.output?.truncated, true);
+    assert.equal(exit.output?.stderr, "");
+    assert.doesNotMatch(JSON.stringify(exit.output), new RegExp(secret.slice(0, 12)));
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.LETAGENTS_TOKEN;
+    } else {
+      process.env.LETAGENTS_TOKEN = previousToken;
+    }
+  }
+});
+
+test("Codex app-server launcher redacts sensitive endpoint config values", () => {
+  const endpoint = "https://user:pass@example.com/v1?api_key=query-secret-for-test";
+  const redactions = sensitiveCodexAppServerConfigValues([
+    `model_providers.letagents_open_model.base_url=${JSON.stringify(endpoint)}`,
+  ]);
+  const output = redactCodexAppServerOutput(
+    `failed with ${endpoint} user pass query-secret-for-test`,
+    redactions,
+  );
+
+  assert.match(output, /failed with \[redacted\]/);
+  assert.doesNotMatch(output, /user/);
+  assert.doesNotMatch(output, /pass/);
+  assert.doesNotMatch(output, /query-secret-for-test/);
+});
+
+test("Codex app-server output line redacts inherited secrets for provider preflight", () => {
+  const secret = "preflight-inherited-token-secret-for-test";
+  const detail = firstRedactedCodexAppServerOutputLine(
+    "",
+    `app-server failed token ${secret}\n`,
+    sensitiveCodexAppServerEnvValues({ LETAGENTS_TOKEN: secret }),
+  );
+
+  assert.equal(detail, "app-server failed token [redacted]");
+  assert.doesNotMatch(detail ?? "", new RegExp(secret));
 });
 
 test("Codex app-server launcher trusts the selected managed worktree", () => {
@@ -2384,6 +2564,67 @@ test("Codex app-server readiness wait fails on early launched-process errors", a
   }
 
   assert.equal(fetchCalls, 1);
+});
+
+test("Codex app-server readiness wait includes captured early-exit diagnostics", async () => {
+  const originalFetch = globalThis.fetch;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    throw new Error("not ready yet");
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => waitForLaunchedCodexAppServer("ws://127.0.0.1:4500", {
+        pid: 12345,
+        exited: Promise.resolve({
+          type: "exit",
+          code: 1,
+          signal: null,
+          output: {
+            stdout: "",
+            stderr: "fatal app-server config",
+            truncated: false,
+          },
+        }),
+      }, 1_000),
+      /Codex app-server exited before it became ready: code 1: stderr: fatal app-server config/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Codex app-server readiness wait prefers late child exit over generic timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    throw new Error("not ready yet");
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => waitForLaunchedCodexAppServer("ws://127.0.0.1:4500", {
+        pid: 12345,
+        exited: new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              type: "exit",
+              code: 1,
+              signal: null,
+              output: {
+                stdout: "",
+                stderr: "fatal after timeout",
+                truncated: false,
+              },
+            });
+          }, 300);
+        }),
+      }, 1),
+      /Codex app-server exited before it became ready: code 1: stderr: fatal after timeout/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Codex install commands use official non-interactive installers", () => {
