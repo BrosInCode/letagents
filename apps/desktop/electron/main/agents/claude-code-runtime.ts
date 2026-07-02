@@ -562,7 +562,6 @@ export function createDesktopClaudeCodeRuntime(
           behavior: "deny",
           message: "Managed Claude Code sessions may not call LetAgents room, rental, or provisioning tools.",
           toolUseID: options.toolUseID,
-          decisionClassification: "user_reject",
         };
       }
       if (isAutoAllowedManagedAgentTool(toolName)) {
@@ -578,7 +577,6 @@ export function createDesktopClaudeCodeRuntime(
           behavior: "deny",
           message: "This Claude Code managed agent is running with the read-only permission profile.",
           toolUseID: options.toolUseID,
-          decisionClassification: "user_reject",
         };
       }
       if (profile.id === "full_access") {
@@ -621,7 +619,6 @@ export function createDesktopClaudeCodeRuntime(
         behavior: "deny",
         message: "Claude Code session is no longer available.",
         toolUseID: input.toolUseId,
-        decisionClassification: "user_reject",
       };
     }
     const request = createManagedAgentPermissionRequest({
@@ -688,7 +685,6 @@ export function createDesktopClaudeCodeRuntime(
       return {
         behavior: "allow",
         toolUseID: input.toolUseId,
-        decisionClassification: "user_temporary",
       };
     }
     return {
@@ -699,7 +695,6 @@ export function createDesktopClaudeCodeRuntime(
           : "Permission denied by LetAgents Desktop."),
       interrupt: decision.source === "system",
       toolUseID: input.toolUseId,
-      decisionClassification: decision.source === "system" ? "user_reject" : "user_reject",
     };
   }
 
