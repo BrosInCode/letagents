@@ -186,9 +186,20 @@ export function isAutoAllowedClaudeCodeTool(toolName: string | null | undefined)
   return isAutoAllowedManagedAgentTool(toolName);
 }
 
+export function allowClaudeCodeToolUse(
+  input: Record<string, unknown>,
+  toolUseID: string,
+): PermissionResult {
+  return {
+    behavior: "allow",
+    updatedInput: input,
+    toolUseID,
+  };
+}
+
 export const claudeCodeDefaultCanUseTool: CanUseTool = async (
   toolName,
-  _input,
+  input,
   options,
 ): Promise<PermissionResult> => {
   if (isBlockedClaudeCodeTool(toolName)) {
@@ -199,10 +210,7 @@ export const claudeCodeDefaultCanUseTool: CanUseTool = async (
     };
   }
   if (isAutoAllowedClaudeCodeTool(toolName)) {
-    return {
-      behavior: "allow",
-      toolUseID: options.toolUseID,
-    };
+    return allowClaudeCodeToolUse(input, options.toolUseID);
   }
   return {
     behavior: "deny",

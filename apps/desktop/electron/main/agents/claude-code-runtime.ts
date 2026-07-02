@@ -39,6 +39,7 @@ import {
   type ManagedAgentPermissionDecision,
 } from "./managed-agent-permissions.js";
 import {
+  allowClaudeCodeToolUse,
   productionClaudeCodeRunner,
   type ClaudeCodeRunner,
   isBlockedClaudeCodeTool,
@@ -565,10 +566,7 @@ export function createDesktopClaudeCodeRuntime(
         };
       }
       if (isAutoAllowedManagedAgentTool(toolName)) {
-        return {
-          behavior: "allow",
-          toolUseID: options.toolUseID,
-        };
+        return allowClaudeCodeToolUse(toolInput, options.toolUseID);
       }
       const session = getStoredClaudeCodeLiveSession(input.sessionId);
       const profile = managedAgentPermissionProfileForProvider("claude-code", session?.permission_profile_id);
@@ -580,10 +578,7 @@ export function createDesktopClaudeCodeRuntime(
         };
       }
       if (profile.id === "full_access") {
-        return {
-          behavior: "allow",
-          toolUseID: options.toolUseID,
-        };
+        return allowClaudeCodeToolUse(toolInput, options.toolUseID);
       }
       return await requestClaudeCodeToolPermission({
         ...input,
@@ -682,10 +677,7 @@ export function createDesktopClaudeCodeRuntime(
     emitSessionUpdate(cleared);
 
     if (decision.behavior === "allow") {
-      return {
-        behavior: "allow",
-        toolUseID: input.toolUseId,
-      };
+      return allowClaudeCodeToolUse(input.toolInput, input.toolUseId);
     }
     return {
       behavior: "deny",
