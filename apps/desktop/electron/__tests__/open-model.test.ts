@@ -133,7 +133,7 @@ test("openModelCodexLaunch builds provider overrides and passes the key via env 
     ),
   );
   assert.ok(
-    launch.configOverrides.includes('model_providers.letagents_open_model.wire_api="chat"'),
+    launch.configOverrides.includes('model_providers.letagents_open_model.wire_api="responses"'),
   );
   assert.ok(
     launch.configOverrides.includes(

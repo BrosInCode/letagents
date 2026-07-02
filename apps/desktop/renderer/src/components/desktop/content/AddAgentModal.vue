@@ -103,7 +103,7 @@
             >
               <span>Model endpoint</span>
               <label>
-                <small>Endpoint URL (OpenAI-compatible)</small>
+                <small>Endpoint URL (OpenAI Responses-compatible)</small>
                 <input
                   v-model="openModelBaseUrl"
                   type="url"

@@ -31,7 +31,9 @@ export function openModelCodexLaunch(settings: StoredOpenModelSettings): OpenMod
     `model_provider="${OPEN_MODEL_PROVIDER_KEY}"`,
     `model_providers.${OPEN_MODEL_PROVIDER_KEY}.name="LetAgents Open Model"`,
     `model_providers.${OPEN_MODEL_PROVIDER_KEY}.base_url=${JSON.stringify(settings.baseUrl)}`,
-    `model_providers.${OPEN_MODEL_PROVIDER_KEY}.wire_api="chat"`,
+    // Codex >= 0.142 removed the chat-completions wire protocol; custom
+    // providers must expose the OpenAI Responses API (openai/codex#7782).
+    `model_providers.${OPEN_MODEL_PROVIDER_KEY}.wire_api="responses"`,
     // Codex hands its process env to model-run shell commands, so without
     // this exclusion the managed model could read the user's API key with a
     // plain printenv. env_key reads from the app-server's own process env
