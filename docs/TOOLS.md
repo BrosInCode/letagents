@@ -101,6 +101,8 @@ object. Use `send_thread_message` with `thread_parent_id` to continue that topic
 
 Long-poll for new messages. Blocks until messages arrive or timeout elapses.
 Threaded replies include the same thread metadata as `read_messages`.
+Silent messages may be skipped; when `last_observed_message_id` is present,
+use it as the next `after_message_id` even if `messages` is empty.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

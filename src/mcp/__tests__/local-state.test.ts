@@ -31,6 +31,7 @@ import {
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
 } from "../local-state.js";
+import { resolveWaitAgentSession } from "../server/tools/messages/wait-tool.js";
 
 function withTempLocalState(callback: () => void): void {
   const previousStatePath = process.env.LETAGENTS_STATE_PATH;
@@ -200,6 +201,9 @@ test("agent session helpers maintain current sessions per room and skip ended se
     assert.deepEqual(getCurrentAgentSession("room_1"), oldSession);
     assert.deepEqual(getCurrentAgentSession("room_2"), newSession);
     assert.deepEqual(getCurrentAgentSession(), newSession);
+    assert.equal(resolveWaitAgentSession("room_1", null), null);
+    assert.equal(resolveWaitAgentSession("room_1", undefined), null);
+    assert.deepEqual(resolveWaitAgentSession("room_1", oldSession.session_id), oldSession);
 
     const ended = endStoredAgentSession("agent_session_new", "2026-05-28T00:06:00.000Z");
     assert.equal(ended?.ended_at, "2026-05-28T00:06:00.000Z");

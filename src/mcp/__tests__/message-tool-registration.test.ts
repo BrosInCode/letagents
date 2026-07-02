@@ -6,6 +6,8 @@ import { buildSendMessageRequestBody } from "../server/tools/messages/send-tool.
 import {
   buildWaitForMessagesHistoryPageRequest,
   buildWaitForMessagesRequestOptions,
+  filterSilentActivationMessages,
+  resolveEffectiveAfterMessageId,
 } from "../server/tools/messages/wait-tool.js";
 import {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
@@ -155,4 +157,72 @@ test("wait_for_messages paginated history requests preserve worker delivery head
   assert.deepEqual(request.options, { headers: deliveryHeaders });
   assert.equal(request.room_path("room_1"), "/rooms/room_1/messages?after=msg_1&include_prompt_only=1");
   assert.equal(request.project_path("project_1"), "/projects/project_1/messages?after=msg_1&include_prompt_only=1");
+});
+
+test("wait_for_messages filters silent activation messages without losing cursor progress", () => {
+  const result = filterSilentActivationMessages([
+    {
+      id: "msg_1",
+      text: "@NorthHarbor please review",
+      activation: {
+        for_current_agent: {
+          decision: "silent",
+          reason: "explicit_other_mention",
+          addressed: false,
+        },
+      },
+    },
+    {
+      id: "msg_2",
+      text: "general update",
+      activation: {
+        for_current_agent: {
+          decision: "unclear",
+          reason: "unaddressed",
+          addressed: false,
+        },
+      },
+    },
+    {
+      id: "msg_3",
+      text: "own echo",
+      activation: {
+        for_current_agent: {
+          decision: "silent",
+          reason: "self_message",
+          addressed: false,
+        },
+      },
+    },
+  ]);
+
+  assert.deepEqual(result.messages.map((message) => message.id), ["msg_2"]);
+  assert.deepEqual(result.skipped_message_ids, ["msg_1", "msg_3"]);
+  assert.equal(result.last_observed_message_id, "msg_3");
+});
+
+test("wait_for_messages honors explicit cursors instead of forcing stored progress", () => {
+  assert.equal(
+    resolveEffectiveAfterMessageId({
+      requestedAfterMessageId: "msg_1",
+      rememberedLastMessageId: "msg_3",
+    }),
+    "msg_1",
+  );
+
+  assert.equal(
+    resolveEffectiveAfterMessageId({
+      requestedAfterMessageId: "msg_4",
+      rememberedLastMessageId: "msg_3",
+    }),
+    "msg_4",
+  );
+
+  assert.equal(
+    resolveEffectiveAfterMessageId({
+      requestedAfterMessageId: undefined,
+      rememberedLastMessageId: "msg_3",
+    }),
+    undefined,
+  );
 });

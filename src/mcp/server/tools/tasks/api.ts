@@ -154,11 +154,21 @@ export async function postCanonicalTaskAction<T>(
         typeof body.target_actor_key === "string" && body.target_actor_key.trim()
           ? body.target_actor_key.trim()
           : null;
+      const targetAgentSessionId =
+        typeof body.target_agent_session_id === "string" && body.target_agent_session_id.trim()
+          ? body.target_agent_session_id.trim()
+          : null;
+      const targetActorInstanceId =
+        typeof body.target_actor_instance_id === "string" && body.target_actor_instance_id.trim()
+          ? body.target_actor_instance_id.trim()
+          : null;
       const task = targetActorKey
         ? await updateLocalTask(sqliteRoomId, taskId, {
-            status: "assigned",
+            ...(existingTask.status === "accepted" ? { status: "assigned" } : {}),
             assignee: targetActorKey,
             assignee_agent_key: targetActorKey,
+            assignee_agent_instance_id: targetActorInstanceId,
+            assignee_agent_session_id: targetAgentSessionId,
           })
         : existingTask;
       return {

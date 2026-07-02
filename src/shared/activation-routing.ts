@@ -1,5 +1,3 @@
-import type { ResolvedRequestAgentIdentity } from "../request/agent-identity.js";
-
 export type AgentMessageActivationDecision = "activate" | "silent" | "unclear";
 
 export type AgentMessageActivationReason =
@@ -9,6 +7,7 @@ export type AgentMessageActivationReason =
   | "broadcast"
   | "reply_target"
   | "thread_participant"
+  | "task_owner"
   | "unaddressed";
 
 export interface AgentMessageActivation {
@@ -33,10 +32,27 @@ type MessageLike = {
   reply_to?: { sender?: unknown } | null;
 };
 
-type ActivationIdentity = Pick<
-  ResolvedRequestAgentIdentity,
-  "actor_label" | "agent_key" | "display_name" | "session_kind"
->;
+export type ActivationIdentity = {
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  agent_session_id: string | null;
+  display_name: string;
+  session_kind: string;
+};
+
+type ActivationTaskLeaseLike = {
+  kind: string;
+  status: string;
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  agent_session_id: string | null;
+};
+
+export type AgentMessageActivationContext = {
+  activeTaskLeases?: readonly ActivationTaskLeaseLike[];
+};
 
 const NON_AGENT_AT_HANDLES = new Set([
   "charset",
@@ -60,14 +76,22 @@ const NON_AGENT_AT_HANDLES = new Set([
   "viewport",
 ]);
 
+const TASK_OWNER_FOLLOW_UP_PATTERNS = [
+  /^(?:ok(?:ay)?|right|cool|great|nice)?[\s,]*(?:try again|retry|rerun|re-run|continue|proceed|go ahead|carry on)\b/,
+  /^(?:ok(?:ay)?|right|cool|great|nice)?[\s,]*(?:open|create|make|raise)\s+(?:a\s+)?pr\b/,
+  /^(?:ok(?:ay)?|right|cool|great|nice)?[\s,]*(?:push|merge|ship|fix|test|run|update)\s+(?:it|that|this|again|tests?|the\s+tests?|ci)\b/,
+  /\b(?:try again|open\s+(?:a\s+)?pr|create\s+(?:a\s+)?pr|make\s+(?:a\s+)?pr|push it|merge it|update it)\b/,
+];
+
 export function attachAgentMessageActivation<T extends MessageLike>(
   message: T,
   identity: ActivationIdentity,
+  context: AgentMessageActivationContext = {},
 ): T & { activation: AgentMessageActivation } {
   return {
     ...message,
     activation: {
-      for_current_agent: decideAgentMessageActivation(message, identity),
+      for_current_agent: decideAgentMessageActivation(message, identity, context),
     },
   };
 }
@@ -75,17 +99,19 @@ export function attachAgentMessageActivation<T extends MessageLike>(
 export function attachAgentMessageActivations<T extends MessageLike>(
   messages: readonly T[],
   identity: ActivationIdentity | null,
+  context: AgentMessageActivationContext = {},
 ): T[] | Array<T & { activation: AgentMessageActivation }> {
   if (!identity || identity.session_kind !== "worker") {
     return [...messages];
   }
 
-  return messages.map((message) => attachAgentMessageActivation(message, identity));
+  return messages.map((message) => attachAgentMessageActivation(message, identity, context));
 }
 
 export function decideAgentMessageActivation(
   message: MessageLike,
   identity: ActivationIdentity,
+  context: AgentMessageActivationContext = {},
 ): AgentMessageActivation["for_current_agent"] {
   if (senderMatchesIdentity(message.sender, identity)) {
     return decision("silent", "self_message");
@@ -111,6 +137,11 @@ export function decideAgentMessageActivation(
 
   if (isThreadReply(message) && threadParticipantsIncludeIdentity(message, identity)) {
     return decision("activate", "thread_participant");
+  }
+
+  const taskOwnerDecision = decideTaskOwnerActivation(message, identity, context);
+  if (taskOwnerDecision) {
+    return taskOwnerDecision;
   }
 
   return decision("unclear", "unaddressed");
@@ -146,6 +177,136 @@ function threadParticipantsIncludeIdentity(
   return senders.some((sender) => senderMatchesIdentity(sender, identity));
 }
 
+function decideTaskOwnerActivation(
+  message: MessageLike,
+  identity: ActivationIdentity,
+  context: AgentMessageActivationContext,
+): AgentMessageActivation["for_current_agent"] | null {
+  if (!isTaskOwnerFollowUp(message.text)) {
+    return null;
+  }
+
+  const owners = uniqueActiveWorkOwners(context.activeTaskLeases ?? []);
+  if (owners.length !== 1) {
+    return null;
+  }
+
+  const owner = owners[0];
+  if (senderMatchesLeaseOwner(message.sender, owner)) {
+    return null;
+  }
+
+  if (leaseOwnerMatchesIdentity(owner, identity)) {
+    return decision("activate", "task_owner");
+  }
+
+  if (identityOverlapsLeaseOwner(identity, owner)) {
+    return null;
+  }
+
+  return decision("silent", "task_owner");
+}
+
+function uniqueActiveWorkOwners(leases: readonly ActivationTaskLeaseLike[]): ActivationTaskLeaseLike[] {
+  const ownersByKey = new Map<string, ActivationTaskLeaseLike>();
+
+  for (const lease of leases) {
+    if (lease.kind !== "work" || lease.status !== "active") continue;
+    const key = leaseOwnerKey(lease);
+    if (!key) continue;
+    ownersByKey.set(key, lease);
+  }
+
+  return [...ownersByKey.values()];
+}
+
+function leaseOwnerKey(lease: ActivationTaskLeaseLike): string | null {
+  const sessionId = normalizedString(lease.agent_session_id);
+  if (sessionId) return `session:${sessionId}`;
+
+  const instanceId = normalizedString(lease.agent_instance_id);
+  const agentKey = normalizeSender(lease.agent_key);
+  if (instanceId) return `instance:${agentKey}:${instanceId}`;
+  if (agentKey) return `agent:${agentKey}`;
+
+  const actorLabel = normalizeSender(lease.actor_label);
+  return actorLabel ? `label:${actorLabel}` : null;
+}
+
+function leaseOwnerMatchesIdentity(
+  lease: ActivationTaskLeaseLike,
+  identity: ActivationIdentity,
+): boolean {
+  const leaseSessionId = normalizedString(lease.agent_session_id);
+  if (leaseSessionId) {
+    return leaseSessionId === normalizedString(identity.agent_session_id);
+  }
+
+  const leaseInstanceId = normalizedString(lease.agent_instance_id);
+  if (leaseInstanceId) {
+    return (
+      leaseInstanceId === normalizedString(identity.agent_instance_id) &&
+      normalizeSender(lease.agent_key) === normalizeSender(identity.agent_key)
+    );
+  }
+
+  const leaseAgentKey = normalizeSender(lease.agent_key);
+  if (leaseAgentKey) {
+    return leaseAgentKey === normalizeSender(identity.agent_key);
+  }
+
+  return senderMatchesIdentity(lease.actor_label, identity);
+}
+
+function senderMatchesLeaseOwner(sender: unknown, lease: ActivationTaskLeaseLike): boolean {
+  const normalizedSender = normalizeSender(sender);
+  if (!normalizedSender) return false;
+
+  return leaseOwnerAliases(lease).has(normalizedSender);
+}
+
+function identityOverlapsLeaseOwner(
+  identity: ActivationIdentity,
+  lease: ActivationTaskLeaseLike,
+): boolean {
+  const identityAliasesForOwner = aliasesForValues([
+    identity.actor_label,
+    identity.display_name,
+    identity.agent_key,
+    identity.agent_instance_id,
+    identity.agent_session_id,
+  ]);
+
+  for (const ownerAlias of leaseOwnerAliases(lease)) {
+    if (identityAliasesForOwner.has(ownerAlias)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function leaseOwnerAliases(lease: ActivationTaskLeaseLike): Set<string> {
+  return aliasesForValues([
+    lease.actor_label,
+    ...String(lease.actor_label || "").split("|"),
+    lease.agent_key,
+    lease.agent_instance_id,
+    lease.agent_session_id,
+  ]);
+}
+
+function aliasesForValues(values: readonly unknown[]): Set<string> {
+  const aliases = new Set<string>();
+  for (const value of values) {
+    const senderAlias = normalizeSender(value);
+    if (senderAlias) aliases.add(senderAlias);
+    const handleAlias = normalizeHandle(value);
+    if (handleAlias) aliases.add(handleAlias);
+  }
+  return aliases;
+}
+
 function senderMatchesIdentity(sender: unknown, identity: ActivationIdentity): boolean {
   const normalizedSender = normalizeSender(sender);
   if (!normalizedSender) return false;
@@ -160,17 +321,13 @@ function senderMatchesIdentity(sender: unknown, identity: ActivationIdentity): b
 
 function identityAliases(identity: ActivationIdentity): Set<string> {
   const aliases = new Set<string>();
-  for (const value of [
+  const values = [
     identity.actor_label,
     identity.display_name,
     identity.agent_key,
     identity.agent_key.split("/").pop(),
-  ]) {
-    const senderAlias = normalizeSender(value);
-    if (senderAlias) aliases.add(senderAlias);
-    const handleAlias = normalizeHandle(value);
-    if (handleAlias) aliases.add(handleAlias);
-  }
+  ];
+  for (const alias of aliasesForValues(values)) aliases.add(alias);
   return aliases;
 }
 
@@ -200,6 +357,12 @@ function isLikelyAgentMentionHandle(handle: string): boolean {
 function hasBroadcastAddress(text: unknown): boolean {
   const raw = typeof text === "string" ? text.toLowerCase() : "";
   return /\b(everyone|all agents|you guys|both of you|any agent|whoever owns this)\b/.test(raw);
+}
+
+function isTaskOwnerFollowUp(text: unknown): boolean {
+  const raw = typeof text === "string" ? text.trim().toLowerCase() : "";
+  if (!raw) return false;
+  return TASK_OWNER_FOLLOW_UP_PATTERNS.some((pattern) => pattern.test(raw));
 }
 
 function normalizedString(value: unknown): string {

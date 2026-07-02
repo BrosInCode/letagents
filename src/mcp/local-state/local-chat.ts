@@ -46,8 +46,12 @@ export type LocalTask = {
   status: string;
   assignee: string | null;
   assignee_agent_key: string | null;
+  assignee_agent_instance_id: string | null;
+  assignee_agent_session_id: string | null;
   created_by: string | null;
   pr_url: string | null;
+  workflow_artifacts: Array<Record<string, unknown>>;
+  workflow_refs: Array<Record<string, unknown>>;
   active_leases?: Array<{
     id: string;
     kind: "review" | string;
@@ -311,6 +315,8 @@ async function getDb(): Promise<SqliteDatabase> {
       status TEXT NOT NULL,
       assignee TEXT,
       assignee_agent_key TEXT,
+      assignee_agent_instance_id TEXT,
+      assignee_agent_session_id TEXT,
       created_by TEXT,
       pr_url TEXT,
       workflow_artifacts_json TEXT,
@@ -334,6 +340,8 @@ async function getDb(): Promise<SqliteDatabase> {
   addColumnIfMissing(db, "local_chat_messages", "thread_root_number", "INTEGER");
   addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
   addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "assignee_agent_instance_id", "TEXT");
+  addColumnIfMissing(db, "local_tasks", "assignee_agent_session_id", "TEXT");
   addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
   addColumnIfMissing(db, "local_tasks", "workflow_refs_json", "TEXT");
   addColumnIfMissing(db, "local_tasks", "sync_started_at", "TEXT");
@@ -749,8 +757,14 @@ function mapTaskRow(row: Record<string, unknown>): LocalTask {
     assignee: typeof row.assignee === "string" ? row.assignee : null,
     assignee_agent_key:
       typeof row.assignee_agent_key === "string" ? row.assignee_agent_key : null,
+    assignee_agent_instance_id:
+      typeof row.assignee_agent_instance_id === "string" ? row.assignee_agent_instance_id : null,
+    assignee_agent_session_id:
+      typeof row.assignee_agent_session_id === "string" ? row.assignee_agent_session_id : null,
     created_by: typeof row.created_by === "string" ? row.created_by : null,
     pr_url: typeof row.pr_url === "string" ? row.pr_url : null,
+    workflow_artifacts: parseJsonArray(row.workflow_artifacts_json, []),
+    workflow_refs: parseJsonArray(row.workflow_refs_json, []),
     active_leases: reviewLeaseId
       ? [
           {
@@ -781,6 +795,16 @@ function mapTaskRow(row: Record<string, unknown>): LocalTask {
   };
 }
 
+function parseJsonArray<T>(value: unknown, fallback: T[]): T[] {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed as T[] : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export async function addLocalTask(
   roomId: string,
   input: {
@@ -803,10 +827,11 @@ export async function addLocalTask(
       .prepare(`
         INSERT INTO local_tasks (
           room_id, task_id, title, description, status, assignee, assignee_agent_key,
+          assignee_agent_instance_id, assignee_agent_session_id,
           created_by, pr_url, workflow_artifacts_json, workflow_refs_json,
           synced_cloud_id, sync_key, sync_started_at, sync_dirty, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'proposed', NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, NULL, 1, ?, ?)
+        VALUES (?, ?, ?, ?, 'proposed', NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, NULL, 1, ?, ?)
       `)
       .run(
         trimmedRoomId,
@@ -878,6 +903,32 @@ export async function updateLocalTask(
         ? patch.status.trim()
         : current.status
       : resolveLocalTaskStatus(current.status, patch.status);
+  const assigneeAgentKey =
+    patch.assignee_agent_key === undefined
+      ? current.assignee_agent_key
+      : typeof patch.assignee_agent_key === "string"
+        ? patch.assignee_agent_key
+        : null;
+  const assigneeAgentInstanceId =
+    patch.assignee_agent_key === undefined
+      ? current.assignee_agent_instance_id
+      : assigneeAgentKey && typeof patch.assignee_agent_instance_id === "string"
+        ? patch.assignee_agent_instance_id
+        : assigneeAgentKey && typeof patch.actor_instance_id === "string"
+          ? patch.actor_instance_id
+          : null;
+  const assigneeAgentSessionId =
+    patch.assignee_agent_key === undefined
+      ? current.assignee_agent_session_id
+      : assigneeAgentKey && typeof patch.assignee_agent_session_id === "string"
+        ? patch.assignee_agent_session_id
+        : assigneeAgentKey && typeof patch.agent_session_id === "string"
+          ? patch.agent_session_id
+          : null;
+  const workflowArtifacts =
+    patch.workflow_artifacts === undefined
+      ? JSON.stringify(current.workflow_artifacts)
+      : JSON.stringify(Array.isArray(patch.workflow_artifacts) ? patch.workflow_artifacts : []);
   const now = new Date().toISOString();
   const database = await getDb();
   database
@@ -886,7 +937,10 @@ export async function updateLocalTask(
       SET status = ?,
           assignee = ?,
           assignee_agent_key = ?,
+          assignee_agent_instance_id = ?,
+          assignee_agent_session_id = ?,
           pr_url = ?,
+          workflow_artifacts_json = ?,
           sync_dirty = 1,
           updated_at = ?
       WHERE room_id = ? AND task_id = ?
@@ -894,12 +948,11 @@ export async function updateLocalTask(
     .run(
       nextStatus,
       patch.assignee === undefined ? current.assignee : patch.assignee || null,
-      patch.assignee_agent_key === undefined
-        ? current.assignee_agent_key
-        : typeof patch.assignee_agent_key === "string"
-          ? patch.assignee_agent_key
-          : null,
+      assigneeAgentKey,
+      assigneeAgentInstanceId,
+      assigneeAgentSessionId,
       patch.pr_url === undefined ? current.pr_url : patch.pr_url || null,
+      workflowArtifacts,
       now,
       roomId,
       taskId,

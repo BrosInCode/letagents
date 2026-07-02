@@ -43,6 +43,8 @@ test("buildRoomAgentPrompt describes advisory activation metadata", () => {
   const prompt = buildRoomAgentPrompt("join");
 
   assert.match(prompt, /activation\.for_current_agent\.decision/);
+  assert.match(prompt, /last_observed_message_id/);
+  assert.match(prompt, /do not announce skipped messages/);
   assert.match(prompt, /`silent` means terminate silently with no room message/);
   assert.match(prompt, /`unclear` means use the rest of the message\/thread\/task context/);
 });
