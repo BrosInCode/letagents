@@ -5,9 +5,10 @@ import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { tasks } from "./schema.js";
 import { clampLimit, nextRoomScopedNumber, parseScopedId } from "./utils.js";
 import { toTask } from "./mappers.js";
+import { assertConsumeBoardIntentApproval } from "./coordination/board-intents.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
 import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
-import type { Task, TaskOwnershipState, TaskRow, TaskStatus } from "./types.js";
+import type { BoardIntentConsumptionInput, Task, TaskOwnershipState, TaskRow, TaskStatus } from "./types.js";
 
 export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   proposed: ["accepted", "cancelled"],
@@ -44,12 +45,13 @@ export async function createTask(
   title: string,
   createdBy: string,
   description?: string,
-  sourceMessageId?: string
+  sourceMessageId?: string,
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
     room_id: roomId,
-    number: await nextRoomScopedNumber("tasks", roomId),
+    number: 0,
     title,
     description: description ?? null,
     status: "proposed",
@@ -63,7 +65,16 @@ export async function createTask(
     updated_at: now,
   };
 
-  await db.insert(tasks).values(task);
+  if (options?.boardIntentApproval) {
+    await db.transaction(async (tx) => {
+      await assertConsumeBoardIntentApproval(options.boardIntentApproval!, tx);
+      task.number = await nextRoomScopedNumber("tasks", roomId, tx);
+      await tx.insert(tasks).values(task);
+    });
+  } else {
+    task.number = await nextRoomScopedNumber("tasks", roomId);
+    await db.insert(tasks).values(task);
+  }
 
   return toTask(task);
 }
@@ -102,7 +113,7 @@ export async function getOpenTasks(
 
   const conditions = [
     eq(tasks.room_id, roomId),
-    notInArray(tasks.status, ["done", "cancelled"]),
+    notInArray(tasks.status, ["merged", "done", "cancelled"]),
   ];
   if (afterNumber) conditions.push(sql`${tasks.number} > ${afterNumber}`);
 
@@ -262,7 +273,8 @@ export async function updateTask(
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
-  }
+  },
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
 ): Promise<Task | null> {
   const task = await getTaskRowById(roomId, taskId);
   if (!task) return null;
@@ -293,17 +305,28 @@ export async function updateTask(
       });
   const now = new Date().toISOString();
 
-  await db
-    .update(tasks)
-    .set({
-      status: assignment.status,
-      assignee: assignment.assignee,
-      assignee_agent_key: assignment.assignee_agent_key,
-      pr_url: newPrUrl,
-      workflow_artifacts: newWorkflowArtifacts,
-      updated_at: now,
-    })
-    .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+  const writeTaskUpdate = async (executor: Pick<typeof db, "update">) => {
+    await executor
+      .update(tasks)
+      .set({
+        status: assignment.status,
+        assignee: assignment.assignee,
+        assignee_agent_key: assignment.assignee_agent_key,
+        pr_url: newPrUrl,
+        workflow_artifacts: newWorkflowArtifacts,
+        updated_at: now,
+      })
+      .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+  };
+
+  if (options?.boardIntentApproval) {
+    await db.transaction(async (tx) => {
+      await assertConsumeBoardIntentApproval(options.boardIntentApproval!, tx);
+      await writeTaskUpdate(tx);
+    });
+  } else {
+    await writeTaskUpdate(db);
+  }
 
   await syncRoomSharedArtifactsForTask({
     room_id: roomId,

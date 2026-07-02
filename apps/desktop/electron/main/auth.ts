@@ -1,6 +1,7 @@
-import { app, safeStorage } from "electron";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type {
@@ -12,6 +13,43 @@ import type {
 } from "../ipc-types.js";
 import { apiUrl } from "./paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
+
+const require = createRequire(import.meta.url);
+
+interface DesktopSecretStorage {
+  isEncryptionAvailable: () => boolean;
+  encryptString: (value: string) => Buffer;
+  decryptString: (value: Buffer) => string;
+}
+
+function getElectronMain(): {
+  app?: { getPath: (name: "userData") => string };
+  safeStorage?: DesktopSecretStorage;
+} {
+  try {
+    const electron = require("electron") as unknown;
+    return typeof electron === "object" && electron !== null
+      ? electron as {
+          app?: { getPath: (name: "userData") => string };
+          safeStorage?: DesktopSecretStorage;
+        }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function desktopUserDataPath(): string {
+  return getElectronMain().app?.getPath("userData") || homedir();
+}
+
+function desktopSecretStorage(): DesktopSecretStorage {
+  return getElectronMain().safeStorage || {
+    isEncryptionAvailable: () => false,
+    encryptString: (value) => Buffer.from(value, "utf8"),
+    decryptString: (value) => value.toString("utf8"),
+  };
+}
 
 type ApiErrorPayload = {
   error?: string;
@@ -89,7 +127,7 @@ export class DesktopApiError extends Error {
 }
 
 function getAuthStorePath(): string {
-  return join(app.getPath("userData"), "letagents-desktop-auth.json");
+  return join(desktopUserDataPath(), "letagents-desktop-auth.json");
 }
 
 function normalizeAuthAccount(
@@ -109,6 +147,7 @@ function normalizeAuthAccount(
 
 function encryptTokenForStorage(token: string | null): string | null {
   if (!token) return null;
+  const safeStorage = desktopSecretStorage();
   if (!safeStorage.isEncryptionAvailable()) {
     return `plain:${token}`;
   }
@@ -127,13 +166,13 @@ function decryptTokenFromStorage(
 
   if (
     !encryptedToken.startsWith("safe:") ||
-    !safeStorage.isEncryptionAvailable()
+    !desktopSecretStorage().isEncryptionAvailable()
   ) {
     return null;
   }
 
   try {
-    return safeStorage.decryptString(
+    return desktopSecretStorage().decryptString(
       Buffer.from(encryptedToken.slice("safe:".length), "base64"),
     );
   } catch {

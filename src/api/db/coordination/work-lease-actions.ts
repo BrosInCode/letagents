@@ -7,11 +7,13 @@ import {
 import { db } from "../client.js";
 import { room_agent_delivery_sessions, task_leases, tasks } from "../schema.js";
 import { toTask, toTaskLease } from "../mappers.js";
+import { assertConsumeBoardIntentApproval } from "./board-intents.js";
 import {
   resolveTaskAssignmentState,
   type TaskAssignmentPatch,
 } from "../task-assignment.js";
 import type {
+  BoardIntentConsumptionInput,
   Task,
   TaskLease,
   TaskLeaseKind,
@@ -37,6 +39,7 @@ export async function applyTaskWorkLeaseAction(input: {
   disposition_status: "released" | "revoked";
   disposition_reason?: string | null;
   task_updates: TaskAssignmentPatch;
+  board_intent_approval?: BoardIntentConsumptionInput | null;
   new_lease?: {
     agent_key: string;
     actor_label: string;
@@ -151,6 +154,10 @@ export async function applyTaskWorkLeaseAction(input: {
 
     if (!updatedTaskRow) {
       return actionConflict("task_not_found");
+    }
+
+    if (input.board_intent_approval) {
+      await assertConsumeBoardIntentApproval(input.board_intent_approval, tx);
     }
 
     let newLeaseRow: TaskLeaseRow | null = null;

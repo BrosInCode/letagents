@@ -2,9 +2,9 @@ import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
 import { isInviteCode } from "../rooms/routing.js";
-import { github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
+import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
-import type { CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
+import type { BoardIntent, BoardIntentRow, BoardManagerAssignment, BoardManagerAssignmentRow, CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomBoardSettings, RoomBoardSettingsRow, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
   const inviteRoom = isInviteCode(row.id);
@@ -347,6 +347,60 @@ export function toCoordinationEvent(row: CoordinationEventRow): CoordinationEven
     reason: row.reason,
     metadata: row.metadata,
     created_at: row.created_at,
+  };
+}
+
+export function toRoomBoardSettings(row: typeof room_board_settings.$inferSelect | RoomBoardSettingsRow): RoomBoardSettings {
+  return {
+    room_id: row.room_id,
+    manager_mode: row.manager_mode as RoomBoardSettings["manager_mode"],
+    updated_by: row.updated_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function toBoardManagerAssignment(
+  row: typeof board_manager_assignments.$inferSelect | BoardManagerAssignmentRow
+): BoardManagerAssignment {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    agent_session_id: row.agent_session_id,
+    agent_key: row.agent_key,
+    actor_label: row.actor_label,
+    runtime_source: row.runtime_source as BoardManagerAssignment["runtime_source"],
+    assigned_by: row.assigned_by,
+    status: row.status as BoardManagerAssignment["status"],
+    last_heartbeat_at: row.last_heartbeat_at,
+    released_by: row.released_by,
+    release_reason: row.release_reason,
+    released_at: row.released_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function toBoardIntent(row: typeof board_intents.$inferSelect | BoardIntentRow): BoardIntent {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    task_id: row.task_id,
+    action_type: row.action_type as BoardIntent["action_type"],
+    payload: row.payload,
+    payload_hash: row.payload_hash,
+    status: row.status as BoardIntent["status"],
+    proposer_actor_label: row.proposer_actor_label,
+    proposer_actor_key: row.proposer_actor_key,
+    proposer_actor_instance_id: row.proposer_actor_instance_id,
+    proposer_agent_session_id: row.proposer_agent_session_id,
+    decision_by: row.decision_by,
+    decision_reason: row.decision_reason,
+    approval_token_hash: row.approval_token_hash,
+    decided_at: row.decided_at,
+    expires_at: row.expires_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 

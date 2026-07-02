@@ -287,6 +287,17 @@ export interface DesktopGitHubEventsPage {
   hasMore: boolean;
 }
 
+export interface DesktopBoardSettingsSummary {
+  managerMode: "off" | "manager_optional" | "intent_required";
+  activeManager: {
+    agentSessionId: string;
+    agentKey: string;
+    actorLabel: string;
+    runtimeSource: "desktop_managed" | "open_model" | "external" | "unknown";
+  } | null;
+  pendingIntentCount: number;
+}
+
 export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
   access: DesktopRoomAccess;
@@ -302,6 +313,7 @@ export interface DesktopRoomSnapshot {
   roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
+  boardSettings: DesktopBoardSettingsSummary;
 }
 
 export interface DesktopSendRoomMessageResult {

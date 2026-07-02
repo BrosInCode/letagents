@@ -40,6 +40,7 @@ export async function fetchRoomSnapshotData(
     reasoningData,
     activityHistoryData,
     roomArtifactsData,
+    boardSettingsData,
     messagesData,
     githubEventsData,
   ] = await Promise.all([
@@ -64,6 +65,9 @@ export async function fetchRoomSnapshotData(
     apiFetch<RoomSnapshotData["roomArtifactsData"]>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/artifacts?limit=100`,
     ).catch(() => ({ artifacts: [] })),
+    apiFetch<RoomSnapshotData["boardSettingsData"]>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-settings`,
+    ).catch(() => ({ pending_intent_count: 0 })),
     !options.forceCloudMessages && storage.effectiveMode === "local"
       ? getLatestLocalChatMessages(localRoomIdentifier, {
           limit: roomMessageHistoryPageSize,
@@ -88,6 +92,7 @@ export async function fetchRoomSnapshotData(
     reasoningData,
     activityHistoryData,
     roomArtifactsData,
+    boardSettingsData,
     messagesData,
     githubEventsData,
   };

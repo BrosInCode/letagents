@@ -2,6 +2,7 @@
 // Domain implementations live under ./db/.
 
 export type { RoomKind, FocusRoomStatus, Project, RoomAlias, GitRoomBinding, GitRoomSummary, RoomSharedArtifact, RoomSharedArtifactSource, GitHubRepositoryLink, GitHubAppInstallation, GitHubAppRepository, GitHubWebhookDeliveryStatus } from "./db/types.js";
+export type { BoardIntent, BoardIntentActionType, BoardIntentConsumptionInput, BoardIntentPayload, BoardIntentStatus, BoardManagerAssignment, BoardManagerMode, BoardManagerRuntimeSource, RoomBoardSettings } from "./db/types.js";
 export type { GitHubWebhookDelivery, Account, Session, SessionAccount, OwnerToken, OwnerTokenAccount, AuthState, AgentIdentity } from "./db/types.js";
 export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenessObservation, RoomAgentDeliverySession, RoomAgentSession, CreatedRoomAgentSession, RoomParticipant, RoomActivityActorCount } from "./db/types.js";
 export type { ReasoningSession, ReasoningSessionUpdate, Message, MessageReplyReference, MessageThreadParticipant, MessageThreadSummary, MessageAttachment, MessageAttachmentData, MessageAttachmentUpload, TaskStatus } from "./db/types.js";
@@ -34,3 +35,25 @@ export { isValidTransition, getTasksForRooms, createTask, getTasks, getOpenTasks
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
+export {
+  assertConsumeBoardIntentApproval,
+  BoardIntentApprovalConsumptionError,
+  assignBoardManager,
+  approveBoardIntent,
+  boardIntentPayloadForLeaseAction,
+  boardIntentPayloadForTaskCreate,
+  boardIntentPayloadForTaskMutation,
+  consumeBoardIntentApproval,
+  countBoardIntents,
+  createBoardIntent,
+  denyBoardIntent,
+  getActiveBoardManager,
+  getRoomBoardSettings,
+  listBoardIntents,
+  normalizeBoardManagerMode,
+  normalizeBoardManagerRuntimeSource,
+  releaseBoardManager,
+  setRoomBoardManagerMode,
+  shouldRequireBoardIntent,
+  verifyBoardIntentApproval,
+} from "./db/coordination.js";

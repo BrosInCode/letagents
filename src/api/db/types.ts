@@ -7,3 +7,4 @@ export type * from "./types/messages.js";
 export type * from "./types/reasoning.js";
 export type * from "./types/rooms.js";
 export type * from "./types/tasks.js";
+export type * from "./types/board.js";

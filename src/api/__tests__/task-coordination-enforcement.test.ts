@@ -123,6 +123,8 @@ function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {})
     updateTaskLeaseWorkflowRefs: async (roomId, leaseId, updates) => {
       workflowRefUpdates.push({ roomId, leaseId, updates });
     },
+    shouldRequireBoardIntent: async () => false,
+    verifyBoardIntentApproval: async () => ({ kind: "allow" as const }),
     ...overrides,
   };
 
@@ -137,6 +139,91 @@ function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {})
     focusRooms,
   };
 }
+
+test("enforceTaskAdmissionCoordination denies agent-created work when manager approval is required", async () => {
+  const harness = createHarness({
+    shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async () => ({
+      kind: "deny",
+      code: "board_intent_required",
+      error: "Board Manager approval is required for this board action.",
+    }),
+  });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskAdmissionCoordination({
+    req: ownerReq(),
+    projectId: "focus_5",
+    title: "Make the board calmer",
+    description: "Reduce default board noise",
+    actorLabel,
+    actorKey,
+    actorInstanceId: "instance:dawn",
+    actorSessionId: "agent_session_1",
+  });
+
+  assert.deepEqual(result, {
+    kind: "deny",
+    code: "board_intent_required",
+    error: "Board Manager approval is required for this board action.",
+  });
+  assert.equal(harness.events.length, 1);
+  assert.equal(harness.events[0].event_type, "task_admit");
+  assert.equal(harness.events[0].decision, "deny");
+});
+
+test("enforceTaskCoordinationMutation returns approved board intent for claiming", async () => {
+  const approvalChecks: Array<Record<string, unknown>> = [];
+  const harness = createHarness({
+    shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async (input) => {
+      approvalChecks.push(input);
+      return { kind: "allow", intent: { id: "bi_approved" } };
+    },
+  });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskCoordinationMutation({
+    req: ownerReq(),
+    projectId: "focus_5",
+    task: task({ status: "accepted" }),
+    taskOwnership: {
+      status: "accepted",
+      assignee: null,
+      assignee_agent_key: null,
+    } satisfies TaskOwnershipState,
+    updates: {
+      status: "assigned",
+      assignee: actorLabel,
+      assignee_agent_key: actorKey,
+    } as never,
+    actorLabel,
+    actorKey,
+    actorInstanceId: "instance:dawn",
+    actorSessionId: "agent_session_1",
+    boardIntentId: "bi_approved",
+    boardApprovalToken: "approval-token",
+  });
+
+  assert.deepEqual(result, {
+    kind: "allow",
+    boardIntentApproval: {
+      room_id: "focus_5",
+      action_type: "task_claim",
+      payload: {
+        task_id: "task_37",
+        status: "assigned",
+        assignee: actorLabel,
+        assignee_agent_key: actorKey,
+        pr_url: null,
+      },
+      intent_id: "bi_approved",
+      approval_token: "approval-token",
+    },
+  });
+  assert.equal(approvalChecks.length, 1);
+  assert.equal(harness.createdLeases.length, 1);
+});
 
 test("enforceTaskCoordinationMutation issues a work lease for the assigned actor", async () => {
   const harness = createHarness();

@@ -124,6 +124,7 @@
         key="board"
         :room-identifier="room.identifier"
         :tasks="tasks"
+        :board-settings="boardSettings"
         :presence="roomPresence"
         :workers="workers"
         :selected-task-id="boardSelectedTaskId"
@@ -234,6 +235,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } fro
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopBoardSettingsSummary,
   DesktopFocusRoomInfo,
   DesktopGitHubEventsPage,
   DesktopManagedAgentPermissionDecisionBehavior,
@@ -318,6 +320,7 @@ const props = defineProps<{
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
+  boardSettings: DesktopBoardSettingsSummary | null;
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
   repoStatus: RepoStatus;

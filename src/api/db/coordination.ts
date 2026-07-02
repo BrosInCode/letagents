@@ -18,3 +18,26 @@ export {
   getActiveTaskLocks,
 } from "./coordination/task-locks.js";
 export { createCoordinationEvent } from "./coordination/events.js";
+export {
+  assertConsumeBoardIntentApproval,
+  BoardIntentApprovalConsumptionError,
+  assignBoardManager,
+  approveBoardIntent,
+  boardIntentPayloadForLeaseAction,
+  boardIntentPayloadForTaskCreate,
+  boardIntentPayloadForTaskMutation,
+  consumeBoardIntentApproval,
+  countBoardIntents,
+  createBoardIntent,
+  denyBoardIntent,
+  getActiveBoardManager,
+  getRoomBoardSettings,
+  hashBoardIntentPayload,
+  listBoardIntents,
+  normalizeBoardManagerMode,
+  normalizeBoardManagerRuntimeSource,
+  releaseBoardManager,
+  setRoomBoardManagerMode,
+  shouldRequireBoardIntent,
+  verifyBoardIntentApproval,
+} from "./coordination/board-intents.js";

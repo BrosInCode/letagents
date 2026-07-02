@@ -1,6 +1,7 @@
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopBoardSettingsSummary,
   DesktopFocusActivityScope,
   DesktopFocusGitHubEventRouting,
   DesktopFocusParentVisibility,
@@ -42,6 +43,7 @@ export function mapSnapshotData(data: RoomSnapshotData) {
     reasoningSessions: mapReasoningSessions(data.reasoningData),
     recentActivity: mapRecentActivity(data.activityHistoryData),
     roomArtifacts: mapRoomArtifacts(data.roomArtifactsData),
+    boardSettings: mapBoardSettings(data.boardSettingsData),
     messages: mapMessages(data.messagesData),
     githubEvents: mapGitHubEvents(data.githubEventsData),
   };
@@ -346,4 +348,45 @@ function normalizeArtifactSource(value: unknown): DesktopRoomSharedArtifact["sou
   return value === "task_workflow_artifact" || value === "github_event" || value === "manual"
     ? value
     : "manual";
+}
+
+function mapBoardSettings(
+  data: RoomSnapshotData["boardSettingsData"],
+): DesktopBoardSettingsSummary {
+  const activeManager = data.active_manager;
+  const pendingIntentCount = Number(data.pending_intent_count ?? 0);
+  return {
+    managerMode: normalizeBoardManagerMode(data.settings?.manager_mode),
+    activeManager: activeManager
+      && activeManager.agent_session_id
+      && activeManager.agent_key
+      && activeManager.actor_label
+      ? {
+          agentSessionId: activeManager.agent_session_id,
+          agentKey: activeManager.agent_key,
+          actorLabel: activeManager.actor_label,
+          runtimeSource: normalizeBoardManagerRuntimeSource(activeManager.runtime_source),
+        }
+      : null,
+    pendingIntentCount: Number.isFinite(pendingIntentCount)
+      ? Math.max(0, pendingIntentCount)
+      : 0,
+  };
+}
+
+function normalizeBoardManagerMode(value: unknown): DesktopBoardSettingsSummary["managerMode"] {
+  return value === "off" || value === "intent_required" || value === "manager_optional"
+    ? value
+    : "manager_optional";
+}
+
+function normalizeBoardManagerRuntimeSource(
+  value: unknown,
+): NonNullable<DesktopBoardSettingsSummary["activeManager"]>["runtimeSource"] {
+  return value === "desktop_managed"
+    || value === "open_model"
+    || value === "external"
+    || value === "unknown"
+    ? value
+    : "unknown";
 }

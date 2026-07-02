@@ -6,17 +6,29 @@
           <span>Board</span>
           <strong>Team tasks and agent handoffs</strong>
         </div>
-        <button
-          class="desktop-board-primary-action desktop-board-add-button"
-          type="button"
-          :disabled="busyAction !== null"
-          @click="openCreateTaskModal"
-        >
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-          </svg>
-          Add task
-        </button>
+        <div class="desktop-board-header-actions">
+          <div
+            class="desktop-board-manager-pill"
+            :data-mode="boardManagerMode"
+            :data-has-pending="boardPendingIntentCount > 0"
+            :title="boardManagerTitle"
+          >
+            <span class="desktop-board-manager-dot" aria-hidden="true"></span>
+            <strong>{{ boardManagerLabel }}</strong>
+            <span v-if="boardPendingIntentCount > 0">{{ boardPendingIntentCount }} pending</span>
+          </div>
+          <button
+            class="desktop-board-primary-action desktop-board-add-button"
+            type="button"
+            :disabled="busyAction !== null"
+            @click="openCreateTaskModal"
+          >
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+            </svg>
+            Add task
+          </button>
+        </div>
       </div>
       <div class="desktop-board-controls">
         <label class="desktop-board-search" for="room-board-search">
@@ -234,7 +246,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
+import type {
+  DesktopAgentPresence,
+  DesktopBoardSettingsSummary,
+  DesktopTaskSummary,
+  WorkerSnapshot,
+} from "../../../../../electron/ipc-types";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import {
   currentFocusableElement,
@@ -251,6 +268,7 @@ import type { TaskAction, TaskGroup } from "./room-board/types";
 const props = defineProps<{
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
+  boardSettings?: DesktopBoardSettingsSummary | null;
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
   selectedTaskId?: string | null;
@@ -278,10 +296,10 @@ const {
   toggleGroup,
 } = useRoomBoardController(props, emit);
 
-type BoardFilter = "open" | "mine" | "unclaimed" | "needs-review" | "closed";
+type BoardFilter = "open" | "mine" | "unclaimed" | "needs-review" | "closeout";
 
-const ACTIVE_BOARD_STATUSES = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review", "merged"];
-const CLOSED_BOARD_STATUSES = ["done", "cancelled"];
+const ACTIVE_BOARD_STATUSES = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review"];
+const CLOSEOUT_BOARD_STATUSES = ["merged", "done", "cancelled"];
 const searchQuery = ref("");
 const activeFilter = ref<BoardFilter>("open");
 const draggedTaskId = ref<string | null>(null);
@@ -302,7 +320,7 @@ const boardFilters: Array<{ id: BoardFilter; label: string }> = [
   { id: "mine", label: "Local agent" },
   { id: "unclaimed", label: "Unclaimed" },
   { id: "needs-review", label: "Needs review" },
-  { id: "closed", label: "Closed" },
+  { id: "closeout", label: "Closeout" },
 ];
 
 const boardFilterOptions = computed(() =>
@@ -320,8 +338,35 @@ const localWorker = computed(() =>
   ) || null
 );
 
+const boardManagerMode = computed(() =>
+  props.boardSettings?.managerMode || "manager_optional"
+);
+const boardPendingIntentCount = computed(() =>
+  Math.max(0, props.boardSettings?.pendingIntentCount || 0)
+);
+const boardManagerLabel = computed(() => {
+  const settings = props.boardSettings;
+  if (boardManagerMode.value === "off") return "Manager off";
+  if (settings?.activeManager) {
+    const source = settings.activeManager.runtimeSource;
+    if (source === "open_model") return "Open model manager";
+    if (source === "desktop_managed") return "Desktop manager";
+    return "Board manager";
+  }
+  return boardManagerMode.value === "intent_required"
+    ? "Approval required"
+    : "Manager optional";
+});
+const boardManagerTitle = computed(() => {
+  const settings = props.boardSettings;
+  const pending = boardPendingIntentCount.value;
+  const pendingText = pending === 1 ? "1 pending intent" : `${pending} pending intents`;
+  if (!settings?.activeManager) return `${boardManagerLabel.value}. ${pendingText}.`;
+  return `${boardManagerLabel.value}: ${settings.activeManager.actorLabel}. ${pendingText}.`;
+});
+
 const visibleStatuses = computed(() =>
-  activeFilter.value === "closed" ? CLOSED_BOARD_STATUSES : ACTIVE_BOARD_STATUSES
+  activeFilter.value === "closeout" ? CLOSEOUT_BOARD_STATUSES : ACTIVE_BOARD_STATUSES
 );
 
 const visibleGroups = computed<TaskGroup[]>(() =>
@@ -348,7 +393,7 @@ const draggedTask = computed(() =>
 const canCreateTask = computed(() =>
   Boolean(createTaskTitle.value.trim() || createTaskDescription.value.trim())
 );
-const emptyTaskState = computed((): { title: string; description: string; actionLabel: string | null; action: "clear-search" | "show-open" | "show-closed" | "add-task" | null } => {
+const emptyTaskState = computed((): { title: string; description: string; actionLabel: string | null; action: "clear-search" | "show-open" | "show-closeout" | "add-task" | null } => {
   if (hasSearchQuery.value) {
     return {
       title: "No tasks match this search",
@@ -385,22 +430,22 @@ const emptyTaskState = computed((): { title: string; description: string; action
     };
   }
 
-  if (activeFilter.value === "closed") {
+  if (activeFilter.value === "closeout") {
     return {
-      title: "No closed tasks",
-      description: "Done and cancelled tasks will appear here after the room finishes work.",
+      title: "No closeout tasks",
+      description: "Merged, done, and cancelled tasks will appear here after the room finishes work.",
       actionLabel: "Show open tasks",
       action: "show-open",
     };
   }
 
-  const closedTaskCount = filterCount("closed");
-  return closedTaskCount > 0
+  const closeoutTaskCount = filterCount("closeout");
+  return closeoutTaskCount > 0
     ? {
       title: "No open tasks",
-      description: "All tasks in this room are closed right now. Switch to Closed to review finished work.",
-      actionLabel: "Show closed tasks",
-      action: "show-closed",
+      description: "All tasks in this room are in closeout right now. Switch to Closeout to review finished work.",
+      actionLabel: "Show closeout",
+      action: "show-closeout",
     }
     : {
       title: "No open tasks",
@@ -549,8 +594,8 @@ function runEmptyTaskStateAction(): void {
     activeFilter.value = "open";
     return;
   }
-  if (action === "show-closed") {
-    activeFilter.value = "closed";
+  if (action === "show-closeout") {
+    activeFilter.value = "closeout";
     return;
   }
   if (action === "add-task") {
@@ -582,8 +627,8 @@ function taskMatchesFilter(task: DesktopTaskSummary, filter: BoardFilter): boole
   if (filter === "mine") return taskMatchesLocalWorker(task);
   if (filter === "unclaimed") return taskIsUnclaimed(task);
   if (filter === "needs-review") return taskNeedsReview(task);
-  if (filter === "closed") return CLOSED_BOARD_STATUSES.includes(task.status);
-  return !["done", "cancelled"].includes(task.status);
+  if (filter === "closeout") return CLOSEOUT_BOARD_STATUSES.includes(task.status);
+  return !["merged", "done", "cancelled"].includes(task.status);
 }
 
 function taskMatchesSearch(task: DesktopTaskSummary): boolean {

@@ -95,7 +95,7 @@ export function getRoomScopedSequenceNames(roomId: string): [string, string] {
   return [`messages:${roomId}`, `tasks:${roomId}`];
 }
 
-export function coordinationId(prefix: "tl" | "lock" | "ce"): string {
+export function coordinationId(prefix: "tl" | "lock" | "ce" | "bi" | "bm"): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 

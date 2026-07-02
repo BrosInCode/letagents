@@ -13,6 +13,11 @@ const emptySnapshotData: RoomSnapshotData = {
   reasoningData: { sessions: [], reasoning_sessions: [] },
   activityHistoryData: { entries: [] },
   roomArtifactsData: { artifacts: [] },
+  boardSettingsData: {
+    settings: { manager_mode: "manager_optional" },
+    active_manager: null,
+    pending_intent_count: 0,
+  },
   messagesData: { messages: [] },
   githubEventsData: null,
 };

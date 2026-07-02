@@ -1,6 +1,7 @@
 import type { Express, Response } from "express";
 
 import {
+  BoardIntentApprovalConsumptionError,
   createCoordinationEvent,
   createTask,
   getOpenTasks,
@@ -8,6 +9,7 @@ import {
   getTaskOwnershipState,
   getTasks,
   updateTask,
+  type BoardIntentConsumptionInput,
   type Project,
   type Task,
   type TaskStatus,
@@ -35,7 +37,7 @@ import type { EnsureTaskGitRoomResult } from "../../github/task-git-room.js";
 type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"];
 
 type TaskCoordinationGuardDecision =
-  | { kind: "allow" }
+  | { kind: "allow"; boardIntentApproval?: BoardIntentConsumptionInput | null }
   | { kind: "deny"; code: string; error: string };
 
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
@@ -86,11 +88,14 @@ export interface LegacyProjectTaskRouteDeps {
     req: AuthenticatedRequest;
     projectId: string;
     title: string;
+    description?: string | null;
     sourceMessageId?: string | null;
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
     actorSessionId: string | null;
+    boardIntentId?: string | null;
+    boardApprovalToken?: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
   isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean>;
   emitTaskLifecycleStatusMessage(
@@ -116,6 +121,8 @@ export interface LegacyProjectTaskRouteDeps {
     actorKey: string | null;
     actorInstanceId: string | null;
     actorSessionId: string | null;
+    boardIntentId?: string | null;
+    boardApprovalToken?: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
   enforceFocusParentBoardWriteIsolation(input: {
     req: AuthenticatedRequest;
@@ -188,18 +195,37 @@ export function registerLegacyProjectTaskRoutes(
       req,
       projectId,
       title,
+      description: description ?? null,
       sourceMessageId: source_message_id ?? null,
       actorLabel: effectiveActorLabel,
       actorKey: effectiveActorKey,
       actorInstanceId: effectiveActorInstanceId,
       actorSessionId: effectiveActorSessionId,
+      boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+      boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
     });
     if (admission.kind === "deny") {
       res.status(409).json({ error: admission.error, code: admission.code });
       return;
     }
 
-    const task = await createTask(projectId, title, createdBy, description, source_message_id);
+    let task: Awaited<ReturnType<typeof createTask>>;
+    try {
+      task = await createTask(
+        projectId,
+        title,
+        createdBy,
+        description,
+        source_message_id,
+        { boardIntentApproval: admission.boardIntentApproval ?? null }
+      );
+    } catch (error) {
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
 
     if (req.authKind === "owner_token") {
       await createCoordinationEvent({
@@ -389,13 +415,20 @@ export function registerLegacyProjectTaskRoutes(
         actorKey: verifiedActorKey,
         actorInstanceId,
         actorSessionId,
+        boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+        boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
 
-      const updated = await updateTask(projectId, taskId, updates);
+      const updated = await updateTask(
+        projectId,
+        taskId,
+        updates,
+        { boardIntentApproval: coordination.boardIntentApproval ?? null }
+      );
       if (updated && updates.status && updates.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(projectId, updated);
       }
@@ -407,6 +440,10 @@ export function registerLegacyProjectTaskRoutes(
       }
       res.json(updated);
     } catch (error) {
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "PATCH /projects/:id/tasks/:taskId",

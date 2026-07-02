@@ -1,6 +1,7 @@
 import type { Express } from "express";
 
 import {
+  BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
   getTaskById,
   getTaskOwnershipState,
@@ -201,13 +202,20 @@ export function registerTaskRecordRoutes(
         actorKey: verifiedActorKey,
         actorInstanceId,
         actorSessionId: workerIdentity?.agent_session_id ?? null,
+        boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+        boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
 
-      const updated = await updateTask(project.id, taskId, updates);
+      const updated = await updateTask(
+        project.id,
+        taskId,
+        updates,
+        { boardIntentApproval: coordination.boardIntentApproval ?? null }
+      );
       if (updated && updates.status && updates.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(project.id, updated);
       }
@@ -224,6 +232,10 @@ export function registerTaskRecordRoutes(
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "PATCH /rooms/:room_id/tasks/:task_id",

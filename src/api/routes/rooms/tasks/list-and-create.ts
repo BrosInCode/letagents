@@ -1,6 +1,7 @@
 import type { Express } from "express";
 
 import {
+  BoardIntentApprovalConsumptionError,
   createCoordinationEvent,
   createTask,
   findTaskBySourceMessageId,
@@ -108,10 +109,13 @@ export function registerTaskListAndCreateRoutes(
       projectId: project.id,
       title,
       sourceMessageId,
+      description: description ?? null,
       actorLabel: effectiveActorLabel,
       actorKey: effectiveActorKey,
       actorInstanceId: effectiveActorInstanceId,
       actorSessionId: effectiveActorSessionId,
+      boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+      boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
     });
     if (admission.kind === "deny") {
       res.status(409).json({ error: admission.error, code: admission.code });
@@ -120,8 +124,19 @@ export function registerTaskListAndCreateRoutes(
 
     let task: Awaited<ReturnType<typeof createTask>>;
     try {
-      task = await createTask(project.id, title, createdBy, description, sourceMessageId ?? undefined);
+      task = await createTask(
+        project.id,
+        title,
+        createdBy,
+        description,
+        sourceMessageId ?? undefined,
+        { boardIntentApproval: admission.boardIntentApproval ?? null }
+      );
     } catch (error) {
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       if (sourceMessageId) {
         const existingTask = await findTaskBySourceMessageId(project.id, sourceMessageId);
         if (existingTask) {

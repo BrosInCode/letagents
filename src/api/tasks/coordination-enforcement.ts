@@ -1,9 +1,16 @@
 import type {
   AgentIdentity,
   Task,
+  BoardIntentActionType,
+  BoardIntentConsumptionInput,
   TaskLeaseKind,
   TaskOwnershipState,
 } from "../db.js";
+import {
+  boardIntentPayloadForTaskCreate,
+  boardIntentPayloadForTaskMutation,
+  type BoardIntentPayload,
+} from "../board-intent-payloads.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import {
   evaluateTaskAdmission,
@@ -27,7 +34,7 @@ import {
 } from "./ownership.js";
 
 export type TaskCoordinationGuardDecision =
-  | { kind: "allow" }
+  | { kind: "allow"; boardIntentApproval?: BoardIntentConsumptionInput | null }
   | { kind: "deny"; code: string; error: string };
 
 export interface RecordCoordinationDecisionInput {
@@ -86,6 +93,17 @@ export interface TaskCoordinationEnforcementDeps {
     leaseId: string,
     updates: { branch_ref?: string | null; pr_url?: string | null }
   ): Promise<unknown>;
+  shouldRequireBoardIntent?(input: { room_id: string }): Promise<boolean>;
+  verifyBoardIntentApproval?(input: {
+    room_id: string;
+    action_type: BoardIntentActionType;
+    payload: BoardIntentPayload;
+    intent_id?: string | null;
+    approval_token?: string | null;
+  }): Promise<
+    | { kind: "allow" | "not_required"; intent?: { id: string } }
+    | { kind: "deny"; code: string; error: string }
+  >;
 }
 
 export interface TaskCoordinationMutationInput {
@@ -99,6 +117,8 @@ export interface TaskCoordinationMutationInput {
   actorKey: string | null;
   actorInstanceId: string | null;
   actorSessionId: string | null;
+  boardIntentId?: string | null;
+  boardApprovalToken?: string | null;
 }
 
 function taskIsAssignedToActor(input: {
@@ -170,10 +190,14 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     req: AuthenticatedRequest;
     projectId: string;
     title: string;
+    description?: string | null;
     sourceMessageId?: string | null;
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
+    actorSessionId?: string | null;
+    boardIntentId?: string | null;
+    boardApprovalToken?: string | null;
   }): Promise<TaskCoordinationGuardDecision> {
     if (input.req.authKind !== "owner_token") {
       return { kind: "allow" };
@@ -236,7 +260,36 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       };
     }
 
-    return { kind: "allow" };
+    const intentDecision = await enforceBoardIntentForAgentAction({
+      roomId: input.projectId,
+      actionType: "task_create",
+      payload: boardIntentPayloadForTaskCreate({
+        title: input.title,
+        description: input.description ?? null,
+        sourceMessageId: input.sourceMessageId ?? null,
+      }),
+      actorLabel,
+      actorKey,
+      actorInstanceId: input.actorInstanceId,
+      actorSessionId: input.actorSessionId ?? null,
+      intentId: input.boardIntentId,
+      approvalToken: input.boardApprovalToken,
+    });
+    if (intentDecision.kind === "deny") {
+      await recordCoordinationDecision({
+        roomId: input.projectId,
+        taskId: null,
+        mutation: "task_admit",
+        decision: "deny",
+        actorLabel,
+        actorKey,
+        actorInstanceId: input.actorInstanceId,
+        reason: intentDecision.error,
+      });
+      return intentDecision;
+    }
+
+    return intentDecision;
   }
 
   async function bindWorkflowArtifactPrUrlIfPresent(
@@ -295,6 +348,66 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     return lease;
   }
 
+  function boardIntentActionForMutation(
+    updates: TaskCoordinationUpdatePatch
+  ): BoardIntentActionType | null {
+    if (updates.status === "assigned") return "task_claim";
+    if (updates.status === "merged" || updates.status === "done" || updates.status === "cancelled") {
+      return "task_close";
+    }
+    if (updates.status === "accepted") return "task_override";
+    return null;
+  }
+
+  async function enforceBoardIntentForAgentAction(input: {
+    roomId: string;
+    actionType: BoardIntentActionType;
+    payload: BoardIntentPayload;
+    actorLabel: string | null;
+    actorKey: string | null;
+    actorInstanceId: string | null;
+    actorSessionId: string | null;
+    intentId?: string | null;
+    approvalToken?: string | null;
+  }): Promise<TaskCoordinationGuardDecision> {
+    if (!input.actorKey && !input.actorSessionId) {
+      return { kind: "allow" };
+    }
+    const requiresIntent = await deps.shouldRequireBoardIntent?.({ room_id: input.roomId });
+    if (!requiresIntent) {
+      return { kind: "allow" };
+    }
+    const approval = await deps.verifyBoardIntentApproval?.({
+      room_id: input.roomId,
+      action_type: input.actionType,
+      payload: input.payload,
+      intent_id: input.intentId,
+      approval_token: input.approvalToken,
+    });
+    if (!approval || approval.kind === "deny") {
+      return {
+        kind: "deny",
+        code: approval?.kind === "deny" ? approval.code : "board_intent_required",
+        error: approval?.kind === "deny"
+          ? approval.error
+          : "Board Manager approval is required for this board action.",
+      };
+    }
+    if (!approval.intent?.id) {
+      return { kind: "allow" };
+    }
+    return {
+      kind: "allow",
+      boardIntentApproval: {
+        room_id: input.roomId,
+        action_type: input.actionType,
+        payload: input.payload,
+        intent_id: approval.intent.id,
+        approval_token: input.approvalToken,
+      },
+    };
+  }
+
   async function enforceTaskCoordinationMutation(
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
@@ -330,7 +443,6 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       };
     }
     const actorKey = verified.actorKey;
-
     const [leases, locks] = await Promise.all([
       deps.getActiveTaskLeases(input.projectId, input.task.id),
       deps.getActiveTaskLocks(input.projectId, input.task.id),
@@ -349,7 +461,44 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       locks,
     });
 
+    const intentActionType = boardIntentActionForMutation(input.updates);
+    const intentDecision = intentActionType
+      ? await enforceBoardIntentForAgentAction({
+          roomId: input.projectId,
+          actionType: intentActionType,
+          payload: boardIntentPayloadForTaskMutation({
+            taskId: input.task.id,
+            status: input.updates.status ?? null,
+            assignee: "assignee" in input.updates ? input.updates.assignee as string | null | undefined : undefined,
+            assigneeAgentKey: "assignee_agent_key" in input.updates ? input.updates.assignee_agent_key as string | null | undefined : undefined,
+            prUrl: input.updates.pr_url,
+          }),
+          actorLabel,
+          actorKey,
+          actorInstanceId: input.actorInstanceId,
+          actorSessionId: input.actorSessionId,
+          intentId: input.boardIntentId,
+          approvalToken: input.boardApprovalToken,
+        })
+      : { kind: "allow" as const };
+    const boardIntentApproval = intentDecision.kind === "allow"
+      ? intentDecision.boardIntentApproval
+      : undefined;
+
     if (decision.kind === "allow") {
+      if (intentDecision.kind === "deny") {
+        await recordCoordinationDecision({
+          roomId: input.projectId,
+          taskId: input.task.id,
+          mutation: classified.mutation,
+          decision: "deny",
+          actorLabel,
+          actorKey,
+          actorInstanceId: input.actorInstanceId,
+          reason: intentDecision.error,
+        });
+        return intentDecision;
+      }
       await recordCoordinationDecision({
         roomId: input.projectId,
         taskId: input.task.id,
@@ -364,11 +513,26 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       if (classified.mutation === "workflow_artifact_attach") {
         await bindWorkflowArtifactPrUrlIfPresent(input.projectId, decision.lease.id, input.updates);
       }
-      return { kind: "allow" };
+      return boardIntentApproval
+        ? { kind: "allow", boardIntentApproval }
+        : { kind: "allow" };
     }
 
     if (decision.code === "missing_lease") {
       if (classified.claim && input.task.status === "accepted") {
+        if (intentDecision.kind === "deny") {
+          await recordCoordinationDecision({
+            roomId: input.projectId,
+            taskId: input.task.id,
+            mutation: classified.mutation,
+            decision: "deny",
+            actorLabel,
+            actorKey,
+            actorInstanceId: input.actorInstanceId,
+            reason: intentDecision.error,
+          });
+          return intentDecision;
+        }
         const lease = await issueWorkLeaseForActor({
           roomId: input.projectId,
           taskId: input.task.id,
@@ -382,7 +546,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         if (classified.mutation === "workflow_artifact_attach") {
           await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
         }
-        return { kind: "allow" };
+        return boardIntentApproval
+          ? { kind: "allow", boardIntentApproval }
+          : { kind: "allow" };
       }
 
       if (
@@ -393,6 +559,19 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
           actorKey,
         })
       ) {
+        if (intentDecision.kind === "deny") {
+          await recordCoordinationDecision({
+            roomId: input.projectId,
+            taskId: input.task.id,
+            mutation: classified.mutation,
+            decision: "deny",
+            actorLabel,
+            actorKey,
+            actorInstanceId: input.actorInstanceId,
+            reason: intentDecision.error,
+          });
+          return intentDecision;
+        }
         const lease = await issueWorkLeaseForActor({
           roomId: input.projectId,
           taskId: input.task.id,
@@ -406,7 +585,9 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
         if (classified.mutation === "workflow_artifact_attach") {
           await bindWorkflowArtifactPrUrlIfPresent(input.projectId, lease.id, input.updates);
         }
-        return { kind: "allow" };
+        return boardIntentApproval
+          ? { kind: "allow", boardIntentApproval }
+          : { kind: "allow" };
       }
     }
 

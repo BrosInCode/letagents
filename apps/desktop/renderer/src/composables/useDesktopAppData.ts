@@ -576,6 +576,7 @@ function createOptimisticSelectedSnapshot(
     reasoningSessions: [],
     recentActivity: [],
     roomArtifacts: [],
+    boardSettings: baseRootSnapshot.boardSettings,
     messages: [],
     githubEvents: null,
   };

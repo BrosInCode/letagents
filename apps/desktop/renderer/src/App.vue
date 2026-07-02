@@ -146,6 +146,7 @@
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :room-artifacts="selectedSnapshot?.roomArtifacts || []"
+          :board-settings="selectedSnapshot?.boardSettings || null"
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
           :repo-status="repoStatusValue"
