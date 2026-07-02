@@ -151,7 +151,7 @@
           :repo-status="repoStatusValue"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
-          :initial-chat-scroll-top="chatScrollTopByRoom[selectedRoomInfo.identifier] ?? null"
+          :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
           @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
@@ -245,7 +245,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
@@ -284,6 +284,7 @@ import { useDesktopNavigationState } from "./composables/useDesktopNavigationSta
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
+import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
 import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
@@ -325,6 +326,7 @@ const sidebarWidth = ref(readStoredSidebarWidth());
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
 const chatScrollTopByRoom = ref<Record<string, number>>({});
+const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const openAddAgentAfterRepoPick = ref(false);
@@ -720,6 +722,7 @@ const {
 });
 
 const {
+  clearSelectedSnapshotCache,
   handleMessageSent,
   handleRefreshRoom,
   handleRoomRenamed,
@@ -1043,6 +1046,7 @@ async function leaveArchivedActiveRoomAfterAppAgent(
   forgetRecentRootRoomAliases(archivedAliases);
   if (options.deferNavigation) {
     rootRoomSnapshot.value = null;
+    clearSelectedSnapshotCache();
     selectedSnapshot.value = null;
     selectedRootRoomIdentifier.value = null;
     return true;
@@ -1101,6 +1105,7 @@ async function leaveArchivedActiveRoom(archivedAliases: Set<string>): Promise<vo
   }
 
   rootRoomSnapshot.value = null;
+  clearSelectedSnapshotCache();
   selectedSnapshot.value = null;
   selectedRootRoomIdentifier.value = null;
   activeEntry.value = settingsEntry;
@@ -1184,6 +1189,7 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
   await window.letagentsDesktop.room.stopStream();
   await refreshActiveRepoStatus();
+  clearSelectedSnapshotCache();
   selectedSnapshot.value = null;
   const rootRoomIdentifier = selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier || null;
   if (rootRoomIdentifier) {
@@ -1273,16 +1279,90 @@ function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
 }
 
 function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {
+  const storageKey = chatScrollPositionKey(roomIdentifier) || roomIdentifier;
+  if (!shouldRememberChatScrollPosition({
+    roomIdentifier,
+    selectedRoomIdentifier: selectedRoomInfo.value.identifier,
+    selectedSnapshotLoading: selectedSnapshotLoading.value,
+    suppressedRoomIdentifiers: loadingChatScrollRoomIdentifiers.value,
+  })) {
+    return;
+  }
   chatScrollTopByRoom.value = {
     ...chatScrollTopByRoom.value,
-    [roomIdentifier]: scrollTop,
+    [storageKey]: scrollTop,
   };
+}
+
+function chatScrollTopForRoom(roomIdentifier: string): number | null {
+  const storageKey = chatScrollPositionKey(roomIdentifier);
+  if (storageKey && chatScrollTopByRoom.value[storageKey] !== undefined) {
+    return chatScrollTopByRoom.value[storageKey];
+  }
+  return chatScrollTopByRoom.value[roomIdentifier] ?? null;
+}
+
+function rememberLoadingChatScrollRoom(roomIdentifier: string | null | undefined): void {
+  const normalizedRoomIdentifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!normalizedRoomIdentifier || loadingChatScrollRoomIdentifiers.value.has(normalizedRoomIdentifier)) return;
+  loadingChatScrollRoomIdentifiers.value = new Set([
+    ...loadingChatScrollRoomIdentifiers.value,
+    normalizedRoomIdentifier,
+  ]);
+}
+
+function forgetLoadingChatScrollRooms(roomIdentifiers: Array<string | null | undefined>): void {
+  const normalizedRoomIdentifiers = roomIdentifiers
+    .map(normalizeRoomIdentifier)
+    .filter((roomIdentifier): roomIdentifier is string => Boolean(roomIdentifier));
+  if (!normalizedRoomIdentifiers.length) return;
+  const nextRoomIdentifiers = new Set(loadingChatScrollRoomIdentifiers.value);
+  for (const roomIdentifier of normalizedRoomIdentifiers) {
+    nextRoomIdentifiers.delete(roomIdentifier);
+  }
+  if (nextRoomIdentifiers.size === loadingChatScrollRoomIdentifiers.value.size) return;
+  loadingChatScrollRoomIdentifiers.value = nextRoomIdentifiers;
+}
+
+watch(
+  [() => selectedSnapshotLoading.value, () => activeChatScrollRoomIdentifier()] as const,
+  ([loading, roomIdentifier]) => {
+    if (loading) rememberLoadingChatScrollRoom(roomIdentifier);
+  },
+  { flush: "sync" }
+);
+
+watch(
+  [
+    () => selectedSnapshotLoading.value,
+    () => selectedSnapshot.value?.roomIdentifier || null,
+    () => selectedSnapshot.value?.room?.identifier || null,
+  ] as const,
+  ([loading, roomIdentifier, roomInfoIdentifier]) => {
+    if (loading) return;
+    forgetLoadingChatScrollRooms([roomIdentifier, roomInfoIdentifier]);
+  },
+  { flush: "sync" }
+);
+
+function activeChatScrollRoomIdentifier(): string | null {
+  if (activeEntry.value.type === "room") {
+    return activeEntry.value.roomIdentifier || selectedRoomInfo.value.identifier || null;
+  }
+  return selectedRoomInfo.value.identifier || null;
 }
 
 watch(
   () => activeEntry.value,
   async (nextEntry, previousEntry) => {
     const selectedEntryId = nextEntry.id;
+    const previousRoomIdentifier = previousEntry?.type === "room" ? previousEntry.roomIdentifier : null;
+    forgetLoadingChatScrollRooms([activeChatScrollRoomIdentifier()]);
+    if (previousRoomIdentifier) {
+      void nextTick(() => {
+        forgetLoadingChatScrollRooms([previousRoomIdentifier]);
+      });
+    }
     rememberStoredString(activeEntryStorageKey, nextEntry.id);
     if (!rootRoomSnapshot.value) return;
     if (nextEntry.id === previousEntry?.id) return;

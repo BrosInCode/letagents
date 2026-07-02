@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -69,9 +69,24 @@ interface DesktopAppDataOptions {
   workers: Ref<WorkerSnapshot[]>;
 }
 
+const selectedSnapshotCacheLimit = 8;
+
 export function useDesktopAppData(options: DesktopAppDataOptions) {
   let selectedSnapshotRequestId = 0;
   const selectedSnapshotLoading = ref(false);
+  const cachedSelectedSnapshots = new Map<string, DesktopRoomSnapshot>();
+  let nextSelectedSnapshotCacheAlias: string | null | undefined;
+  let skipNextSelectedSnapshotCache = false;
+
+  watch(options.selectedSnapshot, (snapshot) => {
+    if (skipNextSelectedSnapshotCache) {
+      skipNextSelectedSnapshotCache = false;
+      nextSelectedSnapshotCacheAlias = undefined;
+      return;
+    }
+    rememberCachedSelectedSnapshot(snapshot, nextSelectedSnapshotCacheAlias);
+    nextSelectedSnapshotCacheAlias = undefined;
+  }, { flush: "sync" });
 
   async function refresh(): Promise<void> {
     if (options.mcpInstallState.value && !options.mcpInstallState.value.completed) {
@@ -227,7 +242,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (!baseRootSnapshot) {
       if (requestId === selectedSnapshotRequestId) {
-        options.selectedSnapshot.value = null;
+        setSelectedSnapshot(null, { cache: false });
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -235,7 +250,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (options.activeEntry.value.type !== "room") {
       if (requestId === selectedSnapshotRequestId) {
-        options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot);
+        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot));
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -259,7 +274,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
         options.repoStatus.value = nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
-        options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot);
+        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false });
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
           aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
@@ -275,17 +290,23 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
     if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
       if (requestId === selectedSnapshotRequestId) {
-        options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot);
+        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot));
         selectedSnapshotLoading.value = false;
       }
       return;
     }
 
-    publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+    const cachedSnapshot = readCachedSelectedSnapshot(roomIdentifier);
+    if (cachedSnapshot) {
+      setSelectedSnapshot(cachedSnapshot, { cacheAlias: roomIdentifier });
+      selectedSnapshotLoading.value = false;
+    } else {
+      publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+    }
     try {
       const nextSnapshot = await window.letagentsDesktop.room.getSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-      options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot);
+      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier });
     } finally {
       if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
     }
@@ -298,12 +319,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     baseRootSnapshot: DesktopRoomSnapshot,
   ): void {
     if (requestId !== selectedSnapshotRequestId) return;
+    setSelectedSnapshot(createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot), { cache: false });
     selectedSnapshotLoading.value = true;
-    options.selectedSnapshot.value = createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot);
   }
 
   function upsertSelectedTask(task: DesktopTaskSummary): void {
-    options.selectedSnapshot.value = upsertSnapshotTask(options.selectedSnapshot.value, task);
+    setSelectedSnapshot(upsertSnapshotTask(options.selectedSnapshot.value, task));
   }
 
   function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
@@ -315,7 +336,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     if (event.type === "message") {
-      options.selectedSnapshot.value = appendSnapshotMessage(options.selectedSnapshot.value, event.message);
+      setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, event.message));
       if (shouldRefreshMetadataForMessage(event.message)) {
         options.scheduleLiveMetadataRefresh();
       }
@@ -329,7 +350,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     if (event.type === "github_event") {
-      options.selectedSnapshot.value = upsertSnapshotGitHubEvent(options.selectedSnapshot.value, event.event);
+      setSelectedSnapshot(upsertSnapshotGitHubEvent(options.selectedSnapshot.value, event.event));
       options.scheduleLiveMetadataRefresh();
       return;
     }
@@ -340,13 +361,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     if (event.type === "reasoning_update") {
-      options.selectedSnapshot.value = upsertSnapshotReasoningSession(options.selectedSnapshot.value, event.session);
+      setSelectedSnapshot(upsertSnapshotReasoningSession(options.selectedSnapshot.value, event.session));
       options.scheduleLiveMetadataRefresh();
       return;
     }
 
     if (event.type === "reasoning_remove") {
-      options.selectedSnapshot.value = removeSnapshotReasoningSession(options.selectedSnapshot.value, event.sessionId);
+      setSelectedSnapshot(removeSnapshotReasoningSession(options.selectedSnapshot.value, event.sessionId));
       options.scheduleLiveMetadataRefresh();
       return;
     }
@@ -368,7 +389,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
     if (snapshot) {
       options.rootRoomSnapshot.value = snapshot;
-      options.selectedSnapshot.value = snapshot;
+      setSelectedSnapshot(snapshot);
       options.selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
       options.rememberRootRoomSnapshot(snapshot);
       options.reconcileActiveEntry();
@@ -380,23 +401,77 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function handleMessageSent(message: DesktopRoomMessage): void {
-    options.selectedSnapshot.value = appendSnapshotMessage(options.selectedSnapshot.value, message);
+    setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message));
     options.scheduleLiveMetadataRefresh();
   }
 
   function handleRoomRenamed(room: DesktopRoomInfo): void {
     if (!options.selectedSnapshot.value) return;
-    options.selectedSnapshot.value = {
+    setSelectedSnapshot({
       ...options.selectedSnapshot.value,
       room,
       roomIdentifier: room.identifier,
-    };
+    });
     if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, options.selectedSnapshot.value)) {
       options.rootRoomSnapshot.value = {
         ...options.rootRoomSnapshot.value,
         room,
         roomIdentifier: room.identifier,
       };
+    }
+  }
+
+  function setSelectedSnapshot(
+    snapshot: DesktopRoomSnapshot | null,
+    input: { cache?: boolean; cacheAlias?: string | null } = {},
+  ): void {
+    const previousSnapshot = options.selectedSnapshot.value;
+    if (input.cache === false) {
+      skipNextSelectedSnapshotCache = true;
+      nextSelectedSnapshotCacheAlias = undefined;
+    } else {
+      nextSelectedSnapshotCacheAlias = input.cacheAlias;
+    }
+    options.selectedSnapshot.value = snapshot;
+    if (previousSnapshot !== snapshot) return;
+    if (skipNextSelectedSnapshotCache) {
+      skipNextSelectedSnapshotCache = false;
+      return;
+    }
+    rememberCachedSelectedSnapshot(snapshot, nextSelectedSnapshotCacheAlias);
+    nextSelectedSnapshotCacheAlias = undefined;
+  }
+
+  function clearSelectedSnapshotCache(): void {
+    cachedSelectedSnapshots.clear();
+  }
+
+  function readCachedSelectedSnapshot(roomIdentifier: string): DesktopRoomSnapshot | null {
+    const cacheKey = selectedSnapshotCacheKey(roomIdentifier);
+    if (!cacheKey) return null;
+    const cachedSnapshot = cachedSelectedSnapshots.get(cacheKey) || null;
+    if (!cachedSnapshot) return null;
+    cachedSelectedSnapshots.delete(cacheKey);
+    cachedSelectedSnapshots.set(cacheKey, cachedSnapshot);
+    return cachedSnapshot;
+  }
+
+  function rememberCachedSelectedSnapshot(
+    snapshot: DesktopRoomSnapshot | null,
+    roomIdentifierAlias?: string | null,
+  ): void {
+    const cacheKey = selectedSnapshotCacheKey(roomIdentifierAlias || snapshot?.roomIdentifier || snapshot?.room?.identifier);
+    if (!cacheKey) return;
+    if (!snapshot || snapshot.access.status !== "ready" || snapshot.room?.kind !== "focus") {
+      cachedSelectedSnapshots.delete(cacheKey);
+      return;
+    }
+    cachedSelectedSnapshots.delete(cacheKey);
+    cachedSelectedSnapshots.set(cacheKey, snapshot);
+    while (cachedSelectedSnapshots.size > selectedSnapshotCacheLimit) {
+      const oldestKey = cachedSelectedSnapshots.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      cachedSelectedSnapshots.delete(oldestKey);
     }
   }
 
@@ -407,6 +482,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   });
 
   return {
+    clearSelectedSnapshotCache,
     handleMessageSent,
     handleRefreshRoom,
     handleRoomRenamed,
@@ -439,6 +515,10 @@ function recoveredRootRoomAlias(
   const recoveredIdentifier = normalizeRoomIdentifier(snapshot.roomIdentifier);
   if (!requestedIdentifier || !recoveredIdentifier) return null;
   return requestedIdentifier === recoveredIdentifier ? null : requestedRoomIdentifier;
+}
+
+function selectedSnapshotCacheKey(roomIdentifier: string | null | undefined): string | null {
+  return normalizeRoomIdentifier(roomIdentifier);
 }
 
 function createOptimisticSelectedSnapshot(

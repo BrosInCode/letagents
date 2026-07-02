@@ -19,7 +19,6 @@
   border-radius: 0;
   background: rgba(10, 10, 10, 0.58);
   overflow: hidden;
-  animation: room-shell-enter var(--duration-normal) var(--ease-out);
 }
 
 .desktop-room-header {
