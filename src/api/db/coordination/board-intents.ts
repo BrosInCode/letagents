@@ -26,10 +26,11 @@ import type {
 } from "../types.js";
 
 export const DEFAULT_BOARD_MANAGER_MODE: BoardManagerMode = "manager_optional";
+export const BOARD_INTENT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 export const BOARD_INTENT_APPROVAL_TTL_MS = 30 * 60 * 1000;
 
 export interface BoardIntentApprovalCheck {
-  kind: "allow" | "not_required";
+  kind: "allow";
   intent?: BoardIntent;
 }
 
@@ -85,6 +86,10 @@ export function hashBoardIntentPayload(payload: BoardIntentPayload): string {
 
 function approvalToken(): string {
   return crypto.randomBytes(32).toString("base64url");
+}
+
+function defaultPendingIntentExpiresAt(now: Date): string {
+  return new Date(now.getTime() + BOARD_INTENT_PENDING_TTL_MS).toISOString();
 }
 
 function isValidBoardManagerMode(value: string): value is BoardManagerMode {
@@ -310,8 +315,12 @@ export async function createBoardIntent(input: {
   proposer_actor_instance_id?: string | null;
   proposer_agent_session_id?: string | null;
   expires_at?: string | null;
+  now?: Date;
 }): Promise<BoardIntent> {
-  const now = new Date().toISOString();
+  const nowDate = input.now ?? new Date();
+  const now = nowDate.toISOString();
+  await expireBoardIntents({ room_id: input.room_id, now: nowDate });
+
   const row: BoardIntentRow = {
     id: coordinationId("bi"),
     room_id: input.room_id,
@@ -328,7 +337,7 @@ export async function createBoardIntent(input: {
     decision_reason: null,
     approval_token_hash: null,
     decided_at: null,
-    expires_at: input.expires_at ?? null,
+    expires_at: input.expires_at ?? defaultPendingIntentExpiresAt(nowDate),
     created_at: now,
     updated_at: now,
   };
@@ -364,6 +373,8 @@ export async function listBoardIntents(input: {
   status?: string | null;
   limit?: number;
 }): Promise<BoardIntent[]> {
+  await expireBoardIntents({ room_id: input.room_id });
+
   const conditions = [eq(board_intents.room_id, input.room_id)];
   if (input.status) {
     conditions.push(eq(board_intents.status, input.status));
@@ -382,6 +393,8 @@ export async function countBoardIntents(input: {
   room_id: string;
   status?: string | null;
 }): Promise<number> {
+  await expireBoardIntents({ room_id: input.room_id });
+
   const conditions = [eq(board_intents.room_id, input.room_id)];
   if (input.status) {
     conditions.push(eq(board_intents.status, input.status));
@@ -404,6 +417,8 @@ export async function approveBoardIntent(input: {
   const nowDate = input.now ?? new Date();
   const now = nowDate.toISOString();
   const expiresAt = new Date(nowDate.getTime() + BOARD_INTENT_APPROVAL_TTL_MS).toISOString();
+  await expireBoardIntents({ room_id: input.room_id, now: nowDate });
+
   const [row] = (await db
     .update(board_intents)
     .set({
@@ -419,7 +434,8 @@ export async function approveBoardIntent(input: {
       and(
         eq(board_intents.room_id, input.room_id),
         eq(board_intents.id, input.intent_id),
-        eq(board_intents.status, "pending")
+        eq(board_intents.status, "pending"),
+        sql`(${board_intents.expires_at} IS NULL OR ${board_intents.expires_at} > ${now}::timestamptz)`
       )
     )
     .returning()) as BoardIntentRow[];
@@ -432,8 +448,12 @@ export async function denyBoardIntent(input: {
   intent_id: string;
   decision_by: string;
   reason?: string | null;
+  now?: Date;
 }): Promise<BoardIntent | null> {
-  const now = new Date().toISOString();
+  const nowDate = input.now ?? new Date();
+  const now = nowDate.toISOString();
+  await expireBoardIntents({ room_id: input.room_id, now: nowDate });
+
   const [row] = (await db
     .update(board_intents)
     .set({
@@ -447,12 +467,39 @@ export async function denyBoardIntent(input: {
       and(
         eq(board_intents.room_id, input.room_id),
         eq(board_intents.id, input.intent_id),
-        eq(board_intents.status, "pending")
+        eq(board_intents.status, "pending"),
+        sql`(${board_intents.expires_at} IS NULL OR ${board_intents.expires_at} > ${now}::timestamptz)`
       )
     )
     .returning()) as BoardIntentRow[];
 
   return row ? toBoardIntent(row) : null;
+}
+
+export async function expireBoardIntents(input: {
+  room_id?: string | null;
+  now?: Date;
+} = {}, executor: Pick<typeof db, "update"> = db): Promise<number> {
+  const now = (input.now ?? new Date()).toISOString();
+  const conditions = [
+    sql`${board_intents.status} IN ('pending', 'approved')`,
+    sql`${board_intents.expires_at} IS NOT NULL`,
+    sql`${board_intents.expires_at} <= ${now}::timestamptz`,
+  ];
+  if (input.room_id) {
+    conditions.push(eq(board_intents.room_id, input.room_id));
+  }
+
+  const rows = await executor
+    .update(board_intents)
+    .set({
+      status: "expired",
+      updated_at: now,
+    })
+    .where(and(...conditions))
+    .returning({ id: board_intents.id });
+
+  return rows.length;
 }
 
 export async function verifyBoardIntentApproval(input: {
@@ -488,6 +535,15 @@ export async function verifyBoardIntentApproval(input: {
       kind: "deny",
       code: "board_intent_not_found",
       error: "Board intent approval was not found.",
+    };
+  }
+  if (row.status === "expired") {
+    return {
+      kind: "deny",
+      code: "board_intent_expired",
+      error: row.approval_token_hash
+        ? `Board intent ${intentId} approval has expired.`
+        : `Board intent ${intentId} has expired.`,
     };
   }
   if (row.status !== "approved") {

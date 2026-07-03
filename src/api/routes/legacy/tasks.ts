@@ -26,6 +26,7 @@ import {
 } from "../../request/agent-identity.js";
 import { validateTaskWorkflowArtifactsInput } from "../../repo-workflow.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { recordBoardIntentConsumptionFailure } from "../../tasks/board-intent-audit.js";
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
@@ -215,6 +216,7 @@ export function registerLegacyProjectTaskRoutes(
     }
 
     let task: Awaited<ReturnType<typeof createTask>>;
+    const boardIntentApproval = admission.boardIntentApproval ?? null;
     try {
       task = await createTask(
         projectId,
@@ -222,10 +224,19 @@ export function registerLegacyProjectTaskRoutes(
         createdBy,
         description,
         source_message_id,
-        { boardIntentApproval: admission.boardIntentApproval ?? null }
+        { boardIntentApproval }
       );
     } catch (error) {
       if (error instanceof BoardIntentApprovalConsumptionError) {
+        await recordBoardIntentConsumptionFailure({
+          roomId: projectId,
+          taskId: null,
+          approval: boardIntentApproval,
+          error,
+          actorLabel: effectiveActorLabel,
+          actorKey: normalizeTaskActorKey(effectiveActorKey),
+          actorInstanceId: effectiveActorInstanceId,
+        });
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }
@@ -363,6 +374,8 @@ export function registerLegacyProjectTaskRoutes(
       updates.assignee_agent_key = workerIdentity.agent_key;
     }
 
+    let auditActorKey = actorKey;
+    let boardIntentApproval: BoardIntentConsumptionInput | null = null;
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
@@ -390,6 +403,7 @@ export function registerLegacyProjectTaskRoutes(
         }
         verifiedActorKey = actorValidation.actorKey;
       }
+      auditActorKey = verifiedActorKey;
 
       const ownership = evaluateTaskOwnership({
         authKind: req.authKind,
@@ -427,13 +441,14 @@ export function registerLegacyProjectTaskRoutes(
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
+      boardIntentApproval = coordination.boardIntentApproval ?? null;
 
       const updated = await updateTask(
         projectId,
         taskId,
         updates,
         {
-          boardIntentApproval: coordination.boardIntentApproval ?? null,
+          boardIntentApproval,
           workLeaseCreation: coordination.workLeaseCreation ?? null,
         }
       );
@@ -449,6 +464,15 @@ export function registerLegacyProjectTaskRoutes(
       res.json(updated);
     } catch (error) {
       if (error instanceof BoardIntentApprovalConsumptionError) {
+        await recordBoardIntentConsumptionFailure({
+          roomId: projectId,
+          taskId: task.id,
+          approval: boardIntentApproval,
+          error,
+          actorLabel,
+          actorKey: normalizeTaskActorKey(auditActorKey),
+          actorInstanceId,
+        });
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }

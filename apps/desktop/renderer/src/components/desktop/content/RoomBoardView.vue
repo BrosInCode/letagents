@@ -7,14 +7,16 @@
           <strong>Team tasks and agent handoffs</strong>
         </div>
         <div class="desktop-board-header-actions">
-          <div class="desktop-board-manager-status">
+          <div class="desktop-board-manager-status" @keydown.esc.stop.prevent="closeBoardManagerDetails">
             <button
+              ref="boardManagerTriggerElement"
               class="desktop-board-manager-pill"
               type="button"
               :data-mode="boardManagerMode"
               :data-has-pending="boardPendingIntentCount > 0"
               :title="boardManagerTitle"
               :aria-expanded="boardManagerDetailsOpen"
+              aria-haspopup="dialog"
               aria-controls="desktop-board-manager-details"
               @click="toggleBoardManagerDetails"
             >
@@ -25,8 +27,11 @@
             <div
               v-if="boardManagerDetailsOpen"
               id="desktop-board-manager-details"
+              ref="boardManagerDetailsElement"
               class="desktop-board-manager-details"
-              role="status"
+              role="dialog"
+              aria-label="Board manager details"
+              tabindex="-1"
             >
               <div v-for="row in boardManagerDetails" :key="row.label">
                 <span>{{ row.label }}</span>
@@ -327,10 +332,13 @@ const isCreateTaskModalOpen = ref(false);
 const createTaskTitle = ref("");
 const createTaskDescription = ref("");
 const createTaskDescriptionField = ref<HTMLTextAreaElement | null>(null);
+const boardManagerTriggerElement = ref<HTMLButtonElement | null>(null);
+const boardManagerDetailsElement = ref<HTMLElement | null>(null);
 const taskModalBackdropElement = ref<HTMLElement | null>(null);
 const taskModalElement = ref<HTMLElement | null>(null);
 const createTaskBackdropElement = ref<HTMLElement | null>(null);
 const createTaskModalElement = ref<HTMLElement | null>(null);
+let boardManagerPreviousFocusElement: HTMLElement | null = null;
 let taskModalPreviousFocusElement: HTMLElement | null = null;
 let createTaskModalPreviousFocusElement: HTMLElement | null = null;
 const boardFilters: Array<{ id: BoardFilter; label: string }> = [
@@ -660,7 +668,31 @@ function setActiveFilter(filter: string): void {
 }
 
 function toggleBoardManagerDetails(): void {
-  boardManagerDetailsOpen.value = !boardManagerDetailsOpen.value;
+  if (boardManagerDetailsOpen.value) {
+    closeBoardManagerDetails();
+    return;
+  }
+  boardManagerPreviousFocusElement = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : boardManagerTriggerElement.value;
+  boardManagerDetailsOpen.value = true;
+  void nextTick(() => {
+    boardManagerDetailsElement.value?.focus();
+  });
+}
+
+function closeBoardManagerDetails(): void {
+  if (!boardManagerDetailsOpen.value) {
+    return;
+  }
+  const focusTarget = boardManagerPreviousFocusElement?.isConnected
+    ? boardManagerPreviousFocusElement
+    : boardManagerTriggerElement.value;
+  boardManagerPreviousFocusElement = null;
+  boardManagerDetailsOpen.value = false;
+  void nextTick(() => {
+    focusTarget?.focus();
+  });
 }
 
 function filterCount(filter: BoardFilter): number {

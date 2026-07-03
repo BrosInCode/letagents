@@ -92,16 +92,16 @@ function isBoardManagerMode(value: string | null): value is "off" | "manager_opt
   return value === "off" || value === "manager_optional" || value === "intent_required";
 }
 
-function requesterLabel(
+export function requesterLabel(
   req: AuthenticatedRequest,
   body: Record<string, unknown>,
   workerIdentity: ResolvedRequestAgentIdentity | null
 ): string {
   const actorLabel = typeof body.actor_label === "string" ? body.actor_label.trim() : "";
   return workerIdentity?.actor_label
-    ?? (actorLabel || null)
     ?? req.sessionAccount?.display_name
     ?? req.sessionAccount?.login
+    ?? (actorLabel || null)
     ?? "participant";
 }
 

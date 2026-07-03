@@ -12,7 +12,7 @@ function ageMsSince(value: string): number | null {
   return Number.isFinite(parsed) ? Math.max(0, Date.now() - parsed) : null;
 }
 
-function getTaskBoardStalePromptState(input: {
+export function getTaskBoardStalePromptState(input: {
   task: Task;
   leases: TaskLease[];
   mute?: Parameters<typeof getTaskStalePromptState>[0]["mute"];
@@ -21,6 +21,15 @@ function getTaskBoardStalePromptState(input: {
     task: input.task,
     mute: input.mute,
   });
+  if (promptState.muted) {
+    return {
+      ...promptState,
+      is_stale: false,
+      reason: null,
+      stale_for_ms: null,
+    };
+  }
+
   const workLease = input.leases.find((lease) => lease.task_id === input.task.id && lease.kind === "work");
   if ((input.task.status === "accepted" || input.task.status === "merged") && workLease) {
     return {

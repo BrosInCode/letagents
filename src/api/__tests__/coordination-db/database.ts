@@ -22,6 +22,11 @@ export const dbApi = {
   createOwnerToken: dbModule?.createOwnerToken,
   createProjectWithName: dbModule?.createProjectWithName,
   createRoomAgentSession: dbModule?.createRoomAgentSession,
+  approveBoardIntent: dbModule?.approveBoardIntent,
+  consumeBoardIntentApproval: dbModule?.consumeBoardIntentApproval,
+  countBoardIntents: dbModule?.countBoardIntents,
+  createBoardIntent: dbModule?.createBoardIntent,
+  denyBoardIntent: dbModule?.denyBoardIntent,
   createSession: dbModule?.createSession,
   createTask: dbModule?.createTask,
   createTaskLease: dbModule?.createTaskLease,
@@ -31,6 +36,7 @@ export const dbApi = {
   registerAgentIdentity: dbModule?.registerAgentIdentity,
   updateTask: dbModule?.updateTask,
   upsertAccount: dbModule?.upsertAccount,
+  verifyBoardIntentApproval: dbModule?.verifyBoardIntentApproval,
 };
 
 export const databaseTestOptions = {

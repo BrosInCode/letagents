@@ -15,6 +15,7 @@ import { apiUrl } from "./paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
 const require = createRequire(import.meta.url);
+let warnedAboutUserDataFallback = false;
 
 interface DesktopSecretStorage {
   isEncryptionAvailable: () => boolean;
@@ -40,7 +41,19 @@ function getElectronMain(): {
 }
 
 function desktopUserDataPath(): string {
-  return getElectronMain().app?.getPath("userData") || homedir();
+  const userDataPath = getElectronMain().app?.getPath("userData");
+  if (userDataPath) {
+    return userDataPath;
+  }
+
+  const fallbackPath = join(homedir(), ".letagents", "desktop");
+  if (!warnedAboutUserDataFallback) {
+    console.warn(
+      "[desktop-auth] Electron userData path unavailable; storing auth state in ~/.letagents/desktop."
+    );
+    warnedAboutUserDataFallback = true;
+  }
+  return fallbackPath;
 }
 
 function desktopSecretStorage(): DesktopSecretStorage {

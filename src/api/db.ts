@@ -47,6 +47,7 @@ export {
   countBoardIntents,
   createBoardIntent,
   denyBoardIntent,
+  expireBoardIntents,
   getActiveBoardManager,
   getRoomBoardSettings,
   listBoardIntents,

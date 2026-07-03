@@ -114,7 +114,7 @@ export async function getOpenTasks(
 
   const conditions = [
     eq(tasks.room_id, roomId),
-    notInArray(tasks.status, ["merged", "done", "cancelled"]),
+    notInArray(tasks.status, ["done", "cancelled"]),
   ];
   if (afterNumber) conditions.push(sql`${tasks.number} > ${afterNumber}`);
 

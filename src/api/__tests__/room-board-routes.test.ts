@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const { authorizeBoardDecision, registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
+const { authorizeBoardDecision, registerRoomBoardRoutes, requesterLabel } = await import("../routes/rooms/board.js");
 import type { BoardManagerAssignment, Project } from "../db.js";
 import type { ResolvedRequestAgentIdentity } from "../request/agent-identity.js";
 
@@ -186,6 +186,21 @@ test("authorizeBoardDecision falls back to admin auth for non-worker requests", 
   assert.equal(requireAdminCalled, true);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body, null);
+});
+
+test("requesterLabel prefers authenticated session identity over body labels", () => {
+  const label = requesterLabel(
+    {
+      sessionAccount: {
+        display_name: "Authenticated Admin",
+        login: "admin-login",
+      },
+    } as never,
+    { actor_label: "Spoofed Manager" },
+    null
+  );
+
+  assert.equal(label, "Authenticated Admin");
 });
 
 for (const [routeName, routePath] of [

@@ -92,7 +92,7 @@ export interface TaskCoordinationEnforcementDeps {
     intent_id?: string | null;
     approval_token?: string | null;
   }): Promise<
-    | { kind: "allow" | "not_required"; intent?: { id: string } }
+    | { kind: "allow"; intent?: { id: string } }
     | { kind: "deny"; code: string; error: string }
   >;
 }

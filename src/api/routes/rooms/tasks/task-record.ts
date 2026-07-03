@@ -6,6 +6,7 @@ import {
   getTaskById,
   getTaskOwnershipState,
   updateTask,
+  type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
 import {
@@ -14,6 +15,7 @@ import {
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
@@ -100,6 +102,8 @@ export function registerTaskRecordRoutes(
       updates.assignee_agent_key = workerIdentity.agent_key;
     }
 
+    let auditActorKey = actorKey;
+    let boardIntentApproval: BoardIntentConsumptionInput | null = null;
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
@@ -150,6 +154,7 @@ export function registerTaskRecordRoutes(
         }
         verifiedActorKey = actorValidation.actorKey;
       }
+      auditActorKey = verifiedActorKey;
 
       if (!reviewDecisionOnly) {
         const ownership = evaluateTaskOwnership({
@@ -209,13 +214,14 @@ export function registerTaskRecordRoutes(
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
+      boardIntentApproval = coordination.boardIntentApproval ?? null;
 
       const updated = await updateTask(
         project.id,
         taskId,
         updates,
         {
-          boardIntentApproval: coordination.boardIntentApproval ?? null,
+          boardIntentApproval,
           workLeaseCreation: coordination.workLeaseCreation ?? null,
         }
       );
@@ -236,6 +242,15 @@ export function registerTaskRecordRoutes(
       }
     } catch (error) {
       if (error instanceof BoardIntentApprovalConsumptionError) {
+        await recordBoardIntentConsumptionFailure({
+          roomId: project.id,
+          taskId: task.id,
+          approval: boardIntentApproval,
+          error,
+          actorLabel,
+          actorKey: normalizeTaskActorKey(auditActorKey),
+          actorInstanceId,
+        });
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }

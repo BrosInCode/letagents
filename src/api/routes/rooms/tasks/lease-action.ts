@@ -242,6 +242,8 @@ export function registerTaskLeaseActionRoute(
       });
     }
 
+    let boardIntentApproval: BoardIntentConsumptionInput | null = null;
+
     try {
       if (action === "handoff" && !LEASE_RECOVERY_ACTIVE_STATUSES.has(task.status)) {
         res.status(409).json({
@@ -261,7 +263,6 @@ export function registerTaskLeaseActionRoute(
         }
       }
 
-      let boardIntentApproval: BoardIntentConsumptionInput | null = null;
       if ((actorKey || actorSessionId) && await shouldRequireBoardIntent({ room_id: project.id })) {
         const payload = boardIntentPayloadForLeaseAction({
           taskId: task.id,
@@ -419,6 +420,27 @@ export function registerTaskLeaseActionRoute(
       });
     } catch (error) {
       if (error instanceof BoardIntentApprovalConsumptionError) {
+        if (boardIntentApproval) {
+          await createCoordinationEvent({
+            room_id: project.id,
+            task_id: task.id,
+            lease_id: activeWorkLease.id,
+            event_type: action === "handoff" ? "task_lease_handoff" : "task_lease_release",
+            decision: "deny",
+            actor_label: actorLabel,
+            actor_key: actorKey,
+            actor_instance_id: actorInstanceId,
+            reason: `Board intent approval consumption failed: ${error.message}`,
+            metadata: {
+              action,
+              board_intent_id: boardIntentApproval.intent_id,
+              previous_lease_id: activeWorkLease.id,
+              previous_agent_key: activeWorkLease.agent_key,
+              target_actor_key: targetActorKey,
+              target_actor_label: targetActorLabel,
+            },
+          });
+        }
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }

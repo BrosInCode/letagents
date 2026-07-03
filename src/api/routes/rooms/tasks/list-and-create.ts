@@ -11,6 +11,7 @@ import {
 } from "../../../db.js";
 import { parseLimit, type AuthenticatedRequest } from "../../../http/helpers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import { normalizeTaskActorKey } from "../../../tasks/ownership.js";
 import {
   isDesktopHumanWrite,
@@ -123,6 +124,7 @@ export function registerTaskListAndCreateRoutes(
     }
 
     let task: Awaited<ReturnType<typeof createTask>>;
+    const boardIntentApproval = admission.boardIntentApproval ?? null;
     try {
       task = await createTask(
         project.id,
@@ -130,10 +132,19 @@ export function registerTaskListAndCreateRoutes(
         createdBy,
         description,
         sourceMessageId ?? undefined,
-        { boardIntentApproval: admission.boardIntentApproval ?? null }
+        { boardIntentApproval }
       );
     } catch (error) {
       if (error instanceof BoardIntentApprovalConsumptionError) {
+        await recordBoardIntentConsumptionFailure({
+          roomId: project.id,
+          taskId: null,
+          approval: boardIntentApproval,
+          error,
+          actorLabel: effectiveActorLabel,
+          actorKey: normalizeTaskActorKey(effectiveActorKey),
+          actorInstanceId: effectiveActorInstanceId,
+        });
         res.status(409).json({ error: error.message, code: error.code });
         return;
       }
