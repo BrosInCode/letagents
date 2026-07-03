@@ -16,16 +16,38 @@ export function desktopEventPublicReplyText(
   value: string | null | undefined,
 ): string | null {
   const trimmed = String(value ?? "").trim();
-  if (!trimmed || trimmed === DESKTOP_EVENTS_NO_ROOM_REPLY) {
-    return null;
-  }
-  if (sessionToken && trimmed === `${sessionToken}_DONE`) {
+  if (!trimmed || hasDesktopEventControlMarkerLine(trimmed, sessionToken)) {
     return null;
   }
   if (hasManagedAgentContextRequestLine(trimmed)) {
     return null;
   }
   return trimmed;
+}
+
+function hasDesktopEventControlMarkerLine(
+  value: string,
+  sessionToken: string | null | undefined,
+): boolean {
+  const stopMarker = sessionToken ? `${sessionToken}_DONE` : null;
+  return value.split(/\r?\n/)
+    .map((line) => stripDesktopEventControlLineDecoration(line))
+    .some((line) =>
+      line === DESKTOP_EVENTS_NO_ROOM_REPLY ||
+      Boolean(stopMarker && line === stopMarker)
+    );
+}
+
+function stripDesktopEventControlLineDecoration(line: string): string {
+  let candidate = line.trim();
+  while (candidate.startsWith(">")) {
+    candidate = candidate.slice(1).trimStart();
+  }
+  const listPrefix = /^(?:[-*+]\s+|\d+[.)]\s+)/.exec(candidate);
+  if (listPrefix) {
+    candidate = candidate.slice(listPrefix[0].length).trimStart();
+  }
+  return candidate;
 }
 
 export function buildDesktopEventPrompt(
