@@ -126,3 +126,55 @@ export interface BoardIntentRow {
   created_at: string;
   updated_at: string;
 }
+
+export interface BoardManagerCandidate {
+  agent_session_id: string;
+  agent_key: string;
+  actor_label: string;
+  display_name: string;
+  runtime: string;
+  runtime_source: BoardManagerRuntimeSource;
+  last_seen_at: string;
+  is_active_manager: boolean;
+}
+
+export interface BoardGovernanceWarning {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+}
+
+export interface BoardGovernanceCapabilities {
+  can_view_governance: boolean;
+  can_assign_manager: boolean;
+  can_release_manager: boolean;
+  can_set_manager_mode: boolean;
+  can_decide_intents: boolean;
+}
+
+export type BoardGovernanceAuditKind =
+  | "coordination_event"
+  | "manager_assignment"
+  | "board_intent_decision";
+
+export interface BoardGovernanceAuditEntry {
+  id: string;
+  kind: BoardGovernanceAuditKind;
+  event_type: string;
+  actor_label: string | null;
+  reason: string | null;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface BoardGovernanceSnapshot {
+  room_id: string;
+  settings: RoomBoardSettings;
+  active_manager: BoardManagerAssignment | null;
+  candidates: BoardManagerCandidate[];
+  pending_intents: BoardIntent[];
+  pending_intent_count: number;
+  audit: BoardGovernanceAuditEntry[];
+  warnings: BoardGovernanceWarning[];
+  capabilities: BoardGovernanceCapabilities;
+}

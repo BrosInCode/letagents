@@ -1,4 +1,5 @@
 @import "./task-board/board-layout-filters.css";
+@import "./task-board/board-governance.css";
 @import "./task-board/column-shell.css";
 @import "./task-board/task-card.css";
 @import "./task-board/review-actions.css";

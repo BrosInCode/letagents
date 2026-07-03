@@ -42,3 +42,10 @@ export {
   shouldRequireBoardIntent,
   verifyBoardIntentApproval,
 } from "./coordination/board-intents.js";
+export {
+  getBoardGovernanceSnapshot,
+  listActiveBoardManagerCandidates,
+  listBoardGovernanceAudit,
+  buildBoardGovernanceCapabilities,
+  buildBoardGovernanceWarnings,
+} from "./coordination/board-governance.js";

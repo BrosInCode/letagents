@@ -69,6 +69,14 @@ import type {
   DesktopTaskReviewWorkerActionInput,
   DesktopTaskWorkerActionInput,
 } from "./tasks.js";
+import type {
+  DesktopBoardGovernanceAssignManagerInput,
+  DesktopBoardGovernanceMutationResult,
+  DesktopBoardGovernanceReleaseManagerInput,
+  DesktopBoardGovernanceSetModeInput,
+  DesktopBoardGovernanceSnapshot,
+  DesktopBoardIntentDecisionInput,
+} from "./board-governance.js";
 
 export interface DesktopApi {
   ui: {
@@ -144,6 +152,24 @@ export interface DesktopApi {
       taskId: string,
       input: DesktopTaskReviewWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
+    getBoardGovernance: (roomIdentifier: string) => Promise<DesktopBoardGovernanceSnapshot>;
+    assignBoardManager: (
+      roomIdentifier: string,
+      input: DesktopBoardGovernanceAssignManagerInput
+    ) => Promise<DesktopBoardGovernanceMutationResult>;
+    releaseBoardManager: (
+      roomIdentifier: string,
+      input?: DesktopBoardGovernanceReleaseManagerInput
+    ) => Promise<DesktopBoardGovernanceMutationResult>;
+    setBoardManagerMode: (
+      roomIdentifier: string,
+      input: DesktopBoardGovernanceSetModeInput
+    ) => Promise<DesktopBoardGovernanceMutationResult>;
+    decideBoardIntent: (
+      roomIdentifier: string,
+      intentId: string,
+      input: DesktopBoardIntentDecisionInput
+    ) => Promise<DesktopBoardGovernanceMutationResult>;
     createTaskFocusRoom: (
       roomIdentifier: string,
       taskId: string

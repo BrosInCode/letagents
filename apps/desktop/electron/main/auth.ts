@@ -335,6 +335,13 @@ export async function apiFetch<T>(
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers(init?.headers);
   requestHeaders.set("Accept", "application/json");
+  if (
+    typeof init?.body === "string"
+    && init.body.length > 0
+    && !requestHeaders.has("Content-Type")
+  ) {
+    requestHeaders.set("Content-Type", "application/json");
+  }
   if (storedAuth.token && !requestHeaders.has("Authorization")) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
   }

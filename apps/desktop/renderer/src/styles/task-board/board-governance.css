@@ -1,0 +1,182 @@
+.desktop-board-governance-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(8 10 16 / 0.55);
+}
+
+.desktop-board-governance-panel {
+  width: min(720px, 100%);
+  max-height: min(80vh, 860px);
+  overflow: auto;
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 18px;
+  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.08));
+  background: var(--desktop-surface-elevated, #171a22);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.35);
+}
+
+.desktop-board-governance-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.desktop-board-governance-header span {
+  display: block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--desktop-text-muted, #9aa3b2);
+}
+
+.desktop-board-governance-header h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
+}
+
+.desktop-board-governance-close,
+.desktop-board-secondary-action {
+  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.12));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.desktop-board-governance-sections {
+  width: 100%;
+}
+
+.desktop-board-governance-error,
+.desktop-board-governance-loading {
+  margin: 0;
+  color: var(--desktop-text-muted, #9aa3b2);
+}
+
+.desktop-board-governance-error {
+  color: #ff8f8f;
+}
+
+.desktop-board-governance-body {
+  display: grid;
+  gap: 16px;
+}
+
+.desktop-board-governance-warnings {
+  display: grid;
+  gap: 8px;
+}
+
+.desktop-board-governance-warnings p {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.04);
+}
+
+.desktop-board-governance-warnings p[data-severity="error"] {
+  background: rgb(220 70 70 / 0.12);
+}
+
+.desktop-board-governance-warnings p[data-severity="warning"] {
+  background: rgb(220 160 40 / 0.12);
+}
+
+.desktop-board-governance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.desktop-board-governance-grid div,
+.desktop-board-governance-mode {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.03);
+}
+
+.desktop-board-governance-grid span,
+.desktop-board-governance-mode > span {
+  font-size: 12px;
+  color: var(--desktop-text-muted, #9aa3b2);
+}
+
+.desktop-board-governance-candidates {
+  display: grid;
+  gap: 10px;
+}
+
+.desktop-board-governance-candidates h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.desktop-board-governance-candidate {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.08));
+}
+
+.desktop-board-governance-candidate span {
+  display: grid;
+  gap: 2px;
+}
+
+.desktop-board-governance-candidate strong {
+  font-size: 14px;
+}
+
+.desktop-board-governance-candidate span span {
+  font-size: 12px;
+  color: var(--desktop-text-muted, #9aa3b2);
+}
+
+.desktop-board-governance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.desktop-board-governance-intent,
+.desktop-board-governance-audit-entry {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.08));
+}
+
+.desktop-board-governance-intent header,
+.desktop-board-governance-audit-entry header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.desktop-board-governance-intent footer {
+  display: flex;
+  gap: 8px;
+}
+
+.desktop-board-governance-intent p,
+.desktop-board-governance-audit-entry p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--desktop-text-muted, #9aa3b2);
+  word-break: break-word;
+}
