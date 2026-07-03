@@ -17,12 +17,14 @@ import {
   type BoardIntentPayload,
   type BoardManagerAssignment,
   type Project,
+  getBoardGovernanceSnapshot,
 } from "../../db.js";
 import { type AuthenticatedRequest } from "../../http/helpers.js";
 import {
   requireWorkerRequestAgentIdentity,
   type ResolvedRequestAgentIdentity,
 } from "../../request/agent-identity.js";
+import { resolveGitRoomProjectRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 
 export interface RoomBoardRouteDeps {
@@ -132,6 +134,24 @@ export function registerRoomBoardRoutes(
 ): void {
   const resolveBoardWorkerIdentity = deps.resolveOptionalWorkerIdentity ?? resolveOptionalWorkerIdentity;
   const getActiveBoardManagerForRoom = deps.getActiveBoardManagerForRoom ?? getActiveBoardManager;
+
+  app.get(/^\/rooms\/(.+)\/board-governance$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const isAdmin = req.sessionAccount
+      ? (await resolveGitRoomProjectRole(project, req.sessionAccount)) === "admin"
+      : false;
+
+    const governance = await getBoardGovernanceSnapshot({
+      room_id: project.id,
+      is_admin: isAdmin,
+    });
+    res.json(governance);
+  });
 
   app.get(/^\/rooms\/(.+)\/board-settings$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");

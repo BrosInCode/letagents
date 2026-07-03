@@ -10,3 +10,4 @@ export * from "./rooms/repo.js";
 export * from "./rooms/room-info.js";
 export * from "./rooms/snapshot.js";
 export * from "./rooms/tasks.js";
+export * from "./rooms/board-governance.js";

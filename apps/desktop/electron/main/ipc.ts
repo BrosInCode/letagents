@@ -84,6 +84,12 @@ import type {
   RepoStatus,
   WorkerSnapshot,
 } from "../ipc-types.js";
+import type {
+  DesktopBoardGovernanceAssignManagerInput,
+  DesktopBoardGovernanceReleaseManagerInput,
+  DesktopBoardGovernanceSetModeInput,
+  DesktopBoardIntentDecisionInput,
+} from "../ipc-types/board-governance.js";
 import { buildRepoStatus } from "../repo-status.js";
 import { registerDesktopRentalIpcHandlers } from "../rental-handlers.js";
 import { RentalApiClient } from "../rental/api-client.js";
@@ -160,6 +166,11 @@ import {
   updateDesktopRoomTask,
   updateDesktopRoomTaskLease,
   updateDesktopRoomTaskReviewLease,
+  getDesktopBoardGovernance,
+  assignDesktopBoardManager,
+  releaseDesktopBoardManager,
+  setDesktopBoardManagerMode,
+  decideDesktopBoardIntent,
 } from "./rooms.js";
 import {
   discardDesktopAttachment,
@@ -466,6 +477,34 @@ export function registerDesktopIpcHandlers(
       input: DesktopTaskReviewWorkerActionInput,
     ): Promise<DesktopTaskMutationResult> =>
       runDesktopRoomTaskReviewWorkerAction(roomIdentifier, taskId, input),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-board-governance",
+    async (_event, roomIdentifier: string) => getDesktopBoardGovernance(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:room:assign-board-manager",
+    async (_event, roomIdentifier: string, input: DesktopBoardGovernanceAssignManagerInput) =>
+      assignDesktopBoardManager(roomIdentifier, input),
+  );
+  targetIpcMain.handle(
+    "desktop:room:release-board-manager",
+    async (_event, roomIdentifier: string, input?: DesktopBoardGovernanceReleaseManagerInput) =>
+      releaseDesktopBoardManager(roomIdentifier, input ?? {}),
+  );
+  targetIpcMain.handle(
+    "desktop:room:set-board-manager-mode",
+    async (_event, roomIdentifier: string, input: DesktopBoardGovernanceSetModeInput) =>
+      setDesktopBoardManagerMode(roomIdentifier, input),
+  );
+  targetIpcMain.handle(
+    "desktop:room:decide-board-intent",
+    async (
+      _event,
+      roomIdentifier: string,
+      intentId: string,
+      input: DesktopBoardIntentDecisionInput,
+    ) => decideDesktopBoardIntent(roomIdentifier, intentId, input),
   );
   targetIpcMain.handle(
     "desktop:room:create-task-focus-room",

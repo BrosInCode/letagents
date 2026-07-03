@@ -163,7 +163,14 @@ export async function setRoomBoardManagerMode(input: {
     })
     .returning()) as RoomBoardSettingsRow[];
 
-  return toRoomBoardSettings(row);
+  const settings = toRoomBoardSettings(row);
+  const { recordBoardManagerModeChangedEvent } = await import("./board-governance.js");
+  await recordBoardManagerModeChangedEvent({
+    room_id: input.room_id,
+    updated_by: input.updated_by,
+    manager_mode: input.manager_mode,
+  });
+  return settings;
 }
 
 export async function getActiveBoardManager(
@@ -195,7 +202,7 @@ export async function getActiveBoardManager(
     : null;
 }
 
-function inferBoardManagerRuntimeSource(
+export function inferBoardManagerRuntimeSource(
   session: RoomAgentSessionRow
 ): BoardManagerRuntimeSource {
   const signal = [
@@ -239,7 +246,7 @@ export async function assignBoardManager(input: {
   if (!session) return null;
 
   const now = new Date().toISOString();
-  await db
+  const replacedRows = (await db
     .update(board_manager_assignments)
     .set({
       status: "released",
@@ -253,7 +260,8 @@ export async function assignBoardManager(input: {
         eq(board_manager_assignments.room_id, input.room_id),
         eq(board_manager_assignments.status, "active")
       )
-    );
+    )
+    .returning()) as BoardManagerAssignmentRow[];
 
   const runtimeSource = input.runtime_source ?? inferBoardManagerRuntimeSource(session);
   const [row] = (await db
@@ -276,7 +284,22 @@ export async function assignBoardManager(input: {
     })
     .returning()) as BoardManagerAssignmentRow[];
 
-  return toBoardManagerAssignment(row);
+  const assignment = toBoardManagerAssignment(row);
+  const { recordBoardManagerAssignedEvent, recordBoardManagerReleasedEvent } = await import("./board-governance.js");
+  for (const replacedRow of replacedRows) {
+    await recordBoardManagerReleasedEvent({
+      room_id: input.room_id,
+      released_by: input.assigned_by,
+      manager: toBoardManagerAssignment(replacedRow),
+      reason: "Replaced by a new Board Manager assignment.",
+    });
+  }
+  await recordBoardManagerAssignedEvent({
+    room_id: input.room_id,
+    assigned_by: input.assigned_by,
+    manager: assignment,
+  });
+  return assignment;
 }
 
 export async function releaseBoardManager(input: {
@@ -302,7 +325,16 @@ export async function releaseBoardManager(input: {
     )
     .returning()) as BoardManagerAssignmentRow[];
 
-  return row ? toBoardManagerAssignment(row) : null;
+  if (!row) return null;
+  const assignment = toBoardManagerAssignment(row);
+  const { recordBoardManagerReleasedEvent } = await import("./board-governance.js");
+  await recordBoardManagerReleasedEvent({
+    room_id: input.room_id,
+    released_by: input.released_by,
+    manager: assignment,
+    reason: input.reason,
+  });
+  return assignment;
 }
 
 export async function createBoardIntent(input: {

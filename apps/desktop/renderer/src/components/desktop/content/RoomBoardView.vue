@@ -7,7 +7,7 @@
           <strong>Team tasks and agent handoffs</strong>
         </div>
         <div class="desktop-board-header-actions">
-          <div class="desktop-board-manager-status" @keydown.esc.stop.prevent="closeBoardManagerDetails">
+          <div class="desktop-board-manager-status">
             <button
               ref="boardManagerTriggerElement"
               class="desktop-board-manager-pill"
@@ -15,29 +15,15 @@
               :data-mode="boardManagerMode"
               :data-has-pending="boardPendingIntentCount > 0"
               :title="boardManagerTitle"
-              :aria-expanded="boardManagerDetailsOpen"
+              :aria-expanded="governanceOpen"
               aria-haspopup="dialog"
-              aria-controls="desktop-board-manager-details"
-              @click="toggleBoardManagerDetails"
+              aria-controls="desktop-board-governance-panel"
+              @click="openGovernance"
             >
               <span class="desktop-board-manager-dot" aria-hidden="true"></span>
               <strong>{{ boardManagerLabel }}</strong>
               <span v-if="boardPendingIntentCount > 0">{{ boardPendingIntentCount }} pending</span>
             </button>
-            <div
-              v-if="boardManagerDetailsOpen"
-              id="desktop-board-manager-details"
-              ref="boardManagerDetailsElement"
-              class="desktop-board-manager-details"
-              role="dialog"
-              aria-label="Board manager details"
-              tabindex="-1"
-            >
-              <div v-for="row in boardManagerDetails" :key="row.label">
-                <span>{{ row.label }}</span>
-                <strong>{{ row.value }}</strong>
-              </div>
-            </div>
           </div>
           <button
             class="desktop-board-primary-action desktop-board-add-button"
@@ -263,6 +249,25 @@
         </footer>
       </form>
     </div>
+
+    <RoomBoardGovernancePanel
+      :open="governanceOpen"
+      :loading="governanceLoading"
+      :busy="governanceBusy"
+      :error="governanceError"
+      :governance="governance"
+      :active-section="activeGovernanceSection"
+      :selected-candidate-id="selectedCandidateId"
+      @close="closeGovernance"
+      @update:active-section="activeGovernanceSection = $event"
+      @update:selected-candidate-id="selectedCandidateId = $event"
+      @refresh="loadGovernance"
+      @assign-manager="handleAssignManager"
+      @release-manager="handleReleaseManager"
+      @set-manager-mode="handleSetManagerMode"
+      @approve-intent="handleApproveIntent"
+      @deny-intent="handleDenyIntent"
+    />
   </section>
 </template>
 
@@ -282,6 +287,8 @@ import {
 } from "./modal-focus";
 import RoomBoardTaskCard from "./room-board/RoomBoardTaskCard.vue";
 import RoomBoardTaskInspector from "./room-board/RoomBoardTaskInspector.vue";
+import RoomBoardGovernancePanel from "./room-board/RoomBoardGovernancePanel.vue";
+import { useBoardGovernance } from "./room-board/useBoardGovernance";
 import { normalizeActor, normalizeRoom, readableStatus } from "./room-board/formatters";
 import { reviewLeases, shouldShowReviewPanel, workLease } from "./room-board/task-state";
 import { useRoomBoardController } from "./room-board/useRoomBoardController";
@@ -324,7 +331,6 @@ const ACTIVE_BOARD_STATUSES = ["proposed", "accepted", "assigned", "in_progress"
 const CLOSEOUT_BOARD_STATUSES = ["merged", "done", "cancelled"];
 const searchQuery = ref("");
 const activeFilter = ref<BoardFilter>("open");
-const boardManagerDetailsOpen = ref(false);
 const draggedTaskId = ref<string | null>(null);
 const dragOverStatus = ref<string | null>(null);
 const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
@@ -333,14 +339,55 @@ const createTaskTitle = ref("");
 const createTaskDescription = ref("");
 const createTaskDescriptionField = ref<HTMLTextAreaElement | null>(null);
 const boardManagerTriggerElement = ref<HTMLButtonElement | null>(null);
-const boardManagerDetailsElement = ref<HTMLElement | null>(null);
 const taskModalBackdropElement = ref<HTMLElement | null>(null);
 const taskModalElement = ref<HTMLElement | null>(null);
 const createTaskBackdropElement = ref<HTMLElement | null>(null);
 const createTaskModalElement = ref<HTMLElement | null>(null);
-let boardManagerPreviousFocusElement: HTMLElement | null = null;
 let taskModalPreviousFocusElement: HTMLElement | null = null;
 let createTaskModalPreviousFocusElement: HTMLElement | null = null;
+
+const {
+  governanceOpen,
+  governanceLoading,
+  governanceBusy,
+  governanceError,
+  governance,
+  activeSection: activeGovernanceSection,
+  selectedCandidateId,
+  openGovernance,
+  closeGovernance,
+  loadGovernance,
+  assignManager,
+  releaseManager,
+  setManagerMode,
+  decideIntent,
+} = useBoardGovernance(props.roomIdentifier);
+
+async function handleAssignManager(agentSessionId: string): Promise<void> {
+  await assignManager(agentSessionId);
+  emit("refresh-room");
+}
+
+async function handleReleaseManager(): Promise<void> {
+  await releaseManager();
+  emit("refresh-room");
+}
+
+async function handleSetManagerMode(mode: "off" | "manager_optional" | "intent_required"): Promise<void> {
+  await setManagerMode(mode);
+  emit("refresh-room");
+}
+
+async function handleApproveIntent(intentId: string): Promise<void> {
+  await decideIntent(intentId, "approve");
+  emit("refresh-room");
+}
+
+async function handleDenyIntent(intentId: string): Promise<void> {
+  await decideIntent(intentId, "deny");
+  emit("refresh-room");
+}
+
 const boardFilters: Array<{ id: BoardFilter; label: string }> = [
   { id: "open", label: "Open" },
   { id: "mine", label: "Local agent" },
@@ -389,32 +436,6 @@ const boardManagerTitle = computed(() => {
   const pendingText = pending === 1 ? "1 pending intent" : `${pending} pending intents`;
   if (!settings?.activeManager) return `${boardManagerLabel.value}. ${pendingText}.`;
   return `${boardManagerLabel.value}: ${settings.activeManager.actorLabel}. ${pendingText}.`;
-});
-const boardManagerDetails = computed(() => {
-  const settings = props.boardSettings;
-  const activeManager = settings?.activeManager;
-  return [
-    {
-      label: "Mode",
-      value: boardManagerMode.value === "intent_required"
-        ? "Approval required"
-        : boardManagerMode.value === "manager_optional"
-          ? "Manager optional"
-          : "Off",
-    },
-    {
-      label: "Manager",
-      value: activeManager
-        ? `${activeManager.actorLabel} (${readableManagerRuntime(activeManager.runtimeSource)})`
-        : "None active",
-    },
-    {
-      label: "Queue",
-      value: boardPendingIntentCount.value === 1
-        ? "1 pending intent"
-        : `${boardPendingIntentCount.value} pending intents`,
-    },
-  ];
 });
 
 const visibleStatuses = computed(() =>
@@ -667,34 +688,6 @@ function setActiveFilter(filter: string): void {
   activeFilter.value = filter as BoardFilter;
 }
 
-function toggleBoardManagerDetails(): void {
-  if (boardManagerDetailsOpen.value) {
-    closeBoardManagerDetails();
-    return;
-  }
-  boardManagerPreviousFocusElement = document.activeElement instanceof HTMLElement
-    ? document.activeElement
-    : boardManagerTriggerElement.value;
-  boardManagerDetailsOpen.value = true;
-  void nextTick(() => {
-    boardManagerDetailsElement.value?.focus();
-  });
-}
-
-function closeBoardManagerDetails(): void {
-  if (!boardManagerDetailsOpen.value) {
-    return;
-  }
-  const focusTarget = boardManagerPreviousFocusElement?.isConnected
-    ? boardManagerPreviousFocusElement
-    : boardManagerTriggerElement.value;
-  boardManagerPreviousFocusElement = null;
-  boardManagerDetailsOpen.value = false;
-  void nextTick(() => {
-    focusTarget?.focus();
-  });
-}
-
 function filterCount(filter: BoardFilter): number {
   return props.tasks.filter((task) => taskMatchesFilter(task, filter)).length;
 }
@@ -710,13 +703,6 @@ function taskMatchesFilter(task: DesktopTaskSummary, filter: BoardFilter): boole
   if (filter === "unclaimed") return taskIsUnclaimed(task);
   if (filter === "needs-review") return taskNeedsReview(task);
   return true;
-}
-
-function readableManagerRuntime(runtimeSource: string): string {
-  if (runtimeSource === "desktop_managed") return "desktop";
-  if (runtimeSource === "open_model") return "open model";
-  if (runtimeSource === "external") return "external";
-  return "unknown";
 }
 
 function taskMatchesSearch(task: DesktopTaskSummary): boolean {
