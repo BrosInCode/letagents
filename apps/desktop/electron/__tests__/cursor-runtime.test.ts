@@ -69,6 +69,28 @@ function storageState(roomIdentifier = "room_1"): DesktopRoomStorageState {
   };
 }
 
+function localStorageState(roomIdentifier = "room_1"): DesktopRoomStorageState {
+  return {
+    roomIdentifier,
+    defaultMode: "local",
+    overrideMode: "local",
+    effectiveMode: "local",
+    isLocalRoom: true,
+    localRoom: {
+      roomIdentifier,
+      displayName: "Local Room",
+      cloudRoomIdentifier: null,
+      publishStatus: "local_only",
+      createdAt: "2026-06-30T00:00:00.000Z",
+      updatedAt: "2026-06-30T00:00:00.000Z",
+      publishedAt: null,
+      gitRoom: null,
+    },
+    databasePath: "/tmp/local-chat.sqlite",
+    localFilesPath: "/tmp/files",
+  };
+}
+
 function messageEvent(
   overrides: Partial<Extract<DesktopRoomStreamEvent, { type: "message" }>> = {},
 ): Extract<DesktopRoomStreamEvent, { type: "message" }> {
@@ -125,7 +147,10 @@ function fakeRegisterWorker(input: {
   });
 }
 
-function createRuntimeHarness(runner: CursorRunner) {
+function createRuntimeHarness(
+  runner: CursorRunner,
+  options: { storage?: DesktopRoomStorageState } = {},
+) {
   const published: Array<{ text: string | null; eventId: string }> = [];
   const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   const runtime = createDesktopCursorRuntime({
@@ -147,7 +172,7 @@ function createRuntimeHarness(runner: CursorRunner) {
         eventId: input.event.type === "message" ? input.event.message.id : input.event.task.id,
       });
     },
-    resolveStorage: async (roomIdentifier) => storageState(roomIdentifier),
+    resolveStorage: async (roomIdentifier) => options.storage ?? storageState(roomIdentifier),
     emitSessionUpdate: () => undefined,
     now: () => "2026-06-30T00:00:00.000Z",
   });
@@ -325,7 +350,8 @@ test("Cursor runtime delivers room events into ask-mode runner and persists resu
   assert.equal(prompts[0]?.env?.CURSOR_CONFIG_DIR, join(tempDir, "cursor-managed", "config", "cursor"));
   assert.equal(prompts[0]?.env?.CURSOR_DATA_DIR, join(tempDir, "cursor-managed", "data", "cursor"));
   assert.match(prompts[0]?.prompt ?? "", /Cursor read-only/);
-  assert.match(prompts[0]?.prompt ?? "", /Do not call LetAgents MCP room tools/);
+  assert.match(prompts[0]?.prompt ?? "", /Do not call raw LetAgents MCP room tools/);
+  assert.match(prompts[0]?.prompt ?? "", /LETAGENTS_ROOM_TOOL_REQUEST/);
   assert.match(prompts[0]?.prompt ?? "", /must not edit files/);
   assert.equal(prompts[0]?.cursorSessionId, null);
   assert.deepEqual(published, [{ text: "I can inspect this in read-only mode.", eventId: "msg_1" }]);
@@ -333,6 +359,47 @@ test("Cursor runtime delivers room events into ask-mode runner and persists resu
   assert.equal(stored?.cursor_session_id, "cursor_session_1");
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.active_work, null);
+});
+
+test("Cursor runtime feeds desktop room tool results back into the runner", async () => {
+  resetState();
+  const prompts: CursorTurnInput[] = [];
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        return {
+          sessionId: "cursor_session_1",
+          text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":42}},"idempotency_key":"event_1:artifact"}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Desktop room tool result/);
+      assert.match(input.prompt, /unsupported_local_room_tool/);
+      return {
+        sessionId: "cursor_session_1",
+        text: "Artifact publishing is not available in this local room.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState() });
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[1]?.cursorSessionId, "cursor_session_1");
+  assert.deepEqual(published, [{ text: "Artifact publishing is not available in this local room.", eventId: "msg_1" }]);
 });
 
 test("Cursor runtime preempts an active event and redelivers the newer event with resume state", async () => {

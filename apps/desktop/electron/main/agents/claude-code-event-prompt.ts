@@ -4,6 +4,9 @@ import type {
 } from "../../ipc-types.js";
 import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
 import { summarizeDesktopEventMessage } from "./desktop-event-message-summary.js";
+import {
+  managedAgentRoomToolInstructionLines,
+} from "./managed-agent-room-tools-protocol.js";
 import type { DesktopClaudeCodeLiveSessionState } from "./state.js";
 
 export function buildClaudeCodeDesktopEventPrompt(
@@ -28,7 +31,8 @@ export function buildClaudeCodeDesktopEventPrompt(
     "Instructions:",
     `- If this is a room message whose text exactly equals ${JSON.stringify(session.stop_phrase)}, stop this local worker: finish with exactly ${session.token}_DONE.`,
     "- Decide whether this event requires action from you.",
-    "- The desktop app owns the LetAgents room connection for this worker. Do not call LetAgents MCP room tools, do not call wait_for_messages, and do not assume earlier thread history is already in this prompt.",
+    ...managedAgentRoomToolInstructionLines(),
+    "- Do not assume earlier thread history is already in this prompt.",
     "- If action is useful, do the local work in this Claude Code session and make your final answer the public room reply the desktop should publish as you.",
     "- If this message is a reply, write the final answer as the reply text; the desktop will keep it in the same thread.",
     "- For task_update events, act only when the task is unclaimed and appropriate for you, assigned or leased to you, needs your review, or contains a blocker that you can resolve. If it is assigned or leased to another worker, finish quietly.",

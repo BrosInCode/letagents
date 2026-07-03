@@ -7,6 +7,10 @@ import {
   hasManagedAgentContextRequestLine,
   MANAGED_AGENT_CONTEXT_REQUEST_PREFIX,
 } from "./managed-agent-context-protocol.js";
+import {
+  hasManagedAgentRoomToolRequestLine,
+  managedAgentRoomToolInstructionLines,
+} from "./managed-agent-room-tools-protocol.js";
 import type { DesktopCodexLiveSessionState } from "./state.js";
 
 export const DESKTOP_EVENTS_NO_ROOM_REPLY = "NO_ROOM_REPLY";
@@ -23,6 +27,9 @@ export function desktopEventPublicReplyText(
     return null;
   }
   if (hasManagedAgentContextRequestLine(trimmed)) {
+    return null;
+  }
+  if (hasManagedAgentRoomToolRequestLine(trimmed)) {
     return null;
   }
   return trimmed;
@@ -50,7 +57,8 @@ export function buildDesktopEventPrompt(
     "Instructions:",
     `- If this is a room message whose text exactly equals ${JSON.stringify(session.stop_phrase)}, stop this local worker: finish with exactly ${session.token}_DONE.`,
     "- Decide whether this event requires action from you.",
-    "- The desktop app owns the LetAgents room connection for this worker. Do not call LetAgents MCP room tools, do not call wait_for_messages, and do not assume earlier thread history is already in this prompt.",
+    ...managedAgentRoomToolInstructionLines(),
+    "- Do not assume earlier thread history is already in this prompt.",
     "- If you need older room or thread context, use the desktop context tools by finishing this turn with exactly one context request line:",
     `  ${MANAGED_AGENT_CONTEXT_REQUEST_PREFIX} {"tool":"read_thread","arguments":{"root_message_id":"msg_12","limit":40}}`,
     "- Available desktop context tools: read_recent_room_messages, search_room_messages, read_thread, read_messages_around, get_task_context, get_room_context_summary.",
