@@ -29,6 +29,7 @@
           :thread-summary="threadIndicatorSummary(entry.message)"
           :active-thread-root="entry.message.id === activeThreadParentId"
           :highlight-query="searchQuery"
+          :message-reference-ids="messageReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
           @quote-reply="$emit('quote-reply', $event)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
@@ -210,6 +211,9 @@ let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages));
+const messageReferenceIds = computed(() =>
+  new Set(props.messages.map((message) => message.id))
+);
 
 watch(
   () => props.messages,

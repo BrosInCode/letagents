@@ -15,6 +15,25 @@
   text-decoration: underline;
 }
 
+.desktop-long-message-html :is(.message-reference-link) {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #93c5fd;
+  font: inherit;
+  font-weight: 800;
+  text-decoration: underline;
+  text-decoration-color: rgba(147, 197, 253, 0.35);
+  text-underline-offset: 0.14em;
+  cursor: pointer;
+}
+
+.desktop-long-message-html :is(.message-reference-link:hover, .message-reference-link:focus-visible) {
+  color: #bfdbfe;
+  text-decoration-color: currentColor;
+}
+
 .desktop-long-message-html :is(code) {
   padding: 2px 5px;
   border-radius: 5px;

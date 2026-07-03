@@ -6,7 +6,7 @@
       :class="{ collapsed: isLong && !expanded }"
       :data-testid="`desktop-long-message-content-${safeMessageId}`"
     >
-      <div class="desktop-long-message-html" v-html="html" />
+      <div class="desktop-long-message-html" v-html="html" @click="handleMessageReferenceClick" />
       <span v-if="isLong && !expanded" class="desktop-long-message-fade" aria-hidden="true" />
     </div>
 
@@ -51,7 +51,11 @@
             <button type="button" @click="closeReader">Close</button>
           </header>
 
-          <div class="desktop-reader-content desktop-long-message-html" v-html="html" />
+          <div
+            class="desktop-reader-content desktop-long-message-html"
+            v-html="html"
+            @click="handleMessageReferenceClick"
+          />
 
           <footer class="desktop-reader-footer">
             <button type="button" @click="copyText">{{ copyLabel }}</button>
@@ -76,6 +80,10 @@ const props = withDefaults(defineProps<{
   collapseAfterChars: 1400,
   collapseAfterLines: 18,
 });
+
+const emit = defineEmits<{
+  "message-reference-click": [messageId: string];
+}>();
 
 const expanded = ref(false);
 const readerOpen = ref(false);
@@ -105,6 +113,18 @@ function openReader(): void {
 
 function closeReader(): void {
   readerOpen.value = false;
+}
+
+function handleMessageReferenceClick(event: MouseEvent): void {
+  const target = event.target instanceof Element
+    ? event.target.closest<HTMLElement>("[data-message-reference-id]")
+    : null;
+  const messageId = target?.dataset.messageReferenceId || "";
+  if (!messageId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  readerOpen.value = false;
+  emit("message-reference-click", messageId);
 }
 
 async function copyText(): Promise<void> {

@@ -88,8 +88,9 @@
           <DesktopLongMessageContent
             v-else
             :text="parent.text || 'No message body.'"
-            :html="renderMessageText(parent.text || 'No message body.', searchQuery)"
+            :html="renderMessageText(parent.text || 'No message body.', searchQuery, threadMessageReferenceIds)"
             :message-id="`${parent.id}-thread-parent`"
+            @message-reference-click="jumpToThreadMessageReference"
           />
           <DesktopMessageAttachments
             v-if="parent.attachments.length"
@@ -158,8 +159,9 @@
             <DesktopLongMessageContent
               v-else
               :text="reply.text || 'No message body.'"
-              :html="renderMessageText(reply.text || 'No message body.', searchQuery)"
+              :html="renderMessageText(reply.text || 'No message body.', searchQuery, threadMessageReferenceIds)"
               :message-id="`${reply.id}-thread-reply`"
+              @message-reference-click="jumpToThreadMessageReference"
             />
             <DesktopMessageAttachments
               v-if="reply.attachments.length"
@@ -322,6 +324,9 @@ const readStateParent = computed(() =>
   props.initialThreadSummary ? { ...props.parent, thread: props.initialThreadSummary } : props.parent
 );
 const readState = computed(() => threadReadState(readStateParent.value, props.replies));
+const threadMessageReferenceIds = computed(() =>
+  new Set([props.parent.id, ...props.replies.map((reply) => reply.id)])
+);
 const replyCountLabel = computed(() => {
   if (props.loadingOlderReplies && props.replies.length === 0) return "Loading replies";
   if (threadSummary.value.count === 1) return "1 reply";
@@ -440,6 +445,15 @@ function scrollActiveSearchMessage(): boolean {
     .find((element) => element.dataset.threadMessageId === messageId);
   target?.scrollIntoView({ block: "center" });
   return Boolean(target);
+}
+
+function jumpToThreadMessageReference(messageId: string): void {
+  const target = [...(panelElement.value?.querySelectorAll<HTMLElement>("[data-thread-message-id]") ?? [])]
+    .find((element) => element.dataset.threadMessageId === messageId);
+  if (!target) return;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("jump-target");
+  window.setTimeout(() => target.classList.remove("jump-target"), 1500);
 }
 
 function handleAttachmentDrop(event: DragEvent): void {
