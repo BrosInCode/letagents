@@ -160,26 +160,15 @@
               class="desktop-add-agent-delivery desktop-add-agent-model"
               aria-label="Agent model"
             >
-              <label class="desktop-add-agent-model-select-label" for="desktop-add-agent-model-select">
-                <span>Model</span>
-                <select
-                  id="desktop-add-agent-model-select"
-                  :value="selectedModelChoice"
-                  data-testid="desktop-add-agent-model-select"
-                  aria-describedby="desktop-add-agent-model-description"
-                  @change="handleModelChoiceChange"
-                >
-                  <option value="default">Use provider default</option>
-                  <option
-                    v-for="option in providerModelOptions"
-                    :key="option.id"
-                    :value="modelChoiceValue(option)"
-                  >
-                    {{ option.label }}
-                  </option>
-                  <option value="custom">Custom model id</option>
-                </select>
-              </label>
+              <DesktopSelectField
+                :model-value="selectedModelChoice"
+                :options="modelSelectOptions"
+                label="Model"
+                id="desktop-add-agent-model-select"
+                described-by="desktop-add-agent-model-description"
+                test-id="desktop-add-agent-model-select"
+                @update:model-value="handleModelChoiceValue"
+              />
               <label v-if="selectedModelMode === 'custom'" class="desktop-add-agent-model-custom-input">
                 <small>Model id</small>
                 <input
@@ -190,6 +179,19 @@
                 />
               </label>
               <p id="desktop-add-agent-model-description">{{ modelSelectorDescription }}</p>
+              <DesktopSelectField
+                v-if="showEffortSelector"
+                :model-value="selectedEffort"
+                :options="effortSelectOptions"
+                label="Effort"
+                id="desktop-add-agent-effort-select"
+                described-by="desktop-add-agent-effort-description"
+                test-id="desktop-add-agent-effort-select"
+                @update:model-value="handleEffortValue"
+              />
+              <p v-if="showEffortSelector" id="desktop-add-agent-effort-description">
+                {{ effortSelectorDescription }}
+              </p>
             </section>
 
             <section
@@ -407,6 +409,7 @@ import type {
   DesktopAgentProviderSetupAction,
   DesktopCursorMcpPolicy,
   DesktopManagedAgentDeliveryMode,
+  DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
@@ -448,6 +451,7 @@ import {
   restoreFocus,
   trapFocusInDialog,
 } from "./modal-focus";
+import DesktopSelectField, { type DesktopSelectOption } from "../controls/DesktopSelectField.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -491,6 +495,7 @@ const MODEL_PREFLIGHT_DEBOUNCE_MS = 400;
 const selectedModelMode = ref<ModelSelectionMode>("default");
 const selectedProviderModelId = ref("");
 const customModelId = ref("");
+const selectedEffort = ref<DesktopManagedAgentEffort | "">("");
 const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
 const selectedPermissionProfileIdsByProvider = ref<
   Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
@@ -602,7 +607,25 @@ const showModelSelector = computed(() =>
   shouldShowManagedModelSelector(selectedProvider.value)
 );
 
+const showEffortSelector = computed(() =>
+  selectedProviderId.value === "codex" || selectedProviderId.value === "claude-code"
+);
+
 const providerModelOptions = computed(() => providerModels.value?.models ?? []);
+
+const modelSelectOptions = computed<DesktopSelectOption[]>(() => [
+  { value: "default", label: "Use provider default" },
+  ...providerModelOptions.value.map((option) => ({
+    value: modelChoiceValue(option),
+    label: option.label,
+  })),
+  { value: "custom", label: "Custom model id" },
+]);
+
+const effortSelectOptions = computed<DesktopSelectOption[]>(() => [
+  { value: "", label: "Use provider default" },
+  ...managedAgentEffortOptionsForProvider(selectedProviderId.value),
+]);
 
 const selectedProviderModel = computed(() =>
   providerModelOptions.value.find((option) => option.id === selectedProviderModelId.value) ?? null
@@ -649,6 +672,11 @@ const modelSelectorDescription = computed(() => {
       : "Use the model configured by the provider app.";
   }
   if (selectedModelMode.value === "custom") {
+    if (selectedProviderId.value === "cursor") {
+      return selectedModel.value
+        ? "Pass this model id directly to Cursor. Cursor effort overrides can use Cursor's parameterized model syntax."
+        : "Enter a Cursor model id or parameterized model string for this agent session.";
+    }
     return selectedModel.value
       ? "Pass this model id directly to the provider for this agent session."
       : "Enter a provider model id or alias for this agent session.";
@@ -657,6 +685,14 @@ const modelSelectorDescription = computed(() => {
   return selectedProviderModel.value
     ? `Use ${selectedProviderModel.value.label} for this agent session.`
     : "Choose another model or return to provider default.";
+});
+
+const effortSelectorDescription = computed(() => {
+  if (!selectedEffort.value) {
+    return "Use the provider's configured reasoning effort for this agent session.";
+  }
+  const label = managedAgentEffortLabel(selectedEffort.value);
+  return `Use ${label.toLowerCase()} reasoning effort for this agent session.`;
 });
 
 const managedAgentStartButtonLabel = computed(() => {
@@ -747,6 +783,15 @@ watch(
   },
 );
 
+watch(
+  () => selectedEffort.value,
+  () => {
+    if (props.open && selectedProviderId.value && showEffortSelector.value) {
+      requestPreflight();
+    }
+  },
+);
+
 onBeforeUnmount(() => {
   clearScheduledModelPreflight();
   stopManagedSessionRefreshTimer();
@@ -823,6 +868,7 @@ async function startManagedAgent(): Promise<void> {
       cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,
       model: selectedModel.value,
       modelSource: selectedModelSource.value,
+      effort: selectedEffort.value || null,
     });
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
@@ -912,6 +958,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
         model: selectedModel.value,
         modelSource: selectedModelSource.value,
+        effort: selectedEffort.value || null,
         refreshModels: options.refresh,
       },
     );
@@ -1053,6 +1100,7 @@ function resetModelSelection(): void {
   selectedModelMode.value = "default";
   selectedProviderModelId.value = "";
   customModelId.value = "";
+  selectedEffort.value = "";
   providerModels.value = null;
   loadingProviderModels.value = false;
   modelRequestId += 1;
@@ -1076,8 +1124,7 @@ function modelChoiceValue(option: DesktopAgentProviderModelOption): string {
   return `option:${option.id}`;
 }
 
-function handleModelChoiceChange(event: Event): void {
-  const value = (event.target as HTMLSelectElement).value;
+function handleModelChoiceValue(value: string): void {
   if (value === "default") {
     selectDefaultModel();
     return;
@@ -1093,6 +1140,17 @@ function handleModelChoiceChange(event: Event): void {
       selectProviderModel(option);
     }
   }
+}
+
+function handleEffortValue(value: string): void {
+  selectedEffort.value = value === "" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max"
+    ? value
+    : "";
 }
 
 function syncPermissionProfileSelection(): void {
@@ -1131,12 +1189,45 @@ function permissionProfileOptionSummary(profile: DesktopManagedAgentPermissionPr
   return `${managedAgentPermissionProfileStatusLabel(profile.status)} - ${profile.detail || profile.description}`;
 }
 
+function managedAgentEffortOptionsForProvider(
+  providerId: DesktopAgentProviderId | null,
+): DesktopSelectOption[] {
+  if (providerId === "codex") {
+    return [
+      { value: "low", label: "Low" },
+      { value: "medium", label: "Medium" },
+      { value: "high", label: "High" },
+      { value: "xhigh", label: "Extra high" },
+    ];
+  }
+  if (providerId === "claude-code") {
+    return [
+      { value: "low", label: "Low" },
+      { value: "medium", label: "Medium" },
+      { value: "high", label: "High" },
+      { value: "xhigh", label: "Extra high" },
+      { value: "max", label: "Max" },
+    ];
+  }
+  return [];
+}
+
+function managedAgentEffortLabel(effort: DesktopManagedAgentEffort | string | null | undefined): string {
+  if (effort === "low") return "Low";
+  if (effort === "medium") return "Medium";
+  if (effort === "high") return "High";
+  if (effort === "xhigh") return "Extra high";
+  if (effort === "max") return "Max";
+  return "";
+}
+
 function managedAgentSessionDetail(session: DesktopManagedAgentSession): string {
   return [
     managedAgentSessionStatusLabel(session),
     managedAgentPermissionProfileLabel(session),
     session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
     session.model || null,
+    session.effort ? `${managedAgentEffortLabel(session.effort)} effort` : null,
     managedAgentRepoDetail(session),
   ].filter(Boolean).join(" - ");
 }
@@ -1208,6 +1299,7 @@ async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
         model: selectedModel.value,
         modelSource: selectedModelSource.value,
+        effort: selectedEffort.value || null,
         refreshModels: options.refreshModels,
       },
     );

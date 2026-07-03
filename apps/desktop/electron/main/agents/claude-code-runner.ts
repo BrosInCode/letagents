@@ -12,6 +12,7 @@ import {
   type SDKResultMessage,
   type SDKSystemMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import type { DesktopManagedAgentEffort } from "../../ipc-types.js";
 import {
   isAutoAllowedManagedAgentTool,
   MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES,
@@ -24,6 +25,7 @@ export interface ClaudeCodeTurnInput {
   claudeSessionId?: string | null;
   claudeBin?: string | null;
   model?: string | null;
+  effort?: DesktopManagedAgentEffort | null;
   abortController?: AbortController;
   canUseTool?: CanUseTool;
 }
@@ -148,6 +150,7 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
     cwd: input.cwd,
     resume: input.claudeSessionId?.trim() || undefined,
     model: input.model?.trim() || undefined,
+    effort: claudeCodeEffortOption(input.effort),
     permissionMode: "default",
     pathToClaudeCodeExecutable: input.claudeBin?.trim() || undefined,
     strictMcpConfig: true,
@@ -167,6 +170,18 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
 }
 
 export const CLAUDE_CODE_AUTO_ALLOWED_TOOL_NAMES = MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES;
+
+function claudeCodeEffortOption(
+  value: DesktopManagedAgentEffort | null | undefined,
+): Options["effort"] | undefined {
+  return value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max"
+    ? value
+    : undefined;
+}
 
 export function isBlockedClaudeCodeTool(toolName: string | null | undefined): boolean {
   const normalized = normalizeToolName(toolName);

@@ -15,6 +15,7 @@ import { dirname } from "node:path";
 
 import type {
   DesktopCursorMcpPolicy,
+  DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentPermissionRequest,
@@ -48,6 +49,8 @@ export interface DesktopCodexLiveSessionState {
   provider_id?: string;
   /** Model slug for BYOK providers that override the engine's default model. */
   model?: string | null;
+  /** Optional provider-specific reasoning effort for this managed session. */
+  effort?: DesktopManagedAgentEffort | null;
   joined_via: DesktopCodexJoinedVia;
   cwd: string;
   repo_branch?: string | null;
@@ -88,6 +91,7 @@ export interface DesktopClaudeCodeLiveSessionState {
   cwd: string;
   repo_branch?: string | null;
   model?: string | null;
+  effort?: DesktopManagedAgentEffort | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
@@ -122,6 +126,7 @@ export interface DesktopCursorLiveSessionState {
   cwd: string;
   repo_branch?: string | null;
   model?: string | null;
+  effort?: DesktopManagedAgentEffort | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
@@ -1132,6 +1137,7 @@ export function toPublicManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? (providerId === "open-model" ? "Open Model" : "Codex"),
     model: session.model ?? null,
+    effort: session.effort ?? null,
     reasoningSessionId: session.reasoning_session_id ?? null,
     activeWork: session.active_work
       ? {
@@ -1242,6 +1248,7 @@ export function toPublicClaudeCodeManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Claude Code",
     model: session.model ?? null,
+    effort: session.effort ?? null,
     reasoningSessionId: session.claude_session_id ?? null,
     activeWork: session.active_work
       ? {
@@ -1354,6 +1361,7 @@ export function toPublicCursorManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Cursor",
     model: session.model ?? null,
+    effort: session.effort ?? null,
     reasoningSessionId: session.cursor_session_id ?? null,
     activeWork: session.active_work
       ? {
