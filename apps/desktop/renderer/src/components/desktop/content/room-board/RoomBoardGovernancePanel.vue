@@ -41,9 +41,8 @@ const sectionOptions = computed(() => [
   { id: "manager", label: "Manager" },
   {
     id: "pending",
-    label: props.governance?.pendingIntentCount
-      ? `Intents (${props.governance.pendingIntentCount})`
-      : "Intents",
+    label: "Intents",
+    count: props.governance?.pendingIntentCount || undefined,
   },
   { id: "audit", label: "Audit" },
 ]);
@@ -82,8 +81,33 @@ const liveManagerCandidates = computed(() =>
 const liveManagerCandidateIds = computed(() =>
   new Set(liveManagerCandidates.value.map((candidate) => candidate.agentSessionId))
 );
-const canAssignSelectedCandidate = computed(() =>
-  Boolean(props.selectedCandidateId && liveManagerCandidateIds.value.has(props.selectedCandidateId))
+const selectedCandidate = computed(() =>
+  liveManagerCandidates.value.find((candidate) => candidate.agentSessionId === props.selectedCandidateId) || null
+);
+const selectedCandidateIsCurrent = computed(() => selectedCandidate.value?.isActiveManager ?? false);
+const canPromoteSelectedCandidate = computed(() =>
+  Boolean(
+    props.selectedCandidateId
+    && liveManagerCandidateIds.value.has(props.selectedCandidateId)
+    && !selectedCandidateIsCurrent.value
+  )
+);
+const managerActionLabel = computed(() => {
+  if (!props.selectedCandidateId) return "Choose agent";
+  if (selectedCandidateIsCurrent.value) return "Current manager";
+  return props.governance?.activeManager ? "Replace manager" : "Make manager";
+});
+const activeManagerLabel = computed(() =>
+  props.governance?.activeManager
+    ? managerCandidateName({
+        agentSessionId: props.governance.activeManager.agentSessionId,
+        actorLabel: props.governance.activeManager.actorLabel,
+        displayName: props.governance.activeManager.actorLabel,
+        runtime: "",
+        runtimeSource: props.governance.activeManager.runtimeSource,
+        isActiveManager: true,
+      })
+    : null
 );
 
 function formatTimestamp(value: string | null | undefined): string {
@@ -111,9 +135,22 @@ function managerCandidateName(candidate: LiveManagerCandidate): string {
 }
 
 function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
-  const runtime = candidate.runtime.trim();
-  if (!runtime) return readableManagerRuntime(candidate.runtimeSource);
-  return runtime
+  const fallback = readableManagerRuntime(candidate.runtimeSource);
+  const runtime = candidate.runtime
+    .trim()
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .replace(/\s+/g, " ");
+  if (!runtime) return fallback;
+  const compactRuntime = runtime.replace(/\s+Room\s+[a-f0-9\s-]+$/i, "").trim();
+  const primaryRuntime = compactRuntime.split(":")[0]?.trim() || compactRuntime;
+  const lowerRuntime = primaryRuntime.toLowerCase();
+  if (lowerRuntime.includes("claude")) return "Claude Code";
+  if (lowerRuntime.includes("cursor")) return "Cursor";
+  if (lowerRuntime.includes("codex")) return "Codex";
+  if (lowerRuntime.includes("open model")) return "Open Model";
+  if (lowerRuntime === "agent" || lowerRuntime === "worker") return fallback;
+  return primaryRuntime
     .replaceAll("_", " ")
     .replaceAll("-", " ")
     .split(" ")
@@ -122,6 +159,10 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
       ? part.toUpperCase()
       : `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
     .join(" ");
+}
+
+function managerCandidateInitial(candidate: LiveManagerCandidate): string {
+  return managerCandidateName(candidate).trim().charAt(0).toUpperCase() || "A";
 }
 </script>
 
@@ -140,11 +181,18 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
     >
       <header class="desktop-board-governance-header">
         <div>
-          <span>Board governance</span>
           <h2 id="desktop-board-governance-title">Board manager</h2>
+          <span>{{ activeManagerLabel ? `Managed by ${activeManagerLabel}` : "No manager assigned" }}</span>
         </div>
-        <button type="button" class="desktop-board-governance-close" @click="emit('close')">
-          Close
+        <button
+          type="button"
+          class="desktop-board-governance-close"
+          aria-label="Close board manager"
+          @click="emit('close')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+          </svg>
         </button>
       </header>
 
@@ -153,6 +201,7 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
         :model-value="activeSection"
         :options="sectionOptions"
         label="Board governance sections"
+        mode="tabs"
         @update:model-value="emit('update:active-section', $event as DesktopBoardGovernanceSection)"
       />
 
@@ -205,9 +254,11 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
           <div v-if="canSetMode" class="desktop-board-governance-mode">
             <span>Manager mode</span>
             <DesktopSegmentedControl
+              class="desktop-board-governance-mode-control"
               :model-value="governance.managerMode"
               :options="managerModeOptions"
               label="Board manager mode"
+              size="compact"
               @update:model-value="emit('set-manager-mode', $event as DesktopBoardManagerMode)"
             />
           </div>
@@ -225,6 +276,7 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
               :key="candidate.agentSessionId"
               class="desktop-board-governance-candidate"
               :data-current="candidate.isActiveManager"
+              :data-selected="selectedCandidateId === candidate.agentSessionId"
             >
               <input
                 type="radio"
@@ -234,12 +286,15 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
                 :disabled="!canAssign || busy"
                 @change="emit('update:selected-candidate-id', candidate.agentSessionId)"
               />
-              <span>
-                <strong>{{ managerCandidateName(candidate) }}</strong>
+              <span class="desktop-board-governance-candidate-avatar" aria-hidden="true">
+                {{ managerCandidateInitial(candidate) }}
+              </span>
+              <span class="desktop-board-governance-candidate-copy">
                 <span>
-                  {{ managerCandidateRuntime(candidate) }}
-                  <template v-if="candidate.isActiveManager"> · current manager</template>
+                  <strong>{{ managerCandidateName(candidate) }}</strong>
+                  <em v-if="candidate.isActiveManager">Current</em>
                 </span>
+                <small>{{ managerCandidateRuntime(candidate) }}</small>
               </span>
             </label>
           </div>
@@ -249,11 +304,11 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
               v-if="canAssign"
               type="button"
               class="desktop-board-primary-action"
-              :disabled="busy || !canAssignSelectedCandidate"
+              :disabled="busy || !canPromoteSelectedCandidate"
               data-testid="board-governance-promote"
               @click="selectedCandidateId && emit('assign-manager', selectedCandidateId)"
             >
-              {{ governance.activeManager ? "Replace" : "Make manager" }}
+              {{ managerActionLabel }}
             </button>
             <button
               v-if="canRelease && governance.activeManager"
