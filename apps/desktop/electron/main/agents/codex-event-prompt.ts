@@ -9,6 +9,7 @@ import {
 } from "./managed-agent-context-protocol.js";
 import {
   hasManagedAgentRoomToolRequestLine,
+  MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
   managedAgentRoomToolInstructionLines,
 } from "./managed-agent-room-tools-protocol.js";
 import type { DesktopCodexLiveSessionState } from "./state.js";
@@ -23,7 +24,19 @@ export function desktopEventPublicReplyText(
   if (!trimmed || trimmed === DESKTOP_EVENTS_NO_ROOM_REPLY) {
     return null;
   }
+  if (trimmed.includes(DESKTOP_EVENTS_NO_ROOM_REPLY)) {
+    return null;
+  }
   if (sessionToken && trimmed === `${sessionToken}_DONE`) {
+    return null;
+  }
+  if (sessionToken && trimmed.includes(`${sessionToken}_DONE`)) {
+    return null;
+  }
+  if (
+    trimmed.includes(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX)
+    || trimmed.includes(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX)
+  ) {
     return null;
   }
   if (hasManagedAgentContextRequestLine(trimmed)) {
@@ -65,6 +78,7 @@ export function buildDesktopEventPrompt(
     "- Context tools are read-only, room-scoped, desktop-brokered, and return compact results. Use them only when needed.",
     "- If action is useful, do the local work in this Codex thread and make your final answer the public room reply the desktop should publish as you.",
     "- If this message is a reply, write the final answer as the reply text; the desktop will keep it in the same thread.",
+    "- In public room replies, never mention control markers, Result JSON, desktop bridge details, or internal tool request syntax.",
     "- For task_update events, act only when the task is unclaimed and appropriate for you, assigned or leased to you, needs your review, or contains a blocker that you can resolve. If it is assigned or leased to another worker, finish quietly.",
     `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
     "- Do not include hidden chain-of-thought in the final answer.",

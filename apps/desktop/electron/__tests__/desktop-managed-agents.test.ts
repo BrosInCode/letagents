@@ -1212,11 +1212,11 @@ test("desktop context requests parse and stay out of public replies", () => {
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", MANAGED_AGENT_CONTEXT_REQUEST_PREFIX), null);
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_CONTEXT_REQUEST inline."),
-    "This mentions LETAGENTS_CONTEXT_REQUEST inline.",
+    null,
   );
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "LETAGENTS_CONTEXT_REQUEST. This is plain prose."),
-    "LETAGENTS_CONTEXT_REQUEST. This is plain prose.",
+    null,
   );
   assert.equal(parseManagedAgentContextRequest("LETAGENTS_CONTEXT_REQUEST not-json"), null);
   assert.equal(parseManagedAgentContextRequest("hello"), null);
@@ -1232,9 +1232,9 @@ test("desktop room tool requests parse and stay out of public replies", () => {
   };
 
   assert.deepEqual(parseManagedAgentRoomToolRequest(requestLine), expectedRequest);
-  assert.deepEqual(parseManagedAgentRoomToolRequest(`- ${requestLine}`), expectedRequest);
-  assert.deepEqual(parseManagedAgentRoomToolRequest(`> ${requestLine}`), expectedRequest);
-  assert.deepEqual(parseManagedAgentRoomToolRequest(`1. ${requestLine}`), expectedRequest);
+  assert.equal(parseManagedAgentRoomToolRequest(`- ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`> ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`1. ${requestLine}`), null);
   assert.equal(parseManagedAgentRoomToolRequest(`Claiming now:\n${requestLine}`), null);
   assert.equal(parseManagedAgentRoomToolRequest(`${requestLine} thanks`), null);
   assert.equal(
@@ -1249,7 +1249,12 @@ test("desktop room tool requests parse and stay out of public replies", () => {
   );
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_ROOM_TOOL_REQUEST inline."),
-    "This mentions LETAGENTS_ROOM_TOOL_REQUEST inline.",
+    null,
+  );
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "I will finish with NO_ROOM_REPLY."), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Stopping with LOCAL_CODEX_ROOM_test_DONE."),
+    null,
   );
 });
 

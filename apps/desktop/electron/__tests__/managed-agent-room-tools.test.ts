@@ -100,11 +100,9 @@ test("managed room tool parser accepts one request line and rejects mixed prose"
     arguments: { open: true },
     idempotency_key: "board:event_1",
   });
-  assert.deepEqual(parseManagedAgentRoomToolRequest(`- ${line}`), {
-    tool: "get_board",
-    arguments: { open: true },
-    idempotency_key: "board:event_1",
-  });
+  assert.equal(parseManagedAgentRoomToolRequest(`- ${line}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`> ${line}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`1. ${line}`), null);
   assert.equal(parseManagedAgentRoomToolRequest(`Need board first\n${line}`), null);
   assert.equal(parseManagedAgentRoomToolRequest(`${line} thanks`), null);
   assert.equal(parseManagedAgentRoomToolRequest(`${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"wait_for_messages","arguments":{}}`), null);
@@ -157,6 +155,35 @@ test("managed room tool executor injects worker credentials and strips returned 
   assert.equal(result.ok, true);
 });
 
+test("managed room tool executor maps bridge idempotency keys to cloud client ids", async () => {
+  resetState();
+  const observedBodies: Record<string, unknown>[] = [];
+  const result = await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage: cloudStorage(),
+    request: {
+      tool: "create_task",
+      arguments: { title: "Idempotent task" },
+      idempotency_key: "event_1:create_task:task_a",
+    },
+    deps: {
+      apiFetch: async <T>(_path: string, init?: RequestInit): Promise<T> => {
+        observedBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return {
+          id: "task_1",
+          title: "Idempotent task",
+          status: "proposed",
+          updated_at: "2026-07-03T00:00:00.000Z",
+        } as T;
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(typeof observedBodies[0]?.client_task_id, "string");
+  assert.match(String(observedBodies[0]?.client_task_id), /^desktop-room-tool:[a-f0-9]{32}$/);
+});
+
 test("managed room tool executor preserves server error codes", async () => {
   resetState();
   const result = await executeManagedAgentRoomToolRequestWithTimeout({
@@ -179,6 +206,31 @@ test("managed room tool executor preserves server error codes", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.status, 409);
   assert.equal(result.code, "board_intent_required");
+});
+
+test("managed room tool executor passes an abort signal to cloud requests", async () => {
+  resetState();
+  let observedSignal: AbortSignal | null = null;
+  const result = await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage: cloudStorage(),
+    request: {
+      tool: "read_messages",
+      arguments: { limit: 1 },
+    },
+    deps: {
+      apiFetch: async <T>(_path: string, init?: RequestInit): Promise<T> => {
+        observedSignal = init?.signal ?? null;
+        return { messages: [] } as T;
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  const signal = observedSignal as AbortSignal | null;
+  assert.ok(signal);
+  assert.equal(signal.aborted, false);
+  assert.equal(typeof signal.addEventListener, "function");
 });
 
 test("managed room tool executor caches repeated idempotent writes per event", async () => {
@@ -221,6 +273,85 @@ test("managed room tool executor caches repeated idempotent writes per event", a
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
   assert.equal(second.cached, true);
+});
+
+test("managed room tool executor rejects idempotency key reuse with different arguments", async () => {
+  resetState();
+  const cache: ManagedAgentRoomToolCache = new Map();
+  let callCount = 0;
+  const deps = {
+    apiFetch: async <T>(): Promise<T> => {
+      callCount += 1;
+      return {
+        id: "task_1",
+        title: "One task",
+        status: "proposed",
+        updated_at: "2026-07-03T00:00:00.000Z",
+      } as T;
+    },
+  };
+  await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage: cloudStorage(),
+    request: {
+      tool: "create_task",
+      arguments: { title: "One task" },
+      idempotency_key: "event_1:create_task",
+    },
+    cache,
+    deps,
+  });
+  const second = await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage: cloudStorage(),
+    request: {
+      tool: "create_task",
+      arguments: { title: "Changed task" },
+      idempotency_key: "event_1:create_task",
+    },
+    cache,
+    deps,
+  });
+
+  assert.equal(callCount, 1);
+  assert.equal(second.ok, false);
+  assert.equal(second.code, "room_tool_idempotency_conflict");
+});
+
+test("managed room tool executor does not cache requests without explicit idempotency keys", async () => {
+  resetState();
+  const cache: ManagedAgentRoomToolCache = new Map();
+  let callCount = 0;
+  const request: ManagedAgentRoomToolRequest = {
+    tool: "get_board",
+    arguments: { open: true },
+  };
+  const deps = {
+    apiFetch: async <T>(): Promise<T> => {
+      callCount += 1;
+      return { tasks: [], callCount } as T;
+    },
+  };
+
+  const first = await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage: cloudStorage(),
+    request,
+    cache,
+    deps,
+  });
+  const second = await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage: cloudStorage(),
+    request,
+    cache,
+    deps,
+  });
+
+  assert.equal(callCount, 2);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(second.cached, undefined);
 });
 
 test("managed room tool executor returns structured unsupported errors for local-only gaps", async () => {

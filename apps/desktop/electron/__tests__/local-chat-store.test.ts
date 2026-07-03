@@ -664,6 +664,13 @@ test("desktop local task review leases are claimed and released locally", async 
   const task = await addLocalTask("review_room", {
     title: "Review locally",
   });
+  await updateLocalTask("review_room", task.id, { status: "accepted" });
+  await updateLocalTask("review_room", task.id, {
+    status: "assigned",
+    assignee: "Local Worker",
+    assigneeAgentKey: "local/worker",
+  });
+  await updateLocalTask("review_room", task.id, { status: "in_review" });
 
   const claimed = await claimLocalTaskReviewLease("review_room", task.id, {
     holderLabel: "Local Reviewer",
@@ -681,6 +688,25 @@ test("desktop local task review leases are claimed and released locally", async 
   assert.deepEqual(released.task.activeLeases, []);
 });
 
+test("desktop local task review leases reject tasks outside review states", async () => {
+  await createLocalRoom({
+    roomIdentifier: "review_status_room",
+    displayName: "Review Status Room",
+  });
+  const task = await addLocalTask("review_status_room", {
+    title: "Not ready for review",
+  });
+
+  await assert.rejects(
+    () => claimLocalTaskReviewLease("review_status_room", task.id, {
+      holderLabel: "Local Reviewer",
+      agentKey: "local/reviewer",
+      agentSessionId: "local_session_status",
+    }),
+    /Cannot assign review authority while task is proposed/,
+  );
+});
+
 test("desktop local task review leases reject the assigned worker", async () => {
   await createLocalRoom({
     roomIdentifier: "review_assignee_room",
@@ -691,9 +717,13 @@ test("desktop local task review leases reject the assigned worker", async () => 
   });
   await updateLocalTask("review_assignee_room", task.id, {
     status: "accepted",
+  });
+  await updateLocalTask("review_assignee_room", task.id, {
+    status: "assigned",
     assignee: "Local Worker",
     assigneeAgentKey: "local/worker",
   });
+  await updateLocalTask("review_assignee_room", task.id, { status: "in_review" });
 
   await assert.rejects(
     () => claimLocalTaskReviewLease("review_assignee_room", task.id, {

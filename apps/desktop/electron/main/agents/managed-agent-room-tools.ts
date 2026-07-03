@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   DesktopRoomMessage,
   DesktopRoomStorageState,
@@ -28,7 +30,6 @@ import {
 import {
   buildManagedAgentRoomToolResultPrompt,
   hasManagedAgentRoomToolRequestLine,
-  isManagedAgentRoomToolRequest,
   MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
   parseManagedAgentRoomToolRequest,
   type ManagedAgentRoomToolName,
@@ -44,13 +45,26 @@ import {
 export {
   buildManagedAgentRoomToolResultPrompt,
   hasManagedAgentRoomToolRequestLine,
-  isManagedAgentRoomToolRequest,
   MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
   parseManagedAgentRoomToolRequest,
 };
 
 export const DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT = 5;
 const ROOM_TOOL_REQUEST_TIMEOUT_MS = 20_000;
+const CACHEABLE_ROOM_TOOL_MUTATIONS = new Set<ManagedAgentRoomToolName>([
+  "send_message",
+  "send_thread_message",
+  "post_status",
+  "post_reasoning",
+  "create_task",
+  "claim_task",
+  "update_task",
+  "claim_task_review",
+  "create_board_intent",
+  "approve_board_intent",
+  "deny_board_intent",
+  "publish_room_artifact",
+]);
 
 type ApiFetch = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -62,7 +76,10 @@ export type ManagedAgentRoomToolSession = {
   agent_session_id?: string | null;
 };
 
-export type ManagedAgentRoomToolCache = Map<string, ManagedAgentRoomToolResult>;
+export type ManagedAgentRoomToolCache = Map<string, {
+  argumentsHash: string;
+  result: ManagedAgentRoomToolResult;
+}>;
 
 export interface ManagedAgentRoomToolExecutorDeps {
   apiFetch?: ApiFetch;
@@ -75,18 +92,34 @@ export async function executeManagedAgentRoomToolRequestWithTimeout(input: {
   cache?: ManagedAgentRoomToolCache;
   deps?: ManagedAgentRoomToolExecutorDeps;
 }): Promise<ManagedAgentRoomToolResult> {
-  const cacheKey = roomToolCacheKey(input.request);
-  const cached = input.cache?.get(cacheKey);
+  const cacheEntry = roomToolCacheEntry(input.request);
+  const cached = cacheEntry ? input.cache?.get(cacheEntry.key) : null;
   if (cached) {
-    return { ...cached, cached: true } as ManagedAgentRoomToolResult;
+    if (cached.argumentsHash !== cacheEntry?.argumentsHash) {
+      return {
+        ok: false,
+        tool: input.request.tool,
+        roomIdentifier: input.session.room_identifier || input.session.room_id,
+        storage: storageMode(input.storage),
+        error: "Desktop room tool idempotency key was reused with different arguments.",
+        code: "room_tool_idempotency_conflict",
+      };
+    }
+    return { ...cached.result, cached: true } as ManagedAgentRoomToolResult;
   }
 
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  const abortController = new AbortController();
   try {
+    const deps = {
+      ...input.deps,
+      apiFetch: withAbortSignal(input.deps?.apiFetch ?? apiFetch, abortController.signal),
+    };
     const result = await Promise.race([
-      executeManagedAgentRoomToolRequest(input.session, input.storage, input.request, input.deps),
+      executeManagedAgentRoomToolRequest(input.session, input.storage, input.request, deps),
       new Promise<ManagedAgentRoomToolResult>((resolve) => {
         timeout = setTimeout(() => {
+          abortController.abort();
           resolve({
             ok: false,
             tool: input.request.tool,
@@ -98,7 +131,12 @@ export async function executeManagedAgentRoomToolRequestWithTimeout(input: {
         }, ROOM_TOOL_REQUEST_TIMEOUT_MS);
       }),
     ]);
-    input.cache?.set(cacheKey, result);
+    if (cacheEntry && result.ok) {
+      input.cache?.set(cacheEntry.key, {
+        argumentsHash: cacheEntry.argumentsHash,
+        result,
+      });
+    }
     return result;
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -184,7 +222,7 @@ async function executeCloudRoomTool(
         text: requiredString(request.arguments, "text"),
         reply_to: optionalString(request.arguments.reply_to ?? request.arguments.reply_to_id),
         thread_root_id: optionalString(request.arguments.thread_root_id),
-        client_message_id: optionalString(request.arguments.client_message_id),
+        client_message_id: optionalString(request.arguments.client_message_id) ?? bridgeClientId(request),
         ...credentials,
       }, fetcher);
     case "send_thread_message": {
@@ -196,20 +234,20 @@ async function executeCloudRoomTool(
         text: requiredString(request.arguments, "text"),
         reply_to: optionalString(request.arguments.reply_to ?? request.arguments.reply_to_id),
         thread_root_id: threadRootId,
-        client_message_id: optionalString(request.arguments.client_message_id),
+        client_message_id: optionalString(request.arguments.client_message_id) ?? bridgeClientId(request),
         ...credentials,
       }, fetcher);
     }
     case "post_status":
-      return await postCloudStatus(roomId, workerSession, request.arguments, credentials, fetcher);
+      return await postCloudStatus(roomId, workerSession, request.arguments, credentials, fetcher, bridgeClientId(request));
     case "post_reasoning":
-      return await postCloudReasoning(roomId, workerSession, request.arguments, credentials, fetcher);
+      return await postCloudReasoning(roomId, workerSession, request.arguments, credentials, fetcher, bridgeClientId(request));
     case "get_board":
       return await readCloudBoard(roomId, request.arguments, fetcher);
     case "get_board_settings":
       return await fetcher(`/rooms/${encodeURIComponent(roomId)}/board-settings`);
     case "create_task":
-      return await mutateCloudTaskCollection(roomId, workerSession, request.arguments, credentials, fetcher);
+      return await mutateCloudTaskCollection(roomId, workerSession, request.arguments, credentials, fetcher, bridgeClientId(request));
     case "claim_task":
       return await claimCloudTask(roomId, workerSession, request.arguments, credentials, fetcher);
     case "update_task":
@@ -410,6 +448,7 @@ async function postCloudStatus(
   args: Record<string, unknown>,
   credentials: Record<string, string>,
   fetcher: ApiFetch,
+  clientMessageId: string | null,
 ): Promise<unknown> {
   const statusText = requiredString(args, "status");
   const presenceStatus = normalizePresenceStatus(args.presence_status ?? args.state) ?? "working";
@@ -421,7 +460,7 @@ async function postCloudStatus(
     }),
     postCloudMessage(roomId, {
       text: `[status] ${statusText}`,
-      client_message_id: optionalString(args.client_message_id),
+      client_message_id: optionalString(args.client_message_id) ?? clientMessageId,
       ...credentials,
     }, fetcher),
   ]);
@@ -439,6 +478,7 @@ async function postCloudReasoning(
   args: Record<string, unknown>,
   credentials: Record<string, string>,
   fetcher: ApiFetch,
+  clientMessageId: string | null,
 ): Promise<unknown> {
   const summary = requiredString(args, "summary");
   const actorLabel = workerSession.actor_label || workerSender(workerSession);
@@ -478,6 +518,7 @@ async function postCloudReasoning(
   if (milestone) {
     milestoneMessage = (await postCloudMessage(roomId, {
       text: milestone,
+      client_message_id: optionalString(args.client_message_id) ?? clientMessageId,
       ...credentials,
     }, fetcher) as { message?: unknown }).message ?? null;
   }
@@ -517,6 +558,7 @@ async function mutateCloudTaskCollection(
   args: Record<string, unknown>,
   credentials: Record<string, string>,
   fetcher: ApiFetch,
+  clientTaskId: string | null,
 ): Promise<unknown> {
   const data = await postJson<DesktopTaskSummaryPayload>(
     fetcher,
@@ -525,7 +567,7 @@ async function mutateCloudTaskCollection(
       title: requiredString(args, "title"),
       description: optionalString(args.description),
       source_message_id: optionalString(args.source_message_id),
-      client_task_id: optionalString(args.client_task_id),
+      client_task_id: optionalString(args.client_task_id) ?? clientTaskId,
       actor_label: workerSession.actor_label || null,
       actor_key: workerSession.agent_key || null,
       actor_instance_id: workerSession.agent_instance_id || null,
@@ -669,6 +711,17 @@ function workerSender(workerSession: StoredAgentSessionState): string {
     || "Managed agent";
 }
 
+function bridgeClientId(request: ManagedAgentRoomToolRequest): string | null {
+  if (!request.idempotency_key) {
+    return null;
+  }
+  const digest = createHash("sha256")
+    .update(`${request.tool}:${request.idempotency_key}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `desktop-room-tool:${digest}`;
+}
+
 async function emitLocalRoomMessage(
   roomIdentifier: string,
   message: DesktopRoomMessage,
@@ -783,10 +836,26 @@ function errorResult(
   };
 }
 
-function roomToolCacheKey(request: ManagedAgentRoomToolRequest): string {
-  return request.idempotency_key
-    ? `${request.tool}:idempotency:${request.idempotency_key}`
-    : `${request.tool}:arguments:${stableJson(request.arguments)}`;
+function roomToolCacheEntry(request: ManagedAgentRoomToolRequest): {
+  key: string;
+  argumentsHash: string;
+} | null {
+  if (!request.idempotency_key || !CACHEABLE_ROOM_TOOL_MUTATIONS.has(request.tool)) {
+    return null;
+  }
+  return {
+    key: `${request.tool}:idempotency:${request.idempotency_key}`,
+    argumentsHash: stableJson(request.arguments),
+  };
+}
+
+function withAbortSignal(fetcher: ApiFetch, signal: AbortSignal): ApiFetch {
+  return async <T>(path: string, init: RequestInit = {}): Promise<T> => {
+    return await fetcher<T>(path, {
+      ...init,
+      signal,
+    });
+  };
 }
 
 function stableJson(value: unknown): string {
