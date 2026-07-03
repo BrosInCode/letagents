@@ -105,6 +105,7 @@ const validLocalTaskTransitions: Record<string, string[]> = {
   done: ["accepted"],
   cancelled: ["accepted"],
 };
+const localReviewLeaseActiveStatuses = new Set(["in_review", "blocked"]);
 
 async function getDb(): Promise<SqliteDatabase> {
   if (db) return db;
@@ -850,6 +851,11 @@ export async function claimLocalTaskReviewLease(
   const actorKey = input.agentKey?.trim() || null;
   const actorSessionId = input.agentSessionId?.trim() || null;
   const holderLabel = input.holderLabel?.trim() || actorKey || "Local reviewer";
+  if (!localReviewLeaseActiveStatuses.has(current.status)) {
+    throw new Error(
+      `Cannot assign review authority while task is ${current.status}. Move the task to in_review first.`,
+    );
+  }
   if (
     actorKey &&
     current.assignee_agent_key &&

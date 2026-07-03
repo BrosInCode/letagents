@@ -29,6 +29,7 @@ import {
 import {
   productionCursorRunner,
   type CursorRunner,
+  type CursorTurnResult,
 } from "./cursor-runner.js";
 import {
   assertManagedAgentPermissionProfileAvailable,
@@ -40,6 +41,14 @@ import {
   persistDesktopManagedAgentLocalReply,
   type DesktopManagedAgentReplyTarget,
 } from "./managed-agent-local-replies.js";
+import {
+  buildManagedAgentRoomToolResultPrompt,
+  DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT,
+  executeManagedAgentRoomToolRequestWithTimeout,
+  hasManagedAgentRoomToolRequestLine,
+  parseManagedAgentRoomToolRequest,
+  type ManagedAgentRoomToolCache,
+} from "./managed-agent-room-tools.js";
 import {
   getCurrentCursorLiveSession,
   getOrCreateDesktopHostId,
@@ -129,6 +138,20 @@ interface CursorRuntimeDependencies {
 export type DesktopCursorRuntime = DesktopManagedAgentRuntime & {
   waitForIdle(): Promise<void>;
 };
+
+function cursorRoomToolErrorResult(
+  sessionId: string | null,
+  recentItems: Array<Record<string, unknown>>,
+  error: string,
+): CursorTurnResult {
+  return {
+    sessionId,
+    text: null,
+    status: "error",
+    error,
+    recentItems,
+  };
+}
 
 export function createDesktopCursorRuntime(
   dependencies: CursorRuntimeDependencies = {},
@@ -329,19 +352,10 @@ export function createDesktopCursorRuntime(
     };
     activeTurns.set(session.session_id, activeTurn);
     try {
-      const launchOptions = cursorLaunchOptionsForPermissionProfile(active.permission_profile_id);
-      const result = await runner.runTurn({
-        prompt: buildCursorDesktopEventPrompt(active, event),
-        cwd: active.cwd,
-        cursorSessionId: active.cursor_session_id,
-        cursorBin: active.cursor_bin,
-        env: prepareCursorManagedProfile({
-          workspaceRoot: active.cwd,
-          mcpPolicy: active.cursor_mcp_policy,
-        }).env,
-        mode: launchOptions.mode,
-        force: launchOptions.force,
-        sandbox: launchOptions.sandbox,
+      const result = await runCursorDesktopEventTurnWithRoomTools({
+        active,
+        event,
+        storage,
         abortController,
       });
 
@@ -391,6 +405,107 @@ export function createDesktopCursorRuntime(
         activeTurns.delete(session.session_id);
       }
     }
+  }
+
+  async function runCursorDesktopEventTurnWithRoomTools(input: {
+    active: DesktopCursorLiveSessionState;
+    event: ManagedRoomEvent;
+    storage: DesktopRoomStorageState;
+    abortController: AbortController;
+  }): Promise<CursorTurnResult> {
+    const roomToolCache: ManagedAgentRoomToolCache = new Map();
+    let cursorSessionId = input.active.cursor_session_id ?? null;
+    let result = await runCursorTurnForDesktopEvent({
+      session: input.active,
+      prompt: buildCursorDesktopEventPrompt(input.active, input.event),
+      cursorSessionId,
+      abortController: input.abortController,
+    });
+    cursorSessionId = result.sessionId ?? cursorSessionId;
+
+    for (let requestCount = 0; requestCount < DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT; requestCount += 1) {
+      if (result.status === "error") {
+        return result;
+      }
+      const request = parseManagedAgentRoomToolRequest(result.text);
+      if (!request) {
+        if (hasManagedAgentRoomToolRequestLine(result.text)) {
+          return cursorRoomToolErrorResult(
+            cursorSessionId,
+            result.recentItems,
+            "Cursor emitted a malformed desktop room tool request.",
+          );
+        }
+        return { ...result, sessionId: cursorSessionId };
+      }
+
+      const updated = updateCursorLiveSession(input.active.session_id, (current) => ({
+        ...current,
+        active_work: {
+          kind: input.event.type,
+          event_id: input.event.type === "message" ? input.event.message.id : input.event.task.id,
+          started_at: current.active_work?.started_at ?? now(),
+          summary: `Running ${request.tool} room tool.`,
+        },
+        updated_at: now(),
+      }));
+      emitSessionUpdate(updated);
+
+      const latest = getStoredCursorLiveSession(input.active.session_id) ?? input.active;
+      const roomToolResult = await executeManagedAgentRoomToolRequestWithTimeout({
+        session: latest,
+        storage: input.storage,
+        request,
+        cache: roomToolCache,
+      });
+      result = await runCursorTurnForDesktopEvent({
+        session: latest,
+        prompt: buildManagedAgentRoomToolResultPrompt(roomToolResult),
+        cursorSessionId,
+        abortController: input.abortController,
+      });
+      cursorSessionId = result.sessionId ?? cursorSessionId;
+    }
+
+    if (parseManagedAgentRoomToolRequest(result.text)) {
+      return cursorRoomToolErrorResult(
+        cursorSessionId,
+        result.recentItems,
+        `Cursor requested more than ${DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT} desktop room tools for one room event.`,
+      );
+    }
+    if (hasManagedAgentRoomToolRequestLine(result.text)) {
+      return cursorRoomToolErrorResult(
+        cursorSessionId,
+        result.recentItems,
+        "Cursor emitted a malformed desktop room tool request.",
+      );
+    }
+
+    return { ...result, sessionId: cursorSessionId };
+  }
+
+  async function runCursorTurnForDesktopEvent(input: {
+    session: DesktopCursorLiveSessionState;
+    prompt: string;
+    cursorSessionId: string | null;
+    abortController: AbortController;
+  }): Promise<CursorTurnResult> {
+    const launchOptions = cursorLaunchOptionsForPermissionProfile(input.session.permission_profile_id);
+    return await runner.runTurn({
+      prompt: input.prompt,
+      cwd: input.session.cwd,
+      cursorSessionId: input.cursorSessionId,
+      cursorBin: input.session.cursor_bin,
+      env: prepareCursorManagedProfile({
+        workspaceRoot: input.session.cwd,
+        mcpPolicy: input.session.cursor_mcp_policy,
+      }).env,
+      mode: launchOptions.mode,
+      force: launchOptions.force,
+      sandbox: launchOptions.sandbox,
+      abortController: input.abortController,
+    });
   }
 
   function preemptActiveTurnIfSafe(session: DesktopCursorLiveSessionState): void {

@@ -58,6 +58,14 @@ import {
   hasManagedAgentContextRequestLine,
   parseManagedAgentContextRequest,
 } from "./managed-agent-context.js";
+import {
+  buildManagedAgentRoomToolResultPrompt,
+  DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT,
+  executeManagedAgentRoomToolRequestWithTimeout,
+  hasManagedAgentRoomToolRequestLine,
+  parseManagedAgentRoomToolRequest,
+  type ManagedAgentRoomToolCache,
+} from "./managed-agent-room-tools.js";
 import type {
   ManagedAgentContextRequest,
   ManagedAgentContextResult,
@@ -1673,6 +1681,7 @@ async function runDesktopEventTurnWithContext(input: {
   client: CodexRpcClient;
   session: DesktopCodexLiveSessionState;
   event: ManagedRoomEvent;
+  storage: DesktopRoomStorageState;
   prompt: string;
   allowContextRequests: boolean;
 }): Promise<{ session: DesktopCodexLiveSessionState; text: string | null }> {
@@ -1694,72 +1703,122 @@ async function runDesktopEventTurnWithContext(input: {
     return { session: latest, text: replyText };
   }
 
-  for (let requestCount = 0; requestCount < DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT; requestCount += 1) {
-    const request = parseManagedAgentContextRequest(replyText);
-    if (!request) {
-      if (hasManagedAgentContextRequestLine(replyText)) {
-        const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
+  const roomToolCache: ManagedAgentRoomToolCache = new Map();
+  let contextRequestCount = 0;
+  let roomToolRequestCount = 0;
+
+  while (true) {
+    const contextRequest = parseManagedAgentContextRequest(replyText);
+    if (contextRequest) {
+      if (contextRequestCount >= DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT) {
+        const capped = updateCodexLiveSession(input.session.session_id, (current) => ({
           ...current,
           status: "unknown",
           active_work: null,
-          last_error: "Codex emitted a malformed desktop context request.",
+          last_error: `Codex requested more than ${DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT} desktop context tools for one room event.`,
           updated_at: new Date().toISOString(),
         })) ?? latest;
-        emitManagedAgentSessionUpdate(malformed);
-        return { session: malformed, text: null };
+        emitManagedAgentSessionUpdate(capped);
+        return { session: capped, text: null };
       }
-      return { session: latest, text: replyText };
+      contextRequestCount += 1;
+
+      queueCodexRuntimeReasoningSummary(latest, {
+        summary: `Reading ${contextRequest.tool} context.`,
+        status: "working",
+        checking: "Desktop context broker is fetching room-scoped context.",
+        next_action: "Injecting compact context into Codex.",
+      });
+
+      const result = await executeManagedAgentContextRequestWithTimeout(latest, contextRequest);
+      const contextPrompt = buildManagedAgentContextResultPrompt(result);
+      const readySession = getStoredCodexLiveSession(input.session.session_id) ?? latest;
+      started = await startDesktopEventCodexTurn({
+        client: input.client,
+        session: readySession,
+        event: input.event,
+        prompt: contextPrompt,
+      });
+      updateActiveWorkSummary(started.session.session_id, `Reading ${contextRequest.tool} context.`);
+      replyText = await waitForDesktopEventTurnCompletion(
+        input.client,
+        input.session.session_id,
+        started.turnId,
+      );
+      latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
+      continue;
     }
 
-    queueCodexRuntimeReasoningSummary(latest, {
-      summary: `Reading ${request.tool} context.`,
-      status: "working",
-      checking: "Desktop context broker is fetching room-scoped context.",
-      next_action: "Injecting compact context into Codex.",
-    });
+    const roomToolRequest = parseManagedAgentRoomToolRequest(replyText);
+    if (roomToolRequest) {
+      if (roomToolRequestCount >= DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT) {
+        const capped = updateCodexLiveSession(input.session.session_id, (current) => ({
+          ...current,
+          status: "unknown",
+          active_work: null,
+          last_error: `Codex requested more than ${DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT} desktop room tools for one room event.`,
+          updated_at: new Date().toISOString(),
+        })) ?? latest;
+        emitManagedAgentSessionUpdate(capped);
+        return { session: capped, text: null };
+      }
+      roomToolRequestCount += 1;
 
-    const result = await executeManagedAgentContextRequestWithTimeout(latest, request);
-    const contextPrompt = buildManagedAgentContextResultPrompt(result);
-    const readySession = getStoredCodexLiveSession(input.session.session_id) ?? latest;
-    started = await startDesktopEventCodexTurn({
-      client: input.client,
-      session: readySession,
-      event: input.event,
-      prompt: contextPrompt,
-    });
-    updateActiveWorkSummary(started.session.session_id, `Reading ${request.tool} context.`);
-    replyText = await waitForDesktopEventTurnCompletion(
-      input.client,
-      input.session.session_id,
-      started.turnId,
-    );
-    latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
-  }
+      queueCodexRuntimeReasoningSummary(latest, {
+        summary: `Running ${roomToolRequest.tool} room tool.`,
+        status: "working",
+        checking: "Desktop room tool bridge is executing a room-scoped action.",
+        next_action: "Injecting the structured room tool result into Codex.",
+      });
 
-  if (parseManagedAgentContextRequest(replyText)) {
-    const capped = updateCodexLiveSession(input.session.session_id, (current) => ({
-      ...current,
-      status: "unknown",
-      active_work: null,
-      last_error: `Codex requested more than ${DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT} desktop context tools for one room event.`,
-      updated_at: new Date().toISOString(),
-    })) ?? latest;
-    emitManagedAgentSessionUpdate(capped);
-    return { session: capped, text: null };
-  }
-  if (hasManagedAgentContextRequestLine(replyText)) {
-    const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
-      ...current,
-      status: "unknown",
-      active_work: null,
-      last_error: "Codex emitted a malformed desktop context request.",
-      updated_at: new Date().toISOString(),
-    })) ?? latest;
-    emitManagedAgentSessionUpdate(malformed);
-    return { session: malformed, text: null };
-  }
+      const result = await executeManagedAgentRoomToolRequestWithTimeout({
+        session: latest,
+        storage: input.storage,
+        request: roomToolRequest,
+        cache: roomToolCache,
+      });
+      const roomToolPrompt = buildManagedAgentRoomToolResultPrompt(result);
+      const readySession = getStoredCodexLiveSession(input.session.session_id) ?? latest;
+      started = await startDesktopEventCodexTurn({
+        client: input.client,
+        session: readySession,
+        event: input.event,
+        prompt: roomToolPrompt,
+      });
+      updateActiveWorkSummary(started.session.session_id, `Running ${roomToolRequest.tool} room tool.`);
+      replyText = await waitForDesktopEventTurnCompletion(
+        input.client,
+        input.session.session_id,
+        started.turnId,
+      );
+      latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
+      continue;
+    }
 
-  return { session: latest, text: replyText };
+    if (hasManagedAgentContextRequestLine(replyText)) {
+      const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
+        ...current,
+        status: "unknown",
+        active_work: null,
+        last_error: "Codex emitted a malformed desktop context request.",
+        updated_at: new Date().toISOString(),
+      })) ?? latest;
+      emitManagedAgentSessionUpdate(malformed);
+      return { session: malformed, text: null };
+    }
+    if (hasManagedAgentRoomToolRequestLine(replyText)) {
+      const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
+        ...current,
+        status: "unknown",
+        active_work: null,
+        last_error: "Codex emitted a malformed desktop room tool request.",
+        updated_at: new Date().toISOString(),
+      })) ?? latest;
+      emitManagedAgentSessionUpdate(malformed);
+      return { session: malformed, text: null };
+    }
+    return { session: latest, text: replyText };
+  }
 }
 
 async function executeManagedAgentContextRequestWithTimeout(
@@ -1834,6 +1893,7 @@ async function deliverDesktopEventTurn(
       client,
       session: idleSession,
       event,
+      storage,
       prompt,
       allowContextRequests: !stopAfterTurn,
     });

@@ -75,6 +75,28 @@ function storageState(roomIdentifier = "room_1"): DesktopRoomStorageState {
   };
 }
 
+function localStorageState(roomIdentifier = "room_1"): DesktopRoomStorageState {
+  return {
+    roomIdentifier,
+    defaultMode: "local",
+    overrideMode: "local",
+    effectiveMode: "local",
+    isLocalRoom: true,
+    localRoom: {
+      roomIdentifier,
+      displayName: "Local Room",
+      cloudRoomIdentifier: null,
+      publishStatus: "local_only",
+      createdAt: "2026-06-30T00:00:00.000Z",
+      updatedAt: "2026-06-30T00:00:00.000Z",
+      publishedAt: null,
+      gitRoom: null,
+    },
+    databasePath: "/tmp/local-chat.sqlite",
+    localFilesPath: "/tmp/files",
+  };
+}
+
 function messageEvent(
   overrides: Partial<Extract<DesktopRoomStreamEvent, { type: "message" }>> = {},
 ): Extract<DesktopRoomStreamEvent, { type: "message" }> {
@@ -138,6 +160,7 @@ function createRuntimeHarness(
       request: DesktopManagedAgentPermissionRequest;
     }) => Promise<{ roomMessageId: string | null }>;
     permissionTimeoutMs?: number;
+    storage?: DesktopRoomStorageState;
   } = {},
 ) {
   const published: Array<{ text: string | null; eventId: string }> = [];
@@ -158,7 +181,7 @@ function createRuntimeHarness(
       });
     },
     publishPermissionRequest: options.publishPermissionRequest,
-    resolveStorage: async (roomIdentifier) => storageState(roomIdentifier),
+    resolveStorage: async (roomIdentifier) => options.storage ?? storageState(roomIdentifier),
     emitSessionUpdate: () => undefined,
     permissionTimeoutMs: options.permissionTimeoutMs,
     now: () => "2026-06-30T00:00:00.000Z",
@@ -214,9 +237,15 @@ test("Claude Code runner options lock down ambient MCP and blocked room tools", 
   assert.equal(options.pathToClaudeCodeExecutable, "/usr/local/bin/claude");
   assert.ok(options.disallowedTools?.includes("rental_run_command"));
   assert.ok(options.disallowedTools?.includes("send_message"));
+  assert.ok(options.disallowedTools?.includes("post_reasoning"));
+  assert.ok(options.disallowedTools?.includes("get_board"));
+  assert.ok(options.disallowedTools?.includes("create_board_intent"));
+  assert.ok(options.disallowedTools?.includes("get_room_artifacts"));
   assert.equal("allowedTools" in options, false);
   assert.equal(typeof options.canUseTool, "function");
   assert.equal(isBlockedClaudeCodeTool("mcp__letagents__send_message"), true);
+  assert.equal(isBlockedClaudeCodeTool("mcp__letagents__get_board"), true);
+  assert.equal(isBlockedClaudeCodeTool("mcp__letagents__post_reasoning"), true);
   assert.equal(isBlockedClaudeCodeTool("mcp__letagents__rental_run_command"), true);
   assert.equal(isBlockedClaudeCodeTool("Read"), false);
   assert.equal(isAutoAllowedClaudeCodeTool("Read"), true);
@@ -424,13 +453,55 @@ test("Claude Code runtime delivers room events into the SDK runner and persists 
 
   assert.equal(prompts.length, 1);
   assert.match(prompts[0]?.prompt ?? "", /Desktop-delivered LetAgents room event/);
-  assert.match(prompts[0]?.prompt ?? "", /Do not call LetAgents MCP room tools/);
+  assert.match(prompts[0]?.prompt ?? "", /Do not call raw LetAgents MCP room tools/);
+  assert.match(prompts[0]?.prompt ?? "", /LETAGENTS_ROOM_TOOL_REQUEST/);
   assert.equal(prompts[0]?.claudeSessionId, null);
   assert.deepEqual(published, [{ text: "I will check this.", eventId: "msg_1" }]);
   const stored = getStoredClaudeCodeLiveSession(started.session.id);
   assert.equal(stored?.claude_session_id, "claude_session_1");
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.active_work, null);
+});
+
+test("Claude Code runtime feeds desktop room tool results back into the SDK runner", async () => {
+  resetState();
+  const prompts: ClaudeCodeTurnInput[] = [];
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        return {
+          sessionId: "claude_session_1",
+          text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":42}},"idempotency_key":"event_1:artifact"}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Desktop room tool result/);
+      assert.match(input.prompt, /unsupported_local_room_tool/);
+      return {
+        sessionId: "claude_session_1",
+        text: "Artifact publishing is not available in this local room.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState() });
+  await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[1]?.claudeSessionId, "claude_session_1");
+  assert.deepEqual(published, [{ text: "Artifact publishing is not available in this local room.", eventId: "msg_1" }]);
 });
 
 test("Claude Code runtime surfaces tool permission requests for desktop approval", async () => {

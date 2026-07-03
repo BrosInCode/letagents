@@ -43,6 +43,11 @@ const {
   parseManagedAgentContextRequest,
 } = await import("../main/agents/managed-agent-context-protocol.js");
 const {
+  buildManagedAgentRoomToolResultPrompt,
+  MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
+  parseManagedAgentRoomToolRequest,
+} = await import("../main/agents/managed-agent-room-tools-protocol.js");
+const {
   compactManagedAgentRoomArtifacts,
   managedAgentRoomArtifactsPath,
 } = await import("../main/agents/managed-agent-artifacts.js");
@@ -1118,7 +1123,8 @@ test("desktop-delivered event prompts include stop handling without resuming MCP
   assert.match(prompt, /exactly equals "\/stop-codex-room"/);
   assert.match(prompt, /LOCAL_CODEX_ROOM_test_DONE/);
   assert.match(prompt, /do not call wait_for_messages/);
-  assert.match(prompt, /Do not call LetAgents MCP room tools/);
+  assert.match(prompt, /Do not call raw LetAgents MCP room tools/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /desktop should publish as you/);
   assert.match(prompt, /Do not include hidden chain-of-thought/);
 });
@@ -1154,7 +1160,11 @@ test("desktop-delivered event prompts advertise brokered context tools", () => {
     },
   });
 
-  assert.match(prompt, /do not assume earlier thread history is already in this prompt/);
+  assert.match(prompt, /Do not assume earlier thread history is already in this prompt/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
+  assert.match(prompt, /get_board/);
+  assert.match(prompt, /send_thread_message/);
+  assert.match(prompt, /Desktop room tools run under your stored worker identity/);
   assert.match(prompt, new RegExp(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX));
   assert.match(prompt, /read_recent_room_messages/);
   assert.match(prompt, /search_room_messages/);
@@ -1202,14 +1212,65 @@ test("desktop context requests parse and stay out of public replies", () => {
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", MANAGED_AGENT_CONTEXT_REQUEST_PREFIX), null);
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_CONTEXT_REQUEST inline."),
-    "This mentions LETAGENTS_CONTEXT_REQUEST inline.",
+    null,
   );
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "LETAGENTS_CONTEXT_REQUEST. This is plain prose."),
-    "LETAGENTS_CONTEXT_REQUEST. This is plain prose.",
+    null,
   );
   assert.equal(parseManagedAgentContextRequest("LETAGENTS_CONTEXT_REQUEST not-json"), null);
   assert.equal(parseManagedAgentContextRequest("hello"), null);
+});
+
+test("desktop room tool requests parse and stay out of public replies", () => {
+  const requestLine =
+    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"claim_task","arguments":{"task_id":"task_1"},"idempotency_key":"event_1:claim_task"}`;
+  const expectedRequest = {
+    tool: "claim_task",
+    arguments: { task_id: "task_1" },
+    idempotency_key: "event_1:claim_task",
+  };
+
+  assert.deepEqual(parseManagedAgentRoomToolRequest(requestLine), expectedRequest);
+  assert.equal(parseManagedAgentRoomToolRequest(`- ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`> ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`1. ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`Claiming now:\n${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`${requestLine} thanks`), null);
+  assert.equal(
+    parseManagedAgentRoomToolRequest(`${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"wait_for_messages","arguments":{}}`),
+    null,
+  );
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", requestLine), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `Claiming now:\n${requestLine}`), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} not-json`),
+    null,
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_ROOM_TOOL_REQUEST inline."),
+    null,
+  );
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "I will finish with NO_ROOM_REPLY."), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Stopping with LOCAL_CODEX_ROOM_test_DONE."),
+    null,
+  );
+});
+
+test("desktop room tool result prompts return structured brokered results", () => {
+  const prompt = buildManagedAgentRoomToolResultPrompt({
+    ok: true,
+    tool: "get_board",
+    roomIdentifier: "room_1",
+    storage: "cloud",
+    data: { tasks: [{ id: "task_1", title: "Bridge room tools" }] },
+  });
+
+  assert.match(prompt, /Desktop room tool result/);
+  assert.match(prompt, /worker session token was not exposed/);
+  assert.match(prompt, /untrusted room\/task\/artifact content/);
+  assert.match(prompt, /LETAGENTS_ROOM_TOOL_REQUEST/);
 });
 
 test("desktop context result prompts return compact brokered context", () => {
@@ -1784,6 +1845,7 @@ test("Claude Code desktop event prompts include thread metadata for human thread
   assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
   assert.match(prompt, /human reply inside a thread you are participating in/);
   assert.match(prompt, /desktop will keep it in the same thread/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
@@ -1795,6 +1857,7 @@ test("Claude Code desktop event prompts keep top-level messages free of thread c
 
   assert.doesNotMatch(prompt, /Thread root:/);
   assert.doesNotMatch(prompt, /Thread context:/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
@@ -1809,6 +1872,7 @@ test("Cursor desktop event prompts include thread metadata for human thread repl
   assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
   assert.match(prompt, /human reply inside a thread you are participating in/);
   assert.match(prompt, /desktop will keep it in the same thread/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
@@ -1820,6 +1884,7 @@ test("Cursor desktop event prompts keep top-level messages free of thread contex
 
   assert.doesNotMatch(prompt, /Thread root:/);
   assert.doesNotMatch(prompt, /Thread context:/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
