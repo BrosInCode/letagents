@@ -87,29 +87,12 @@
 .desktop-board-manager-pill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
-  max-width: 260px;
-  min-height: 34px;
-  padding: 0 11px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--text-tertiary);
-  font-size: 0.72rem;
-  font-weight: 800;
+  max-width: none;
+  flex-shrink: 0;
   line-height: 1;
   white-space: nowrap;
-  cursor: pointer;
-  transition:
-    border-color 150ms var(--ease-out),
-    background 150ms var(--ease-out),
-    box-shadow 150ms var(--ease-out);
-}
-
-.desktop-board-manager-pill:hover {
-  border-color: rgba(147, 197, 253, 0.36);
-  background: rgba(255, 255, 255, 0.065);
 }
 
 .desktop-board-manager-pill:focus-visible {
@@ -125,22 +108,8 @@
 }
 
 .desktop-board-manager-pill strong {
-  color: var(--text);
+  color: inherit;
   font-weight: 900;
-}
-
-.desktop-board-manager-pill[data-mode="intent_required"] {
-  border-color: rgba(245, 158, 11, 0.34);
-  background: rgba(245, 158, 11, 0.1);
-}
-
-.desktop-board-manager-pill[data-mode="off"] {
-  border-color: rgba(148, 163, 184, 0.2);
-  background: rgba(148, 163, 184, 0.08);
-}
-
-.desktop-board-manager-pill[data-has-pending="true"] {
-  border-color: rgba(96, 165, 250, 0.36);
 }
 
 .desktop-board-manager-dot {
@@ -157,6 +126,20 @@
 
 .desktop-board-manager-pill[data-mode="intent_required"] .desktop-board-manager-dot {
   background: rgb(245, 158, 11);
+}
+
+.desktop-board-manager-pill .desktop-board-manager-pending-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.16);
+  color: inherit;
+  font-size: 0.68rem;
+  font-weight: 900;
 }
 
 .desktop-board-manager-details {
