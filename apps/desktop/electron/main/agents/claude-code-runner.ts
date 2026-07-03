@@ -16,6 +16,7 @@ import {
   isAutoAllowedManagedAgentTool,
   MANAGED_AGENT_AUTO_ALLOWED_TOOL_NAMES,
 } from "./managed-agent-permissions.js";
+import { MANAGED_AGENT_ROOM_TOOL_NAMES } from "./managed-agent-room-tools-protocol.js";
 
 export interface ClaudeCodeTurnInput {
   prompt: string;
@@ -38,29 +39,12 @@ export interface ClaudeCodeRunner {
   runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult>;
 }
 
-export const CLAUDE_CODE_BLOCKED_TOOL_NAMES = [
+const CLAUDE_CODE_EXTRA_BLOCKED_TOOL_NAMES = [
   "rental_run_command",
   "propose",
   "provision",
   "wait_for_messages",
-  "read_messages",
-  "send_message",
-  "send_thread_message",
-  "post_status",
-  "post_reasoning",
-  "get_board",
-  "get_board_settings",
-  "claim_task",
-  "claim_task_review",
-  "update_task",
-  "create_task",
   "accept_task",
-  "create_board_intent",
-  "list_board_intents",
-  "approve_board_intent",
-  "deny_board_intent",
-  "get_room_artifacts",
-  "publish_room_artifact",
   "register_agent_session",
   "disconnect_agent_session",
   "join_room",
@@ -70,6 +54,11 @@ export const CLAUDE_CODE_BLOCKED_TOOL_NAMES = [
   "create_project",
   "start_local_codex_session",
   "stop_local_codex_session",
+] as const;
+
+export const CLAUDE_CODE_BLOCKED_TOOL_NAMES = [
+  ...CLAUDE_CODE_EXTRA_BLOCKED_TOOL_NAMES,
+  ...MANAGED_AGENT_ROOM_TOOL_NAMES,
 ] as const;
 
 export const productionClaudeCodeRunner: ClaudeCodeRunner = {

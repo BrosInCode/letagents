@@ -1,4 +1,4 @@
-import { dialog } from "electron";
+import electron from "electron";
 import { basename } from "node:path";
 import type {
   DesktopGitHubIntegrationActionResult,
@@ -25,6 +25,8 @@ import {
   rememberJoinedRoomInfo,
   type RoomInfoPayload,
 } from "./room-info.js";
+
+const { dialog } = electron as typeof import("electron");
 
 export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
   const options: Electron.OpenDialogOptions = {

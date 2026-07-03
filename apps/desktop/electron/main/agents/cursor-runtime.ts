@@ -45,13 +45,8 @@ import {
   type DesktopManagedAgentReplyTarget,
 } from "./managed-agent-local-replies.js";
 import {
-  buildManagedAgentRoomToolResultPrompt,
-  DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT,
-  executeManagedAgentRoomToolRequestWithTimeout,
-  hasManagedAgentRoomToolRequestLine,
-  parseManagedAgentRoomToolRequest,
-  type ManagedAgentRoomToolCache,
-} from "./managed-agent-room-tools.js";
+  runManagedAgentRoomToolLoop,
+} from "./managed-agent-room-tool-loop.js";
 import {
   getCurrentCursorLiveSession,
   getOrCreateDesktopHostId,
@@ -416,9 +411,8 @@ export function createDesktopCursorRuntime(
     storage: DesktopRoomStorageState;
     abortController: AbortController;
   }): Promise<CursorTurnResult> {
-    const roomToolCache: ManagedAgentRoomToolCache = new Map();
     let cursorSessionId = input.active.cursor_session_id ?? null;
-    let result = await runCursorTurnForDesktopEvent({
+    const result = await runCursorTurnForDesktopEvent({
       session: input.active,
       prompt: buildCursorDesktopEventPrompt(input.active, input.event),
       cursorSessionId,
@@ -426,66 +420,46 @@ export function createDesktopCursorRuntime(
     });
     cursorSessionId = result.sessionId ?? cursorSessionId;
 
-    for (let requestCount = 0; requestCount < DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT; requestCount += 1) {
-      if (result.status === "error") {
-        return result;
-      }
-      const request = parseManagedAgentRoomToolRequest(result.text);
-      if (!request) {
-        if (hasManagedAgentRoomToolRequestLine(result.text)) {
-          return cursorRoomToolErrorResult(
-            cursorSessionId,
-            result.recentItems,
-            "Cursor emitted a malformed desktop room tool request.",
-          );
-        }
-        return { ...result, sessionId: cursorSessionId };
-      }
+    const loop = await runManagedAgentRoomToolLoop({
+      providerLabel: "Cursor",
+      session: input.active,
+      storage: input.storage,
+      initialTurn: result,
+      initialContinuationId: cursorSessionId,
+      getContinuationId: (turn) => turn.sessionId,
+      getLatestSession: (fallback) =>
+        getStoredCursorLiveSession(input.active.session_id) ?? fallback,
+      onRoomToolRequest: ({ request }) => {
+        const updated = updateCursorLiveSession(input.active.session_id, (current) => ({
+          ...current,
+          active_work: {
+            kind: input.event.type,
+            event_id: input.event.type === "message" ? input.event.message.id : input.event.task.id,
+            started_at: current.active_work?.started_at ?? now(),
+            summary: `Running ${request.tool} room tool.`,
+          },
+          updated_at: now(),
+        }));
+        emitSessionUpdate(updated);
+        return updated;
+      },
+      runContinuationTurn: async ({ prompt, session, continuationId }) => {
+        const turn = await runCursorTurnForDesktopEvent({
+          session,
+          prompt,
+          cursorSessionId: continuationId,
+          abortController: input.abortController,
+        });
+        return {
+          session: getStoredCursorLiveSession(input.active.session_id) ?? session,
+          turn,
+        };
+      },
+      onLoopError: ({ continuationId, recentItems, error }) =>
+        cursorRoomToolErrorResult(continuationId, recentItems, error),
+    });
 
-      const updated = updateCursorLiveSession(input.active.session_id, (current) => ({
-        ...current,
-        active_work: {
-          kind: input.event.type,
-          event_id: input.event.type === "message" ? input.event.message.id : input.event.task.id,
-          started_at: current.active_work?.started_at ?? now(),
-          summary: `Running ${request.tool} room tool.`,
-        },
-        updated_at: now(),
-      }));
-      emitSessionUpdate(updated);
-
-      const latest = getStoredCursorLiveSession(input.active.session_id) ?? input.active;
-      const roomToolResult = await executeManagedAgentRoomToolRequestWithTimeout({
-        session: latest,
-        storage: input.storage,
-        request,
-        cache: roomToolCache,
-      });
-      result = await runCursorTurnForDesktopEvent({
-        session: latest,
-        prompt: buildManagedAgentRoomToolResultPrompt(roomToolResult),
-        cursorSessionId,
-        abortController: input.abortController,
-      });
-      cursorSessionId = result.sessionId ?? cursorSessionId;
-    }
-
-    if (parseManagedAgentRoomToolRequest(result.text)) {
-      return cursorRoomToolErrorResult(
-        cursorSessionId,
-        result.recentItems,
-        `Cursor requested more than ${DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT} desktop room tools for one room event.`,
-      );
-    }
-    if (hasManagedAgentRoomToolRequestLine(result.text)) {
-      return cursorRoomToolErrorResult(
-        cursorSessionId,
-        result.recentItems,
-        "Cursor emitted a malformed desktop room tool request.",
-      );
-    }
-
-    return { ...result, sessionId: cursorSessionId };
+    return { ...loop.turn, sessionId: loop.continuationId };
   }
 
   async function runCursorTurnForDesktopEvent(input: {

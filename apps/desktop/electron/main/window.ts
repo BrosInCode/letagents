@@ -1,12 +1,15 @@
-import { app, BrowserWindow } from "electron";
+import electron from "electron";
+import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
 
-let mainWindow: BrowserWindow | null = null;
+const { app, BrowserWindow } = electron as typeof import("electron");
 
-export function getMainWindow(): BrowserWindow | null {
+let mainWindow: ElectronBrowserWindow | null = null;
+
+export function getMainWindow(): ElectronBrowserWindow | null {
   return mainWindow;
 }
 
@@ -54,7 +57,7 @@ export function createWindow(): void {
   void mainWindow.loadFile(rendererDistPath);
 }
 
-function installSmokeCheck(window: BrowserWindow): void {
+function installSmokeCheck(window: ElectronBrowserWindow): void {
   if (process.env.LETAGENTS_DESKTOP_SMOKE_CHECK !== "1") {
     return;
   }

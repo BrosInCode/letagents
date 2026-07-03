@@ -59,13 +59,9 @@ import {
   parseManagedAgentContextRequest,
 } from "./managed-agent-context.js";
 import {
-  buildManagedAgentRoomToolResultPrompt,
-  DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT,
-  executeManagedAgentRoomToolRequestWithTimeout,
-  hasManagedAgentRoomToolRequestLine,
-  parseManagedAgentRoomToolRequest,
-  type ManagedAgentRoomToolCache,
-} from "./managed-agent-room-tools.js";
+  runManagedAgentRoomToolLoop,
+  type ManagedAgentRoomToolLoopState,
+} from "./managed-agent-room-tool-loop.js";
 import type {
   ManagedAgentContextRequest,
   ManagedAgentContextResult,
@@ -1703,9 +1699,11 @@ async function runDesktopEventTurnWithContext(input: {
     return { session: latest, text: replyText };
   }
 
-  const roomToolCache: ManagedAgentRoomToolCache = new Map();
   let contextRequestCount = 0;
-  let roomToolRequestCount = 0;
+  let roomToolLoopState: ManagedAgentRoomToolLoopState = {
+    cache: new Map(),
+    requestCount: 0,
+  };
 
   while (true) {
     const contextRequest = parseManagedAgentContextRequest(replyText);
@@ -1749,52 +1747,6 @@ async function runDesktopEventTurnWithContext(input: {
       continue;
     }
 
-    const roomToolRequest = parseManagedAgentRoomToolRequest(replyText);
-    if (roomToolRequest) {
-      if (roomToolRequestCount >= DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT) {
-        const capped = updateCodexLiveSession(input.session.session_id, (current) => ({
-          ...current,
-          status: "unknown",
-          active_work: null,
-          last_error: `Codex requested more than ${DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT} desktop room tools for one room event.`,
-          updated_at: new Date().toISOString(),
-        })) ?? latest;
-        emitManagedAgentSessionUpdate(capped);
-        return { session: capped, text: null };
-      }
-      roomToolRequestCount += 1;
-
-      queueCodexRuntimeReasoningSummary(latest, {
-        summary: `Running ${roomToolRequest.tool} room tool.`,
-        status: "working",
-        checking: "Desktop room tool bridge is executing a room-scoped action.",
-        next_action: "Injecting the structured room tool result into Codex.",
-      });
-
-      const result = await executeManagedAgentRoomToolRequestWithTimeout({
-        session: latest,
-        storage: input.storage,
-        request: roomToolRequest,
-        cache: roomToolCache,
-      });
-      const roomToolPrompt = buildManagedAgentRoomToolResultPrompt(result);
-      const readySession = getStoredCodexLiveSession(input.session.session_id) ?? latest;
-      started = await startDesktopEventCodexTurn({
-        client: input.client,
-        session: readySession,
-        event: input.event,
-        prompt: roomToolPrompt,
-      });
-      updateActiveWorkSummary(started.session.session_id, `Running ${roomToolRequest.tool} room tool.`);
-      replyText = await waitForDesktopEventTurnCompletion(
-        input.client,
-        input.session.session_id,
-        started.turnId,
-      );
-      latest = getStoredCodexLiveSession(input.session.session_id) ?? started.session;
-      continue;
-    }
-
     if (hasManagedAgentContextRequestLine(replyText)) {
       const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
         ...current,
@@ -1806,16 +1758,65 @@ async function runDesktopEventTurnWithContext(input: {
       emitManagedAgentSessionUpdate(malformed);
       return { session: malformed, text: null };
     }
-    if (hasManagedAgentRoomToolRequestLine(replyText)) {
-      const malformed = updateCodexLiveSession(input.session.session_id, (current) => ({
-        ...current,
-        status: "unknown",
-        active_work: null,
-        last_error: "Codex emitted a malformed desktop room tool request.",
-        updated_at: new Date().toISOString(),
-      })) ?? latest;
-      emitManagedAgentSessionUpdate(malformed);
-      return { session: malformed, text: null };
+
+    const roomToolLoop = await runManagedAgentRoomToolLoop({
+      providerLabel: "Codex",
+      session: latest,
+      storage: input.storage,
+      initialTurn: { text: replyText },
+      state: roomToolLoopState,
+      getLatestSession: (fallback) =>
+        getStoredCodexLiveSession(input.session.session_id) ?? fallback,
+      onRoomToolRequest: ({ request, session }) => {
+        queueCodexRuntimeReasoningSummary(session, {
+          summary: `Running ${request.tool} room tool.`,
+          status: "working",
+          checking: "Desktop room tool bridge is executing a room-scoped action.",
+          next_action: "Injecting the structured room tool result into Codex.",
+        });
+      },
+      runContinuationTurn: async ({ prompt, request, session }) => {
+        const readySession = getStoredCodexLiveSession(input.session.session_id) ?? session;
+        const roomToolTurn = await startDesktopEventCodexTurn({
+          client: input.client,
+          session: readySession,
+          event: input.event,
+          prompt,
+        });
+        updateActiveWorkSummary(roomToolTurn.session.session_id, `Running ${request.tool} room tool.`);
+        const text = await waitForDesktopEventTurnCompletion(
+          input.client,
+          input.session.session_id,
+          roomToolTurn.turnId,
+        );
+        return {
+          session: getStoredCodexLiveSession(input.session.session_id) ?? roomToolTurn.session,
+          turn: { text },
+        };
+      },
+      onLoopError: ({ error, session }) => {
+        const failed = updateCodexLiveSession(input.session.session_id, (current) => ({
+          ...current,
+          status: "unknown",
+          active_work: null,
+          last_error: error,
+          updated_at: new Date().toISOString(),
+        })) ?? session;
+        emitManagedAgentSessionUpdate(failed);
+        return {
+          session: failed,
+          turn: { text: null },
+        };
+      },
+    });
+    roomToolLoopState = roomToolLoop.state;
+    replyText = roomToolLoop.turn.text;
+    latest = roomToolLoop.session;
+    if (roomToolLoop.error) {
+      return { session: latest, text: replyText };
+    }
+    if (roomToolLoop.handledRequests > 0) {
+      continue;
     }
     return { session: latest, text: replyText };
   }

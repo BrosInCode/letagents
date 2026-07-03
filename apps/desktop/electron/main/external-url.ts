@@ -1,4 +1,6 @@
-import { shell } from "electron";
+import electron from "electron";
+
+const { shell } = electron as typeof import("electron");
 
 export function assertAllowedExternalUrl(rawUrl: string, allowedHosts: readonly string[]): string {
   let url: URL;
@@ -21,4 +23,3 @@ export function assertAllowedExternalUrl(rawUrl: string, allowedHosts: readonly 
 export async function openAllowedExternalUrl(rawUrl: string, allowedHosts: readonly string[]): Promise<void> {
   await shell.openExternal(assertAllowedExternalUrl(rawUrl, allowedHosts));
 }
-

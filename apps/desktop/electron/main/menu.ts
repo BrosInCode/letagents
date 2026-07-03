@@ -1,6 +1,9 @@
-import { app, Menu, shell, type MenuItemConstructorOptions } from "electron";
+import electron from "electron";
+import type { MenuItemConstructorOptions } from "electron";
 
 import { emitToMainWindow, focusMainWindow } from "./window.js";
+
+const { app, Menu, shell } = electron as typeof import("electron");
 
 function openSettings(): void {
   focusMainWindow();

@@ -402,6 +402,59 @@ test("Cursor runtime feeds desktop room tool results back into the runner", asyn
   assert.deepEqual(published, [{ text: "Artifact publishing is not available in this local room.", eventId: "msg_1" }]);
 });
 
+test("Cursor runtime runs multiple desktop room tools before publishing the final reply", async () => {
+  resetState();
+  const prompts: CursorTurnInput[] = [];
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        return {
+          sessionId: "cursor_session_1",
+          text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":42}},"idempotency_key":"event_1:artifact"}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      if (prompts.length === 2) {
+        assert.match(input.prompt, /Desktop room tool result/);
+        assert.match(input.prompt, /unsupported_local_room_tool/);
+        return {
+          sessionId: "cursor_session_1",
+          text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":43}},"idempotency_key":"event_1:artifact_2"}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Desktop room tool result/);
+      assert.match(input.prompt, /unsupported_local_room_tool/);
+      return {
+        sessionId: "cursor_session_1",
+        text: "Both artifact attempts hit the local-room limitation.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState() });
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts[1]?.cursorSessionId, "cursor_session_1");
+  assert.equal(prompts[2]?.cursorSessionId, "cursor_session_1");
+  assert.deepEqual(published, [{ text: "Both artifact attempts hit the local-room limitation.", eventId: "msg_1" }]);
+});
+
 test("Cursor runtime preempts an active event and redelivers the newer event with resume state", async () => {
   resetState();
   const calls: CursorTurnInput[] = [];

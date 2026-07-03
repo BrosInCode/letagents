@@ -79,13 +79,8 @@ import {
   type DesktopManagedAgentReplyTarget,
 } from "./managed-agent-local-replies.js";
 import {
-  buildManagedAgentRoomToolResultPrompt,
-  DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT,
-  executeManagedAgentRoomToolRequestWithTimeout,
-  hasManagedAgentRoomToolRequestLine,
-  parseManagedAgentRoomToolRequest,
-  type ManagedAgentRoomToolCache,
-} from "./managed-agent-room-tools.js";
+  runManagedAgentRoomToolLoop,
+} from "./managed-agent-room-tool-loop.js";
 
 const DEFAULT_CLAUDE_CODE_STOP_PHRASE = "/stop-claude-code-room";
 
@@ -469,9 +464,8 @@ export function createDesktopClaudeCodeRuntime(
     abortController: AbortController;
     canUseTool: CanUseTool;
   }): Promise<ClaudeCodeTurnResult> {
-    const roomToolCache: ManagedAgentRoomToolCache = new Map();
     let claudeSessionId = input.active.claude_session_id ?? null;
-    let result = await runner.runTurn({
+    const result = await runner.runTurn({
       prompt: buildClaudeCodeDesktopEventPrompt(input.active, input.event),
       cwd: input.active.cwd,
       claudeSessionId,
@@ -481,68 +475,48 @@ export function createDesktopClaudeCodeRuntime(
     });
     claudeSessionId = result.sessionId ?? claudeSessionId;
 
-    for (let requestCount = 0; requestCount < DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT; requestCount += 1) {
-      if (result.status === "error") {
-        return result;
-      }
-      const request = parseManagedAgentRoomToolRequest(result.text);
-      if (!request) {
-        if (hasManagedAgentRoomToolRequestLine(result.text)) {
-          return claudeCodeRoomToolErrorResult(
-            claudeSessionId,
-            result.recentItems,
-            "Claude Code emitted a malformed desktop room tool request.",
-          );
-        }
-        return { ...result, sessionId: claudeSessionId };
-      }
+    const loop = await runManagedAgentRoomToolLoop({
+      providerLabel: "Claude Code",
+      session: input.active,
+      storage: input.storage,
+      initialTurn: result,
+      initialContinuationId: claudeSessionId,
+      getContinuationId: (turn) => turn.sessionId,
+      getLatestSession: (fallback) =>
+        getStoredClaudeCodeLiveSession(input.active.session_id) ?? fallback,
+      onRoomToolRequest: ({ request }) => {
+        const updated = updateClaudeCodeLiveSession(input.active.session_id, (current) => ({
+          ...current,
+          active_work: {
+            kind: input.event.type,
+            event_id: input.event.type === "message" ? input.event.message.id : input.event.task.id,
+            started_at: current.active_work?.started_at ?? now(),
+            summary: `Running ${request.tool} room tool.`,
+          },
+          updated_at: now(),
+        }));
+        emitSessionUpdate(updated);
+        return updated;
+      },
+      runContinuationTurn: async ({ prompt, session, continuationId }) => {
+        const turn = await runner.runTurn({
+          prompt,
+          cwd: session.cwd,
+          claudeSessionId: continuationId,
+          claudeBin: session.claude_bin,
+          abortController: input.abortController,
+          canUseTool: input.canUseTool,
+        });
+        return {
+          session: getStoredClaudeCodeLiveSession(input.active.session_id) ?? session,
+          turn,
+        };
+      },
+      onLoopError: ({ continuationId, recentItems, error }) =>
+        claudeCodeRoomToolErrorResult(continuationId, recentItems, error),
+    });
 
-      const updated = updateClaudeCodeLiveSession(input.active.session_id, (current) => ({
-        ...current,
-        active_work: {
-          kind: input.event.type,
-          event_id: input.event.type === "message" ? input.event.message.id : input.event.task.id,
-          started_at: current.active_work?.started_at ?? now(),
-          summary: `Running ${request.tool} room tool.`,
-        },
-        updated_at: now(),
-      }));
-      emitSessionUpdate(updated);
-
-      const latest = getStoredClaudeCodeLiveSession(input.active.session_id) ?? input.active;
-      const roomToolResult = await executeManagedAgentRoomToolRequestWithTimeout({
-        session: latest,
-        storage: input.storage,
-        request,
-        cache: roomToolCache,
-      });
-      result = await runner.runTurn({
-        prompt: buildManagedAgentRoomToolResultPrompt(roomToolResult),
-        cwd: latest.cwd,
-        claudeSessionId,
-        claudeBin: latest.claude_bin,
-        abortController: input.abortController,
-        canUseTool: input.canUseTool,
-      });
-      claudeSessionId = result.sessionId ?? claudeSessionId;
-    }
-
-    if (parseManagedAgentRoomToolRequest(result.text)) {
-      return claudeCodeRoomToolErrorResult(
-        claudeSessionId,
-        result.recentItems,
-        `Claude Code requested more than ${DESKTOP_EVENT_ROOM_TOOL_REQUEST_LIMIT} desktop room tools for one room event.`,
-      );
-    }
-    if (hasManagedAgentRoomToolRequestLine(result.text)) {
-      return claudeCodeRoomToolErrorResult(
-        claudeSessionId,
-        result.recentItems,
-        "Claude Code emitted a malformed desktop room tool request.",
-      );
-    }
-
-    return { ...result, sessionId: claudeSessionId };
+    return { ...loop.turn, sessionId: loop.continuationId };
   }
 
   function preemptActiveTurn(sessionId: string): void {
