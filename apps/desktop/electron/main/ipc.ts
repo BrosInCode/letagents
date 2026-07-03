@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+import electron from "electron";
 import type { IpcMain } from "electron";
 
 import type {
@@ -185,6 +185,8 @@ import {
   getOpenModelSettingsStatus,
   saveOpenModelSettings,
 } from "./agents/open-model-settings.js";
+
+const { ipcMain } = electron as typeof import("electron");
 
 export function registerDesktopIpcHandlers(
   targetIpcMain: IpcMain = ipcMain,

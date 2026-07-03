@@ -81,6 +81,7 @@ const {
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
+const { dispatchRoomStreamEventToManagedAgents } = await import("../main/agents/codex-supervisor.js");
 const {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
@@ -242,6 +243,171 @@ function managedWorkerSession(
     ended_at: null,
     ...overrides,
   };
+}
+
+type ScriptedCodexWebSocket = {
+  prompts: string[];
+  sentMessages: Array<Record<string, unknown>>;
+  restore: () => void;
+};
+
+function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCodexWebSocket {
+  const originalWebSocket = globalThis.WebSocket;
+  const replies = [...turnReplies];
+  const completedTurns = new Map<string, string>();
+  const prompts: string[] = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  let turnStartCount = 0;
+
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+
+    constructor(readonly url: string) {
+      queueMicrotask(() => this.onopen?.());
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as {
+        id?: number;
+        method?: string;
+        params?: { input?: Array<{ text?: string }> };
+      };
+      sentMessages.push(message as Record<string, unknown>);
+      if (!message.id) {
+        return;
+      }
+
+      let result: Record<string, unknown> = {};
+      if (message.method === "turn/start") {
+        const turnId = `turn_event_${++turnStartCount}`;
+        prompts.push(String(message.params?.input?.[0]?.text ?? ""));
+        completedTurns.set(turnId, replies.shift() ?? "NO_ROOM_REPLY");
+        result = { turn: { id: turnId } };
+      } else if (message.method === "thread/read") {
+        result = {
+          thread: {
+            status: { type: "idle" },
+            turns: [
+              { id: "turn_boot", status: "completed", items: [] },
+              ...[...completedTurns.entries()].map(([id, text]) => ({
+                id,
+                status: "completed",
+                items: [{ type: "agentMessage", phase: "final", text }],
+              })),
+            ],
+          },
+        };
+      }
+
+      queueMicrotask(() => {
+        this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) });
+      });
+    }
+
+    close(): void {
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+    FakeWebSocket as unknown as typeof WebSocket;
+
+  return {
+    prompts,
+    sentMessages,
+    restore: () => {
+      globalThis.WebSocket = originalWebSocket;
+    },
+  };
+}
+
+function installReadyAndReasoningFetchForTest(): () => void {
+  const originalFetch = globalThis.fetch;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/readyz")) {
+      return new Response("ok", { status: 200 });
+    }
+    if (url.includes("/reasoning-sessions")) {
+      return new Response(JSON.stringify({ session: { id: "reasoning_1" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+}
+
+async function waitForCondition<T>(
+  read: () => T | Promise<T>,
+  description: string,
+  timeoutMs = 7_000,
+): Promise<NonNullable<T>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value) {
+      return value as NonNullable<T>;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`Timed out waiting for ${description}`);
+}
+
+async function setupDesktopEventRoomToolSession(input: {
+  roomIdentifier: string;
+  sessionId: string;
+  workerSessionId: string;
+  displayName: string;
+  providerId?: "codex" | "open-model";
+  ideLabel?: string;
+}): Promise<void> {
+  const token = `LOCAL_CODEX_ROOM_${input.sessionId}`;
+  await createLocalRoom({
+    roomIdentifier: input.roomIdentifier,
+    displayName: "Desktop Event Room",
+  });
+  await setLocalAwareRoomStorageMode(input.roomIdentifier, "local");
+  saveAgentSession(managedWorkerSession({
+    session_id: input.workerSessionId,
+    session_token: `${input.workerSessionId}_token`,
+    room_id: input.roomIdentifier,
+    runtime: `codex:${token}`,
+    actor_label: `${input.displayName} | EmmyMay's agent | ${input.ideLabel ?? "Codex"}`,
+    agent_key: `EmmyMay/${input.displayName.toLowerCase()}`,
+    agent_instance_id: `desktop-codex:${token}`,
+    display_name: input.displayName,
+    owner_label: "EmmyMay's agent",
+    ide_label: input.ideLabel ?? "Codex",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: input.sessionId,
+    room_id: input.roomIdentifier,
+    room_identifier: input.roomIdentifier,
+    room_display_name: "Desktop Event Room",
+    display_name: input.displayName,
+    provider_id: input.providerId === "open-model" ? "open-model" : undefined,
+    token,
+    agent_session_id: input.workerSessionId,
+    thread_id: `thread_${input.sessionId}`,
+    turn_id: "turn_boot",
+    server_url: "ws://127.0.0.1:4500",
+    status: "completed",
+    reasoning_session_id: "reasoning_1",
+  }));
 }
 
 test("desktop Codex runtime reasoning summaries accumulate readable app-server deltas", () => {
@@ -1271,6 +1437,110 @@ test("desktop room tool result prompts return structured brokered results", () =
   assert.match(prompt, /worker session token was not exposed/);
   assert.match(prompt, /untrusted room\/task\/artifact content/);
   assert.match(prompt, /LETAGENTS_ROOM_TOOL_REQUEST/);
+});
+
+test("Open Model desktop events run two brokered room tools before the final reply", async () => {
+  resetState();
+  const roomIdentifier = "local_room_open_model_tools";
+  await setupDesktopEventRoomToolSession({
+    roomIdentifier,
+    sessionId: "open_model_room_tools",
+    workerSessionId: "agent_session_open_model_tools",
+    displayName: "OpenModelRiver",
+    providerId: "open-model",
+    ideLabel: "Open Model",
+  });
+
+  const firstRequest =
+    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"get_board","arguments":{"open":true}}`;
+  const secondRequest =
+    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"post_status","arguments":{"status":"checking board"},"idempotency_key":"event_1:status"}`;
+  const websocket = installScriptedCodexWebSocketForTest([
+    firstRequest,
+    secondRequest,
+    "Final public reply after tools.",
+  ]);
+  const restoreFetch = installReadyAndReasoningFetchForTest();
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent({
+      roomIdentifier,
+      message: {
+        ...messageEvent().message,
+        id: "msg_open_model_tools",
+        text: "please check the board and report back",
+        threadRootId: "msg_open_model_tools",
+      },
+    }));
+
+    const finalMessage = await waitForCondition(async () => {
+      const page = await getLocalChatMessages(roomIdentifier);
+      return page.messages.find((message) => message.text === "Final public reply after tools.") ?? null;
+    }, "Open Model desktop event final local reply");
+
+    assert.equal(finalMessage.sender, "OpenModelRiver | EmmyMay's agent | Open Model");
+    const page = await getLocalChatMessages(roomIdentifier);
+    assert.ok(page.messages.some((message) => message.text === "[status] checking board"));
+    assert.equal(
+      websocket.sentMessages.filter((message) => message.method === "turn/start").length,
+      3,
+    );
+    assert.match(websocket.prompts[0] ?? "", /please check the board and report back/);
+    assert.match(websocket.prompts[1] ?? "", /Desktop room tool result/);
+    assert.match(websocket.prompts[1] ?? "", /"tool": "get_board"/);
+    assert.match(websocket.prompts[2] ?? "", /Desktop room tool result/);
+    assert.match(websocket.prompts[2] ?? "", /"tool": "post_status"/);
+    assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.provider_id, "open-model");
+    assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.last_error, null);
+  } finally {
+    restoreFetch();
+    websocket.restore();
+  }
+});
+
+test("Codex desktop events report malformed brokered room tool requests", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_malformed_tool";
+  await setupDesktopEventRoomToolSession({
+    roomIdentifier,
+    sessionId: "codex_malformed_room_tool",
+    workerSessionId: "agent_session_codex_malformed_tool",
+    displayName: "CedarVista",
+  });
+
+  const websocket = installScriptedCodexWebSocketForTest([
+    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} not-json`,
+  ]);
+  const restoreFetch = installReadyAndReasoningFetchForTest();
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent({
+      roomIdentifier,
+      message: {
+        ...messageEvent().message,
+        id: "msg_codex_malformed_tool",
+        text: "please check the board",
+        threadRootId: "msg_codex_malformed_tool",
+      },
+    }));
+
+    const failedSession = await waitForCondition(
+      () => {
+        const current = getCurrentCodexLiveSession(roomIdentifier);
+        return current?.last_error ? current : null;
+      },
+      "Codex malformed room tool request error",
+    );
+    const page = await getLocalChatMessages(roomIdentifier);
+
+    assert.equal(websocket.sentMessages.filter((message) => message.method === "turn/start").length, 1);
+    assert.match(websocket.prompts[0] ?? "", /please check the board/);
+    assert.equal(failedSession.status, "unknown");
+    assert.equal(failedSession.active_work, null);
+    assert.equal(failedSession.last_error, "Codex emitted a malformed desktop room tool request.");
+    assert.equal(page.messages.some((message) => message.text.includes("malformed")), false);
+  } finally {
+    restoreFetch();
+    websocket.restore();
+  }
 });
 
 test("desktop context result prompts return compact brokered context", () => {
