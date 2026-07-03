@@ -306,6 +306,47 @@ describe("useDesktopNavigationState", () => {
     });
   });
 
+  it("keeps the account room display name when the active room has a stale recent label", () => {
+    withLocalStorage(() => {
+      const localRoomId = "local_726155b7-ff5a-43f3-b7f3-dc8da067425f";
+      const snapshot = roomSnapshot(localRoomId, { displayName: "HZLocal" });
+      const state = useDesktopNavigationState({
+        accountRooms: ref<DesktopAccountRoomEntry[]>([
+          accountRoom(localRoomId, "HZLocal"),
+        ]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([{
+          identifier: localRoomId,
+          kind: "room",
+          rootPath: null,
+          displayName: "Local room",
+          meta: "Local on this device",
+          updatedAt: "2026-07-03T00:00:00.000Z",
+        }]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(snapshot),
+        selectedRootRoomIdentifier: ref<string | null>(localRoomId),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(snapshot),
+      });
+
+      const activeGroup = state.projectEntries.value.find(
+        (project) => project.parent.roomIdentifier === localRoomId,
+      );
+
+      assert.equal(activeGroup?.roomName, "HZLocal");
+      assert.equal(activeGroup?.parent.title, "HZLocal");
+      assert.equal(activeGroup?.parent.meta, "Admin");
+    });
+  });
+
   it("labels account Git focus rooms as Git Rooms in the sidebar", () => {
     withLocalStorage(() => {
       const accountRooms = ref<DesktopAccountRoomEntry[]>([

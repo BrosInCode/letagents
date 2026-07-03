@@ -165,6 +165,7 @@ export function buildSidebarProjectGroups(input: {
       return;
     }
     existing.parent = mergeRoomEntry(existing.parent, group.parent);
+    existing.roomName = existing.parent.title;
     existing.focusRooms = mergeRoomEntries(existing.focusRooms, group.focusRooms);
   }
 
@@ -199,8 +200,14 @@ function mergeRoomEntries(current: RoomEntry[], incoming: RoomEntry[]): RoomEntr
 }
 
 function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
+  const preferIncomingDisplay = current.source === "current" && incoming.source === "account";
   return {
     ...current,
+    title: preferIncomingDisplay ? incoming.title : current.title,
+    meta: preferIncomingDisplay ? incoming.meta : current.meta,
+    sectionLabel: preferIncomingDisplay ? incoming.sectionLabel : current.sectionLabel,
+    headline: preferIncomingDisplay ? incoming.headline : current.headline,
+    description: preferIncomingDisplay ? incoming.description : current.description,
     latestMessageId: incoming.latestMessageId || current.latestMessageId,
     latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
     pinned: current.pinned || incoming.pinned,
