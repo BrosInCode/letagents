@@ -568,6 +568,20 @@ describe("room chat helpers", () => {
     );
   });
 
+  it("links loaded message id references in desktop message text", () => {
+    assert.equal(
+      renderMessageText("See msg_6's note, not msg_99.", "", new Set(["msg_6"])),
+      'See <button class="message-reference-link" type="button" data-message-reference-id="msg_6" title="Jump to msg_6">msg_6</button>\'s note, not msg_99.',
+    );
+  });
+
+  it("does not link message id references inside code or URLs", () => {
+    assert.equal(
+      renderMessageText("Use `msg_6` or https://example.com/msg_6 before msg_7", "", new Set(["msg_6", "msg_7"])),
+      'Use <code>msg_6</code> or <a href="https://example.com/msg_6" target="_blank" rel="noopener noreferrer">https://example.com/msg_6</a> before <button class="message-reference-link" type="button" data-message-reference-id="msg_7" title="Jump to msg_7">msg_7</button>',
+    );
+  });
+
   it("formats selected-text quotes as the message target with optional source context", () => {
     assert.equal(
       selectedTextQuoteBlock("first line\n\nsecond line", "msg_42"),

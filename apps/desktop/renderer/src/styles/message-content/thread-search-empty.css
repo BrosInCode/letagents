@@ -29,6 +29,12 @@
   background: rgba(255, 255, 255, 0.055);
 }
 
+.room-thread-message.jump-target {
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--avatar-color, #71717a) 56%, rgba(255, 255, 255, 0.22));
+}
+
 .room-chat-message.is-search-active .room-message-bubble {
   border-color: rgba(251, 191, 36, 0.38);
   box-shadow:

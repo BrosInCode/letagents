@@ -98,6 +98,7 @@
           :text="message.text || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
+          @message-reference-click="$emit('scroll-to-message', $event)"
         />
 
         <DesktopMessageAttachments
@@ -205,6 +206,7 @@ const props = defineProps<{
   threadSummary: ThreadIndicatorSummary;
   activeThreadRoot: boolean;
   highlightQuery: string;
+  messageReferenceIds?: ReadonlySet<string>;
   searchActive: boolean;
 }>();
 
@@ -246,7 +248,9 @@ const replyDisplayName = computed(() =>
 );
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
+const renderedText = computed(() =>
+  renderMessageText(props.message.text || "No message body.", props.highlightQuery, props.messageReferenceIds)
+);
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const threadIndicatorVisible = computed(() =>
   props.threadSummary.count > 0 || props.threadSummary.hasPartialHistory || props.threadSummary.loadingEarlier
