@@ -49,6 +49,7 @@ export interface DesktopAgentProviderPreflightInput {
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   model?: string | null;
   modelSource?: DesktopAgentProviderModelSource | null;
+  effort?: DesktopManagedAgentEffort | null;
   refreshModels?: boolean | null;
 }
 
@@ -89,6 +90,13 @@ export type DesktopManagedAgentSessionStatus =
 export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
   | "desktop_events";
+
+export type DesktopManagedAgentEffort =
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 export type DesktopCursorMcpPolicy =
   | "filter_letagents"
@@ -258,6 +266,7 @@ export interface DesktopManagedAgentSession {
   permissionProfile: DesktopManagedAgentPermissionProfile;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   model?: string | null;
+  effort?: DesktopManagedAgentEffort | null;
   canStop: boolean;
   agentSessionId: string | null;
   actorLabel: string | null;
@@ -283,6 +292,7 @@ export interface DesktopManagedAgentStartInput {
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   model?: string | null;
   modelSource?: DesktopAgentProviderModelSource | null;
+  effort?: DesktopManagedAgentEffort | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
 }

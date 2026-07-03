@@ -8,6 +8,8 @@ const tempDir = mkdtempSync(join(tmpdir(), "letagents-managed-agent-models-"));
 
 const {
   listDesktopAgentProviderModels,
+  normalizeManagedAgentEffort,
+  normalizeManagedAgentEffortForProvider,
   normalizeManagedAgentModel,
   parseCodexModelsOutput,
   parseCursorModelsOutput,
@@ -27,6 +29,15 @@ test("managed agent model normalization trims blanks to null", () => {
   assert.equal(normalizeManagedAgentModel("  sonnet  "), "sonnet");
   assert.equal(normalizeManagedAgentModel("  "), null);
   assert.equal(normalizeManagedAgentModel(null), null);
+});
+
+test("managed agent effort normalization is provider aware", () => {
+  assert.equal(normalizeManagedAgentEffort("  high  "), "high");
+  assert.equal(normalizeManagedAgentEffort("unsupported"), null);
+  assert.equal(normalizeManagedAgentEffortForProvider("codex", "xhigh"), "xhigh");
+  assert.equal(normalizeManagedAgentEffortForProvider("codex", "max"), null);
+  assert.equal(normalizeManagedAgentEffortForProvider("claude-code", "max"), "max");
+  assert.equal(normalizeManagedAgentEffortForProvider("cursor", "high"), null);
 });
 
 test("Cursor model parser handles labels, defaults, duplicates, and empty lines", () => {

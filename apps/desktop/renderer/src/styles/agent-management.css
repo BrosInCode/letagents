@@ -533,22 +533,12 @@
   color: var(--text);
 }
 
-.desktop-add-agent-model-select-label {
-  display: grid;
-  gap: 6px;
-  width: min(100%, 360px);
-}
-
-.desktop-add-agent-model-select-label > span {
-  color: var(--text-tertiary);
-  font-size: 0.72rem;
-  font-weight: 850;
-  text-transform: uppercase;
-}
-
-.desktop-add-agent-model select,
+.desktop-add-agent-model .desktop-select-field,
 .desktop-add-agent-model input {
   width: min(100%, 360px);
+}
+
+.desktop-add-agent-model input {
   min-height: 32px;
   padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);

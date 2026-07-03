@@ -83,7 +83,10 @@ const {
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
-const { dispatchRoomStreamEventToManagedAgents } = await import("../main/agents/codex-supervisor.js");
+const {
+  buildCodexManagedAgentLaunchContext,
+  dispatchRoomStreamEventToManagedAgents,
+} = await import("../main/agents/codex-supervisor.js");
 const {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
@@ -524,9 +527,15 @@ test("public Codex managed session projects the selected permission profile", ()
   assert.equal(publicSession.permissionProfile.label, "Full access");
   assert.equal(publicSession.permissionProfile.status, "available");
   assert.equal(publicSession.model, null);
+  assert.equal(publicSession.effort, null);
   assert.equal(toPublicManagedAgentSession(liveSession({
     model: "gpt-5.2-codex-high",
+    effort: "high",
   })).model, "gpt-5.2-codex-high");
+  assert.equal(toPublicManagedAgentSession(liveSession({
+    model: "gpt-5.2-codex-high",
+    effort: "high",
+  })).effort, "high");
 });
 
 test("desktop Codex runtime reasoning hides raw app-server reasoning text", () => {
@@ -3279,16 +3288,35 @@ test("Codex app-server launcher trusts the selected managed worktree", () => {
   ]);
   assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500", {
     trustedProjectPath: "/tmp/room-worktree",
-    configOverrides: ['model="gpt-5.2-codex-high"'],
+    configOverrides: ['model="gpt-5.2-codex-high"', 'model_reasoning_effort="xhigh"'],
   }), [
     "app-server",
     "-c",
     'projects."/tmp/room-worktree".trust_level="trusted"',
     "-c",
     'model="gpt-5.2-codex-high"',
+    "-c",
+    'model_reasoning_effort="xhigh"',
     "--listen",
     "ws://127.0.0.1:4500",
   ]);
+});
+
+test("managed Codex effort-only starts use a dedicated app-server config override", () => {
+  const effortOnly = buildCodexManagedAgentLaunchContext({
+    effort: "xhigh",
+  });
+
+  assert.equal(effortOnly.model, null);
+  assert.equal(effortOnly.effort, "xhigh");
+  assert.deepEqual(effortOnly.launch.configOverrides, [
+    'model_reasoning_effort="xhigh"',
+  ]);
+  assert.equal(effortOnly.dedicatedServer, true);
+
+  const providerDefault = buildCodexManagedAgentLaunchContext({});
+  assert.deepEqual(providerDefault.launch, {});
+  assert.equal(providerDefault.dedicatedServer, false);
 });
 
 test("dedicated Codex app-server URLs do not reuse the shared configured server", async () => {

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type {
   DesktopAgentProviderId,
   DesktopManagedAgentChangeSummary,
+  DesktopManagedAgentEffort,
   DesktopManagedAgentInspectResult,
   DesktopManagedAgentPermissionDecisionInput,
   DesktopManagedAgentPermissionDecisionResult,
@@ -105,7 +106,10 @@ import {
 import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { openModelCodexLaunch } from "./open-model-launch.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
-import { normalizeManagedAgentModel } from "./managed-agent-models.js";
+import {
+  normalizeManagedAgentEffortForProvider,
+  normalizeManagedAgentModel,
+} from "./managed-agent-models.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import {
   buildManagedAgentChangeSummaryAttachmentDraft,
@@ -1052,6 +1056,7 @@ interface CodexEngineProviderContext {
   providerName: string;
   ideLabel: string;
   model: string | null;
+  effort: DesktopManagedAgentEffort | null;
   launch: {
     configOverrides?: string[];
     env?: Record<string, string>;
@@ -1067,6 +1072,7 @@ const CODEX_ENGINE_CONTEXT: CodexEngineProviderContext = {
   providerName: "Codex",
   ideLabel: "Codex",
   model: null,
+  effort: null,
   launch: {},
   dedicatedServer: false,
   forceDesktopEvents: false,
@@ -1075,15 +1081,33 @@ const CODEX_ENGINE_CONTEXT: CodexEngineProviderContext = {
 function startDesktopManagedCodexAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
-  const selectedModel = normalizeManagedAgentModel(input.model);
+  const launchContext = buildCodexManagedAgentLaunchContext(input);
   return startDesktopManagedCodexEngineAgent(input, {
     ...CODEX_ENGINE_CONTEXT,
-    model: selectedModel,
-    launch: selectedModel
-      ? { configOverrides: [`model=${JSON.stringify(selectedModel)}`] }
-      : {},
-    dedicatedServer: Boolean(selectedModel),
+    ...launchContext,
   });
+}
+
+export function buildCodexManagedAgentLaunchContext(
+  input: Pick<DesktopManagedAgentStartInput, "model" | "effort">,
+): {
+  model: string | null;
+  effort: DesktopManagedAgentEffort | null;
+  launch: { configOverrides?: string[] };
+  dedicatedServer: boolean;
+} {
+  const selectedModel = normalizeManagedAgentModel(input.model);
+  const selectedEffort = normalizeManagedAgentEffortForProvider("codex", input.effort);
+  const configOverrides = [
+    ...(selectedModel ? [`model=${JSON.stringify(selectedModel)}`] : []),
+    ...(selectedEffort ? [`model_reasoning_effort=${JSON.stringify(selectedEffort)}`] : []),
+  ];
+  return {
+    model: selectedModel,
+    effort: selectedEffort,
+    launch: configOverrides.length ? { configOverrides } : {},
+    dedicatedServer: Boolean(configOverrides.length),
+  };
 }
 
 async function startDesktopManagedOpenModelAgent(
@@ -1097,6 +1121,7 @@ async function startDesktopManagedOpenModelAgent(
     providerName: "Open Model",
     ideLabel: "Open Model",
     model: selectedModel,
+    effort: null,
     launch,
     dedicatedServer: true,
     forceDesktopEvents: true,
@@ -1216,6 +1241,7 @@ async function startDesktopManagedCodexEngineAgent(
       display_name: displayName,
       provider_id: engine.providerId === "codex" ? undefined : engine.providerId,
       model: engine.model,
+      effort: engine.effort,
       joined_via: joinedVia,
       cwd,
       repo_branch: repoBranch,

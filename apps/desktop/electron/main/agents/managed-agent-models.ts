@@ -7,6 +7,7 @@ import type {
   DesktopAgentProviderModelSource,
   DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflightInput,
+  DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
@@ -57,6 +58,30 @@ export function normalizeManagedAgentModelSource(
   return value === "provider" || value === "known" || value === "custom"
     ? value
     : "custom";
+}
+
+export function normalizeManagedAgentEffort(
+  value: DesktopManagedAgentEffort | string | null | undefined,
+): DesktopManagedAgentEffort | null {
+  const normalized = String(value ?? "").trim();
+  return normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high" ||
+    normalized === "xhigh" ||
+    normalized === "max"
+    ? normalized
+    : null;
+}
+
+export function normalizeManagedAgentEffortForProvider(
+  providerId: DesktopAgentProviderId,
+  value: DesktopManagedAgentEffort | string | null | undefined,
+): DesktopManagedAgentEffort | null {
+  const effort = normalizeManagedAgentEffort(value);
+  if (!effort) return null;
+  if (providerId === "claude-code") return effort;
+  if (providerId === "codex") return effort === "max" ? null : effort;
+  return null;
 }
 
 export async function listDesktopAgentProviderModels(

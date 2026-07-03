@@ -72,7 +72,10 @@ import {
   assertManagedAgentPermissionProfileAvailable,
   managedAgentPermissionProfileForProvider,
 } from "./managed-agent-permission-profiles.js";
-import { normalizeManagedAgentModel } from "./managed-agent-models.js";
+import {
+  normalizeManagedAgentEffortForProvider,
+  normalizeManagedAgentModel,
+} from "./managed-agent-models.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
 import {
   desktopManagedAgentReplyTargetForMessage,
@@ -239,12 +242,14 @@ export function createDesktopClaudeCodeRuntime(
       repoRootPath: cwd,
       model: input.model,
       modelSource: input.modelSource,
+      effort: input.effort,
     });
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
     const permissionProfile = assertManagedAgentPermissionProfileAvailable("claude-code", input.permissionProfileId);
     const selectedModel = normalizeManagedAgentModel(input.model);
+    const selectedEffort = normalizeManagedAgentEffortForProvider("claude-code", input.effort);
 
     const token = makeClaudeCodeStopToken();
     const displayName = suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(roomIdentifier), token);
@@ -265,6 +270,7 @@ export function createDesktopClaudeCodeRuntime(
       cwd,
       repo_branch: repoBranch,
       model: selectedModel,
+      effort: selectedEffort,
       stop_phrase: input.stopPhrase?.trim() || DEFAULT_CLAUDE_CODE_STOP_PHRASE,
       max_minutes: coerceMaxMinutes(input.maxMinutes),
       delivery_mode: "desktop_events",
@@ -481,6 +487,7 @@ export function createDesktopClaudeCodeRuntime(
       claudeSessionId,
       claudeBin: input.active.claude_bin,
       model: input.active.model ?? null,
+      effort: input.active.effort ?? null,
       abortController: input.abortController,
       canUseTool: input.canUseTool,
     });
@@ -516,6 +523,7 @@ export function createDesktopClaudeCodeRuntime(
           claudeSessionId: continuationId,
           claudeBin: session.claude_bin,
           model: session.model ?? null,
+          effort: session.effort ?? null,
           abortController: input.abortController,
           canUseTool: input.canUseTool,
         });
