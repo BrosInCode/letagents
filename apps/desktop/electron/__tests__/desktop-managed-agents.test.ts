@@ -248,6 +248,12 @@ function managedWorkerSession(
 type ScriptedCodexWebSocket = {
   prompts: string[];
   sentMessages: Array<Record<string, unknown>>;
+  unexpectedCalls: string[];
+  restore: () => void;
+};
+
+type StrictFetchMock = {
+  unexpectedCalls: string[];
   restore: () => void;
 };
 
@@ -257,6 +263,7 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
   const completedTurns = new Map<string, string>();
   const prompts: string[] = [];
   const sentMessages: Array<Record<string, unknown>> = [];
+  const unexpectedCalls: string[] = [];
   let turnStartCount = 0;
 
   class FakeWebSocket {
@@ -279,11 +286,16 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
       };
       sentMessages.push(message as Record<string, unknown>);
       if (!message.id) {
+        if (message.method !== "initialized") {
+          unexpectedCalls.push(`notification:${message.method ?? "(missing method)"}`);
+        }
         return;
       }
 
-      let result: Record<string, unknown> = {};
-      if (message.method === "turn/start") {
+      let result: Record<string, unknown>;
+      if (message.method === "initialize") {
+        result = {};
+      } else if (message.method === "turn/start") {
         const turnId = `turn_event_${++turnStartCount}`;
         prompts.push(String(message.params?.input?.[0]?.text ?? ""));
         completedTurns.set(turnId, replies.shift() ?? "NO_ROOM_REPLY");
@@ -301,6 +313,11 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
               })),
             ],
           },
+        };
+      } else {
+        unexpectedCalls.push(`rpc:${message.method ?? "(missing method)"}`);
+        result = {
+          error: `Unexpected Codex app-server RPC in test: ${message.method ?? "(missing method)"}`,
         };
       }
 
@@ -321,16 +338,18 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
   return {
     prompts,
     sentMessages,
+    unexpectedCalls,
     restore: () => {
       globalThis.WebSocket = originalWebSocket;
     },
   };
 }
 
-function installReadyAndReasoningFetchForTest(): () => void {
+function installReadyAndReasoningFetchForTest(): StrictFetchMock {
   const originalFetch = globalThis.fetch;
+  const unexpectedCalls: string[] = [];
   (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
-    const url = String(input);
+    const url = input instanceof Request ? input.url : String(input);
     if (url.endsWith("/readyz")) {
       return new Response("ok", { status: 200 });
     }
@@ -340,15 +359,34 @@ function installReadyAndReasoningFetchForTest(): () => void {
         headers: { "Content-Type": "application/json" },
       });
     }
-    return new Response(JSON.stringify({}), {
-      status: 200,
+    unexpectedCalls.push(`fetch:${url}`);
+    return new Response(JSON.stringify({
+      error: `Unexpected fetch in desktop event room tool test: ${url}`,
+    }), {
+      status: 599,
       headers: { "Content-Type": "application/json" },
     });
   }) as typeof fetch;
 
-  return () => {
-    globalThis.fetch = originalFetch;
+  return {
+    unexpectedCalls,
+    restore: () => {
+      globalThis.fetch = originalFetch;
+    },
   };
+}
+
+function failOnUnexpectedDesktopEventTestCalls(
+  websocket: ScriptedCodexWebSocket,
+  fetchMock: StrictFetchMock,
+): void {
+  const unexpectedCalls = [
+    ...websocket.unexpectedCalls,
+    ...fetchMock.unexpectedCalls,
+  ];
+  if (unexpectedCalls.length) {
+    assert.fail(`Unexpected desktop event test calls: ${unexpectedCalls.join(", ")}`);
+  }
 }
 
 async function waitForCondition<T>(
@@ -1460,7 +1498,7 @@ test("Open Model desktop events run two brokered room tools before the final rep
     secondRequest,
     "Final public reply after tools.",
   ]);
-  const restoreFetch = installReadyAndReasoningFetchForTest();
+  const fetchMock = installReadyAndReasoningFetchForTest();
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent({
       roomIdentifier,
@@ -1473,6 +1511,7 @@ test("Open Model desktop events run two brokered room tools before the final rep
     }));
 
     const finalMessage = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
       const page = await getLocalChatMessages(roomIdentifier);
       return page.messages.find((message) => message.text === "Final public reply after tools.") ?? null;
     }, "Open Model desktop event final local reply");
@@ -1492,7 +1531,7 @@ test("Open Model desktop events run two brokered room tools before the final rep
     assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.provider_id, "open-model");
     assert.equal(getCurrentCodexLiveSession(roomIdentifier)?.last_error, null);
   } finally {
-    restoreFetch();
+    fetchMock.restore();
     websocket.restore();
   }
 });
@@ -1510,7 +1549,7 @@ test("Codex desktop events report malformed brokered room tool requests", async 
   const websocket = installScriptedCodexWebSocketForTest([
     `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} not-json`,
   ]);
-  const restoreFetch = installReadyAndReasoningFetchForTest();
+  const fetchMock = installReadyAndReasoningFetchForTest();
   try {
     dispatchRoomStreamEventToManagedAgents(messageEvent({
       roomIdentifier,
@@ -1524,6 +1563,7 @@ test("Codex desktop events report malformed brokered room tool requests", async 
 
     const failedSession = await waitForCondition(
       () => {
+        failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
         const current = getCurrentCodexLiveSession(roomIdentifier);
         return current?.last_error ? current : null;
       },
@@ -1538,7 +1578,7 @@ test("Codex desktop events report malformed brokered room tool requests", async 
     assert.equal(failedSession.last_error, "Codex emitted a malformed desktop room tool request.");
     assert.equal(page.messages.some((message) => message.text.includes("malformed")), false);
   } finally {
-    restoreFetch();
+    fetchMock.restore();
     websocket.restore();
   }
 });
