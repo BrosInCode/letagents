@@ -9,7 +9,8 @@
         :expanded="Boolean(expandedChangeSummaryKeys[attachmentKey(attachment)])"
         :fallback-text="changeSummaryFallbackText(attachment)"
         :open-href="changeSummaryOpenHref(attachment)"
-        :retry-visible="Boolean(failedChangeSummaryKeys[attachmentKey(attachment)])"
+        :retry-visible="changeSummaryRetryVisible(attachment)"
+        :unavailable="changeSummaryUnavailable(attachment)"
         @toggle-expanded="toggleExpandedChangeSummary(attachment)"
         @retry="retryChangeSummaryAttachment(attachment)"
       />
@@ -93,16 +94,24 @@ function changeSummary(attachment: DesktopRoomMessageAttachment): DesktopManaged
 
 function changeSummaryFallbackText(attachment: DesktopRoomMessageAttachment): string {
   const key = attachmentKey(attachment);
-  if (loadingChangeSummaryKeys.value[key]) return "Loading file changes...";
-  if (failedChangeSummaryKeys.value[key]) return "Change summary could not be loaded.";
   const summary = changeSummary(attachment);
   if (summary?.error) return summary.error;
-  return "No working tree changes in this Codex working tree.";
+  if (summary) return "No working tree changes in this Codex working tree.";
+  if (loadingChangeSummaryKeys.value[key]) return "Loading file changes...";
+  return "The attached change summary could not be loaded.";
 }
 
 function changeSummaryOpenHref(attachment: DesktopRoomMessageAttachment): string | null {
   const href = attachmentHref(attachment);
   return href === "#" ? null : href;
+}
+
+function changeSummaryRetryVisible(attachment: DesktopRoomMessageAttachment): boolean {
+  return !changeSummary(attachment) && Boolean(failedChangeSummaryKeys.value[attachmentKey(attachment)]);
+}
+
+function changeSummaryUnavailable(attachment: DesktopRoomMessageAttachment): boolean {
+  return !changeSummary(attachment) && !loadingChangeSummaryKeys.value[attachmentKey(attachment)];
 }
 
 function toggleExpandedChangeSummary(attachment: DesktopRoomMessageAttachment): void {
@@ -130,8 +139,11 @@ async function retryChangeSummaryAttachment(attachment: DesktopRoomMessageAttach
 
 async function loadRemoteChangeSummaryAttachment(attachment: DesktopRoomMessageAttachment): Promise<void> {
   if (!isManagedAgentChangeSummaryAttachment(attachment)) return;
-  if (decodeManagedAgentChangeSummaryAttachment(attachment)) return;
   const key = attachmentKey(attachment);
+  if (decodeManagedAgentChangeSummaryAttachment(attachment)) {
+    clearChangeSummaryLoadState(key);
+    return;
+  }
   if (
     loadingChangeSummaryKeys.value[key] ||
     Object.prototype.hasOwnProperty.call(remoteChangeSummaries.value, key) ||
@@ -165,6 +177,15 @@ async function loadRemoteChangeSummaryAttachment(attachment: DesktopRoomMessageA
     const { [key]: _ignored, ...remaining } = loadingChangeSummaryKeys.value;
     loadingChangeSummaryKeys.value = remaining;
   }
+}
+
+function clearChangeSummaryLoadState(key: string): void {
+  const { [key]: _failed, ...remainingFailures } = failedChangeSummaryKeys.value;
+  const { [key]: _loading, ...remainingLoading } = loadingChangeSummaryKeys.value;
+  const { [key]: _summary, ...remainingSummaries } = remoteChangeSummaries.value;
+  failedChangeSummaryKeys.value = remainingFailures;
+  loadingChangeSummaryKeys.value = remainingLoading;
+  remoteChangeSummaries.value = remainingSummaries;
 }
 
 function pruneChangeSummaryState(): void {

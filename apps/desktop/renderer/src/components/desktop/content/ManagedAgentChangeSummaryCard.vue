@@ -5,8 +5,8 @@
         <FileDiff />
       </span>
       <div>
-        <strong>{{ managedAgentChangeSummaryTitle(summary, loading) }}</strong>
-        <small>{{ managedAgentChangeSummarySubtitle(summary, loading) }}</small>
+        <strong>{{ managedAgentChangeSummaryTitle(summary, loading, { unavailable }) }}</strong>
+        <small>{{ managedAgentChangeSummarySubtitle(summary, loading, { unavailable }) }}</small>
       </div>
     </header>
 
@@ -67,7 +67,7 @@
       <button
         v-if="retryVisible"
         type="button"
-        class="managed-agent-change-show-files"
+        class="managed-agent-change-retry"
         @click="$emit('retry')"
       >
         Retry
@@ -102,12 +102,14 @@ const props = withDefaults(defineProps<{
   fallbackText?: string;
   openHref?: string | null;
   retryVisible?: boolean;
+  unavailable?: boolean;
 }>(), {
   loading: false,
   expanded: false,
   fallbackText: "No working tree changes in this Codex working tree.",
   openHref: null,
   retryVisible: false,
+  unavailable: false,
 });
 
 defineEmits<{

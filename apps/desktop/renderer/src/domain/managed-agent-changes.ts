@@ -44,8 +44,10 @@ export async function fetchManagedAgentChangeSummaryAttachment(
 export function managedAgentChangeSummaryTitle(
   summary: ManagedAgentChangeSummaryView | null,
   loading = false,
+  options: { unavailable?: boolean } = {},
 ): string {
   if (!summary && loading) return "Checking file changes";
+  if (!summary && options.unavailable) return "Change summary unavailable";
   if (summary?.error) return "Changes unavailable";
   if (!summary || summary.changedFileCount === 0) return "No working tree changes";
   return `Working tree changes: ${summary.changedFileCount} ${summary.changedFileCount === 1 ? "file" : "files"}`;
@@ -54,7 +56,9 @@ export function managedAgentChangeSummaryTitle(
 export function managedAgentChangeSummarySubtitle(
   summary: ManagedAgentChangeSummaryView | null,
   loading = false,
+  options: { unavailable?: boolean } = {},
 ): string {
+  if (!summary && options.unavailable && !loading) return "Attachment could not be loaded.";
   if (!summary) return loading ? "Reading the Codex working tree..." : "Codex working tree";
   if (summary.error) return "Git summary could not be loaded.";
   const totals = [

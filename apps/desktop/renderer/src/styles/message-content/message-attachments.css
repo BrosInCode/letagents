@@ -194,12 +194,10 @@
 }
 
 .managed-agent-change-show-files,
-.managed-agent-change-open-attachment {
+.managed-agent-change-open-attachment,
+.managed-agent-change-retry {
   min-height: 26px;
   padding: 0 9px;
-}
-
-.managed-agent-change-open-attachment {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -210,4 +208,9 @@
   font-size: 0.75rem;
   font-weight: 700;
   text-decoration: none;
+}
+
+.managed-agent-change-show-files,
+.managed-agent-change-retry {
+  cursor: pointer;
 }
