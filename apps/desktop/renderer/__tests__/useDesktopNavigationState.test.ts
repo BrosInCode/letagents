@@ -448,6 +448,11 @@ function roomSnapshot(
     reasoningSessions: [],
     recentActivity: [],
     roomArtifacts: [],
+    boardSettings: {
+      managerMode: "manager_optional",
+      activeManager: null,
+      pendingIntentCount: 0,
+    },
     messages: [],
     githubEvents: null,
   };

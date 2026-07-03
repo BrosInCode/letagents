@@ -1,4 +1,5 @@
-import { app } from "electron";
+import electron from "electron";
+import type { App } from "electron";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,6 +20,14 @@ const smokeCodexLiveSessionId = "local_smoke_codex";
 const smokeCodexReasoningSessionId = "reasoning_smoke_codex";
 let smokeUserDataPath: string | null = null;
 
+function electronApp(): App {
+  const app = (electron as { app?: App }).app;
+  if (!app) {
+    throw new Error("Electron app is unavailable outside the Electron runtime.");
+  }
+  return app;
+}
+
 export function isDesktopSmokeCheck(): boolean {
   return process.env.LETAGENTS_DESKTOP_SMOKE_CHECK === "1";
 }
@@ -27,7 +36,7 @@ export function configureDesktopSmokeEnvironment(): void {
   if (!isDesktopSmokeCheck()) return;
 
   smokeUserDataPath = mkdtempSync(join(tmpdir(), "letagents-desktop-smoke-"));
-  app.setPath("userData", smokeUserDataPath);
+  electronApp().setPath("userData", smokeUserDataPath);
   process.env.LETAGENTS_STATE_PATH ||= join(smokeUserDataPath, "letagents-state.json");
   process.once("exit", () => {
     if (smokeUserDataPath) {
@@ -39,7 +48,7 @@ export function configureDesktopSmokeEnvironment(): void {
 export function seedDesktopSmokeState(): void {
   if (!isDesktopSmokeCheck()) return;
 
-  const userDataPath = app.getPath("userData");
+  const userDataPath = electronApp().getPath("userData");
   mkdirSync(userDataPath, { recursive: true });
   const now = new Date().toISOString();
   writeFileSync(
@@ -278,6 +287,11 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
     ],
     recentActivity: [],
     roomArtifacts: [],
+    boardSettings: {
+      managerMode: "manager_optional",
+      activeManager: null,
+      pendingIntentCount: 0,
+    },
     messages: [
       {
         id: "msg_smoke_1",

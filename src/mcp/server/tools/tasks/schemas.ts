@@ -24,6 +24,11 @@ export const workerTaskIdentitySchema = {
     .describe("Registered agent session to use for this task action. Required for worker task writes."),
 };
 
+export const boardIntentApprovalSchema = {
+  board_intent_id: z.string().optional().describe("Approved board intent id for high-impact board actions."),
+  board_approval_token: z.string().optional().describe("Scoped approval token returned by approve_board_intent."),
+};
+
 export const taskReviewIdentitySchema = {
   ...workerTaskIdentitySchema,
   agent_session_id: z

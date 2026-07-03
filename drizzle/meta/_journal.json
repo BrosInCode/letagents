@@ -414,6 +414,13 @@
       "when": 1783036800000,
       "tag": "0058_room_shared_artifact_number_bigint",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1783123200000,
+      "tag": "0059_board_manager_intents",
+      "breakpoints": true
     }
   ]
 }

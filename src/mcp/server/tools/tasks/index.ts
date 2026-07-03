@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerBoardIntentTools } from "./board-intent-tools.js";
 import { registerTaskArtifactTools } from "./artifact-tools.js";
 import { registerTaskBoardTools } from "./board-tools.js";
 import { registerTaskEventTools } from "./event-tools.js";
@@ -7,6 +8,7 @@ import { registerTaskMutationTools } from "./mutation-tools.js";
 
 export function registerTaskTools(server: McpServer): void {
   registerTaskBoardTools(server);
+  registerBoardIntentTools(server);
   registerTaskEventTools(server);
   registerTaskArtifactTools(server);
   registerTaskMutationTools(server);

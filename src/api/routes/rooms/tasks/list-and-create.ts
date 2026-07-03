@@ -1,6 +1,7 @@
 import type { Express } from "express";
 
 import {
+  BoardIntentApprovalConsumptionError,
   createCoordinationEvent,
   createTask,
   findTaskBySourceMessageId,
@@ -10,6 +11,7 @@ import {
 } from "../../../db.js";
 import { parseLimit, type AuthenticatedRequest } from "../../../http/helpers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import { normalizeTaskActorKey } from "../../../tasks/ownership.js";
 import {
   isDesktopHumanWrite,
@@ -108,10 +110,13 @@ export function registerTaskListAndCreateRoutes(
       projectId: project.id,
       title,
       sourceMessageId,
+      description: description ?? null,
       actorLabel: effectiveActorLabel,
       actorKey: effectiveActorKey,
       actorInstanceId: effectiveActorInstanceId,
       actorSessionId: effectiveActorSessionId,
+      boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+      boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
     });
     if (admission.kind === "deny") {
       res.status(409).json({ error: admission.error, code: admission.code });
@@ -119,9 +124,30 @@ export function registerTaskListAndCreateRoutes(
     }
 
     let task: Awaited<ReturnType<typeof createTask>>;
+    const boardIntentApproval = admission.boardIntentApproval ?? null;
     try {
-      task = await createTask(project.id, title, createdBy, description, sourceMessageId ?? undefined);
+      task = await createTask(
+        project.id,
+        title,
+        createdBy,
+        description,
+        sourceMessageId ?? undefined,
+        { boardIntentApproval }
+      );
     } catch (error) {
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        await recordBoardIntentConsumptionFailure({
+          roomId: project.id,
+          taskId: null,
+          approval: boardIntentApproval,
+          error,
+          actorLabel: effectiveActorLabel,
+          actorKey: normalizeTaskActorKey(effectiveActorKey),
+          actorInstanceId: effectiveActorInstanceId,
+        });
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       if (sourceMessageId) {
         const existingTask = await findTaskBySourceMessageId(project.id, sourceMessageId);
         if (existingTask) {

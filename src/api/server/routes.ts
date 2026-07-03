@@ -81,6 +81,10 @@ import {
   type RoomArtifactRouteDeps,
 } from "../routes/rooms/artifacts.js";
 import {
+  registerRoomBoardRoutes,
+  type RoomBoardRouteDeps,
+} from "../routes/rooms/board.js";
+import {
   registerRoomEntryRoutes,
   type RoomEntryRouteDeps,
 } from "../routes/rooms/entry.js";
@@ -320,6 +324,14 @@ export function registerApiRoutes(app: Express): void {
     upsertRoomSharedArtifact,
   } satisfies RoomArtifactRouteDeps;
 
+  const roomBoardRouteDeps = {
+    resolveCanonicalRoomRequestId,
+    resolveRoomOrReply,
+    requireAdmin,
+    requireParticipant,
+    normalizeOptionalString,
+  } satisfies RoomBoardRouteDeps;
+
   const roomMetadataRouteDeps = {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
@@ -378,6 +390,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);
   registerRoomTaskRoutes(app, roomTaskRouteDeps);
+  registerRoomBoardRoutes(app, roomBoardRouteDeps);
   registerRoomEventRoutes(app, roomEventRouteDeps);
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);

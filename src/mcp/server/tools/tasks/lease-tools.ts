@@ -8,7 +8,7 @@ import {
   taskActorPayload,
 } from "./context.js";
 import { jsonToolResponse, taskToolError } from "./response.js";
-import { taskLeaseIdentitySchema, taskReviewIdentitySchema } from "./schemas.js";
+import { boardIntentApprovalSchema, taskLeaseIdentitySchema, taskReviewIdentitySchema } from "./schemas.js";
 
 export function registerTaskLeaseTools(server: McpServer): void {
   server.tool(
@@ -107,8 +107,9 @@ export function registerTaskLeaseTools(server: McpServer): void {
       lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
       reason: z.string().optional().describe("Why the lease is being released"),
       ...taskLeaseIdentitySchema,
+      ...boardIntentApprovalSchema,
     },
-    async ({ task_id, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id }) => {
+    async ({ task_id, lease_id, reason, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
       const targetRoomId = resolveCanonicalRoomId(room_id);
       if (!targetRoomId) return taskToolError("Not in a canonical room.");
 
@@ -122,6 +123,8 @@ export function registerTaskLeaseTools(server: McpServer): void {
           action: "release",
           lease_id: lease_id ?? undefined,
           reason,
+          board_intent_id,
+          board_approval_token,
           ...taskActorPayload(identity, agentSession),
         });
         await syncRoomPresence(targetRoomId, identity, {
@@ -155,6 +158,7 @@ export function registerTaskLeaseTools(server: McpServer): void {
       lease_id: z.string().optional().describe("Optional expected active lease id for stale-checking"),
       reason: z.string().optional().describe("Why the lane is being handed off"),
       ...taskLeaseIdentitySchema,
+      ...boardIntentApprovalSchema,
     },
     async ({
       task_id,
@@ -166,6 +170,8 @@ export function registerTaskLeaseTools(server: McpServer): void {
       room_id,
       conversation_id: _conversation_id,
       agent_session_id,
+      board_intent_id,
+      board_approval_token,
     }) => {
       const targetRoomId = resolveCanonicalRoomId(room_id);
       if (!targetRoomId) return taskToolError("Not in a canonical room.");
@@ -184,6 +190,8 @@ export function registerTaskLeaseTools(server: McpServer): void {
           target_actor_key: target_agent_key,
           target_actor_instance_id: target_actor_instance_id ?? undefined,
           target_agent_session_id: target_agent_session_id ?? undefined,
+          board_intent_id,
+          board_approval_token,
           ...taskActorPayload(identity, agentSession),
         });
         await syncRoomPresence(targetRoomId, identity, {

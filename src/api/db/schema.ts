@@ -11,3 +11,4 @@ export * from "./schema/reasoning.js";
 export * from "./schema/messages.js";
 export * from "./schema/tasks.js";
 export * from "./schema/coordination.js";
+export * from "./schema/board.js";

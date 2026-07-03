@@ -2,6 +2,7 @@ import type { Express } from "express";
 
 import {
   applyTaskWorkLeaseAction,
+  BoardIntentApprovalConsumptionError,
   createCoordinationEvent,
   getActiveRoomAgentSessionsForWorkerIdentity,
   getActiveTaskLeases,
@@ -9,7 +10,11 @@ import {
   getAgentIdentityByCanonicalKey,
   getReachableWorkerDeliverySessionForAgentSession,
   getTaskById,
+  shouldRequireBoardIntent,
+  verifyBoardIntentApproval,
+  type BoardIntentConsumptionInput,
 } from "../../../db.js";
+import { boardIntentPayloadForLeaseAction } from "../../../board-intent-payloads.js";
 import { buildLeasedBranchRef } from "../../../github/lease-enforcement.js";
 import {
   respondWithBadRequest,
@@ -41,6 +46,8 @@ type LeaseActionRequestBody = {
   target_actor_key?: string;
   target_actor_instance_id?: string;
   target_agent_session_id?: string;
+  board_intent_id?: string;
+  board_approval_token?: string;
 };
 
 export function registerTaskLeaseActionRoute(
@@ -126,7 +133,9 @@ export function registerTaskLeaseActionRoute(
       return;
     }
 
-    if (requestBody.lease_id && requestBody.lease_id.trim() !== activeWorkLease.id) {
+    const requestedLeaseId = deps.normalizeOptionalString(requestBody.lease_id);
+    const approvalLeaseId = requestedLeaseId ?? activeWorkLease.id;
+    if (requestedLeaseId && requestedLeaseId !== activeWorkLease.id) {
       res.status(409).json({
         error: `Lease ${requestBody.lease_id} is no longer the active work lease for this task`,
         code: "coordination_stale_lease_reference",
@@ -233,6 +242,8 @@ export function registerTaskLeaseActionRoute(
       });
     }
 
+    let boardIntentApproval: BoardIntentConsumptionInput | null = null;
+
     try {
       if (action === "handoff" && !LEASE_RECOVERY_ACTIVE_STATUSES.has(task.status)) {
         res.status(409).json({
@@ -249,6 +260,46 @@ export function registerTaskLeaseActionRoute(
             code: "coordination_active_lock",
           });
           return;
+        }
+      }
+
+      if ((actorKey || actorSessionId) && await shouldRequireBoardIntent({ room_id: project.id })) {
+        const payload = boardIntentPayloadForLeaseAction({
+          taskId: task.id,
+          action,
+          leaseId: approvalLeaseId,
+          targetActorKey,
+          targetAgentSessionId: deps.normalizeOptionalString(requestBody.target_agent_session_id),
+        });
+        const approval = await verifyBoardIntentApproval({
+          room_id: project.id,
+          action_type: "task_override",
+          payload,
+          intent_id: deps.normalizeOptionalString(requestBody.board_intent_id),
+          approval_token: deps.normalizeOptionalString(requestBody.board_approval_token),
+        });
+        if (approval.kind === "deny") {
+          await createCoordinationEvent({
+            room_id: project.id,
+            task_id: task.id,
+            event_type: action === "handoff" ? "task_lease_handoff" : "task_lease_release",
+            decision: "deny",
+            actor_label: actorLabel,
+            actor_key: actorKey,
+            actor_instance_id: actorInstanceId,
+            reason: approval.error,
+          });
+          res.status(409).json({ error: approval.error, code: approval.code });
+          return;
+        }
+        if (approval.intent?.id) {
+          boardIntentApproval = {
+            room_id: project.id,
+            action_type: "task_override",
+            payload,
+            intent_id: approval.intent.id,
+            approval_token: deps.normalizeOptionalString(requestBody.board_approval_token),
+          };
         }
       }
 
@@ -279,6 +330,7 @@ export function registerTaskLeaseActionRoute(
         disposition_status: requesterIsLeaseHolder ? "released" : "revoked",
         disposition_reason: dispositionReason,
         task_updates: leaseActionUpdates,
+        board_intent_approval: boardIntentApproval,
         new_lease: action === "handoff" && targetActorKey && targetActorLabel
           ? {
               agent_key: targetActorKey,
@@ -367,6 +419,31 @@ export function registerTaskLeaseActionRoute(
         new_lease: newLease,
       });
     } catch (error) {
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        if (boardIntentApproval) {
+          await createCoordinationEvent({
+            room_id: project.id,
+            task_id: task.id,
+            lease_id: activeWorkLease.id,
+            event_type: action === "handoff" ? "task_lease_handoff" : "task_lease_release",
+            decision: "deny",
+            actor_label: actorLabel,
+            actor_key: actorKey,
+            actor_instance_id: actorInstanceId,
+            reason: `Board intent approval consumption failed: ${error.message}`,
+            metadata: {
+              action,
+              board_intent_id: boardIntentApproval.intent_id,
+              previous_lease_id: activeWorkLease.id,
+              previous_agent_key: activeWorkLease.agent_key,
+              target_actor_key: targetActorKey,
+              target_actor_label: targetActorLabel,
+            },
+          });
+        }
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/tasks/:task_id/lease-action",

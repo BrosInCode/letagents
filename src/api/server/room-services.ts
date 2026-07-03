@@ -1,6 +1,5 @@
 import {
   createCoordinationEvent,
-  createTaskLease,
   getActiveFocusRoomForTask,
   getActiveTaskLeases,
   getActiveTaskLocks,
@@ -12,8 +11,10 @@ import {
   getStaleTaskPromptMutes,
   getTasks,
   hasMessagesFromSender,
+  shouldRequireBoardIntent,
   upsertRoomParticipant,
   updateTaskLeaseWorkflowRefs,
+  verifyBoardIntentApproval,
 } from "../db.js";
 import { createGitHubFocusIsolationResolver } from "../github/focus-isolation.js";
 import { createFocusParentBoardWriteIsolationEnforcer } from "../focus-rooms/task-write-isolation.js";
@@ -76,8 +77,9 @@ const taskCoordinationEnforcement = createTaskCoordinationEnforcement({
       focus_status: focusRoom.focus_status,
     })),
   getActiveTaskLeases,
-  createTaskLease,
   updateTaskLeaseWorkflowRefs,
+  shouldRequireBoardIntent,
+  verifyBoardIntentApproval,
 });
 
 export const {

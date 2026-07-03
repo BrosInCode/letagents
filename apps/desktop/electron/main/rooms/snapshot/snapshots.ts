@@ -1,4 +1,5 @@
 import type {
+  DesktopBoardSettingsSummary,
   DesktopLocalRoomInfo,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
@@ -30,9 +31,18 @@ const emptySnapshotCollections = {
   reasoningSessions: [],
   recentActivity: [],
   roomArtifacts: [],
+  boardSettings: defaultBoardSettings(),
   messages: [],
   githubEvents: null,
 };
+
+function defaultBoardSettings(): DesktopBoardSettingsSummary {
+  return {
+    managerMode: "manager_optional",
+    activeManager: null,
+    pendingIntentCount: 0,
+  };
+}
 
 function cloudStorageState(roomIdentifier: string | null): DesktopRoomStorageState {
   return {
@@ -113,6 +123,7 @@ export function createLocalReadyRoomSnapshot(input: {
     reasoningSessions: [],
     recentActivity: [],
     roomArtifacts: [],
+    boardSettings: defaultBoardSettings(),
     messages: input.messages
       .sort((left, right) =>
         Date.parse(left.timestamp || "") - Date.parse(right.timestamp || "")

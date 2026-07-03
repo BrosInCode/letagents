@@ -14,7 +14,7 @@ import {
   taskActorPayload,
 } from "./context.js";
 import { jsonToolResponse, taskToolError } from "./response.js";
-import { TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
+import { boardIntentApprovalSchema, TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
 
 export function registerTaskBoardTools(server: McpServer): void {
   server.tool(
@@ -32,8 +32,9 @@ export function registerTaskBoardTools(server: McpServer): void {
         .describe("Deprecated override. Agent identity is resolved automatically on room entry."),
       source_message_id: z.string().optional().describe("Optional message ID where task was agreed, e.g. 'msg_42'"),
       ...workerTaskIdentitySchema,
+      ...boardIntentApprovalSchema,
     },
-    async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id }) => {
+    async ({ title, description, created_by: _createdBy, source_message_id, room_id, conversation_id: _conversation_id, agent_session_id, board_intent_id, board_approval_token }) => {
       const target = resolveTaskToolTarget(room_id);
       if (!target) return taskToolError("Not in a room. Join one first.");
 
@@ -44,6 +45,8 @@ export function registerTaskBoardTools(server: McpServer): void {
         created_by: identity.actor_label,
         ...taskActorPayload(identity, agentSession),
         source_message_id,
+        board_intent_id,
+        board_approval_token,
       });
 
       await syncRoomPresence(
@@ -62,12 +65,12 @@ export function registerTaskBoardTools(server: McpServer): void {
 
   server.tool(
     "get_board",
-    "Get the current task board for the room. By default shows only open tasks " +
-      "(not done/cancelled). Agents should check this on startup and when idle to " +
+    "Get the current task board for the room. By default shows only actionable tasks " +
+      "(including merged closeout work, but not done/cancelled). Agents should check this on startup and when idle to " +
       "see if there is unassigned work to claim.",
     {
       status: z.enum(TASK_STATUSES).optional().describe("Filter by specific status"),
-      open_only: z.boolean().optional().describe("If true (default), only show tasks not done/cancelled"),
+      open_only: z.boolean().optional().describe("If true (default), only show actionable tasks, including merged closeout work but not done/cancelled"),
       room_id: z.string().optional().describe("Canonical room ID. Defaults to current room."),
     },
     async ({ status, open_only, room_id }) => {

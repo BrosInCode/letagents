@@ -6,17 +6,51 @@
           <span>Board</span>
           <strong>Team tasks and agent handoffs</strong>
         </div>
-        <button
-          class="desktop-board-primary-action desktop-board-add-button"
-          type="button"
-          :disabled="busyAction !== null"
-          @click="openCreateTaskModal"
-        >
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-          </svg>
-          Add task
-        </button>
+        <div class="desktop-board-header-actions">
+          <div class="desktop-board-manager-status" @keydown.esc.stop.prevent="closeBoardManagerDetails">
+            <button
+              ref="boardManagerTriggerElement"
+              class="desktop-board-manager-pill"
+              type="button"
+              :data-mode="boardManagerMode"
+              :data-has-pending="boardPendingIntentCount > 0"
+              :title="boardManagerTitle"
+              :aria-expanded="boardManagerDetailsOpen"
+              aria-haspopup="dialog"
+              aria-controls="desktop-board-manager-details"
+              @click="toggleBoardManagerDetails"
+            >
+              <span class="desktop-board-manager-dot" aria-hidden="true"></span>
+              <strong>{{ boardManagerLabel }}</strong>
+              <span v-if="boardPendingIntentCount > 0">{{ boardPendingIntentCount }} pending</span>
+            </button>
+            <div
+              v-if="boardManagerDetailsOpen"
+              id="desktop-board-manager-details"
+              ref="boardManagerDetailsElement"
+              class="desktop-board-manager-details"
+              role="dialog"
+              aria-label="Board manager details"
+              tabindex="-1"
+            >
+              <div v-for="row in boardManagerDetails" :key="row.label">
+                <span>{{ row.label }}</span>
+                <strong>{{ row.value }}</strong>
+              </div>
+            </div>
+          </div>
+          <button
+            class="desktop-board-primary-action desktop-board-add-button"
+            type="button"
+            :disabled="busyAction !== null"
+            @click="openCreateTaskModal"
+          >
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+            </svg>
+            Add task
+          </button>
+        </div>
       </div>
       <div class="desktop-board-controls">
         <label class="desktop-board-search" for="room-board-search">
@@ -234,7 +268,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import type { DesktopAgentPresence, DesktopTaskSummary, WorkerSnapshot } from "../../../../../electron/ipc-types";
+import type {
+  DesktopAgentPresence,
+  DesktopBoardSettingsSummary,
+  DesktopTaskSummary,
+  WorkerSnapshot,
+} from "../../../../../electron/ipc-types";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import {
   currentFocusableElement,
@@ -251,6 +290,7 @@ import type { TaskAction, TaskGroup } from "./room-board/types";
 const props = defineProps<{
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
+  boardSettings?: DesktopBoardSettingsSummary | null;
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
   selectedTaskId?: string | null;
@@ -278,12 +318,13 @@ const {
   toggleGroup,
 } = useRoomBoardController(props, emit);
 
-type BoardFilter = "open" | "mine" | "unclaimed" | "needs-review" | "closed";
+type BoardFilter = "open" | "mine" | "unclaimed" | "needs-review" | "closeout";
 
-const ACTIVE_BOARD_STATUSES = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review", "merged"];
-const CLOSED_BOARD_STATUSES = ["done", "cancelled"];
+const ACTIVE_BOARD_STATUSES = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review"];
+const CLOSEOUT_BOARD_STATUSES = ["merged", "done", "cancelled"];
 const searchQuery = ref("");
 const activeFilter = ref<BoardFilter>("open");
+const boardManagerDetailsOpen = ref(false);
 const draggedTaskId = ref<string | null>(null);
 const dragOverStatus = ref<string | null>(null);
 const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
@@ -291,10 +332,13 @@ const isCreateTaskModalOpen = ref(false);
 const createTaskTitle = ref("");
 const createTaskDescription = ref("");
 const createTaskDescriptionField = ref<HTMLTextAreaElement | null>(null);
+const boardManagerTriggerElement = ref<HTMLButtonElement | null>(null);
+const boardManagerDetailsElement = ref<HTMLElement | null>(null);
 const taskModalBackdropElement = ref<HTMLElement | null>(null);
 const taskModalElement = ref<HTMLElement | null>(null);
 const createTaskBackdropElement = ref<HTMLElement | null>(null);
 const createTaskModalElement = ref<HTMLElement | null>(null);
+let boardManagerPreviousFocusElement: HTMLElement | null = null;
 let taskModalPreviousFocusElement: HTMLElement | null = null;
 let createTaskModalPreviousFocusElement: HTMLElement | null = null;
 const boardFilters: Array<{ id: BoardFilter; label: string }> = [
@@ -302,7 +346,7 @@ const boardFilters: Array<{ id: BoardFilter; label: string }> = [
   { id: "mine", label: "Local agent" },
   { id: "unclaimed", label: "Unclaimed" },
   { id: "needs-review", label: "Needs review" },
-  { id: "closed", label: "Closed" },
+  { id: "closeout", label: "Closeout" },
 ];
 
 const boardFilterOptions = computed(() =>
@@ -320,8 +364,61 @@ const localWorker = computed(() =>
   ) || null
 );
 
+const boardManagerMode = computed(() =>
+  props.boardSettings?.managerMode || "manager_optional"
+);
+const boardPendingIntentCount = computed(() =>
+  Math.max(0, props.boardSettings?.pendingIntentCount || 0)
+);
+const boardManagerLabel = computed(() => {
+  const settings = props.boardSettings;
+  if (boardManagerMode.value === "off") return "Manager off";
+  if (settings?.activeManager) {
+    const source = settings.activeManager.runtimeSource;
+    if (source === "open_model") return "Open model manager";
+    if (source === "desktop_managed") return "Desktop manager";
+    return "Board manager";
+  }
+  return boardManagerMode.value === "intent_required"
+    ? "Approval required"
+    : "Manager optional";
+});
+const boardManagerTitle = computed(() => {
+  const settings = props.boardSettings;
+  const pending = boardPendingIntentCount.value;
+  const pendingText = pending === 1 ? "1 pending intent" : `${pending} pending intents`;
+  if (!settings?.activeManager) return `${boardManagerLabel.value}. ${pendingText}.`;
+  return `${boardManagerLabel.value}: ${settings.activeManager.actorLabel}. ${pendingText}.`;
+});
+const boardManagerDetails = computed(() => {
+  const settings = props.boardSettings;
+  const activeManager = settings?.activeManager;
+  return [
+    {
+      label: "Mode",
+      value: boardManagerMode.value === "intent_required"
+        ? "Approval required"
+        : boardManagerMode.value === "manager_optional"
+          ? "Manager optional"
+          : "Off",
+    },
+    {
+      label: "Manager",
+      value: activeManager
+        ? `${activeManager.actorLabel} (${readableManagerRuntime(activeManager.runtimeSource)})`
+        : "None active",
+    },
+    {
+      label: "Queue",
+      value: boardPendingIntentCount.value === 1
+        ? "1 pending intent"
+        : `${boardPendingIntentCount.value} pending intents`,
+    },
+  ];
+});
+
 const visibleStatuses = computed(() =>
-  activeFilter.value === "closed" ? CLOSED_BOARD_STATUSES : ACTIVE_BOARD_STATUSES
+  activeFilter.value === "closeout" ? CLOSEOUT_BOARD_STATUSES : ACTIVE_BOARD_STATUSES
 );
 
 const visibleGroups = computed<TaskGroup[]>(() =>
@@ -348,7 +445,7 @@ const draggedTask = computed(() =>
 const canCreateTask = computed(() =>
   Boolean(createTaskTitle.value.trim() || createTaskDescription.value.trim())
 );
-const emptyTaskState = computed((): { title: string; description: string; actionLabel: string | null; action: "clear-search" | "show-open" | "show-closed" | "add-task" | null } => {
+const emptyTaskState = computed((): { title: string; description: string; actionLabel: string | null; action: "clear-search" | "show-open" | "show-closeout" | "add-task" | null } => {
   if (hasSearchQuery.value) {
     return {
       title: "No tasks match this search",
@@ -385,22 +482,22 @@ const emptyTaskState = computed((): { title: string; description: string; action
     };
   }
 
-  if (activeFilter.value === "closed") {
+  if (activeFilter.value === "closeout") {
     return {
-      title: "No closed tasks",
-      description: "Done and cancelled tasks will appear here after the room finishes work.",
+      title: "No closeout tasks",
+      description: "Merged, done, and cancelled tasks will appear here for final closeout.",
       actionLabel: "Show open tasks",
       action: "show-open",
     };
   }
 
-  const closedTaskCount = filterCount("closed");
-  return closedTaskCount > 0
+  const closeoutTaskCount = filterCount("closeout");
+  return closeoutTaskCount > 0
     ? {
       title: "No open tasks",
-      description: "All tasks in this room are closed right now. Switch to Closed to review finished work.",
-      actionLabel: "Show closed tasks",
-      action: "show-closed",
+      description: "All tasks in this room are in closeout right now. Switch to Closeout to finish or audit them.",
+      actionLabel: "Show closeout",
+      action: "show-closeout",
     }
     : {
       title: "No open tasks",
@@ -549,8 +646,8 @@ function runEmptyTaskStateAction(): void {
     activeFilter.value = "open";
     return;
   }
-  if (action === "show-closed") {
-    activeFilter.value = "closed";
+  if (action === "show-closeout") {
+    activeFilter.value = "closeout";
     return;
   }
   if (action === "add-task") {
@@ -570,6 +667,34 @@ function setActiveFilter(filter: string): void {
   activeFilter.value = filter as BoardFilter;
 }
 
+function toggleBoardManagerDetails(): void {
+  if (boardManagerDetailsOpen.value) {
+    closeBoardManagerDetails();
+    return;
+  }
+  boardManagerPreviousFocusElement = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : boardManagerTriggerElement.value;
+  boardManagerDetailsOpen.value = true;
+  void nextTick(() => {
+    boardManagerDetailsElement.value?.focus();
+  });
+}
+
+function closeBoardManagerDetails(): void {
+  if (!boardManagerDetailsOpen.value) {
+    return;
+  }
+  const focusTarget = boardManagerPreviousFocusElement?.isConnected
+    ? boardManagerPreviousFocusElement
+    : boardManagerTriggerElement.value;
+  boardManagerPreviousFocusElement = null;
+  boardManagerDetailsOpen.value = false;
+  void nextTick(() => {
+    focusTarget?.focus();
+  });
+}
+
 function filterCount(filter: BoardFilter): number {
   return props.tasks.filter((task) => taskMatchesFilter(task, filter)).length;
 }
@@ -579,11 +704,19 @@ function taskMatchesActiveView(task: DesktopTaskSummary): boolean {
 }
 
 function taskMatchesFilter(task: DesktopTaskSummary, filter: BoardFilter): boolean {
+  if (filter === "closeout") return CLOSEOUT_BOARD_STATUSES.includes(task.status);
+  if (!ACTIVE_BOARD_STATUSES.includes(task.status)) return false;
   if (filter === "mine") return taskMatchesLocalWorker(task);
   if (filter === "unclaimed") return taskIsUnclaimed(task);
   if (filter === "needs-review") return taskNeedsReview(task);
-  if (filter === "closed") return CLOSED_BOARD_STATUSES.includes(task.status);
-  return !["done", "cancelled"].includes(task.status);
+  return true;
+}
+
+function readableManagerRuntime(runtimeSource: string): string {
+  if (runtimeSource === "desktop_managed") return "desktop";
+  if (runtimeSource === "open_model") return "open model";
+  if (runtimeSource === "external") return "external";
+  return "unknown";
 }
 
 function taskMatchesSearch(task: DesktopTaskSummary): boolean {

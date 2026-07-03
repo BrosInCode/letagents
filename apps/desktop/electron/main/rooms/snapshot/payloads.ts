@@ -203,6 +203,19 @@ export interface RoomArtifactsResponse {
   }>;
 }
 
+export interface BoardSettingsResponse {
+  settings?: {
+    manager_mode?: "off" | "manager_optional" | "intent_required" | string;
+  } | null;
+  active_manager?: {
+    agent_session_id?: string | null;
+    agent_key?: string | null;
+    actor_label?: string | null;
+    runtime_source?: "desktop_managed" | "open_model" | "external" | "unknown" | string | null;
+  } | null;
+  pending_intent_count?: number | null;
+}
+
 export interface RoomSnapshotData {
   focusRoomsData: FocusRoomsResponse;
   tasksData: { tasks?: DesktopTaskSummaryPayload[] };
@@ -211,6 +224,7 @@ export interface RoomSnapshotData {
   reasoningData: ReasoningResponse;
   activityHistoryData: ActivityHistoryResponse;
   roomArtifactsData: RoomArtifactsResponse;
+  boardSettingsData: BoardSettingsResponse;
   messagesData: MessagesResponse;
   githubEventsData: GitHubEventsResponse | null;
 }
