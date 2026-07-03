@@ -11,12 +11,12 @@
 }
 
 .desktop-board-governance-panel {
-  width: min(560px, calc(100vw - 28px));
+  width: min(600px, calc(100vw - 28px));
   max-height: min(82vh, 680px);
   overflow: auto;
   display: grid;
-  gap: 12px;
-  padding: 16px;
+  gap: 20px;
+  padding: 28px 32px 30px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   background: var(--bg);
@@ -28,12 +28,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 20px;
 }
 
 .desktop-board-governance-header span {
   display: block;
-  margin-top: 4px;
+  margin-top: 6px;
   color: var(--text-secondary);
   font-size: 0.78rem;
   font-weight: 750;
@@ -42,7 +42,7 @@
 
 .desktop-board-governance-header h2 {
   margin: 0;
-  font-size: 1.28rem;
+  font-size: 1.38rem;
   line-height: 1.1;
 }
 
@@ -50,8 +50,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   flex: 0 0 auto;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -88,12 +88,12 @@
 }
 
 .desktop-board-governance-sections {
-  --desktop-segmented-gap: 2px;
-  --desktop-segmented-padding: 2px;
+  --desktop-segmented-gap: 4px;
+  --desktop-segmented-padding: 3px;
   --desktop-segmented-radius: var(--radius-md);
-  --desktop-segmented-button-height: 30px;
-  --desktop-segmented-button-padding: 0 10px;
-  --desktop-segmented-button-radius: 7px;
+  --desktop-segmented-button-height: 34px;
+  --desktop-segmented-button-padding: 0 16px;
+  --desktop-segmented-button-radius: 8px;
   justify-self: start;
   width: auto;
 }
@@ -110,7 +110,12 @@
 
 .desktop-board-governance-body {
   display: grid;
-  gap: 12px;
+  gap: 20px;
+}
+
+.desktop-board-governance-section {
+  display: grid;
+  gap: 18px;
 }
 
 .desktop-board-governance-warnings {
@@ -139,14 +144,14 @@
 .desktop-board-governance-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .desktop-board-governance-grid div,
 .desktop-board-governance-mode {
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 10px;
+  padding: 16px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-card);
@@ -155,6 +160,7 @@
 .desktop-board-governance-mode {
   grid-template-columns: auto 1fr;
   align-items: center;
+  min-height: 68px;
 }
 
 .desktop-board-governance-grid span,
@@ -165,25 +171,26 @@
 }
 
 .desktop-board-governance-mode-control {
-  --desktop-segmented-gap: 2px;
-  --desktop-segmented-padding: 2px;
+  --desktop-segmented-gap: 3px;
+  --desktop-segmented-padding: 3px;
   --desktop-segmented-radius: 8px;
-  --desktop-segmented-button-height: 30px;
-  --desktop-segmented-button-padding: 0 9px;
+  --desktop-segmented-button-height: 34px;
+  --desktop-segmented-button-padding: 0 12px;
   --desktop-segmented-button-radius: 6px;
   justify-self: end;
 }
 
 .desktop-board-governance-candidates {
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
 .desktop-board-governance-candidates-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
+  padding: 0 2px;
 }
 
 .desktop-board-governance-candidates h3,
@@ -213,11 +220,11 @@
 
 .desktop-board-governance-candidate {
   display: grid;
-  grid-template-columns: 34px 1fr auto;
-  gap: 10px;
+  grid-template-columns: 40px 1fr auto;
+  gap: 14px;
   align-items: center;
-  min-height: 58px;
-  padding: 10px;
+  min-height: 76px;
+  padding: 14px 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-card);
@@ -241,8 +248,8 @@
 .desktop-board-governance-candidate input {
   grid-column: 3;
   grid-row: 1;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   margin: 0;
   accent-color: var(--text);
 }
@@ -253,8 +260,8 @@
   grid-row: 1;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   border: 1px solid var(--border);
   border-radius: 50%;
   background: var(--bg-elevated);
@@ -267,7 +274,7 @@
   display: grid;
   grid-column: 2;
   grid-row: 1;
-  gap: 3px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -281,7 +288,7 @@
 .desktop-board-governance-candidate-copy strong {
   overflow: hidden;
   min-width: 0;
-  font-size: 0.9rem;
+  font-size: 0.96rem;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -303,7 +310,7 @@
   overflow: hidden;
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 0.78rem;
+  font-size: 0.82rem;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -313,12 +320,14 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 12px;
+  padding-top: 4px;
 }
 
 .desktop-board-governance-actions .desktop-board-primary-action,
 .desktop-board-governance-actions .desktop-board-secondary-action {
-  min-width: 124px;
+  min-width: 148px;
+  min-height: 44px;
 }
 
 .desktop-board-governance-intent,
@@ -360,18 +369,39 @@
   .desktop-board-governance-panel {
     width: 100%;
     max-height: 88vh;
+    gap: 16px;
+    padding: 20px;
   }
 
   .desktop-board-governance-mode {
     grid-template-columns: 1fr;
+    min-height: auto;
+    padding: 14px;
   }
 
   .desktop-board-governance-mode-control {
     justify-self: stretch;
   }
 
+  .desktop-board-governance-section {
+    gap: 14px;
+  }
+
+  .desktop-board-governance-candidate {
+    grid-template-columns: 36px 1fr auto;
+    gap: 12px;
+    min-height: 68px;
+    padding: 12px 14px;
+  }
+
+  .desktop-board-governance-candidate-avatar {
+    width: 36px;
+    height: 36px;
+  }
+
   .desktop-board-governance-actions {
     justify-content: stretch;
+    padding-top: 2px;
   }
 
   .desktop-board-governance-actions .desktop-board-primary-action,
