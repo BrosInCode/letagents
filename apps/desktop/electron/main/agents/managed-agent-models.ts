@@ -36,10 +36,10 @@ const MODEL_LIST_MAX_BUFFER = 8 * 1024 * 1024;
 const modelListCache = new Map<string, ModelListCacheEntry>();
 
 const CLAUDE_CODE_KNOWN_MODELS: DesktopAgentProviderModelOption[] = [
-  { id: "fable", label: "Fable 5", source: "known" },
-  { id: "opus", label: "Opus 4.8", source: "known" },
-  { id: "sonnet", label: "Sonnet 5", source: "known" },
-  { id: "haiku", label: "Haiku 4.5", source: "known" },
+  { id: "fable", label: "Fable (latest)", source: "known" },
+  { id: "opus", label: "Opus (latest)", source: "known" },
+  { id: "sonnet", label: "Sonnet (latest)", source: "known" },
+  { id: "haiku", label: "Haiku (latest)", source: "known" },
   { id: "best", label: "Best available", source: "known" },
   { id: "opusplan", label: "Opus Plan", source: "known" },
   { id: "sonnet[1m]", label: "Sonnet 1M", source: "known" },
@@ -113,13 +113,10 @@ async function listCodexModels(
   }
 
   if (!forceRefresh && next.status !== "ready" && cached?.result.status === "ready") {
-    return cloneModelResult(cached.result);
+    return refreshStaleReadyModelCache(cacheKey, cached);
   }
 
-  modelListCache.set(cacheKey, {
-    expiresAt: Date.now() + (next.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
-    result: next,
-  });
+  cacheModelListResult(cacheKey, next);
   return cloneModelResult(next);
 }
 
@@ -218,14 +215,32 @@ async function listCursorModels(
     );
 
   if (!forceRefresh && next.status !== "ready" && cached?.result.status === "ready") {
-    return cloneModelResult(cached.result);
+    return refreshStaleReadyModelCache(cacheKey, cached);
   }
 
-  modelListCache.set(cacheKey, {
-    expiresAt: Date.now() + (next.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
-    result: next,
-  });
+  cacheModelListResult(cacheKey, next);
   return cloneModelResult(next);
+}
+
+function cacheModelListResult(
+  cacheKey: string,
+  result: DesktopAgentProviderModelsResult,
+): void {
+  modelListCache.set(cacheKey, {
+    expiresAt: Date.now() + (result.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
+    result,
+  });
+}
+
+function refreshStaleReadyModelCache(
+  cacheKey: string,
+  cached: ModelListCacheEntry,
+): DesktopAgentProviderModelsResult {
+  modelListCache.set(cacheKey, {
+    expiresAt: Date.now() + MODEL_LIST_ERROR_CACHE_MS,
+    result: cached.result,
+  });
+  return cloneModelResult(cached.result);
 }
 
 function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput): {

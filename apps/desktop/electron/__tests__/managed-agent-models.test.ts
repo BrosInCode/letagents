@@ -89,6 +89,14 @@ test("Codex model parser handles refreshed catalog JSON", () => {
 });
 
 test("known and custom model validation use the selected source intentionally", async () => {
+  const claudeModels = await listDesktopAgentProviderModels("claude-code");
+  assert.deepEqual(claudeModels.models.slice(0, 4).map((model) => model.label), [
+    "Fable (latest)",
+    "Opus (latest)",
+    "Sonnet (latest)",
+    "Haiku (latest)",
+  ]);
+
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
     model: "sonnet",
@@ -150,6 +158,51 @@ test("Codex model discovery reads debug model catalog output", async () => {
     model: "gpt-5.4-mini",
     modelSource: "provider",
   }), { model: "gpt-5.4-mini", error: null });
+});
+
+test("Codex stale ready model cache is extended after failed rediscovery", async (t) => {
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+
+  const codexBin = join(tempDir, "codex-debug-models-stale-cache");
+  const counterPath = join(tempDir, "codex-debug-models-stale-cache-count");
+  const failPath = join(tempDir, "codex-debug-models-stale-cache-fail");
+  writeFileSync(
+    codexBin,
+    [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      `const counterPath = ${JSON.stringify(counterPath)};`,
+      `const failPath = ${JSON.stringify(failPath)};`,
+      "const count = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, 'utf8')) : 0;",
+      "fs.writeFileSync(counterPath, String(count + 1));",
+      "if (fs.existsSync(failPath)) {",
+      "  console.error('codex unavailable');",
+      "  process.exit(1);",
+      "}",
+      "if (process.argv[2] !== 'debug' || process.argv[3] !== 'models') process.exit(2);",
+      "console.log(JSON.stringify({ models: [",
+      "  { slug: 'gpt-cache', display_name: 'GPT Cache', visibility: 'list' }",
+      "] }));",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.LETAGENTS_CODEX_BIN = codexBin;
+
+  const first = await listDesktopAgentProviderModels("codex", { refreshModels: true });
+  assert.equal(first.status, "ready");
+  assert.deepEqual(first.models.map((model) => model.id), ["gpt-cache"]);
+
+  writeFileSync(failPath, "fail");
+  now += 61_000;
+  const stale = await listDesktopAgentProviderModels("codex");
+  const cachedAgain = await listDesktopAgentProviderModels("codex");
+
+  assert.equal(stale.status, "ready");
+  assert.equal(cachedAgain.status, "ready");
+  assert.deepEqual(cachedAgain.models.map((model) => model.id), ["gpt-cache"]);
+  assert.equal(readFileSync(counterPath, "utf8"), "3");
 });
 
 test("Cursor discovered model validation blocks stale provider ids", async () => {
