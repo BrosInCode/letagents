@@ -63,7 +63,9 @@ import {
   type ManagedAgentRoomToolLoopState,
 } from "./managed-agent-room-tool-loop.js";
 import {
-  createLocalDesktopManagedAgentWorkerSessionForRoom,
+  createLocalDesktopManagedAgentWorkerSession,
+  shouldUseCloudDesktopManagedAgentWorkerSession,
+  resolveDesktopManagedAgentWorkerRegistration,
 } from "./managed-agent-local-worker-session.js";
 import type {
   ManagedAgentContextRequest,
@@ -393,15 +395,20 @@ async function registerDesktopManagedCodexWorker(input: {
   const runtime = `codex:${input.token}`;
   const agentInstanceId = `desktop-codex:${input.token}`;
   const registrationLiveness = codexSessionLivenessRegistration(runtime, input.token);
-  const localSession = await createLocalDesktopManagedAgentWorkerSessionForRoom({
+  const registration = await resolveDesktopManagedAgentWorkerRegistration({
     roomIdentifier: input.roomIdentifier,
-    runtime,
-    agentInstanceId,
-    displayName: input.displayName,
-    ideLabel: input.ideLabel || "Codex",
-    repoBranch: input.repoBranch,
-    registrationLiveness,
   });
+  const localSession = registration.storage.effectiveMode === "local"
+    ? await createLocalDesktopManagedAgentWorkerSession({
+      roomIdentifier: input.roomIdentifier,
+      runtime,
+      agentInstanceId,
+      displayName: input.displayName,
+      ideLabel: input.ideLabel || "Codex",
+      repoBranch: input.repoBranch,
+      registrationLiveness,
+    }, registration.storage)
+    : null;
   if (localSession) {
     return localSession;
   }
@@ -412,8 +419,9 @@ async function registerDesktopManagedCodexWorker(input: {
     throw new Error("LetAgents desktop agent identity is missing an actor key.");
   }
 
+  const cloudRoomIdentifier = registration.cloudRoomIdentifier;
   const created = await apiFetch<AgentSessionCreateResponse>(
-    `/rooms/${encodeURIComponent(input.roomIdentifier)}/agent-sessions`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -432,7 +440,7 @@ async function registerDesktopManagedCodexWorker(input: {
   );
 
   return saveAgentSession(toStoredAgentSession(created, {
-    roomIdentifier: input.roomIdentifier,
+    roomIdentifier: cloudRoomIdentifier,
     runtime,
     identity,
     agentInstanceId,
@@ -444,6 +452,11 @@ async function disconnectDesktopManagedCodexWorker(
   session: StoredAgentSessionState | null,
 ): Promise<void> {
   if (!session?.session_id || !session.session_token) {
+    return;
+  }
+
+  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
+    markAgentSessionEnded(session.session_id);
     return;
   }
 
@@ -466,8 +479,8 @@ async function disconnectDesktopManagedCodexWorker(
   }
 }
 
-function reasoningRoomPath(session: DesktopCodexLiveSessionState): string {
-  return `/rooms/${encodeURIComponent(session.room_identifier || session.room_id)}/reasoning-sessions`;
+function reasoningRoomPath(roomIdentifier: string): string {
+  return `/rooms/${encodeURIComponent(roomIdentifier)}/reasoning-sessions`;
 }
 
 function reasoningSignature(
@@ -512,6 +525,10 @@ async function publishCodexRuntimeReasoningSummary(
     return;
   }
 
+  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(workerSession))) {
+    return;
+  }
+
   if (!shouldPostCodexRuntimeReasoning(session, summary)) {
     return;
   }
@@ -532,7 +549,13 @@ async function publishCodexRuntimeReasoningSummary(
     status: summary.status,
   };
 
-  const roomPath = reasoningRoomPath(session);
+  const storage = await resolveLocalAwareRoomStorageMode(session.room_identifier || session.room_id);
+  if (storage.effectiveMode === "local") {
+    return;
+  }
+  const roomPath = reasoningRoomPath(
+    cloudRoomIdentifierForStorage(storage, session.room_identifier || session.room_id),
+  );
   if (session.reasoning_session_id) {
     try {
       await apiFetch<Record<string, unknown>>(

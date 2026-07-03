@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { DesktopRoomStorageState } from "../../ipc-types.js";
 import {
+  cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "../rooms/local-store.js";
@@ -20,6 +21,9 @@ export interface LocalDesktopManagedAgentWorkerSessionInput {
   repoBranch: string | null;
   registrationLiveness: Record<string, string | null>;
 }
+
+const LOCAL_AGENT_SESSION_ID_PREFIX = "local_agent_session_";
+const LOCAL_AGENT_SESSION_TOKEN_PREFIX = "local_agent_token_";
 
 function normalizeDisplayText(value: string | null | undefined, fallback: string): string {
   const normalized = String(value ?? "").trim().replace(/\s+/g, " ");
@@ -86,8 +90,8 @@ export async function createLocalDesktopManagedAgentWorkerSession(
   const hostId = livenessField(input.registrationLiveness, "host_id") || getOrCreateDesktopHostId();
 
   return saveAgentSession({
-    session_id: `local_agent_session_${randomUUID()}`,
-    session_token: `local_agent_token_${randomUUID()}`,
+    session_id: `${LOCAL_AGENT_SESSION_ID_PREFIX}${randomUUID()}`,
+    session_token: `${LOCAL_AGENT_SESSION_TOKEN_PREFIX}${randomUUID()}`,
     room_id: roomId,
     session_kind: "worker",
     runtime: input.runtime,
@@ -100,6 +104,7 @@ export async function createLocalDesktopManagedAgentWorkerSession(
     agent_key: [
       "local",
       normalizeAgentKeyPart(ownerLabel, "desktop"),
+      normalizeAgentKeyPart(ideLabel, "agent"),
       normalizeAgentKeyPart(displayName, "agent"),
     ].join("/"),
     agent_instance_id: input.agentInstanceId,
@@ -114,12 +119,32 @@ export async function createLocalDesktopManagedAgentWorkerSession(
   });
 }
 
-export async function createLocalDesktopManagedAgentWorkerSessionForRoom(
-  input: LocalDesktopManagedAgentWorkerSessionInput,
-): Promise<StoredAgentSessionState | null> {
+export function isLocalDesktopManagedAgentWorkerSession(
+  session: StoredAgentSessionState | null | undefined,
+): boolean {
+  return Boolean(
+    session?.session_id?.startsWith(LOCAL_AGENT_SESSION_ID_PREFIX) ||
+      session?.session_token?.startsWith(LOCAL_AGENT_SESSION_TOKEN_PREFIX) ||
+      session?.agent_key?.startsWith("local/"),
+  );
+}
+
+export async function resolveDesktopManagedAgentWorkerRegistration(input: {
+  roomIdentifier: string;
+}): Promise<{ storage: DesktopRoomStorageState; cloudRoomIdentifier: string }> {
   const storage = await resolveLocalAwareRoomStorageMode(input.roomIdentifier);
-  if (storage.effectiveMode !== "local") {
-    return null;
+  return {
+    storage,
+    cloudRoomIdentifier: cloudRoomIdentifierForStorage(storage, input.roomIdentifier),
+  };
+}
+
+export async function shouldUseCloudDesktopManagedAgentWorkerSession(
+  session: StoredAgentSessionState | null | undefined,
+): Promise<boolean> {
+  if (!session?.session_id || !session.session_token || isLocalDesktopManagedAgentWorkerSession(session)) {
+    return false;
   }
-  return createLocalDesktopManagedAgentWorkerSession(input, storage);
+  const storage = await resolveLocalAwareRoomStorageMode(session.room_id);
+  return storage.effectiveMode !== "local";
 }

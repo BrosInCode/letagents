@@ -361,6 +361,12 @@ test("Claude Code runtime starts in a local room without cloud worker registrati
     roomIdentifier,
     displayName: "HZLocal",
   });
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    fetchCalls += 1;
+    throw new Error("local room start/stop should not call the cloud API");
+  }) as typeof fetch;
   const runtime = createDesktopClaudeCodeRuntime({
     runner: {
       async runTurn(): Promise<ClaudeCodeTurnResult> {
@@ -372,25 +378,33 @@ test("Claude Code runtime starts in a local room without cloud worker registrati
     now: () => "2026-06-30T00:00:00.000Z",
   });
 
-  const result = await runtime.start({
-    providerId: "claude-code",
-    roomIdentifier,
-    roomDisplayName: "HZLocal",
-    repoRootPath: tempDir,
-    deliveryMode: "desktop_events",
-    permissionProfileId: "full_access",
-  });
-  const workerSession = getStoredAgentSession(result.session.agentSessionId);
+  try {
+    const result = await runtime.start({
+      providerId: "claude-code",
+      roomIdentifier,
+      roomDisplayName: "HZLocal",
+      repoRootPath: tempDir,
+      deliveryMode: "desktop_events",
+      permissionProfileId: "full_access",
+    });
+    const workerSession = getStoredAgentSession(result.session.agentSessionId);
 
-  assert.equal(result.session.roomIdentifier, roomIdentifier);
-  assert.equal(result.session.status, "completed");
-  assert.equal(result.session.permissionProfileId, "full_access");
-  assert.ok(result.session.agentSessionId?.startsWith("local_agent_session_"));
-  assert.equal(workerSession?.room_id, roomIdentifier);
-  assert.match(workerSession?.session_token ?? "", /^local_agent_token_/);
-  assert.equal(workerSession?.ide_label, "Claude Code");
-  assert.ok(workerSession?.owner_label);
-  assert.match(workerSession?.agent_key ?? "", /^local\//);
+    assert.equal(result.session.roomIdentifier, roomIdentifier);
+    assert.equal(result.session.status, "completed");
+    assert.equal(result.session.permissionProfileId, "full_access");
+    assert.ok(result.session.agentSessionId?.startsWith("local_agent_session_"));
+    assert.equal(workerSession?.room_id, roomIdentifier);
+    assert.match(workerSession?.session_token ?? "", /^local_agent_token_/);
+    assert.equal(workerSession?.ide_label, "Claude Code");
+    assert.ok(workerSession?.owner_label);
+    assert.match(workerSession?.agent_key ?? "", /^local\/.+\/claude-code\//);
+
+    await runtime.stop({ sessionId: result.session.id });
+    assert.ok(getStoredAgentSession(result.session.agentSessionId)?.ended_at);
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Claude Code runtime applies read-only and full-access permission profiles", async () => {

@@ -88,6 +88,9 @@ const {
   persistDesktopManagedAgentLocalReply,
 } = await import("../main/agents/managed-agent-local-replies.js");
 const {
+  resolveDesktopManagedAgentWorkerRegistration,
+} = await import("../main/agents/managed-agent-local-worker-session.js");
+const {
   MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
 } = await import("../ipc-types.js");
 const {
@@ -1705,6 +1708,84 @@ test("desktop managed agent replies are persisted into local room chat", async (
   assert.equal(reply?.source, "agent");
   assert.equal(reply?.sender, "StoneForge | EmmyMay's agent | Codex");
   assert.equal(reply?.reply_to, null);
+});
+
+test("desktop managed local replies are recognized as the worker's own messages", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_own_reply_room",
+    displayName: "Own Reply Room",
+  });
+  await setLocalAwareRoomStorageMode("local_own_reply_room", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("local_own_reply_room");
+  const workerSession = managedWorkerSession({
+    session_id: "worker_local_own",
+    session_token: "worker_local_token",
+    room_id: "local_own_reply_room",
+    actor_label: "StoneForge | EmmyMay's agent | Codex",
+    agent_key: "local/emmymay/codex/stone-forge",
+    display_name: "StoneForge",
+    owner_label: "EmmyMay",
+    ide_label: "Codex",
+  });
+
+  const result = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "local_own_reply_room",
+    storage,
+    workerSession,
+    replyTo: null,
+    text: "Local reply from myself.",
+  });
+
+  assert.equal(result?.sender, workerSession.actor_label);
+  assert.equal(
+    shouldDeliverRoomStreamEventToManagedAgent({
+      id: "session_public",
+      providerId: "codex",
+      runtime: "codex",
+      roomIdentifier: "local_own_reply_room",
+      roomDisplayName: "Own Reply Room",
+      repoRootPath: tempDir,
+      repoBranch: null,
+      status: "completed",
+      deliveryMode: "desktop_events",
+      permissionProfileId: "read_only",
+      permissionProfile: managedAgentPermissionProfileForProvider("codex", "read_only"),
+      canStop: true,
+      agentSessionId: workerSession.session_id,
+      actorLabel: workerSession.actor_label ?? null,
+      agentKey: workerSession.agent_key ?? null,
+      displayName: workerSession.display_name ?? null,
+      ownerLabel: workerSession.owner_label ?? null,
+      ideLabel: workerSession.ide_label ?? null,
+      reasoningSessionId: null,
+      activeWork: null,
+      pendingPermissionRequests: [],
+      startedAt: "2026-06-14T12:00:00.000Z",
+      updatedAt: "2026-06-14T12:00:00.000Z",
+      lastError: null,
+    }, {
+      type: "message",
+      roomIdentifier: "local_own_reply_room",
+      message: result!,
+    }),
+    false,
+  );
+});
+
+test("desktop managed worker registration maps linked local rooms to cloud id in cloud mode", async () => {
+  await createLocalRoom({
+    roomIdentifier: "linked_cloud_registration_room",
+    cloudRoomIdentifier: "github.com/BrosInCode/letagents",
+    displayName: "Linked Cloud Room",
+  });
+  await setLocalAwareRoomStorageMode("linked_cloud_registration_room", "cloud");
+
+  const registration = await resolveDesktopManagedAgentWorkerRegistration({
+    roomIdentifier: "linked_cloud_registration_room",
+  });
+
+  assert.equal(registration.storage.effectiveMode, "cloud");
+  assert.equal(registration.cloudRoomIdentifier, "github.com/BrosInCode/letagents");
 });
 
 test("desktop managed agent local replies preserve change summary attachments", async () => {

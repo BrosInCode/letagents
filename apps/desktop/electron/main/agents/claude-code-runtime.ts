@@ -82,7 +82,9 @@ import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
 import {
-  createLocalDesktopManagedAgentWorkerSessionForRoom,
+  createLocalDesktopManagedAgentWorkerSession,
+  shouldUseCloudDesktopManagedAgentWorkerSession,
+  resolveDesktopManagedAgentWorkerRegistration,
 } from "./managed-agent-local-worker-session.js";
 
 const DEFAULT_CLAUDE_CODE_STOP_PHRASE = "/stop-claude-code-room";
@@ -1091,15 +1093,20 @@ async function registerDesktopManagedClaudeCodeWorker(
   const runtime = `claude-code:${input.token}`;
   const agentInstanceId = `desktop-claude-code:${input.token}`;
   const registrationLiveness = claudeCodeSessionLivenessRegistration(runtime, input.token);
-  const localSession = await createLocalDesktopManagedAgentWorkerSessionForRoom({
+  const registration = await resolveDesktopManagedAgentWorkerRegistration({
     roomIdentifier: input.roomIdentifier,
-    runtime,
-    agentInstanceId,
-    displayName: input.displayName,
-    ideLabel: "Claude Code",
-    repoBranch: input.repoBranch,
-    registrationLiveness,
   });
+  const localSession = registration.storage.effectiveMode === "local"
+    ? await createLocalDesktopManagedAgentWorkerSession({
+      roomIdentifier: input.roomIdentifier,
+      runtime,
+      agentInstanceId,
+      displayName: input.displayName,
+      ideLabel: "Claude Code",
+      repoBranch: input.repoBranch,
+      registrationLiveness,
+    }, registration.storage)
+    : null;
   if (localSession) {
     return localSession;
   }
@@ -1111,8 +1118,9 @@ async function registerDesktopManagedClaudeCodeWorker(
   }
 
   const { apiFetch } = await import("../auth.js");
+  const cloudRoomIdentifier = registration.cloudRoomIdentifier;
   const created = await apiFetch<AgentSessionCreateResponse>(
-    `/rooms/${encodeURIComponent(input.roomIdentifier)}/agent-sessions`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1131,7 +1139,7 @@ async function registerDesktopManagedClaudeCodeWorker(
   );
 
   return saveAgentSession(toStoredClaudeCodeAgentSession(created, {
-    roomIdentifier: input.roomIdentifier,
+    roomIdentifier: cloudRoomIdentifier,
     runtime,
     identity,
     agentInstanceId,
@@ -1143,6 +1151,11 @@ async function disconnectDesktopManagedClaudeCodeWorker(
   session: StoredAgentSessionState | null,
 ): Promise<void> {
   if (!session?.session_id || !session.session_token) {
+    return;
+  }
+
+  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
+    markAgentSessionEnded(session.session_id);
     return;
   }
 
