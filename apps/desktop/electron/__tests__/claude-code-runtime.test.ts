@@ -504,6 +504,59 @@ test("Claude Code runtime feeds desktop room tool results back into the SDK runn
   assert.deepEqual(published, [{ text: "Artifact publishing is not available in this local room.", eventId: "msg_1" }]);
 });
 
+test("Claude Code runtime runs multiple desktop room tools before publishing the final reply", async () => {
+  resetState();
+  const prompts: ClaudeCodeTurnInput[] = [];
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: ClaudeCodeTurnInput): Promise<ClaudeCodeTurnResult> {
+      prompts.push(input);
+      if (prompts.length === 1) {
+        return {
+          sessionId: "claude_session_1",
+          text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":42}},"idempotency_key":"event_1:artifact"}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      if (prompts.length === 2) {
+        assert.match(input.prompt, /Desktop room tool result/);
+        assert.match(input.prompt, /unsupported_local_room_tool/);
+        return {
+          sessionId: "claude_session_1",
+          text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":43}},"idempotency_key":"event_1:artifact_2"}',
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Desktop room tool result/);
+      assert.match(input.prompt, /unsupported_local_room_tool/);
+      return {
+        sessionId: "claude_session_1",
+        text: "Both artifact attempts hit the local-room limitation.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState() });
+  await runtime.start({
+    providerId: "claude-code",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent());
+  await runtime.waitForIdle();
+
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts[1]?.claudeSessionId, "claude_session_1");
+  assert.equal(prompts[2]?.claudeSessionId, "claude_session_1");
+  assert.deepEqual(published, [{ text: "Both artifact attempts hit the local-room limitation.", eventId: "msg_1" }]);
+});
+
 test("Claude Code runtime surfaces tool permission requests for desktop approval", async () => {
   resetState();
   const permissionRequests: DesktopManagedAgentPermissionRequest[] = [];

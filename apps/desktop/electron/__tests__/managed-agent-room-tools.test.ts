@@ -12,6 +12,9 @@ const {
   executeManagedAgentRoomToolRequestWithTimeout,
 } = await import("../main/agents/managed-agent-room-tools.js");
 const {
+  runManagedAgentRoomToolLoop,
+} = await import("../main/agents/managed-agent-room-tool-loop.js");
+const {
   buildManagedAgentRoomToolResultPrompt,
   MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
   parseManagedAgentRoomToolRequest,
@@ -21,6 +24,7 @@ const {
 } = await import("../main/agents/state.js");
 
 import type { DesktopRoomStorageState } from "../ipc-types.js";
+import type { ManagedAgentRoomToolLoopTurn } from "../main/agents/managed-agent-room-tool-loop.js";
 import type { ManagedAgentRoomToolCache } from "../main/agents/managed-agent-room-tools.js";
 import type { ManagedAgentRoomToolRequest } from "../main/agents/managed-agent-room-tools-protocol.js";
 
@@ -92,6 +96,13 @@ function session() {
     agent_session_id: "agent_session_1",
   };
 }
+
+type ProviderLoopTurn = ManagedAgentRoomToolLoopTurn & {
+  sessionId: string | null;
+  status: "success" | "error";
+  error: string | null;
+  recentItems: Array<Record<string, unknown>>;
+};
 
 test("managed room tool parser accepts one request line and rejects mixed prose", () => {
   const line = `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"get_board","arguments":{"open":true},"idempotency_key":"board:event_1"}`;
@@ -369,4 +380,205 @@ test("managed room tool executor returns structured unsupported errors for local
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "unsupported_local_room_tool");
+});
+
+test("managed room tool loop executes multiple requests before returning the public reply", async () => {
+  const firstRequest = `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"get_board","arguments":{"open":true}}`;
+  const secondRequest = `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"post_status","arguments":{"status":"working"},"idempotency_key":"event_1:status"}`;
+  const executed: ManagedAgentRoomToolRequest[] = [];
+  const prompts: string[] = [];
+  const continuationIds: Array<string | null> = [];
+  const initialTurn: ProviderLoopTurn = {
+    sessionId: "provider_session_1",
+    text: firstRequest,
+    status: "success",
+    error: null,
+    recentItems: [],
+  };
+
+  const result = await runManagedAgentRoomToolLoop({
+    providerLabel: "Cursor",
+    session: session(),
+    storage: cloudStorage(),
+    initialTurn,
+    getContinuationId: (turn) => turn.sessionId,
+    executeRoomTool: async ({ request }) => {
+      executed.push(request);
+      return {
+        ok: true,
+        tool: request.tool,
+        roomIdentifier: "room_1",
+        storage: "cloud",
+        data: { ok: true },
+      };
+    },
+    runContinuationTurn: async ({ prompt, requestIndex, continuationId }) => {
+      prompts.push(prompt);
+      continuationIds.push(continuationId);
+      return {
+        turn: requestIndex === 1
+          ? {
+              sessionId: "provider_session_2",
+              text: secondRequest,
+              status: "success" as const,
+              error: null,
+              recentItems: [],
+            } satisfies ProviderLoopTurn
+          : {
+              sessionId: "provider_session_2",
+              text: "Final public reply after tools.",
+              status: "success" as const,
+              error: null,
+              recentItems: [],
+            } satisfies ProviderLoopTurn,
+      };
+    },
+    onLoopError: ({ continuationId, error, recentItems }) => ({
+      sessionId: continuationId,
+      text: null,
+      status: "error" as const,
+      error,
+      recentItems,
+    }),
+  });
+
+  assert.deepEqual(executed.map((request) => request.tool), ["get_board", "post_status"]);
+  assert.equal(result.handledRequests, 2);
+  assert.equal(result.state.requestCount, 2);
+  assert.equal(result.turn.text, "Final public reply after tools.");
+  assert.equal(result.continuationId, "provider_session_2");
+  assert.deepEqual(continuationIds, ["provider_session_1", "provider_session_2"]);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0] ?? "", /Desktop room tool result/);
+  assert.match(prompts[1] ?? "", /Desktop room tool result/);
+});
+
+test("managed room tool loop supports text-only Codex and Open Model continuations", async () => {
+  const requestLine = `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"read_messages","arguments":{"limit":1}}`;
+  const initialTurn: ManagedAgentRoomToolLoopTurn = { text: requestLine };
+
+  const result = await runManagedAgentRoomToolLoop({
+    providerLabel: "Codex",
+    session: session(),
+    storage: cloudStorage(),
+    initialTurn,
+    executeRoomTool: async ({ request }) => ({
+      ok: true,
+      tool: request.tool,
+      roomIdentifier: "room_1",
+      storage: "cloud",
+      data: { messages: [] },
+    }),
+    runContinuationTurn: async () => ({
+      turn: { text: "NO_ROOM_REPLY" },
+    }),
+    onLoopError: ({ error }) => ({
+      text: null,
+      status: "error" as const,
+      error,
+      recentItems: [],
+    }),
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.handledRequests, 1);
+  assert.equal(result.continuationId, null);
+  assert.equal(result.turn.text, "NO_ROOM_REPLY");
+});
+
+test("managed room tool loop reports malformed requests clearly", async () => {
+  let executeCalls = 0;
+  const initialTurn: ProviderLoopTurn = {
+    sessionId: "provider_session_1",
+    text: `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} not-json`,
+    status: "success",
+    error: null,
+    recentItems: [{ type: "result" }],
+  };
+  const result = await runManagedAgentRoomToolLoop({
+    providerLabel: "Claude Code",
+    session: session(),
+    storage: cloudStorage(),
+    initialTurn,
+    getContinuationId: (turn) => turn.sessionId,
+    executeRoomTool: async ({ request }) => {
+      executeCalls += 1;
+      return {
+        ok: true,
+        tool: request.tool,
+        roomIdentifier: "room_1",
+        storage: "cloud",
+        data: {},
+      };
+    },
+    runContinuationTurn: async () => {
+      throw new Error("malformed requests should not continue");
+    },
+    onLoopError: ({ continuationId, error, recentItems }) => ({
+      sessionId: continuationId,
+      text: null,
+      status: "error" as const,
+      error,
+      recentItems,
+    }),
+  });
+
+  assert.equal(executeCalls, 0);
+  assert.equal(result.error, "Claude Code emitted a malformed desktop room tool request.");
+  assert.equal(result.turn.status, "error");
+  assert.equal(result.turn.error, "Claude Code emitted a malformed desktop room tool request.");
+  assert.equal(result.continuationId, "provider_session_1");
+});
+
+test("managed room tool loop enforces the per-event request cap", async () => {
+  const requestLine = `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"get_board","arguments":{"open":true}}`;
+  let executeCalls = 0;
+  const initialTurn: ProviderLoopTurn = {
+    sessionId: "provider_session_1",
+    text: requestLine,
+    status: "success",
+    error: null,
+    recentItems: [],
+  };
+
+  const result = await runManagedAgentRoomToolLoop({
+    providerLabel: "Cursor",
+    session: session(),
+    storage: cloudStorage(),
+    initialTurn,
+    requestLimit: 1,
+    getContinuationId: (turn) => turn.sessionId,
+    executeRoomTool: async ({ request }) => {
+      executeCalls += 1;
+      return {
+        ok: true,
+        tool: request.tool,
+        roomIdentifier: "room_1",
+        storage: "cloud",
+        data: {},
+      };
+    },
+    runContinuationTurn: async () => ({
+      turn: {
+        sessionId: "provider_session_1",
+        text: requestLine,
+        status: "success" as const,
+        error: null,
+        recentItems: [],
+      },
+    }),
+    onLoopError: ({ continuationId, error, recentItems }) => ({
+      sessionId: continuationId,
+      text: null,
+      status: "error" as const,
+      error,
+      recentItems,
+    }),
+  });
+
+  assert.equal(executeCalls, 1);
+  assert.equal(result.handledRequests, 1);
+  assert.equal(result.state.requestCount, 1);
+  assert.equal(result.error, "Cursor requested more than 1 desktop room tools for one room event.");
+  assert.equal(result.turn.error, "Cursor requested more than 1 desktop room tools for one room event.");
 });
