@@ -157,11 +157,9 @@
 }
 
 .desktop-board-governance-mode {
-  display: inline-flex;
-  align-items: center;
+  display: grid;
   justify-self: start;
-  gap: 14px;
-  min-height: 38px;
+  gap: 8px;
   padding: 0 2px;
 }
 
@@ -375,10 +373,7 @@
   }
 
   .desktop-board-governance-mode {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 10px;
-    min-height: auto;
+    gap: 8px;
     padding: 0 2px;
   }
 
