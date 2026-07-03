@@ -48,6 +48,9 @@ import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
 import {
+  createLocalDesktopManagedAgentWorkerSessionForRoom,
+} from "./managed-agent-local-worker-session.js";
+import {
   getCurrentCursorLiveSession,
   getOrCreateDesktopHostId,
   getStoredAgentIdentityForRuntimeKey,
@@ -662,14 +665,28 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
 async function registerDesktopManagedCursorWorker(
   input: RegisterCursorWorkerInput,
 ): Promise<StoredAgentSessionState> {
+  const runtime = `cursor:${input.token}`;
+  const agentInstanceId = `desktop-cursor:${input.token}`;
+  const registrationLiveness = cursorSessionLivenessRegistration(runtime, input.token);
+  const localSession = await createLocalDesktopManagedAgentWorkerSessionForRoom({
+    roomIdentifier: input.roomIdentifier,
+    runtime,
+    agentInstanceId,
+    displayName: input.displayName,
+    ideLabel: "Cursor",
+    repoBranch: input.repoBranch,
+    registrationLiveness,
+  });
+  if (localSession) {
+    return localSession;
+  }
+
   const identity = await ensureDesktopManagedCursorIdentity(input.displayName);
   const actorKey = normalizeDisplayText(identity.canonical_key, "");
   if (!actorKey) {
     throw new Error("LetAgents desktop Cursor identity is missing an actor key.");
   }
 
-  const runtime = `cursor:${input.token}`;
-  const agentInstanceId = `desktop-cursor:${input.token}`;
   const { apiFetch } = await import("../auth.js");
   const created = await apiFetch<AgentSessionCreateResponse>(
     `/rooms/${encodeURIComponent(input.roomIdentifier)}/agent-sessions`,
@@ -685,7 +702,7 @@ async function registerDesktopManagedCursorWorker(
         session_kind: "worker",
         runtime,
         repo_branch: input.repoBranch,
-        registration_liveness: cursorSessionLivenessRegistration(runtime, input.token),
+        registration_liveness: registrationLiveness,
       }),
     },
   );

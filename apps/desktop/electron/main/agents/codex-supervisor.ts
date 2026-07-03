@@ -62,6 +62,9 @@ import {
   runManagedAgentRoomToolLoop,
   type ManagedAgentRoomToolLoopState,
 } from "./managed-agent-room-tool-loop.js";
+import {
+  createLocalDesktopManagedAgentWorkerSessionForRoom,
+} from "./managed-agent-local-worker-session.js";
 import type {
   ManagedAgentContextRequest,
   ManagedAgentContextResult,
@@ -384,17 +387,31 @@ async function registerDesktopManagedCodexWorker(input: {
   repoBranch: string | null;
   ideLabel?: string;
 }): Promise<StoredAgentSessionState> {
+  // The runtime and instance markers stay codex-prefixed for every
+  // Codex-engine provider: worker binding matches on these exact
+  // per-token markers, and tokens are unique per session.
+  const runtime = `codex:${input.token}`;
+  const agentInstanceId = `desktop-codex:${input.token}`;
+  const registrationLiveness = codexSessionLivenessRegistration(runtime, input.token);
+  const localSession = await createLocalDesktopManagedAgentWorkerSessionForRoom({
+    roomIdentifier: input.roomIdentifier,
+    runtime,
+    agentInstanceId,
+    displayName: input.displayName,
+    ideLabel: input.ideLabel || "Codex",
+    repoBranch: input.repoBranch,
+    registrationLiveness,
+  });
+  if (localSession) {
+    return localSession;
+  }
+
   const identity = await ensureDesktopManagedCodexIdentity(input.displayName);
   const actorKey = normalizeDisplayText(identity.canonical_key, "");
   if (!actorKey) {
     throw new Error("LetAgents desktop agent identity is missing an actor key.");
   }
 
-  // The runtime and instance markers stay codex-prefixed for every
-  // Codex-engine provider: worker binding matches on these exact
-  // per-token markers, and tokens are unique per session.
-  const runtime = `codex:${input.token}`;
-  const agentInstanceId = `desktop-codex:${input.token}`;
   const created = await apiFetch<AgentSessionCreateResponse>(
     `/rooms/${encodeURIComponent(input.roomIdentifier)}/agent-sessions`,
     {
@@ -409,7 +426,7 @@ async function registerDesktopManagedCodexWorker(input: {
         session_kind: "worker",
         runtime,
         repo_branch: input.repoBranch,
-        registration_liveness: codexSessionLivenessRegistration(runtime, input.token),
+        registration_liveness: registrationLiveness,
       }),
     },
   );
