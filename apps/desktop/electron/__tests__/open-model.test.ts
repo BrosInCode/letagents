@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -21,6 +21,7 @@ import {
   readOpenModelSettings,
   saveOpenModelSettings,
 } from "../main/agents/open-model-settings.js";
+import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 
 const secretStorage = {
   isEncryptionAvailable: () => true,
@@ -114,6 +115,51 @@ test("unconfigured open model settings report configured=false", async () => {
   assert.equal(status.configured, false);
   assert.equal(status.hasApiKey, false);
   assert.equal(status.baseUrl, DEFAULT_OPEN_MODEL_BASE_URL);
+});
+
+test("Open Model preflight accepts a per-agent model when no saved default exists", async () => {
+  const settingsPath = await tempSettingsPath();
+  const bin = join(tmpdir(), `letagents-codex-open-model-${Date.now()}`);
+  const previousSettingsPath = process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH;
+  const previousCodexBin = process.env.LETAGENTS_CODEX_BIN;
+  await saveOpenModelSettings(
+    { baseUrl: "http://127.0.0.1:11434/v1", model: null },
+    { storePath: settingsPath, secretStorage },
+  );
+  await writeFile(
+    bin,
+    [
+      "#!/usr/bin/env node",
+      "if (process.argv[2] === '--version') { console.log('codex test'); process.exit(0); }",
+      "if (process.argv[2] === 'app-server' && process.argv[3] === '--help') { console.log('help'); process.exit(0); }",
+      "process.exit(2);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH = settingsPath;
+  process.env.LETAGENTS_CODEX_BIN = bin;
+  try {
+    const result = await runDesktopAgentProviderPreflight("open-model", {
+      repoRootPath: tmpdir(),
+      model: "qwen/custom-session-model",
+      modelSource: "custom",
+    });
+    assert.equal(result.canStart, true);
+    assert.match(result.detail ?? "", /qwen\/custom-session-model/);
+    assert.match(result.version ?? "", /qwen\/custom-session-model/);
+  } finally {
+    if (previousSettingsPath === undefined) {
+      delete process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH;
+    } else {
+      process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH = previousSettingsPath;
+    }
+    if (previousCodexBin === undefined) {
+      delete process.env.LETAGENTS_CODEX_BIN;
+    } else {
+      process.env.LETAGENTS_CODEX_BIN = previousCodexBin;
+    }
+  }
 });
 
 test("openModelCodexLaunch builds provider overrides and passes the key via env only", () => {

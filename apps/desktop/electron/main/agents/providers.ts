@@ -25,6 +25,10 @@ import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
 } from "./managed-agent-permission-profiles.js";
+import {
+  normalizeManagedAgentModel,
+  validateDesktopManagedAgentModel,
+} from "./managed-agent-models.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 
 type ExecResult = {
@@ -429,6 +433,7 @@ async function openModelPreflight(
   }
 
   const settings = await getOpenModelSettingsStatus();
+  const effectiveModel = normalizeManagedAgentModel(input.model) || settings.model;
   if (settings.error) {
     return {
       providerId: provider.id,
@@ -441,13 +446,13 @@ async function openModelPreflight(
       mcpStatus,
     };
   }
-  if (!settings.configured) {
+  if (!settings.baseUrl || !effectiveModel) {
     return {
       providerId: provider.id,
       status: "config_required",
       canStart: false,
       message: "Configure a model endpoint before starting an Open Model agent.",
-      detail: "Add an endpoint URL that speaks the OpenAI Responses API (OpenRouter, vLLM, ...) and a model below. Paste an API key if the endpoint needs one (local endpoints usually do not).",
+      detail: "Add an endpoint URL that speaks the OpenAI Responses API (OpenRouter, vLLM, ...) and save a default model or choose a per-agent model below. Paste an API key if the endpoint needs one (local endpoints usually do not).",
       nextAction: null,
       version,
       mcpStatus,
@@ -472,9 +477,9 @@ async function openModelPreflight(
     status: "ready",
     canStart: true,
     message: "Open Model is ready to start.",
-    detail: `Runs the Codex engine with ${settings.model} via your configured endpoint${settings.hasApiKey ? " using your saved API key" : ""}.`,
+    detail: `Runs the Codex engine with ${effectiveModel} via your configured endpoint${settings.hasApiKey ? " using your saved API key" : ""}.`,
     nextAction: null,
-    version: version ? `${version} - ${settings.model}` : settings.model,
+    version: version ? `${version} - ${effectiveModel}` : effectiveModel,
     mcpStatus,
   };
 }
@@ -485,9 +490,30 @@ export async function runDesktopAgentProviderPreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   assertAgentProviderId(providerId);
   const provider = findAgentProvider(providerId);
+  const withModelValidation = async (
+    result: DesktopAgentProviderPreflight,
+  ): Promise<DesktopAgentProviderPreflight> => {
+    if (!result.canStart || !provider.capabilities.includes("desktop_managed_runtime")) {
+      return result;
+    }
+    const validation = await validateDesktopManagedAgentModel({
+      providerId,
+      ...input,
+    });
+    if (!validation.error) {
+      return result;
+    }
+    return {
+      ...result,
+      status: "config_required",
+      canStart: false,
+      message: "Selected model is not available.",
+      detail: validation.error,
+    };
+  };
   if (isDesktopSmokeCheck()) {
     if (provider.id === "codex") {
-      return {
+      return withModelValidation({
         providerId: provider.id,
         status: "missing_runtime",
         canStart: false,
@@ -496,9 +522,9 @@ export async function runDesktopAgentProviderPreflight(
         nextAction: "install_runtime",
         version: null,
         mcpStatus: "installed",
-      };
+      });
     }
-    return {
+    return withModelValidation({
       providerId: provider.id,
       status: provider.capabilities.includes("desktop_managed_runtime")
         ? input.repoRootPath?.trim()
@@ -521,21 +547,21 @@ export async function runDesktopAgentProviderPreflight(
         : null,
       version: provider.id === "codex" ? "codex smoke" : null,
       mcpStatus: "installed",
-    };
+    });
   }
   const mcpStatus = await getProviderMcpStatus(provider);
 
   if (provider.id === "codex") {
-    return codexPreflight(provider, input, mcpStatus);
+    return withModelValidation(await codexPreflight(provider, input, mcpStatus));
   }
   if (provider.id === "claude-code") {
-    return claudeCodePreflight(provider, input, mcpStatus);
+    return withModelValidation(await claudeCodePreflight(provider, input, mcpStatus));
   }
   if (provider.id === "cursor") {
-    return runDesktopCursorProviderPreflight(provider, input, mcpStatus);
+    return withModelValidation(await runDesktopCursorProviderPreflight(provider, input, mcpStatus));
   }
   if (provider.id === "open-model") {
-    return openModelPreflight(provider, input, mcpStatus);
+    return withModelValidation(await openModelPreflight(provider, input, mcpStatus));
   }
 
   return bridgePreflight(provider, mcpStatus);

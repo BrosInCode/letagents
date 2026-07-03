@@ -105,6 +105,7 @@ import {
 import { runDesktopAgentProviderPreflight } from "./providers.js";
 import { openModelCodexLaunch } from "./open-model-launch.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
+import { normalizeManagedAgentModel } from "./managed-agent-models.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
 import {
   buildManagedAgentChangeSummaryAttachmentDraft,
@@ -1074,19 +1075,28 @@ const CODEX_ENGINE_CONTEXT: CodexEngineProviderContext = {
 function startDesktopManagedCodexAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
-  return startDesktopManagedCodexEngineAgent(input, CODEX_ENGINE_CONTEXT);
+  const selectedModel = normalizeManagedAgentModel(input.model);
+  return startDesktopManagedCodexEngineAgent(input, {
+    ...CODEX_ENGINE_CONTEXT,
+    model: selectedModel,
+    launch: selectedModel
+      ? { configOverrides: [`model=${JSON.stringify(selectedModel)}`] }
+      : {},
+    dedicatedServer: Boolean(selectedModel),
+  });
 }
 
 async function startDesktopManagedOpenModelAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
   const settings = await readOpenModelSettings();
-  const launch = openModelCodexLaunch(settings);
+  const selectedModel = normalizeManagedAgentModel(input.model) || settings.model;
+  const launch = openModelCodexLaunch({ ...settings, model: selectedModel });
   return startDesktopManagedCodexEngineAgent(input, {
     providerId: "open-model",
     providerName: "Open Model",
     ideLabel: "Open Model",
-    model: settings.model,
+    model: selectedModel,
     launch,
     dedicatedServer: true,
     forceDesktopEvents: true,
@@ -1111,6 +1121,8 @@ async function startDesktopManagedCodexEngineAgent(
   const preflight = await runDesktopAgentProviderPreflight(engine.providerId, {
     roomIdentifier,
     repoRootPath: cwd,
+    model: input.model,
+    modelSource: input.modelSource,
   });
   if (!preflight.canStart) {
     throw new Error(preflight.detail || preflight.message);

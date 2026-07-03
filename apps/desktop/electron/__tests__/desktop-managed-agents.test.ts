@@ -76,6 +76,7 @@ const {
   firstRedactedCodexAppServerOutputLine,
   launchCodexAppServer,
   redactCodexAppServerOutput,
+  resolveCodexAppServerUrl,
   sensitiveCodexAppServerConfigValues,
   sensitiveCodexAppServerEnvValues,
   waitForLaunchedCodexAppServer,
@@ -522,6 +523,10 @@ test("public Codex managed session projects the selected permission profile", ()
   assert.equal(publicSession.permissionProfileId, "full_access");
   assert.equal(publicSession.permissionProfile.label, "Full access");
   assert.equal(publicSession.permissionProfile.status, "available");
+  assert.equal(publicSession.model, null);
+  assert.equal(toPublicManagedAgentSession(liveSession({
+    model: "gpt-5.2-codex-high",
+  })).model, "gpt-5.2-codex-high");
 });
 
 test("desktop Codex runtime reasoning hides raw app-server reasoning text", () => {
@@ -3272,6 +3277,35 @@ test("Codex app-server launcher trusts the selected managed worktree", () => {
     "--listen",
     "ws://127.0.0.1:4500",
   ]);
+  assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500", {
+    trustedProjectPath: "/tmp/room-worktree",
+    configOverrides: ['model="gpt-5.2-codex-high"'],
+  }), [
+    "app-server",
+    "-c",
+    'projects."/tmp/room-worktree".trust_level="trusted"',
+    "-c",
+    'model="gpt-5.2-codex-high"',
+    "--listen",
+    "ws://127.0.0.1:4500",
+  ]);
+});
+
+test("dedicated Codex app-server URLs do not reuse the shared configured server", async () => {
+  const previous = process.env.LETAGENTS_CODEX_SERVER_URL;
+  process.env.LETAGENTS_CODEX_SERVER_URL = "ws://127.0.0.1:4500";
+  try {
+    assert.equal(await resolveCodexAppServerUrl(null, { dedicated: false }), "ws://127.0.0.1:4500");
+    const dedicatedUrl = await resolveCodexAppServerUrl(null, { dedicated: true });
+    assert.match(dedicatedUrl, /^ws:\/\/127\.0\.0\.1:\d+$/);
+    assert.notEqual(dedicatedUrl, "ws://127.0.0.1:4500");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.LETAGENTS_CODEX_SERVER_URL;
+    } else {
+      process.env.LETAGENTS_CODEX_SERVER_URL = previous;
+    }
+  }
 });
 
 test("Codex app-server readiness wait fails on early launched-process errors", async () => {

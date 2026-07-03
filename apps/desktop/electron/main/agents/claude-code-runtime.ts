@@ -72,6 +72,7 @@ import {
   assertManagedAgentPermissionProfileAvailable,
   managedAgentPermissionProfileForProvider,
 } from "./managed-agent-permission-profiles.js";
+import { normalizeManagedAgentModel } from "./managed-agent-models.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
 import {
   desktopManagedAgentReplyTargetForMessage,
@@ -236,11 +237,14 @@ export function createDesktopClaudeCodeRuntime(
     const preflightResult = await preflight("claude-code", {
       roomIdentifier,
       repoRootPath: cwd,
+      model: input.model,
+      modelSource: input.modelSource,
     });
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
     const permissionProfile = assertManagedAgentPermissionProfileAvailable("claude-code", input.permissionProfileId);
+    const selectedModel = normalizeManagedAgentModel(input.model);
 
     const token = makeClaudeCodeStopToken();
     const displayName = suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(roomIdentifier), token);
@@ -260,6 +264,7 @@ export function createDesktopClaudeCodeRuntime(
       joined_via: joinedViaForRoomIdentifier(roomIdentifier),
       cwd,
       repo_branch: repoBranch,
+      model: selectedModel,
       stop_phrase: input.stopPhrase?.trim() || DEFAULT_CLAUDE_CODE_STOP_PHRASE,
       max_minutes: coerceMaxMinutes(input.maxMinutes),
       delivery_mode: "desktop_events",
@@ -475,6 +480,7 @@ export function createDesktopClaudeCodeRuntime(
       cwd: input.active.cwd,
       claudeSessionId,
       claudeBin: input.active.claude_bin,
+      model: input.active.model ?? null,
       abortController: input.abortController,
       canUseTool: input.canUseTool,
     });
@@ -509,6 +515,7 @@ export function createDesktopClaudeCodeRuntime(
           cwd: session.cwd,
           claudeSessionId: continuationId,
           claudeBin: session.claude_bin,
+          model: session.model ?? null,
           abortController: input.abortController,
           canUseTool: input.canUseTool,
         });

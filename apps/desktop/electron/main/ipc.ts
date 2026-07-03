@@ -6,6 +6,7 @@ import type {
   DesktopAgentPresence,
   DesktopAgentProvider,
   DesktopAgentProviderId,
+  DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
@@ -108,6 +109,7 @@ import {
   runDesktopAgentProviderPreflight,
   runDesktopAgentProviderSetup,
 } from "./agents/providers.js";
+import { listDesktopAgentProviderModels } from "./agents/managed-agent-models.js";
 import {
   getDesktopManagedAgentChangeSummary,
   inspectDesktopManagedAgentSession,
@@ -756,6 +758,15 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:workers:list-agent-providers",
     async (): Promise<DesktopAgentProvider[]> => listDesktopAgentProviders(),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:list-agent-provider-models",
+    async (
+      _event,
+      providerId: DesktopAgentProviderId,
+      input?: DesktopAgentProviderPreflightInput,
+    ): Promise<DesktopAgentProviderModelsResult> =>
+      listDesktopAgentProviderModels(providerId, input ?? {}),
   );
   targetIpcMain.handle(
     "desktop:workers:run-agent-provider-preflight",

@@ -193,6 +193,8 @@ const api: DesktopApi = {
     resolveManagedAgentPermission: (input) =>
       ipcRenderer.invoke("desktop:workers:resolve-managed-agent-permission", input),
     listAgentProviders: () => ipcRenderer.invoke("desktop:workers:list-agent-providers"),
+    listAgentProviderModels: (providerId, input = {}) =>
+      ipcRenderer.invoke("desktop:workers:list-agent-provider-models", providerId, input),
     runAgentProviderPreflight: (providerId, input = {}) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-preflight", providerId, input),
     runAgentProviderSetup: (providerId, input) =>

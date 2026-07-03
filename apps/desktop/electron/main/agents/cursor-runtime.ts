@@ -37,6 +37,7 @@ import {
 import {
   assertManagedAgentPermissionProfileAvailable,
 } from "./managed-agent-permission-profiles.js";
+import { normalizeManagedAgentModel } from "./managed-agent-models.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
 import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
 import {
@@ -200,10 +201,13 @@ export function createDesktopCursorRuntime(
       repoRootPath: cwd,
       permissionProfileId: permissionProfile.id,
       cursorMcpPolicy,
+      model: input.model,
+      modelSource: input.modelSource,
     });
     if (!preflightResult.canStart) {
       throw new Error(preflightResult.detail || preflightResult.message);
     }
+    const selectedModel = normalizeManagedAgentModel(input.model);
     prepareCursorManagedProfile({ workspaceRoot: cwd, mcpPolicy: cursorMcpPolicy });
 
     const token = makeCursorStopToken();
@@ -224,6 +228,7 @@ export function createDesktopCursorRuntime(
       joined_via: joinedViaForRoomIdentifier(roomIdentifier),
       cwd,
       repo_branch: repoBranch,
+      model: selectedModel,
       stop_phrase: input.stopPhrase?.trim() || DEFAULT_CURSOR_STOP_PHRASE,
       max_minutes: coerceMaxMinutes(input.maxMinutes),
       delivery_mode: "desktop_events",
@@ -479,6 +484,7 @@ export function createDesktopCursorRuntime(
       cwd: input.session.cwd,
       cursorSessionId: input.cursorSessionId,
       cursorBin: input.session.cursor_bin,
+      model: input.session.model ?? null,
       env: prepareCursorManagedProfile({
         workspaceRoot: input.session.cwd,
         mcpPolicy: input.session.cursor_mcp_policy,

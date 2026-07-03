@@ -95,6 +95,29 @@ test("Cursor runner args enable explicit write profiles", () => {
   ]);
 });
 
+test("Cursor runner args include a selected model before the prompt", () => {
+  assert.deepEqual(buildCursorAgentArgs({
+    prompt: "use model",
+    cwd: "/tmp/repo",
+    cursorSessionId: "cursor_session_1",
+    model: "gpt-5.3-codex-high",
+  }), [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--trust",
+    "--workspace",
+    "/tmp/repo",
+    "--mode",
+    "ask",
+    "--model",
+    "gpt-5.3-codex-high",
+    "--resume",
+    "cursor_session_1",
+    "use model",
+  ]);
+});
+
 test("Cursor runner parses a successful stream-json turn", async () => {
   const cursorBin = script("cursor-success", [
     emitJson({

@@ -47,6 +47,9 @@ export interface DesktopAgentProviderPreflightInput {
   repoRootPath?: string | null;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
+  model?: string | null;
+  modelSource?: DesktopAgentProviderModelSource | null;
+  refreshModels?: boolean | null;
 }
 
 export interface DesktopAgentProviderPreflight {
@@ -91,6 +94,31 @@ export type DesktopCursorMcpPolicy =
   | "filter_letagents"
   | "normal"
   | "none";
+
+export type DesktopAgentProviderModelSource =
+  | "provider"
+  | "known"
+  | "custom";
+
+export interface DesktopAgentProviderModelOption {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+  source: DesktopAgentProviderModelSource;
+}
+
+export type DesktopAgentProviderModelsStatus =
+  | "ready"
+  | "unavailable"
+  | "error";
+
+export interface DesktopAgentProviderModelsResult {
+  providerId: DesktopAgentProviderId;
+  status: DesktopAgentProviderModelsStatus;
+  models: DesktopAgentProviderModelOption[];
+  defaultModel: string | null;
+  error: string | null;
+}
 
 export interface DesktopManagedAgentActiveWork {
   kind: "message" | "task_update";
@@ -253,6 +281,8 @@ export interface DesktopManagedAgentStartInput {
   deliveryMode?: DesktopManagedAgentDeliveryMode;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
+  model?: string | null;
+  modelSource?: DesktopAgentProviderModelSource | null;
   stopPhrase?: string | null;
   maxMinutes?: number | null;
 }

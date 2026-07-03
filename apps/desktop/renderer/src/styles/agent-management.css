@@ -533,6 +533,41 @@
   color: var(--text);
 }
 
+.desktop-add-agent-model-select-label {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 360px);
+}
+
+.desktop-add-agent-model-select-label > span {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.desktop-add-agent-model select,
+.desktop-add-agent-model input {
+  width: min(100%, 360px);
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.desktop-add-agent-model-custom-input {
+  display: grid;
+  gap: 4px;
+}
+
+.desktop-add-agent-model-custom-input small {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+}
+
 .desktop-add-agent-delivery p,
 .desktop-add-agent-permissions p {
   margin: 0;

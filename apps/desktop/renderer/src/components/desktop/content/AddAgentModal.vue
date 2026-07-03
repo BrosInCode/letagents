@@ -62,7 +62,11 @@
                 <span>{{ selectedProvider?.name || "Provider" }}</span>
                 <h4>{{ statusTitle }}</h4>
               </div>
-              <button type="button" :disabled="loadingPreflight || !selectedProviderId" @click="runPreflight">
+              <button
+                type="button"
+                :disabled="loadingPreflight || !selectedProviderId"
+                @click="refreshSelectedProvider({ forceModels: true })"
+              >
                 {{ loadingPreflight ? "Checking..." : "Check again" }}
               </button>
             </div>
@@ -112,7 +116,7 @@
                 />
               </label>
               <label>
-                <small>Model</small>
+                <small>Saved default model</small>
                 <input
                   v-model="openModelModel"
                   type="text"
@@ -149,6 +153,43 @@
                 </button>
               </div>
               <p v-if="openModelStatus?.error">{{ openModelStatus.error }}</p>
+            </section>
+
+            <section
+              v-if="showModelSelector"
+              class="desktop-add-agent-delivery desktop-add-agent-model"
+              aria-label="Agent model"
+            >
+              <label class="desktop-add-agent-model-select-label" for="desktop-add-agent-model-select">
+                <span>Model</span>
+                <select
+                  id="desktop-add-agent-model-select"
+                  :value="selectedModelChoice"
+                  data-testid="desktop-add-agent-model-select"
+                  aria-describedby="desktop-add-agent-model-description"
+                  @change="handleModelChoiceChange"
+                >
+                  <option value="default">Use provider default</option>
+                  <option
+                    v-for="option in providerModelOptions"
+                    :key="option.id"
+                    :value="modelChoiceValue(option)"
+                  >
+                    {{ option.label }}
+                  </option>
+                  <option value="custom">Custom model id</option>
+                </select>
+              </label>
+              <label v-if="selectedModelMode === 'custom'" class="desktop-add-agent-model-custom-input">
+                <small>Model id</small>
+                <input
+                  v-model="customModelId"
+                  type="text"
+                  placeholder="provider/model-or-alias"
+                  data-testid="desktop-add-agent-model-custom-input"
+                />
+              </label>
+              <p id="desktop-add-agent-model-description">{{ modelSelectorDescription }}</p>
             </section>
 
             <section
@@ -359,6 +400,9 @@ import { X } from "@lucide/vue";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
+  DesktopAgentProviderModelOption,
+  DesktopAgentProviderModelsResult,
+  DesktopAgentProviderModelSource,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
   DesktopCursorMcpPolicy,
@@ -394,6 +438,7 @@ import {
   managedAgentStopResultMessage,
   shouldShowCursorMcpPolicySelector,
   shouldShowDeliveryModeSelector,
+  shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
@@ -439,6 +484,13 @@ const openModelBaseUrl = ref("");
 const openModelModel = ref("");
 const openModelApiKey = ref("");
 const savingOpenModelSettings = ref(false);
+const providerModels = ref<DesktopAgentProviderModelsResult | null>(null);
+const loadingProviderModels = ref(false);
+type ModelSelectionMode = "default" | "option" | "custom";
+const MODEL_PREFLIGHT_DEBOUNCE_MS = 400;
+const selectedModelMode = ref<ModelSelectionMode>("default");
+const selectedProviderModelId = ref("");
+const customModelId = ref("");
 const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
 const selectedPermissionProfileIdsByProvider = ref<
   Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
@@ -446,8 +498,10 @@ const selectedPermissionProfileIdsByProvider = ref<
 const dialogElement = ref<HTMLElement | null>(null);
 let previousFocusElement: HTMLElement | null = null;
 let preflightRequestId = 0;
+let modelRequestId = 0;
 let modalStateVersion = 0;
 let managedSessionRefreshTimer: number | null = null;
+let modelPreflightTimer: number | null = null;
 
 const selectedProvider = computed(() =>
   providers.value.find((provider) => provider.id === selectedProviderId.value) || null
@@ -473,6 +527,7 @@ const canStartManagedAgent = computed(() =>
   Boolean(
     preflight.value?.canStart &&
     !loadingPreflight.value &&
+    (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
     (
       !selectedPermissionProfiles.value.length ||
       selectedPermissionProfile.value?.status === "available"
@@ -543,9 +598,66 @@ const showOpenModelConfig = computed(() =>
   shouldShowOpenModelConfig(selectedProvider.value)
 );
 
+const showModelSelector = computed(() =>
+  shouldShowManagedModelSelector(selectedProvider.value)
+);
+
+const providerModelOptions = computed(() => providerModels.value?.models ?? []);
+
+const selectedProviderModel = computed(() =>
+  providerModelOptions.value.find((option) => option.id === selectedProviderModelId.value) ?? null
+);
+
+const selectedModelChoice = computed(() => {
+  if (selectedModelMode.value === "option" && selectedProviderModelId.value) {
+    return `option:${selectedProviderModelId.value}`;
+  }
+  return selectedModelMode.value;
+});
+
+const selectedModel = computed(() => {
+  if (selectedModelMode.value === "option") {
+    return selectedProviderModelId.value.trim() || null;
+  }
+  if (selectedModelMode.value === "custom") {
+    return customModelId.value.trim() || null;
+  }
+  return null;
+});
+
+const selectedModelSource = computed<DesktopAgentProviderModelSource | null>(() => {
+  if (selectedModelMode.value === "option") {
+    return selectedProviderModel.value?.source ?? "provider";
+  }
+  if (selectedModelMode.value === "custom") {
+    return "custom";
+  }
+  return null;
+});
+
 const selectedCursorMcpPolicyDescription = computed(() =>
   cursorMcpPolicyDescription(selectedCursorMcpPolicy.value)
 );
+
+const modelSelectorDescription = computed(() => {
+  if (loadingProviderModels.value) return "Loading available models...";
+  if (selectedModelMode.value === "default") {
+    if (providerModels.value?.error) return providerModels.value.error;
+    const defaultModel = providerModels.value?.defaultModel;
+    return defaultModel
+      ? `Use the provider default (${defaultModel}).`
+      : "Use the model configured by the provider app.";
+  }
+  if (selectedModelMode.value === "custom") {
+    return selectedModel.value
+      ? "Pass this model id directly to the provider for this agent session."
+      : "Enter a provider model id or alias for this agent session.";
+  }
+  if (providerModels.value?.error && !selectedProviderModel.value) return providerModels.value.error;
+  return selectedProviderModel.value
+    ? `Use ${selectedProviderModel.value.label} for this agent session.`
+    : "Choose another model or return to provider default.";
+});
 
 const managedAgentStartButtonLabel = computed(() => {
   if (startingAgent.value) return "Starting...";
@@ -586,7 +698,6 @@ watch(
     if (open) {
       previousFocusElement = currentFocusableElement();
       void loadProviders();
-      void loadManagedSessions();
       startManagedSessionRefreshTimer();
       void nextTick(() => dialogElement.value?.focus());
     } else {
@@ -603,9 +714,7 @@ watch(
   () => [selectedProviderId.value, props.repoRootPath, props.roomIdentifier] as const,
   () => {
     if (props.open && selectedProviderId.value) {
-      void runPreflight();
-      void loadManagedSessions();
-      void loadOpenModelSettings();
+      void refreshSelectedProvider();
     }
   },
 );
@@ -614,13 +723,32 @@ watch(
   () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value] as const,
   () => {
     if (props.open && selectedProviderId.value) {
-      preflight.value = null;
-      void runPreflight();
+      void loadProviderModels();
+      requestPreflight();
+    }
+  },
+);
+
+watch(
+  () => [selectedModelMode.value, selectedProviderModelId.value] as const,
+  () => {
+    if (props.open && selectedProviderId.value) {
+      requestPreflight();
+    }
+  },
+);
+
+watch(
+  () => customModelId.value,
+  () => {
+    if (props.open && selectedProviderId.value && selectedModelMode.value === "custom") {
+      requestPreflight({ debounce: true });
     }
   },
 );
 
 onBeforeUnmount(() => {
+  clearScheduledModelPreflight();
   stopManagedSessionRefreshTimer();
 });
 
@@ -639,6 +767,15 @@ async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<v
   }
 }
 
+async function refreshSelectedProvider(options: { forceModels?: boolean } = {}): Promise<void> {
+  if (!props.open || !selectedProviderId.value) return;
+  clearScheduledModelPreflight();
+  void loadManagedSessions();
+  void loadOpenModelSettings();
+  void loadProviderModels({ refresh: options.forceModels });
+  await runPreflight({ refreshModels: options.forceModels });
+}
+
 async function loadProviders(): Promise<void> {
   if (!props.open || loadingProviders.value) return;
   const requestVersion = modalStateVersion;
@@ -648,16 +785,15 @@ async function loadProviders(): Promise<void> {
     const nextProviders = await window.letagentsDesktop.workers.listAgentProviders();
     if (!isCurrentModalState(requestVersion)) return;
     providers.value = nextProviders;
-    await loadManagedSessions();
-    if (!isCurrentModalState(requestVersion)) return;
+    const previousProviderId = selectedProviderId.value;
     selectedProviderId.value = selectedProviderId.value
       && providers.value.some((provider) => provider.id === selectedProviderId.value)
       ? selectedProviderId.value
       : providers.value.find((provider) => provider.id === "codex")?.id || providers.value[0]?.id || null;
     syncPermissionProfileSelection();
-    if (selectedProviderId.value) {
-      void loadOpenModelSettings();
-      await runPreflight();
+    syncDeliveryModeSelection();
+    if (selectedProviderId.value && selectedProviderId.value === previousProviderId) {
+      await refreshSelectedProvider();
     }
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
@@ -685,6 +821,8 @@ async function startManagedAgent(): Promise<void> {
       deliveryMode: deliveryMode.value,
       permissionProfileId: selectedPermissionProfile.value?.id ?? null,
       cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,
+      model: selectedModel.value,
+      modelSource: selectedModelSource.value,
     });
     if (!isCurrentModalState(requestVersion)) return;
     setupMessage.value = result.message;
@@ -744,6 +882,93 @@ async function loadOpenModelSettings(): Promise<void> {
   }
 }
 
+async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<void> {
+  if (!props.open || !selectedProviderId.value || !showModelSelector.value) {
+    providerModels.value = null;
+    return;
+  }
+  const requestVersion = modalStateVersion;
+  const requestId = ++modelRequestId;
+  const requestProviderId = selectedProviderId.value;
+  loadingProviderModels.value = true;
+  try {
+    const result = await window.letagentsDesktop.workers.listAgentProviderModels(
+      requestProviderId,
+      {
+        roomIdentifier: props.roomIdentifier,
+        repoRootPath: props.repoRootPath,
+        cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
+        model: selectedModel.value,
+        modelSource: selectedModelSource.value,
+        refreshModels: options.refresh,
+      },
+    );
+    if (
+      isCurrentModalState(requestVersion) &&
+      requestId === modelRequestId &&
+      selectedProviderId.value === requestProviderId
+    ) {
+      providerModels.value = result;
+      syncSelectedProviderModelSelection(result);
+    }
+  } catch (error) {
+    if (
+      isCurrentModalState(requestVersion) &&
+      requestId === modelRequestId &&
+      selectedProviderId.value === requestProviderId
+    ) {
+      providerModels.value = {
+        providerId: requestProviderId,
+        status: "error",
+        models: [],
+        defaultModel: null,
+        error: error instanceof Error ? error.message : "Could not load provider models.",
+      };
+    }
+  } finally {
+    if (isCurrentModalState(requestVersion) && requestId === modelRequestId) {
+      loadingProviderModels.value = false;
+    }
+  }
+}
+
+function requestPreflight(options: { debounce?: boolean } = {}): void {
+  if (!props.open || !selectedProviderId.value) return;
+  clearScheduledModelPreflight();
+  invalidateCurrentPreflight();
+  if (options.debounce) {
+    modelPreflightTimer = window.setTimeout(() => {
+      modelPreflightTimer = null;
+      void runPreflight();
+    }, MODEL_PREFLIGHT_DEBOUNCE_MS);
+    return;
+  }
+  void runPreflight();
+}
+
+function invalidateCurrentPreflight(): void {
+  preflight.value = null;
+  setupConfirmation.value = null;
+  loadingPreflight.value = false;
+  preflightRequestId += 1;
+}
+
+function clearScheduledModelPreflight(): void {
+  if (modelPreflightTimer !== null) {
+    window.clearTimeout(modelPreflightTimer);
+    modelPreflightTimer = null;
+  }
+}
+
+function syncSelectedProviderModelSelection(
+  result: DesktopAgentProviderModelsResult | null = providerModels.value,
+): void {
+  if (selectedModelMode.value !== "option" || !selectedProviderModelId.value) return;
+  if (result?.status !== "ready") return;
+  if (result.models.some((option) => option.id === selectedProviderModelId.value)) return;
+  selectDefaultModel();
+}
+
 async function applyOpenModelSettings(input: {
   baseUrl?: string | null;
   model?: string | null;
@@ -761,6 +986,7 @@ async function applyOpenModelSettings(input: {
     openModelModel.value = status.model;
     openModelApiKey.value = "";
     setupMessage.value = "Model settings saved.";
+    await loadProviderModels();
     await runPreflight();
   } catch (error) {
     if (!isCurrentModalState(requestVersion)) return;
@@ -787,8 +1013,11 @@ function clearOpenModelApiKey(): Promise<void> {
 
 function selectProvider(providerId: DesktopAgentProviderId): void {
   modalStateVersion += 1;
+  clearScheduledModelPreflight();
   selectedProviderId.value = providerId;
+  resetModelSelection();
   syncPermissionProfileSelection();
+  syncDeliveryModeSelection();
   preflight.value = null;
   preflightRequestId += 1;
   loadingPreflight.value = false;
@@ -799,6 +1028,59 @@ function selectProvider(providerId: DesktopAgentProviderId): void {
   copyingExternalPrompt.value = false;
   setupConfirmation.value = null;
   setupMessage.value = null;
+}
+
+function syncDeliveryModeSelection(): void {
+  if (!shouldShowDeliveryModeSelector(selectedProvider.value)) {
+    deliveryMode.value = "desktop_events";
+  }
+}
+
+function resetModelSelection(): void {
+  clearScheduledModelPreflight();
+  selectedModelMode.value = "default";
+  selectedProviderModelId.value = "";
+  customModelId.value = "";
+  providerModels.value = null;
+  loadingProviderModels.value = false;
+  modelRequestId += 1;
+}
+
+function selectDefaultModel(): void {
+  selectedModelMode.value = "default";
+  selectedProviderModelId.value = "";
+}
+
+function selectProviderModel(option: DesktopAgentProviderModelOption): void {
+  selectedModelMode.value = "option";
+  selectedProviderModelId.value = option.id;
+}
+
+function selectCustomModel(): void {
+  selectedModelMode.value = "custom";
+}
+
+function modelChoiceValue(option: DesktopAgentProviderModelOption): string {
+  return `option:${option.id}`;
+}
+
+function handleModelChoiceChange(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value;
+  if (value === "default") {
+    selectDefaultModel();
+    return;
+  }
+  if (value === "custom") {
+    selectCustomModel();
+    return;
+  }
+  if (value.startsWith("option:")) {
+    const modelId = value.slice("option:".length);
+    const option = providerModelOptions.value.find((entry) => entry.id === modelId);
+    if (option) {
+      selectProviderModel(option);
+    }
+  }
 }
 
 function syncPermissionProfileSelection(): void {
@@ -842,7 +1124,7 @@ function managedAgentSessionDetail(session: DesktopManagedAgentSession): string 
     managedAgentSessionStatusLabel(session),
     managedAgentPermissionProfileLabel(session),
     session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
-    session.providerId === "open-model" ? session.model || null : null,
+    session.model || null,
     managedAgentRepoDetail(session),
   ].filter(Boolean).join(" - ");
 }
@@ -850,6 +1132,7 @@ function managedAgentSessionDetail(session: DesktopManagedAgentSession): string 
 function resetTransientState(): void {
   modalStateVersion += 1;
   preflightRequestId += 1;
+  clearScheduledModelPreflight();
   loadingProviders.value = false;
   loadingPreflight.value = false;
   setupBusy.value = false;
@@ -862,6 +1145,7 @@ function resetTransientState(): void {
   loadError.value = null;
   openModelApiKey.value = "";
   savingOpenModelSettings.value = false;
+  resetModelSelection();
 }
 
 function upsertManagedSession(session: DesktopManagedAgentSession): void {
@@ -893,8 +1177,9 @@ function handleDialogTab(event: KeyboardEvent): void {
   trapFocusInDialog(event, dialogElement.value);
 }
 
-async function runPreflight(): Promise<void> {
+async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<void> {
   if (!selectedProviderId.value) return;
+  clearScheduledModelPreflight();
   const requestProviderId = selectedProviderId.value;
   const requestVersion = modalStateVersion;
   const requestId = ++preflightRequestId;
@@ -909,6 +1194,9 @@ async function runPreflight(): Promise<void> {
         repoRootPath: props.repoRootPath,
         permissionProfileId: selectedPermissionProfile.value?.id ?? null,
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
+        model: selectedModel.value,
+        modelSource: selectedModelSource.value,
+        refreshModels: options.refreshModels,
       },
     );
     if (
