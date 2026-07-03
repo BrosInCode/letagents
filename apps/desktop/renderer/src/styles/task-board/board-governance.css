@@ -147,8 +147,7 @@
   gap: 12px;
 }
 
-.desktop-board-governance-grid div,
-.desktop-board-governance-mode {
+.desktop-board-governance-grid div {
   display: grid;
   gap: 10px;
   padding: 16px 18px;
@@ -158,9 +157,12 @@
 }
 
 .desktop-board-governance-mode {
-  grid-template-columns: auto 1fr;
+  display: inline-flex;
   align-items: center;
-  min-height: 68px;
+  justify-self: start;
+  gap: 14px;
+  min-height: 38px;
+  padding: 0 2px;
 }
 
 .desktop-board-governance-grid span,
@@ -174,10 +176,9 @@
   --desktop-segmented-gap: 3px;
   --desktop-segmented-padding: 3px;
   --desktop-segmented-radius: 8px;
-  --desktop-segmented-button-height: 34px;
-  --desktop-segmented-button-padding: 0 12px;
+  --desktop-segmented-button-height: 32px;
+  --desktop-segmented-button-padding: 0 11px;
   --desktop-segmented-button-radius: 6px;
-  justify-self: end;
 }
 
 .desktop-board-governance-candidates {
@@ -374,13 +375,15 @@
   }
 
   .desktop-board-governance-mode {
-    grid-template-columns: 1fr;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
     min-height: auto;
-    padding: 14px;
+    padding: 0 2px;
   }
 
   .desktop-board-governance-mode-control {
-    justify-self: stretch;
+    width: 100%;
   }
 
   .desktop-board-governance-section {
