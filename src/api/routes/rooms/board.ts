@@ -15,6 +15,7 @@ import {
   setRoomBoardManagerMode,
   type BoardIntentActionType,
   type BoardIntentPayload,
+  type BoardManagerAssignment,
   type Project,
 } from "../../db.js";
 import { type AuthenticatedRequest } from "../../http/helpers.js";
@@ -42,6 +43,13 @@ export interface RoomBoardRouteDeps {
     project: Project
   ): Promise<boolean>;
   normalizeOptionalString(value: unknown): string | null;
+  resolveOptionalWorkerIdentity?(input: {
+    req: AuthenticatedRequest;
+    res: Response;
+    room_id: string;
+    body: Record<string, unknown>;
+  }): Promise<ResolvedRequestAgentIdentity | null | "responded">;
+  getActiveBoardManagerForRoom?(roomId: string): Promise<BoardManagerAssignment | null>;
 }
 
 function hasAgentSessionCredentials(input: Record<string, unknown>): boolean {
@@ -97,18 +105,23 @@ function requesterLabel(
     ?? "participant";
 }
 
-async function authorizeBoardDecision(input: {
+export async function authorizeBoardDecision(input: {
   req: AuthenticatedRequest;
   res: Response;
   project: Project;
   workerIdentity: ResolvedRequestAgentIdentity | null;
   requireAdmin: RoomBoardRouteDeps["requireAdmin"];
+  getActiveBoardManagerForRoom?: (roomId: string) => Promise<BoardManagerAssignment | null>;
 }): Promise<boolean> {
   if (input.workerIdentity?.agent_session_id) {
-    const activeManager = await getActiveBoardManager(input.project.id);
+    const activeManager = await (input.getActiveBoardManagerForRoom ?? getActiveBoardManager)(input.project.id);
     if (activeManager?.agent_session_id === input.workerIdentity.agent_session_id) {
       return true;
     }
+    input.res.status(403).json({
+      error: "Only the active Board Manager can decide board intents with worker credentials.",
+    });
+    return false;
   }
   return input.requireAdmin(input.req, input.res, input.project);
 }
@@ -117,6 +130,9 @@ export function registerRoomBoardRoutes(
   app: Express,
   deps: RoomBoardRouteDeps
 ): void {
+  const resolveBoardWorkerIdentity = deps.resolveOptionalWorkerIdentity ?? resolveOptionalWorkerIdentity;
+  const getActiveBoardManagerForRoom = deps.getActiveBoardManagerForRoom ?? getActiveBoardManager;
+
   app.get(/^\/rooms\/(.+)\/board-settings$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -126,7 +142,7 @@ export function registerRoomBoardRoutes(
 
     const [settings, activeManager, pendingIntentCount] = await Promise.all([
       getRoomBoardSettings(project.id),
-      getActiveBoardManager(project.id),
+      getActiveBoardManagerForRoom(project.id),
       countBoardIntents({ room_id: project.id, status: "pending" }),
     ]);
     res.json({
@@ -221,7 +237,7 @@ export function registerRoomBoardRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const workerIdentity = await resolveOptionalWorkerIdentity({
+    const workerIdentity = await resolveBoardWorkerIdentity({
       req,
       res,
       room_id: project.id,
@@ -260,14 +276,21 @@ export function registerRoomBoardRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const workerIdentity = await resolveOptionalWorkerIdentity({
+    const workerIdentity = await resolveBoardWorkerIdentity({
       req,
       res,
       room_id: project.id,
       body,
     });
     if (workerIdentity === "responded") return;
-    if (!(await authorizeBoardDecision({ req, res, project, workerIdentity, requireAdmin: deps.requireAdmin }))) {
+    if (!(await authorizeBoardDecision({
+      req,
+      res,
+      project,
+      workerIdentity,
+      requireAdmin: deps.requireAdmin,
+      getActiveBoardManagerForRoom,
+    }))) {
       return;
     }
 
@@ -297,14 +320,21 @@ export function registerRoomBoardRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const body = (req.body ?? {}) as Record<string, unknown>;
-    const workerIdentity = await resolveOptionalWorkerIdentity({
+    const workerIdentity = await resolveBoardWorkerIdentity({
       req,
       res,
       room_id: project.id,
       body,
     });
     if (workerIdentity === "responded") return;
-    if (!(await authorizeBoardDecision({ req, res, project, workerIdentity, requireAdmin: deps.requireAdmin }))) {
+    if (!(await authorizeBoardDecision({
+      req,
+      res,
+      project,
+      workerIdentity,
+      requireAdmin: deps.requireAdmin,
+      getActiveBoardManagerForRoom,
+    }))) {
       return;
     }
 
