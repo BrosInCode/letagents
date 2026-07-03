@@ -6,6 +6,7 @@ export type AgentMessageActivationReason =
   | "explicit_other_mention"
   | "broadcast"
   | "reply_target"
+  | "other_reply_target"
   | "thread_participant"
   | "task_owner"
   | "unaddressed";
@@ -29,7 +30,7 @@ type MessageLike = {
     participants?: Array<{ sender?: unknown }> | null;
     latest_reply?: { sender?: unknown } | null;
   } | null;
-  reply_to?: { sender?: unknown } | null;
+  reply_to?: { sender?: unknown; source?: unknown } | null;
 };
 
 export type ActivationIdentity = {
@@ -135,6 +136,10 @@ export function decideAgentMessageActivation(
     return decision("activate", "reply_target");
   }
 
+  if (isAgentReplyTarget(message.reply_to) && !isThreadReply(message)) {
+    return decision("silent", "other_reply_target");
+  }
+
   if (isThreadReply(message) && threadParticipantsIncludeIdentity(message, identity)) {
     return decision("activate", "thread_participant");
   }
@@ -162,6 +167,10 @@ function isThreadReply(message: MessageLike): boolean {
   const ownId = normalizedString(message.id);
   const rootId = normalizedString(message.thread_root_id) || normalizedString(message.thread?.root_message_id);
   return Boolean(ownId && rootId && ownId !== rootId);
+}
+
+function isAgentReplyTarget(replyTo: MessageLike["reply_to"]): boolean {
+  return normalizeSender(replyTo?.source) === "agent";
 }
 
 function threadParticipantsIncludeIdentity(

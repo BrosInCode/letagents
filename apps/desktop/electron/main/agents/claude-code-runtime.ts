@@ -27,6 +27,9 @@ import {
 import {
   desktopEventPublicReplyText,
 } from "./codex-event-prompt.js";
+import {
+  shouldDeliverRoomStreamEventToManagedAgent,
+} from "./codex-event-routing.js";
 import { buildClaudeCodeDesktopEventPrompt } from "./claude-code-event-prompt.js";
 import {
   buildManagedAgentPermissionRoomText,
@@ -972,65 +975,7 @@ function shouldDeliverRoomStreamEventToClaudeCodeSession(
   session: DesktopClaudeCodeLiveSessionState,
   event: ManagedRoomEvent,
 ): boolean {
-  if (!canDeliverDesktopEventToClaudeCodeSession(session) || isOwnRoomStreamEvent(session, event)) {
-    return false;
-  }
-
-  if (event.type !== "task_update") {
-    return true;
-  }
-
-  const worker = toPublicClaudeCodeManagedAgentSession(session);
-  const workerKeys = [
-    worker.agentSessionId,
-    specificAgentKey(worker.agentKey),
-    worker.actorLabel,
-    worker.displayName,
-  ].map(normalizeKey).filter(Boolean);
-  const taskTargetKeys = [
-    specificAgentKey(event.task.assigneeAgentKey),
-    event.task.assignee,
-    ...event.task.activeLeases
-      .filter((lease) => lease.status === "active")
-      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey), lease.holderLabel]),
-  ].map(normalizeKey).filter(Boolean);
-
-  return !taskTargetKeys.length || workerKeys.some((key) => taskTargetKeys.includes(key));
-}
-
-function isOwnRoomStreamEvent(
-  session: DesktopClaudeCodeLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  if (event.type !== "message") {
-    return false;
-  }
-
-  const worker = toPublicClaudeCodeManagedAgentSession(session);
-  const message = event.message;
-  const messageStableKeys = [
-    message.agentIdentity?.agentSessionId,
-    specificAgentKey(message.agentIdentity?.agentKey),
-  ].map(normalizeKey).filter(Boolean);
-  const workerStableKeys = [
-    worker.agentSessionId,
-    specificAgentKey(worker.agentKey),
-  ].map(normalizeKey).filter(Boolean);
-  if (workerStableKeys.some((key) => messageStableKeys.includes(key))) {
-    return true;
-  }
-
-  const messageNames = [
-    message.actorLabel,
-    message.agentIdentity?.actorLabel,
-    message.agentIdentity?.displayName,
-    message.sender,
-  ].map(normalizeKey).filter(Boolean);
-  const workerNames = [
-    worker.actorLabel,
-    worker.displayName,
-  ].map(normalizeKey).filter(Boolean);
-  return Boolean(messageNames.length && workerNames.some((key) => messageNames.includes(key)));
+  return shouldDeliverRoomStreamEventToManagedAgent(toPublicClaudeCodeManagedAgentSession(session), event);
 }
 
 function isStopPhraseRoomStreamEvent(
@@ -1448,21 +1393,6 @@ function buildAgentActorLabel(input: {
 
 function isUsableAgentIdentity(identity: StoredAgentIdentityState | null): identity is StoredAgentIdentityState {
   return Boolean(identity?.canonical_key?.trim());
-}
-
-function normalizeKey(value: string | null | undefined): string {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function specificAgentKey(value: string | null | undefined): string {
-  const normalized = normalizeKey(value);
-  if (!normalized || !/[/:]/.test(normalized)) {
-    return "";
-  }
-  return normalized;
 }
 
 function appendRecentItem(
