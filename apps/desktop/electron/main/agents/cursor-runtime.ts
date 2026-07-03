@@ -17,6 +17,9 @@ import { buildRepoStatus } from "../../repo-status.js";
 import { looksLikeInviteCode } from "./codex-start-prompt.js";
 import { desktopEventPublicReplyText } from "./codex-event-prompt.js";
 import {
+  shouldDeliverRoomStreamEventToManagedAgent,
+} from "./codex-event-routing.js";
+import {
   isManagedRoomStreamEvent,
   type ManagedRoomEvent,
 } from "./codex-managed-agent-dispatch.js";
@@ -605,65 +608,7 @@ function shouldDeliverRoomStreamEventToCursorSession(
   session: DesktopCursorLiveSessionState,
   event: ManagedRoomEvent,
 ): boolean {
-  if (!canDeliverDesktopEventToCursorSession(session) || isOwnRoomStreamEvent(session, event)) {
-    return false;
-  }
-
-  if (event.type !== "task_update") {
-    return true;
-  }
-
-  const worker = toPublicCursorManagedAgentSession(session);
-  const workerKeys = [
-    worker.agentSessionId,
-    specificAgentKey(worker.agentKey),
-    worker.actorLabel,
-    worker.displayName,
-  ].map(normalizeKey).filter(Boolean);
-  const taskTargetKeys = [
-    specificAgentKey(event.task.assigneeAgentKey),
-    event.task.assignee,
-    ...event.task.activeLeases
-      .filter((lease) => lease.status === "active")
-      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey), lease.holderLabel]),
-  ].map(normalizeKey).filter(Boolean);
-
-  return !taskTargetKeys.length || workerKeys.some((key) => taskTargetKeys.includes(key));
-}
-
-function isOwnRoomStreamEvent(
-  session: DesktopCursorLiveSessionState,
-  event: ManagedRoomEvent,
-): boolean {
-  if (event.type !== "message") {
-    return false;
-  }
-
-  const worker = toPublicCursorManagedAgentSession(session);
-  const message = event.message;
-  const messageStableKeys = [
-    message.agentIdentity?.agentSessionId,
-    specificAgentKey(message.agentIdentity?.agentKey),
-  ].map(normalizeKey).filter(Boolean);
-  const workerStableKeys = [
-    worker.agentSessionId,
-    specificAgentKey(worker.agentKey),
-  ].map(normalizeKey).filter(Boolean);
-  if (workerStableKeys.some((key) => messageStableKeys.includes(key))) {
-    return true;
-  }
-
-  const messageNames = [
-    message.actorLabel,
-    message.agentIdentity?.actorLabel,
-    message.agentIdentity?.displayName,
-    message.sender,
-  ].map(normalizeKey).filter(Boolean);
-  const workerNames = [
-    worker.actorLabel,
-    worker.displayName,
-  ].map(normalizeKey).filter(Boolean);
-  return Boolean(messageNames.length && workerNames.some((key) => messageNames.includes(key)));
+  return shouldDeliverRoomStreamEventToManagedAgent(toPublicCursorManagedAgentSession(session), event);
 }
 
 function activeWorkForEvent(
@@ -1025,19 +970,4 @@ function buildAgentActorLabel(input: {
 
 function isUsableAgentIdentity(identity: StoredAgentIdentityState | null): identity is StoredAgentIdentityState {
   return Boolean(identity?.canonical_key?.trim());
-}
-
-function normalizeKey(value: string | null | undefined): string {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function specificAgentKey(value: string | null | undefined): string {
-  const normalized = normalizeKey(value);
-  if (!normalized || !/[/:]/.test(normalized)) {
-    return "";
-  }
-  return normalized;
 }

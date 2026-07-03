@@ -30,6 +30,7 @@ const {
   canDeliverDesktopEventToSession,
   isOwnRoomStreamEvent,
   isStopPhraseRoomStreamEvent,
+  shouldDeliverRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToSession,
 } = await import("../main/agents/codex-event-routing.js");
 const { buildCodexStartPrompt } = await import("../main/agents/codex-start-prompt.js");
@@ -109,7 +110,7 @@ const {
 const { buildClaudeCodeDesktopEventPrompt } = await import("../main/agents/claude-code-event-prompt.js");
 const { buildCursorDesktopEventPrompt } = await import("../main/agents/cursor-event-prompt.js");
 
-import type { DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
+import type { DesktopManagedAgentSession, DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
 import type {
   DesktopClaudeCodeLiveSessionState,
   DesktopCodexLiveSessionState,
@@ -218,6 +219,21 @@ function messageEvent(
       thread: null,
       replyTo: null,
     },
+    ...overrides,
+  };
+}
+
+function publicManagedAgentSession(
+  overrides: Partial<DesktopManagedAgentSession> = {},
+): DesktopManagedAgentSession {
+  return {
+    ...toPublicManagedAgentSession(liveSession()),
+    agentSessionId: "agent_session_1",
+    actorLabel: "RiverField",
+    agentKey: "EmmyMay/riverfield",
+    displayName: "RiverField",
+    status: "running",
+    deliveryMode: "desktop_events",
     ...overrides,
   };
 }
@@ -2084,6 +2100,199 @@ test("desktop event routing suppresses a renamed worker's own messages by stable
   assert.equal(isOwnRoomStreamEvent(session, ownEvent), true);
   assert.equal(isOwnRoomStreamEvent(session, otherEvent), false);
   assert.equal(isOwnRoomStreamEvent(session, genericOtherEvent), false);
+});
+
+test("desktop message routing treats top-level quote replies as direct replies", () => {
+  const directReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_reply",
+      text: "yes I want to, is there another way?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "You can promote me through the room controls.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_reply",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+  const targetWorkers = [
+    publicManagedAgentSession({ providerId: "codex", runtime: "codex" }),
+    publicManagedAgentSession({ providerId: "claude-code", runtime: "claude-code" }),
+    publicManagedAgentSession({ providerId: "cursor", runtime: "cursor" }),
+  ];
+  const otherWorker = publicManagedAgentSession({
+    id: "local_dawn",
+    providerId: "cursor",
+    runtime: "cursor",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+
+  for (const worker of targetWorkers) {
+    assert.equal(shouldDeliverRoomStreamEventToManagedAgent(worker, directReply), true);
+  }
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(otherWorker, directReply), false);
+});
+
+test("desktop message routing keeps broadcasts and unaddressed room messages deliverable", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const broadcastReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_broadcast_reply",
+      text: "@everyone what do you think?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "This is my read.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_broadcast_reply",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+  const unaddressed = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_unaddressed",
+      text: "can someone check this?",
+      replyTo: null,
+      threadRootId: "msg_unaddressed",
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, broadcastReply), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, broadcastReply), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, unaddressed), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, unaddressed), true);
+});
+
+test("desktop message routing keeps human quote replies deliverable", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const humanQuoteReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_human_quote",
+      text: "can someone check this?",
+      replyTo: {
+        id: "msg_human",
+        sender: "EmmyMay",
+        text: "Earlier context",
+        source: "browser",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_human_quote",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, humanQuoteReply), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, humanQuoteReply), true);
+});
+
+test("desktop message routing keeps real thread replies participant-aware", () => {
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const threadReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_thread_reply",
+      text: "what about this?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "This is my read.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_thread_root",
+      threadReplyToId: "msg_river",
+      thread: {
+        rootMessageId: "msg_thread_root",
+        replyCount: 3,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [
+          {
+            sender: "RiverField",
+            source: "agent",
+            messageCount: 1,
+            latestMessageId: "msg_river",
+          },
+          {
+            sender: "DawnRidge",
+            source: "agent",
+            messageCount: 1,
+            latestMessageId: "msg_dawn",
+          },
+        ],
+        lastReadMessageId: null,
+      },
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, threadReply), true);
+});
+
+test("desktop message routing lets explicit mentions override quote targets", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const mentionedOtherAgent = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_mention_quote",
+      text: "@DawnRidge can you check this?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "This is my read.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_mention_quote",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, mentionedOtherAgent), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, mentionedOtherAgent), false);
 });
 
 test("desktop event routing does not deliver queued events after a worker is stopped", () => {

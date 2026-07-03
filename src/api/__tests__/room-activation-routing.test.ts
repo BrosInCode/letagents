@@ -15,6 +15,15 @@ const worker = {
   session_kind: "worker" as const,
 };
 
+const otherWorker = {
+  actor_label: "DawnRidge | EmmyMay's agent | Agent",
+  agent_key: "EmmyMay/dawnridge",
+  agent_instance_id: "agent_instance_2",
+  agent_session_id: "agent_session_2",
+  display_name: "DawnRidge",
+  session_kind: "worker" as const,
+};
+
 function workLease(overrides: {
   actor_label?: string;
   agent_key?: string;
@@ -146,11 +155,95 @@ test("activation routing activates thread participants and direct reply targets"
       text: "try again",
       reply_to: {
         sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
       },
     }, worker),
     {
       decision: "activate",
       reason: "reply_target",
+      addressed: true,
+    },
+  );
+
+  assert.deepEqual(
+    decideAgentMessageActivation({
+      id: "msg_8",
+      sender: "EmmyMay",
+      text: "try again",
+      reply_to: {
+        sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
+      },
+    }, otherWorker),
+    {
+      decision: "silent",
+      reason: "other_reply_target",
+      addressed: false,
+    },
+  );
+});
+
+test("activation routing leaves human quote replies deliverable as unaddressed", () => {
+  assert.deepEqual(
+    decideAgentMessageActivation({
+      id: "msg_9",
+      sender: "EmmyMay",
+      text: "can someone check this?",
+      reply_to: {
+        sender: "EmmyMay",
+        source: "browser",
+      },
+    }, otherWorker),
+    {
+      decision: "unclear",
+      reason: "unaddressed",
+      addressed: false,
+    },
+  );
+});
+
+test("activation routing keeps top-level quote reply broadcasts fan-out", () => {
+  assert.deepEqual(
+    decideAgentMessageActivation({
+      id: "msg_9",
+      sender: "EmmyMay",
+      text: "@everyone what do you think?",
+      reply_to: {
+        sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
+      },
+    }, otherWorker),
+    {
+      decision: "activate",
+      reason: "broadcast",
+      addressed: true,
+    },
+  );
+});
+
+test("activation routing keeps thread replies participant-aware", () => {
+  assert.deepEqual(
+    decideAgentMessageActivation({
+      id: "msg_10",
+      sender: "EmmyMay",
+      text: "what about this?",
+      thread_root_id: "msg_3",
+      reply_to: {
+        sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
+      },
+      thread: {
+        root_message_id: "msg_3",
+        participants: [
+          { sender: "EmmyMay" },
+          { sender: "CometLively | EmmyMay's agent | Agent" },
+          { sender: "DawnRidge | EmmyMay's agent | Agent" },
+        ],
+      },
+    }, otherWorker),
+    {
+      decision: "activate",
+      reason: "thread_participant",
       addressed: true,
     },
   );
@@ -164,6 +257,7 @@ test("activation routing ignores non-chat at-tokens when resolving replies", () 
       text: "try npm install @types/node",
       reply_to: {
         sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
       },
     }, worker),
     {
@@ -180,6 +274,7 @@ test("activation routing ignores non-chat at-tokens when resolving replies", () 
       text: "email dev@example.com then try again",
       reply_to: {
         sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
       },
     }, worker),
     {
@@ -196,6 +291,7 @@ test("activation routing ignores non-chat at-tokens when resolving replies", () 
       text: "try adding @media print",
       reply_to: {
         sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
       },
     }, worker),
     {
@@ -214,6 +310,7 @@ test("activation routing silences explicit other-agent mentions before reply own
       text: "@NorthHarbor please review this",
       reply_to: {
         sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
       },
     }, worker),
     {
@@ -230,12 +327,30 @@ test("activation routing silences explicit other-agent mentions before reply own
       text: "@northharbor please review this",
       reply_to: {
         sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
       },
     }, worker),
     {
       decision: "silent",
       reason: "explicit_other_mention",
       addressed: false,
+    },
+  );
+
+  assert.deepEqual(
+    decideAgentMessageActivation({
+      id: "msg_13",
+      sender: "EmmyMay",
+      text: "@DawnRidge please review this",
+      reply_to: {
+        sender: "CometLively | EmmyMay's agent | Agent",
+        source: "agent",
+      },
+    }, otherWorker),
+    {
+      decision: "activate",
+      reason: "explicit_mention",
+      addressed: true,
     },
   );
 });
