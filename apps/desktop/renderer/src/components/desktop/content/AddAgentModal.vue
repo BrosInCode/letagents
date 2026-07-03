@@ -890,9 +890,21 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
   const requestVersion = modalStateVersion;
   const requestId = ++modelRequestId;
   const requestProviderId = selectedProviderId.value;
+  const listModels = window.letagentsDesktop.workers.listAgentProviderModels;
+  if (typeof listModels !== "function") {
+    providerModels.value = {
+      providerId: requestProviderId,
+      status: "unavailable",
+      models: [],
+      defaultModel: null,
+      error: "Restart the desktop app to load provider model options.",
+    };
+    loadingProviderModels.value = false;
+    return;
+  }
   loadingProviderModels.value = true;
   try {
-    const result = await window.letagentsDesktop.workers.listAgentProviderModels(
+    const result = await listModels(
       requestProviderId,
       {
         roomIdentifier: props.roomIdentifier,

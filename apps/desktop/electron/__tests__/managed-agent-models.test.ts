@@ -9,11 +9,13 @@ const tempDir = mkdtempSync(join(tmpdir(), "letagents-managed-agent-models-"));
 const {
   listDesktopAgentProviderModels,
   normalizeManagedAgentModel,
+  parseCodexModelsOutput,
   parseCursorModelsOutput,
   validateDesktopManagedAgentModel,
 } = await import("../main/agents/managed-agent-models.js");
 
 test.after(() => {
+  delete process.env.LETAGENTS_CODEX_BIN;
   delete process.env.LETAGENTS_CURSOR_AGENT_BIN;
   delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
   delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
@@ -52,6 +54,40 @@ test("Cursor model parser handles labels, defaults, duplicates, and empty lines"
   ]);
 });
 
+test("Codex model parser handles refreshed catalog JSON", () => {
+  const models = parseCodexModelsOutput(JSON.stringify({
+    models: [
+      {
+        slug: "gpt-5.5",
+        display_name: "GPT-5.5",
+        visibility: "list",
+        is_default: true,
+        base_instructions: "large prompt omitted",
+      },
+      {
+        slug: "codex-auto-review",
+        display_name: "Auto Review",
+        visibility: "hidden",
+      },
+      {
+        id: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        visibility: "list",
+      },
+      {
+        model: "gpt-5.5",
+        name: "Duplicate",
+        visibility: "list",
+      },
+    ],
+  }));
+
+  assert.deepEqual(models, [
+    { id: "gpt-5.5", label: "GPT-5.5", isDefault: true, source: "provider" },
+    { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", isDefault: false, source: "provider" },
+  ]);
+});
+
 test("known and custom model validation use the selected source intentionally", async () => {
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
@@ -69,9 +105,51 @@ test("known and custom model validation use the selected source intentionally", 
 
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
+    model: "opusplan",
+    modelSource: "known",
+  }), { model: "opusplan", error: null });
+
+  assert.deepEqual(await validateDesktopManagedAgentModel({
+    providerId: "claude-code",
+    model: "sonnet[1m]",
+    modelSource: "known",
+  }), { model: "sonnet[1m]", error: null });
+
+  assert.deepEqual(await validateDesktopManagedAgentModel({
+    providerId: "claude-code",
     model: "unknown-claude-model",
     modelSource: "custom",
   }), { model: "unknown-claude-model", error: null });
+});
+
+test("Codex model discovery reads debug model catalog output", async () => {
+  const codexBin = join(tempDir, "codex-debug-models");
+  writeFileSync(
+    codexBin,
+    [
+      "#!/usr/bin/env node",
+      "if (process.argv[2] !== 'debug' || process.argv[3] !== 'models') process.exit(2);",
+      "console.log(JSON.stringify({ models: [",
+      "  { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list', is_default: true },",
+      "  { slug: 'codex-auto-review', display_name: 'Auto Review', visibility: 'hidden' },",
+      "  { slug: 'gpt-5.4-mini', display_name: 'GPT-5.4 Mini', visibility: 'list' }",
+      "] }));",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.LETAGENTS_CODEX_BIN = codexBin;
+
+  const result = await listDesktopAgentProviderModels("codex", { refreshModels: true });
+  assert.equal(result.status, "ready");
+  assert.equal(result.defaultModel, "gpt-5.5");
+  assert.deepEqual(result.models.map((model) => model.id), ["gpt-5.5", "gpt-5.4-mini"]);
+
+  assert.deepEqual(await validateDesktopManagedAgentModel({
+    providerId: "codex",
+    model: "gpt-5.4-mini",
+    modelSource: "provider",
+  }), { model: "gpt-5.4-mini", error: null });
 });
 
 test("Cursor discovered model validation blocks stale provider ids", async () => {

@@ -32,13 +32,18 @@ type ExecOptions = {
 const MODEL_LIST_CACHE_MS = 60_000;
 const MODEL_LIST_ERROR_CACHE_MS = 10_000;
 const MODEL_LIST_TIMEOUT_MS = 10_000;
+const MODEL_LIST_MAX_BUFFER = 8 * 1024 * 1024;
 const modelListCache = new Map<string, ModelListCacheEntry>();
 
 const CLAUDE_CODE_KNOWN_MODELS: DesktopAgentProviderModelOption[] = [
-  { id: "sonnet", label: "Sonnet", source: "known" },
-  { id: "opus", label: "Opus", source: "known" },
-  { id: "haiku", label: "Haiku", source: "known" },
-  { id: "fable", label: "Fable", source: "known" },
+  { id: "fable", label: "Fable 5", source: "known" },
+  { id: "opus", label: "Opus 4.8", source: "known" },
+  { id: "sonnet", label: "Sonnet 5", source: "known" },
+  { id: "haiku", label: "Haiku 4.5", source: "known" },
+  { id: "best", label: "Best available", source: "known" },
+  { id: "opusplan", label: "Opus Plan", source: "known" },
+  { id: "sonnet[1m]", label: "Sonnet 1M", source: "known" },
+  { id: "opus[1m]", label: "Opus 1M", source: "known" },
 ];
 
 export function normalizeManagedAgentModel(value: string | null | undefined): string | null {
@@ -65,12 +70,57 @@ export async function listDesktopAgentProviderModels(
     return modelResult(providerId, "ready", CLAUDE_CODE_KNOWN_MODELS, null, null);
   }
   if (providerId === "codex") {
-    return modelResult(providerId, "ready", [], null, null);
+    return listCodexModels(input);
   }
   if (providerId === "open-model") {
     return listOpenModelModels(input);
   }
   return modelResult(providerId, "unavailable", [], null, "Model selection is only available for desktop-managed agents.");
+}
+
+async function listCodexModels(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopAgentProviderModelsResult> {
+  const command = process.env.LETAGENTS_CODEX_BIN || "codex";
+  const cacheKey = `codex:${command}`;
+  const forceRefresh = Boolean(input.refreshModels);
+  const cached = modelListCache.get(cacheKey);
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+    return cloneModelResult(cached.result);
+  }
+
+  const refreshed = await execFileWithTimeout(command, ["debug", "models"]);
+  let models = parseCodexModelsOutput(refreshed.stdout);
+  let next: DesktopAgentProviderModelsResult | null = null;
+  if (refreshed.ok && models.length) {
+    next = modelResult("codex", "ready", models, codexDefaultModel(models), null);
+  } else {
+    const bundled = await execFileWithTimeout(command, ["debug", "models", "--bundled"]);
+    models = parseCodexModelsOutput(bundled.stdout);
+    next = bundled.ok && models.length
+      ? modelResult("codex", "ready", models, codexDefaultModel(models), null)
+      : modelResult(
+        "codex",
+        refreshed.ok || bundled.ok ? "unavailable" : "error",
+        [],
+        null,
+        firstNonEmptyLine(refreshed.stderr) ||
+          firstNonEmptyLine(bundled.stderr) ||
+          refreshed.error ||
+          bundled.error ||
+          "Codex did not return any models.",
+      );
+  }
+
+  if (!forceRefresh && next.status !== "ready" && cached?.result.status === "ready") {
+    return cloneModelResult(cached.result);
+  }
+
+  modelListCache.set(cacheKey, {
+    expiresAt: Date.now() + (next.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
+    result: next,
+  });
+  return cloneModelResult(next);
 }
 
 export async function validateDesktopManagedAgentModel(input: {
@@ -274,7 +324,61 @@ export function parseCursorModelsOutput(output: string): DesktopAgentProviderMod
   return models;
 }
 
+export function parseCodexModelsOutput(output: string): DesktopAgentProviderModelOption[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return [];
+  }
+
+  const modelEntries = codexModelEntries(parsed);
+  const seen = new Set<string>();
+  const models: DesktopAgentProviderModelOption[] = [];
+  for (const entry of modelEntries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (record.hidden === true) continue;
+    const visibility = typeof record.visibility === "string" ? record.visibility.toLowerCase() : null;
+    if (visibility && visibility !== "list") continue;
+
+    const id = firstStringField(record, ["slug", "id", "model"]);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    models.push({
+      id,
+      label: firstStringField(record, ["display_name", "displayName", "name"]) || id,
+      isDefault: Boolean(record.is_default || record.isDefault || record.default),
+      source: "provider",
+    });
+  }
+  return models;
+}
+
+function codexModelEntries(parsed: unknown): unknown[] {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== "object") return [];
+  const record = parsed as Record<string, unknown>;
+  if (Array.isArray(record.models)) return record.models;
+  if (Array.isArray(record.data)) return record.data;
+  return [];
+}
+
+function firstStringField(record: Record<string, unknown>, fields: string[]): string | null {
+  for (const field of fields) {
+    const value = record[field];
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 function cursorDefaultModel(models: DesktopAgentProviderModelOption[]): string | null {
+  return models.find((model) => model.isDefault)?.id ?? null;
+}
+
+function codexDefaultModel(models: DesktopAgentProviderModelOption[]): string | null {
   return models.find((model) => model.isDefault)?.id ?? null;
 }
 
@@ -301,6 +405,7 @@ function execFileWithTimeout(
       args,
       {
         timeout: MODEL_LIST_TIMEOUT_MS,
+        maxBuffer: MODEL_LIST_MAX_BUFFER,
         cwd: options.cwd,
         env: options.env,
       },
