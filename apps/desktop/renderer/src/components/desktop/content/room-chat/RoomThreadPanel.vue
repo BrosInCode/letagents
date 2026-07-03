@@ -216,10 +216,10 @@
           :data-active="index === activeMentionIndex"
           :data-testid="`room-thread-mention-option-${candidate.participantKey}`"
           type="button"
-          @click="insertMention(candidate.displayName)"
+          @click="insertMention(candidate.insertText)"
         >
           <span>{{ candidate.displayName }}</span>
-          <small>{{ candidate.kind === 'agent' ? 'Agent' : 'Human' }}</small>
+          <small>{{ candidate.label }}</small>
         </button>
       </div>
       <div class="room-thread-composer-footer">
@@ -256,10 +256,7 @@ import type {
   DesktopRoomMessageThreadSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
-import {
-  isMentionableRoomParticipant,
-  sortMentionableRoomParticipants,
-} from "../../../../domain/participants";
+import { roomMentionCandidates } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import DesktopGitHubEventCard from "../desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "../desktop-chat-message/DesktopMessageAttachments.vue";
@@ -338,11 +335,7 @@ const canSend = computed(() =>
 );
 const mentionOpen = computed(() => mentionQuery.value !== null && mentionCandidates.value.length > 0);
 const mentionCandidates = computed(() => {
-  const query = (mentionQuery.value || "").toLowerCase();
-  return sortMentionableRoomParticipants(props.participants
-    .filter(isMentionableRoomParticipant)
-    .filter((participant) => participant.displayName.toLowerCase().includes(query)))
-    .slice(0, 6);
+  return roomMentionCandidates(props.participants, mentionQuery.value);
 });
 
 watch(
@@ -485,7 +478,7 @@ function handleEnterKey(event: KeyboardEvent): void {
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];
-    if (candidate) insertMention(candidate.displayName);
+    if (candidate) insertMention(candidate.insertText);
     return;
   }
   if (event.metaKey || event.ctrlKey || event.shiftKey) {
@@ -507,8 +500,8 @@ function handleMentionArrow(event: KeyboardEvent, delta: number): void {
   activeMentionIndex.value = (activeMentionIndex.value + delta + mentionCandidates.value.length) % mentionCandidates.value.length;
 }
 
-function insertMention(displayName: string): void {
-  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._-]*)$/, `$1@${displayName} `);
+function insertMention(mentionText: string): void {
+  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._-]*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
   void nextTick(() => textareaElement.value?.focus());
 }

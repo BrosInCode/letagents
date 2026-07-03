@@ -1,6 +1,21 @@
 import type { DesktopParticipantSummary } from "../../../electron/ipc-types";
 
 const AGENT_RUNTIME_PREFIXES = ["antigravity", "claude", "codex", "orchestrator"] as const;
+const EVERYONE_MENTION_CANDIDATE: RoomMentionCandidate = {
+  participantKey: "room:everyone",
+  kind: "broadcast",
+  displayName: "everyone",
+  insertText: "everyone",
+  label: "Everyone",
+};
+
+export interface RoomMentionCandidate {
+  participantKey: string;
+  kind: DesktopParticipantSummary["kind"] | "broadcast";
+  displayName: string;
+  insertText: string;
+  label: string;
+}
 
 function normalizeDisplayName(value: string | null | undefined): string {
   return String(value ?? "").trim();
@@ -64,6 +79,32 @@ export function sortMentionableRoomParticipants<T extends Pick<
     mentionPriority(left) - mentionPriority(right) ||
     left.displayName.localeCompare(right.displayName)
   );
+}
+
+export function roomMentionCandidates(
+  participants: readonly DesktopParticipantSummary[],
+  query: string | null | undefined,
+  limit = 6,
+): RoomMentionCandidate[] {
+  const normalizedQuery = normalizeDisplayName(query).toLowerCase();
+  const candidates: RoomMentionCandidate[] = [];
+  if ("everyone".includes(normalizedQuery)) {
+    candidates.push(EVERYONE_MENTION_CANDIDATE);
+  }
+
+  candidates.push(...sortMentionableRoomParticipants(participants
+    .filter(isMentionableRoomParticipant)
+    .filter((participant) => participant.displayName.toLowerCase() !== "everyone")
+    .filter((participant) => participant.displayName.toLowerCase().includes(normalizedQuery)))
+    .map((participant) => ({
+      participantKey: participant.participantKey,
+      kind: participant.kind,
+      displayName: participant.displayName,
+      insertText: participant.displayName,
+      label: participant.kind === "agent" ? "Agent" : "Human",
+    })));
+
+  return candidates.slice(0, limit);
 }
 
 function mentionPriority(

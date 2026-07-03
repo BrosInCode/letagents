@@ -13,6 +13,7 @@ import type {
 } from "../../electron/ipc-types";
 import {
   isMentionableRoomParticipant,
+  roomMentionCandidates,
   sortMentionableRoomParticipants,
 } from "../src/domain/participants";
 import { isIdleReasoningSession } from "../src/domain/reasoning";
@@ -490,6 +491,37 @@ describe("room chat helpers", () => {
     assert.equal(cappedCandidates.length, 6);
     assert.equal(cappedCandidates[0].displayName, "LumenVale");
     assert.equal(cappedCandidates.some((candidate) => candidate.displayName === "Human6"), false);
+  });
+
+  it("adds @everyone as the first room mention candidate", () => {
+    const candidates = roomMentionCandidates([
+      participant({
+        participantKey: "human:emmy",
+        displayName: "EmmyMay",
+        githubLogin: "emmymay",
+      }),
+      participant({
+        participantKey: "agent-presence:lumenvale",
+        kind: "agent",
+        displayName: "LumenVale",
+        actorLabel: "LumenVale",
+        agentKey: "cursor/lumenvale",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+    ], "");
+
+    assert.equal(candidates[0]?.participantKey, "room:everyone");
+    assert.equal(candidates[0]?.displayName, "everyone");
+    assert.equal(candidates[0]?.insertText, "everyone");
+    assert.equal(candidates[0]?.label, "Everyone");
+    assert.equal(candidates[1]?.displayName, "LumenVale");
+  });
+
+  it("filters the @everyone mention candidate by query", () => {
+    assert.equal(roomMentionCandidates([], "eve")[0]?.insertText, "everyone");
+    assert.equal(roomMentionCandidates([], "lumen").length, 0);
   });
 
   it("maps GitHub room messages to desktop event cards", () => {
