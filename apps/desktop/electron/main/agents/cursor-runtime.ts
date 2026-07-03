@@ -48,6 +48,11 @@ import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
 import {
+  createLocalDesktopManagedAgentWorkerSession,
+  shouldUseCloudDesktopManagedAgentWorkerSession,
+  resolveDesktopManagedAgentWorkerRegistration,
+} from "./managed-agent-local-worker-session.js";
+import {
   getCurrentCursorLiveSession,
   getOrCreateDesktopHostId,
   getStoredAgentIdentityForRuntimeKey,
@@ -662,17 +667,37 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
 async function registerDesktopManagedCursorWorker(
   input: RegisterCursorWorkerInput,
 ): Promise<StoredAgentSessionState> {
+  const runtime = `cursor:${input.token}`;
+  const agentInstanceId = `desktop-cursor:${input.token}`;
+  const registrationLiveness = cursorSessionLivenessRegistration(runtime, input.token);
+  const registration = await resolveDesktopManagedAgentWorkerRegistration({
+    roomIdentifier: input.roomIdentifier,
+  });
+  const localSession = registration.storage.effectiveMode === "local"
+    ? await createLocalDesktopManagedAgentWorkerSession({
+      roomIdentifier: input.roomIdentifier,
+      runtime,
+      agentInstanceId,
+      displayName: input.displayName,
+      ideLabel: "Cursor",
+      repoBranch: input.repoBranch,
+      registrationLiveness,
+    }, registration.storage)
+    : null;
+  if (localSession) {
+    return localSession;
+  }
+
   const identity = await ensureDesktopManagedCursorIdentity(input.displayName);
   const actorKey = normalizeDisplayText(identity.canonical_key, "");
   if (!actorKey) {
     throw new Error("LetAgents desktop Cursor identity is missing an actor key.");
   }
 
-  const runtime = `cursor:${input.token}`;
-  const agentInstanceId = `desktop-cursor:${input.token}`;
   const { apiFetch } = await import("../auth.js");
+  const cloudRoomIdentifier = registration.cloudRoomIdentifier;
   const created = await apiFetch<AgentSessionCreateResponse>(
-    `/rooms/${encodeURIComponent(input.roomIdentifier)}/agent-sessions`,
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -685,13 +710,13 @@ async function registerDesktopManagedCursorWorker(
         session_kind: "worker",
         runtime,
         repo_branch: input.repoBranch,
-        registration_liveness: cursorSessionLivenessRegistration(runtime, input.token),
+        registration_liveness: registrationLiveness,
       }),
     },
   );
 
   return saveAgentSession(toStoredCursorAgentSession(created, {
-    roomIdentifier: input.roomIdentifier,
+    roomIdentifier: cloudRoomIdentifier,
     runtime,
     identity,
     agentInstanceId,
@@ -703,6 +728,11 @@ async function disconnectDesktopManagedCursorWorker(
   session: StoredAgentSessionState | null,
 ): Promise<void> {
   if (!session?.session_id || !session.session_token) {
+    return;
+  }
+
+  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
+    markAgentSessionEnded(session.session_id);
     return;
   }
 

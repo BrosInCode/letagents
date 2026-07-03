@@ -6,6 +6,9 @@ import test from "node:test";
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-"));
 process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
+process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
+process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
+process.env.LETAGENTS_LOCAL_PROFILE_PATH = join(tempDir, "local-profile.json");
 const cursorSourceHome = join(tempDir, "cursor-source-home");
 mkdirSync(join(cursorSourceHome, ".cursor"), { recursive: true });
 writeFileSync(join(cursorSourceHome, ".cursor", "mcp.json"), '{"mcpServers":{"filesystem":{"command":"npx"}}}\n');
@@ -35,6 +38,9 @@ import type { StoredAgentSessionState } from "../main/agents/state.js";
 
 test.after(() => {
   delete process.env.LETAGENTS_STATE_PATH;
+  delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
+  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
+  delete process.env.LETAGENTS_LOCAL_PROFILE_PATH;
   delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -213,6 +219,57 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(getStoredCursorLiveSession(result.session.id)?.cursor_mcp_policy, "filter_letagents");
   assert.equal(preflightInputs[0]?.permissionProfileId, "read_only");
   assert.equal(preflightInputs[0]?.cursorMcpPolicy, "filter_letagents");
+});
+
+test("Cursor runtime starts and stops in a local room without cloud worker registration", async () => {
+  resetState();
+  const { createLocalRoom } = await import("../main/rooms/local-store.js");
+  const roomIdentifier = "local_cursor_start";
+  await createLocalRoom({
+    roomIdentifier,
+    displayName: "Cursor Local",
+  });
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => {
+    fetchCalls += 1;
+    throw new Error("local room start/stop should not call the cloud API");
+  }) as typeof fetch;
+  const runtime = createDesktopCursorRuntime({
+    runner: {
+      async runTurn(): Promise<CursorTurnResult> {
+        throw new Error("runTurn should not be called during start");
+      },
+    },
+    preflight: async () => readyPreflight(),
+    emitSessionUpdate: () => undefined,
+    now: () => "2026-06-30T00:00:00.000Z",
+  });
+
+  try {
+    const result = await runtime.start({
+      providerId: "cursor",
+      roomIdentifier,
+      roomDisplayName: "Cursor Local",
+      repoRootPath: tempDir,
+      deliveryMode: "desktop_events",
+    });
+    const workerSession = getStoredAgentSession(result.session.agentSessionId);
+
+    assert.equal(result.session.providerId, "cursor");
+    assert.equal(result.session.roomIdentifier, roomIdentifier);
+    assert.ok(result.session.agentSessionId?.startsWith("local_agent_session_"));
+    assert.equal(workerSession?.room_id, roomIdentifier);
+    assert.match(workerSession?.session_token ?? "", /^local_agent_token_/);
+    assert.equal(workerSession?.ide_label, "Cursor");
+    assert.match(workerSession?.agent_key ?? "", /^local\/.+\/cursor\//);
+
+    await runtime.stop({ sessionId: result.session.id });
+    assert.ok(getStoredAgentSession(result.session.agentSessionId)?.ended_at);
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Cursor runtime persists selected MCP policy and reuses it for event turns", async () => {

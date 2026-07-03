@@ -52,9 +52,13 @@ export async function persistDesktopManagedAgentLocalReply(input: {
 }
 
 function desktopManagedAgentReplySender(workerSession: StoredAgentSessionState): string {
+  const actorLabel = workerSession.actor_label?.trim();
+  if (actorLabel?.includes(" | ")) {
+    return actorLabel;
+  }
   const displayName = workerSession.display_name?.trim();
   if (!displayName) {
-    return workerSession.actor_label?.trim() || "Codex";
+    return "Codex";
   }
   const ownerLabel = workerSession.owner_label?.trim() || "Local desktop";
   const ideLabel = workerSession.ide_label?.trim() || "Codex";
