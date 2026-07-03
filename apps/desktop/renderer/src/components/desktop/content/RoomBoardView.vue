@@ -10,7 +10,7 @@
           <div class="desktop-board-manager-status">
             <button
               ref="boardManagerTriggerElement"
-              class="desktop-board-manager-pill"
+              class="desktop-board-primary-action desktop-board-manager-pill"
               type="button"
               :data-mode="boardManagerMode"
               :data-has-pending="boardPendingIntentCount > 0"
@@ -21,8 +21,14 @@
               @click="openGovernance"
             >
               <span class="desktop-board-manager-dot" aria-hidden="true"></span>
-              <strong>{{ boardManagerLabel }}</strong>
-              <span v-if="boardPendingIntentCount > 0">{{ boardPendingIntentCount }} pending</span>
+              <strong>Manager</strong>
+              <span
+                v-if="boardPendingIntentCount > 0"
+                class="desktop-board-manager-pending-count"
+                aria-label="Pending board intents"
+              >
+                {{ boardPendingIntentCount }}
+              </span>
             </button>
           </div>
           <button
@@ -258,6 +264,7 @@
       :governance="governance"
       :active-section="activeGovernanceSection"
       :selected-candidate-id="selectedCandidateId"
+      :live-agents="liveBoardManagerAgents"
       @close="closeGovernance"
       @update:active-section="activeGovernanceSection = $event"
       @update:selected-candidate-id="selectedCandidateId = $event"
@@ -410,6 +417,27 @@ const localWorker = computed(() =>
     && ["connected", "away"].includes(worker.state)
   ) || null
 );
+
+const liveBoardManagerAgents = computed(() => {
+  const seenSessionIds = new Set<string>();
+  const agents: DesktopAgentPresence[] = [];
+  for (const presence of props.presence) {
+    if (
+      presence.sessionKind !== "worker"
+      || !presence.agentSessionId
+      || presence.freshness !== "active"
+      || presence.activityState === "offline"
+    ) {
+      continue;
+    }
+    if (seenSessionIds.has(presence.agentSessionId)) {
+      continue;
+    }
+    seenSessionIds.add(presence.agentSessionId);
+    agents.push(presence);
+  }
+  return agents;
+});
 
 const boardManagerMode = computed(() =>
   props.boardSettings?.managerMode || "manager_optional"

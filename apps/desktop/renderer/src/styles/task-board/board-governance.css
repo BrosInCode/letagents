@@ -6,20 +6,22 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgb(8 10 16 / 0.55);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  backdrop-filter: blur(2px);
 }
 
 .desktop-board-governance-panel {
-  width: min(720px, 100%);
-  max-height: min(80vh, 860px);
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(78vh, 760px);
   overflow: auto;
   display: grid;
-  gap: 16px;
-  padding: 20px;
-  border-radius: 18px;
-  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.08));
-  background: var(--desktop-surface-elevated, #171a22);
-  box-shadow: 0 24px 80px rgb(0 0 0 / 0.35);
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.5);
 }
 
 .desktop-board-governance-header {
@@ -31,25 +33,36 @@
 
 .desktop-board-governance-header span {
   display: block;
-  font-size: 12px;
-  text-transform: uppercase;
+  font-size: 0.72rem;
+  font-weight: 800;
   letter-spacing: 0.08em;
-  color: var(--desktop-text-muted, #9aa3b2);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
 }
 
 .desktop-board-governance-header h2 {
   margin: 4px 0 0;
-  font-size: 20px;
+  font-size: 1.45rem;
+  line-height: 1.1;
 }
 
 .desktop-board-governance-close,
 .desktop-board-secondary-action {
-  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.12));
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: transparent;
-  color: inherit;
-  padding: 8px 14px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
   cursor: pointer;
+}
+
+.desktop-board-governance-close:hover,
+.desktop-board-secondary-action:hover:not(:disabled) {
+  border-color: var(--border-accent);
+  background: var(--bg-elevated);
 }
 
 .desktop-board-governance-sections {
@@ -59,16 +72,16 @@
 .desktop-board-governance-error,
 .desktop-board-governance-loading {
   margin: 0;
-  color: var(--desktop-text-muted, #9aa3b2);
+  color: var(--text-secondary);
 }
 
 .desktop-board-governance-error {
-  color: #ff8f8f;
+  color: var(--red);
 }
 
 .desktop-board-governance-body {
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
 .desktop-board-governance-warnings {
@@ -79,37 +92,42 @@
 .desktop-board-governance-warnings p {
   margin: 0;
   padding: 10px 12px;
-  border-radius: 12px;
-  background: rgb(255 255 255 / 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
 }
 
 .desktop-board-governance-warnings p[data-severity="error"] {
-  background: rgb(220 70 70 / 0.12);
+  border-color: color-mix(in srgb, var(--red) 34%, var(--border));
+  background: var(--red-dim);
 }
 
 .desktop-board-governance-warnings p[data-severity="warning"] {
-  background: rgb(220 160 40 / 0.12);
+  border-color: color-mix(in srgb, var(--amber) 34%, var(--border));
+  background: var(--amber-dim);
 }
 
 .desktop-board-governance-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .desktop-board-governance-grid div,
 .desktop-board-governance-mode {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   padding: 12px;
-  border-radius: 12px;
-  background: rgb(255 255 255 / 0.03);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
 }
 
 .desktop-board-governance-grid span,
 .desktop-board-governance-mode > span {
-  font-size: 12px;
-  color: var(--desktop-text-muted, #9aa3b2);
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--text-secondary);
 }
 
 .desktop-board-governance-candidates {
@@ -117,9 +135,35 @@
   gap: 10px;
 }
 
-.desktop-board-governance-candidates h3 {
+.desktop-board-governance-candidates-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.desktop-board-governance-candidates h3,
+.desktop-board-governance-candidates-heading strong {
   margin: 0;
-  font-size: 14px;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.desktop-board-governance-candidates-heading strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.desktop-board-governance-candidates > p,
+.desktop-board-governance-section > p {
+  margin: 0;
+  color: var(--text-secondary);
 }
 
 .desktop-board-governance-candidate {
@@ -128,22 +172,49 @@
   gap: 10px;
   align-items: start;
   padding: 12px;
-  border-radius: 12px;
-  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.08));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  cursor: pointer;
 }
 
-.desktop-board-governance-candidate span {
+.desktop-board-governance-candidate:hover {
+  border-color: var(--border-accent);
+  background: var(--bg-elevated);
+}
+
+.desktop-board-governance-candidate[data-current="true"] {
+  border-color: var(--border-accent);
+}
+
+.desktop-board-governance-candidate input {
+  margin-top: 2px;
+  accent-color: var(--text);
+}
+
+.desktop-board-governance-candidate > span {
   display: grid;
-  gap: 2px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .desktop-board-governance-candidate strong {
-  font-size: 14px;
+  overflow: hidden;
+  min-width: 0;
+  font-size: 0.92rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-board-governance-candidate span span {
-  font-size: 12px;
-  color: var(--desktop-text-muted, #9aa3b2);
+  overflow: hidden;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desktop-board-governance-actions {
@@ -157,8 +228,9 @@
   display: grid;
   gap: 8px;
   padding: 12px;
-  border-radius: 12px;
-  border: 1px solid var(--desktop-border-subtle, rgb(255 255 255 / 0.08));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
 }
 
 .desktop-board-governance-intent header,
@@ -176,7 +248,7 @@
 .desktop-board-governance-intent p,
 .desktop-board-governance-audit-entry p {
   margin: 0;
-  font-size: 12px;
-  color: var(--desktop-text-muted, #9aa3b2);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
   word-break: break-word;
 }

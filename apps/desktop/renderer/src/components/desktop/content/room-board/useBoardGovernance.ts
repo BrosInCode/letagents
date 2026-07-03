@@ -31,13 +31,12 @@ export function useBoardGovernance(roomIdentifier: string) {
   const governanceBusy = ref(false);
   const governanceError = ref<string | null>(null);
   const governance = ref<DesktopBoardGovernanceSnapshot | null>(null);
-  const activeSection = ref<DesktopBoardGovernanceSection>("overview");
+  const activeSection = ref<DesktopBoardGovernanceSection>("manager");
   const selectedCandidateId = ref<string | null>(null);
 
   const sections = computed(() => [
-    { id: "overview" as const, label: "Overview" },
     { id: "manager" as const, label: "Manager" },
-    { id: "pending" as const, label: "Pending", count: governance.value?.pendingIntentCount ?? 0 },
+    { id: "pending" as const, label: "Intents", count: governance.value?.pendingIntentCount ?? 0 },
     { id: "audit" as const, label: "Audit" },
   ]);
 
