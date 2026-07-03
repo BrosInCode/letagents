@@ -321,6 +321,18 @@ test("Claude Code runner options lock down ambient MCP and blocked room tools", 
   );
 });
 
+test("Claude Code runner options pass a selected model and omit provider default", () => {
+  assert.equal(buildClaudeCodeQueryOptions({
+    prompt: "hello",
+    cwd: tempDir,
+    model: "  sonnet  ",
+  }).model, "sonnet");
+  assert.equal(buildClaudeCodeQueryOptions({
+    prompt: "hello",
+    cwd: tempDir,
+  }).model, undefined);
+});
+
 test("Claude Code runtime starts, lists, and inspects a desktop-managed worker", async () => {
   resetState();
   const { runtime } = createRuntimeHarness({
@@ -506,18 +518,23 @@ test("Claude Code runtime delivers room events into the SDK runner and persists 
     roomIdentifier: "room_1",
     repoRootPath: tempDir,
     deliveryMode: "desktop_events",
+    model: "sonnet",
+    modelSource: "known",
   });
 
   runtime.dispatchRoomStreamEvent(messageEvent());
   await runtime.waitForIdle();
 
   assert.equal(prompts.length, 1);
+  assert.equal(started.session.model, "sonnet");
+  assert.equal(prompts[0]?.model, "sonnet");
   assert.match(prompts[0]?.prompt ?? "", /Desktop-delivered LetAgents room event/);
   assert.match(prompts[0]?.prompt ?? "", /Do not call raw LetAgents MCP room tools/);
   assert.match(prompts[0]?.prompt ?? "", /LETAGENTS_ROOM_TOOL_REQUEST/);
   assert.equal(prompts[0]?.claudeSessionId, null);
   assert.deepEqual(published, [{ text: "I will check this.", eventId: "msg_1" }]);
   const stored = getStoredClaudeCodeLiveSession(started.session.id);
+  assert.equal(stored?.model, "sonnet");
   assert.equal(stored?.claude_session_id, "claude_session_1");
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.active_work, null);

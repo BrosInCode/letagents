@@ -1,0 +1,330 @@
+import { execFile } from "node:child_process";
+import { resolve } from "node:path";
+
+import type {
+  DesktopAgentProviderId,
+  DesktopAgentProviderModelOption,
+  DesktopAgentProviderModelSource,
+  DesktopAgentProviderModelsResult,
+  DesktopAgentProviderPreflightInput,
+} from "../../ipc-types.js";
+import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
+import { buildCursorChildEnv } from "./cursor-runner.js";
+import { readOpenModelSettings } from "./open-model-settings.js";
+
+type ModelListCacheEntry = {
+  expiresAt: number;
+  result: DesktopAgentProviderModelsResult;
+};
+
+type ExecResult = {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+};
+
+type ExecOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+};
+
+const MODEL_LIST_CACHE_MS = 60_000;
+const MODEL_LIST_ERROR_CACHE_MS = 10_000;
+const MODEL_LIST_TIMEOUT_MS = 10_000;
+const modelListCache = new Map<string, ModelListCacheEntry>();
+
+const CLAUDE_CODE_KNOWN_MODELS: DesktopAgentProviderModelOption[] = [
+  { id: "sonnet", label: "Sonnet", source: "known" },
+  { id: "opus", label: "Opus", source: "known" },
+  { id: "haiku", label: "Haiku", source: "known" },
+  { id: "fable", label: "Fable", source: "known" },
+];
+
+export function normalizeManagedAgentModel(value: string | null | undefined): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+export function normalizeManagedAgentModelSource(
+  value: DesktopAgentProviderModelSource | null | undefined,
+): DesktopAgentProviderModelSource {
+  return value === "provider" || value === "known" || value === "custom"
+    ? value
+    : "custom";
+}
+
+export async function listDesktopAgentProviderModels(
+  providerId: DesktopAgentProviderId,
+  input: DesktopAgentProviderPreflightInput = {},
+): Promise<DesktopAgentProviderModelsResult> {
+  if (providerId === "cursor") {
+    return listCursorModels(input);
+  }
+  if (providerId === "claude-code") {
+    return modelResult(providerId, "ready", CLAUDE_CODE_KNOWN_MODELS, null, null);
+  }
+  if (providerId === "codex") {
+    return modelResult(providerId, "ready", [], null, null);
+  }
+  if (providerId === "open-model") {
+    return listOpenModelModels(input);
+  }
+  return modelResult(providerId, "unavailable", [], null, "Model selection is only available for desktop-managed agents.");
+}
+
+export async function validateDesktopManagedAgentModel(input: {
+  providerId: DesktopAgentProviderId;
+  model?: string | null;
+  modelSource?: DesktopAgentProviderModelSource | null;
+  repoRootPath?: string | null;
+  cursorMcpPolicy?: DesktopAgentProviderPreflightInput["cursorMcpPolicy"];
+}): Promise<{ model: string | null; error: string | null }> {
+  const model = normalizeManagedAgentModel(input.model);
+  if (!model) {
+    return { model: null, error: null };
+  }
+
+  const source = normalizeManagedAgentModelSource(input.modelSource);
+  if (source === "custom") {
+    return { model, error: null };
+  }
+
+  const result = await listDesktopAgentProviderModels(input.providerId, input);
+  if (result.status !== "ready") {
+    return {
+      model,
+      error: result.error || `Could not verify ${providerLabel(input.providerId)} model '${model}'.`,
+    };
+  }
+
+  if (source === "provider") {
+    const exists = result.models.some((option) =>
+      option.source === "provider" && option.id === model
+    );
+    return exists
+      ? { model, error: null }
+      : {
+        model,
+        error: `${providerLabel(input.providerId)} model '${model}' is no longer available. Choose another model or use a custom model id.`,
+      };
+  }
+
+  const known = result.models.some((option) =>
+    option.source === "known" && option.id === model
+  );
+  return known || input.providerId === "open-model"
+    ? { model, error: null }
+    : {
+      model,
+      error: `${providerLabel(input.providerId)} model '${model}' is not in the known model list. Use Custom model id to pass it through anyway.`,
+    };
+}
+
+function modelResult(
+  providerId: DesktopAgentProviderId,
+  status: DesktopAgentProviderModelsResult["status"],
+  models: DesktopAgentProviderModelOption[],
+  defaultModel: string | null,
+  error: string | null,
+): DesktopAgentProviderModelsResult {
+  return {
+    providerId,
+    status,
+    models: models.map((model) => ({ ...model })),
+    defaultModel,
+    error,
+  };
+}
+
+async function listCursorModels(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopAgentProviderModelsResult> {
+  const command = process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
+  const context = cursorModelExecutionContext(input);
+  if (context.error) {
+    return modelResult("cursor", "error", [], null, context.error);
+  }
+  const cacheKey = `cursor:${command}:${context.cacheKey}`;
+  const forceRefresh = Boolean(input.refreshModels);
+  const cached = modelListCache.get(cacheKey);
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+    return cloneModelResult(cached.result);
+  }
+
+  const result = await execFileWithTimeout(command, ["models"], {
+    cwd: context.cwd,
+    env: context.env,
+  });
+  const models = parseCursorModelsOutput(result.stdout);
+  const next = result.ok && models.length
+    ? modelResult("cursor", "ready", models, cursorDefaultModel(models), null)
+    : modelResult(
+      "cursor",
+      result.ok ? "unavailable" : "error",
+      [],
+      null,
+      firstNonEmptyLine(result.stderr) || result.error || "Cursor did not return any models.",
+    );
+
+  if (!forceRefresh && next.status !== "ready" && cached?.result.status === "ready") {
+    return cloneModelResult(cached.result);
+  }
+
+  modelListCache.set(cacheKey, {
+    expiresAt: Date.now() + (next.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
+    result: next,
+  });
+  return cloneModelResult(next);
+}
+
+function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput): {
+  cwd?: string;
+  env: NodeJS.ProcessEnv;
+  cacheKey: string;
+  error: string | null;
+} {
+  const workspaceRoot = normalizeOptionalPath(input.repoRootPath);
+  const resolvedWorkspaceRoot = workspaceRoot ? resolve(workspaceRoot) : null;
+  const mcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
+  try {
+    const profile = prepareCursorManagedProfile({
+      workspaceRoot: resolvedWorkspaceRoot,
+      mcpPolicy,
+    });
+    const env = buildCursorChildEnv(profile.env);
+    return {
+      cwd: resolvedWorkspaceRoot ?? undefined,
+      env,
+      cacheKey: [
+        mcpPolicy,
+        resolvedWorkspaceRoot ?? "",
+        profile.homeDir,
+        profile.configDir,
+        profile.dataDir,
+      ].join(":"),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      env: buildCursorChildEnv(),
+      cacheKey: `${mcpPolicy}:${resolvedWorkspaceRoot ?? ""}`,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function cloneModelResult(result: DesktopAgentProviderModelsResult): DesktopAgentProviderModelsResult {
+  return modelResult(
+    result.providerId,
+    result.status,
+    result.models,
+    result.defaultModel,
+    result.error,
+  );
+}
+
+function normalizeOptionalPath(value: string | null | undefined): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+async function listOpenModelModels(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopAgentProviderModelsResult> {
+  const settings = await readOpenModelSettings();
+  const selectedModel = normalizeManagedAgentModel(input.model);
+  const models: DesktopAgentProviderModelOption[] = [];
+  if (settings.model) {
+    models.push({
+      id: settings.model,
+      label: `${settings.model} (saved)`,
+      isDefault: true,
+      source: "known",
+    });
+  }
+  if (selectedModel && selectedModel !== settings.model) {
+    models.push({
+      id: selectedModel,
+      label: selectedModel,
+      source: normalizeManagedAgentModelSource(input.modelSource),
+    });
+  }
+  return modelResult("open-model", "ready", models, settings.model || null, null);
+}
+
+export function parseCursorModelsOutput(output: string): DesktopAgentProviderModelOption[] {
+  const models: DesktopAgentProviderModelOption[] = [];
+  const seen = new Set<string>();
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const match = /^(\S+)\s+-\s+(.+)$/.exec(trimmed);
+    if (!match) continue;
+    const id = match[1]?.trim();
+    const label = match[2]?.trim();
+    if (!id || !label || seen.has(id)) continue;
+    seen.add(id);
+    models.push({
+      id,
+      label,
+      isDefault: cursorLabelMarksDefault(label),
+      source: "provider",
+    });
+  }
+  return models;
+}
+
+function cursorDefaultModel(models: DesktopAgentProviderModelOption[]): string | null {
+  return models.find((model) => model.isDefault)?.id ?? null;
+}
+
+function cursorLabelMarksDefault(label: string): boolean {
+  const metadataPattern = /\(([^)]*)\)/g;
+  let group: RegExpExecArray | null;
+  while ((group = metadataPattern.exec(label)) !== null) {
+    const tokens = String(group[1] || "").split(",").map((token) => token.trim().toLowerCase());
+    if (tokens.includes("default")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function execFileWithTimeout(
+  command: string,
+  args: string[],
+  options: ExecOptions = {},
+): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      command,
+      args,
+      {
+        timeout: MODEL_LIST_TIMEOUT_MS,
+        cwd: options.cwd,
+        env: options.env,
+      },
+      (error, stdout, stderr) => {
+        resolve({
+          ok: !error,
+          stdout: String(stdout || ""),
+          stderr: String(stderr || ""),
+          error: error instanceof Error ? error.message : null,
+        });
+      },
+    );
+    child.stdin?.end();
+  });
+}
+
+function firstNonEmptyLine(value: string): string | null {
+  return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+}
+
+function providerLabel(providerId: DesktopAgentProviderId): string {
+  if (providerId === "claude-code") return "Claude Code";
+  if (providerId === "cursor") return "Cursor";
+  if (providerId === "codex") return "Codex";
+  if (providerId === "open-model") return "Open Model";
+  return "Agent";
+}

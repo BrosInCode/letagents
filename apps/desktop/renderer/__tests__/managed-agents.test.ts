@@ -46,6 +46,8 @@ import {
   pendingManagedAgentPermissionApprovals,
   preferredManagedAgentRepoRootPath,
   shouldShowCursorMcpPolicySelector,
+  shouldShowDeliveryModeSelector,
+  shouldShowManagedModelSelector,
 } from "../src/domain/managed-agents";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
 
@@ -219,6 +221,59 @@ test("Cursor MCP policy selector only shows for desktop-managed Cursor", () => {
     capabilities: ["external_mcp"],
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
+  })), false);
+});
+
+test("managed model selector only shows for desktop-managed providers", () => {
+  assert.equal(shouldShowManagedModelSelector(provider()), true);
+  assert.equal(shouldShowManagedModelSelector(provider({
+    id: "claude-code",
+    name: "Claude Code",
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "claude",
+    mcpTargetId: "claude-code",
+  })), true);
+  assert.equal(shouldShowManagedModelSelector(provider({
+    id: "cursor",
+    name: "Cursor",
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "cursor-agent",
+    mcpTargetId: "cursor",
+  })), true);
+  assert.equal(shouldShowManagedModelSelector(provider({
+    id: "open-model",
+    name: "Open Model",
+    capabilities: ["desktop_managed_runtime"],
+    runtimeCommand: "codex",
+    mcpTargetId: "open-model",
+  })), true);
+  assert.equal(shouldShowManagedModelSelector(provider({
+    capabilities: ["external_mcp"],
+  })), false);
+});
+
+test("delivery mode selector only shows for managed Codex", () => {
+  assert.equal(shouldShowDeliveryModeSelector(provider()), true);
+  assert.equal(shouldShowDeliveryModeSelector(provider({
+    id: "claude-code",
+    name: "Claude Code",
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "claude",
+    mcpTargetId: "claude-code",
+  })), false);
+  assert.equal(shouldShowDeliveryModeSelector(provider({
+    id: "cursor",
+    name: "Cursor",
+    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    runtimeCommand: "cursor-agent",
+    mcpTargetId: "cursor",
+  })), false);
+  assert.equal(shouldShowDeliveryModeSelector(provider({
+    id: "open-model",
+    name: "Open Model",
+    capabilities: ["desktop_managed_runtime"],
+    runtimeCommand: "codex",
+    mcpTargetId: "open-model",
   })), false);
 });
 

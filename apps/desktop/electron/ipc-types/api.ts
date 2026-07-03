@@ -10,6 +10,7 @@ import type {
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
+  DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
@@ -226,6 +227,10 @@ export interface DesktopApi {
       input: DesktopManagedAgentPermissionDecisionInput
     ) => Promise<DesktopManagedAgentPermissionDecisionResult>;
     listAgentProviders: () => Promise<DesktopAgentProvider[]>;
+    listAgentProviderModels: (
+      providerId: DesktopAgentProviderId,
+      input?: DesktopAgentProviderPreflightInput
+    ) => Promise<DesktopAgentProviderModelsResult>;
     runAgentProviderPreflight: (
       providerId: DesktopAgentProviderId,
       input?: DesktopAgentProviderPreflightInput

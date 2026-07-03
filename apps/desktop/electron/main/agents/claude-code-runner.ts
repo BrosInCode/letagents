@@ -23,6 +23,7 @@ export interface ClaudeCodeTurnInput {
   cwd: string;
   claudeSessionId?: string | null;
   claudeBin?: string | null;
+  model?: string | null;
   abortController?: AbortController;
   canUseTool?: CanUseTool;
 }
@@ -146,6 +147,7 @@ export function buildClaudeCodeQueryOptions(input: ClaudeCodeTurnInput): Options
   return {
     cwd: input.cwd,
     resume: input.claudeSessionId?.trim() || undefined,
+    model: input.model?.trim() || undefined,
     permissionMode: "default",
     pathToClaudeCodeExecutable: input.claudeBin?.trim() || undefined,
     strictMcpConfig: true,

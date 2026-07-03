@@ -87,6 +87,7 @@ export interface DesktopClaudeCodeLiveSessionState {
   joined_via: DesktopClaudeCodeJoinedVia;
   cwd: string;
   repo_branch?: string | null;
+  model?: string | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
@@ -120,6 +121,7 @@ export interface DesktopCursorLiveSessionState {
   joined_via: DesktopCursorJoinedVia;
   cwd: string;
   repo_branch?: string | null;
+  model?: string | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
@@ -1239,6 +1241,7 @@ export function toPublicClaudeCodeManagedAgentSession(
     displayName,
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Claude Code",
+    model: session.model ?? null,
     reasoningSessionId: session.claude_session_id ?? null,
     activeWork: session.active_work
       ? {
@@ -1350,6 +1353,7 @@ export function toPublicCursorManagedAgentSession(
     displayName,
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Cursor",
+    model: session.model ?? null,
     reasoningSessionId: session.cursor_session_id ?? null,
     activeWork: session.active_work
       ? {

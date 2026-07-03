@@ -272,7 +272,7 @@ test("Cursor runtime starts and stops in a local room without cloud worker regis
   }
 });
 
-test("Cursor runtime persists selected MCP policy and reuses it for event turns", async () => {
+test("Cursor runtime persists selected MCP policy and model, then reuses them for event turns", async () => {
   resetState();
   const calls: CursorTurnInput[] = [];
   const { runtime, preflightInputs } = createRuntimeHarness({
@@ -294,14 +294,21 @@ test("Cursor runtime persists selected MCP policy and reuses it for event turns"
     repoRootPath: tempDir,
     deliveryMode: "desktop_events",
     cursorMcpPolicy: "normal",
+    model: "gpt-5.3-codex-high",
+    modelSource: "custom",
   });
   runtime.dispatchRoomStreamEvent(messageEvent());
   await runtime.waitForIdle();
 
   assert.equal(started.session.cursorMcpPolicy, "normal");
+  assert.equal(started.session.model, "gpt-5.3-codex-high");
   assert.equal(getStoredCursorLiveSession(started.session.id)?.cursor_mcp_policy, "normal");
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.model, "gpt-5.3-codex-high");
   assert.equal(preflightInputs[0]?.cursorMcpPolicy, "normal");
+  assert.equal(preflightInputs[0]?.model, "gpt-5.3-codex-high");
+  assert.equal(preflightInputs[0]?.modelSource, "custom");
   assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.model, "gpt-5.3-codex-high");
   assert.deepEqual(calls[0]?.env, {});
 });
 

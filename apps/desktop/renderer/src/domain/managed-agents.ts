@@ -275,12 +275,21 @@ export function shouldShowOpenModelConfig(
   return provider?.id === "open-model" && hasDesktopManagedRuntime(provider);
 }
 
+export function shouldShowManagedModelSelector(
+  provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
+): boolean {
+  return Boolean(provider && hasDesktopManagedRuntime(provider));
+}
+
 export function shouldShowDeliveryModeSelector(
   provider: Pick<DesktopAgentProvider, "id" | "capabilities"> | null | undefined,
 ): boolean {
   // Providers without an external MCP join path (e.g. open-model) always
   // deliver room events from the desktop app, so there is nothing to choose.
-  return hasDesktopManagedRuntime(provider) &&
+  // Claude Code and Cursor have external MCP setup, but their supervised
+  // desktop runtimes only support desktop-delivered room events.
+  return provider?.id === "codex" &&
+    hasDesktopManagedRuntime(provider) &&
     Boolean(provider?.capabilities.includes("external_mcp"));
 }
 
