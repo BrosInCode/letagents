@@ -111,6 +111,14 @@ describe("room chat helpers", () => {
     assert.equal(decoded?.changedFileCount, 2);
     assert.equal(managedAgentChangeSummaryTitle(decoded), "Working tree changes: 2 files");
     assert.equal(managedAgentChangeSummarySubtitle(decoded), "tracked +8  tracked -1  1 untracked");
+    assert.equal(
+      managedAgentChangeSummaryTitle(null, false, { unavailable: true }),
+      "Change summary unavailable",
+    );
+    assert.equal(
+      managedAgentChangeSummarySubtitle(null, false, { unavailable: true }),
+      "Attachment could not be loaded.",
+    );
     assert.deepEqual(visibleManagedAgentChangedFiles(decoded, false).map((file) => file.path), [
       "apps/desktop/App.vue",
       "notes.md",
