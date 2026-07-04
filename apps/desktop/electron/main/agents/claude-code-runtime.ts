@@ -239,6 +239,7 @@ export function createDesktopClaudeCodeRuntime(
       .catch(() => null);
     const preflightResult = await preflight("claude-code", {
       roomIdentifier,
+      roomGitRoom: input.roomGitRoom,
       repoRootPath: cwd,
       model: input.model,
       modelSource: input.modelSource,

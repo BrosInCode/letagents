@@ -324,7 +324,8 @@
 .desktop-add-agent-status[data-state="missing_runtime"] .desktop-add-agent-checks div:first-child,
 .desktop-add-agent-status[data-state="auth_required"] .desktop-add-agent-checks div:first-child,
 .desktop-add-agent-status[data-state="bridge_required"] .desktop-add-agent-checks div:nth-child(2),
-.desktop-add-agent-status[data-state="repo_required"] .desktop-add-agent-checks div:nth-child(3) {
+.desktop-add-agent-status[data-state="repo_required"] .desktop-add-agent-checks div:nth-child(3),
+.desktop-add-agent-status[data-state="branch_mismatch"] .desktop-add-agent-checks div:nth-child(3) {
   border-color: rgba(245, 158, 11, 0.28);
   background: rgba(245, 158, 11, 0.07);
 }
@@ -724,11 +725,23 @@
 }
 
 .desktop-add-agent-actions {
+  position: sticky;
+  bottom: -22px;
+  z-index: 1;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 20px;
+  margin-right: -22px;
+  margin-bottom: -22px;
+  margin-left: -22px;
+  padding: 14px 22px 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(14, 14, 15, 0.84), rgba(14, 14, 15, 0.98) 42%),
+    rgba(14, 14, 15, 0.98);
+  backdrop-filter: blur(14px);
 }
 
 .desktop-add-agent-primary {

@@ -350,12 +350,12 @@
               </button>
 
               <button
-                v-else-if="preflight?.nextAction === 'choose_repo'"
+                v-else-if="preflight?.nextAction === 'choose_repo' || preflight?.nextAction === 'choose_worktree'"
                 type="button"
                 class="desktop-add-agent-primary"
                 @click="emit('choose-repo')"
               >
-                Choose project folder
+                {{ preflight?.nextAction === "choose_worktree" ? "Choose matching worktree" : "Choose project folder" }}
               </button>
 
               <button
@@ -408,6 +408,7 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
   DesktopCursorMcpPolicy,
+  DesktopGitRoomInfo,
   DesktopManagedAgentDeliveryMode,
   DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfile,
@@ -456,6 +457,7 @@ import DesktopSelectField, { type DesktopSelectOption } from "../controls/Deskto
 const props = defineProps<{
   open: boolean;
   roomIdentifier: string;
+  roomGitRoom: DesktopGitRoomInfo | null;
   roomDisplayName: string | null;
   repoRootPath: string | null;
   managedSessions: DesktopManagedAgentSession[];
@@ -747,7 +749,13 @@ watch(
 );
 
 watch(
-  () => [selectedProviderId.value, props.repoRootPath, props.roomIdentifier] as const,
+  () => [
+    selectedProviderId.value,
+    props.repoRootPath,
+    props.roomIdentifier,
+    props.roomGitRoom?.ref.type,
+    props.roomGitRoom?.ref.name,
+  ] as const,
   () => {
     if (props.open && selectedProviderId.value) {
       void refreshSelectedProvider();
@@ -861,6 +869,7 @@ async function startManagedAgent(): Promise<void> {
     const result = await window.letagentsDesktop.workers.startManagedAgent({
       providerId: selectedProviderId.value,
       roomIdentifier: props.roomIdentifier,
+      roomGitRoom: props.roomGitRoom,
       roomDisplayName: props.roomDisplayName,
       repoRootPath: props.repoRootPath,
       deliveryMode: deliveryMode.value,
@@ -954,6 +963,7 @@ async function loadProviderModels(options: { refresh?: boolean } = {}): Promise<
       requestProviderId,
       {
         roomIdentifier: props.roomIdentifier,
+        roomGitRoom: props.roomGitRoom,
         repoRootPath: props.repoRootPath,
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
         model: selectedModel.value,
@@ -1228,7 +1238,7 @@ function managedAgentSessionDetail(session: DesktopManagedAgentSession): string 
     session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
     session.model || null,
     session.effort ? `${managedAgentEffortLabel(session.effort)} effort` : null,
-    managedAgentRepoDetail(session),
+    managedAgentRepoDetail(session, props.roomGitRoom),
   ].filter(Boolean).join(" - ");
 }
 
@@ -1294,6 +1304,7 @@ async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<
       requestProviderId,
       {
         roomIdentifier: props.roomIdentifier,
+        roomGitRoom: props.roomGitRoom,
         repoRootPath: props.repoRootPath,
         permissionProfileId: selectedPermissionProfile.value?.id ?? null,
         cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,

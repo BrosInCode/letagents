@@ -1145,6 +1145,7 @@ async function startDesktopManagedCodexEngineAgent(
   const permissionProfile = assertManagedAgentPermissionProfileAvailable(engine.providerId, input.permissionProfileId);
   const preflight = await runDesktopAgentProviderPreflight(engine.providerId, {
     roomIdentifier,
+    roomGitRoom: input.roomGitRoom,
     repoRootPath: cwd,
     model: input.model,
     modelSource: input.modelSource,
