@@ -6,6 +6,7 @@ import test from "node:test";
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-managed-agent-room-tools-"));
 process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
+process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
 
 const { DesktopApiError } = await import("../main/auth.js");
 const {
@@ -30,6 +31,7 @@ import type { ManagedAgentRoomToolRequest } from "../main/agents/managed-agent-r
 
 test.after(() => {
   delete process.env.LETAGENTS_STATE_PATH;
+  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -65,7 +67,7 @@ function cloudStorage(): DesktopRoomStorageState {
   };
 }
 
-function localStorage(): DesktopRoomStorageState {
+function localStorage(roomIdentifier = "local_room_1"): DesktopRoomStorageState {
   return {
     roomIdentifier: "room_1",
     defaultMode: "local",
@@ -73,7 +75,7 @@ function localStorage(): DesktopRoomStorageState {
     effectiveMode: "local",
     isLocalRoom: true,
     localRoom: {
-      roomIdentifier: "local_room_1",
+      roomIdentifier,
       displayName: "Local Room",
       cloudRoomIdentifier: null,
       publishStatus: "local_only",
@@ -365,21 +367,41 @@ test("managed room tool executor does not cache requests without explicit idempo
   assert.equal(second.cached, undefined);
 });
 
-test("managed room tool executor returns structured unsupported errors for local-only gaps", async () => {
+test("managed room tool executor publishes and reads local room artifacts", async () => {
   resetState();
-  const result = await executeManagedAgentRoomToolRequestWithTimeout({
+  const storage = localStorage("local_artifact_tool_room");
+  const published = await executeManagedAgentRoomToolRequestWithTimeout({
     session: session(),
-    storage: localStorage(),
+    storage,
     request: {
       tool: "publish_room_artifact",
       arguments: {
-        artifact: { provider: "github", kind: "pull_request", number: 42 },
+        artifact: {
+          provider: "git",
+          kind: "commit",
+          id: "abc123",
+          title: "Local commit",
+        },
+        linked_task_ids: ["task_1"],
       },
     },
   });
 
-  assert.equal(result.ok, false);
-  assert.equal(result.code, "unsupported_local_room_tool");
+  assert.equal(published.ok, true);
+  assert.equal((published.data as any).artifact.identity_key, "git:commit:id:abc123");
+
+  const listed = await executeManagedAgentRoomToolRequestWithTimeout({
+    session: session(),
+    storage,
+    request: {
+      tool: "get_room_artifacts",
+      arguments: { task_id: "task_1" },
+    },
+  });
+
+  assert.equal(listed.ok, true);
+  assert.equal((listed.data as any).artifacts[0].identity_key, "git:commit:id:abc123");
+  assert.deepEqual((listed.data as any).artifacts[0].linked_task_ids, ["task_1"]);
 });
 
 test("managed room tool loop executes multiple requests before returning the public reply", async () => {

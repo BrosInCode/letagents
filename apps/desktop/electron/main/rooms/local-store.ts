@@ -17,6 +17,10 @@ import {
   resolveRoomStorageMode,
   setRoomStorageMode,
 } from "../chat-storage/settings.js";
+import {
+  syncLocalRoomArtifactsForTask,
+  validateLocalRoomArtifactInputs,
+} from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
 
 type SqliteStatement = {
@@ -793,6 +797,14 @@ export async function updateLocalTask(
     patch.workflowArtifacts === undefined
       ? current.workflow_artifacts_json
       : JSON.stringify(patch.workflowArtifacts || []);
+  const nextWorkflowArtifactInputs = patch.workflowArtifacts === undefined
+    ? null
+    : (patch.workflowArtifacts || []) as Record<string, unknown>[];
+  if (nextWorkflowArtifactInputs) {
+    validateLocalRoomArtifactInputs(nextWorkflowArtifactInputs, {
+      requireStableIdentity: false,
+    });
+  }
   const nextAssigneeAgentKey =
     patch.assigneeAgentKey === undefined
       ? current.assignee_agent_key
@@ -832,6 +844,13 @@ export async function updateLocalTask(
       taskId,
     );
   touchLocalRoom(database, roomId, now);
+  if (patch.workflowArtifacts !== undefined) {
+    await syncLocalRoomArtifactsForTask({
+      roomId,
+      taskId,
+      artifacts: nextWorkflowArtifactInputs || [],
+    });
+  }
   const updated = await getLocalTask(roomId, taskId);
   if (!updated) throw new Error("Task not found.");
   return updated;
@@ -957,6 +976,15 @@ export async function importLocalTasks(
   tasks: DesktopTaskSummary[],
 ): Promise<void> {
   if (!tasks.length) return;
+  const taskArtifactInputs = tasks.map((task) => ({
+    taskId: task.id,
+    artifacts: (task.workflowArtifacts || []) as Record<string, unknown>[],
+  }));
+  for (const task of taskArtifactInputs) {
+    validateLocalRoomArtifactInputs(task.artifacts, {
+      requireStableIdentity: false,
+    });
+  }
   const database = await getDb();
   const now = new Date().toISOString();
   beginImmediate(database);
@@ -970,7 +998,7 @@ export async function importLocalTasks(
             created_by, pr_url, workflow_artifacts_json, workflow_refs_json,
             synced_cloud_id, sync_key, sync_started_at, sync_dirty, created_at, updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
           ON CONFLICT(room_id, task_id) DO UPDATE SET
             title = excluded.title,
             description = excluded.description,
@@ -1008,6 +1036,13 @@ export async function importLocalTasks(
   } catch (error) {
     rollback(database);
     throw error;
+  }
+  for (const task of taskArtifactInputs) {
+    await syncLocalRoomArtifactsForTask({
+      roomId,
+      taskId: task.taskId,
+      artifacts: task.artifacts,
+    });
   }
 }
 

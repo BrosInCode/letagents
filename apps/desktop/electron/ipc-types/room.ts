@@ -37,6 +37,7 @@ export interface DesktopRoomInfo {
 }
 
 export type DesktopRoomSharedArtifactProvider =
+  | "git"
   | "github"
   | "gitlab"
   | "bitbucket"
@@ -44,6 +45,9 @@ export type DesktopRoomSharedArtifactProvider =
 export type DesktopRoomSharedArtifactKind =
   | "issue"
   | "branch"
+  | "commit"
+  | "diff"
+  | "change_summary"
   | "pull_request"
   | "merge_request"
   | "review"

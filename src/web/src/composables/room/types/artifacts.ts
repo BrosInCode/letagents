@@ -1,4 +1,5 @@
 export type RoomSharedArtifactProvider =
+  | 'git'
   | 'github'
   | 'gitlab'
   | 'bitbucket'
@@ -7,6 +8,9 @@ export type RoomSharedArtifactProvider =
 export type RoomSharedArtifactKind =
   | 'issue'
   | 'branch'
+  | 'commit'
+  | 'diff'
+  | 'change_summary'
   | 'pull_request'
   | 'merge_request'
   | 'review'

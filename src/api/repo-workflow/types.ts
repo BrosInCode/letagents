@@ -123,10 +123,13 @@ export type RepoRoomEvent =
   | RepoPushEvent
   | RepoBranchLifecycleEvent;
 
-export type TaskWorkflowRefProvider = RepoWorkflowProvider | "unknown";
+export type TaskWorkflowRefProvider = RepoWorkflowProvider | "git" | "unknown";
 export type TaskWorkflowArtifactKind =
   | "issue"
   | "branch"
+  | "commit"
+  | "diff"
+  | "change_summary"
   | "pull_request"
   | "merge_request"
   | "review"

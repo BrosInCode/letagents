@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import type { DesktopGitRoomInfo } from "../ipc-types.js";
+import type { DesktopGitRoomInfo, DesktopTaskSummary } from "../ipc-types.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -47,6 +47,7 @@ const {
   createLocalRoom,
   getLocalRoomIncludingArchived,
   getLocalTask,
+  importLocalTasks,
   localRoomIdentifierForStorage,
   listLocalRoomEntries,
   listLocalTasks,
@@ -59,6 +60,15 @@ const {
   setLocalRoomPinned,
   updateLocalTask,
 } = await import("../main/rooms/local-store.js");
+const {
+  buildLocalRoomArtifactIdentityKey,
+  getLocalRoomArtifacts,
+  publishLocalRoomArtifact,
+  syncLocalRoomArtifactsForTask,
+} = await import("../main/rooms/artifacts/local-store.js");
+const {
+  executeManagedAgentContextRequest,
+} = await import("../main/agents/managed-agent-context.js");
 
 test.after(() => {
   delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
@@ -426,6 +436,132 @@ test("desktop local Git rooms persist Git metadata for snapshots and account ent
   );
 });
 
+test("desktop local room artifacts persist and link to tasks", async () => {
+  const room = await createLocalRoom({
+    roomIdentifier: "local_artifacts_room",
+    displayName: "Local Artifacts",
+  });
+  assert.equal(
+    buildLocalRoomArtifactIdentityKey({
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+    }),
+    "git:commit:id:abc123",
+  );
+
+  const published = await publishLocalRoomArtifact({
+    roomId: room.roomIdentifier,
+    artifact: {
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+      title: "Initial local commit",
+      ref: "feature/local-artifacts",
+      state: "created",
+    },
+    linkedTaskIds: ["task_1"],
+  });
+  assert.equal(published.artifact.provider, "git");
+  assert.equal(published.artifact.kind, "commit");
+  assert.deepEqual(published.artifact.linked_task_ids, ["task_1"]);
+
+  await publishLocalRoomArtifact({
+    roomId: room.roomIdentifier,
+    artifact: {
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+      title: "Updated local commit",
+    },
+    taskId: "task_2",
+  });
+
+  const artifacts = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(artifacts.artifacts?.length, 1);
+  assert.equal(artifacts.artifacts?.[0]?.title, "Updated local commit");
+  assert.equal(artifacts.artifacts?.[0]?.ref, "feature/local-artifacts");
+  assert.equal(artifacts.artifacts?.[0]?.state, "created");
+  assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_1", "task_2"]);
+
+  const filtered = await getLocalRoomArtifacts(room.roomIdentifier, { taskId: "task_2" });
+  assert.equal(filtered.artifacts?.[0]?.identity_key, "git:commit:id:abc123");
+  await syncLocalRoomArtifactsForTask({
+    roomId: room.roomIdentifier,
+    taskId: "task_3",
+    artifacts: [{
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+      title: "Task sync title",
+    }],
+  });
+  const afterTaskSync = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(afterTaskSync.artifacts?.[0]?.title, "Updated local commit");
+  assert.equal(afterTaskSync.artifacts?.[0]?.source, "manual");
+
+  await assert.rejects(
+    publishLocalRoomArtifact({
+      roomId: room.roomIdentifier,
+      artifact: { provider: "git", kind: "commit", title: "Missing identity" },
+    }),
+    /stable identity/,
+  );
+  await assert.rejects(
+    publishLocalRoomArtifact({
+      roomId: room.roomIdentifier,
+      artifact: { provider: "git", kind: "commit", number: null },
+    }),
+    /stable identity/,
+  );
+});
+
+test("managed agent local context resolves linked local room artifacts", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/context-linked-local-room";
+  const linked = await createLocalRoom({
+    roomIdentifier: "context_linked_local_room",
+    displayName: "Context Linked Local Room",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+  await publishLocalRoomArtifact({
+    roomId: linked.roomIdentifier,
+    artifact: {
+      provider: "git",
+      kind: "commit",
+      id: "ctx123",
+      title: "Context commit",
+    },
+  });
+
+  const result = await executeManagedAgentContextRequest({
+    session_id: "context_session",
+    room_id: cloudRoomIdentifier,
+    room_identifier: cloudRoomIdentifier,
+    joined_via: "join_room",
+    cwd: tempDir,
+    stop_phrase: "stop",
+    max_minutes: 30,
+    token: "token",
+    thread_id: "thread",
+    turn_id: "turn",
+    server_url: "http://127.0.0.1",
+    launched_server: false,
+    codex_bin: "codex",
+    status: "completed",
+    started_at: "2026-07-04T00:00:00.000Z",
+    updated_at: "2026-07-04T00:00:00.000Z",
+  } as any, {
+    tool: "get_room_context_summary",
+    arguments: {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.storage, "local");
+  assert.equal(result.roomIdentifier, linked.roomIdentifier);
+  assert.equal((result.artifacts as any[])?.[0]?.identityKey, "git:commit:id:ctx123");
+});
+
 test("desktop linked local rooms use the cloud room as the visible account identity", async () => {
   const cloudRoomIdentifier = "github.com/BrosInCode/visible-linked-local-room";
   const linked = await createLocalRoom({
@@ -544,11 +680,42 @@ test("desktop local room task store supports board create and lifecycle updates"
     assignee: "Local Agent",
     assigneeAgentKey: "local/agent",
     prUrl: "https://github.com/BrosInCode/letagents/pull/1",
+    workflowArtifacts: [{
+      provider: "git",
+      kind: "commit",
+      id: "def456",
+      number: null,
+      title: "Local task commit",
+      url: null,
+      ref: null,
+      state: null,
+    }],
   });
   assert.equal(updated.status, "accepted");
   assert.equal(updated.assignee, "Local Agent");
   assert.equal(updated.assigneeAgentKey, "local/agent");
   assert.equal(updated.prUrl, "https://github.com/BrosInCode/letagents/pull/1");
+  assert.equal(updated.workflowArtifacts?.[0]?.provider, "git");
+  assert.equal(
+    (await getLocalRoomArtifacts("task_room", { taskId: task.id })).artifacts?.[0]?.identity_key,
+    "git:commit:id:def456",
+  );
+
+  await updateLocalTask("task_room", task.id, {
+    workflowArtifacts: [],
+  });
+  assert.deepEqual((await getLocalRoomArtifacts("task_room", { taskId: task.id })).artifacts, []);
+  await assert.rejects(
+    () => updateLocalTask("task_room", task.id, {
+      workflowArtifacts: [{
+        provider: "git",
+        kind: "invalid",
+        id: "bad",
+      } as any],
+    }),
+    /artifact.kind is invalid/,
+  );
+  assert.deepEqual((await getLocalTask("task_room", task.id))?.workflowArtifacts, []);
 
   assert.deepEqual((await listLocalTasks("task_room")).map((entry) => entry.id), [task.id]);
   assert.equal((await getLocalTask("task_room", task.id))?.status, "accepted");
@@ -557,6 +724,43 @@ test("desktop local room task store supports board create and lifecycle updates"
     () => updateLocalTask("task_room", task.id, { status: "done" }),
     /Invalid transition: accepted -> done/,
   );
+});
+
+test("desktop local task import syncs workflow artifacts into shared artifacts", async () => {
+  await createLocalRoom({
+    roomIdentifier: "task_import_artifact_room",
+    displayName: "Task Import Artifact Room",
+  });
+  await importLocalTasks("task_import_artifact_room", [{
+    id: "task_9",
+    title: "Imported task",
+    description: null,
+    status: "accepted",
+    assignee: null,
+    assigneeAgentKey: null,
+    createdBy: "GitHub",
+    prUrl: null,
+    workflowArtifacts: [{
+      provider: "git",
+      kind: "commit",
+      id: "import123",
+      number: null,
+      title: "Imported commit",
+      url: null,
+      ref: "feature/imported",
+      state: null,
+    }],
+    workflowRefs: [],
+    activeLeases: [],
+    activeLocks: [],
+    stalePromptState: null,
+    createdAt: "2026-07-04T00:00:00.000Z",
+    updatedAt: "2026-07-04T00:00:00.000Z",
+  } satisfies DesktopTaskSummary]);
+
+  const artifacts = await getLocalRoomArtifacts("task_import_artifact_room", { taskId: "task_9" });
+  assert.equal(artifacts.artifacts?.[0]?.identity_key, "git:commit:id:import123");
+  assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_9"]);
 });
 
 test("desktop local task reassignment clears stale agent session owner metadata", async () => {

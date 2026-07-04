@@ -566,10 +566,11 @@ test("Claude Code runtime feeds desktop room tool results back into the SDK runn
         };
       }
       assert.match(input.prompt, /Desktop room tool result/);
-      assert.match(input.prompt, /unsupported_local_room_tool/);
+      assert.match(input.prompt, /"ok": true/);
+      assert.match(input.prompt, /github:pull_request:number:42/);
       return {
         sessionId: "claude_session_1",
-        text: "Artifact publishing is not available in this local room.",
+        text: "Artifact published in this local room.",
         status: "success",
         error: null,
         recentItems: [],
@@ -588,7 +589,7 @@ test("Claude Code runtime feeds desktop room tool results back into the SDK runn
 
   assert.equal(prompts.length, 2);
   assert.equal(prompts[1]?.claudeSessionId, "claude_session_1");
-  assert.deepEqual(published, [{ text: "Artifact publishing is not available in this local room.", eventId: "msg_1" }]);
+  assert.deepEqual(published, [{ text: "Artifact published in this local room.", eventId: "msg_1" }]);
 });
 
 test("Claude Code runtime runs multiple desktop room tools before publishing the final reply", async () => {
@@ -608,7 +609,8 @@ test("Claude Code runtime runs multiple desktop room tools before publishing the
       }
       if (prompts.length === 2) {
         assert.match(input.prompt, /Desktop room tool result/);
-        assert.match(input.prompt, /unsupported_local_room_tool/);
+        assert.match(input.prompt, /"ok": true/);
+        assert.match(input.prompt, /github:pull_request:number:42/);
         return {
           sessionId: "claude_session_1",
           text: 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":43}},"idempotency_key":"event_1:artifact_2"}',
@@ -618,10 +620,11 @@ test("Claude Code runtime runs multiple desktop room tools before publishing the
         };
       }
       assert.match(input.prompt, /Desktop room tool result/);
-      assert.match(input.prompt, /unsupported_local_room_tool/);
+      assert.match(input.prompt, /"ok": true/);
+      assert.match(input.prompt, /github:pull_request:number:43/);
       return {
         sessionId: "claude_session_1",
-        text: "Both artifact attempts hit the local-room limitation.",
+        text: "Both artifacts were published in this local room.",
         status: "success",
         error: null,
         recentItems: [],
@@ -641,7 +644,7 @@ test("Claude Code runtime runs multiple desktop room tools before publishing the
   assert.equal(prompts.length, 3);
   assert.equal(prompts[1]?.claudeSessionId, "claude_session_1");
   assert.equal(prompts[2]?.claudeSessionId, "claude_session_1");
-  assert.deepEqual(published, [{ text: "Both artifact attempts hit the local-room limitation.", eventId: "msg_1" }]);
+  assert.deepEqual(published, [{ text: "Both artifacts were published in this local room.", eventId: "msg_1" }]);
 });
 
 test("Claude Code runtime surfaces tool permission requests for desktop approval", async () => {

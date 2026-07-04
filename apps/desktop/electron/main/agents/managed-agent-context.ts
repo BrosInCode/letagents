@@ -1,12 +1,17 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
 import { apiFetch } from "../auth.js";
-import { isLocalChatStorageEnabled } from "../chat-storage/settings.js";
+import {
+  cloudRoomIdentifierForStorage,
+  localRoomIdentifierForStorage,
+  resolveLocalAwareRoomStorageMode,
+} from "../rooms/local-store.js";
 import {
   getLatestLocalChatMessages,
   getLocalChatMessagesAround,
   getLocalChatThreadMessages,
   searchLocalChatMessages,
 } from "../rooms/messages/local-store.js";
+import { getLocalRoomArtifacts } from "../rooms/artifacts/local-store.js";
 import type { RoomMessagePayload } from "../rooms/messages/mappers.js";
 import {
   mapDesktopTaskSummaryPayload,
@@ -14,6 +19,7 @@ import {
 } from "../rooms/tasks/mappers.js";
 import {
   compactManagedAgentRoomArtifacts,
+  MANAGED_AGENT_CONTEXT_ARTIFACT_LIMIT,
   managedAgentRoomArtifactsPath,
   type CompactManagedAgentRoomArtifact,
   type ManagedAgentRoomArtifactPayload,
@@ -76,7 +82,11 @@ export async function executeManagedAgentContextRequest(
   request: ManagedAgentContextRequest,
 ): Promise<ManagedAgentContextResult> {
   const roomIdentifier = (session.room_identifier || session.room_id || "").trim();
-  const storage: ContextStorage = await isLocalChatStorageEnabled() ? "local" : "cloud";
+  const storageState = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  const storage: ContextStorage = storageState.effectiveMode === "local" ? "local" : "cloud";
+  const storageRoomIdentifier = storage === "local"
+    ? localRoomIdentifierForStorage(storageState, roomIdentifier)
+    : cloudRoomIdentifierForStorage(storageState, roomIdentifier);
   if (!roomIdentifier) {
     return {
       ok: false,
@@ -90,23 +100,23 @@ export async function executeManagedAgentContextRequest(
   try {
     switch (request.tool) {
       case "read_recent_room_messages":
-        return await readRecentRoomMessages(roomIdentifier, storage, request.arguments);
+        return await readRecentRoomMessages(storageRoomIdentifier, storage, request.arguments);
       case "search_room_messages":
-        return await searchRoomMessages(roomIdentifier, storage, request.arguments);
+        return await searchRoomMessages(storageRoomIdentifier, storage, request.arguments);
       case "read_thread":
-        return await readThread(roomIdentifier, storage, request.arguments);
+        return await readThread(storageRoomIdentifier, storage, request.arguments);
       case "read_messages_around":
-        return await readMessagesAround(roomIdentifier, storage, request.arguments);
+        return await readMessagesAround(storageRoomIdentifier, storage, request.arguments);
       case "get_task_context":
-        return await getTaskContext(roomIdentifier, storage, request.arguments);
+        return await getTaskContext(storageRoomIdentifier, storage, request.arguments);
       case "get_room_context_summary":
-        return await getRoomContextSummary(roomIdentifier, storage, request.arguments);
+        return await getRoomContextSummary(storageRoomIdentifier, storage, request.arguments);
     }
   } catch (error) {
     return {
       ok: false,
       tool: request.tool,
-      roomIdentifier,
+      roomIdentifier: storageRoomIdentifier,
       storage,
       error: error instanceof Error ? error.message : String(error),
     };
@@ -655,6 +665,9 @@ async function getRoomContextSummary(
   const messageLimit = numberArg(args, "message_limit", 12, MAX_CONTEXT_MESSAGES);
   if (storage === "local") {
     const recentMessages = await getLatestLocalChatMessages(roomIdentifier, { limit: messageLimit });
+    const artifactPage = await getLocalRoomArtifacts(roomIdentifier, {
+      limit: MANAGED_AGENT_CONTEXT_ARTIFACT_LIMIT,
+    });
     return {
       ok: true,
       tool: "get_room_context_summary",
@@ -662,7 +675,8 @@ async function getRoomContextSummary(
       storage,
       messages: recentMessages.messages.map(compactMessage),
       hasMore: recentMessages.has_more,
-      note: "Local storage summary includes messages only; local task and shared artifact context are not available yet.",
+      artifacts: compactManagedAgentRoomArtifacts(artifactPage.artifacts),
+      note: "Local storage summary includes messages and shared artifacts; local task context is not available yet.",
     };
   }
 

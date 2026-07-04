@@ -4,6 +4,7 @@ import { bigint as pgBigInt, check, foreignKey, index, pgTable, primaryKey, text
 import { rooms } from "./core.js";
 
 export const ROOM_SHARED_ARTIFACT_PROVIDERS = [
+  "git",
   "github",
   "gitlab",
   "bitbucket",
@@ -13,6 +14,9 @@ export const ROOM_SHARED_ARTIFACT_PROVIDERS = [
 export const ROOM_SHARED_ARTIFACT_KINDS = [
   "issue",
   "branch",
+  "commit",
+  "diff",
+  "change_summary",
   "pull_request",
   "merge_request",
   "review",
@@ -67,11 +71,11 @@ export const room_shared_artifacts = pgTable(
       .where(sql`${table.ref} IS NOT NULL`),
     provider_check: check(
       "room_shared_artifacts_provider_check",
-      sql`${table.provider} IN ('github', 'gitlab', 'bitbucket', 'unknown')`
+      sql`${table.provider} IN ('git', 'github', 'gitlab', 'bitbucket', 'unknown')`
     ),
     kind_check: check(
       "room_shared_artifacts_kind_check",
-      sql`${table.kind} IN ('issue', 'branch', 'pull_request', 'merge_request', 'review', 'check_run', 'merge')`
+      sql`${table.kind} IN ('issue', 'branch', 'commit', 'diff', 'change_summary', 'pull_request', 'merge_request', 'review', 'check_run', 'merge')`
     ),
     source_check: check(
       "room_shared_artifacts_source_check",

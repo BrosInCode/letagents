@@ -327,7 +327,7 @@ function mapRoomArtifacts(
 }
 
 function normalizeArtifactProvider(value: unknown): DesktopRoomSharedArtifact["provider"] {
-  return value === "github" || value === "gitlab" || value === "bitbucket"
+  return value === "git" || value === "github" || value === "gitlab" || value === "bitbucket"
     ? value
     : "unknown";
 }
@@ -335,6 +335,9 @@ function normalizeArtifactProvider(value: unknown): DesktopRoomSharedArtifact["p
 function normalizeArtifactKind(value: unknown): DesktopRoomSharedArtifact["kind"] | null {
   return value === "issue"
     || value === "branch"
+    || value === "commit"
+    || value === "diff"
+    || value === "change_summary"
     || value === "pull_request"
     || value === "merge_request"
     || value === "review"
