@@ -3,13 +3,18 @@ import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { task_leases, tasks } from "./schema.js";
-import { clampLimit, nextRoomScopedNumber, parseScopedId } from "./utils.js";
+import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
-import { assertConsumeBoardIntentApproval } from "./coordination/board-intents.js";
+import {
+  approveBoardIntent,
+  assertConsumeBoardIntentApproval,
+  getBoardIntent,
+  markBoardIntentTaskResult,
+} from "./coordination/board-intents.js";
 import { createTaskLeaseRow } from "./coordination/lease-rows.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
 import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
-import type { BoardIntentConsumptionInput, Task, TaskOwnershipState, TaskRow, TaskStatus, TaskWorkLeaseCreationInput } from "./types.js";
+import type { BoardIntent, BoardIntentConsumptionInput, BoardIntentPayload, Task, TaskOwnershipState, TaskRow, TaskStatus, TaskWorkLeaseCreationInput } from "./types.js";
 
 export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   proposed: ["accepted", "cancelled"],
@@ -27,6 +32,27 @@ export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
+function optionalPayloadString(payload: BoardIntentPayload, key: string): string | null {
+  const value = payload[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+export function normalizeTaskCreateBoardIntentPayload(payload: BoardIntentPayload): {
+  title: string;
+  description?: string | null;
+  sourceMessageId?: string | null;
+} | null {
+  const title = optionalPayloadString(payload, "title");
+  if (!title) return null;
+  return {
+    title,
+    description: optionalPayloadString(payload, "description"),
+    sourceMessageId: optionalPayloadString(payload, "source_message_id"),
+  };
+}
+
 export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task[]> {
   if (roomIds.length === 0) {
     return [];
@@ -41,12 +67,13 @@ export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task
   return (rows as TaskRow[]).map(toTask);
 }
 
-export async function createTask(
+async function insertTaskRow(
   roomId: string,
   title: string,
   createdBy: string,
   description?: string,
   sourceMessageId?: string,
+  executor: RoomSequenceExecutor = db,
   options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
@@ -67,17 +94,96 @@ export async function createTask(
   };
 
   if (options?.boardIntentApproval) {
-    await db.transaction(async (tx) => {
-      await assertConsumeBoardIntentApproval(options.boardIntentApproval!, tx);
-      task.number = await nextRoomScopedNumber("tasks", roomId, tx);
-      await tx.insert(tasks).values(task);
-    });
-  } else {
-    task.number = await nextRoomScopedNumber("tasks", roomId);
-    await db.insert(tasks).values(task);
+    await assertConsumeBoardIntentApproval(options.boardIntentApproval, executor);
+  }
+
+  task.number = await nextRoomScopedNumber("tasks", roomId, executor);
+  await executor.insert(tasks).values(task);
+
+  if (
+    options?.boardIntentApproval?.action_type === "task_create"
+    && options.boardIntentApproval.intent_id
+  ) {
+    await markBoardIntentTaskResult({
+      room_id: roomId,
+      intent_id: options.boardIntentApproval.intent_id,
+      task_id: formatTaskId(task.number),
+    }, executor);
   }
 
   return toTask(task);
+}
+
+export async function createTask(
+  roomId: string,
+  title: string,
+  createdBy: string,
+  description?: string,
+  sourceMessageId?: string,
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+): Promise<Task> {
+  if (options?.boardIntentApproval) {
+    return db.transaction((tx) =>
+      insertTaskRow(roomId, title, createdBy, description, sourceMessageId, tx, options)
+    );
+  }
+
+  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId);
+}
+
+export async function approveTaskCreateBoardIntent(input: {
+  room_id: string;
+  intent_id: string;
+  decision_by: string;
+  reason?: string | null;
+  now?: Date;
+}): Promise<{ intent: BoardIntent; approval_token: string; task: Task } | null> {
+  return db.transaction(async (tx) => {
+    const existing = await getBoardIntent({
+      room_id: input.room_id,
+      intent_id: input.intent_id,
+    }, tx);
+    if (!existing || existing.action_type !== "task_create") {
+      return null;
+    }
+
+    const approved = await approveBoardIntent(input, tx);
+    if (!approved) return null;
+
+    const payload = normalizeTaskCreateBoardIntentPayload(approved.intent.payload);
+    if (!payload) {
+      throw new Error(`Board intent ${input.intent_id} has an invalid task creation payload.`);
+    }
+
+    const task = await insertTaskRow(
+      input.room_id,
+      payload.title,
+      approved.intent.proposer_actor_label ?? input.decision_by,
+      payload.description ?? undefined,
+      payload.sourceMessageId ?? undefined,
+      tx,
+      {
+        boardIntentApproval: {
+          room_id: input.room_id,
+          action_type: "task_create",
+          payload: approved.intent.payload,
+          intent_id: approved.intent.id,
+          approval_token: approved.approval_token,
+          now: input.now,
+        },
+      }
+    );
+
+    const intent = await getBoardIntent({
+      room_id: input.room_id,
+      intent_id: approved.intent.id,
+    }, tx);
+    return {
+      intent: intent ?? { ...approved.intent, status: "used", task_id: task.id },
+      approval_token: approved.approval_token,
+      task,
+    };
+  });
 }
 
 export async function getTasks(

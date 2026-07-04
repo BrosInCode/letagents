@@ -318,3 +318,52 @@ test("enforceTaskAdmissionCoordination records active room lock denials", async 
     },
   ]);
 });
+
+test("enforceTaskAdmissionPreconditions records active room lock denials", async () => {
+  const harness = createHarness();
+  harness.activeLocks.push(lock());
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskAdmissionPreconditions({
+    projectId: "focus_5",
+    title: "New slice",
+    actorLabel,
+    actorKey,
+    actorInstanceId: null,
+  });
+
+  assert.deepEqual(result, {
+    kind: "deny",
+    code: "coordination_active_lock",
+    error: "Task admission is blocked by manager_pause lock lock_1.",
+  });
+  assert.equal(harness.events[0]?.event_type, "task_admit");
+  assert.equal(harness.events[0]?.decision, "deny");
+  assert.equal(harness.events[0]?.lock_id, "lock_1");
+});
+
+test("enforceTaskAdmissionPreconditions blocks duplicate task-create intents", async () => {
+  const harness = createHarness();
+  harness.tasks.push(task({
+    id: "task_41",
+    source_message_id: "msg_existing",
+    title: "Investigate board manager delivery",
+  }));
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskAdmissionPreconditions({
+    projectId: "focus_5",
+    title: "Investigate board manager delivery",
+    sourceMessageId: "msg_existing",
+    actorLabel,
+    actorKey,
+    actorInstanceId: "instance:dawn",
+  });
+
+  assert.equal(result.kind, "deny");
+  assert.equal(result.code, "coordination_duplicate_work");
+  assert.match(result.error, /Duplicate work intent matched source_message on task_41/);
+  assert.equal(harness.events[0]?.event_type, "task_admit");
+  assert.equal(harness.events[0]?.decision, "deny");
+  assert.equal(harness.events[0]?.reason, result.error);
+});

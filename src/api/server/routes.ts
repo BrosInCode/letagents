@@ -152,6 +152,7 @@ import {
   emitTaskLifecycleStatusMessage,
   enforceFocusParentBoardWriteIsolation,
   enforceTaskAdmissionCoordination,
+  enforceTaskAdmissionPreconditions,
   enforceTaskCoordinationMutation,
   isTrustedAgentCreator,
   maybeEmitStaleWorkPrompt,
@@ -330,6 +331,13 @@ export function registerApiRoutes(app: Express): void {
     requireAdmin,
     requireParticipant,
     normalizeOptionalString,
+    emitProjectMessage,
+    enforceFocusParentBoardWriteIsolation: ({ req, targetProject }) =>
+      enforceFocusParentBoardWriteIsolation({
+        req,
+        targetProjectId: targetProject.id,
+      }),
+    enforceTaskCreateBoardIntentAdmission: enforceTaskAdmissionPreconditions,
   } satisfies RoomBoardRouteDeps;
 
   const roomMetadataRouteDeps = {

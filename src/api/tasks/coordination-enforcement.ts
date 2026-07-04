@@ -115,6 +115,15 @@ export interface TaskCoordinationMutationInput {
 type TaskCoordinationDenyDecision = Extract<TaskCoordinationGuardDecision, { kind: "deny" }>;
 type TaskCoordinationAllowDecision = Extract<TaskCoordinationGuardDecision, { kind: "allow" }>;
 
+export interface TaskAdmissionPreconditionInput {
+  projectId: string;
+  title: string;
+  sourceMessageId?: string | null;
+  actorLabel: string | null;
+  actorKey: string | null;
+  actorInstanceId: string | null;
+}
+
 function taskIsAssignedToActor(input: {
   taskOwnership: TaskOwnershipState;
   actorLabel: string;
@@ -230,6 +239,47 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       return { kind: "allow" };
     }
 
+    const precondition = await enforceTaskAdmissionPreconditions(input);
+    if (precondition.kind === "deny") {
+      return precondition;
+    }
+
+    const actorLabel = normalizeTaskActorLabel(input.actorLabel);
+    const actorKey = normalizeTaskActorKey(input.actorKey);
+
+    const intentDecision = await enforceBoardIntentForAgentAction({
+      roomId: input.projectId,
+      actionType: "task_create",
+      payload: boardIntentPayloadForTaskCreate({
+        title: input.title,
+        description: input.description ?? null,
+        sourceMessageId: input.sourceMessageId ?? null,
+      }),
+      actorLabel,
+      actorKey,
+      actorInstanceId: input.actorInstanceId,
+      actorSessionId: input.actorSessionId ?? null,
+      intentId: input.boardIntentId,
+      approvalToken: input.boardApprovalToken,
+    });
+    if (intentDecision.kind === "deny") {
+      return recordIntentDenial({
+        roomId: input.projectId,
+        taskId: null,
+        mutation: "task_admit",
+        actorLabel,
+        actorKey,
+        actorInstanceId: input.actorInstanceId,
+        decision: intentDecision,
+      });
+    }
+
+    return intentDecision;
+  }
+
+  async function enforceTaskAdmissionPreconditions(
+    input: TaskAdmissionPreconditionInput
+  ): Promise<TaskCoordinationGuardDecision> {
     const actorLabel = normalizeTaskActorLabel(input.actorLabel);
     const actorKey = normalizeTaskActorKey(input.actorKey);
 
@@ -287,34 +337,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       };
     }
 
-    const intentDecision = await enforceBoardIntentForAgentAction({
-      roomId: input.projectId,
-      actionType: "task_create",
-      payload: boardIntentPayloadForTaskCreate({
-        title: input.title,
-        description: input.description ?? null,
-        sourceMessageId: input.sourceMessageId ?? null,
-      }),
-      actorLabel,
-      actorKey,
-      actorInstanceId: input.actorInstanceId,
-      actorSessionId: input.actorSessionId ?? null,
-      intentId: input.boardIntentId,
-      approvalToken: input.boardApprovalToken,
-    });
-    if (intentDecision.kind === "deny") {
-      return recordIntentDenial({
-        roomId: input.projectId,
-        taskId: null,
-        mutation: "task_admit",
-        actorLabel,
-        actorKey,
-        actorInstanceId: input.actorInstanceId,
-        decision: intentDecision,
-      });
-    }
-
-    return intentDecision;
+    return allowDecision();
   }
 
   async function bindWorkflowArtifactPrUrlIfPresent(
@@ -622,6 +645,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     validateOwnerTokenTaskActorKey,
     recordCoordinationDecision,
     enforceTaskAdmissionCoordination,
+    enforceTaskAdmissionPreconditions,
     enforceTaskCoordinationMutation,
   };
 }

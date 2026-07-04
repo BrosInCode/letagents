@@ -92,7 +92,7 @@ export async function listBoardGovernanceAudit(
       .where(
         and(
           eq(board_intents.room_id, roomId),
-          inArray(board_intents.status, ["approved", "denied"])
+          inArray(board_intents.status, ["approved", "denied", "used"])
         )
       )
       .orderBy(desc(board_intents.decided_at))
@@ -152,10 +152,17 @@ export async function listBoardGovernanceAudit(
 
   for (const row of intentRows) {
     const intent = toBoardIntent(row);
+    const eventType = intent.status === "used" && intent.action_type === "task_create"
+      ? "board_intent_task_created"
+      : intent.status === "used"
+      ? "board_intent_used"
+      : intent.status === "approved"
+      ? "board_intent_approved"
+      : "board_intent_denied";
     entries.push({
       id: intent.id,
       kind: "board_intent_decision",
-      event_type: intent.status === "approved" ? "board_intent_approved" : "board_intent_denied",
+      event_type: eventType,
       actor_label: intent.decision_by,
       reason: intent.decision_reason,
       created_at: intent.decided_at ?? intent.updated_at,

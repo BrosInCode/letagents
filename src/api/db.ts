@@ -31,7 +31,7 @@ export {
   assignProjectAdminIfRoomHasNoAdmins,
   isProjectAdmin,
 } from "./db/auth.js";
-export { isValidTransition, getTasksForRooms, createTask, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskBySourceMessageId } from "./db/tasks.js";
+export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskBySourceMessageId } from "./db/tasks.js";
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
@@ -49,6 +49,7 @@ export {
   denyBoardIntent,
   expireBoardIntents,
   getActiveBoardManager,
+  getBoardIntent,
   getRoomBoardSettings,
   listBoardIntents,
   normalizeBoardManagerMode,

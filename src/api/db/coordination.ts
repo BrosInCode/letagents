@@ -32,6 +32,7 @@ export {
   denyBoardIntent,
   expireBoardIntents,
   getActiveBoardManager,
+  getBoardIntent,
   getRoomBoardSettings,
   hashBoardIntentPayload,
   listBoardIntents,

@@ -2,7 +2,9 @@
 import { computed } from "vue";
 import type {
   DesktopAgentPresence,
+  DesktopBoardGovernanceAuditEntry,
   DesktopBoardManagerRuntimeSource,
+  DesktopBoardIntentSummary,
   DesktopBoardGovernanceSection,
   DesktopBoardGovernanceSnapshot,
   DesktopBoardManagerMode,
@@ -163,6 +165,63 @@ function managerCandidateRuntime(candidate: LiveManagerCandidate): string {
 
 function managerCandidateInitial(candidate: LiveManagerCandidate): string {
   return managerCandidateName(candidate).trim().charAt(0).toUpperCase() || "A";
+}
+
+function payloadText(intent: DesktopBoardIntentSummary, key: string): string | null {
+  const value = intent.payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readableIntentTitle(intent: DesktopBoardIntentSummary): string {
+  if (intent.actionType === "task_create") return "Create task";
+  return readableIntentAction(intent.actionType);
+}
+
+function readableIntentBody(intent: DesktopBoardIntentSummary): string {
+  if (intent.actionType === "task_create") {
+    const title = payloadText(intent, "title");
+    const description = payloadText(intent, "description");
+    return description ? `${title || "Untitled task"} — ${description}` : title || "Untitled task";
+  }
+  const taskId = payloadText(intent, "task_id") || intent.taskId || "task";
+  const status = payloadText(intent, "status");
+  const assignee = payloadText(intent, "assignee");
+  const prUrl = payloadText(intent, "pr_url");
+  if (intent.actionType === "task_claim") {
+    return assignee ? `Assign ${taskId} to ${assignee}` : `Claim ${taskId}`;
+  }
+  if (intent.actionType === "task_close") {
+    const statusText = status ? `Move ${taskId} to ${status}` : `Close ${taskId}`;
+    return prUrl ? `${statusText} with ${prUrl}` : statusText;
+  }
+  if (intent.actionType === "task_update") {
+    return status ? `Update ${taskId} to ${status}` : `Update ${taskId}`;
+  }
+  if (intent.actionType === "task_override") {
+    const action = payloadText(intent, "action");
+    const target = payloadText(intent, "target_actor_key");
+    if (action === "handoff") return target ? `Hand off ${taskId} to ${target}` : `Hand off ${taskId}`;
+    if (action === "release") return `Release work on ${taskId}`;
+    return `Change work lease for ${taskId}`;
+  }
+  return "Review the requested board change.";
+}
+
+function approveIntentLabel(intent: DesktopBoardIntentSummary): string {
+  return intent.actionType === "task_create" ? "Create task" : "Approve";
+}
+
+function readableAuditEvent(entry: DesktopBoardGovernanceAuditEntry): string {
+  if (entry.eventType === "board_intent_task_created") return "Task created";
+  return entry.eventType.replaceAll("_", " ");
+}
+
+function auditResultText(entry: DesktopBoardGovernanceAuditEntry): string | null {
+  const taskId = entry.metadata?.task_id;
+  if (entry.eventType === "board_intent_task_created" && typeof taskId === "string") {
+    return `Created ${taskId}`;
+  }
+  return null;
 }
 </script>
 
@@ -331,10 +390,10 @@ function managerCandidateInitial(candidate: LiveManagerCandidate): string {
             class="desktop-board-governance-intent"
           >
             <header>
-              <strong>{{ readableIntentAction(intent.actionType) }}</strong>
+              <strong>{{ readableIntentTitle(intent) }}</strong>
               <span>{{ intent.proposerActorLabel || "Unknown proposer" }}</span>
             </header>
-            <p>{{ JSON.stringify(intent.payload) }}</p>
+            <p>{{ readableIntentBody(intent) }}</p>
             <footer v-if="canDecideIntents">
               <button
                 type="button"
@@ -342,7 +401,7 @@ function managerCandidateInitial(candidate: LiveManagerCandidate): string {
                 :disabled="busy"
                 @click="emit('approve-intent', intent.id)"
               >
-                Approve
+                {{ approveIntentLabel(intent) }}
               </button>
               <button
                 type="button"
@@ -364,10 +423,11 @@ function managerCandidateInitial(candidate: LiveManagerCandidate): string {
             class="desktop-board-governance-audit-entry"
           >
             <header>
-              <strong>{{ entry.eventType.replaceAll("_", " ") }}</strong>
+              <strong>{{ readableAuditEvent(entry) }}</strong>
               <span>{{ formatTimestamp(entry.createdAt) }}</span>
             </header>
             <p v-if="entry.actorLabel">By {{ entry.actorLabel }}</p>
+            <p v-if="auditResultText(entry)">{{ auditResultText(entry) }}</p>
             <p v-if="entry.reason">{{ entry.reason }}</p>
           </article>
         </section>

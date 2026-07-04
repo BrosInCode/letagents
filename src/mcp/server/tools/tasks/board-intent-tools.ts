@@ -210,7 +210,7 @@ export function registerBoardIntentTools(server: McpServer): void {
 
   server.tool(
     "register_task_create_intent",
-    "Register intent to add a task. Use this before add_task when Board Manager approval is required.",
+    "Register intent to add a task. Use this instead of add_task when Board Manager approval is required; approval creates the task directly.",
     {
       title: z.string().describe("Task title exactly as it will be passed to add_task."),
       description: z.string().optional().describe("Task description exactly as it will be passed to add_task."),
@@ -378,7 +378,7 @@ export function registerBoardIntentTools(server: McpServer): void {
 
   server.tool(
     "approve_board_intent",
-    "Approve a pending board intent. Returns the scoped approval token that must be passed to the actual board action.",
+    "Approve a pending board intent. For task_create intents this creates the task immediately and returns result.kind=\"task_created\"; do not call add_task afterward. Other intent types return a scoped approval token for the follow-up board action.",
     {
       intent_id: z.string().describe("Board intent id to approve."),
       reason: z.string().optional().describe("Short approval reason."),
