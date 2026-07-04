@@ -178,6 +178,15 @@ const api: DesktopApi = {
   },
   repos: {
     getStatus: (rootPath) => ipcRenderer.invoke("desktop:repos:get-status", rootPath || null),
+    startStatusWatch: (rootPath) => ipcRenderer.invoke("desktop:repos:start-status-watch", rootPath),
+    stopStatusWatch: () => ipcRenderer.invoke("desktop:repos:stop-status-watch"),
+    onStatusChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:repos:status-changed", listener);
+      return () => {
+        ipcRenderer.off("desktop:repos:status-changed", listener);
+      };
+    },
     openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
   },

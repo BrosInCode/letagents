@@ -232,6 +232,9 @@ export interface DesktopApi {
   };
   repos: {
     getStatus: (rootPath?: string | null) => Promise<RepoStatus>;
+    startStatusWatch: (rootPath: string) => Promise<RepoStatus>;
+    stopStatusWatch: () => Promise<void>;
+    onStatusChanged: (callback: (status: RepoStatus) => void) => () => void;
     openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
   };

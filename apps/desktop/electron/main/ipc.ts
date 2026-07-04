@@ -91,6 +91,10 @@ import type {
   DesktopBoardIntentDecisionInput,
 } from "../ipc-types/board-governance.js";
 import { buildRepoStatus } from "../repo-status.js";
+import {
+  startRepoStatusWatch,
+  stopRepoStatusWatch,
+} from "./repo-status-watch.js";
 import { registerDesktopRentalIpcHandlers } from "../rental-handlers.js";
 import { RentalApiClient } from "../rental/api-client.js";
 import { RenterTriggerRuntime } from "../rental/renter-trigger.js";
@@ -731,6 +735,14 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:repos:get-status",
     async (_event, rootPath?: string | null): Promise<RepoStatus> => buildRepoStatus(rootPath || workspaceRoot),
+  );
+  targetIpcMain.handle(
+    "desktop:repos:start-status-watch",
+    async (_event, rootPath?: string | null): Promise<RepoStatus> => startRepoStatusWatch(rootPath || workspaceRoot),
+  );
+  targetIpcMain.handle(
+    "desktop:repos:stop-status-watch",
+    async (): Promise<void> => stopRepoStatusWatch(),
   );
   targetIpcMain.handle(
     "desktop:repos:pick-room",
