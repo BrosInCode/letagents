@@ -26,6 +26,7 @@ const {
 import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
+  DesktopGitRoomInfo,
   DesktopRoomStorageState,
   DesktopRoomStreamEvent,
 } from "../ipc-types.js";
@@ -94,6 +95,31 @@ function localStorageState(roomIdentifier = "room_1"): DesktopRoomStorageState {
     },
     databasePath: "/tmp/local-chat.sqlite",
     localFilesPath: "/tmp/files",
+  };
+}
+
+function branchGitRoom(): DesktopGitRoomInfo {
+  return {
+    provider: "git",
+    host: "local",
+    repository: {
+      id: null,
+      fullName: "repo",
+      owner: "",
+      name: "repo",
+    },
+    ref: {
+      type: "branch",
+      name: "feature/cursor-agent",
+      defaultBranch: "main",
+      baseRef: null,
+      headRef: null,
+      headRepository: null,
+    },
+    visibility: "local",
+    accessMode: "local",
+    isDefault: false,
+    source: "local_git",
   };
 }
 
@@ -196,6 +222,7 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   const result = await runtime.start({
     providerId: "cursor",
     roomIdentifier: "room_1",
+    roomGitRoom: branchGitRoom(),
     roomDisplayName: "Room One",
     repoRootPath: tempDir,
     deliveryMode: "desktop_events",
@@ -219,6 +246,7 @@ test("Cursor runtime starts, lists, and inspects a read-only desktop worker", as
   assert.equal(getStoredCursorLiveSession(result.session.id)?.cursor_mcp_policy, "filter_letagents");
   assert.equal(preflightInputs[0]?.permissionProfileId, "read_only");
   assert.equal(preflightInputs[0]?.cursorMcpPolicy, "filter_letagents");
+  assert.equal(preflightInputs[0]?.roomGitRoom?.ref.name, "feature/cursor-agent");
 });
 
 test("Cursor runtime starts and stops in a local room without cloud worker registration", async () => {

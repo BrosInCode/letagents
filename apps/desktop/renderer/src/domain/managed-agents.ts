@@ -5,6 +5,7 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
   DesktopCursorMcpPolicy,
+  DesktopGitRoomInfo,
   DesktopManagedAgentPermissionProfile,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentPermissionRequest,
@@ -749,11 +750,41 @@ function mergeParticipantSourceFlags(
   return Array.from(new Set([...existing, ...next, "presence" as const]));
 }
 
+export function managedAgentRoomBranchMismatch(
+  session: { repoBranch?: string | null },
+  gitRoom: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null | undefined,
+): { expectedBranch: string; actualBranch: string | null } | null {
+  const expectedBranch = gitRoom?.ref.type === "branch"
+    ? gitRoom.ref.name?.trim() || null
+    : null;
+  if (!expectedBranch) return null;
+  if (gitRoom?.isDefault) return null;
+  const defaultBranch = gitRoom?.ref.defaultBranch?.trim() || null;
+  if (defaultBranch && expectedBranch === defaultBranch) return null;
+  const actualBranch = session.repoBranch?.trim() || null;
+  if (actualBranch === expectedBranch) return null;
+  return { expectedBranch, actualBranch };
+}
+
+export function managedAgentRoomBranchMismatchLabel(
+  session: { repoBranch?: string | null },
+  gitRoom: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null | undefined,
+): string | null {
+  const mismatch = managedAgentRoomBranchMismatch(session, gitRoom);
+  if (!mismatch) return null;
+  return mismatch.actualBranch
+    ? `Expected ${mismatch.expectedBranch}; agent is on ${mismatch.actualBranch}`
+    : `Expected ${mismatch.expectedBranch}; agent branch is unknown`;
+}
+
 export function managedAgentRepoDetail(
   session: Pick<DesktopManagedAgentSession, "repoBranch" | "repoRootPath">,
+  gitRoom?: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null,
 ): string {
   const branch = session.repoBranch?.trim();
-  return branch ? `${branch} - ${session.repoRootPath}` : session.repoRootPath;
+  const detail = branch ? `${branch} - ${session.repoRootPath}` : session.repoRootPath;
+  const mismatch = managedAgentRoomBranchMismatchLabel(session, gitRoom);
+  return mismatch ? `${detail} - ${mismatch}` : detail;
 }
 
 function mergeManagedAgentPresenceEntry(

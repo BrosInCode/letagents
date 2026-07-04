@@ -5,6 +5,7 @@ import type {
   DesktopAgentPresence,
   DesktopAgentProvider,
   DesktopAgentProviderPreflight,
+  DesktopGitRoomInfo,
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
 } from "../../electron/ipc-types";
@@ -27,6 +28,7 @@ import {
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
   managedAgentRepoDetail,
+  managedAgentRoomBranchMismatch,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSelectionForProvider,
   managedAgentPermissionProfileStatusLabel,
@@ -128,6 +130,31 @@ function session(
     updatedAt: "2026-06-14T12:00:00.000Z",
     lastError: null,
     ...overrides,
+  };
+}
+
+function branchGitRoom(branch = "feature/codex-work"): DesktopGitRoomInfo {
+  return {
+    provider: "git",
+    host: "local",
+    repository: {
+      id: null,
+      fullName: "repo",
+      owner: "",
+      name: "repo",
+    },
+    ref: {
+      type: "branch",
+      name: branch,
+      defaultBranch: "main",
+      baseRef: null,
+      headRef: null,
+      headRepository: null,
+    },
+    visibility: "local",
+    accessMode: "local",
+    isDefault: false,
+    source: "local_git",
   };
 }
 
@@ -639,6 +666,47 @@ test("managedAgentRepoDetail includes branch when available", () => {
     "codex/git-rooms - /tmp/repo",
   );
   assert.equal(managedAgentRepoDetail(session({ repoBranch: null })), "/tmp/repo");
+});
+
+test("managedAgentRoomBranchMismatch only flags branch-scoped room conflicts", () => {
+  const defaultBranchGitRoom = branchGitRoom("main");
+  defaultBranchGitRoom.ref.type = "default_branch";
+
+  assert.deepEqual(
+    managedAgentRoomBranchMismatch(
+      session({ repoBranch: "main" }),
+      branchGitRoom("feature/codex-work"),
+    ),
+    { expectedBranch: "feature/codex-work", actualBranch: "main" },
+  );
+  assert.equal(
+    managedAgentRepoDetail(
+      session({ repoBranch: "main" }),
+      branchGitRoom("feature/codex-work"),
+    ),
+    "main - /tmp/repo - Expected feature/codex-work; agent is on main",
+  );
+  assert.equal(
+    managedAgentRoomBranchMismatch(
+      session({ repoBranch: "feature/codex-work" }),
+      branchGitRoom("feature/codex-work"),
+    ),
+    null,
+  );
+  assert.equal(
+    managedAgentRoomBranchMismatch(
+      session({ repoBranch: "feature/codex-work" }),
+      defaultBranchGitRoom,
+    ),
+    null,
+  );
+  assert.equal(
+    managedAgentRoomBranchMismatch(
+      session({ repoBranch: "feature/codex-work" }),
+      branchGitRoom("main"),
+    ),
+    null,
+  );
 });
 
 test("managedAgentStopResultMessage does not hide failed stop interrupts", () => {

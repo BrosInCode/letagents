@@ -7,13 +7,19 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
+  DesktopGitRoomInfo,
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
+import { buildRepoStatus } from "../../repo-status.js";
 import {
   buildMcpInstallState,
   installLetAgentsMcpServer,
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
+import {
+  getLocalRoom,
+  getLocalRoomByCloudRoom,
+} from "../rooms/local-store.js";
 import {
   firstRedactedCodexAppServerOutputLine,
   sensitiveCodexAppServerEnvValues,
@@ -29,6 +35,11 @@ import {
   normalizeManagedAgentModel,
   validateDesktopManagedAgentModel,
 } from "./managed-agent-models.js";
+import {
+  applyManagedAgentBranchScopePreflight,
+  branchScopedGitRoomName,
+  gitRoomFromBranchRoomIdentifier,
+} from "./managed-agent-branch-scope.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 
 type ExecResult = {
@@ -490,7 +501,7 @@ export async function runDesktopAgentProviderPreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   assertAgentProviderId(providerId);
   const provider = findAgentProvider(providerId);
-  const withModelValidation = async (
+  const withManagedRuntimeValidation = async (
     result: DesktopAgentProviderPreflight,
   ): Promise<DesktopAgentProviderPreflight> => {
     if (!result.canStart || !provider.capabilities.includes("desktop_managed_runtime")) {
@@ -500,20 +511,36 @@ export async function runDesktopAgentProviderPreflight(
       providerId,
       ...input,
     });
-    if (!validation.error) {
+    if (validation.error) {
+      return {
+        ...result,
+        status: "config_required",
+        canStart: false,
+        message: "Selected model is not available.",
+        detail: validation.error,
+      };
+    }
+
+    const gitRoom = await resolveManagedAgentPreflightGitRoom(input);
+    const branchScopedName = branchScopedGitRoomName(gitRoom);
+    if (!branchScopedName) {
       return result;
     }
-    return {
-      ...result,
-      status: "config_required",
-      canStart: false,
-      message: "Selected model is not available.",
-      detail: validation.error,
-    };
+
+    const repoRootPath = input.repoRootPath?.trim();
+    const repoStatus = repoRootPath
+      ? await buildRepoStatus(repoRootPath).catch(() => null)
+      : null;
+    return applyManagedAgentBranchScopePreflight({
+      providerName: provider.name,
+      preflight: result,
+      gitRoom,
+      repoStatus,
+    });
   };
   if (isDesktopSmokeCheck()) {
     if (provider.id === "codex") {
-      return withModelValidation({
+      return withManagedRuntimeValidation({
         providerId: provider.id,
         status: "missing_runtime",
         canStart: false,
@@ -524,7 +551,7 @@ export async function runDesktopAgentProviderPreflight(
         mcpStatus: "installed",
       });
     }
-    return withModelValidation({
+    return withManagedRuntimeValidation({
       providerId: provider.id,
       status: provider.capabilities.includes("desktop_managed_runtime")
         ? input.repoRootPath?.trim()
@@ -552,19 +579,33 @@ export async function runDesktopAgentProviderPreflight(
   const mcpStatus = await getProviderMcpStatus(provider);
 
   if (provider.id === "codex") {
-    return withModelValidation(await codexPreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await codexPreflight(provider, input, mcpStatus));
   }
   if (provider.id === "claude-code") {
-    return withModelValidation(await claudeCodePreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await claudeCodePreflight(provider, input, mcpStatus));
   }
   if (provider.id === "cursor") {
-    return withModelValidation(await runDesktopCursorProviderPreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await runDesktopCursorProviderPreflight(provider, input, mcpStatus));
   }
   if (provider.id === "open-model") {
-    return withModelValidation(await openModelPreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus));
   }
 
   return bridgePreflight(provider, mcpStatus);
+}
+
+async function resolveManagedAgentPreflightGitRoom(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopGitRoomInfo | null> {
+  const identifierGitRoom = gitRoomFromBranchRoomIdentifier(input.roomIdentifier);
+  if (identifierGitRoom) return identifierGitRoom;
+  if (input.roomGitRoom) return input.roomGitRoom;
+
+  const roomIdentifier = input.roomIdentifier?.trim();
+  if (!roomIdentifier) return null;
+  const localRoom = await getLocalRoom(roomIdentifier)
+    || await getLocalRoomByCloudRoom(roomIdentifier);
+  return localRoom?.gitRoom ?? null;
 }
 
 async function installCodexRuntime(

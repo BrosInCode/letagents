@@ -1,3 +1,4 @@
+import type { DesktopGitRoomInfo } from "./room.js";
 import type { DesktopMcpInstallTargetId } from "./setup.js";
 
 export type DesktopAgentProviderId =
@@ -23,6 +24,7 @@ export type DesktopAgentProviderStatus =
   | "bridge_required"
   | "config_required"
   | "repo_required"
+  | "branch_mismatch"
   | "ready"
   | "running"
   | "error";
@@ -44,6 +46,7 @@ export interface DesktopAgentProvider {
 
 export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
+  roomGitRoom?: DesktopGitRoomInfo | null;
   repoRootPath?: string | null;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
@@ -59,7 +62,7 @@ export interface DesktopAgentProviderPreflight {
   canStart: boolean;
   message: string;
   detail: string | null;
-  nextAction: DesktopAgentProviderSetupAction | "authenticate" | "choose_repo" | null;
+  nextAction: DesktopAgentProviderSetupAction | "authenticate" | "choose_repo" | "choose_worktree" | null;
   version: string | null;
   mcpStatus: "not_installed" | "installed" | "needs_attention" | null;
 }
@@ -285,6 +288,7 @@ export interface DesktopManagedAgentSession {
 export interface DesktopManagedAgentStartInput {
   providerId: DesktopAgentProviderId;
   roomIdentifier: string;
+  roomGitRoom?: DesktopGitRoomInfo | null;
   roomDisplayName?: string | null;
   repoRootPath: string;
   deliveryMode?: DesktopManagedAgentDeliveryMode;

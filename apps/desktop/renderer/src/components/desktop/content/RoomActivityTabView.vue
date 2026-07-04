@@ -134,6 +134,11 @@
               <p>{{ selectedLiveParticipant.repoBranch }}</p>
             </article>
 
+            <article v-if="selectedLiveBranchMismatchLabel" class="desktop-activity-inspector-row" data-emphasis="true">
+              <span>Room branch</span>
+              <p>{{ selectedLiveBranchMismatchLabel }}</p>
+            </article>
+
             <article class="desktop-activity-inspector-row">
               <span>Session</span>
               <p v-if="selectedLiveParticipant.livenessObservation">
@@ -332,10 +337,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopGitRoomInfo,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -345,6 +351,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
+import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 
@@ -354,6 +361,7 @@ const props = defineProps<{
   liveClearedCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  roomGitRoom: DesktopGitRoomInfo | null;
   roomArtifacts: DesktopRoomSharedArtifact[];
   tasks: DesktopTaskSummary[];
   messages: DesktopRoomMessage[];
@@ -388,6 +396,12 @@ const {
   taskStatusLabel,
 } = useRoomActivityViewModel(props);
 
+const selectedLiveBranchMismatchLabel = computed(() =>
+  selectedLiveParticipant.value
+    ? roomBranchMismatchLabel(selectedLiveParticipant.value)
+    : null
+);
+
 function refreshActivity(): void {
   emit("refresh-room");
 }
@@ -406,7 +420,15 @@ function connectionDisplayLabel(participant: ActivityParticipant): string {
 }
 
 function branchLabel(participant: ActivityParticipant): string | null {
+  const mismatch = roomBranchMismatchLabel(participant);
+  if (mismatch) return mismatch;
   return participant.repoBranch ? `Branch ${participant.repoBranch}` : null;
+}
+
+function roomBranchMismatchLabel(
+  participant: Pick<ActivityParticipant, "repoBranch">,
+): string | null {
+  return managedAgentRoomBranchMismatchLabel(participant, props.roomGitRoom);
 }
 
 function detailSubtitle(participant: ActivityParticipant): string {

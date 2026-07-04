@@ -198,6 +198,7 @@ export function createDesktopCursorRuntime(
     const permissionProfile = assertManagedAgentPermissionProfileAvailable("cursor", input.permissionProfileId);
     const preflightResult = await preflight("cursor", {
       roomIdentifier,
+      roomGitRoom: input.roomGitRoom,
       repoRootPath: cwd,
       permissionProfileId: permissionProfile.id,
       cursorMcpPolicy,

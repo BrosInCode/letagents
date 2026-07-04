@@ -220,6 +220,7 @@
         :live-cleared-count="participantHiddenCount"
         :presence="roomPresence"
         :reasoning-sessions="reasoningSessions"
+        :room-git-room="room.gitRoom"
         :room-artifacts="roomArtifacts"
         :tasks="tasks"
         :messages="visibleMessages"
@@ -272,6 +273,7 @@
     <AddAgentModal
       :open="addAgentModalOpen"
       :room-identifier="room.identifier"
+      :room-git-room="room.gitRoom"
       :room-display-name="room.displayName"
       :repo-root-path="managedAgentRepoRootPath"
       :managed-sessions="managedAgentSessions"
