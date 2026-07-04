@@ -52,8 +52,19 @@ export const deprecatedAssigneeSchema = z
 
 export const workflowArtifactSchema = z
   .object({
-    provider: z.enum(["github", "gitlab", "bitbucket", "unknown"]),
-    kind: z.enum(["issue", "branch", "pull_request", "merge_request", "review", "check_run", "merge"]),
+    provider: z.enum(["git", "github", "gitlab", "bitbucket", "unknown"]),
+    kind: z.enum([
+      "issue",
+      "branch",
+      "commit",
+      "diff",
+      "change_summary",
+      "pull_request",
+      "merge_request",
+      "review",
+      "check_run",
+      "merge",
+    ]),
     id: z.string().nullable().optional(),
     number: z.number().int().nullable().optional(),
     title: z.string().nullable().optional(),

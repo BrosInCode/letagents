@@ -14,6 +14,10 @@ import {
   claimLocalTaskReviewLease,
 } from "../rooms/local-store.js";
 import {
+  getLocalRoomArtifacts,
+  publishLocalRoomArtifact,
+} from "../rooms/artifacts/local-store.js";
+import {
   addLocalChatMessage,
   getLatestLocalChatMessages,
   getLocalChatMessages,
@@ -380,6 +384,18 @@ async function executeLocalRoomTool(
       });
       return result;
     }
+    case "get_room_artifacts":
+      return await getLocalRoomArtifacts(roomId, {
+        taskId: optionalString(request.arguments.task_id),
+        limit: numberArg(request.arguments.limit, 100, 250),
+      });
+    case "publish_room_artifact":
+      return await publishLocalRoomArtifact({
+        roomId,
+        artifact: objectArg(request.arguments.artifact, "artifact"),
+        taskId: optionalString(request.arguments.task_id),
+        linkedTaskIds: arrayArg(request.arguments.linked_task_ids),
+      });
     default:
       return unsupportedLocalRoomTool(request.tool);
   }

@@ -7,6 +7,7 @@ import type {
 } from "./types.js";
 
 const TASK_WORKFLOW_ARTIFACT_PROVIDERS = new Set<TaskWorkflowRefProvider>([
+  "git",
   "github",
   "gitlab",
   "bitbucket",
@@ -16,6 +17,9 @@ const TASK_WORKFLOW_ARTIFACT_PROVIDERS = new Set<TaskWorkflowRefProvider>([
 const TASK_WORKFLOW_ARTIFACT_KINDS = new Set<TaskWorkflowArtifactKind>([
   "issue",
   "branch",
+  "commit",
+  "diff",
+  "change_summary",
   "pull_request",
   "merge_request",
   "review",
@@ -106,6 +110,12 @@ function buildTaskWorkflowRefLabel(artifact: TaskWorkflowArtifact): string {
       return artifact.number ? `Issue #${artifact.number}` : "Issue";
     case "branch":
       return artifact.ref ? `Branch ${artifact.ref}` : "Branch";
+    case "commit":
+      return artifact.id ? `Commit ${artifact.id.slice(0, 12)}` : "Commit";
+    case "diff":
+      return artifact.title ? `Diff ${artifact.title}` : "Diff";
+    case "change_summary":
+      return artifact.title ? `Change summary ${artifact.title}` : "Change summary";
     case "pull_request":
       return artifact.number ? `PR #${artifact.number}` : "PR";
     case "merge_request":

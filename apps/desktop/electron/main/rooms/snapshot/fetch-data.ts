@@ -6,6 +6,7 @@ import {
 } from "../local-store.js";
 import { roomMessageHistoryPageSize } from "../../paths.js";
 import type { GitHubEventsResponse } from "../events.js";
+import { getLocalRoomArtifacts } from "../artifacts/local-store.js";
 import { getLatestLocalChatMessages } from "../messages/local-store.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import { resolveLocalThreadReaderKey } from "../messages/thread-reader.js";
@@ -62,9 +63,11 @@ export async function fetchRoomSnapshotData(
     apiFetch<ActivityHistoryResponse>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/activity-history?page_size=50`,
     ).catch(() => ({ entries: [] })),
-    apiFetch<RoomSnapshotData["roomArtifactsData"]>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/artifacts?limit=100`,
-    ).catch(() => ({ artifacts: [] })),
+    storage.effectiveMode === "local"
+      ? getLocalRoomArtifacts(localRoomIdentifier, { limit: 100 })
+      : apiFetch<RoomSnapshotData["roomArtifactsData"]>(
+          `/rooms/${encodeURIComponent(apiRoomIdentifier)}/artifacts?limit=100`,
+        ).catch(() => ({ artifacts: [] })),
     apiFetch<RoomSnapshotData["boardSettingsData"]>(
       `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-settings`,
     ).catch(() => ({ pending_intent_count: 0 })),

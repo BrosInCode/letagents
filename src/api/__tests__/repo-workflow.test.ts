@@ -356,6 +356,41 @@ test("validateTaskWorkflowArtifactsInput accepts valid artifacts", () => {
   );
 });
 
+test("validateTaskWorkflowArtifactsInput accepts local git artifacts", () => {
+  assert.deepEqual(
+    validateTaskWorkflowArtifactsInput([
+      {
+        provider: "git",
+        kind: "commit",
+        id: "abc123",
+        title: "Local commit",
+        ref: "feature/git-rooms",
+      },
+      {
+        provider: "git",
+        kind: "change_summary",
+        ref: "feature/git-rooms",
+        title: "Agent changes",
+      },
+    ]),
+    [
+      {
+        provider: "git",
+        kind: "commit",
+        id: "abc123",
+        title: "Local commit",
+        ref: "feature/git-rooms",
+      },
+      {
+        provider: "git",
+        kind: "change_summary",
+        ref: "feature/git-rooms",
+        title: "Agent changes",
+      },
+    ]
+  );
+});
+
 test("synchronizeTaskWorkflowArtifactsWithPrUrl replaces stale legacy PR artifacts when pr_url changes", () => {
   assert.deepEqual(
     synchronizeTaskWorkflowArtifactsWithPrUrl({
