@@ -23,6 +23,7 @@ export const dbApi = {
   createProjectWithName: dbModule?.createProjectWithName,
   createRoomAgentSession: dbModule?.createRoomAgentSession,
   approveBoardIntent: dbModule?.approveBoardIntent,
+  approveTaskCreateBoardIntent: dbModule?.approveTaskCreateBoardIntent,
   consumeBoardIntentApproval: dbModule?.consumeBoardIntentApproval,
   countBoardIntents: dbModule?.countBoardIntents,
   createBoardIntent: dbModule?.createBoardIntent,

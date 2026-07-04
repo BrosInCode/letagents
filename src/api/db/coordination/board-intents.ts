@@ -421,6 +421,24 @@ export async function listBoardIntents(input: {
   return rows.map(toBoardIntent);
 }
 
+export async function getBoardIntent(input: {
+  room_id: string;
+  intent_id: string;
+}, executor: BoardIntentExecutor = db): Promise<BoardIntent | null> {
+  const [row] = (await executor
+    .select()
+    .from(board_intents)
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        eq(board_intents.id, input.intent_id)
+      )
+    )
+    .limit(1)) as BoardIntentRow[];
+
+  return row ? toBoardIntent(row) : null;
+}
+
 export async function countBoardIntents(input: {
   room_id: string;
   status?: string | null;
@@ -444,14 +462,14 @@ export async function approveBoardIntent(input: {
   decision_by: string;
   reason?: string | null;
   now?: Date;
-}): Promise<{ intent: BoardIntent; approval_token: string } | null> {
+}, executor: BoardIntentExecutor = db): Promise<{ intent: BoardIntent; approval_token: string } | null> {
   const token = approvalToken();
   const nowDate = input.now ?? new Date();
   const now = nowDate.toISOString();
   const expiresAt = new Date(nowDate.getTime() + BOARD_INTENT_APPROVAL_TTL_MS).toISOString();
-  await expireBoardIntents({ room_id: input.room_id, now: nowDate });
+  await expireBoardIntents({ room_id: input.room_id, now: nowDate }, executor);
 
-  const [row] = (await db
+  const [row] = (await executor
     .update(board_intents)
     .set({
       status: "approved",
@@ -473,6 +491,29 @@ export async function approveBoardIntent(input: {
     .returning()) as BoardIntentRow[];
 
   return row ? { intent: toBoardIntent(row), approval_token: token } : null;
+}
+
+export async function markBoardIntentTaskResult(input: {
+  room_id: string;
+  intent_id: string;
+  task_id: string;
+}, executor: BoardIntentExecutor = db): Promise<BoardIntent | null> {
+  const now = new Date().toISOString();
+  const [row] = (await executor
+    .update(board_intents)
+    .set({
+      task_id: input.task_id,
+      updated_at: now,
+    })
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        eq(board_intents.id, input.intent_id)
+      )
+    )
+    .returning()) as BoardIntentRow[];
+
+  return row ? toBoardIntent(row) : null;
 }
 
 export async function denyBoardIntent(input: {

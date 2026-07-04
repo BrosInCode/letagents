@@ -86,6 +86,7 @@ export const {
   validateOwnerTokenTaskActorKey,
   recordCoordinationDecision,
   enforceTaskAdmissionCoordination,
+  enforceTaskAdmissionPreconditions,
   enforceTaskCoordinationMutation,
 } = taskCoordinationEnforcement;
 

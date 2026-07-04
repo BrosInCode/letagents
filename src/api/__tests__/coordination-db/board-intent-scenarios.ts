@@ -187,6 +187,71 @@ test(
 );
 
 test(
+  "approving a task_create board intent creates the task and marks the intent used",
+  databaseTestOptions,
+  async () => {
+    const {
+      approveTaskCreateBoardIntent,
+      createBoardIntent,
+      createProjectWithName,
+      verifyBoardIntentApproval,
+    } = dbApi;
+    if (
+      !approveTaskCreateBoardIntent ||
+      !createBoardIntent ||
+      !createProjectWithName ||
+      !verifyBoardIntentApproval
+    ) {
+      throw new Error("DB-backed coordination tests require TEST_DB_URL or DB_URL");
+    }
+
+    const room = await createProjectWithName("board-intent-task-create-approval");
+    const payload = {
+      title: "Investigate accepted task editing",
+      description: "Find why accepted board tasks cannot be edited after creation.",
+      source_message_id: "msg_94",
+    };
+    const intent = await createBoardIntent({
+      room_id: room.id,
+      action_type: "task_create",
+      payload,
+      proposer_actor_label: "HarborVale",
+      now: new Date("2026-07-04T02:20:00.000Z"),
+    });
+
+    const approved = await approveTaskCreateBoardIntent({
+      room_id: room.id,
+      intent_id: intent.id,
+      decision_by: "RiverField",
+      now: new Date("2026-07-04T02:21:00.000Z"),
+    });
+    assert.ok(approved);
+    assert.equal(approved.task.title, payload.title);
+    assert.equal(approved.task.description, payload.description);
+    assert.equal(approved.task.source_message_id, payload.source_message_id);
+    assert.equal(approved.task.created_by, "HarborVale");
+    assert.equal(approved.task.status, "proposed");
+    assert.equal(approved.intent.status, "used");
+    assert.equal(approved.intent.task_id, approved.task.id);
+    assert.equal(approved.intent.decision_by, "RiverField");
+
+    const reuseDecision = await verifyBoardIntentApproval({
+      room_id: room.id,
+      action_type: "task_create",
+      payload,
+      intent_id: intent.id,
+      approval_token: approved.approval_token,
+      now: new Date("2026-07-04T02:22:00.000Z"),
+    });
+    assert.deepEqual(reuseDecision, {
+      kind: "deny",
+      code: "board_intent_not_approved",
+      error: `Board intent ${intent.id} is used, not approved.`,
+    });
+  },
+);
+
+test(
   "approved board intents deny consumption after approval expiry",
   databaseTestOptions,
   async () => {

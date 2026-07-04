@@ -26,7 +26,7 @@ export const workerTaskIdentitySchema = {
 
 export const boardIntentApprovalSchema = {
   board_intent_id: z.string().optional().describe("Approved board intent id for high-impact board actions."),
-  board_approval_token: z.string().optional().describe("Scoped approval token returned by approve_board_intent."),
+  board_approval_token: z.string().optional().describe("Scoped approval token returned by approve_board_intent for non-task_create intents."),
 };
 
 export const taskReviewIdentitySchema = {
