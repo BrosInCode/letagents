@@ -18,10 +18,29 @@ export interface RepoWorktreeEntry {
   isMain?: boolean;
 }
 
+export interface RepoChangeSummary {
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  conflicted: number;
+}
+
 export interface RepoStatus {
   rootPath: string;
   mainRootPath?: string | null;
+  isGitRepo?: boolean;
+  gitHeadPath?: string | null;
+  head?: string | null;
   branch: string | null;
+  detached?: boolean;
+  defaultBranch?: string | null;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  changes?: RepoChangeSummary;
+  dirty?: boolean;
+  roomIdentifier?: string | null;
+  roomSource?: "configured" | "git_remote" | "local_git" | "local_folder" | null;
   worktrees: RepoWorktreeEntry[];
 }
 

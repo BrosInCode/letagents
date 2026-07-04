@@ -21,6 +21,31 @@
   overflow: hidden;
 }
 
+.desktop-room-shell[data-git-notice="true"] {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.desktop-room-shell > .desktop-room-header {
+  grid-row: 1;
+}
+
+.desktop-room-shell > .desktop-room-control-rail {
+  grid-row: 2;
+}
+
+.desktop-room-shell > .room-tab-page {
+  grid-row: 3;
+  min-height: 0;
+}
+
+.desktop-room-shell[data-git-notice="true"] > .desktop-room-control-rail {
+  grid-row: 3;
+}
+
+.desktop-room-shell[data-git-notice="true"] > .room-tab-page {
+  grid-row: 4;
+}
+
 .desktop-room-header {
   border: 1px solid var(--border);
   background: rgba(20, 20, 20, 0.76);
@@ -98,6 +123,7 @@
 }
 
 .desktop-room-git-meta {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -113,12 +139,19 @@
   align-items: center;
   gap: 5px;
   min-width: 0;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.035);
   font-size: 0.76rem;
   font-weight: 720;
   line-height: 1;
   white-space: nowrap;
   flex: 0 1 auto;
   overflow: hidden;
+  cursor: pointer;
 }
 
 .desktop-room-git-item svg {
@@ -132,10 +165,169 @@
   color: rgba(255, 255, 255, 0.76);
 }
 
-.desktop-room-git-ref span {
+.desktop-room-git-ref span,
+.desktop-room-git-ref small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.desktop-room-git-ref small {
+  flex: 0 0 auto;
+  max-width: 48px;
+  color: var(--text-tertiary);
+  font-size: 0.66rem;
+  font-weight: 820;
+}
+
+.desktop-room-git-item:hover,
+.desktop-room-git-item:focus-visible,
+.desktop-room-git-item[aria-expanded="true"] {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.desktop-room-git-menu,
+.desktop-room-overflow-menu {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgb(18, 18, 18);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.desktop-room-git-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 95;
+  display: grid;
+  gap: 6px;
+  width: min(320px, 82vw);
+  max-height: min(440px, 70vh);
+  overflow: auto;
+}
+
+.desktop-room-git-menu-section {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-secondary);
+}
+
+.desktop-room-git-menu-section strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-room-git-menu-section span,
+.desktop-room-git-worktree small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-room-git-menu-label {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.66rem;
+  font-weight: 860;
+  text-transform: uppercase;
+}
+
+.desktop-room-git-worktree {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  appearance: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.desktop-room-git-worktree span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-room-git-worktree:hover,
+.desktop-room-git-worktree:focus-visible,
+.desktop-room-git-worktree[data-current="true"] {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.desktop-room-git-prompt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 7px 16px 7px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(38, 31, 18, 0.92);
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.desktop-room-git-prompt[data-state="detached"] {
+  background: rgba(31, 31, 35, 0.94);
+}
+
+.desktop-room-git-prompt[data-state="error"] {
+  background: rgba(46, 21, 25, 0.94);
+}
+
+.desktop-room-git-prompt span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-action-button {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 820;
+}
+
+.inline-action-button:hover,
+.inline-action-button:focus-visible {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.inline-action-button.muted {
+  color: var(--text-secondary);
 }
 
 .desktop-room-header-actions {
@@ -214,12 +406,6 @@
   gap: 4px;
   min-width: 176px;
   padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: rgb(18, 18, 18);
-  box-shadow:
-    0 18px 42px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
   backdrop-filter: none;
   transform-origin: top right;
   will-change: opacity, transform;

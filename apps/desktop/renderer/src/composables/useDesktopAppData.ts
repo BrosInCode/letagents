@@ -477,7 +477,24 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   const repoStatusValue = computed<RepoStatus>(() => options.repoStatus.value || {
     rootPath: options.appInfo.value?.workspaceRoot || "",
+    isGitRepo: false,
+    gitHeadPath: null,
+    head: null,
     branch: null,
+    detached: false,
+    defaultBranch: null,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    changes: {
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+    },
+    dirty: false,
+    roomIdentifier: null,
+    roomSource: null,
     worktrees: [],
   });
 

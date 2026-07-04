@@ -1,5 +1,6 @@
 import type { DesktopRoomSnapshot } from "../../ipc-types.js";
-import { resolveRoomIdentifier } from "../../repo-status.js";
+import { basename } from "node:path";
+import { resolveWorkspaceRoom } from "../../repo-status.js";
 import { DesktopApiError } from "../auth.js";
 import { workspaceRoot } from "../paths.js";
 import {
@@ -28,9 +29,13 @@ export async function fetchRoomSnapshot(
     return desktopSmokeRoomSnapshot();
   }
 
+  const resolvedWorkspaceRoom = requestedRoomIdentifier?.trim()
+    ? null
+    : await resolveWorkspaceRoom(workspaceRoot);
   const roomIdentifier =
     requestedRoomIdentifier?.trim() ||
-    (await resolveRoomIdentifier(workspaceRoot));
+    resolvedWorkspaceRoom?.roomIdentifier ||
+    null;
 
   if (!roomIdentifier) {
     return createMissingRoomSnapshot();
@@ -41,7 +46,10 @@ export async function fetchRoomSnapshot(
     if (storage.effectiveMode === "local") {
       const localRoom = storage.localRoom || await createLocalRoom({
         roomIdentifier,
-        displayName: roomIdentifier,
+        displayName: resolvedWorkspaceRoom?.repoRoot
+          ? basename(resolvedWorkspaceRoom.repoRoot) || roomIdentifier
+          : roomIdentifier,
+        gitRoom: resolvedWorkspaceRoom?.gitRoom || null,
       });
       const visibleRoomIdentifier =
         localRoom.cloudRoomIdentifier || localRoom.roomIdentifier;

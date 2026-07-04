@@ -1,18 +1,71 @@
 <template>
-  <section class="desktop-room-shell" :data-liquid-glass="liquidGlassEnabled" data-testid="desktop-room-shell">
+  <section
+    class="desktop-room-shell"
+    :data-liquid-glass="liquidGlassEnabled"
+    :data-git-notice="Boolean(gitRoomBranchPrompt || gitRoomOpenError)"
+    data-testid="desktop-room-shell"
+  >
     <DesktopRoomHeader
       :sidebar-mode="sidebarMode"
       :room="room"
       :storage="storage"
+      :repo-status="repoStatus"
+      :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
       :tabs="tabs"
       :active-tab="activeTab"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
       @cycle-sidebar="emit('cycle-sidebar')"
+      @open-workspace-git-room="emit('open-workspace-git-room')"
+      @open-repo-root="emit('open-repo-root', $event)"
       @toggle-search="toggleSearchTool"
       @toggle-action-panel="toggleActionPanel"
       @select-tab="selectTab"
     />
+
+    <div
+      v-if="gitRoomBranchPrompt || gitRoomOpenError"
+      class="desktop-room-git-prompt"
+      :data-state="gitRoomOpenError ? 'error' : gitRoomBranchPrompt?.state"
+      :role="gitRoomOpenError ? 'alert' : undefined"
+      data-testid="desktop-room-git-branch-prompt"
+    >
+      <template v-if="gitRoomOpenError">
+        <span>{{ gitRoomOpenError }}</span>
+        <button
+          class="inline-action-button muted"
+          type="button"
+          aria-label="Dismiss Git Room open error"
+          @click="emit('dismiss-git-room-open-error')"
+        >
+          Dismiss
+        </button>
+      </template>
+      <template v-else-if="gitRoomBranchPrompt">
+        <span v-if="gitRoomBranchPrompt.state === 'detached'">
+          Workspace is detached. This room is still scoped to {{ gitRoomBranchPrompt.roomRef }}.
+        </span>
+        <span v-else>
+          Workspace is on {{ gitRoomBranchPrompt.workspaceBranch }}; this room is scoped to {{ gitRoomBranchPrompt.roomRef }}.
+        </span>
+        <button
+          v-if="gitRoomBranchPrompt.state === 'branch_mismatch'"
+          class="inline-action-button"
+          type="button"
+          @click="emit('open-workspace-git-room')"
+        >
+          Open Git Room
+        </button>
+        <button
+          class="inline-action-button muted"
+          type="button"
+          aria-label="Dismiss Git Room branch notice"
+          @click="emit('dismiss-git-room-branch-prompt', gitRoomBranchPrompt.key)"
+        >
+          Dismiss
+        </button>
+      </template>
+    </div>
 
     <DesktopRoomControlRail
       v-model:search-query="searchQuery"
@@ -324,6 +377,15 @@ const props = defineProps<{
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
   repoStatus: RepoStatus;
+  gitRoomMatchesActiveRepo: boolean;
+  gitRoomOpenError: string | null;
+  gitRoomBranchPrompt: {
+    key: string;
+    state: "branch_mismatch" | "detached";
+    workspaceBranch: string | null;
+    roomRef: string;
+    targetRoomIdentifier: string | null;
+  } | null;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
@@ -338,6 +400,10 @@ const emit = defineEmits<{
   "open-focus-room": [roomIdentifier: string];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
+  "open-workspace-git-room": [];
+  "open-repo-root": [rootPath: string];
+  "dismiss-git-room-branch-prompt": [key: string];
+  "dismiss-git-room-open-error": [];
   "add-agent-open-request-consumed": [];
 }>();
 
