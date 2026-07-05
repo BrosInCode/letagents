@@ -206,6 +206,7 @@ test("repo environment surfaces a matching pull request artifact", () => {
     label: "PR #647",
     description: "Productize Git Room environment panel",
     value: "Open",
+    tone: "positive",
     url: "https://github.com/BrosInCode/letagents/pull/647",
   });
 });
@@ -234,6 +235,7 @@ test("repo environment surfaces a matching pull request event", () => {
     label: "PR #647",
     description: "Productize Git Room environment panel",
     value: "Open",
+    tone: "positive",
     url: "https://github.com/BrosInCode/letagents/pull/647",
   });
 });

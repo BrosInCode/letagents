@@ -34,6 +34,7 @@
         :label="pullRequestSummary.label"
         :description="pullRequestSummary.description"
         :value="pullRequestSummary.value"
+        :tone="pullRequestSummary.tone"
         :actionable="Boolean(pullRequestSummary.url)"
         wrap-label
         test-id="git-room-environment-pull-request"
@@ -43,8 +44,10 @@
           <GitPullRequest :size="18" aria-hidden="true" />
         </template>
         <template #trailing>
+          <span v-if="pullRequestSummary.value" class="git-room-environment-pr-state">
+            {{ pullRequestSummary.value }}
+          </span>
           <ChevronRight v-if="pullRequestSummary.url" :size="16" aria-hidden="true" />
-          <span v-else>{{ pullRequestSummary.value }}</span>
         </template>
       </DesktopEnvironmentRow>
 
@@ -168,3 +171,9 @@ function openPullRequest(): void {
   if (url) emit("open-github-event", url);
 }
 </script>
+
+<style scoped>
+.git-room-environment-pr-state {
+  min-width: 0;
+}
+</style>

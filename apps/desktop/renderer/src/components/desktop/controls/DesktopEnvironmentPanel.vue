@@ -39,10 +39,10 @@ const emit = defineEmits<{
 <style scoped>
 .desktop-environment-panel {
   display: grid;
-  gap: 16px;
-  width: min(300px, calc(100vw - 32px));
+  gap: 22px;
+  width: min(360px, calc(100vw - 32px));
   max-height: min(620px, calc(100% - 20px));
-  padding: 18px 20px 22px;
+  padding: 24px 28px 32px;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 16px;
   background: rgba(18, 18, 18, 0.98);
@@ -91,7 +91,7 @@ const emit = defineEmits<{
 
 .desktop-environment-panel-body {
   display: grid;
-  gap: 16px;
-  padding-bottom: 16px;
+  gap: 22px;
+  padding-bottom: 20px;
 }
 </style>

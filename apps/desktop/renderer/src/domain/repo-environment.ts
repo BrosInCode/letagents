@@ -106,6 +106,7 @@ export interface RepoEnvironmentPullRequest {
   label: string;
   description: string | null;
   value: string | null;
+  tone: "neutral" | "positive" | "attention" | "danger";
   url: string | null;
 }
 
@@ -128,6 +129,7 @@ export function repoEnvironmentPullRequestForRoom(
       label: artifact.artifactNumber ? `PR #${artifact.artifactNumber}` : "Pull request",
       description: artifact.title,
       value: artifactStateLabel(artifact.state),
+      tone: pullRequestTone(artifact.state),
       url: artifact.url,
     };
   }
@@ -145,6 +147,7 @@ export function repoEnvironmentPullRequestForRoom(
     label: number ? `PR #${number}` : "Pull request",
     description: event.title || metadataString(event.metadata, ["pull_request", "title"]),
     value: artifactStateLabel(event.state || event.action),
+    tone: pullRequestTone(event.state || event.action),
     url: event.githubObjectUrl,
   };
 }
@@ -173,6 +176,19 @@ function artifactStateLabel(value: string | null | undefined): string | null {
     .filter(Boolean)
     .map((part) => `${part[0]?.toUpperCase() || ""}${part.slice(1).toLowerCase()}`)
     .join(" ");
+}
+
+function pullRequestTone(value: string | null | undefined): RepoEnvironmentPullRequest["tone"] {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return "neutral";
+  if (["closed", "failure", "failed", "changes_requested"].includes(normalized)) return "danger";
+  if (["draft", "converted_to_draft", "review_requested", "queued", "pending"].includes(normalized)) {
+    return "attention";
+  }
+  if (["open", "opened", "reopened", "ready_for_review", "merged", "success"].includes(normalized)) {
+    return "positive";
+  }
+  return "neutral";
 }
 
 function metadataString(metadata: Record<string, unknown>, path: string[]): string | null {

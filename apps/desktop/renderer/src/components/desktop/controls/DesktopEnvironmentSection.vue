@@ -20,11 +20,11 @@ defineProps<{
 <style scoped>
 .desktop-environment-section {
   display: grid;
-  gap: 9px;
+  gap: 14px;
 }
 
 .desktop-environment-section + .desktop-environment-section {
-  padding-top: 14px;
+  padding-top: 20px;
   border-top: 1px solid rgba(255, 255, 255, 0.065);
 }
 
@@ -51,6 +51,6 @@ defineProps<{
 
 .desktop-environment-section-body {
   display: grid;
-  gap: 10px;
+  gap: 18px;
 }
 </style>

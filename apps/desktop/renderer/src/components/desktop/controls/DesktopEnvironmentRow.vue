@@ -73,10 +73,10 @@ const emit = defineEmits<{
 <style scoped>
 .desktop-environment-row {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  min-height: 22px;
+  gap: 16px;
+  min-height: 38px;
   width: 100%;
   padding: 0;
   border: 0;
@@ -102,13 +102,13 @@ button.desktop-environment-row:disabled {
 .desktop-environment-row-icon {
   display: inline-grid;
   place-items: center;
-  width: 20px;
+  width: 26px;
   color: currentColor;
 }
 
 .desktop-environment-row-main {
   display: grid;
-  gap: 2px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -116,9 +116,9 @@ button.desktop-environment-row:disabled {
   min-width: 0;
   overflow: hidden;
   color: currentColor;
-  font-size: 0.86rem;
+  font-size: 0.92rem;
   font-weight: 520;
-  line-height: 1.18;
+  line-height: 1.16;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -133,17 +133,21 @@ button.desktop-environment-row:disabled {
   min-width: 0;
   overflow: hidden;
   color: rgba(255, 255, 255, 0.38);
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   font-weight: 620;
-  line-height: 1.2;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .desktop-environment-row-trailing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
   min-width: 0;
   color: rgba(255, 255, 255, 0.56);
-  font-size: 0.78rem;
+  font-size: 0.82rem;
   font-weight: 680;
   line-height: 1.2;
   white-space: nowrap;
