@@ -42,27 +42,44 @@ export function repoEnvironmentCurrentBranchMatchesRoom(
   return repoStatus.branch === roomRef;
 }
 
-export function repoEnvironmentChangeLabel(repoStatus: RepoStatus): string {
+function repoEnvironmentCodeDeltaLabel(delta: RepoBranchDelta | null | undefined): string | null {
+  if (!delta) return null;
+  const additions = delta.additions.toLocaleString();
+  const deletions = delta.deletions.toLocaleString();
+  return `+${additions} -${deletions}`;
+}
+
+function repoEnvironmentFileDeltaLabel(filesChanged: number): string {
+  return `${filesChanged.toLocaleString()} ${filesChanged === 1 ? "file" : "files"} changed`;
+}
+
+export function repoEnvironmentChangeLabel(
+  repoStatus: RepoStatus,
+  delta?: RepoBranchDelta | null,
+): string {
   const changes = repoStatus.changes;
   const changedCount = repoChangedFileCount(repoStatus);
   if (!changes || changedCount === 0) return "Clean";
+  const codeDelta = repoEnvironmentCodeDeltaLabel(delta);
   if (changes.conflicted === 0) {
-    return `${changedCount} ${changedCount === 1 ? "file" : "files"} changed`;
+    return [repoEnvironmentFileDeltaLabel(changedCount), codeDelta].filter(Boolean).join(" · ");
   }
   const parts = [
     changes.staged ? `${changes.staged} staged` : null,
     changes.unstaged ? `${changes.unstaged} modified` : null,
     changes.untracked ? `${changes.untracked} untracked` : null,
     changes.conflicted ? `${changes.conflicted} conflicted` : null,
+    codeDelta,
   ].filter(Boolean);
   return parts.join(" · ");
 }
 
 export function repoEnvironmentBranchDeltaLabel(delta: RepoBranchDelta | null | undefined): string | null {
   if (!delta) return null;
-  const additions = delta.additions.toLocaleString();
-  const deletions = delta.deletions.toLocaleString();
-  return `+${additions} -${deletions}`;
+  return [
+    repoEnvironmentFileDeltaLabel(delta.filesChanged),
+    repoEnvironmentCodeDeltaLabel(delta),
+  ].filter(Boolean).join(" · ");
 }
 
 export function repoEnvironmentBranchDeltaForRoom(

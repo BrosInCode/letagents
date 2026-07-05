@@ -627,9 +627,10 @@ const environmentWidgetSummary = computed(() => {
     ) || roomBranch;
   }
   const changedCount = repoChangedFileCount(props.repoStatus);
-  if (changedCount > 0) return repoEnvironmentChangeLabel(props.repoStatus);
+  const roomDelta = repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo);
+  if (changedCount > 0) return repoEnvironmentChangeLabel(props.repoStatus, roomDelta);
   return repoEnvironmentBranchDeltaLabel(
-    repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo),
+    roomDelta,
   ) || "Clean";
 });
 const roomManagedAgentSessions = computed(() =>

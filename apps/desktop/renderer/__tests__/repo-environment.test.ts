@@ -43,6 +43,28 @@ test("repo environment summarizes non-conflicted changes as files changed", () =
   assert.equal(repoWorkspaceSummary(status), "7 files changed · tracking origin/feature/git-rooms");
 });
 
+test("repo environment summarizes files changed with code in and out when branch delta is available", () => {
+  const status = repoStatus({
+    changes: {
+      staged: 2,
+      unstaged: 3,
+      untracked: 2,
+      conflicted: 0,
+    },
+  });
+
+  assert.equal(
+    repoEnvironmentChangeLabel(status, {
+      branch: "feature/git-rooms",
+      filesChanged: 9,
+      additions: 131,
+      deletions: 138,
+      baseBranch: "main",
+    }),
+    "7 files changed · +131 -138",
+  );
+});
+
 test("repo environment describes the linked Git room", () => {
   const room = roomInfo();
 
@@ -59,7 +81,7 @@ test("repo environment formats branch-wide code delta", () => {
       deletions: 779,
       baseBranch: "main",
     }),
-    "+19,926 -779",
+    "7 files changed · +19,926 -779",
   );
   assert.equal(repoEnvironmentBranchDeltaLabel(null), null);
 });

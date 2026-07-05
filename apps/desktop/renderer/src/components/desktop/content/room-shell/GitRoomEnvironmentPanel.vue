@@ -104,7 +104,7 @@ const branchChangesValue = computed(() => {
   if (changedCount.value === 0) {
     return repoEnvironmentBranchDeltaLabel(roomBranchDelta.value) || "Clean";
   }
-  return repoEnvironmentChangeLabel(props.repoStatus);
+  return repoEnvironmentChangeLabel(props.repoStatus, roomBranchDelta.value);
 });
 const branchChangesDescription = computed(() => {
   if (!currentBranchMatchesRoom.value) {
