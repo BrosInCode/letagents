@@ -91,6 +91,37 @@
             </dl>
 
             <section
+              v-if="showWorktreePicker"
+              class="desktop-add-agent-worktrees"
+              data-testid="desktop-add-agent-worktree-picker"
+              aria-label="Matching worktrees"
+            >
+              <div class="desktop-add-agent-worktrees-header">
+                <span>Existing worktrees</span>
+                <p>{{ worktreePickerDescription }}</p>
+              </div>
+              <button
+                v-for="worktree in matchingWorktrees"
+                :key="worktree.path"
+                type="button"
+                class="desktop-add-agent-worktree"
+                :data-current="worktree.isCurrent"
+                :data-testid="`desktop-add-agent-worktree-${worktree.path}`"
+                @click="chooseWorktree(worktree.path)"
+              >
+                <GitBranch :size="14" aria-hidden="true" />
+                <span>
+                  <strong>{{ worktree.branch }}</strong>
+                  <small>{{ worktree.path }}</small>
+                </span>
+                <code>{{ worktree.head.slice(0, 7) }}</code>
+              </button>
+              <p v-if="!matchingWorktrees.length" class="desktop-add-agent-worktrees-empty">
+                No existing worktree is on {{ preflight?.branchMismatch?.expectedBranch }}.
+              </p>
+            </section>
+
+            <section
               v-if="preflight?.nextAction === 'authenticate' && authCommand"
               class="desktop-add-agent-auth-command"
               aria-label="Agent sign-in command"
@@ -350,12 +381,21 @@
               </button>
 
               <button
-                v-else-if="preflight?.nextAction === 'choose_repo' || preflight?.nextAction === 'choose_worktree'"
+                v-else-if="preflight?.nextAction === 'choose_repo'"
                 type="button"
                 class="desktop-add-agent-primary"
                 @click="emit('choose-repo')"
               >
-                {{ preflight?.nextAction === "choose_worktree" ? "Choose matching worktree" : "Choose project folder" }}
+                Choose project folder
+              </button>
+
+              <button
+                v-else-if="preflight?.nextAction === 'choose_worktree'"
+                type="button"
+                class="desktop-add-agent-primary"
+                disabled
+              >
+                {{ matchingWorktrees.length ? "Choose a worktree above" : "No matching worktree found" }}
               </button>
 
               <button
@@ -398,7 +438,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { X } from "@lucide/vue";
+import { GitBranch, X } from "@lucide/vue";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
@@ -415,12 +455,14 @@ import type {
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentSession,
   DesktopOpenModelSettingsStatus,
+  RepoStatus,
 } from "../../../../../electron/ipc-types";
 import {
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
+  branchScopedGitRoomExpectedBranch,
   cursorMcpPolicyDescription,
   cursorMcpPolicyLabel,
   cursorMcpPolicyOptions,
@@ -431,6 +473,7 @@ import {
   isAgentSetupConfirmationActive,
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
+  matchingManagedAgentWorktreesForBranch,
   managedAgentRepoDetail,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSelectionForProvider,
@@ -458,14 +501,17 @@ const props = defineProps<{
   open: boolean;
   roomIdentifier: string;
   roomGitRoom: DesktopGitRoomInfo | null;
+  gitRoomMatchesActiveRepo: boolean;
   roomDisplayName: string | null;
   repoRootPath: string | null;
+  repoStatus: RepoStatus | null;
   managedSessions: DesktopManagedAgentSession[];
 }>();
 
 const emit = defineEmits<{
   close: [];
   "choose-repo": [];
+  "choose-worktree": [rootPath: string];
   "managed-sessions-updated": [sessions: DesktopManagedAgentSession[]];
   "managed-session-started": [session: DesktopManagedAgentSession];
 }>();
@@ -584,7 +630,36 @@ const repoLabel = computed(() => {
   if (!agentProviderNeedsDesktopRepo(selectedProvider.value)) {
     return "Handled by provider app";
   }
+  const mismatch = preflight.value?.branchMismatch;
+  if (mismatch) {
+    return mismatch.currentBranch
+      ? `${mismatch.currentBranch} - expected ${mismatch.expectedBranch}`
+      : `Expected ${mismatch.expectedBranch}`;
+  }
   return props.repoRootPath || "Required before local agents can start";
+});
+
+const matchingWorktrees = computed(() =>
+  props.roomGitRoom && !props.gitRoomMatchesActiveRepo
+    ? []
+    : matchingManagedAgentWorktreesForBranch(props.repoStatus, expectedWorktreeBranch.value)
+);
+
+const showWorktreePicker = computed(() =>
+  preflight.value?.nextAction === "choose_worktree"
+);
+
+const expectedWorktreeBranch = computed(() =>
+  preflight.value?.branchMismatch?.expectedBranch
+  || branchScopedGitRoomExpectedBranch(props.roomGitRoom, props.repoStatus)
+);
+
+const worktreePickerDescription = computed(() => {
+  const expectedBranch = expectedWorktreeBranch.value || "this branch";
+  if (matchingWorktrees.value.length) {
+    return `Pick an existing checkout on ${expectedBranch}.`;
+  }
+  return `Open an existing worktree on ${expectedBranch}, then check again.`;
 });
 
 const deliveryModeDescription = computed(() =>
@@ -1370,6 +1445,12 @@ async function runSetupAction(action: DesktopAgentProviderSetupAction): Promise<
       setupBusy.value = false;
     }
   }
+}
+
+function chooseWorktree(rootPath: string): void {
+  const trimmed = rootPath.trim();
+  if (!trimmed) return;
+  emit("choose-worktree", trimmed);
 }
 
 function setupActionButtonText(action: DesktopAgentProviderSetupAction): string {

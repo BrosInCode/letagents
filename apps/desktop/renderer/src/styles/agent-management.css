@@ -331,6 +331,7 @@
 }
 
 .desktop-add-agent-auth-command,
+.desktop-add-agent-worktrees,
 .desktop-add-agent-external-prompt {
   display: grid;
   gap: 8px;
@@ -346,12 +347,84 @@
   background: rgba(34, 211, 238, 0.06);
 }
 
+.desktop-add-agent-worktrees {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(245, 158, 11, 0.06);
+}
+
 .desktop-add-agent-auth-command span,
+.desktop-add-agent-worktrees-header span,
 .desktop-add-agent-external-prompt span {
   color: var(--text-tertiary);
   font-size: 0.72rem;
   font-weight: 850;
   text-transform: uppercase;
+}
+
+.desktop-add-agent-worktrees-header {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.desktop-add-agent-worktrees-header p,
+.desktop-add-agent-worktrees-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.desktop-add-agent-worktree {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.desktop-add-agent-worktree:hover,
+.desktop-add-agent-worktree:focus-visible {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.12);
+  outline: none;
+}
+
+.desktop-add-agent-worktree > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-add-agent-worktree strong,
+.desktop-add-agent-worktree small,
+.desktop-add-agent-worktree code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-add-agent-worktree strong {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.desktop-add-agent-worktree small {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+}
+
+.desktop-add-agent-worktree code {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
 }
 
 .desktop-add-agent-external-prompt-intro {

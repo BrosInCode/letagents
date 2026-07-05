@@ -12,7 +12,9 @@ import type {
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopReasoningSession,
+  DesktopRoomInfo,
   RepoStatus,
+  RepoWorktreeEntry,
 } from "../../../electron/ipc-types";
 import { normalizeAgentKey } from "./agents";
 
@@ -28,14 +30,73 @@ export function hasDesktopManagedRuntime(
 }
 
 export function preferredManagedAgentRepoRootPath(
-  repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath"> | null | undefined,
+  repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath" | "worktrees" | "defaultBranch"> | null | undefined,
+  gitRoom?: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null,
 ): string | null {
+  const matchingWorktree = matchingManagedAgentWorktrees(repoStatus, gitRoom)[0];
+  if (matchingWorktree?.path.trim()) {
+    return matchingWorktree.path.trim();
+  }
   const mainRootPath = String(repoStatus?.mainRootPath ?? "").trim();
   if (mainRootPath) {
     return mainRootPath;
   }
   const rootPath = String(repoStatus?.rootPath ?? "").trim();
   return rootPath || null;
+}
+
+export function branchScopedGitRoomExpectedBranch(
+  gitRoom: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null | undefined,
+  repoStatus?: Pick<RepoStatus, "defaultBranch"> | null,
+): string | null {
+  if (!gitRoom) return null;
+  const expectedBranch = gitRoom.ref.type === "branch"
+    ? gitRoom.ref.name?.trim() || null
+    : null;
+  if (!expectedBranch) return null;
+  if (gitRoom.isDefault) return null;
+  const defaultBranch = gitRoom.ref.defaultBranch?.trim() || repoStatus?.defaultBranch?.trim() || null;
+  if (defaultBranch && expectedBranch === defaultBranch) return null;
+  return expectedBranch;
+}
+
+export function matchingManagedAgentWorktrees(
+  repoStatus: Pick<RepoStatus, "worktrees" | "defaultBranch"> | null | undefined,
+  gitRoom?: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null,
+): RepoWorktreeEntry[] {
+  const expectedBranch = branchScopedGitRoomExpectedBranch(gitRoom, repoStatus);
+  return matchingManagedAgentWorktreesForBranch(repoStatus, expectedBranch);
+}
+
+export function matchingManagedAgentWorktreesForBranch(
+  repoStatus: Pick<RepoStatus, "worktrees"> | null | undefined,
+  expectedBranch: string | null | undefined,
+): RepoWorktreeEntry[] {
+  const branch = expectedBranch?.trim() || null;
+  if (!branch) return [];
+  return (repoStatus?.worktrees || [])
+    .filter((worktree) => worktree.branch?.trim() === branch)
+    .sort((left, right) => Number(right.isCurrent) - Number(left.isCurrent));
+}
+
+export function isBranchScopedGitRoomIdentifier(roomIdentifier: string | null | undefined): boolean {
+  return /^git-room:(?:github\.com:[^:\s]+|local:[^:\s]+):branch:[A-Za-z0-9_-]+$/i.test(
+    roomIdentifier?.trim() || "",
+  );
+}
+
+export function managedAgentRepoStatusForRoom<T extends Pick<RepoStatus, "rootPath">>(
+  repoStatus: T,
+  room: Pick<DesktopRoomInfo, "identifier" | "gitRoom">,
+  gitRoomMatchesActiveRepo: boolean,
+): T | null {
+  if (room.gitRoom) {
+    return gitRoomMatchesActiveRepo ? repoStatus : null;
+  }
+  if (isBranchScopedGitRoomIdentifier(room.identifier)) {
+    return null;
+  }
+  return repoStatus;
 }
 
 export function isVisibleManagedAgentSession(
@@ -754,13 +815,8 @@ export function managedAgentRoomBranchMismatch(
   session: { repoBranch?: string | null },
   gitRoom: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null | undefined,
 ): { expectedBranch: string; actualBranch: string | null } | null {
-  const expectedBranch = gitRoom?.ref.type === "branch"
-    ? gitRoom.ref.name?.trim() || null
-    : null;
+  const expectedBranch = branchScopedGitRoomExpectedBranch(gitRoom);
   if (!expectedBranch) return null;
-  if (gitRoom?.isDefault) return null;
-  const defaultBranch = gitRoom?.ref.defaultBranch?.trim() || null;
-  if (defaultBranch && expectedBranch === defaultBranch) return null;
   const actualBranch = session.repoBranch?.trim() || null;
   if (actualBranch === expectedBranch) return null;
   return { expectedBranch, actualBranch };
