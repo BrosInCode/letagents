@@ -3,9 +3,13 @@ import { describe, it } from "node:test";
 
 import type {
   DesktopRoomMessage,
+  DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
 } from "../../electron/ipc-types";
-import { mergeRoomSnapshotMessages } from "../src/domain/desktop-room-snapshots";
+import {
+  mergeRoomSnapshotMessages,
+  upsertSnapshotRoomArtifact,
+} from "../src/domain/desktop-room-snapshots";
 
 describe("desktop room snapshot merging", () => {
   it("replaces messages instead of merging when room storage changes namespace", () => {
@@ -16,6 +20,37 @@ describe("desktop room snapshot merging", () => {
 
     assert.equal(merged.storage.effectiveMode, "local");
     assert.deepEqual(merged.messages.map((message) => message.text), ["Local message"]);
+  });
+
+  it("upserts room artifacts by identity and keeps newest activity first", () => {
+    const snapshot = {
+      ...roomSnapshot("local", "Local message", "msg_1", "local_room"),
+      roomArtifacts: [
+        roomArtifact("git:branch:ref:feature/old", "feature/old", "2026-06-17T00:01:00.000Z"),
+      ],
+    };
+
+    const withNew = upsertSnapshotRoomArtifact(
+      snapshot,
+      roomArtifact("git:commit:id:abc123", "abc123", "2026-06-17T00:02:00.000Z"),
+    );
+    assert.deepEqual(withNew?.roomArtifacts.map((artifact) => artifact.identityKey), [
+      "git:commit:id:abc123",
+      "git:branch:ref:feature/old",
+    ]);
+
+    const withUpdated = upsertSnapshotRoomArtifact(
+      withNew,
+      {
+        ...roomArtifact("git:branch:ref:feature/old", "feature/old", "2026-06-17T00:03:00.000Z"),
+        state: "updated",
+      },
+    );
+    assert.deepEqual(withUpdated?.roomArtifacts.map((artifact) => artifact.identityKey), [
+      "git:branch:ref:feature/old",
+      "git:commit:id:abc123",
+    ]);
+    assert.equal(withUpdated?.roomArtifacts[0]?.state, "updated");
   });
 });
 
@@ -113,5 +148,28 @@ function roomMessage(id: string, text: string): DesktopRoomMessage {
     threadReplyToId: null,
     thread: null,
     replyTo: null,
+  };
+}
+
+function roomArtifact(
+  identityKey: string,
+  ref: string,
+  updatedAt: string,
+): DesktopRoomSharedArtifact {
+  return {
+    roomId: "local_room",
+    identityKey,
+    provider: "git",
+    kind: identityKey.includes(":commit:") ? "commit" : "branch",
+    artifactId: identityKey.includes(":commit:") ? ref : null,
+    artifactNumber: null,
+    title: null,
+    url: null,
+    ref,
+    state: null,
+    source: "manual",
+    firstSeenAt: "2026-06-17T00:00:00.000Z",
+    updatedAt,
+    linkedTaskIds: [],
   };
 }

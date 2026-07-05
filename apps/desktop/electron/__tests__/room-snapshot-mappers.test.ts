@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
+import { mapRoomArtifactPayload, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
 
@@ -50,6 +50,32 @@ test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", 
   assert.equal(gitRoom?.ref.name, "feature/player-3d-presentation");
   assert.equal(gitRoom?.accessMode, "local");
   assert.equal(gitRoom?.source, "local_git");
+});
+
+test("mapRoomArtifactPayload hydrates desktop artifact fields and rejects incomplete payloads", () => {
+  const artifact = mapRoomArtifactPayload({
+    room_id: "room_1",
+    identity_key: "git:change_summary:id:agent_1:feature",
+    provider: "git",
+    kind: "change_summary",
+    artifact_id: "agent_1:feature",
+    artifact_number: null,
+    title: "Agent changes",
+    url: null,
+    ref: "feature/local",
+    state: "updated",
+    source: "task_workflow_artifact",
+    first_seen_at: "2026-05-12T10:40:00.000Z",
+    updated_at: "2026-05-12T11:10:00.000Z",
+    linked_task_ids: ["task_1", 42 as never, "task_2"],
+  });
+
+  assert.equal(artifact?.identityKey, "git:change_summary:id:agent_1:feature");
+  assert.equal(artifact?.provider, "git");
+  assert.equal(artifact?.kind, "change_summary");
+  assert.deepEqual(artifact?.linkedTaskIds, ["task_1", "task_2"]);
+  assert.equal(mapRoomArtifactPayload({ room_id: "room_1", provider: "git", kind: "branch" }), null);
+  assert.equal(mapRoomArtifactPayload({ room_id: "room_1", identity_key: "bad", provider: "git", kind: "unknown" }), null);
 });
 
 test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => {

@@ -180,6 +180,7 @@
           @run-action="runModalTaskAction"
           @update:selected-reviewer="setModalReviewer"
           @view-events="emit('view-events', $event)"
+          @view-artifacts="emit('view-artifacts', $event)"
         />
       </div>
     </div>
@@ -315,6 +316,7 @@ const emit = defineEmits<{
   "refresh-room": [];
   "update:selected-task-id": [taskId: string | null];
   "view-events": [taskId: string];
+  "view-artifacts": [taskId: string];
 }>();
 
 const {

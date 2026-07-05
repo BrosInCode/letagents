@@ -25,6 +25,7 @@ import {
   snapshotMatchesRoom,
   upsertSnapshotReasoningSession,
   upsertSnapshotGitHubEvent,
+  upsertSnapshotRoomArtifact,
   upsertSnapshotTask,
 } from "../domain/desktop-room-snapshots";
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
@@ -356,6 +357,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     if (event.type === "artifact_update") {
+      if (event.artifact) {
+        setSelectedSnapshot(upsertSnapshotRoomArtifact(options.selectedSnapshot.value, event.artifact));
+      }
       options.scheduleLiveMetadataRefresh();
       return;
     }

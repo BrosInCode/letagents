@@ -431,6 +431,7 @@ export type DesktopRoomStreamEvent =
       type: "artifact_update";
       roomIdentifier: string;
       artifactIdentityKey: string | null;
+      artifact?: DesktopRoomSharedArtifact | null;
     }
   | {
       type: "reasoning_update";
