@@ -157,11 +157,12 @@ export function buildSidebarProjectGroups(input: {
   const currentRoomIdentifier = normalizeRoomIdentifier(input.currentParentRoom.roomIdentifier);
 
   function upsertGroup(group: ProjectGroup): void {
-    const identifier = projectGroupLookupKey(group);
-    if (!identifier) return;
-    const existing = groupsByRoom.get(identifier);
+    const identifiers = projectGroupLookupKeys(group);
+    const existing = identifiers.map((identifier) => groupsByRoom.get(identifier)).find(Boolean);
     if (!existing) {
-      groupsByRoom.set(identifier, group);
+      for (const identifier of identifiers) {
+        groupsByRoom.set(identifier, group);
+      }
       groups.push(group);
       return;
     }
@@ -169,6 +170,9 @@ export function buildSidebarProjectGroups(input: {
     existing.roomName = existing.parent.title;
     existing.branchRooms = mergeRoomEntries(existing.branchRooms, group.branchRooms);
     existing.focusRooms = mergeRoomEntries(existing.focusRooms, group.focusRooms);
+    for (const identifier of identifiers) {
+      groupsByRoom.set(identifier, existing);
+    }
   }
 
   upsertGroup({
@@ -260,10 +264,16 @@ function projectGroupIdForEntry(entry: RoomEntry): string {
   return repositoryKey ? `project:git:${repositoryKey}` : `project:${entry.id}`;
 }
 
-function projectGroupLookupKey(group: ProjectGroup): string | null {
-  const repositoryKey = gitRoomRepositoryKey(group.parent.gitRoom ?? null);
-  if (repositoryKey) return normalizeRoomIdentifier(`project:git:${repositoryKey}`);
-  return normalizeRoomIdentifier(group.parent.roomIdentifier || group.parent.title);
+function projectGroupLookupKeys(group: ProjectGroup): string[] {
+  const gitRoom = group.parent.gitRoom ?? null;
+  const repositoryKeys = gitRoomRepositoryKeys(gitRoom);
+  if (repositoryKeys.length) {
+    return repositoryKeys
+      .map((key) => normalizeRoomIdentifier(`project:git:${key}`))
+      .filter((key): key is string => Boolean(key));
+  }
+  const roomKey = normalizeRoomIdentifier(group.parent.roomIdentifier || group.parent.title);
+  return roomKey ? [roomKey] : [];
 }
 
 function groupAccountGitRoomsByRepository(
@@ -423,8 +433,10 @@ function accountGitRoomToRepoParentEntry(
   const currentWorkspace = normalizeRoomIdentifier(room.roomIdentifier) === currentRoomIdentifier;
   return {
     ...entry,
-    title: gitRoom.repository.fullName || entry.title,
-    meta: gitAccessModeLabel(gitRoom),
+    title: entry.title,
+    meta: gitRoom.repository.fullName && gitRoom.repository.fullName !== entry.title
+      ? gitRoom.repository.fullName
+      : gitAccessModeLabel(gitRoom),
     sectionLabel: "Git repo",
     headline: gitRoom.repository.fullName,
     description: `${gitRefTypeLabel(gitRoom)} · ${gitRoomRefLabel(gitRoom)}`,
@@ -505,11 +517,20 @@ function gitRoomSidebarMeta(gitRoom: DesktopGitRoomInfo | null): {
 }
 
 function gitRoomRepositoryKey(gitRoom: DesktopGitRoomInfo | null | undefined): string | null {
+  return gitRoomRepositoryKeys(gitRoom)[0] || null;
+}
+
+function gitRoomRepositoryKeys(gitRoom: DesktopGitRoomInfo | null | undefined): string[] {
+  const keys: string[] = [];
   const repositoryId = gitRoom?.repository.id?.trim().toLowerCase();
-  if (repositoryId) return `${gitRoom?.provider || "git"}:${gitRoom?.host || "git"}:id:${repositoryId}`;
+  if (repositoryId) {
+    keys.push(`${gitRoom?.provider || "git"}:${gitRoom?.host || "git"}:id:${repositoryId}`);
+  }
   const fullName = gitRoom?.repository.fullName.trim().toLowerCase();
-  if (!fullName) return null;
-  return `${gitRoom?.provider || "git"}:${gitRoom?.host || "git"}:${fullName}`;
+  if (fullName && gitRoom?.accessMode !== "local") {
+    keys.push(`${gitRoom?.provider || "git"}:${gitRoom?.host || "git"}:${fullName}`);
+  }
+  return keys;
 }
 
 function isDefaultGitRoom(gitRoom: DesktopGitRoomInfo | null | undefined): boolean {

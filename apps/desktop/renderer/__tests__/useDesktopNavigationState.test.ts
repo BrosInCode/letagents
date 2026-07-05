@@ -445,8 +445,8 @@ describe("useDesktopNavigationState", () => {
       const group = state.projectEntries.value.find((project) =>
         project.parent.gitRoom?.repository.fullName === "BrosInCode/letagents"
       );
-      assert.equal(group?.parent.title, "BrosInCode/letagents");
-      assert.equal(group?.parent.meta, "Public");
+      assert.equal(group?.parent.title, "sky-lake");
+      assert.equal(group?.parent.meta, "BrosInCode/letagents");
       assert.equal(group?.parent.currentWorkspace, false);
 
       const branch = group?.branchRooms.find((room) => room.kind === "branch");
@@ -503,6 +503,57 @@ describe("useDesktopNavigationState", () => {
       assert.equal(group?.branchRooms.length, 1);
       assert.equal(group?.branchRooms[0]?.roomIdentifier, branchRoomIdentifier);
       assert.equal(group?.branchRooms[0]?.currentWorkspace, true);
+    });
+  });
+
+  it("groups the current branch under the named repo room when Git repository ids differ", () => {
+    withLocalStorage(() => {
+      const defaultGitRoom = gitRoom({
+        repositoryId: "repo-default-id",
+        refType: "default_branch",
+        refName: "main",
+        isDefault: true,
+      });
+      const branchGitRoom = gitRoom({
+        repositoryId: "repo-branch-id",
+        refName: "staging",
+      });
+      const branchRoomIdentifier =
+        "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw";
+      const state = useDesktopNavigationState({
+        accountRooms: ref<DesktopAccountRoomEntry[]>([
+          accountRoom("github.com/BrosInCode/letagents", "sky-lake", {
+            gitRoom: defaultGitRoom,
+          }),
+        ]),
+        activeEntryStorageKey: "active-entry",
+        appInfo: ref<DesktopAppInfo>({
+          appName: "LetAgents Desktop",
+          platform: "darwin",
+          versions: { electron: "1", chrome: "1", node: "1" },
+          workspaceRoot: "/Users/emmy/Projects/letagents",
+          apiUrl: "https://letagents.chat",
+        }),
+        recentRootRooms: ref<RecentRootRoom[]>([]),
+        recentRootRoomsStorageKey: "recent-root-rooms",
+        repoStatus: ref<RepoStatus | null>(null),
+        rootRoomSnapshot: ref<DesktopRoomSnapshot | null>(roomSnapshot(branchRoomIdentifier, {
+          displayName: "Branch: staging",
+          gitRoom: branchGitRoom,
+        })),
+        selectedRootRoomIdentifier: ref<string | null>(branchRoomIdentifier),
+        selectedSnapshot: ref<DesktopRoomSnapshot | null>(null),
+      });
+
+      const repoGroups = state.projectEntries.value.filter((project) =>
+        project.parent.gitRoom?.repository.fullName === "BrosInCode/letagents"
+      );
+
+      assert.equal(repoGroups.length, 1);
+      assert.equal(repoGroups[0]?.parent.title, "sky-lake");
+      assert.equal(repoGroups[0]?.parent.roomIdentifier, "github.com/BrosInCode/letagents");
+      assert.deepEqual(repoGroups[0]?.branchRooms.map((room) => room.roomIdentifier), [branchRoomIdentifier]);
+      assert.equal(repoGroups[0]?.branchRooms[0]?.currentWorkspace, true);
     });
   });
 
