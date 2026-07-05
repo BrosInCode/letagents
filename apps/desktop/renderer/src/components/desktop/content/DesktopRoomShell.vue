@@ -105,7 +105,7 @@
     />
 
     <div
-      v-if="room.gitRoom && !actionPanelOpen && !searchOpen"
+      v-if="showEnvironmentPanelWidget"
       class="desktop-room-environment-popover"
       data-testid="desktop-room-environment-popover"
     >
@@ -126,7 +126,7 @@
           :room-artifacts="roomArtifacts"
           :github-events="eventsPage"
           @open-repo-root="emit('open-repo-root', $event)"
-          @open-github-event="openGitHubEventFromChat"
+          @open-pull-request="openGitHubUrlExternally"
         />
       </DesktopFloatingWidget>
     </div>
@@ -619,6 +619,9 @@ const githubEventsAvailable = computed(() =>
 );
 
 const showEventsTab = computed(() => githubEventsAvailable.value);
+const showEnvironmentPanelWidget = computed(() =>
+  activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
+);
 const environmentWidgetSummary = computed(() => {
   const roomBranch = repoEnvironmentRoomRefLabel(props.room);
   if (!roomBranch) return "Git Room";
@@ -1264,6 +1267,10 @@ async function openGitHubEventFromChat(url: string): Promise<void> {
   }
   await refreshGitHubEvents();
   eventsSelectedEventId.value = findEventByUrl(url)?.id || null;
+}
+
+async function openGitHubUrlExternally(url: string): Promise<void> {
+  await window.letagentsDesktop?.app?.openGitHubUrl?.(url);
 }
 
 function scheduleGitHubEventsRefresh(delayMs: number): void {

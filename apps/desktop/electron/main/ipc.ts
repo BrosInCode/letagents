@@ -236,6 +236,12 @@ export function registerDesktopIpcHandlers(
     }),
   );
   targetIpcMain.handle(
+    "desktop:app:open-github-url",
+    async (_event, url: string): Promise<void> => {
+      await openAllowedExternalUrl(url, ["github.com"]);
+    },
+  );
+  targetIpcMain.handle(
     "desktop:app-agent:get-settings-status",
     async (): Promise<DesktopAppAgentSettingsStatus> =>
       getAppAgentSettingsStatus(),

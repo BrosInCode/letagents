@@ -99,7 +99,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "open-repo-root": [rootPath: string];
-  "open-github-event": [url: string];
+  "open-pull-request": [url: string];
 }>();
 
 const changedCount = computed(() => repoChangedFileCount(props.repoStatus));
@@ -168,7 +168,7 @@ function openRoomBranch(): void {
 
 function openPullRequest(): void {
   const url = pullRequestSummary.value?.url;
-  if (url) emit("open-github-event", url);
+  if (url) emit("open-pull-request", url);
 }
 </script>
 

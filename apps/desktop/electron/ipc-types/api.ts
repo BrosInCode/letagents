@@ -85,6 +85,7 @@ export interface DesktopApi {
   };
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
+    openGitHubUrl: (url: string) => Promise<void>;
   };
   appAgent: {
     getSettingsStatus: () => Promise<DesktopAppAgentSettingsStatus>;
