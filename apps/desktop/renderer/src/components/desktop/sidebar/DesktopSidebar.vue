@@ -40,11 +40,11 @@
           >
             <button
               class="pinned-room"
-              :data-active="activeEntry.id === project.parent.id"
+              :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
               :data-unread="project.parent.hasUnread"
               type="button"
               :data-testid="`pinned-room-${project.parent.id}`"
-              @click="$emit('select-entry', project.parent)"
+              @click="selectOrToggleProject(project)"
               @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
             >
               <span class="pin-mark" aria-hidden="true">
@@ -63,7 +63,7 @@
                 <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
               </span>
               <span
-                v-if="project.focusRooms.length"
+                v-if="projectChildRooms(project).length"
                 class="project-open"
                 :data-collapsed="collapsedProjects[project.id]"
                 :data-testid="`pinned-room-group-toggle-${project.id}`"
@@ -74,27 +74,36 @@
             </button>
 
             <Transition name="sidebar-reveal">
-              <div v-if="!collapsedProjects[project.id] && project.focusRooms.length" class="project-room-list">
+              <div v-if="!collapsedProjects[project.id] && projectChildRooms(project).length" class="project-room-list">
                 <button
-                  v-for="focusRoom in project.focusRooms"
-                  :key="focusRoom.id"
+                  v-for="childRoom in projectChildRooms(project)"
+                  :key="childRoom.id"
                   class="room-row room-focus"
-                  :data-active="activeEntry.id === focusRoom.id"
-                  :data-unread="focusRoom.hasUnread"
+                  :data-kind="childRoom.kind"
+                  :data-active="activeEntry.id === childRoom.id"
+                  :data-unread="childRoom.hasUnread"
                   type="button"
-                  :data-testid="`pinned-focus-room-${focusRoom.id}`"
-                  @click="$emit('select-entry', focusRoom)"
-                  @contextmenu.prevent.stop="openRoomContextMenu($event, focusRoom)"
+                  :data-testid="`pinned-child-room-${childRoom.id}`"
+                  @click="$emit('select-entry', childRoom)"
+                  @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
                 >
                   <span class="room-title-line">
-                    <span class="room-title">{{ focusRoom.title }}</span>
+                    <span class="room-title">{{ childRoom.title }}</span>
+                    <span v-if="childRoom.currentWorkspace" class="room-workspace-pill">Current</span>
                     <span
-                      v-if="focusRoom.hasUnread"
+                      v-if="childRoom.hasUnread"
                       class="room-unread-dot"
                       aria-label="Unread messages"
                       title="Unread messages"
                     ></span>
                   </span>
+                  <small v-if="childRoom.meta" class="room-child-meta">{{ childRoom.meta }}</small>
+                  <small
+                    v-if="childRoom.suggestedAction && !childRoom.currentWorkspace"
+                    class="room-suggested-action"
+                  >
+                    {{ childRoom.suggestedAction }}
+                  </small>
                 </button>
               </div>
             </Transition>
@@ -128,11 +137,11 @@
           >
             <button
               class="project-row"
-              :data-active="activeEntry.id === project.parent.id"
+              :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
               :data-unread="project.parent.hasUnread"
               type="button"
               :data-testid="`room-parent-${project.parent.id}`"
-              @click="$emit('select-entry', project.parent)"
+              @click="selectOrToggleProject(project)"
               @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
             >
               <div class="project-row-main">
@@ -155,7 +164,7 @@
                 </span>
               </div>
               <span
-                v-if="project.focusRooms.length"
+                v-if="projectChildRooms(project).length"
                 class="project-open"
                 :data-collapsed="collapsedProjects[project.id]"
                 :data-testid="`room-group-toggle-${project.id}`"
@@ -166,27 +175,36 @@
             </button>
 
             <Transition name="sidebar-reveal">
-              <div v-if="!collapsedProjects[project.id] && project.focusRooms.length" class="project-room-list">
+              <div v-if="!collapsedProjects[project.id] && projectChildRooms(project).length" class="project-room-list">
                 <button
-                  v-for="focusRoom in project.focusRooms"
-                  :key="focusRoom.id"
+                  v-for="childRoom in projectChildRooms(project)"
+                  :key="childRoom.id"
                   class="room-row room-focus"
-                  :data-active="activeEntry.id === focusRoom.id"
-                  :data-unread="focusRoom.hasUnread"
+                  :data-kind="childRoom.kind"
+                  :data-active="activeEntry.id === childRoom.id"
+                  :data-unread="childRoom.hasUnread"
                   type="button"
-                  :data-testid="`focus-room-${focusRoom.id}`"
-                  @click="$emit('select-entry', focusRoom)"
-                  @contextmenu.prevent.stop="openRoomContextMenu($event, focusRoom)"
+                  :data-testid="`child-room-${childRoom.id}`"
+                  @click="$emit('select-entry', childRoom)"
+                  @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
                 >
                   <span class="room-title-line">
-                    <span class="room-title">{{ focusRoom.title }}</span>
+                    <span class="room-title">{{ childRoom.title }}</span>
+                    <span v-if="childRoom.currentWorkspace" class="room-workspace-pill">Current</span>
                     <span
-                      v-if="focusRoom.hasUnread"
+                      v-if="childRoom.hasUnread"
                       class="room-unread-dot"
                       aria-label="Unread messages"
                       title="Unread messages"
                     ></span>
                   </span>
+                  <small v-if="childRoom.meta" class="room-child-meta">{{ childRoom.meta }}</small>
+                  <small
+                    v-if="childRoom.suggestedAction && !childRoom.currentWorkspace"
+                    class="room-suggested-action"
+                  >
+                    {{ childRoom.suggestedAction }}
+                  </small>
                 </button>
               </div>
             </Transition>
@@ -248,7 +266,7 @@
       @contextmenu.prevent
     >
       <p class="sidebar-context-title">{{ roomContextMenu.entry.title }}</p>
-      <button type="button" role="menuitem" @click="selectContextRoom">
+      <button v-if="isSelectableRoom(roomContextMenu.entry)" type="button" role="menuitem" @click="selectContextRoom">
         <House aria-hidden="true" />
         <span>Open room</span>
       </button>
@@ -263,7 +281,7 @@
         @click="toggleContextProject"
       >
         <ChevronRight aria-hidden="true" />
-        <span>{{ collapsedProjects[contextProject.id] ? "Expand focus rooms" : "Collapse focus rooms" }}</span>
+        <span>{{ collapsedProjects[contextProject.id] ? "Expand rooms" : "Collapse rooms" }}</span>
       </button>
       <button
         v-if="canArchiveContextRoom"
@@ -316,13 +334,13 @@ const pinnedProjectEntries = computed(() => props.projectEntries.filter((project
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
 
 const totalRoomCount = computed(() =>
-  roomProjectEntries.value.reduce((total, project) => total + 1 + project.focusRooms.length, 0)
+  roomProjectEntries.value.reduce((total, project) => total + 1 + projectChildRooms(project).length, 0)
 );
 
 const contextProject = computed(() => {
   const projectId = roomContextMenu.value?.projectId;
   if (!projectId) return null;
-  return props.projectEntries.find((project) => project.id === projectId && project.focusRooms.length) || null;
+  return props.projectEntries.find((project) => project.id === projectId && projectChildRooms(project).length) || null;
 });
 
 const canArchiveContextRoom = computed(() => {
@@ -339,7 +357,7 @@ const archiveContextLabel = computed(() =>
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
   const menuWidth = 228;
-  const hasProjectToggle = Boolean(projectId && props.projectEntries.find((project) => project.id === projectId)?.focusRooms.length);
+  const hasProjectToggle = Boolean(projectId && projectChildRooms(props.projectEntries.find((project) => project.id === projectId)).length);
   const menuHeight = hasProjectToggle ? 196 : entry.kind === "parent" ? 156 : 116;
   const sidebarRect = (event.currentTarget as HTMLElement | null)
     ?.closest(".app-sidebar")
@@ -359,8 +377,9 @@ function closeRoomContextMenu(): void {
 }
 
 function selectContextRoom(): void {
-  if (!roomContextMenu.value) return;
-  emit("select-entry", roomContextMenu.value.entry);
+  const entry = roomContextMenu.value?.entry;
+  if (!entry || !isSelectableRoom(entry)) return;
+  emit("select-entry", entry);
   closeRoomContextMenu();
 }
 
@@ -378,10 +397,36 @@ function archiveContextRoom(): void {
 }
 
 function projectSubtitle(project: ProjectGroup): string {
-  if (project.focusRooms.length) {
-    return `${project.focusRooms.length} focus ${project.focusRooms.length === 1 ? "room" : "rooms"}`;
+  const branchCount = project.branchRooms.length;
+  const focusCount = project.focusRooms.length;
+  if (project.parent.gitRoom && branchCount) {
+    const branchLabel = `${branchCount} ${branchCount === 1 ? "branch" : "branches"}`;
+    const focusLabel = focusCount ? ` · ${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}` : "";
+    return `${project.parent.meta} · ${branchLabel}${focusLabel}`;
+  }
+  if (focusCount) {
+    return `${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}`;
   }
   return project.parent.meta;
+}
+
+function projectChildRooms(project: ProjectGroup | null | undefined): RoomEntry[] {
+  if (!project) return [];
+  return [...project.branchRooms, ...project.focusRooms];
+}
+
+function isSelectableRoom(entry: RoomEntry): boolean {
+  return Boolean(entry.roomIdentifier);
+}
+
+function selectOrToggleProject(project: ProjectGroup): void {
+  if (isSelectableRoom(project.parent)) {
+    emit("select-entry", project.parent);
+    return;
+  }
+  if (projectChildRooms(project).length) {
+    emit("toggle-project", project.id);
+  }
 }
 
 async function copyContextRoomUrl(): Promise<void> {

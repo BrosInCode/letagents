@@ -284,6 +284,11 @@
   box-shadow: none;
 }
 
+.room-focus[data-kind="branch"] {
+  min-height: 42px;
+  gap: 2px;
+}
+
 .room-focus:hover {
   background: rgba(255, 255, 255, 0.035);
 }
@@ -298,6 +303,35 @@
   grid-column: 1;
   font-size: 0.74rem;
   line-height: 1.2;
+}
+
+.room-child-meta,
+.room-suggested-action {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  line-height: 1.15;
+}
+
+.room-child-meta {
+  color: var(--text-tertiary);
+}
+
+.room-suggested-action {
+  color: color-mix(in srgb, var(--accent, #7dd3fc) 78%, var(--text-secondary));
+}
+
+.room-workspace-pill {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #7dd3fc) 16%, transparent);
+  color: color-mix(in srgb, var(--accent, #7dd3fc) 84%, var(--text));
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1.4;
 }
 
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-focus {
