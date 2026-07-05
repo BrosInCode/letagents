@@ -191,6 +191,7 @@
         @refresh-room="emit('refresh-room')"
         @update:selected-task-id="boardSelectedTaskId = $event"
         @view-events="openEventsForTask"
+        @view-artifacts="openArtifactsForTask"
       />
 
       <RoomEventsView
@@ -228,6 +229,8 @@
         :reasoning-sessions="reasoningSessions"
         :room-git-room="room.gitRoom"
         :room-artifacts="roomArtifacts"
+        :activity-history-request="activityHistoryRequest"
+        :artifact-task-filter-id="artifactTimelineTaskFilterId"
         :tasks="tasks"
         :messages="visibleMessages"
         :workers="workers"
@@ -235,6 +238,7 @@
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetail"
         @refresh-room="emit('refresh-room')"
+        @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
 
       <RoomDetailsView
@@ -452,6 +456,8 @@ const eventsTaskFilterId = ref<string | null>(null);
 const eventsSelectedEventId = ref<string | null>(null);
 const eventsLoadedOlderWithoutMatches = ref(false);
 const boardSelectedTaskId = ref<string | null>(null);
+const activityHistoryRequest = ref(0);
+const artifactTimelineTaskFilterId = ref<string | null>(null);
 const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
@@ -1140,6 +1146,13 @@ function openEventsForTask(taskId: string): void {
   eventsTaskFilterId.value = taskId;
   eventsSelectedEventId.value = null;
   activeTab.value = "events";
+}
+
+function openArtifactsForTask(taskId: string): void {
+  boardSelectedTaskId.value = taskId;
+  artifactTimelineTaskFilterId.value = taskId;
+  activityHistoryRequest.value += 1;
+  activeTab.value = "activity";
 }
 
 function openBoardTaskFromEvents(taskId: string): void {

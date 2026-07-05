@@ -401,7 +401,16 @@ async function upsertLocalRoomArtifact(input: {
 
   const published = await getLocalRoomArtifactByIdentityKey(roomId, identityKey);
   if (!published) throw new Error("Local room artifact could not be published.");
+  await emitLocalRoomArtifactUpdate(roomId, published);
   return { room_id: roomId, artifact: published };
+}
+
+async function emitLocalRoomArtifactUpdate(
+  localRoomIdentifier: string,
+  artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number],
+): Promise<void> {
+  const { emitPersistedLocalRoomArtifactUpdate } = await import("../../room-stream.js");
+  emitPersistedLocalRoomArtifactUpdate(localRoomIdentifier, artifact);
 }
 
 export async function syncLocalRoomArtifactsForTask(input: {
@@ -415,6 +424,12 @@ export async function syncLocalRoomArtifactsForTask(input: {
   const source: DesktopRoomSharedArtifactSource = "task_workflow_artifact";
   const synced: NonNullable<RoomArtifactsResponse["artifacts"]> = [];
   const identityKeys: string[] = [];
+  const database = await getDb();
+  const previousIdentityKeys = getLocalTaskArtifactIdentityKeys(database, {
+    roomId,
+    taskId,
+    source,
+  });
 
   for (const artifact of input.artifacts) {
     const result = await upsertLocalRoomArtifact({
@@ -430,7 +445,6 @@ export async function syncLocalRoomArtifactsForTask(input: {
     identityKeys.push(identityKey);
   }
 
-  const database = await getDb();
   const deleteBase = `
     DELETE FROM local_room_artifact_tasks
     WHERE room_id = ?
@@ -446,7 +460,42 @@ export async function syncLocalRoomArtifactsForTask(input: {
     database.prepare(deleteBase).run(roomId, taskId, source);
   }
 
+  await emitLocalRoomArtifactUpdatesForIdentityKeys(
+    roomId,
+    previousIdentityKeys.filter((identityKey) => !identityKeys.includes(identityKey)),
+  );
+
   return synced;
+}
+
+function getLocalTaskArtifactIdentityKeys(
+  database: SqliteDatabase,
+  input: { roomId: string; taskId: string; source: DesktopRoomSharedArtifactSource },
+): string[] {
+  return database
+    .prepare(`
+      SELECT artifact_identity_key
+      FROM local_room_artifact_tasks
+      WHERE room_id = ?
+        AND task_id = ?
+        AND source = ?
+      ORDER BY artifact_identity_key ASC
+    `)
+    .all(input.roomId, input.taskId, input.source)
+    .map((row) => stringValue(row.artifact_identity_key))
+    .filter((identityKey): identityKey is string => Boolean(identityKey));
+}
+
+async function emitLocalRoomArtifactUpdatesForIdentityKeys(
+  roomId: string,
+  identityKeys: string[],
+): Promise<void> {
+  for (const identityKey of identityKeys) {
+    const artifact = await getLocalRoomArtifactByIdentityKey(roomId, identityKey);
+    if (artifact) {
+      await emitLocalRoomArtifactUpdate(roomId, artifact);
+    }
+  }
 }
 
 export async function getLocalRoomArtifacts(

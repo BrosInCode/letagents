@@ -68,6 +68,7 @@
 }
 
 .desktop-activity-group header > strong,
+.desktop-activity-artifact-header-actions > strong,
 .desktop-activity-detail-section header span {
   display: inline-grid;
   place-items: center;
@@ -76,6 +77,31 @@
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.07);
   font-size: 0.82rem;
+}
+
+.desktop-activity-artifact-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: end;
+  gap: 7px;
+}
+
+.desktop-activity-artifact-header-actions button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.desktop-activity-artifact-header-actions button:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text);
 }
 
 .desktop-activity-roster-item {
@@ -110,25 +136,81 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
-.desktop-activity-artifact-row {
+.desktop-activity-artifact-timeline {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  min-height: 54px;
-  padding: 9px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.035);
+  gap: 0;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
 }
 
-.desktop-activity-artifact-row > span:nth-child(2) {
+.desktop-activity-artifact-event {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 62px;
+  padding: 9px 0 9px 2px;
+}
+
+.desktop-activity-artifact-event + .desktop-activity-artifact-event {
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.desktop-activity-artifact-marker {
+  position: relative;
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: rgba(125, 223, 149, 0.92);
+  box-shadow: 0 0 0 4px rgba(125, 223, 149, 0.11);
+}
+
+.desktop-activity-artifact-marker::after {
+  position: absolute;
+  top: 14px;
+  left: 4px;
+  width: 1px;
+  height: calc(100% + 36px);
+  background: rgba(255, 255, 255, 0.09);
+  content: "";
+}
+
+.desktop-activity-artifact-event:last-child .desktop-activity-artifact-marker::after {
+  display: none;
+}
+
+.desktop-activity-artifact-marker[data-kind="check_run"],
+.desktop-activity-artifact-marker[data-kind="review"] {
+  background: rgba(96, 165, 250, 0.94);
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.12);
+}
+
+.desktop-activity-artifact-marker[data-kind="diff"],
+.desktop-activity-artifact-marker[data-kind="change_summary"] {
+  background: rgba(167, 139, 250, 0.94);
+  box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.12);
+}
+
+.desktop-activity-artifact-content {
+  display: grid;
+  gap: 4px;
   min-width: 0;
 }
 
-.desktop-activity-artifact-row strong,
-.desktop-activity-artifact-row a {
-  display: block;
+.desktop-activity-artifact-title-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.desktop-activity-artifact-title-line strong,
+.desktop-activity-artifact-title-line a {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--text-primary);
   font-size: 0.9rem;
@@ -138,14 +220,12 @@
   white-space: nowrap;
 }
 
-.desktop-activity-artifact-row a:hover {
+.desktop-activity-artifact-title-line a:hover {
   color: #d8b4fe;
 }
 
-.desktop-activity-artifact-row small {
-  display: block;
+.desktop-activity-artifact-content small {
   overflow: hidden;
-  margin-top: 3px;
   color: var(--text-tertiary);
   font-size: 0.76rem;
   text-overflow: ellipsis;

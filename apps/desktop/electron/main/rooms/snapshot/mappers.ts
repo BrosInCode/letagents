@@ -295,26 +295,8 @@ function mapRoomArtifacts(
 ): DesktopRoomSharedArtifact[] {
   return (data.artifacts || [])
     .flatMap((artifact): DesktopRoomSharedArtifact[] => {
-      const kind = normalizeArtifactKind(artifact.kind);
-      if (!artifact.identity_key || !artifact.room_id || !kind) return [];
-      return [{
-        roomId: artifact.room_id,
-        identityKey: artifact.identity_key,
-        provider: normalizeArtifactProvider(artifact.provider),
-        kind,
-        artifactId: artifact.artifact_id || null,
-        artifactNumber: typeof artifact.artifact_number === "number" ? artifact.artifact_number : null,
-        title: artifact.title || null,
-        url: artifact.url || null,
-        ref: artifact.ref || null,
-        state: artifact.state || null,
-        source: normalizeArtifactSource(artifact.source),
-        firstSeenAt: artifact.first_seen_at || "",
-        updatedAt: artifact.updated_at || artifact.first_seen_at || "",
-        linkedTaskIds: Array.isArray(artifact.linked_task_ids)
-          ? artifact.linked_task_ids.filter((taskId): taskId is string => typeof taskId === "string")
-          : [],
-      }];
+      const mapped = mapRoomArtifactPayload(artifact);
+      return mapped ? [mapped] : [];
     })
     .sort((left, right) => {
       const leftTime = Date.parse(left.updatedAt || left.firstSeenAt || "");
@@ -324,6 +306,32 @@ function mapRoomArtifacts(
         (Number.isFinite(leftTime) ? leftTime : -1)
       );
     });
+}
+
+export function mapRoomArtifactPayload(
+  artifact: NonNullable<RoomSnapshotData["roomArtifactsData"]["artifacts"]>[number] | null | undefined,
+): DesktopRoomSharedArtifact | null {
+  if (!artifact) return null;
+  const kind = normalizeArtifactKind(artifact.kind);
+  if (!artifact.identity_key || !artifact.room_id || !kind) return null;
+  return {
+    roomId: artifact.room_id,
+    identityKey: artifact.identity_key,
+    provider: normalizeArtifactProvider(artifact.provider),
+    kind,
+    artifactId: artifact.artifact_id || null,
+    artifactNumber: typeof artifact.artifact_number === "number" ? artifact.artifact_number : null,
+    title: artifact.title || null,
+    url: artifact.url || null,
+    ref: artifact.ref || null,
+    state: artifact.state || null,
+    source: normalizeArtifactSource(artifact.source),
+    firstSeenAt: artifact.first_seen_at || "",
+    updatedAt: artifact.updated_at || artifact.first_seen_at || "",
+    linkedTaskIds: Array.isArray(artifact.linked_task_ids)
+      ? artifact.linked_task_ids.filter((taskId): taskId is string => typeof taskId === "string")
+      : [],
+  };
 }
 
 function normalizeArtifactProvider(value: unknown): DesktopRoomSharedArtifact["provider"] {

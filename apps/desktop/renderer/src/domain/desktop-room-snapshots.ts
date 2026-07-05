@@ -3,6 +3,7 @@ import type {
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
   DesktopRoomMessage,
+  DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
@@ -98,6 +99,27 @@ export function upsertSnapshotGitHubEvent(
   };
 }
 
+export function upsertSnapshotRoomArtifact(
+  snapshot: DesktopRoomSnapshot | null,
+  artifact: DesktopRoomSharedArtifact,
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  const existingIndex = snapshot.roomArtifacts.findIndex((existing) =>
+    existing.identityKey === artifact.identityKey
+  );
+  const roomArtifacts = [...snapshot.roomArtifacts];
+  if (existingIndex >= 0) {
+    roomArtifacts.splice(existingIndex, 1, { ...roomArtifacts[existingIndex], ...artifact });
+  } else {
+    roomArtifacts.unshift(artifact);
+  }
+  roomArtifacts.sort(compareDesktopRoomArtifacts);
+  return {
+    ...snapshot,
+    roomArtifacts,
+  };
+}
+
 export function mergeRoomSnapshotMessages(
   current: DesktopRoomSnapshot | null,
   incoming: DesktopRoomSnapshot
@@ -184,6 +206,15 @@ function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: Desktop
     return rightTime - leftTime;
   }
   return right.id.localeCompare(left.id);
+}
+
+function compareDesktopRoomArtifacts(left: DesktopRoomSharedArtifact, right: DesktopRoomSharedArtifact): number {
+  const leftTime = Date.parse(left.updatedAt || left.firstSeenAt || "");
+  const rightTime = Date.parse(right.updatedAt || right.firstSeenAt || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return left.identityKey.localeCompare(right.identityKey);
 }
 
 function shouldPreserveCurrentRoomSnapshot(

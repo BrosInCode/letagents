@@ -21,6 +21,7 @@ import {
   mapDesktopTaskSummaryPayload,
   mapRoomMessagePayload,
 } from "./rooms.js";
+import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
 import { emitToMainWindow } from "./window.js";
 import { dispatchRoomStreamEventToManagedAgents } from "./agents/codex-supervisor.js";
 import {
@@ -101,6 +102,31 @@ export function emitPersistedLocalRoomMessage(
     type: "message",
     roomIdentifier: trimmedRoomIdentifier,
     message,
+  }, { deliverToManagedAgents: false });
+}
+
+export function emitPersistedLocalRoomArtifactUpdate(
+  localRoomIdentifier: string,
+  artifactPayload: Parameters<typeof mapRoomArtifactPayload>[0],
+): void {
+  const stream = activeRoomStream;
+  const localIdentifier = localRoomIdentifier.trim();
+  if (
+    !stream ||
+    !localIdentifier ||
+    stream.localRoomIdentifier !== localIdentifier ||
+    stream.stopped
+  ) {
+    return;
+  }
+
+  const artifact = mapRoomArtifactPayload(artifactPayload);
+  if (!artifact) return;
+  emitRoomStreamEvent({
+    type: "artifact_update",
+    roomIdentifier: stream.roomIdentifier,
+    artifactIdentityKey: artifact.identityKey,
+    artifact,
   }, { deliverToManagedAgents: false });
 }
 
@@ -202,13 +228,19 @@ function handleRoomStreamFrame(
   }
 
   if (eventName === "artifact_update") {
+    const artifact = mapRoomArtifactPayload(
+      payload.artifact && typeof payload.artifact === "object"
+        ? payload.artifact as Parameters<typeof mapRoomArtifactPayload>[0]
+        : null,
+    );
     emitRoomStreamEvent({
       type: "artifact_update",
       roomIdentifier: eventRoomIdentifier,
       artifactIdentityKey:
         typeof payload.artifact_identity_key === "string"
           ? payload.artifact_identity_key
-          : null,
+          : artifact?.identityKey ?? null,
+      artifact,
     });
     return;
   }

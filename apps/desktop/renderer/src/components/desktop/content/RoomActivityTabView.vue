@@ -202,31 +202,59 @@
 
     <div v-else class="desktop-activity-layout">
       <div class="desktop-activity-groups">
-        <section v-if="roomArtifacts.length" class="desktop-activity-group">
+        <section v-if="artifactTimeline.length || artifactTaskFilterId" class="desktop-activity-group">
           <header>
             <div>
-              <h3>Shared artifacts</h3>
-              <p>Workflow objects linked to this room.</p>
+              <h3>{{ artifactTimelineTitle }}</h3>
+              <p>{{ artifactTimelineDescription }}</p>
             </div>
-            <strong>{{ roomArtifacts.length }}</strong>
+            <span class="desktop-activity-artifact-header-actions">
+              <button
+                v-if="artifactTaskFilterId"
+                type="button"
+                @click="emit('clear-artifact-task-filter')"
+              >
+                Show all
+              </button>
+              <strong>{{ artifactTimeline.length }}</strong>
+            </span>
           </header>
 
-          <article
-            v-for="artifact in roomArtifacts"
-            :key="artifact.identityKey"
-            class="desktop-activity-artifact-row"
-          >
-            <span class="desktop-activity-mini-pill">{{ artifactKindLabel(artifact.kind) }}</span>
-            <span>
-              <a v-if="artifact.url" :href="artifact.url" target="_blank" rel="noopener noreferrer">
-                {{ artifactTitle(artifact) }}
-              </a>
-              <strong v-else>{{ artifactTitle(artifact) }}</strong>
-              <small>{{ artifactMeta(artifact) }}</small>
-            </span>
-            <span v-if="artifact.linkedTaskIds.length" class="desktop-activity-row-meta">
-              <span class="desktop-activity-mini-pill">{{ artifact.linkedTaskIds.length }} task{{ artifact.linkedTaskIds.length === 1 ? "" : "s" }}</span>
-            </span>
+          <ol v-if="artifactTimeline.length" class="desktop-activity-artifact-timeline">
+            <li
+              v-for="item in artifactTimeline"
+              :key="item.artifact.identityKey"
+              class="desktop-activity-artifact-event"
+            >
+              <span class="desktop-activity-artifact-marker" :data-kind="item.artifact.kind" aria-hidden="true"></span>
+              <span class="desktop-activity-artifact-content">
+                <span class="desktop-activity-artifact-title-line">
+                  <span class="desktop-activity-mini-pill">{{ item.kindLabel }}</span>
+                  <a
+                    v-if="item.artifact.url"
+                    :href="item.artifact.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {{ item.title }}
+                  </a>
+                  <strong v-else>{{ item.title }}</strong>
+                </span>
+                <small v-if="item.metaLabel">{{ item.metaLabel }}</small>
+                <small v-if="item.occurredAt">
+                  {{ item.wasUpdated ? "Updated" : "First seen" }} {{ formatRelativeTime(item.occurredAt) }}
+                  <template v-if="item.wasUpdated && item.firstSeenAt">
+                    · first seen {{ formatRelativeTime(item.firstSeenAt) }}
+                  </template>
+                </small>
+              </span>
+              <span v-if="item.taskCountLabel" class="desktop-activity-row-meta">
+                <span class="desktop-activity-mini-pill">{{ item.taskCountLabel }}</span>
+              </span>
+            </li>
+          </ol>
+          <article v-else class="desktop-activity-empty">
+            No artifacts are linked to this task yet.
           </article>
         </section>
 
@@ -337,7 +365,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -352,6 +380,9 @@ import type {
 import type { ActivityParticipant } from "./room-activity/types";
 import { activityParticipantToAgentTarget } from "./room-activity/agentTarget";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
+import {
+  roomArtifactTimelineItems,
+} from "../../../domain/room-artifacts";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 
@@ -363,6 +394,8 @@ const props = defineProps<{
   reasoningSessions: DesktopReasoningSession[];
   roomGitRoom: DesktopGitRoomInfo | null;
   roomArtifacts: DesktopRoomSharedArtifact[];
+  activityHistoryRequest: number;
+  artifactTaskFilterId: string | null;
   tasks: DesktopTaskSummary[];
   messages: DesktopRoomMessage[];
   workers: WorkerSnapshot[];
@@ -373,6 +406,7 @@ const emit = defineEmits<{
   "open-add-agent": [];
   "open-agent-detail": [target: AgentModalTarget];
   "refresh-room": [];
+  "clear-artifact-task-filter": [];
 }>();
 
 const {
@@ -401,6 +435,32 @@ const selectedLiveBranchMismatchLabel = computed(() =>
     ? roomBranchMismatchLabel(selectedLiveParticipant.value)
     : null
 );
+const artifactTimeline = computed(() =>
+  roomArtifactTimelineItems(props.roomArtifacts, {
+    taskId: props.artifactTaskFilterId,
+  })
+);
+const artifactFilterTask = computed(() =>
+  props.artifactTaskFilterId
+    ? props.tasks.find((task) => task.id === props.artifactTaskFilterId) || null
+    : null
+);
+const artifactTimelineTitle = computed(() =>
+  props.artifactTaskFilterId ? "Task artifact timeline" : "Artifact timeline"
+);
+const artifactTimelineDescription = computed(() => {
+  if (!props.artifactTaskFilterId) {
+    return "Workflow objects ordered by latest room activity.";
+  }
+  const task = artifactFilterTask.value;
+  return task
+    ? `Artifacts linked to ${task.title}.`
+    : `Artifacts linked to ${props.artifactTaskFilterId}.`;
+});
+
+watch(() => props.activityHistoryRequest, (request) => {
+  if (request > 0) activeView.value = "history";
+}, { immediate: true });
 
 function refreshActivity(): void {
   emit("refresh-room");
@@ -435,36 +495,6 @@ function detailSubtitle(participant: ActivityParticipant): string {
   if (participant.activityState === "active" || participant.activityState === "away") return "Reachable in chat";
   if (connectionLabel(participant) === "work update") return "Work updates available";
   return "Not reachable in chat";
-}
-
-function artifactKindLabel(kind: DesktopRoomSharedArtifact["kind"]): string {
-  switch (kind) {
-    case "pull_request":
-      return "Pull request";
-    case "merge_request":
-      return "Merge request";
-    case "check_run":
-      return "Check";
-    default:
-      return kind.charAt(0).toUpperCase() + kind.slice(1).replace(/_/g, " ");
-  }
-}
-
-function artifactTitle(artifact: DesktopRoomSharedArtifact): string {
-  if (artifact.title?.trim()) return artifact.title;
-  if (artifact.ref?.trim()) return artifact.ref;
-  if (artifact.artifactNumber !== null) return `${artifactKindLabel(artifact.kind)} #${artifact.artifactNumber}`;
-  if (artifact.artifactId?.trim()) return artifact.artifactId;
-  return artifactKindLabel(artifact.kind);
-}
-
-function artifactMeta(artifact: DesktopRoomSharedArtifact): string {
-  return [
-    artifact.provider,
-    artifact.state,
-    artifact.ref ? `ref ${artifact.ref}` : null,
-    artifact.artifactNumber !== null ? `#${artifact.artifactNumber}` : null,
-  ].filter(Boolean).join(" · ");
 }
 
 onMounted(refreshActivity);
