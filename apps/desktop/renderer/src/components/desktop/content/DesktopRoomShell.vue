@@ -366,7 +366,6 @@ import {
   repoEnvironmentCurrentBranchMatchesRoom,
   repoEnvironmentRoomRefLabel,
 } from "../../../domain/repo-environment";
-import { repoChangedFileCount } from "../../../domain/repo-status";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
@@ -629,12 +628,10 @@ const environmentWidgetSummary = computed(() => {
       repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo),
     ) || roomBranch;
   }
-  const changedCount = repoChangedFileCount(props.repoStatus);
   const roomDelta = repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo);
-  if (changedCount > 0) return repoEnvironmentChangeLabel(props.repoStatus, roomDelta);
   return repoEnvironmentBranchDeltaLabel(
     roomDelta,
-  ) || "Clean";
+  ) || repoEnvironmentChangeLabel(props.repoStatus);
 });
 const roomManagedAgentSessions = computed(() =>
   managedAgentSessions.value.filter((session) =>

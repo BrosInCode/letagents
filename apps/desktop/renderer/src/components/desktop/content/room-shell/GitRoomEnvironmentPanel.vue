@@ -129,12 +129,12 @@ const openBranchDescription = computed(() => {
   return "No local worktree for this branch";
 });
 const branchChangesValue = computed(() => {
+  const branchDeltaLabel = repoEnvironmentBranchDeltaLabel(roomBranchDelta.value);
+  if (branchDeltaLabel) return branchDeltaLabel;
   if (!currentBranchMatchesRoom.value) {
-    return repoEnvironmentBranchDeltaLabel(roomBranchDelta.value) || "No local worktree";
+    return "No local worktree";
   }
-  if (changedCount.value === 0) {
-    return repoEnvironmentBranchDeltaLabel(roomBranchDelta.value) || "Clean";
-  }
+  if (changedCount.value === 0) return "Clean";
   return repoEnvironmentChangeLabel(props.repoStatus, roomBranchDelta.value);
 });
 const branchChangesDescription = computed(() => {
@@ -144,8 +144,11 @@ const branchChangesDescription = computed(() => {
       ? `Open ${roomBranchLabel.value} to inspect local changes`
       : "Open a local worktree to inspect changes";
   }
-  if (changedCount.value > 0) return "Uncommitted changes";
-  if (roomBranchDelta.value?.baseBranch) return `Compared with ${roomBranchDelta.value.baseBranch}`;
+  const localState = changedCount.value > 0
+    ? repoEnvironmentChangeLabel(props.repoStatus)
+    : "No uncommitted changes";
+  if (roomBranchDelta.value?.baseBranch) return `${localState} · compared with ${roomBranchDelta.value.baseBranch}`;
+  if (changedCount.value > 0) return localState;
   return "No uncommitted changes";
 });
 const branchChangesTone = computed(() => {
