@@ -23,6 +23,12 @@
       @select-tab="selectTab"
     />
 
+    <RepoStateStrip
+      :room="room"
+      :repo-status="repoStatus"
+      :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
+    />
+
     <div
       v-if="gitRoomBranchPrompt || gitRoomOpenError"
       class="desktop-room-git-prompt"
@@ -236,6 +242,8 @@
         key="rooms"
         :room="room"
         :focus-rooms="focusRooms"
+        :repo-status="repoStatus"
+        :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
         :tasks="tasks"
         @open-focus-room="emit('open-focus-room', $event)"
         @refresh-room="emit('refresh-room')"
@@ -330,6 +338,7 @@ import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RentAnAgentView from "./RentAnAgentView.vue";
+import RepoStateStrip from "./RepoStateStrip.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";

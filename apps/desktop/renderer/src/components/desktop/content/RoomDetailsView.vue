@@ -409,6 +409,12 @@
           </Transition>
         </aside>
       </div>
+
+      <RepoStatusView
+        v-if="showRepoStatusDetails"
+        class="focus-room-repo-status"
+        :repo-status="repoStatus"
+      />
     </template>
 
     <Teleport to="body">
@@ -463,9 +469,11 @@
 <script setup lang="ts">
 import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { shouldShowRepoStateForRoom } from "../../../domain/repo-state-strip";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
+import RepoStatusView from "./RepoStatusView.vue";
 import type {
   DesktopFocusActivityScope,
   DesktopGitRoomInfo,
@@ -479,6 +487,7 @@ import type {
   DesktopFocusRoomSettings,
   DesktopRoomInfo,
   DesktopTaskSummary,
+  RepoStatus,
 } from "../../../../../electron/ipc-types";
 
 type FocusRoomTab = "open" | "concluded" | "tasks";
@@ -544,6 +553,8 @@ const parentTaskNextOptions: Array<Option<DesktopFocusRoomParentTaskNextAction>>
 const props = defineProps<{
   room: DesktopRoomInfo;
   focusRooms: DesktopFocusRoomInfo[];
+  repoStatus: RepoStatus;
+  gitRoomMatchesActiveRepo: boolean;
   tasks: DesktopTaskSummary[];
 }>();
 
@@ -576,6 +587,10 @@ const closeoutDetails = reactive<DesktopFocusRoomConclusionDetails>({
   parent_task_next: "keep_open",
   next_owner: "",
 });
+
+const showRepoStatusDetails = computed(() =>
+  shouldShowRepoStateForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
+);
 
 const openFocusRooms = computed(() =>
   props.focusRooms.filter((focusRoom) => focusRoom.focusStatus !== "concluded")
@@ -1176,7 +1191,8 @@ onBeforeUnmount(() => {
 .focus-room-current-main,
 .focus-room-form,
 .focus-room-detail,
-.focus-room-list-pane {
+.focus-room-list-pane,
+.focus-room-repo-status {
   min-width: 0;
 }
 

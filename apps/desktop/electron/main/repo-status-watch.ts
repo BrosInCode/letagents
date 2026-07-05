@@ -5,11 +5,30 @@ import { promisify } from "node:util";
 
 import type { RepoStatus } from "../ipc-types.js";
 import { buildRepoStatus } from "../repo-status.js";
-import { emitToMainWindow } from "./window.js";
+import {
+  repoStatusChanged,
+  repoStatusWatchFingerprint,
+  shouldScheduleRepoStatusRefreshForWindow,
+  type RepoStatusWatchWindowState,
+} from "./repo-status-watch-state.js";
+import { emitToMainWindow, getMainWindow } from "./window.js";
 
 const repoStatusSlowRefreshMs = 5_000;
 const repoStatusChangeDebounceMs = 1_500;
 const execFileAsync = promisify(execFile);
+type RepoStatusWatchHooks = {
+  buildRepoStatus: typeof buildRepoStatus;
+  emitToMainWindow: typeof emitToMainWindow;
+  getMainWindow: () => RepoStatusWatchWindowState | null;
+};
+
+const defaultRepoStatusWatchHooks: RepoStatusWatchHooks = {
+  buildRepoStatus,
+  emitToMainWindow,
+  getMainWindow,
+};
+
+let repoStatusWatchHooks = defaultRepoStatusWatchHooks;
 
 let activeWatch: {
   rootPath: string;
@@ -18,6 +37,7 @@ let activeWatch: {
   debounceTimer: NodeJS.Timeout | null;
   intervalTimer: NodeJS.Timeout | null;
   sequence: number;
+  lastStatusFingerprint: string | null;
 } | null = null;
 let watchRequestId = 0;
 
@@ -25,7 +45,7 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
   const requestId = ++watchRequestId;
   closeActiveWatch();
 
-  const status = await buildRepoStatus(rootPath);
+  const status = await repoStatusWatchHooks.buildRepoStatus(rootPath);
   if (requestId !== watchRequestId) {
     return status;
   }
@@ -41,6 +61,7 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
     debounceTimer: null as NodeJS.Timeout | null,
     intervalTimer: null as NodeJS.Timeout | null,
     sequence: 0,
+    lastStatusFingerprint: repoStatusWatchFingerprint(status),
   };
   activeWatch = watchState;
 
@@ -56,6 +77,23 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
 export function stopRepoStatusWatch(): void {
   watchRequestId += 1;
   closeActiveWatch();
+}
+
+export function configureRepoStatusWatchForTest(
+  hooks: Partial<RepoStatusWatchHooks>,
+): () => void {
+  repoStatusWatchHooks = {
+    ...defaultRepoStatusWatchHooks,
+    ...hooks,
+  };
+  return () => {
+    repoStatusWatchHooks = defaultRepoStatusWatchHooks;
+  };
+}
+
+export async function refreshActiveRepoStatusForTest(): Promise<void> {
+  if (!activeWatch) return;
+  await refreshRepoStatus(activeWatch);
 }
 
 function closeActiveWatch(): void {
@@ -107,6 +145,7 @@ function openWatchers(
 
 function scheduleRepoStatusRefresh(watchState: NonNullable<typeof activeWatch>): void {
   if (activeWatch !== watchState) return;
+  if (!shouldScheduleRepoStatusRefreshForWindow(repoStatusWatchHooks.getMainWindow())) return;
   if (watchState.debounceTimer) {
     clearTimeout(watchState.debounceTimer);
   }
@@ -118,8 +157,9 @@ function scheduleRepoStatusRefresh(watchState: NonNullable<typeof activeWatch>):
 
 async function refreshRepoStatus(watchState: NonNullable<typeof activeWatch>): Promise<void> {
   if (activeWatch !== watchState) return;
+  if (!shouldScheduleRepoStatusRefreshForWindow(repoStatusWatchHooks.getMainWindow())) return;
   const sequence = ++watchState.sequence;
-  const status = await buildRepoStatus(watchState.rootPath).catch(() => null);
+  const status = await repoStatusWatchHooks.buildRepoStatus(watchState.rootPath).catch(() => null);
   if (!status || activeWatch !== watchState || sequence !== watchState.sequence) return;
 
   const nextWatchPaths = await repoStatusWatchPaths(status);
@@ -131,7 +171,11 @@ async function refreshRepoStatus(watchState: NonNullable<typeof activeWatch>): P
     watchState.watchers = openWatchers(nextWatchPaths, watchState);
   }
 
-  emitToMainWindow("desktop:repos:status-changed", status);
+  if (!repoStatusChanged(watchState.lastStatusFingerprint, status)) {
+    return;
+  }
+  watchState.lastStatusFingerprint = repoStatusWatchFingerprint(status);
+  repoStatusWatchHooks.emitToMainWindow("desktop:repos:status-changed", status);
 }
 
 async function repoStatusWatchPaths(status: RepoStatus): Promise<string[]> {
