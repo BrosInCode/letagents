@@ -77,7 +77,32 @@ async function getRoutingBranch(workspaceRoot: string): Promise<string | null> {
   return (await getCurrentBranch(workspaceRoot)) || await getRebaseHeadBranch(workspaceRoot);
 }
 
-async function getDefaultBranch(workspaceRoot: string): Promise<string | null> {
+async function getLocalBranches(workspaceRoot: string): Promise<string[]> {
+  try {
+    const stdout = await runGit(workspaceRoot, [
+      "for-each-ref",
+      "--format=%(refname:short)",
+      "refs/heads",
+    ]);
+    return stdout.split(/\r?\n/)
+      .map((branch) => branch.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function fallbackDefaultBranch(localBranches: string[]): string | null {
+  for (const candidate of ["main", "master", "trunk", "develop"]) {
+    if (localBranches.includes(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function getDefaultBranch(
+  workspaceRoot: string,
+  localBranches: string[] = [],
+): Promise<string | null> {
   try {
     const stdout = await runGit(workspaceRoot, [
       "symbolic-ref",
@@ -87,7 +112,7 @@ async function getDefaultBranch(workspaceRoot: string): Promise<string | null> {
     ]);
     return stdout.trim().replace(/^origin\//, "") || null;
   } catch {
-    return null;
+    return fallbackDefaultBranch(localBranches);
   }
 }
 
@@ -327,17 +352,18 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
     };
   }
 
-  const [worktrees, gitStatus, defaultBranch, headPath, resolvedRoom] = await Promise.all([
+  const [worktrees, gitStatus, localBranches, headPath, resolvedRoom] = await Promise.all([
     getWorktrees(repoRoot),
     getStatusPorcelain(repoRoot),
-    getDefaultBranch(repoRoot),
+    getLocalBranches(repoRoot),
     getGitHeadPath(repoRoot),
     resolveRoomIdentifierFromPath(repoRoot),
   ]);
+  const defaultBranch = await getDefaultBranch(repoRoot, localBranches);
 
   const branchDeltas = await getKnownBranchDeltas(
     repoRoot,
-    [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
+    [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch), ...localBranches],
     defaultBranch,
   );
   const branchDelta = branchDeltas.find((delta) => delta.branch === gitStatus.branch) ?? null;
@@ -570,10 +596,11 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
     };
   }
 
-  const [currentBranch, defaultBranch] = await Promise.all([
+  const [currentBranch, localBranches] = await Promise.all([
     getRoutingBranch(repoRoot),
-    getDefaultBranch(repoRoot),
+    getLocalBranches(repoRoot),
   ]);
+  const defaultBranch = await getDefaultBranch(repoRoot, localBranches);
 
   const configured = readConfiguredRoomIdentifierAt(repoRoot);
   if (configured) {

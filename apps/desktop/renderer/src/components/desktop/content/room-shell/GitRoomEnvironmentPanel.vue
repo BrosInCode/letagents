@@ -68,18 +68,20 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "open-workspace-git-room": [];
   "open-repo-root": [rootPath: string];
 }>();
 
 const changedCount = computed(() => repoChangedFileCount(props.repoStatus));
 const linkedRoomLabel = computed(() => repoEnvironmentLinkedRoomLabel(props.room));
 const roomBranchLabel = computed(() => repoEnvironmentRoomRefLabel(props.room) || "this branch");
-const roomBranchDelta = computed(() => repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus));
+const roomBranchDelta = computed(() =>
+  repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
+);
 const currentBranchMatchesRoom = computed(() =>
-  repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus)
+  repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
 );
 const matchingRoomWorktree = computed(() => {
+  if (!props.gitRoomMatchesActiveRepo) return null;
   const roomBranch = roomBranchLabel.value;
   return props.repoStatus.worktrees.find((worktree) => worktree.branch === roomBranch) || null;
 });

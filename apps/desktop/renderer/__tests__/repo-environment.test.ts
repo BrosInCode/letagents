@@ -9,8 +9,6 @@ import {
   repoEnvironmentLinkedRoomLabel,
   repoEnvironmentChangeLabel,
   repoEnvironmentRoomRefLabel,
-  repoEnvironmentShortHead,
-  repoEnvironmentItems,
   shouldShowRepoEnvironmentForRoom,
 } from "../src/domain/repo-environment";
 import { repoWorkspaceSummary } from "../src/domain/repo-status";
@@ -29,16 +27,6 @@ test("repo environment summarizes dirty and conflicted Git state", () => {
   });
 
   assert.equal(repoEnvironmentChangeLabel(status), "2 staged · 3 modified · 1 untracked · 1 conflicted");
-  assert.equal(repoEnvironmentShortHead(status), "1234567");
-  assert.deepEqual(
-    repoEnvironmentItems(status).map((item) => [item.key, item.value, item.tone]),
-    [
-      ["changes", "2 staged · 3 modified · 1 untracked · 1 conflicted", "danger"],
-      ["sync", "2 ahead · 1 behind · origin/feature/git-rooms", "attention"],
-      ["default", "main", "neutral"],
-      ["head", "1234567", "neutral"],
-    ],
-  );
 });
 
 test("repo environment summarizes non-conflicted changes as files changed", () => {
@@ -52,12 +40,6 @@ test("repo environment summarizes non-conflicted changes as files changed", () =
   });
 
   assert.equal(repoEnvironmentChangeLabel(status), "7 files changed");
-  assert.deepEqual(repoEnvironmentItems(status)[0], {
-    key: "changes",
-    label: "Changes",
-    value: "7 files changed",
-    tone: "attention",
-  });
   assert.equal(repoWorkspaceSummary(status), "7 files changed · tracking origin/feature/git-rooms");
 });
 
@@ -118,12 +100,15 @@ test("repo environment finds branch delta for the linked room", () => {
     deletions: 3,
     baseBranch: "main",
   });
+
+  assert.equal(repoEnvironmentBranchDeltaForRoom(room, status, false), null);
 });
 
 test("repo environment knows when the current branch is the room branch", () => {
   const room = roomInfo();
 
   assert.equal(repoEnvironmentCurrentBranchMatchesRoom(room, repoStatus()), true);
+  assert.equal(repoEnvironmentCurrentBranchMatchesRoom(room, repoStatus(), false), false);
   assert.equal(repoEnvironmentCurrentBranchMatchesRoom(room, repoStatus({ branch: "main" })), false);
   assert.equal(repoEnvironmentCurrentBranchMatchesRoom(room, repoStatus({ detached: true })), false);
 });

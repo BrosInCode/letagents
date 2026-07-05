@@ -255,3 +255,61 @@ test("buildRepoStatus exposes local Git room routing for no-remote repositories"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("buildRepoStatus uses local default branches for no-remote branch deltas", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-local-branch-delta-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    execFileSync("git", ["add", "tracked.txt"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test User",
+      "commit",
+      "-m",
+      "Initial commit",
+    ], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/delta"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\nworld\n");
+    execFileSync("git", ["add", "tracked.txt"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test User",
+      "commit",
+      "-m",
+      "Feature commit",
+    ], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+
+    const status = await buildRepoStatus(tempDir);
+
+    assert.equal(status.defaultBranch, "main");
+    assert.equal(status.branchDelta?.branch, "feature/delta");
+    assert.equal(status.branchDelta?.baseBranch, "main");
+    assert.equal(status.branchDelta?.additions, 1);
+    assert.equal(status.branchDelta?.deletions, 0);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

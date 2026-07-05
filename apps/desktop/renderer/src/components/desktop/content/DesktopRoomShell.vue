@@ -123,7 +123,6 @@
           :room="room"
           :repo-status="repoStatus"
           :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
-          @open-workspace-git-room="emit('open-workspace-git-room')"
           @open-repo-root="emit('open-repo-root', $event)"
         />
       </DesktopFloatingWidget>
@@ -621,15 +620,16 @@ const showEventsTab = computed(() => githubEventsAvailable.value);
 const environmentWidgetSummary = computed(() => {
   const roomBranch = repoEnvironmentRoomRefLabel(props.room);
   if (!roomBranch) return "Git Room";
-  if (!repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus)) {
+  if (!props.gitRoomMatchesActiveRepo) return roomBranch;
+  if (!repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)) {
     return repoEnvironmentBranchDeltaLabel(
-      repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus),
+      repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo),
     ) || roomBranch;
   }
   const changedCount = repoChangedFileCount(props.repoStatus);
   if (changedCount > 0) return repoEnvironmentChangeLabel(props.repoStatus);
   return repoEnvironmentBranchDeltaLabel(
-    repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus),
+    repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo),
   ) || "Clean";
 });
 const roomManagedAgentSessions = computed(() =>
