@@ -207,6 +207,7 @@ test("repo environment surfaces a matching pull request artifact", () => {
     description: "Productize Git Room environment panel",
     value: "Open",
     tone: "positive",
+    delta: null,
     url: "https://github.com/BrosInCode/letagents/pull/647",
   });
 });
@@ -236,7 +237,38 @@ test("repo environment surfaces a matching pull request event", () => {
     description: "Productize Git Room environment panel",
     value: "Open",
     tone: "positive",
+    delta: null,
     url: "https://github.com/BrosInCode/letagents/pull/647",
+  });
+});
+
+test("repo environment reads pull request code stats from event metadata", () => {
+  const room = roomInfo();
+
+  assert.deepEqual(repoEnvironmentPullRequestForRoom(room, [], [{
+    id: "evt_1",
+    eventType: "pull_request",
+    action: "opened",
+    githubObjectId: "647",
+    githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/647",
+    title: "Productize Git Room environment panel",
+    state: "open",
+    actorLogin: "EmmyMay",
+    metadata: {
+      head_ref: "feature/git-rooms",
+      base_ref: "staging",
+      changed_files: 31,
+      additions: 1988,
+      deletions: 768,
+    },
+    linkedTaskId: null,
+    createdAt: "2026-07-06T00:00:00.000Z",
+  }])?.delta, {
+    branch: "feature/git-rooms",
+    filesChanged: 31,
+    additions: 1988,
+    deletions: 768,
+    baseBranch: "staging",
   });
 });
 

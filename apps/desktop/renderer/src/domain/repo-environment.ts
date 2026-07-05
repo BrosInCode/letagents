@@ -107,6 +107,7 @@ export interface RepoEnvironmentPullRequest {
   description: string | null;
   value: string | null;
   tone: "neutral" | "positive" | "attention" | "danger";
+  delta: RepoBranchDelta | null;
   url: string | null;
 }
 
@@ -130,6 +131,7 @@ export function repoEnvironmentPullRequestForRoom(
       description: artifact.title,
       value: artifactStateLabel(artifact.state),
       tone: pullRequestTone(artifact.state),
+      delta: null,
       url: artifact.url,
     };
   }
@@ -148,6 +150,7 @@ export function repoEnvironmentPullRequestForRoom(
     description: event.title || metadataString(event.metadata, ["pull_request", "title"]),
     value: artifactStateLabel(event.state || event.action),
     tone: pullRequestTone(event.state || event.action),
+    delta: pullRequestDeltaFromEvent(event, roomRef),
     url: event.githubObjectUrl,
   };
 }
@@ -176,6 +179,25 @@ function artifactStateLabel(value: string | null | undefined): string | null {
     .filter(Boolean)
     .map((part) => `${part[0]?.toUpperCase() || ""}${part.slice(1).toLowerCase()}`)
     .join(" ");
+}
+
+function pullRequestDeltaFromEvent(event: DesktopGitHubRoomEvent, fallbackBranch: string): RepoBranchDelta | null {
+  const filesChanged = metadataNumeric(event.metadata, ["changed_files"]) ??
+    metadataNumeric(event.metadata, ["pull_request", "changed_files"]);
+  const additions = metadataNumeric(event.metadata, ["additions"]) ??
+    metadataNumeric(event.metadata, ["pull_request", "additions"]);
+  const deletions = metadataNumeric(event.metadata, ["deletions"]) ??
+    metadataNumeric(event.metadata, ["pull_request", "deletions"]);
+  if (filesChanged === null && additions === null && deletions === null) return null;
+  return {
+    branch: eventBranchRef(event) || fallbackBranch,
+    filesChanged: filesChanged ?? 0,
+    additions: additions ?? 0,
+    deletions: deletions ?? 0,
+    baseBranch: metadataString(event.metadata, ["base_ref"]) ||
+      metadataString(event.metadata, ["pull_request", "base_ref"]) ||
+      metadataString(event.metadata, ["pull_request", "base", "ref"]),
+  };
 }
 
 function pullRequestTone(value: string | null | undefined): RepoEnvironmentPullRequest["tone"] {
@@ -207,4 +229,11 @@ function metadataNumber(metadata: Record<string, unknown>, path: string[]): stri
     value = (value as Record<string, unknown>)[key];
   }
   return typeof value === "number" || typeof value === "string" ? String(value) : null;
+}
+
+function metadataNumeric(metadata: Record<string, unknown>, path: string[]): number | null {
+  const value = metadataNumber(metadata, path);
+  if (value === null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }

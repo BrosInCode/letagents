@@ -157,11 +157,23 @@ button.desktop-environment-row:disabled {
   color: #76f56f;
 }
 
+.desktop-environment-row[data-tone="positive"] .desktop-environment-row-icon {
+  color: #76f56f;
+}
+
 .desktop-environment-row[data-tone="attention"] .desktop-environment-row-trailing {
   color: #f4c06a;
 }
 
+.desktop-environment-row[data-tone="attention"] .desktop-environment-row-icon {
+  color: #f4c06a;
+}
+
 .desktop-environment-row[data-tone="danger"] .desktop-environment-row-trailing {
+  color: #ff6b82;
+}
+
+.desktop-environment-row[data-tone="danger"] .desktop-environment-row-icon {
   color: #ff6b82;
 }
 

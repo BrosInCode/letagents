@@ -41,7 +41,7 @@
         @select="openPullRequest"
       >
         <template #icon>
-          <GitPullRequest :size="18" aria-hidden="true" />
+          <GitPullRequest :size="18" aria-hidden="true" class="git-room-environment-pr-icon" />
         </template>
         <template #trailing>
           <span v-if="pullRequestSummary.value" class="git-room-environment-pr-state">
@@ -134,6 +134,8 @@ const openBranchDescription = computed(() => {
 const branchChangesValue = computed(() => {
   const branchDeltaLabel = repoEnvironmentBranchDeltaLabel(roomBranchDelta.value);
   if (branchDeltaLabel) return branchDeltaLabel;
+  const pullRequestDeltaLabel = repoEnvironmentBranchDeltaLabel(pullRequestSummary.value?.delta);
+  if (pullRequestDeltaLabel) return pullRequestDeltaLabel;
   if (!currentBranchMatchesRoom.value) {
     return "No local worktree";
   }
@@ -150,7 +152,8 @@ const branchChangesDescription = computed(() => {
   const localState = changedCount.value > 0
     ? repoEnvironmentChangeLabel(props.repoStatus)
     : "No local edits";
-  if (roomBranchDelta.value?.baseBranch) return `${localState} · compared with ${roomBranchDelta.value.baseBranch}`;
+  const baseBranch = roomBranchDelta.value?.baseBranch || pullRequestSummary.value?.delta?.baseBranch;
+  if (baseBranch) return `${localState} · compared with ${baseBranch}`;
   if (changedCount.value > 0) return localState;
   return "No local edits";
 });
@@ -175,5 +178,9 @@ function openPullRequest(): void {
 <style scoped>
 .git-room-environment-pr-state {
   min-width: 0;
+}
+
+.git-room-environment-pr-icon {
+  color: inherit;
 }
 </style>

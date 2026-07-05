@@ -1270,7 +1270,11 @@ async function openGitHubEventFromChat(url: string): Promise<void> {
 }
 
 async function openGitHubUrlExternally(url: string): Promise<void> {
-  await window.letagentsDesktop?.app?.openGitHubUrl?.(url);
+  if (window.letagentsDesktop?.app?.openGitHubUrl) {
+    await window.letagentsDesktop.app.openGitHubUrl(url);
+    return;
+  }
+  await window.letagentsDesktop?.auth?.openVerification?.(url);
 }
 
 function scheduleGitHubEventsRefresh(delayMs: number): void {
