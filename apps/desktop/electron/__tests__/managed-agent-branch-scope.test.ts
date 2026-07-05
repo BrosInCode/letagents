@@ -150,6 +150,16 @@ test("applyManagedAgentBranchScopePreflight leaves default-branch rooms flexible
 
   assert.equal(localDefaultBranch.canStart, true);
   assert.equal(localDefaultBranch.status, "ready");
+
+  const localDefaultBranchFromGitRoom = applyManagedAgentBranchScopePreflight({
+    providerName: "Cursor",
+    preflight: readyPreflight(),
+    gitRoom: gitRoom({ type: "branch", name: "main", defaultBranch: "main" }),
+    repoStatus: repoStatus({ branch: "feature/active-work", defaultBranch: null }),
+  });
+
+  assert.equal(localDefaultBranchFromGitRoom.canStart, true);
+  assert.equal(localDefaultBranchFromGitRoom.status, "ready");
 });
 
 test("applyManagedAgentBranchScopePreflight blocks mismatched and detached branch rooms", () => {
@@ -162,6 +172,11 @@ test("applyManagedAgentBranchScopePreflight blocks mismatched and detached branc
   assert.equal(mismatched.canStart, false);
   assert.equal(mismatched.status, "branch_mismatch");
   assert.equal(mismatched.nextAction, "choose_worktree");
+  assert.deepEqual(mismatched.branchMismatch, {
+    expectedBranch: "feature/player-3d-presentation",
+    currentBranch: "main",
+    detached: false,
+  });
   assert.match(mismatched.detail ?? "", /selected project is on main/);
 
   const detached = applyManagedAgentBranchScopePreflight({
@@ -172,6 +187,11 @@ test("applyManagedAgentBranchScopePreflight blocks mismatched and detached branc
   });
   assert.equal(detached.canStart, false);
   assert.equal(detached.status, "branch_mismatch");
+  assert.deepEqual(detached.branchMismatch, {
+    expectedBranch: "feature/player-3d-presentation",
+    currentBranch: null,
+    detached: true,
+  });
   assert.match(detached.detail ?? "", /detached HEAD/);
 });
 

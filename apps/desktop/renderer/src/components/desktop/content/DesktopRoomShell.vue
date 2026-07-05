@@ -283,10 +283,13 @@
       :room-identifier="room.identifier"
       :room-git-room="room.gitRoom"
       :room-display-name="room.displayName"
+      :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
       :repo-root-path="managedAgentRepoRootPath"
+      :repo-status="managedAgentRepoStatus"
       :managed-sessions="managedAgentSessions"
       @close="addAgentModalOpen = false"
       @choose-repo="openAgentRepoPicker"
+      @choose-worktree="openAgentWorktree"
       @managed-sessions-updated="replaceManagedAgentSessions"
       @managed-session-started="upsertManagedAgentSession"
     />
@@ -324,6 +327,7 @@ import {
   activeManagedAgentWorkIndicators,
   managedAgentSessionDisplayName,
   managedAgentSessionMatchesRoom,
+  managedAgentRepoStatusForRoom,
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
@@ -411,6 +415,7 @@ const emit = defineEmits<{
   "open-focus-room": [roomIdentifier: string];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
+  "choose-worktree": [rootPath: string];
   "open-workspace-git-room": [];
   "open-repo-root": [rootPath: string];
   "dismiss-git-room-branch-prompt": [key: string];
@@ -571,7 +576,12 @@ const roomManagedAgentSessions = computed(() =>
     managedAgentSessionMatchesRoom(session, props.room.identifier)
   )
 );
-const managedAgentRepoRootPath = computed(() => preferredManagedAgentRepoRootPath(props.repoStatus));
+const managedAgentRepoStatus = computed(() =>
+  managedAgentRepoStatusForRoom(props.repoStatus, props.room, props.gitRoomMatchesActiveRepo)
+);
+const managedAgentRepoRootPath = computed(() =>
+  preferredManagedAgentRepoRootPath(managedAgentRepoStatus.value, props.room.gitRoom)
+);
 const roomPresence = computed(() =>
   mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
 );
@@ -1403,6 +1413,11 @@ function openReasoningFromAgentDetail(sessionId: string): void {
 function openAgentRepoPicker(): void {
   addAgentModalOpen.value = false;
   emit("choose-repo");
+}
+
+function openAgentWorktree(rootPath: string): void {
+  addAgentModalOpen.value = false;
+  emit("choose-worktree", rootPath);
 }
 
 async function copyRoomLink(): Promise<void> {

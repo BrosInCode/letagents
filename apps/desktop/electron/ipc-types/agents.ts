@@ -65,6 +65,11 @@ export interface DesktopAgentProviderPreflight {
   nextAction: DesktopAgentProviderSetupAction | "authenticate" | "choose_repo" | "choose_worktree" | null;
   version: string | null;
   mcpStatus: "not_installed" | "installed" | "needs_attention" | null;
+  branchMismatch?: {
+    expectedBranch: string;
+    currentBranch: string | null;
+    detached: boolean;
+  } | null;
 }
 
 export interface DesktopAgentProviderSetupInput {

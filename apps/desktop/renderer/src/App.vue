@@ -164,6 +164,7 @@
           @open-focus-room="openFocusRoomFromRoomsTab"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
+          @choose-worktree="openWorktreeForAgent"
           @open-workspace-git-room="openWorkspaceGitRoom"
           @open-repo-root="openWorkspaceGitRoom"
           @dismiss-git-room-branch-prompt="dismissGitRoomBranchPrompt"
@@ -311,6 +312,7 @@ import {
   appAgentArchivedRoomIdentifiers,
   appAgentRefreshTargets,
 } from "./domain/app-agent";
+import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
 
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
@@ -656,16 +658,16 @@ function dismissGitRoomBranchPrompt(key: string): void {
   dismissedGitRoomBranchPromptKey.value = key;
 }
 
-async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<void> {
+async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean> {
   const rootPath = rootPathOverride || repoStatus.value?.rootPath || activeProjectRootPath();
-  if (!rootPath) return;
+  if (!rootPath) return false;
   loading.value = true;
   gitRoomOpenError.value = null;
   try {
     const selection = await window.letagentsDesktop.repos.openRoom(rootPath);
     if (selection.error || !selection.snapshot) {
       gitRoomOpenError.value = selection.error || "Could not open the matching Git Room.";
-      return;
+      return false;
     }
     if (selection.repoStatus) {
       repoStatus.value = selection.repoStatus;
@@ -676,10 +678,12 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<void> {
       kind: "project",
       meta: selection.repoStatus?.branch || null,
     });
+    return true;
   } catch (error) {
     gitRoomOpenError.value = error instanceof Error
       ? error.message
       : "Could not open the matching Git Room.";
+    return false;
   } finally {
     loading.value = false;
   }
@@ -1005,6 +1009,16 @@ async function pickRepoRoomForAgent(): Promise<void> {
   if (openedRoom) {
     openAddAgentAfterRepoPick.value = true;
   }
+}
+
+async function openWorktreeForAgent(rootPath: string): Promise<void> {
+  await openManagedAgentWorktree({
+    rootPath,
+    openWorkspaceGitRoom,
+    setReopenAddAgent: (value) => {
+      openAddAgentAfterRepoPick.value = value;
+    },
+  });
 }
 
 function getChatStorageBridge(): typeof window.letagentsDesktop.chatStorage | null {

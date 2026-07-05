@@ -14,6 +14,7 @@ import {
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
   agentAuthCommand,
+  branchScopedGitRoomExpectedBranch,
   agentProviderNeedsDesktopRepo,
   canStopManagedAgentTurn,
   cursorMcpPolicyDescription,
@@ -27,7 +28,9 @@ import {
   isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
   isVisibleManagedAgentSession,
+  isBranchScopedGitRoomIdentifier,
   managedAgentRepoDetail,
+  managedAgentRepoStatusForRoom,
   managedAgentRoomBranchMismatch,
   managedAgentPermissionProfileLabel,
   managedAgentPermissionProfileSelectionForProvider,
@@ -44,6 +47,8 @@ import {
   mergeDesktopManagedAgentParticipants,
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
+  matchingManagedAgentWorktrees,
+  matchingManagedAgentWorktreesForBranch,
   normalizeManagedAgentRoomIdentifier,
   pendingManagedAgentPermissionApprovals,
   preferredManagedAgentRepoRootPath,
@@ -308,15 +313,111 @@ test("preferredManagedAgentRepoRootPath defaults local agents to the main checko
   assert.equal(preferredManagedAgentRepoRootPath({
     rootPath: "/repo-feature-worktree",
     mainRootPath: "/repo-main-checkout",
+    defaultBranch: "main",
+    worktrees: [],
   }), "/repo-main-checkout");
   assert.equal(preferredManagedAgentRepoRootPath({
     rootPath: "/repo-feature-worktree",
     mainRootPath: null,
+    defaultBranch: "main",
+    worktrees: [],
   }), "/repo-feature-worktree");
   assert.equal(preferredManagedAgentRepoRootPath({
     rootPath: " ",
     mainRootPath: " ",
+    defaultBranch: "main",
+    worktrees: [],
   }), null);
+});
+
+test("preferredManagedAgentRepoRootPath picks matching worktrees for branch-scoped rooms", () => {
+  const repoStatus = {
+    rootPath: "/repo-main-checkout",
+    mainRootPath: "/repo-main-checkout",
+    defaultBranch: "main",
+    worktrees: [
+      {
+        path: "/repo-main-checkout",
+        branch: "main",
+        head: "1111111",
+        isCurrent: true,
+        isMain: true,
+      },
+      {
+        path: "/repo-feature-worktree",
+        branch: "feature/codex-work",
+        head: "2222222",
+        isCurrent: false,
+        isMain: false,
+      },
+    ],
+  };
+
+  assert.equal(
+    branchScopedGitRoomExpectedBranch(branchGitRoom("feature/codex-work"), repoStatus),
+    "feature/codex-work",
+  );
+  assert.equal(
+    preferredManagedAgentRepoRootPath(repoStatus, branchGitRoom("feature/codex-work")),
+    "/repo-feature-worktree",
+  );
+  assert.deepEqual(
+    matchingManagedAgentWorktrees(repoStatus, branchGitRoom("feature/codex-work")).map((worktree) => worktree.path),
+    ["/repo-feature-worktree"],
+  );
+  assert.deepEqual(
+    matchingManagedAgentWorktreesForBranch(repoStatus, "feature/codex-work").map((worktree) => worktree.path),
+    ["/repo-feature-worktree"],
+  );
+  assert.equal(
+    preferredManagedAgentRepoRootPath(repoStatus, branchGitRoom("feature/missing")),
+    "/repo-main-checkout",
+  );
+  assert.equal(
+    branchScopedGitRoomExpectedBranch(branchGitRoom("main"), repoStatus),
+    null,
+  );
+  assert.equal(
+    preferredManagedAgentRepoRootPath(null, branchGitRoom("feature/codex-work")),
+    null,
+  );
+});
+
+test("managedAgentRepoStatusForRoom requires verified repo identity for branch rooms", () => {
+  const repoStatus = {
+    rootPath: "/repo-main-checkout",
+  };
+  const branchRoomIdentifier = "git-room:local:1234567890abcdef:branch:ZmVhdHVyZS9jb2RleC13b3Jr";
+
+  assert.equal(isBranchScopedGitRoomIdentifier(branchRoomIdentifier), true);
+  assert.equal(
+    managedAgentRepoStatusForRoom(repoStatus, {
+      identifier: branchRoomIdentifier,
+      gitRoom: null,
+    }, true),
+    null,
+  );
+  assert.equal(
+    managedAgentRepoStatusForRoom(repoStatus, {
+      identifier: "ad-hoc-room",
+      gitRoom: null,
+    }, false),
+    repoStatus,
+  );
+  assert.equal(
+    managedAgentRepoStatusForRoom(repoStatus, {
+      identifier: "github.com/BrosInCode/letagents",
+      gitRoom: branchGitRoom("feature/codex-work"),
+    }, false),
+    null,
+  );
+  assert.equal(
+    managedAgentRepoStatusForRoom(repoStatus, {
+      identifier: "github.com/BrosInCode/letagents",
+      gitRoom: branchGitRoom("feature/codex-work"),
+    }, true),
+    repoStatus,
+  );
 });
 
 test("isVisibleManagedAgentSession keeps idle desktop-event workers visible", () => {

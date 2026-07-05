@@ -14,7 +14,7 @@ export function branchScopedGitRoomName(
   const branchName = gitRoom.ref.name?.trim() || null;
   if (!branchName) return null;
   if (gitRoom.isDefault) return null;
-  const defaultBranch = repoStatus?.defaultBranch?.trim() || null;
+  const defaultBranch = gitRoom.ref.defaultBranch?.trim() || repoStatus?.defaultBranch?.trim() || null;
   return defaultBranch && branchName === defaultBranch ? null : branchName;
 }
 
@@ -81,6 +81,11 @@ export function applyManagedAgentBranchScopePreflight(input: {
     message: `Choose a worktree on ${expectedBranch} before starting ${input.providerName}.`,
     detail: `This Git Room is scoped to ${expectedBranch}, but the selected project is ${branchState}. Choose a matching worktree or switch branches before starting an agent.`,
     nextAction: "choose_worktree",
+    branchMismatch: {
+      expectedBranch,
+      currentBranch,
+      detached: Boolean(input.repoStatus?.detached),
+    },
   };
 }
 
