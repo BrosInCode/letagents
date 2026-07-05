@@ -1,4 +1,10 @@
-import type { DesktopRoomInfo, RepoBranchDelta, RepoStatus } from "../../../electron/ipc-types";
+import type {
+  DesktopGitHubRoomEvent,
+  DesktopRoomInfo,
+  DesktopRoomSharedArtifact,
+  RepoBranchDelta,
+  RepoStatus,
+} from "../../../electron/ipc-types";
 import { repoChangedFileCount } from "./repo-status";
 
 export function shouldShowRepoEnvironmentForRoom(
@@ -84,13 +90,105 @@ export function repoEnvironmentBranchDeltaLabel(delta: RepoBranchDelta | null | 
 
 export function repoEnvironmentBranchDeltaForRoom(
   room: Pick<DesktopRoomInfo, "gitRoom">,
-  repoStatus: Pick<RepoStatus, "branchDelta" | "branchDeltas">,
+  repoStatus: Pick<RepoStatus, "branch" | "branchDelta" | "branchDeltas">,
   gitRoomMatchesActiveRepo = true,
 ): RepoBranchDelta | null {
   if (!gitRoomMatchesActiveRepo) return null;
   const roomRef = repoEnvironmentRoomRefLabel(room);
   if (!roomRef) return null;
   const deltas = repoStatus.branchDeltas || [];
+  const activeDelta = repoStatus.branchDelta ?? null;
   return deltas.find((delta) => delta.branch === roomRef) ??
-    (repoStatus.branchDelta?.branch === roomRef ? repoStatus.branchDelta : null);
+    (activeDelta && (activeDelta.branch === roomRef || repoStatus.branch === roomRef) ? activeDelta : null);
+}
+
+export interface RepoEnvironmentPullRequest {
+  label: string;
+  description: string | null;
+  value: string | null;
+  url: string | null;
+}
+
+export function repoEnvironmentPullRequestForRoom(
+  room: Pick<DesktopRoomInfo, "gitRoom">,
+  artifacts: readonly DesktopRoomSharedArtifact[],
+  events: readonly DesktopGitHubRoomEvent[] = [],
+): RepoEnvironmentPullRequest | null {
+  const roomRef = repoEnvironmentRoomRefLabel(room);
+  if (!roomRef) return null;
+
+  const artifact = artifacts
+    .filter((candidate) =>
+      candidate.kind === "pull_request" &&
+      (!candidate.ref || refsMatch(candidate.ref, roomRef))
+    )
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
+  if (artifact) {
+    return {
+      label: artifact.artifactNumber ? `PR #${artifact.artifactNumber}` : "Pull request",
+      description: artifact.title,
+      value: artifactStateLabel(artifact.state),
+      url: artifact.url,
+    };
+  }
+
+  const event = events
+    .filter((candidate) =>
+      candidate.eventType === "pull_request" &&
+      (!eventBranchRef(candidate) || refsMatch(eventBranchRef(candidate) || "", roomRef))
+    )
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
+  if (!event) return null;
+  const number = event.githubObjectId || metadataNumber(event.metadata, ["number"]) ||
+    metadataNumber(event.metadata, ["pull_request", "number"]);
+  return {
+    label: number ? `PR #${number}` : "Pull request",
+    description: event.title || metadataString(event.metadata, ["pull_request", "title"]),
+    value: artifactStateLabel(event.state || event.action),
+    url: event.githubObjectUrl,
+  };
+}
+
+function refsMatch(candidate: string, roomRef: string): boolean {
+  const normalizedCandidate = candidate.trim().toLowerCase();
+  const normalizedRoomRef = roomRef.trim().toLowerCase();
+  return normalizedCandidate === normalizedRoomRef || normalizedCandidate.endsWith(`:${normalizedRoomRef}`);
+}
+
+function eventBranchRef(event: DesktopGitHubRoomEvent): string | null {
+  return metadataString(event.metadata, ["head_branch"]) ||
+    metadataString(event.metadata, ["head_ref"]) ||
+    metadataString(event.metadata, ["branch"]) ||
+    metadataString(event.metadata, ["ref"]) ||
+    metadataString(event.metadata, ["pull_request", "head_ref"]) ||
+    metadataString(event.metadata, ["pull_request", "head", "ref"]) ||
+    metadataString(event.metadata, ["pull_request", "head", "label"]);
+}
+
+function artifactStateLabel(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  return normalized
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() || ""}${part.slice(1).toLowerCase()}`)
+    .join(" ");
+}
+
+function metadataString(metadata: Record<string, unknown>, path: string[]): string | null {
+  let value: unknown = metadata;
+  for (const key of path) {
+    if (!value || typeof value !== "object" || !(key in value)) return null;
+    value = (value as Record<string, unknown>)[key];
+  }
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function metadataNumber(metadata: Record<string, unknown>, path: string[]): string | null {
+  let value: unknown = metadata;
+  for (const key of path) {
+    if (!value || typeof value !== "object" || !(key in value)) return null;
+    value = (value as Record<string, unknown>)[key];
+  }
+  return typeof value === "number" || typeof value === "string" ? String(value) : null;
 }

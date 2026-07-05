@@ -123,7 +123,10 @@
           :room="room"
           :repo-status="repoStatus"
           :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
+          :room-artifacts="roomArtifacts"
+          :github-events="eventsPage"
           @open-repo-root="emit('open-repo-root', $event)"
+          @open-github-event="openGitHubEventFromChat"
         />
       </DesktopFloatingWidget>
     </div>

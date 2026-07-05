@@ -8,6 +8,7 @@ import {
   repoEnvironmentCurrentBranchMatchesRoom,
   repoEnvironmentLinkedRoomLabel,
   repoEnvironmentChangeLabel,
+  repoEnvironmentPullRequestForRoom,
   repoEnvironmentRoomRefLabel,
   shouldShowRepoEnvironmentForRoom,
 } from "../src/domain/repo-environment";
@@ -126,6 +127,29 @@ test("repo environment finds branch delta for the linked room", () => {
   assert.equal(repoEnvironmentBranchDeltaForRoom(room, status, false), null);
 });
 
+test("repo environment falls back to active branch delta when the room branch is open", () => {
+  const room = roomInfo();
+  const status = repoStatus({
+    branch: "feature/git-rooms",
+    branchDelta: {
+      branch: null,
+      filesChanged: 7,
+      additions: 131,
+      deletions: 138,
+      baseBranch: "main",
+    },
+    branchDeltas: [],
+  });
+
+  assert.deepEqual(repoEnvironmentBranchDeltaForRoom(room, status), {
+    branch: null,
+    filesChanged: 7,
+    additions: 131,
+    deletions: 138,
+    baseBranch: "main",
+  });
+});
+
 test("repo environment knows when the current branch is the room branch", () => {
   const room = roomInfo();
 
@@ -158,6 +182,60 @@ test("repo environment only shows for Git Rooms backed by a Git repo", () => {
   assert.equal(shouldShowRepoEnvironmentForRoom(roomInfo(), repoStatus({ isGitRepo: false }), true), false);
   assert.equal(shouldShowRepoEnvironmentForRoom(roomInfo(), repoStatus(), false), false);
   assert.equal(shouldShowRepoEnvironmentForRoom(roomInfo(), repoStatus(), true), true);
+});
+
+test("repo environment surfaces a matching pull request artifact", () => {
+  const room = roomInfo();
+
+  assert.deepEqual(repoEnvironmentPullRequestForRoom(room, [{
+    roomId: "room_1",
+    identityKey: "github:pull_request:number:647",
+    provider: "github",
+    kind: "pull_request",
+    artifactId: "647",
+    artifactNumber: 647,
+    title: "Productize Git Room environment panel",
+    url: "https://github.com/BrosInCode/letagents/pull/647",
+    ref: "feature/git-rooms",
+    state: "open",
+    source: "github_event",
+    firstSeenAt: "2026-07-06T00:00:00.000Z",
+    updatedAt: "2026-07-06T00:00:00.000Z",
+    linkedTaskIds: [],
+  }]), {
+    label: "PR #647",
+    description: "Productize Git Room environment panel",
+    value: "Open",
+    url: "https://github.com/BrosInCode/letagents/pull/647",
+  });
+});
+
+test("repo environment surfaces a matching pull request event", () => {
+  const room = roomInfo();
+
+  assert.deepEqual(repoEnvironmentPullRequestForRoom(room, [], [{
+    id: "evt_1",
+    eventType: "pull_request",
+    action: "opened",
+    githubObjectId: "647",
+    githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/647",
+    title: "Productize Git Room environment panel",
+    state: "open",
+    actorLogin: "EmmyMay",
+    metadata: {
+      pull_request: {
+        number: 647,
+        head: { ref: "feature/git-rooms" },
+      },
+    },
+    linkedTaskId: null,
+    createdAt: "2026-07-06T00:00:00.000Z",
+  }]), {
+    label: "PR #647",
+    description: "Productize Git Room environment panel",
+    value: "Open",
+    url: "https://github.com/BrosInCode/letagents/pull/647",
+  });
 });
 
 function roomInfo(overrides: Partial<DesktopRoomInfo> = {}): DesktopRoomInfo {
