@@ -283,7 +283,7 @@ import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
-import type { RoomEntry, SidebarEntry } from "./components/desktop/types";
+import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -478,6 +478,7 @@ const sidebarProjectEntries = computed(() =>
   projectEntries.value.map((project) => ({
     ...project,
     parent: withRoomUnreadState(project.parent),
+    branchRooms: project.branchRooms.map(withRoomUnreadState),
     focusRooms: project.focusRooms.map(withRoomUnreadState),
   }))
 );
@@ -720,7 +721,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
 function sidebarRoomIdentifiers(): string[] {
   const identifiers = new Set<string>();
   for (const project of projectEntries.value) {
-    for (const entry of [project.parent, ...project.focusRooms]) {
+    for (const entry of [project.parent, ...projectChildRooms(project)]) {
       const identifier = entry.roomIdentifier?.trim();
       if (identifier) identifiers.add(identifier);
     }
@@ -781,7 +782,7 @@ function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
   const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
   if (!normalizedIdentifier) return;
   const existingFocusRoom = projectEntries.value
-    .flatMap((project) => project.focusRooms)
+    .flatMap(projectChildRooms)
     .find((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === normalizedIdentifier);
   if (existingFocusRoom) {
     handleSidebarEntrySelected(existingFocusRoom);
@@ -811,7 +812,7 @@ function seedReadMarkersForKnownRooms(): void {
   let nextMarkers = readRoomMessageIds.value;
   let changed = false;
   for (const project of projectEntries.value) {
-    for (const entry of [project.parent, ...project.focusRooms]) {
+    for (const entry of [project.parent, ...projectChildRooms(project)]) {
       const result = seedRoomReadMarker(nextMarkers, entry.roomIdentifier, latestMessageIdForEntry(entry));
       nextMarkers = result.readMarkers;
       changed = changed || result.changed;
@@ -821,6 +822,10 @@ function seedReadMarkersForKnownRooms(): void {
     readRoomMessageIds.value = nextMarkers;
     rememberRoomMessageIds();
   }
+}
+
+function projectChildRooms(project: ProjectGroup): RoomEntry[] {
+  return [...project.branchRooms, ...project.focusRooms];
 }
 
 function markActiveRoomRead(): void {

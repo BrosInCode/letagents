@@ -201,6 +201,8 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     headline: "Start here, then branch work into focused rooms when it needs space.",
     description:
       "The main room should feel like home base: familiar, recent, and connected to the focused work happening around it.",
+    gitRoom: options.rootRoomSnapshot.value?.room?.gitRoom ?? null,
+    currentWorkspace: true,
     latestMessageId: options.rootRoomSnapshot.value?.messages.at(-1)?.id || null,
     latestMessageAt: options.rootRoomSnapshot.value?.messages.at(-1)?.timestamp || null,
     hasUnread: false,
@@ -224,6 +226,9 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     sectionLabel: currentParentRoom.value.sectionLabel,
     headline: currentParentRoom.value.headline,
     description: currentParentRoom.value.description,
+    gitRoom: currentParentRoom.value.gitRoom ?? null,
+    suggestedAction: currentParentRoom.value.suggestedAction ?? null,
+    currentWorkspace: currentParentRoom.value.currentWorkspace ?? false,
     latestMessageId: currentParentRoom.value.latestMessageId,
     latestMessageAt: currentParentRoom.value.latestMessageAt,
     hasUnread: false,
@@ -242,8 +247,8 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
     for (const group of projectEntries.value) {
       if (group.parent.id === entryId) return group.parent;
-      const focusRoom = group.focusRooms.find((room) => room.id === entryId);
-      if (focusRoom) return focusRoom;
+      const childRoom = projectChildRooms(group).find((room) => room.id === entryId);
+      if (childRoom) return childRoom;
     }
 
     return systemEntries.find((entry) => entry.id === entryId) || null;
@@ -309,11 +314,11 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
     if (activeEntry.value.type !== "room") return;
 
-    if (activeEntry.value.kind === "focus") {
-      const nextFocus = projectEntries.value
-        .flatMap((project) => project.focusRooms)
+    if (activeEntry.value.kind !== "parent") {
+      const nextChild = projectEntries.value
+        .flatMap(projectChildRooms)
         .find((room) => room.id === activeEntry.value.id);
-      activeEntry.value = nextFocus || currentParentRoom.value;
+      activeEntry.value = nextChild || currentParentRoom.value;
       return;
     }
 
@@ -353,6 +358,10 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     toggleProject,
     toggleRoomsCollapsed,
   };
+}
+
+function projectChildRooms(project: ProjectGroup): RoomEntry[] {
+  return [...project.branchRooms, ...project.focusRooms];
 }
 
 function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {

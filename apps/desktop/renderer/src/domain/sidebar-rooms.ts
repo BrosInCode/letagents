@@ -154,9 +154,10 @@ export function buildSidebarProjectGroups(input: {
 }): ProjectGroup[] {
   const groups: ProjectGroup[] = [];
   const groupsByRoom = new Map<string, ProjectGroup>();
+  const currentRoomIdentifier = normalizeRoomIdentifier(input.currentParentRoom.roomIdentifier);
 
   function upsertGroup(group: ProjectGroup): void {
-    const identifier = normalizeRoomIdentifier(group.parent.roomIdentifier || group.parent.title);
+    const identifier = projectGroupLookupKey(group);
     if (!identifier) return;
     const existing = groupsByRoom.get(identifier);
     if (!existing) {
@@ -166,17 +167,33 @@ export function buildSidebarProjectGroups(input: {
     }
     existing.parent = mergeRoomEntry(existing.parent, group.parent);
     existing.roomName = existing.parent.title;
+    existing.branchRooms = mergeRoomEntries(existing.branchRooms, group.branchRooms);
     existing.focusRooms = mergeRoomEntries(existing.focusRooms, group.focusRooms);
   }
 
   upsertGroup({
-    id: `project:${input.currentParentRoom.id}`,
+    id: projectGroupIdForEntry(input.currentParentRoom),
     roomName: input.currentParentRoom.title,
     parent: input.currentParentRoom,
+    branchRooms: gitRoomBranchChildFromCurrentEntry(input.currentParentRoom),
     focusRooms: input.focusRooms.map(desktopFocusRoomToEntry),
   });
 
+  const groupedGitRooms = groupAccountGitRoomsByRepository(input.accountRooms);
+  const groupedRoomIdentifiers = new Set<string>();
+  for (const [repositoryKey, rooms] of groupedGitRooms) {
+    upsertGroup(accountGitRoomToGroup({
+      repositoryKey,
+      rooms,
+      currentRoomIdentifier,
+    }));
+    for (const room of rooms) {
+      groupedRoomIdentifiers.add(room.roomIdentifier);
+    }
+  }
+
   for (const accountRoom of input.accountRooms) {
+    if (groupedRoomIdentifiers.has(accountRoom.roomIdentifier)) continue;
     upsertGroup(accountRoomToGroup(accountRoom));
   }
 
@@ -201,6 +218,21 @@ function mergeRoomEntries(current: RoomEntry[], incoming: RoomEntry[]): RoomEntr
 
 function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
   const preferIncomingDisplay = current.source === "current" && incoming.source === "account";
+  const sameRoom = roomEntryKey(current) === roomEntryKey(incoming);
+  if (!sameRoom) {
+    const incomingSyntheticGitParent = Boolean(incoming.gitRoom && !incoming.roomIdentifier);
+    const keepCurrentDefaultGitParent = incomingSyntheticGitParent && isDefaultGitRoom(current.gitRoom);
+    const preferred = incoming.source === "account" && !keepCurrentDefaultGitParent
+      ? incoming
+      : current;
+    return {
+      ...preferred,
+      pinned: current.pinned || incoming.pinned,
+      hasUnread: current.hasUnread || incoming.hasUnread,
+      latestMessageId: incoming.latestMessageId || current.latestMessageId,
+      latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
+    };
+  }
   return {
     ...current,
     title: preferIncomingDisplay ? incoming.title : current.title,
@@ -208,6 +240,11 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
     sectionLabel: preferIncomingDisplay ? incoming.sectionLabel : current.sectionLabel,
     headline: preferIncomingDisplay ? incoming.headline : current.headline,
     description: preferIncomingDisplay ? incoming.description : current.description,
+    gitRoom: incoming.gitRoom ?? current.gitRoom ?? null,
+    suggestedAction: incoming.suggestedAction ?? current.suggestedAction ?? null,
+    currentWorkspace: sameRoom
+      ? Boolean(current.currentWorkspace || incoming.currentWorkspace)
+      : Boolean(incoming.currentWorkspace),
     latestMessageId: incoming.latestMessageId || current.latestMessageId,
     latestMessageAt: incoming.latestMessageAt || current.latestMessageAt,
     pinned: current.pinned || incoming.pinned,
@@ -216,6 +253,44 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
 
 function roomEntryKey(entry: RoomEntry): string {
   return normalizeRoomIdentifier(entry.roomIdentifier || entry.title) || entry.id;
+}
+
+function projectGroupIdForEntry(entry: RoomEntry): string {
+  const repositoryKey = gitRoomRepositoryKey(entry.gitRoom ?? null);
+  return repositoryKey ? `project:git:${repositoryKey}` : `project:${entry.id}`;
+}
+
+function projectGroupLookupKey(group: ProjectGroup): string | null {
+  const repositoryKey = gitRoomRepositoryKey(group.parent.gitRoom ?? null);
+  if (repositoryKey) return normalizeRoomIdentifier(`project:git:${repositoryKey}`);
+  return normalizeRoomIdentifier(group.parent.roomIdentifier || group.parent.title);
+}
+
+function groupAccountGitRoomsByRepository(
+  rooms: readonly DesktopAccountRoomEntry[],
+): Map<string, DesktopAccountRoomEntry[]> {
+  const groups = new Map<string, DesktopAccountRoomEntry[]>();
+  for (const room of rooms) {
+    const repositoryKey = gitRoomRepositoryKey(room.gitRoom);
+    if (!repositoryKey) continue;
+    const entries = groups.get(repositoryKey) || [];
+    entries.push(room);
+    groups.set(repositoryKey, entries);
+  }
+  return groups;
+}
+
+function gitRoomBranchChildFromCurrentEntry(entry: RoomEntry): RoomEntry[] {
+  if (!entry.gitRoom || isDefaultGitRoom(entry.gitRoom)) return [];
+  return [{
+    ...entry,
+    kind: "branch",
+    title: gitRoomRefLabel(entry.gitRoom),
+    meta: gitRefTypeLabel(entry.gitRoom),
+    sectionLabel: "Branch room",
+    suggestedAction: null,
+    currentWorkspace: true,
+  }];
 }
 
 function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][number]): RoomEntry {
@@ -231,6 +306,8 @@ function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][nu
     headline: gitMeta?.headline || "Focused work should stay close to the room it came from.",
     description: gitMeta?.description
       || "A focus room gives one thread of work more space, without losing the connection back to the main room.",
+    gitRoom: focusRoom.gitRoom,
+    suggestedAction: gitMeta ? "Open branch room" : null,
     latestMessageId: null,
     latestMessageAt: null,
     hasUnread: false,
@@ -242,15 +319,54 @@ function desktopFocusRoomToEntry(focusRoom: DesktopRoomSnapshot["focusRooms"][nu
 function accountRoomToGroup(room: DesktopAccountRoomEntry): ProjectGroup {
   const parent = accountRoomToEntry(room);
   return {
-    id: `project:${parent.id}`,
+    id: projectGroupIdForEntry(parent),
     roomName: parent.title,
     parent,
-    focusRooms: room.focusRooms.map(accountFocusRoomToEntry),
+    branchRooms: [],
+    focusRooms: room.focusRooms.map((focusRoom) => accountFocusRoomToEntry(focusRoom)),
   };
 }
 
-function accountFocusRoomToEntry(room: DesktopAccountRoomEntry["focusRooms"][number]): RoomEntry {
+function accountGitRoomToGroup(input: {
+  repositoryKey: string;
+  rooms: DesktopAccountRoomEntry[];
+  currentRoomIdentifier: string | null;
+}): ProjectGroup {
+  const sortedRooms = [...input.rooms].sort(compareGitAccountRooms);
+  const defaultRoom = sortedRooms.find((room) => isDefaultGitRoom(room.gitRoom));
+  const parentRoom = defaultRoom || sortedRooms[0];
+  const parent = {
+    ...accountGitRoomToRepoParentEntry(parentRoom, input.currentRoomIdentifier),
+    pinned: sortedRooms.some((room) => room.pinned),
+  };
+  if (!defaultRoom) {
+    parent.id = `room:git-repo:${input.repositoryKey}`;
+    parent.roomIdentifier = null;
+    parent.description = `${sortedRooms.length} ${sortedRooms.length === 1 ? "branch room" : "branch rooms"}`;
+    parent.currentWorkspace = false;
+  }
+  const branchRooms = sortedRooms
+    .filter((room) => !defaultRoom || room.roomIdentifier !== defaultRoom.roomIdentifier)
+    .map((room) => accountGitRoomToBranchEntry(room, input.currentRoomIdentifier));
+  const focusRooms = sortedRooms.flatMap((room) =>
+    room.focusRooms.map((focusRoom) => accountFocusRoomToEntry(focusRoom, input.currentRoomIdentifier))
+  );
+
+  return {
+    id: `project:git:${input.repositoryKey}`,
+    roomName: parent.title,
+    parent,
+    branchRooms,
+    focusRooms,
+  };
+}
+
+function accountFocusRoomToEntry(
+  room: DesktopAccountRoomEntry["focusRooms"][number],
+  currentRoomIdentifier: string | null = null,
+): RoomEntry {
   const gitMeta = gitRoomSidebarMeta(room.gitRoom);
+  const currentWorkspace = normalizeRoomIdentifier(room.roomIdentifier) === currentRoomIdentifier;
   return {
     id: `room:focus:${room.roomIdentifier}`,
     type: "room",
@@ -264,6 +380,9 @@ function accountFocusRoomToEntry(room: DesktopAccountRoomEntry["focusRooms"][num
     headline: gitMeta?.headline || "Focused work should stay close to the room it came from.",
     description: gitMeta?.description
       || "A focus room gives one thread of work more space, without losing the connection back to the main room.",
+    gitRoom: room.gitRoom,
+    suggestedAction: currentWorkspace ? "Current workspace" : gitMeta ? "Open branch room" : null,
+    currentWorkspace,
     latestMessageId: room.latestMessageId,
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
@@ -285,12 +404,66 @@ function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
     headline: gitMeta?.headline || "Open this room from your account history.",
     description: gitMeta?.description
       || "Rooms from your account are available across devices, with focus rooms grouped underneath.",
+    gitRoom: room.gitRoom,
     latestMessageId: room.latestMessageId,
     latestMessageAt: room.latestMessageAt,
     hasUnread: false,
     pinned: room.pinned,
     source: "account",
   };
+}
+
+function accountGitRoomToRepoParentEntry(
+  room: DesktopAccountRoomEntry,
+  currentRoomIdentifier: string | null,
+): RoomEntry {
+  const entry = accountRoomToEntry(room);
+  const gitRoom = room.gitRoom;
+  if (!gitRoom) return entry;
+  const currentWorkspace = normalizeRoomIdentifier(room.roomIdentifier) === currentRoomIdentifier;
+  return {
+    ...entry,
+    title: gitRoom.repository.fullName || entry.title,
+    meta: gitAccessModeLabel(gitRoom),
+    sectionLabel: "Git repo",
+    headline: gitRoom.repository.fullName,
+    description: `${gitRefTypeLabel(gitRoom)} · ${gitRoomRefLabel(gitRoom)}`,
+    currentWorkspace,
+  };
+}
+
+function accountGitRoomToBranchEntry(
+  room: DesktopAccountRoomEntry,
+  currentRoomIdentifier: string | null,
+): RoomEntry {
+  const entry = accountRoomToEntry(room);
+  const gitRoom = room.gitRoom;
+  const currentWorkspace = normalizeRoomIdentifier(room.roomIdentifier) === currentRoomIdentifier;
+  if (!gitRoom) {
+    return {
+      ...entry,
+      kind: "branch",
+      currentWorkspace,
+    };
+  }
+  return {
+    ...entry,
+    kind: "branch",
+    title: gitRoomRefLabel(gitRoom),
+    meta: `${gitRefTypeLabel(gitRoom)} · ${gitAccessModeLabel(gitRoom)}`,
+    sectionLabel: "Branch room",
+    headline: gitRoom.repository.fullName,
+    description: room.displayName,
+    suggestedAction: null,
+    currentWorkspace,
+  };
+}
+
+function compareGitAccountRooms(left: DesktopAccountRoomEntry, right: DesktopAccountRoomEntry): number {
+  const leftDefault = isDefaultGitRoom(left.gitRoom);
+  const rightDefault = isDefaultGitRoom(right.gitRoom);
+  if (leftDefault !== rightDefault) return leftDefault ? -1 : 1;
+  return gitRoomRefLabel(left.gitRoom).localeCompare(gitRoomRefLabel(right.gitRoom));
 }
 
 function sortSidebarProjectGroups(groups: ProjectGroup[]): ProjectGroup[] {
@@ -324,25 +497,41 @@ function gitRoomSidebarMeta(gitRoom: DesktopGitRoomInfo | null): {
 } | null {
   if (!gitRoom) return null;
 
-  const refType = gitRoom.ref.type === "default_branch"
-    ? "Default branch"
-    : gitRoom.ref.type === "pull_request"
-      ? "Pull request"
-      : gitRoom.ref.type === "branch"
-        ? "Branch"
-        : "Tag";
   return {
-    meta: `${refType} · ${gitRoomRefLabel(gitRoom)}`,
+    meta: `${gitRefTypeLabel(gitRoom)} · ${gitRoomRefLabel(gitRoom)}`,
     headline: gitRoom.repository.fullName,
-    description: gitRoom.accessMode === "local"
-      ? "Local Git Room"
-      : gitRoom.accessMode === "private"
-        ? "Private Git Room"
-        : "Git Room",
+    description: `${gitAccessModeLabel(gitRoom)} Git Room`,
   };
 }
 
-function gitRoomRefLabel(gitRoom: DesktopGitRoomInfo): string {
+function gitRoomRepositoryKey(gitRoom: DesktopGitRoomInfo | null | undefined): string | null {
+  const repositoryId = gitRoom?.repository.id?.trim().toLowerCase();
+  if (repositoryId) return `${gitRoom?.provider || "git"}:${gitRoom?.host || "git"}:id:${repositoryId}`;
+  const fullName = gitRoom?.repository.fullName.trim().toLowerCase();
+  if (!fullName) return null;
+  return `${gitRoom?.provider || "git"}:${gitRoom?.host || "git"}:${fullName}`;
+}
+
+function isDefaultGitRoom(gitRoom: DesktopGitRoomInfo | null | undefined): boolean {
+  return Boolean(gitRoom?.isDefault || gitRoom?.ref.type === "default_branch");
+}
+
+function gitAccessModeLabel(gitRoom: DesktopGitRoomInfo): string {
+  if (gitRoom.accessMode === "local") return "Local";
+  if (gitRoom.accessMode === "private") return "Private";
+  if (gitRoom.accessMode === "public") return "Public";
+  return "Git";
+}
+
+function gitRefTypeLabel(gitRoom: DesktopGitRoomInfo): string {
+  if (gitRoom.ref.type === "default_branch") return "Default branch";
+  if (gitRoom.ref.type === "pull_request") return "Pull request";
+  if (gitRoom.ref.type === "branch") return "Branch";
+  return "Tag";
+}
+
+function gitRoomRefLabel(gitRoom: DesktopGitRoomInfo | null | undefined): string {
+  if (!gitRoom) return "Git ref";
   const ref = gitRoom.ref;
   if (
     ref.name
