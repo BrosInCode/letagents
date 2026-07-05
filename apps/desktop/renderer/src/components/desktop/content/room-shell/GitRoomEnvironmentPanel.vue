@@ -87,17 +87,19 @@ const matchingRoomWorktree = computed(() => {
 });
 const canOpenRoomBranch = computed(() => {
   if (!props.gitRoomMatchesActiveRepo || !props.room.gitRoom || !props.repoStatus.isGitRepo) return false;
-  return currentBranchMatchesRoom.value || Boolean(matchingRoomWorktree.value?.path);
+  return !currentBranchMatchesRoom.value && Boolean(matchingRoomWorktree.value?.path);
 });
-const openBranchLabel = computed(() => `Open ${roomBranchLabel.value}`);
+const openBranchLabel = computed(() =>
+  currentBranchMatchesRoom.value ? "Local worktree" : "Open local worktree"
+);
 const openBranchDescription = computed(() => {
-  if (currentBranchMatchesRoom.value) return "Already open";
-  if (matchingRoomWorktree.value) return "Switch to its workspace";
-  return "No local workspace for this branch";
+  if (currentBranchMatchesRoom.value) return `${roomBranchLabel.value} is open on this machine`;
+  if (matchingRoomWorktree.value) return roomBranchLabel.value;
+  return "No local worktree for this branch";
 });
 const branchChangesValue = computed(() => {
   if (!currentBranchMatchesRoom.value) {
-    return repoEnvironmentBranchDeltaLabel(roomBranchDelta.value) || "Unknown";
+    return repoEnvironmentBranchDeltaLabel(roomBranchDelta.value) || "No local worktree";
   }
   if (changedCount.value === 0) {
     return repoEnvironmentBranchDeltaLabel(roomBranchDelta.value) || "Clean";
@@ -108,8 +110,8 @@ const branchChangesDescription = computed(() => {
   if (!currentBranchMatchesRoom.value) {
     if (roomBranchDelta.value?.baseBranch) return `Compared with ${roomBranchDelta.value.baseBranch}`;
     return matchingRoomWorktree.value
-      ? `Open ${roomBranchLabel.value} to check workspace changes`
-      : "No workspace open for this branch";
+      ? `Open ${roomBranchLabel.value} to inspect local changes`
+      : "Open a local worktree to inspect changes";
   }
   if (changedCount.value > 0) return "Uncommitted changes";
   if (roomBranchDelta.value?.baseBranch) return `Compared with ${roomBranchDelta.value.baseBranch}`;

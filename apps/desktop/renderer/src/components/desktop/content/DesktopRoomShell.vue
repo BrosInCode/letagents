@@ -39,10 +39,10 @@
       </template>
       <template v-else-if="gitRoomBranchPrompt">
         <span v-if="gitRoomBranchPrompt.state === 'detached'">
-          Your workspace is not on a branch. This room is for {{ gitRoomBranchPrompt.roomRef }}.
+          Your local worktree is not on a branch. This room is for {{ gitRoomBranchPrompt.roomRef }}.
         </span>
         <span v-else>
-          You are working on {{ gitRoomBranchPrompt.workspaceBranch }}, but this room is for {{ gitRoomBranchPrompt.roomRef }}.
+          This local worktree is on {{ gitRoomBranchPrompt.workspaceBranch }}, but this room is for {{ gitRoomBranchPrompt.roomRef }}.
         </span>
         <button
           v-if="gitRoomBranchPrompt.state === 'branch_mismatch'"

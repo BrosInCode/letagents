@@ -459,6 +459,11 @@ const gitRoomBranchPrompt = computed(() => {
 const selectedGitRoomMatchesActiveRepo = computed(() => {
   const gitRoom = selectedRoomInfo.value.gitRoom;
   if (!gitRoom || !repoStatus.value?.isGitRepo) return false;
+  const activeRoomIdentifier = normalizeRoomIdentifier(repoStatus.value.roomIdentifier);
+  if (
+    activeRoomIdentifier &&
+    activeRoomIdentifier === normalizeRoomIdentifier(selectedRoomInfo.value.identifier)
+  ) return true;
   const rootGitRoom = rootRoomSnapshot.value?.room?.gitRoom || null;
   if (rootGitRoom) return gitRoomsShareRepo(rootGitRoom, gitRoom);
   return normalizeRoomIdentifier(selectedRoomInfo.value.identifier)
