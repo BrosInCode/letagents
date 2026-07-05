@@ -22,7 +22,7 @@ export function buildManagedAgentChangeSummaryAttachmentDraft(
     return null;
   }
 
-  const publicSummary = toPublicChangeSummary(summary);
+  const publicSummary = toPublicManagedAgentChangeSummary(summary);
   const json = JSON.stringify({
     kind: "managed_agent_change_summary",
     version: 1,
@@ -77,7 +77,7 @@ export function managedAgentChangeSummaryLocalAttachmentPayload(
   };
 }
 
-function toPublicChangeSummary(
+export function toPublicManagedAgentChangeSummary(
   summary: DesktopManagedAgentChangeSummary,
 ): DesktopManagedAgentPublicChangeSummary {
   return {
