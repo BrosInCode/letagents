@@ -631,7 +631,7 @@ const environmentWidgetSummary = computed(() => {
   const roomDelta = repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo);
   return repoEnvironmentBranchDeltaLabel(
     roomDelta,
-  ) || repoEnvironmentChangeLabel(props.repoStatus);
+  ) || roomBranch;
 });
 const roomManagedAgentSessions = computed(() =>
   managedAgentSessions.value.filter((session) =>

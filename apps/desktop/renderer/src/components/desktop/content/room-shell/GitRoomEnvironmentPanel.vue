@@ -134,7 +134,7 @@ const branchChangesValue = computed(() => {
   if (!currentBranchMatchesRoom.value) {
     return "No local worktree";
   }
-  if (changedCount.value === 0) return "Clean";
+  if (changedCount.value === 0) return "No local edits";
   return repoEnvironmentChangeLabel(props.repoStatus, roomBranchDelta.value);
 });
 const branchChangesDescription = computed(() => {
@@ -146,10 +146,10 @@ const branchChangesDescription = computed(() => {
   }
   const localState = changedCount.value > 0
     ? repoEnvironmentChangeLabel(props.repoStatus)
-    : "No uncommitted changes";
+    : "No local edits";
   if (roomBranchDelta.value?.baseBranch) return `${localState} · compared with ${roomBranchDelta.value.baseBranch}`;
   if (changedCount.value > 0) return localState;
-  return "No uncommitted changes";
+  return "No local edits";
 });
 const branchChangesTone = computed(() => {
   if (!currentBranchMatchesRoom.value) return "neutral";
