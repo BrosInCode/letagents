@@ -295,11 +295,26 @@ export async function publishLocalRoomArtifact(input: {
   });
 }
 
+export async function publishLocalRoomWorkflowArtifact(input: {
+  roomId: string;
+  artifact: Record<string, unknown>;
+  taskId?: string | null;
+  linkedTaskIds?: unknown[];
+  replaceLinkedTaskIds?: boolean;
+}): Promise<{ room_id: string; artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number] }> {
+  return upsertLocalRoomArtifact({
+    ...input,
+    source: "task_workflow_artifact",
+    requireStableIdentity: true,
+  });
+}
+
 async function upsertLocalRoomArtifact(input: {
   roomId: string;
   artifact: Record<string, unknown>;
   taskId?: string | null;
   linkedTaskIds?: unknown[];
+  replaceLinkedTaskIds?: boolean;
   source: DesktopRoomSharedArtifactSource;
   requireStableIdentity: boolean;
 }): Promise<{ room_id: string; artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number] }> {
@@ -392,6 +407,22 @@ async function upsertLocalRoomArtifact(input: {
             updated_at = excluded.updated_at
         `)
         .run(roomId, identityKey, taskId, input.source, now, now);
+    }
+    if (input.replaceLinkedTaskIds) {
+      const deleteBase = `
+        DELETE FROM local_room_artifact_tasks
+        WHERE room_id = ?
+          AND artifact_identity_key = ?
+          AND source = ?
+      `;
+      if (linkedTaskIds.length) {
+        const placeholders = linkedTaskIds.map(() => "?").join(", ");
+        database
+          .prepare(`${deleteBase} AND task_id NOT IN (${placeholders})`)
+          .run(roomId, identityKey, input.source, ...linkedTaskIds);
+      } else {
+        database.prepare(deleteBase).run(roomId, identityKey, input.source);
+      }
     }
     database.exec("COMMIT");
   } catch (error) {

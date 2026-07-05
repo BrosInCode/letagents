@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -92,6 +93,10 @@ const {
   persistDesktopManagedAgentLocalReply,
 } = await import("../main/agents/managed-agent-local-replies.js");
 const {
+  buildManagedAgentChangeSummaryWorkflowArtifact,
+  publishManagedAgentLocalChangeSummaryArtifact,
+} = await import("../main/agents/managed-agent-change-summary-artifacts.js");
+const {
   resolveDesktopManagedAgentWorkerRegistration,
 } = await import("../main/agents/managed-agent-local-worker-session.js");
 const {
@@ -111,6 +116,9 @@ const {
   addLocalChatMessage,
   getLocalChatMessages,
 } = await import("../main/rooms/messages/local-store.js");
+const {
+  getLocalRoomArtifacts,
+} = await import("../main/rooms/artifacts/local-store.js");
 const {
   isManagedRoomStreamEvent,
   listDeliverableCodexSessionsForRoomStreamEvent,
@@ -149,6 +157,10 @@ test.after(() => {
 
 function resetState(state: Record<string, unknown> = {}): void {
   writeFileSync(process.env.LETAGENTS_STATE_PATH ?? "", `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+}
+
+function git(cwd: string, args: string[]): void {
+  execFileSync("git", args, { cwd, stdio: "pipe" });
 }
 
 function liveSession(
@@ -433,6 +445,8 @@ async function setupDesktopEventRoomToolSession(input: {
   sessionId: string;
   workerSessionId: string;
   displayName: string;
+  cwd?: string;
+  repoBranch?: string | null;
   providerId?: "codex" | "open-model";
   ideLabel?: string;
 }): Promise<void> {
@@ -461,6 +475,8 @@ async function setupDesktopEventRoomToolSession(input: {
     room_display_name: "Desktop Event Room",
     display_name: input.displayName,
     provider_id: input.providerId === "open-model" ? "open-model" : undefined,
+    cwd: input.cwd ?? "/tmp/repo",
+    repo_branch: input.repoBranch ?? "codex/git-rooms",
     token,
     agent_session_id: input.workerSessionId,
     thread_id: `thread_${input.sessionId}`,
@@ -1616,6 +1632,94 @@ test("Codex desktop events report malformed brokered room tool requests", async 
   }
 });
 
+test("Codex desktop events publish local change summary artifacts", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_change_summary_artifact";
+  const repo = mkdtempSync(join(tempDir, "codex-change-summary-repo-"));
+  git(repo, ["init", "-q"]);
+  git(repo, ["config", "user.email", "agent@example.com"]);
+  git(repo, ["config", "user.name", "Agent"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\n");
+  git(repo, ["add", "tracked.txt"]);
+  git(repo, ["commit", "-qm", "init"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\ntwo\n");
+  await setupDesktopEventRoomToolSession({
+    roomIdentifier,
+    sessionId: "codex_change_summary_artifact",
+    workerSessionId: "agent_session_codex_change_summary_artifact",
+    displayName: "CedarVista",
+    cwd: repo,
+    repoBranch: "feature/artifact-producer",
+  });
+
+  const websocket = installScriptedCodexWebSocketForTest([
+    "Implemented the artifact producer.",
+    "Linked the first task.",
+    "Linked the second task.",
+  ]);
+  const fetchMock = installReadyAndReasoningFetchForTest();
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent({
+      roomIdentifier,
+      message: {
+        ...messageEvent().message,
+        id: "msg_codex_change_summary_artifact",
+        text: "please implement the artifact producer",
+        threadRootId: "msg_codex_change_summary_artifact",
+      },
+    }));
+
+    const artifact = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+      const artifacts = await getLocalRoomArtifacts(roomIdentifier);
+      return artifacts.artifacts?.find((entry) => entry.kind === "change_summary") ?? null;
+    }, "Codex desktop event local change summary artifact");
+
+    assert.equal(artifact.provider, "git");
+    assert.equal(artifact.source, "task_workflow_artifact");
+    assert.equal(artifact.ref, "feature/artifact-producer");
+    assert.equal(artifact.state, "updated");
+    assert.equal(artifact.linked_task_ids?.length, 0);
+    assert.match(artifact.identity_key ?? "", /git:change_summary:id:managed-agent:key:EmmyMay\/cedarvista:branch:feature\/artifact-producer/);
+    dispatchRoomStreamEventToManagedAgents({
+      type: "task_update",
+      roomIdentifier,
+      task: taskSummary({
+        id: "task_artifact_1",
+        assignee: "CedarVista",
+      }),
+    });
+    const taskOneArtifact = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+      const artifacts = await getLocalRoomArtifacts(roomIdentifier);
+      const current = artifacts.artifacts?.find((entry) => entry.kind === "change_summary") ?? null;
+      return current?.linked_task_ids?.[0] === "task_artifact_1" ? current : null;
+    }, "Codex desktop event task one artifact link");
+    assert.deepEqual(taskOneArtifact.linked_task_ids, ["task_artifact_1"]);
+
+    dispatchRoomStreamEventToManagedAgents({
+      type: "task_update",
+      roomIdentifier,
+      task: taskSummary({
+        id: "task_artifact_2",
+        assignee: "CedarVista",
+      }),
+    });
+    const taskTwoArtifact = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+      const artifacts = await getLocalRoomArtifacts(roomIdentifier);
+      const current = artifacts.artifacts?.find((entry) => entry.kind === "change_summary") ?? null;
+      return current?.linked_task_ids?.[0] === "task_artifact_2" ? current : null;
+    }, "Codex desktop event task two artifact link");
+    assert.deepEqual(taskTwoArtifact.linked_task_ids, ["task_artifact_2"]);
+    assert.deepEqual((await getLocalRoomArtifacts(roomIdentifier, { taskId: "task_artifact_1" })).artifacts, []);
+    assert.equal(websocket.sentMessages.filter((message) => message.method === "turn/start").length, 3);
+  } finally {
+    fetchMock.restore();
+    websocket.restore();
+  }
+});
+
 test("desktop context result prompts return compact brokered context", () => {
   const prompt = buildManagedAgentContextResultPrompt({
     ok: true,
@@ -1863,6 +1967,118 @@ test("desktop managed agent local replies preserve change summary attachments", 
   const savedPayload = JSON.parse(Buffer.from(result?.attachments[0]?.contentBase64 ?? "", "base64").toString("utf8"));
   assert.equal("sessionId" in savedPayload.summary, false);
   assert.equal("repoRootPath" in savedPayload.summary, false);
+});
+
+test("desktop managed agent change summaries publish stable local workflow artifacts", async () => {
+  const room = await createLocalRoom({
+    roomIdentifier: "local_change_summary_artifacts",
+    cloudRoomIdentifier: "room_change_summary_artifacts",
+    displayName: "Change Summary Artifacts",
+  });
+  await setLocalAwareRoomStorageMode("room_change_summary_artifacts", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_change_summary_artifacts");
+  const workerSession = managedWorkerSession({
+    session_id: "agent_session_summary",
+    room_id: "room_change_summary_artifacts",
+    display_name: "StoneForge",
+  });
+  const summary = {
+    providerId: "codex" as const,
+    repoBranch: "feature/artifacts",
+    changeScope: "working_tree" as const,
+    changedFileCount: 2,
+    stagedFileCount: 0,
+    unstagedFileCount: 2,
+    untrackedFileCount: 0,
+    additions: 8,
+    deletions: 3,
+    files: [],
+    hiddenFileCount: 0,
+    isGitRepo: true,
+    updatedAt: "2026-07-02T00:00:00.000Z",
+    error: null,
+  };
+
+  const artifactInput = buildManagedAgentChangeSummaryWorkflowArtifact({
+    summary,
+    workerSession,
+  });
+  assert.equal(
+    artifactInput?.id,
+    "managed-agent:key:codex/stone-forge:branch:feature/artifacts",
+  );
+
+  const first = await publishManagedAgentLocalChangeSummaryArtifact({
+    roomIdentifier: "room_change_summary_artifacts",
+    storage,
+    workerSession,
+    summary,
+    taskId: "task_7",
+  });
+  assert.equal(
+    first?.artifactIdentityKey,
+    "git:change_summary:id:managed-agent:key:codex/stone-forge:branch:feature/artifacts",
+  );
+
+  await publishManagedAgentLocalChangeSummaryArtifact({
+    roomIdentifier: "room_change_summary_artifacts",
+    storage,
+    workerSession,
+    summary: {
+      ...summary,
+      changedFileCount: 3,
+      updatedAt: "2026-07-02T00:05:00.000Z",
+    },
+    taskId: "task_8",
+  });
+
+  const artifacts = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(artifacts.artifacts?.length, 1);
+  assert.equal(artifacts.artifacts?.[0]?.kind, "change_summary");
+  assert.equal(artifacts.artifacts?.[0]?.source, "task_workflow_artifact");
+  assert.equal(artifacts.artifacts?.[0]?.title, "StoneForge changes on feature/artifacts (3 files)");
+  assert.equal(artifacts.artifacts?.[0]?.ref, "feature/artifacts");
+  assert.equal(artifacts.artifacts?.[0]?.state, "updated");
+  assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_8"]);
+  assert.deepEqual((await getLocalRoomArtifacts(room.roomIdentifier, { taskId: "task_7" })).artifacts, []);
+
+  await publishManagedAgentLocalChangeSummaryArtifact({
+    roomIdentifier: "room_change_summary_artifacts",
+    storage,
+    workerSession,
+    summary: {
+      ...summary,
+      changedFileCount: 0,
+      stagedFileCount: 0,
+      unstagedFileCount: 0,
+      untrackedFileCount: 0,
+      additions: 0,
+      deletions: 0,
+      updatedAt: "2026-07-02T00:10:00.000Z",
+    },
+  });
+  const cleanArtifacts = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(cleanArtifacts.artifacts?.length, 1);
+  assert.equal(cleanArtifacts.artifacts?.[0]?.title, "StoneForge clean on feature/artifacts");
+  assert.equal(cleanArtifacts.artifacts?.[0]?.state, "clean");
+  assert.deepEqual(cleanArtifacts.artifacts?.[0]?.linked_task_ids, []);
+
+  assert.equal(
+    await publishManagedAgentLocalChangeSummaryArtifact({
+      roomIdentifier: "room_change_summary_artifacts",
+      storage: { ...storage, effectiveMode: "cloud", isLocalRoom: false },
+      workerSession,
+      summary,
+    }),
+    null,
+  );
+  assert.equal(
+    buildManagedAgentChangeSummaryWorkflowArtifact({
+      summary: { ...summary, isGitRepo: false, error: "Not a Git repository." },
+      workerSession,
+    }),
+    null,
+  );
 });
 
 test("desktop managed agent reply targets distinguish quote replies from thread replies", () => {
