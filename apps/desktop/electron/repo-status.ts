@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type {
   DesktopGitRoomInfo,
   DesktopGitRoomRefType,
+  RepoBranchDelta,
   DesktopRepoRoomSelection,
   RepoChangeSummary,
   RepoStatus,
@@ -160,6 +161,59 @@ function emptyChangeSummary(): RepoChangeSummary {
   };
 }
 
+export function parseGitShortStat(
+  stdout: string,
+  baseBranch: string | null,
+  branch: string | null = null,
+): RepoBranchDelta {
+  const text = stdout.trim();
+  const filesMatch = /(\d+)\s+files?\s+changed/.exec(text);
+  const insertionsMatch = /(\d+)\s+insertions?\(\+\)/.exec(text);
+  const deletionsMatch = /(\d+)\s+deletions?\(-\)/.exec(text);
+  return {
+    branch,
+    filesChanged: filesMatch ? Number(filesMatch[1]) : 0,
+    additions: insertionsMatch ? Number(insertionsMatch[1]) : 0,
+    deletions: deletionsMatch ? Number(deletionsMatch[1]) : 0,
+    baseBranch,
+  };
+}
+
+async function getBranchDelta(
+  workspaceRoot: string,
+  branch: string | null,
+  defaultBranch: string | null,
+): Promise<RepoBranchDelta | null> {
+  if (!branch || !defaultBranch) return null;
+  if (branch === defaultBranch) {
+    return { branch, filesChanged: 0, additions: 0, deletions: 0, baseBranch: defaultBranch };
+  }
+  try {
+    const stdout = await runGit(workspaceRoot, [
+      "--no-optional-locks",
+      "diff",
+      "--shortstat",
+      `${defaultBranch}...${branch}`,
+      "--",
+    ]);
+    return parseGitShortStat(stdout, defaultBranch, branch);
+  } catch {
+    return null;
+  }
+}
+
+async function getKnownBranchDeltas(
+  workspaceRoot: string,
+  branches: Array<string | null | undefined>,
+  defaultBranch: string | null,
+): Promise<RepoBranchDelta[]> {
+  const uniqueBranches = [...new Set(branches.map((branch) => branch?.trim()).filter(Boolean) as string[])];
+  const deltas = await Promise.all(
+    uniqueBranches.map((branch) => getBranchDelta(workspaceRoot, branch, defaultBranch)),
+  );
+  return deltas.filter((delta): delta is RepoBranchDelta => Boolean(delta));
+}
+
 export function parseGitStatusPorcelainV2(stdout: string): ParsedGitStatus {
   const changes = emptyChangeSummary();
   let head: string | null = null;
@@ -264,6 +318,8 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
       ahead: 0,
       behind: 0,
       changes: emptyChangeSummary(),
+      branchDelta: null,
+      branchDeltas: [],
       dirty: false,
       roomIdentifier: null,
       roomSource: "local_folder",
@@ -279,6 +335,13 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
     resolveRoomIdentifierFromPath(repoRoot),
   ]);
 
+  const branchDeltas = await getKnownBranchDeltas(
+    repoRoot,
+    [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
+    defaultBranch,
+  );
+  const branchDelta = branchDeltas.find((delta) => delta.branch === gitStatus.branch) ?? null;
+
   return {
     rootPath: repoRoot,
     mainRootPath: worktrees.find((worktree) => worktree.isMain)?.path ?? repoRoot,
@@ -292,6 +355,8 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
     ahead: gitStatus.ahead,
     behind: gitStatus.behind,
     changes: gitStatus.changes,
+    branchDelta,
+    branchDeltas,
     dirty: gitStatus.dirty,
     roomIdentifier: resolvedRoom.roomIdentifier,
     roomSource: resolvedRoom.source,

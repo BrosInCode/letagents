@@ -23,16 +23,17 @@ export function readLiquidGlassEnabled(): boolean {
 }
 
 const githubEventsVisibilityStorageKey = "letagents-desktop:github-events-visible";
+const environmentPanelOpenStorageKey = "letagents-desktop:environment-panel-open";
 
 export function readGitHubEventsVisible(roomIdentifier: string | null | undefined): boolean {
   const key = roomPreferenceKey(roomIdentifier);
-  if (!key) return true;
+  if (!key) return false;
   try {
     const preferences = readBooleanPreferenceMap(githubEventsVisibilityStorageKey);
     const storedValue = preferences[key];
-    return typeof storedValue === "boolean" ? storedValue : true;
+    return typeof storedValue === "boolean" ? storedValue : false;
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -43,6 +44,30 @@ export function rememberGitHubEventsVisible(roomIdentifier: string | null | unde
     const preferences = readBooleanPreferenceMap(githubEventsVisibilityStorageKey);
     preferences[key] = visible;
     window.localStorage.setItem(githubEventsVisibilityStorageKey, JSON.stringify(preferences));
+  } catch {
+    // Local preference persistence is best-effort.
+  }
+}
+
+export function readEnvironmentPanelOpen(roomIdentifier: string | null | undefined): boolean {
+  const key = roomPreferenceKey(roomIdentifier);
+  if (!key) return false;
+  try {
+    const preferences = readBooleanPreferenceMap(environmentPanelOpenStorageKey);
+    const storedValue = preferences[key];
+    return typeof storedValue === "boolean" ? storedValue : false;
+  } catch {
+    return false;
+  }
+}
+
+export function rememberEnvironmentPanelOpen(roomIdentifier: string | null | undefined, open: boolean): void {
+  const key = roomPreferenceKey(roomIdentifier);
+  if (!key) return;
+  try {
+    const preferences = readBooleanPreferenceMap(environmentPanelOpenStorageKey);
+    preferences[key] = open;
+    window.localStorage.setItem(environmentPanelOpenStorageKey, JSON.stringify(preferences));
   } catch {
     // Local preference persistence is best-effort.
   }

@@ -68,6 +68,7 @@
           :attaching="attaching"
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
+          :event-previews="composerEventPreviews"
           :initial-draft="initialDraft"
           :participants="participants"
           :permission-approvals="permissionApprovals"
@@ -85,6 +86,7 @@
           @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
+          @open-event-preview="openEventPreview"
           @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @send-message="handleComposerSend"
         />
@@ -182,6 +184,7 @@ import {
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
 import RoomComposer from "./room-chat/RoomComposer.vue";
+import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
 import {
@@ -201,6 +204,7 @@ const props = defineProps<{
   localAgentWork: ManagedAgentWorkIndicator[];
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
+  composerEventPreviews: ComposerEventPreview[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubEventsVisible: boolean;
@@ -233,6 +237,7 @@ const emit = defineEmits<{
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
+  "open-events": [];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
@@ -384,6 +389,14 @@ function quoteSelectedText(messageId: string, selectedText: string): void {
         sourceMessageId: target.id,
       }
     : null;
+}
+
+function openEventPreview(event: ComposerEventPreview): void {
+  if (event.url) {
+    emit("open-github-event", event.url);
+    return;
+  }
+  emit("open-events");
 }
 
 function clearReplyTarget(): void {

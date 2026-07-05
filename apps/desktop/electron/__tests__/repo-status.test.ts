@@ -11,6 +11,7 @@ import {
   buildLocalGitRoomInfo,
   buildRepoStatus,
   parseGitStatusPorcelainV2,
+  parseGitShortStat,
   parseGitWorktreePorcelain,
   resolveRoomIdentifierFromPath,
   resolveWorkspaceRoom,
@@ -92,6 +93,23 @@ test("parseGitStatusPorcelainV2 treats detached HEAD as a non-branch state", () 
   assert.equal(status.branch, null);
   assert.equal(status.detached, true);
   assert.equal(status.dirty, false);
+});
+
+test("parseGitShortStat extracts branch code delta", () => {
+  assert.deepEqual(parseGitShortStat(" 3 files changed, 12 insertions(+), 5 deletions(-)\n", "main"), {
+    branch: null,
+    filesChanged: 3,
+    additions: 12,
+    deletions: 5,
+    baseBranch: "main",
+  });
+  assert.deepEqual(parseGitShortStat("", "main"), {
+    branch: null,
+    filesChanged: 0,
+    additions: 0,
+    deletions: 0,
+    baseBranch: "main",
+  });
 });
 
 test("local Git room ids are deterministic from repo root and active ref", () => {

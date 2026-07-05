@@ -9,24 +9,14 @@
       :sidebar-mode="sidebarMode"
       :room="room"
       :storage="storage"
-      :repo-status="repoStatus"
-      :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
       :tabs="tabs"
       :active-tab="activeTab"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
       @cycle-sidebar="emit('cycle-sidebar')"
-      @open-workspace-git-room="emit('open-workspace-git-room')"
-      @open-repo-root="emit('open-repo-root', $event)"
       @toggle-search="toggleSearchTool"
       @toggle-action-panel="toggleActionPanel"
       @select-tab="selectTab"
-    />
-
-    <RepoStateStrip
-      :room="room"
-      :repo-status="repoStatus"
-      :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
     />
 
     <div
@@ -49,10 +39,10 @@
       </template>
       <template v-else-if="gitRoomBranchPrompt">
         <span v-if="gitRoomBranchPrompt.state === 'detached'">
-          Workspace is detached. This room is still scoped to {{ gitRoomBranchPrompt.roomRef }}.
+          Your workspace is not on a branch. This room is for {{ gitRoomBranchPrompt.roomRef }}.
         </span>
         <span v-else>
-          Workspace is on {{ gitRoomBranchPrompt.workspaceBranch }}; this room is scoped to {{ gitRoomBranchPrompt.roomRef }}.
+          You are working on {{ gitRoomBranchPrompt.workspaceBranch }}, but this room is for {{ gitRoomBranchPrompt.roomRef }}.
         </span>
         <button
           v-if="gitRoomBranchPrompt.state === 'branch_mismatch'"
@@ -60,7 +50,7 @@
           type="button"
           @click="emit('open-workspace-git-room')"
         >
-          Open Git Room
+          Open {{ gitRoomBranchPrompt.workspaceBranch }} room
         </button>
         <button
           class="inline-action-button muted"
@@ -114,6 +104,31 @@
       @close-action-panel="closeActionPanel"
     />
 
+    <div
+      v-if="room.gitRoom && !actionPanelOpen && !searchOpen"
+      class="desktop-room-environment-popover"
+      data-testid="desktop-room-environment-popover"
+    >
+      <DesktopFloatingWidget
+        :open="environmentPanelOpen"
+        label="Environment"
+        :summary="environmentWidgetSummary"
+        test-id="desktop-room-environment-widget"
+        @update:open="setEnvironmentPanelOpen"
+      >
+        <template #icon>
+          <GitBranch :size="18" aria-hidden="true" />
+        </template>
+        <GitRoomEnvironmentPanel
+          :room="room"
+          :repo-status="repoStatus"
+          :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
+          @open-workspace-git-room="emit('open-workspace-git-room')"
+          @open-repo-root="emit('open-repo-root', $event)"
+        />
+      </DesktopFloatingWidget>
+    </div>
+
     <RoomChatView
       ref="roomChatView"
       v-show="activeTab === 'chat'"
@@ -121,6 +136,7 @@
       :messages="timelineMessages"
       :thread-messages="visibleMessages"
       :message-namespace="messageNamespace"
+      :composer-event-previews="composerGitHubEventPreviews"
       :has-filtered-room-activity="hasFilteredRoomActivity"
       :room-identifier="room.identifier"
       :github-events-visible="githubEventsVisible"
@@ -152,6 +168,7 @@
       @open-permission-detail="openComposerPermissionDetail"
       @resolve-permission="resolveComposerPermission"
       @draft-change="chatDraftText = $event"
+      @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @scroll-position="rememberChatScrollPosition"
       @thread-read="handleThreadRead"
@@ -301,6 +318,7 @@
 </template>
 
 <script setup lang="ts">
+import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
@@ -339,14 +357,22 @@ import {
   preferredManagedAgentRepoRootPath,
   type ManagedAgentPermissionApproval,
 } from "../../../domain/managed-agents";
+import {
+  repoEnvironmentBranchDeltaForRoom,
+  repoEnvironmentBranchDeltaLabel,
+  repoEnvironmentChangeLabel,
+  repoEnvironmentCurrentBranchMatchesRoom,
+  repoEnvironmentRoomRefLabel,
+} from "../../../domain/repo-environment";
+import { repoChangedFileCount } from "../../../domain/repo-status";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
 import DesktopAgentDetailModal from "./DesktopAgentDetailModal.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
+import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RentAnAgentView from "./RentAnAgentView.vue";
-import RepoStateStrip from "./RepoStateStrip.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
@@ -356,14 +382,22 @@ import RoomInboxView from "./RoomInboxView.vue";
 import { ownerAttribution as ownerAttributionLabel } from "./room-activity/agentTarget";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
+import GitRoomEnvironmentPanel from "./room-shell/GitRoomEnvironmentPanel.vue";
 import {
+  readEnvironmentPanelOpen,
   readGitHubEventsVisible,
+  rememberEnvironmentPanelOpen,
   rememberGitHubEventsVisible,
 } from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
-import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
+import type { AgentModalTarget, GitHubEventPresentation } from "./desktop-chat-message/types";
+import {
+  isLowSignalGitHubCheckMessage,
+  parseGitHubEvent,
+} from "./desktop-chat-message/github-event";
 import {
   buildDesktopInboxItems,
   desktopInboxItemFingerprint,
@@ -378,6 +412,8 @@ import {
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { isThreadReplyMessage } from "./room-shell/threading";
+
+type RoomTabIndicatorTone = NonNullable<NonNullable<RoomTab["indicator"]>["tone"]>;
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
@@ -460,10 +496,15 @@ const activityHistoryRequest = ref(0);
 const artifactTimelineTaskFilterId = ref<string | null>(null);
 const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
+const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
+const composerGitHubEventPreviews = ref<ComposerEventPreview[]>([]);
+const eventsUnseenCount = ref(0);
+const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const composerPermissionError = ref<string | null>(null);
 const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
 let githubEventsRefreshTimer: number | null = null;
+const composerGitHubEventTimers = new Map<string, number>();
 let inboxRefreshTimer: number | null = null;
 let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
@@ -576,7 +617,21 @@ const githubEventsAvailable = computed(() =>
   )
 );
 
-const showEventsTab = computed(() => githubEventsVisible.value && githubEventsAvailable.value);
+const showEventsTab = computed(() => githubEventsAvailable.value);
+const environmentWidgetSummary = computed(() => {
+  const roomBranch = repoEnvironmentRoomRefLabel(props.room);
+  if (!roomBranch) return "Git Room";
+  if (!repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus)) {
+    return repoEnvironmentBranchDeltaLabel(
+      repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus),
+    ) || roomBranch;
+  }
+  const changedCount = repoChangedFileCount(props.repoStatus);
+  if (changedCount > 0) return repoEnvironmentChangeLabel(props.repoStatus);
+  return repoEnvironmentBranchDeltaLabel(
+    repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus),
+  ) || "Clean";
+});
 const roomManagedAgentSessions = computed(() =>
   managedAgentSessions.value.filter((session) =>
     managedAgentSessionMatchesRoom(session, props.room.identifier)
@@ -649,6 +704,9 @@ watch(() => props.room.identifier, () => {
   eventsError.value = null;
   eventsLoadedOlderWithoutMatches.value = false;
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
+  environmentPanelOpen.value = readEnvironmentPanelOpen(props.room.identifier);
+  clearComposerGitHubEventPreviews();
+  resetEventsIndicator();
   void refreshManagedAgentSessions();
   restartManagedAgentSessionsRefreshTimer();
 }, { immediate: true });
@@ -668,6 +726,12 @@ watch(messageNamespace, () => {
 watch(addAgentModalOpen, (open) => {
   if (open) {
     void refreshManagedAgentSessions();
+  }
+});
+
+watch(() => actionPanelOpen.value || searchOpen.value, (toolSurfaceOpen) => {
+  if (toolSurfaceOpen && environmentPanelOpen.value) {
+    setEnvironmentPanelOpen(false);
   }
 });
 
@@ -694,6 +758,9 @@ watch(activeTab, (tab) => {
   rememberRoomActiveTab(props.room.identifier, tab);
   if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
     void refreshGitHubEvents().catch(() => undefined);
+  }
+  if (tab === "events") {
+    resetEventsIndicator();
   }
   if (tab === "inbox" && inboxLoadedKey.value !== currentInboxLoadKey() && !inboxLoading.value) {
     void loadInboxThreads().catch(() => undefined);
@@ -729,6 +796,7 @@ watch(() => props.messages.at(-1)?.id || null, () => {
     scheduleInboxRefresh(activeTab.value === "inbox" ? 200 : 700);
   }
   if (!showEventsTab.value || !shouldRefreshEventsForMessage(latestMessage)) return;
+  ingestComposerGitHubEvent(latestMessage);
   scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
 });
 
@@ -737,6 +805,7 @@ onBeforeUnmount(() => {
     window.clearTimeout(githubEventsRefreshTimer);
     githubEventsRefreshTimer = null;
   }
+  clearComposerGitHubEventPreviews();
   if (inboxRefreshTimer !== null) {
     window.clearTimeout(inboxRefreshTimer);
     inboxRefreshTimer = null;
@@ -770,34 +839,52 @@ watchRoomNotifications({
   showRoomNotification: (message) => showRoomNotification(message, props.room.displayName),
 });
 
-const tabs = computed<RoomTab[]>(() => [
-  { id: "chat", label: "Chat", count: null },
-  {
-    id: "inbox",
-    label: "Inbox",
-    count: inboxActionableCount.value || null,
-    indicator: inboxUnseenCount.value > 0 && activeTab.value !== "inbox"
-      ? {
-          label: inboxUnseenCount.value === 1 ? "New inbox item" : "New inbox items",
-          count: inboxUnseenCount.value,
-          tone: "info",
-          pulse: true,
-          mode: "dot",
-        }
-      : null,
-  },
-  ...(showEventsTab.value ? [{
-    id: "events" as const,
-    label: "Events",
-    count: null,
-  }] : []),
-  { id: "board", label: "Board", count: null },
-  { id: "activity" as const, label: "Activity", count: null },
-  ...(!isLocalRoom.value ? [
-    { id: "rooms" as const, label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
-    { id: "rent" as const, label: "Rent an Agent", count: null },
-  ] : []),
-]);
+const tabs = computed<RoomTab[]>(() => {
+  const nextTabs: RoomTab[] = [
+    { id: "chat", label: "Chat", count: null },
+    {
+      id: "inbox",
+      label: "Inbox",
+      count: inboxActionableCount.value || null,
+      indicator: inboxUnseenCount.value > 0 && activeTab.value !== "inbox"
+        ? {
+            label: inboxUnseenCount.value === 1 ? "New inbox item" : "New inbox items",
+            count: inboxUnseenCount.value,
+            tone: "info",
+            pulse: true,
+            mode: "dot",
+          }
+        : null,
+    },
+  ];
+  if (showEventsTab.value) {
+    nextTabs.push({
+      id: "events",
+      label: "Events",
+      count: null,
+      indicator: eventsUnseenCount.value > 0 && activeTab.value !== "events"
+        ? {
+            label: eventsUnseenCount.value === 1 ? "New event" : "New events",
+            count: eventsUnseenCount.value,
+            tone: eventsUnseenTone.value,
+            pulse: true,
+            mode: "count",
+          }
+        : null,
+    });
+  }
+  nextTabs.push(
+    { id: "board", label: "Board", count: null },
+    { id: "activity", label: "Activity", count: null },
+  );
+  if (!isLocalRoom.value) {
+    nextTabs.push(
+      { id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
+      { id: "rent", label: "Rent an Agent", count: null },
+    );
+  }
+  return nextTabs;
+});
 
 function selectTab(tabId: RoomTabId): void {
   if (activeTab.value === tabId) return;
@@ -1088,10 +1175,15 @@ function openInboxTask(taskId: string): void {
 }
 
 function openInboxGitHubEvent(eventId: string): void {
-  githubEventsVisible.value = true;
-  rememberGitHubEventsVisible(props.room.identifier, true);
   eventsTaskFilterId.value = null;
   eventsSelectedEventId.value = eventId;
+  activeTab.value = "events";
+}
+
+function openEventsTab(): void {
+  if (!showEventsTab.value) return;
+  eventsTaskFilterId.value = null;
+  eventsSelectedEventId.value = null;
   activeTab.value = "events";
 }
 
@@ -1184,20 +1276,71 @@ function scheduleGitHubEventsRefresh(delayMs: number): void {
   }, delayMs);
 }
 
+function ingestComposerGitHubEvent(message: DesktopRoomMessage): void {
+  if (activeTab.value === "events" || isLowSignalGitHubCheckMessage(message)) return;
+  const event = parseGitHubEvent(message);
+  if (!event) return;
+  eventsUnseenCount.value = Math.min(99, eventsUnseenCount.value + 1);
+  eventsUnseenTone.value = eventTabIndicatorTone(event.tone);
+  addComposerGitHubEventPreview(message.id, event);
+}
+
+function addComposerGitHubEventPreview(messageId: string, event: GitHubEventPresentation): void {
+  const preview: ComposerEventPreview = {
+    id: messageId,
+    kind: event.kind,
+    tone: event.tone,
+    kindLabel: event.kindLabel,
+    statusLabel: event.statusLabel,
+    headline: event.headline,
+    url: event.url,
+  };
+  const existingTimer = composerGitHubEventTimers.get(messageId);
+  if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+  composerGitHubEventPreviews.value = [
+    ...composerGitHubEventPreviews.value.filter((item) => item.id !== messageId),
+    preview,
+  ].slice(-2);
+  for (const staleId of [...composerGitHubEventTimers.keys()]) {
+    if (composerGitHubEventPreviews.value.some((item) => item.id === staleId)) continue;
+    const timer = composerGitHubEventTimers.get(staleId);
+    if (timer !== undefined) window.clearTimeout(timer);
+    composerGitHubEventTimers.delete(staleId);
+  }
+  composerGitHubEventTimers.set(messageId, window.setTimeout(() => {
+    composerGitHubEventTimers.delete(messageId);
+    composerGitHubEventPreviews.value = composerGitHubEventPreviews.value.filter((item) => item.id !== messageId);
+  }, 8000));
+}
+
+function clearComposerGitHubEventPreviews(): void {
+  for (const timer of composerGitHubEventTimers.values()) {
+    window.clearTimeout(timer);
+  }
+  composerGitHubEventTimers.clear();
+  composerGitHubEventPreviews.value = [];
+}
+
+function resetEventsIndicator(): void {
+  eventsUnseenCount.value = 0;
+  eventsUnseenTone.value = "info";
+}
+
+function eventTabIndicatorTone(tone: GitHubEventPresentation["tone"]): RoomTabIndicatorTone {
+  if (tone === "emerald") return "success";
+  if (tone === "rose") return "danger";
+  if (tone === "amber") return "warning";
+  return "info";
+}
+
 function toggleGitHubEventsVisible(): void {
   githubEventsVisible.value = !githubEventsVisible.value;
   rememberGitHubEventsVisible(props.room.identifier, githubEventsVisible.value);
-  if (githubEventsVisible.value) return;
-  eventsTaskFilterId.value = null;
-  eventsSelectedEventId.value = null;
-  eventsLoadedOlderWithoutMatches.value = false;
-  if (activeTab.value === "events") {
-    activeTab.value = "chat";
-  }
-  if (githubEventsRefreshTimer !== null) {
-    window.clearTimeout(githubEventsRefreshTimer);
-    githubEventsRefreshTimer = null;
-  }
+}
+
+function setEnvironmentPanelOpen(open: boolean): void {
+  environmentPanelOpen.value = open;
+  rememberEnvironmentPanelOpen(props.room.identifier, open);
 }
 
 async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"]): Promise<void> {

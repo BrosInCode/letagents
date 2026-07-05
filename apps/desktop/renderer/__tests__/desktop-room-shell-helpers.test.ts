@@ -23,11 +23,13 @@ import {
   roomSupportsGitHubIntegration,
 } from "../src/domain/git-rooms";
 import {
+  readEnvironmentPanelOpen,
   readGitHubEventsVisible,
   readLiquidGlassEnabled,
   readNotificationPermission,
   readNotificationsEnabled,
   readSoundEnabled,
+  rememberEnvironmentPanelOpen,
   rememberGitHubEventsVisible,
 } from "../src/components/desktop/content/room-shell/preferences";
 import {
@@ -493,14 +495,16 @@ describe("desktop room shell preferences", () => {
       assert.equal(readNotificationsEnabled(), true);
       assert.equal(readLiquidGlassEnabled(), false);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
-      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
 
     withLocalStorage({}, () => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
       assert.equal(readLiquidGlassEnabled(), true);
-      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
   });
 
@@ -518,12 +522,27 @@ describe("desktop room shell preferences", () => {
     });
   });
 
+  it("persists environment panel state per normalized room", () => {
+    const entries: Record<string, string> = {};
+    withMutableLocalStorage(entries, () => {
+      rememberEnvironmentPanelOpen("GitHub.com/BrosInCode/LetAgents", true);
+      assert.equal(readEnvironmentPanelOpen("github.com/brosincode/letagents"), true);
+      assert.deepEqual(JSON.parse(entries["letagents-desktop:environment-panel-open"]), {
+        "github.com/brosincode/letagents": true,
+      });
+
+      rememberEnvironmentPanelOpen("github.com/BrosInCode/letagents", false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
+    });
+  });
+
   it("falls back when storage or notification APIs are unavailable", () => {
     withThrowingLocalStorage(() => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
       assert.equal(readLiquidGlassEnabled(), true);
-      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
 
     withNotificationPermission("denied", () => {

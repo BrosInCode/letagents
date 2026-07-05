@@ -5,6 +5,128 @@
   gap: 8px;
 }
 
+.desktop-composer-event-chips {
+  position: absolute;
+  right: 70px;
+  bottom: calc(100% - 6px);
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap-reverse;
+  justify-content: flex-end;
+  gap: 7px;
+  max-width: min(620px, calc(100% - 96px));
+  pointer-events: none;
+}
+
+.desktop-composer-event-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: min(310px, 100%);
+  min-height: 30px;
+  padding: 4px 9px 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--composer-event-accent) 25%, rgba(255, 255, 255, 0.1));
+  border-radius: 999px;
+  appearance: none;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--composer-event-accent) 13%, transparent), rgba(255, 255, 255, 0.035)),
+    rgba(18, 18, 18, 0.97);
+  color: var(--text);
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  pointer-events: auto;
+  backdrop-filter: blur(14px);
+  --composer-event-accent: #8ec7ff;
+}
+
+.desktop-composer-event-chip[data-tone="emerald"] {
+  --composer-event-accent: #73d49d;
+}
+
+.desktop-composer-event-chip[data-tone="rose"] {
+  --composer-event-accent: #ff8fa3;
+}
+
+.desktop-composer-event-chip[data-tone="amber"] {
+  --composer-event-accent: #ffbd75;
+}
+
+.desktop-composer-event-chip[data-tone="violet"] {
+  --composer-event-accent: #b9a7ff;
+}
+
+.desktop-composer-event-chip[data-tone="sky"] {
+  --composer-event-accent: #8ec7ff;
+}
+
+.desktop-composer-event-chip[data-tone="slate"] {
+  --composer-event-accent: #a8abb8;
+}
+
+.desktop-composer-event-chip:hover,
+.desktop-composer-event-chip:focus-visible {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--composer-event-accent) 42%, rgba(255, 255, 255, 0.16));
+}
+
+.desktop-composer-event-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--composer-event-accent) 62%, transparent);
+  outline-offset: 2px;
+}
+
+.desktop-composer-event-chip-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--composer-event-accent) 16%, transparent);
+  color: var(--composer-event-accent);
+}
+
+.desktop-composer-event-chip-copy {
+  display: grid;
+  min-width: 0;
+  text-align: left;
+}
+
+.desktop-composer-event-chip-copy strong,
+.desktop-composer-event-chip-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-event-chip-copy strong {
+  font-size: 0.72rem;
+  font-weight: 840;
+  line-height: 1.1;
+}
+
+.desktop-composer-event-chip-copy small {
+  color: var(--text-tertiary);
+  font-size: 0.62rem;
+  font-weight: 760;
+  line-height: 1.1;
+}
+
+.desktop-composer-event-chip-enter-active,
+.desktop-composer-event-chip-leave-active {
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
+}
+
+.desktop-composer-event-chip-enter-from,
+.desktop-composer-event-chip-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+}
+
 .desktop-composer-input {
   width: 100%;
   min-height: 34px;

@@ -25,6 +25,14 @@ export interface RepoChangeSummary {
   conflicted: number;
 }
 
+export interface RepoBranchDelta {
+  branch: string | null;
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+  baseBranch: string | null;
+}
+
 export interface RepoStatus {
   rootPath: string;
   mainRootPath?: string | null;
@@ -38,6 +46,8 @@ export interface RepoStatus {
   ahead?: number;
   behind?: number;
   changes?: RepoChangeSummary;
+  branchDelta?: RepoBranchDelta | null;
+  branchDeltas?: RepoBranchDelta[];
   dirty?: boolean;
   roomIdentifier?: string | null;
   roomSource?: "configured" | "git_remote" | "local_git" | "local_folder" | null;

@@ -469,7 +469,7 @@
 <script setup lang="ts">
 import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { shouldShowRepoStateForRoom } from "../../../domain/repo-state-strip";
+import { shouldShowRepoEnvironmentForRoom } from "../../../domain/repo-environment";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
@@ -589,7 +589,7 @@ const closeoutDetails = reactive<DesktopFocusRoomConclusionDetails>({
 });
 
 const showRepoStatusDetails = computed(() =>
-  shouldShowRepoStateForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
+  shouldShowRepoEnvironmentForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
 );
 
 const openFocusRooms = computed(() =>

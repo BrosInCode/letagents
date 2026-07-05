@@ -10,6 +10,7 @@
 }
 
 .desktop-room-shell {
+  position: relative;
   grid-template-rows: auto auto minmax(0, 1fr);
   align-content: start;
   gap: 0;
@@ -72,6 +73,7 @@
   gap: 10px;
   min-width: 0;
   flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .desktop-room-sidebar-reveal {
@@ -98,8 +100,10 @@
   align-items: center;
   gap: 9px;
   min-width: 0;
-  flex: 0 1 auto;
+  max-width: 100%;
+  flex: 1 1 auto;
   margin: 0;
+  overflow: hidden;
   color: var(--text);
   font-size: 1.28rem;
   font-weight: 950;
@@ -108,6 +112,7 @@
 }
 
 .desktop-room-title-text {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -119,76 +124,10 @@
   align-items: center;
   gap: 9px;
   min-width: 0;
-  flex: 1 1 auto;
-}
-
-.desktop-room-git-meta {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: min(180px, 20vw);
-  padding-top: 2px;
-  color: var(--text-secondary);
-}
-
-.desktop-room-git-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  min-height: 28px;
-  padding: 0 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  appearance: none;
-  background: rgba(255, 255, 255, 0.035);
-  font-size: 0.76rem;
-  font-weight: 720;
-  line-height: 1;
-  white-space: nowrap;
-  flex: 0 1 auto;
+  flex: 1 1 0;
   overflow: hidden;
-  cursor: pointer;
 }
 
-.desktop-room-git-item svg {
-  flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
-}
-
-.desktop-room-git-ref {
-  max-width: 154px;
-  color: rgba(255, 255, 255, 0.76);
-}
-
-.desktop-room-git-ref span,
-.desktop-room-git-ref small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.desktop-room-git-ref small {
-  flex: 0 0 auto;
-  max-width: 48px;
-  color: var(--text-tertiary);
-  font-size: 0.66rem;
-  font-weight: 820;
-}
-
-.desktop-room-git-item:hover,
-.desktop-room-git-item:focus-visible,
-.desktop-room-git-item[aria-expanded="true"] {
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
-}
-
-.desktop-room-git-menu,
 .desktop-room-overflow-menu {
   padding: 8px;
   border: 1px solid var(--border);
@@ -197,86 +136,6 @@
   box-shadow:
     0 18px 42px rgba(0, 0, 0, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.desktop-room-git-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 95;
-  display: grid;
-  gap: 6px;
-  width: min(320px, 82vw);
-  max-height: min(440px, 70vh);
-  overflow: auto;
-}
-
-.desktop-room-git-menu-section {
-  display: grid;
-  gap: 3px;
-  padding: 8px;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-secondary);
-}
-
-.desktop-room-git-menu-section strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 0.82rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.desktop-room-git-menu-section span,
-.desktop-room-git-worktree small {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-tertiary);
-  font-size: 0.72rem;
-  font-weight: 720;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.desktop-room-git-menu-label {
-  margin: 0;
-  color: var(--text-tertiary);
-  font-size: 0.66rem;
-  font-weight: 860;
-  text-transform: uppercase;
-}
-
-.desktop-room-git-worktree {
-  display: grid;
-  gap: 2px;
-  width: 100%;
-  min-height: 42px;
-  padding: 7px 8px;
-  border: 0;
-  border-radius: 7px;
-  appearance: none;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  text-align: left;
-}
-
-.desktop-room-git-worktree span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 0.78rem;
-  font-weight: 820;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.desktop-room-git-worktree:hover,
-.desktop-room-git-worktree:focus-visible,
-.desktop-room-git-worktree[data-current="true"] {
-  background: rgba(255, 255, 255, 0.08);
 }
 
 .desktop-room-git-prompt {
@@ -336,6 +195,7 @@
   justify-content: flex-end;
   gap: 10px;
   min-width: 0;
+  flex: 0 0 auto;
 }
 
 .desktop-room-overflow {
@@ -474,6 +334,10 @@
   height: 15px;
 }
 
+.desktop-room-menu-item svg:last-child {
+  margin-left: auto;
+}
+
 .desktop-room-menu-item:hover,
 .desktop-room-menu-item:focus-visible,
 .desktop-room-menu-item[data-active="true"] {
@@ -509,6 +373,7 @@
   justify-content: start;
   gap: 2px;
   min-width: 0;
+  flex: 0 0 auto;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -519,6 +384,8 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex: 0 1 auto;
+  min-width: 0;
   min-height: 30px;
   padding: 0 10px;
   border-radius: 6px;
@@ -532,6 +399,12 @@
     color var(--duration-fast) var(--ease-out),
     transform var(--duration-fast) var(--ease-out),
     box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.desktop-room-tab span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .desktop-room-tab-icon {
@@ -585,14 +458,46 @@
   backdrop-filter: blur(18px) saturate(1.18);
 }
 
-@media (max-width: 1180px) {
-  .desktop-room-git-meta {
-    max-width: min(160px, 24vw);
-  }
+.desktop-room-environment-popover {
+  position: absolute;
+  top: 76px;
+  right: 22px;
+  z-index: 42;
+  width: min-content;
+  max-height: calc(100% - 92px);
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  opacity: 1;
+  transition:
+    opacity 160ms var(--ease-out),
+    transform 160ms var(--ease-out);
 }
 
-@media (max-width: 980px) {
-  .desktop-room-git-meta {
-    display: none;
-  }
+.desktop-room-shell[data-git-notice="true"] .desktop-room-environment-popover {
+  top: 112px;
+}
+
+.desktop-room-shell:has(.room-chat-layout[data-thread-open="true"]) .desktop-room-environment-popover {
+  pointer-events: none;
+  transform: translateY(-8px) scale(0.985);
+  opacity: 0;
+}
+
+.desktop-room-environment-pop-enter-active,
+.desktop-room-environment-pop-leave-active {
+  transition:
+    opacity 160ms var(--ease-out),
+    transform 160ms var(--ease-out);
+}
+
+.desktop-room-environment-pop-enter-from,
+.desktop-room-environment-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.985);
+}
+
+.desktop-room-environment-pop-enter-to,
+.desktop-room-environment-pop-leave-from {
+  opacity: 1;
+  transform: translateY(0) scale(1);
 }
