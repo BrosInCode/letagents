@@ -6,11 +6,14 @@ import type {
   AuthenticatedRequest,
 } from "../../http/helpers.js";
 import { respondWithBadRequest } from "../../http/helpers.js";
+import type { WorkerRequestAgentIdentityResult } from "../../request/agent-identity.js";
 import {
   validateTaskWorkflowArtifactsInput,
   type TaskWorkflowArtifact,
 } from "../../repo-workflow.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+
+export type PublishedArtifactSource = "manual" | "task_workflow_artifact";
 
 export interface RoomArtifactRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -28,14 +31,19 @@ export interface RoomArtifactRouteDeps {
   upsertRoomSharedArtifact(input: {
     room_id: string;
     artifact: TaskWorkflowArtifact;
-    source?: "manual";
+    source?: PublishedArtifactSource;
   }): Promise<RoomSharedArtifact>;
   linkRoomSharedArtifactToTask(input: {
     room_id: string;
     artifact_identity_key: string;
     task_id: string;
-    source?: "manual";
+    source?: PublishedArtifactSource;
   }): Promise<unknown>;
+  requireWorkerRequestAgentIdentity(input: {
+    req: AuthenticatedRequest;
+    body: Record<string, unknown>;
+    room_id: string;
+  }): Promise<WorkerRequestAgentIdentityResult>;
   getRoomSharedArtifactByIdentityKey(input: {
     room_id: string;
     identity_key: string;
@@ -110,6 +118,11 @@ function parsePublishedArtifact(body: Record<string, unknown>): TaskWorkflowArti
   return artifact;
 }
 
+function hasAgentSessionCredentials(body: Record<string, unknown>): boolean {
+  return (typeof body.agent_session_id === "string" && body.agent_session_id.trim().length > 0)
+    || (typeof body.agent_session_token === "string" && body.agent_session_token.trim().length > 0);
+}
+
 function parseLinkedTaskIds(body: Record<string, unknown>): string[] {
   const taskIds = new Set<string>();
 
@@ -171,14 +184,31 @@ export function registerRoomArtifactRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // Agent sessions publish workflow artifacts, humans publish manual ones.
+    // Presenting credentials means the caller claims to be an agent, so bad
+    // credentials are an error rather than a silent downgrade to manual.
+    let source: PublishedArtifactSource = "manual";
+    if (req.authKind === "owner_token" && hasAgentSessionCredentials(body)) {
+      const worker = await deps.requireWorkerRequestAgentIdentity({
+        req,
+        body,
+        room_id: project.id,
+      });
+      if (!worker.ok) {
+        res.status(worker.status).json({ error: worker.error });
+        return;
+      }
+      source = "task_workflow_artifact";
+    }
+
     try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
       const artifact = parsePublishedArtifact(body);
       const linkedTaskIds = parseLinkedTaskIds(body);
       const sharedArtifact = await deps.upsertRoomSharedArtifact({
         room_id: project.id,
         artifact,
-        source: "manual",
+        source,
       });
 
       for (const taskId of linkedTaskIds) {
@@ -186,7 +216,7 @@ export function registerRoomArtifactRoutes(
           room_id: project.id,
           artifact_identity_key: sharedArtifact.identity_key,
           task_id: taskId,
-          source: "manual",
+          source,
         });
       }
 
