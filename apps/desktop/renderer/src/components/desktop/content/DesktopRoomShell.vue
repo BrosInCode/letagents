@@ -121,7 +121,7 @@
         </template>
         <GitRoomEnvironmentPanel
           :room="room"
-          :repo-status="repoStatus"
+          :repo-status="effectiveEnvironmentRepoStatus"
           :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
           :room-artifacts="roomArtifacts"
           :github-events="eventsPage"
@@ -498,6 +498,7 @@ const artifactTimelineTaskFilterId = ref<string | null>(null);
 const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
+const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
 const composerGitHubEventPreviews = ref<ComposerEventPreview[]>([]);
 const eventsUnseenCount = ref(0);
 const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
@@ -510,6 +511,7 @@ let inboxRefreshTimer: number | null = null;
 let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
+let environmentRepoStatusRefreshRequestId = 0;
 let inboxReloadAfterCurrentLoad = false;
 let inboxThreadBaselinePending = false;
 const roomUrl = computed(() =>
@@ -622,16 +624,22 @@ const showEventsTab = computed(() => githubEventsAvailable.value);
 const showEnvironmentPanelWidget = computed(() =>
   activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
 );
+const effectiveEnvironmentRepoStatus = computed(() => {
+  const refreshed = refreshedEnvironmentRepoStatus.value;
+  if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;
+  return refreshed;
+});
 const environmentWidgetSummary = computed(() => {
   const roomBranch = repoEnvironmentRoomRefLabel(props.room);
   if (!roomBranch) return "Git Room";
+  const repoStatus = effectiveEnvironmentRepoStatus.value;
   if (!props.gitRoomMatchesActiveRepo) return roomBranch;
-  if (!repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)) {
+  if (!repoEnvironmentCurrentBranchMatchesRoom(props.room, repoStatus, props.gitRoomMatchesActiveRepo)) {
     return repoEnvironmentBranchDeltaLabel(
-      repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo),
+      repoEnvironmentBranchDeltaForRoom(props.room, repoStatus, props.gitRoomMatchesActiveRepo),
     ) || roomBranch;
   }
-  const roomDelta = repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo);
+  const roomDelta = repoEnvironmentBranchDeltaForRoom(props.room, repoStatus, props.gitRoomMatchesActiveRepo);
   return repoEnvironmentBranchDeltaLabel(
     roomDelta,
   ) || roomBranch;
@@ -699,6 +707,7 @@ watch(() => props.githubEvents, (nextPage) => {
 watch(() => props.room.identifier, () => {
   activeTab.value = readRoomActiveTab(props.room.identifier);
   eventsPage.value = props.githubEvents;
+  refreshedEnvironmentRepoStatus.value = null;
   managedAgentSessions.value = [];
   composerPermissionError.value = null;
   resolvingComposerPermissionIds.value = {};
@@ -738,6 +747,15 @@ watch(() => actionPanelOpen.value || searchOpen.value, (toolSurfaceOpen) => {
     setEnvironmentPanelOpen(false);
   }
 });
+
+watch(
+  () => [environmentPanelOpen.value, props.repoStatus.rootPath, props.room.identifier] as const,
+  ([open]) => {
+    if (!open) return;
+    void refreshEnvironmentRepoStatus();
+  },
+  { immediate: true },
+);
 
 watch(() => props.openAddAgentRequested, (requested) => {
   if (!requested) return;
@@ -1353,6 +1371,17 @@ function toggleGitHubEventsVisible(): void {
 function setEnvironmentPanelOpen(open: boolean): void {
   environmentPanelOpen.value = open;
   rememberEnvironmentPanelOpen(props.room.identifier, open);
+  if (open) void refreshEnvironmentRepoStatus();
+}
+
+async function refreshEnvironmentRepoStatus(): Promise<void> {
+  const rootPath = props.repoStatus.rootPath?.trim();
+  if (!rootPath || !window.letagentsDesktop?.repos?.getStatus) return;
+  const requestId = ++environmentRepoStatusRefreshRequestId;
+  const nextStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
+  if (requestId !== environmentRepoStatusRefreshRequestId || !nextStatus) return;
+  if (nextStatus.rootPath !== props.repoStatus.rootPath) return;
+  refreshedEnvironmentRepoStatus.value = nextStatus;
 }
 
 async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"]): Promise<void> {
