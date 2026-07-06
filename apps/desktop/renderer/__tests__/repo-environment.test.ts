@@ -9,6 +9,7 @@ import {
   repoEnvironmentLinkedRoomLabel,
   repoEnvironmentChangeLabel,
   repoEnvironmentPullRequestForRoom,
+  repoEnvironmentInspectableBranchDeltaForRoom,
   repoEnvironmentRoomRefLabel,
   shouldShowRepoEnvironmentForRoom,
 } from "../src/domain/repo-environment";
@@ -148,6 +149,49 @@ test("repo environment falls back to active branch delta when the room branch is
     deletions: 138,
     baseBranch: "main",
   });
+});
+
+test("repo environment only exposes local branch delta when the room branch is open", () => {
+  const room = roomInfo();
+  const status = repoStatus({
+    branch: "main",
+    branchDelta: {
+      branch: "main",
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+      baseBranch: "main",
+    },
+    branchDeltas: [
+      {
+        branch: "feature/git-rooms",
+        filesChanged: 4,
+        additions: 21,
+        deletions: 3,
+        baseBranch: "main",
+      },
+    ],
+  });
+
+  assert.equal(repoEnvironmentInspectableBranchDeltaForRoom(room, status), null);
+  assert.deepEqual(
+    repoEnvironmentInspectableBranchDeltaForRoom(room, repoStatus({
+      branchDelta: {
+        branch: "feature/git-rooms",
+        filesChanged: 4,
+        additions: 21,
+        deletions: 3,
+        baseBranch: "main",
+      },
+    })),
+    {
+      branch: "feature/git-rooms",
+      filesChanged: 4,
+      additions: 21,
+      deletions: 3,
+      baseBranch: "main",
+    },
+  );
 });
 
 test("repo environment can show active branch delta even when repo matching is unresolved", () => {

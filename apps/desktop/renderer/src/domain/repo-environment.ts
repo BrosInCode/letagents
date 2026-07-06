@@ -106,6 +106,18 @@ export function repoEnvironmentBranchDeltaForRoom(
     (activeDelta && (activeDelta.branch === roomRef || repoStatus.branch === roomRef) ? activeDelta : null);
 }
 
+export function repoEnvironmentInspectableBranchDeltaForRoom(
+  room: Pick<DesktopRoomInfo, "gitRoom">,
+  repoStatus: Pick<
+    RepoStatus,
+    "isGitRepo" | "detached" | "branch" | "defaultBranch" | "branchDelta" | "branchDeltas"
+  >,
+  gitRoomMatchesActiveRepo = true,
+): RepoBranchDelta | null {
+  if (!repoEnvironmentCurrentBranchMatchesRoom(room, repoStatus, gitRoomMatchesActiveRepo)) return null;
+  return repoEnvironmentBranchDeltaForRoom(room, repoStatus, gitRoomMatchesActiveRepo);
+}
+
 export interface RepoEnvironmentPullRequest {
   label: string;
   description: string | null;

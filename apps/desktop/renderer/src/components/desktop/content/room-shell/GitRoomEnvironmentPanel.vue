@@ -89,7 +89,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import { repoChangedFileCount } from "../../../../domain/repo-status";
 import {
-  repoEnvironmentBranchDeltaForRoom,
+  repoEnvironmentInspectableBranchDeltaForRoom,
   repoEnvironmentBranchDeltaLabel,
   repoEnvironmentChangeLabel,
   repoEnvironmentCurrentBranchMatchesRoom,
@@ -121,7 +121,7 @@ const changedCount = computed(() => repoChangedFileCount(props.repoStatus));
 const linkedRoomLabel = computed(() => repoEnvironmentLinkedRoomLabel(props.room));
 const roomBranchLabel = computed(() => repoEnvironmentRoomRefLabel(props.room) || "this branch");
 const roomBranchDelta = computed(() =>
-  repoEnvironmentBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
+  repoEnvironmentInspectableBranchDeltaForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
 );
 const currentBranchMatchesRoom = computed(() =>
   repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
@@ -151,7 +151,7 @@ const primaryDelta = computed(() => {
   if (pullRequestDelta) return pullRequestDelta;
   const delta = roomBranchDelta.value;
   if (!delta) return null;
-  if (currentBranchMatchesRoom.value && changedCount.value > 0 && isEmptyDelta(delta)) return null;
+  if (changedCount.value > 0 && isEmptyDelta(delta)) return null;
   return delta;
 });
 const pullRequestLabel = computed(() =>
