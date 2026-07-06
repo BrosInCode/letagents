@@ -487,6 +487,7 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
+  visibleDesktopAgentProviders,
   type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
 import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
@@ -910,7 +911,9 @@ async function loadProviders(): Promise<void> {
   loadingProviders.value = true;
   loadError.value = null;
   try {
-    const nextProviders = await window.letagentsDesktop.workers.listAgentProviders();
+    const nextProviders = visibleDesktopAgentProviders(
+      await window.letagentsDesktop.workers.listAgentProviders(),
+    );
     if (!isCurrentModalState(requestVersion)) return;
     providers.value = nextProviders;
     const previousProviderId = selectedProviderId.value;
