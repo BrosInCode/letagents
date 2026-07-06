@@ -54,6 +54,15 @@ import {
   resolveDesktopManagedAgentWorkerRegistration,
 } from "./managed-agent-local-worker-session.js";
 import {
+  buildDesktopManagedAgentReplyChangeContext,
+  clearDesktopManagedAgentReplyChangeState,
+  desktopManagedAgentReplyChangeSignature,
+  localDesktopManagedAgentReplyChangeAttachments,
+  publishDesktopManagedAgentReplyChangeSummaryArtifact,
+  rememberDesktopManagedAgentReplyChangeAttachment,
+  stageDesktopManagedAgentReplyChangeAttachment,
+} from "./managed-agent-reply-changes.js";
+import {
   getCurrentCursorLiveSession,
   getOrCreateDesktopHostId,
   getStoredAgentIdentityForRuntimeKey,
@@ -74,6 +83,10 @@ import {
 } from "./state.js";
 
 const DEFAULT_CURSOR_STOP_PHRASE = "/stop-cursor-room";
+
+function cursorReplyChangeSessionKey(sessionId: string): string {
+  return `cursor:${sessionId}`;
+}
 
 type ActiveCursorTurn = {
   abortController: AbortController;
@@ -123,6 +136,7 @@ interface PublishCursorReplyInput {
   event: ManagedRoomEvent;
   storage: DesktopRoomStorageState;
   text: string | null;
+  beforeChangeSignature?: string | null;
 }
 
 interface CursorRuntimeDependencies {
@@ -292,6 +306,7 @@ export function createDesktopCursorRuntime(
       activeTurn.interruptReason = "stop";
       activeTurn.abortController.abort();
     }
+    clearDesktopManagedAgentReplyChangeState(cursorReplyChangeSessionKey(session.session_id));
     const updated = updateCursorLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -354,6 +369,9 @@ export function createDesktopCursorRuntime(
 
     const stopAfterTurn = isStopPhraseRoomStreamEvent(session, event);
     const active = markSessionActiveForEvent(session, event);
+    const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(
+      toPublicCursorManagedAgentSession(active),
+    );
     const abortController = new AbortController();
     const activeTurn: ActiveCursorTurn = {
       abortController,
@@ -405,6 +423,7 @@ export function createDesktopCursorRuntime(
         event,
         storage,
         text: result.text,
+        beforeChangeSignature,
       });
       if (stopAfterTurn) {
         await stopAfterRoomStopPhrase(completed);
@@ -634,7 +653,13 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
   }
 
   const roomIdentifier = input.session.room_identifier || input.session.room_id;
+  const sessionKey = cursorReplyChangeSessionKey(input.session.session_id);
   const replyTarget = replyTargetForEvent(input.event);
+  const changeContext = await buildDesktopManagedAgentReplyChangeContext({
+    sessionKey,
+    session: toPublicCursorManagedAgentSession(input.session),
+    beforeSignature: input.beforeChangeSignature ?? null,
+  });
   const localReply = await persistDesktopManagedAgentLocalReply({
     roomIdentifier,
     storage: input.storage,
@@ -642,8 +667,18 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
     replyTo: replyTarget.replyTo,
     threadRootId: replyTarget.threadRootId,
     text,
+    attachments: localDesktopManagedAgentReplyChangeAttachments(changeContext),
   });
   if (localReply) {
+    await publishDesktopManagedAgentReplyChangeSummaryArtifact({
+      sessionKey,
+      roomIdentifier,
+      storage: input.storage,
+      workerSession,
+      event: input.event,
+      context: changeContext,
+    });
+    rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
     const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
     emitPersistedLocalRoomMessage(roomIdentifier, localReply);
     return;
@@ -652,6 +687,13 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
   const { apiFetch } = await import("../auth.js");
   const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
+  const attachments = await stageDesktopManagedAgentReplyChangeAttachment(
+    cloudRoomIdentifier,
+    changeContext.attachmentDraft,
+  );
+  if (changeContext.attachmentDraft && attachments.length === 0) {
+    console.warn("Could not attach Cursor managed-agent working tree summary to room reply.");
+  }
   await apiFetch<Record<string, unknown>>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
@@ -666,9 +708,13 @@ async function publishDesktopManagedCursorReply(input: PublishCursorReplyInput):
         thread_root_id: replyTarget.threadRootId,
         agent_session_id: workerSession.session_id,
         agent_session_token: workerSession.session_token,
+        attachments,
       }),
     },
   );
+  if (changeContext.attachmentDraft && attachments.length > 0) {
+    rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
+  }
 }
 
 async function registerDesktopManagedCursorWorker(

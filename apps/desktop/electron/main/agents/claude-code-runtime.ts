@@ -90,10 +90,23 @@ import {
   shouldUseCloudDesktopManagedAgentWorkerSession,
   resolveDesktopManagedAgentWorkerRegistration,
 } from "./managed-agent-local-worker-session.js";
+import {
+  buildDesktopManagedAgentReplyChangeContext,
+  clearDesktopManagedAgentReplyChangeState,
+  desktopManagedAgentReplyChangeSignature,
+  localDesktopManagedAgentReplyChangeAttachments,
+  publishDesktopManagedAgentReplyChangeSummaryArtifact,
+  rememberDesktopManagedAgentReplyChangeAttachment,
+  stageDesktopManagedAgentReplyChangeAttachment,
+} from "./managed-agent-reply-changes.js";
 
 const DEFAULT_CLAUDE_CODE_STOP_PHRASE = "/stop-claude-code-room";
 
 type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
+
+function claudeCodeReplyChangeSessionKey(sessionId: string): string {
+  return `claude-code:${sessionId}`;
+}
 
 type AgentIdentityCreateResponse = {
   name?: string;
@@ -143,6 +156,7 @@ interface PublishClaudeCodeReplyInput {
   event: ManagedRoomEvent;
   storage: DesktopRoomStorageState;
   text: string | null;
+  beforeChangeSignature?: string | null;
 }
 
 interface PublishClaudeCodePermissionRequestInput {
@@ -340,6 +354,7 @@ export function createDesktopClaudeCodeRuntime(
       session.session_id,
       "Permission request was cancelled because the managed agent session stopped.",
     );
+    clearDesktopManagedAgentReplyChangeState(claudeCodeReplyChangeSessionKey(session.session_id));
     const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",
@@ -405,6 +420,9 @@ export function createDesktopClaudeCodeRuntime(
 
     const stopAfterTurn = isStopPhraseRoomStreamEvent(session, event);
     const active = markSessionActiveForEvent(session, event);
+    const beforeChangeSignature = await desktopManagedAgentReplyChangeSignature(
+      toPublicClaudeCodeManagedAgentSession(active),
+    );
     const abortController = new AbortController();
     const activeTurn: ActiveClaudeCodeTurn = {
       abortController,
@@ -462,6 +480,7 @@ export function createDesktopClaudeCodeRuntime(
         event,
         storage,
         text: result.text,
+        beforeChangeSignature,
       });
       if (stopAfterTurn) {
         await stopAfterRoomStopPhrase(completed);
@@ -1017,7 +1036,13 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
   }
 
   const roomIdentifier = input.session.room_identifier || input.session.room_id;
+  const sessionKey = claudeCodeReplyChangeSessionKey(input.session.session_id);
   const replyTarget = replyTargetForEvent(input.event);
+  const changeContext = await buildDesktopManagedAgentReplyChangeContext({
+    sessionKey,
+    session: toPublicClaudeCodeManagedAgentSession(input.session),
+    beforeSignature: input.beforeChangeSignature ?? null,
+  });
   const localReply = await persistDesktopManagedAgentLocalReply({
     roomIdentifier,
     storage: input.storage,
@@ -1025,8 +1050,18 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
     replyTo: replyTarget.replyTo,
     threadRootId: replyTarget.threadRootId,
     text,
+    attachments: localDesktopManagedAgentReplyChangeAttachments(changeContext),
   });
   if (localReply) {
+    await publishDesktopManagedAgentReplyChangeSummaryArtifact({
+      sessionKey,
+      roomIdentifier,
+      storage: input.storage,
+      workerSession,
+      event: input.event,
+      context: changeContext,
+    });
+    rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
     const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
     emitPersistedLocalRoomMessage(roomIdentifier, localReply);
     return;
@@ -1035,6 +1070,13 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
   const { apiFetch } = await import("../auth.js");
   const { cloudRoomIdentifierForStorage } = await import("../rooms/local-store.js");
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, roomIdentifier);
+  const attachments = await stageDesktopManagedAgentReplyChangeAttachment(
+    cloudRoomIdentifier,
+    changeContext.attachmentDraft,
+  );
+  if (changeContext.attachmentDraft && attachments.length === 0) {
+    console.warn("Could not attach Claude Code managed-agent working tree summary to room reply.");
+  }
   await apiFetch<Record<string, unknown>>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
@@ -1049,9 +1091,13 @@ async function publishDesktopManagedClaudeCodeReply(input: PublishClaudeCodeRepl
         thread_root_id: replyTarget.threadRootId,
         agent_session_id: workerSession.session_id,
         agent_session_token: workerSession.session_token,
+        attachments,
       }),
     },
   );
+  if (changeContext.attachmentDraft && attachments.length > 0) {
+    rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
+  }
 }
 
 async function publishDesktopManagedClaudeCodePermissionRequest(
