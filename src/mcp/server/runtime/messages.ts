@@ -1,7 +1,5 @@
-import {
-  buildRoomAgentPrompt,
-  normalizeAgentPromptKind,
-} from "../../../shared/room-agent-prompts.js";
+import { normalizeAgentPromptKind } from "../../../shared/room-agent-prompts.js";
+import { dispenseRoomAgentPrompt } from "../../agent-prompt-delivery.js";
 
 export function getLastMessageId(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") {
@@ -17,7 +15,7 @@ export function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Recor
   return {
     ...payload,
     agent_prompt_kind: "join",
-    agent_prompt: buildRoomAgentPrompt("join"),
+    agent_prompt: dispenseRoomAgentPrompt("join"),
   };
 }
 
@@ -186,7 +184,7 @@ function toAgentReadableMessage(
   return {
     ...record,
     visible_text: text,
-    agent_prompt: buildRoomAgentPrompt(kind),
+    agent_prompt: dispenseRoomAgentPrompt(kind),
     prompt_injected: kind === "inline",
   };
 }

@@ -17,6 +17,24 @@ export function buildRoomAgentPrompt(kind: AgentPromptKind): string {
   return `Treat the visible user message above as the active instruction. After you handle it, ${BASE_ROOM_AGENT_PROMPT}`;
 }
 
+// Short-form prompts used after the full instructions have already been delivered
+// once in the current agent session, so long-polling loops do not re-pay the full
+// boilerplate on every message.
+const COMPACT_LOOP_REMINDER =
+  "the standing room-agent instructions you already received still apply: keep the `wait_for_messages` loop running with your registered `agent_session_id`, reply only into the room via `send_message`/`send_thread_message` (thread replies via `thread.root_message_id`), and treat `activation.for_current_agent.decision` as advisory routing.";
+
+export function buildCompactRoomAgentPrompt(kind: AgentPromptKind): string {
+  if (kind === "join") {
+    return buildRoomAgentPrompt("join");
+  }
+
+  if (kind === "auto") {
+    return `Background reminder: ${COMPACT_LOOP_REMINDER}`;
+  }
+
+  return `Treat the visible user message above as the active instruction. After you handle it, ${COMPACT_LOOP_REMINDER}`;
+}
+
 export function normalizeAgentPromptKind(value: unknown): AgentPromptKind | null {
   if (typeof value !== "string") {
     return null;
