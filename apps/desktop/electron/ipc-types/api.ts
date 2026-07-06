@@ -1,5 +1,11 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
-import type { DesktopAppInfo, DiagnosticsSnapshot, RepoStatus, WorkerSnapshot } from "./core.js";
+import type {
+  DesktopAppInfo,
+  DesktopGitHubPullRequestStats,
+  DiagnosticsSnapshot,
+  RepoStatus,
+  WorkerSnapshot,
+} from "./core.js";
 import type {
   DesktopAppAgentActionMetadata,
   DesktopAppAgentRunInput,
@@ -86,6 +92,7 @@ export interface DesktopApi {
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
     openGitHubUrl: (url: string) => Promise<void>;
+    getGitHubPullRequestStats: (url: string) => Promise<DesktopGitHubPullRequestStats | null>;
   };
   appAgent: {
     getSettingsStatus: () => Promise<DesktopAppAgentSettingsStatus>;

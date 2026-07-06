@@ -10,6 +10,18 @@ export interface DesktopAppInfo {
   apiUrl: string | null;
 }
 
+export interface DesktopGitHubPullRequestStats {
+  url: string;
+  number: number;
+  title: string | null;
+  state: "open" | "closed" | "merged" | "draft" | "unknown";
+  baseRefName: string | null;
+  headRefName: string | null;
+  changedFiles: number;
+  additions: number;
+  deletions: number;
+}
+
 export interface RepoWorktreeEntry {
   path: string;
   branch: string | null;

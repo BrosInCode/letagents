@@ -190,6 +190,7 @@ import {
 } from "./room-stream.js";
 import { apiUrl, workspaceRoot } from "./paths.js";
 import { openAllowedExternalUrl } from "./external-url.js";
+import { getGitHubPullRequestStats } from "./github-pr-stats.js";
 import {
   getAppAgentSettingsStatus,
   saveAppAgentSettings,
@@ -240,6 +241,10 @@ export function registerDesktopIpcHandlers(
     async (_event, url: string): Promise<void> => {
       await openAllowedExternalUrl(url, ["github.com"]);
     },
+  );
+  targetIpcMain.handle(
+    "desktop:app:get-github-pull-request-stats",
+    async (_event, url: string) => getGitHubPullRequestStats(url),
   );
   targetIpcMain.handle(
     "desktop:app-agent:get-settings-status",
