@@ -1,7 +1,38 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
 import { rental_sessions } from "../../db/schema.js";
+
+/**
+ * Session statuses that consume a slot against a listing's
+ * max_concurrent_sessions. "requested" is excluded (the provider has not
+ * committed capacity yet), as are the terminal states.
+ */
+export const CAPACITY_CONSUMING_STATUSES = [
+  "accepted",
+  "provisioning",
+  "active",
+  "blocked",
+  "patch_review",
+  "pr_opened",
+  "budget_exhausted",
+  "stale",
+] as const;
+
+export async function countCapacityConsumingSessions(
+  listingId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(rental_sessions)
+    .where(
+      and(
+        eq(rental_sessions.listing_id, listingId),
+        inArray(rental_sessions.status, [...CAPACITY_CONSUMING_STATUSES]),
+      ),
+    );
+  return row?.count ?? 0;
+}
 
 export async function getSessionById(
   sessionId: string,
