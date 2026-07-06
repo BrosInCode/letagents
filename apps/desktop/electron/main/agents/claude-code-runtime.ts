@@ -90,6 +90,7 @@ import {
   shouldUseCloudDesktopManagedAgentWorkerSession,
   resolveDesktopManagedAgentWorkerRegistration,
 } from "./managed-agent-local-worker-session.js";
+import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
   buildDesktopManagedAgentReplyChangeContext,
   clearDesktopManagedAgentReplyChangeState,
@@ -355,6 +356,7 @@ export function createDesktopClaudeCodeRuntime(
       "Permission request was cancelled because the managed agent session stopped.",
     );
     clearDesktopManagedAgentReplyChangeState(claudeCodeReplyChangeSessionKey(session.session_id));
+    cleanupAgentSessionAttachments(session.session_id);
     const updated = updateClaudeCodeLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",

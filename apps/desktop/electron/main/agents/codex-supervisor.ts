@@ -110,6 +110,7 @@ import {
   normalizeManagedAgentModel,
 } from "./managed-agent-models.js";
 import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
+import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
 import {
   buildDesktopManagedAgentReplyChangeContext,
@@ -654,6 +655,7 @@ function clearCodexRuntimeReasoningState(sessionId: string): void {
   codexRuntimeReasoningLastPost.delete(sessionId);
   codexRuntimeReasoningPostQueues.delete(sessionId);
   clearDesktopManagedAgentReplyChangeState(codexReplyChangeSessionKey(sessionId));
+  cleanupAgentSessionAttachments(sessionId);
 }
 
 function emitManagedAgentSessionUpdate(session: DesktopCodexLiveSessionState | null | undefined): void {

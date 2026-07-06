@@ -1,4 +1,5 @@
 import type { DesktopRoomMessage } from "../../ipc-types.js";
+import { describeDesktopEventMessageAttachments } from "./managed-agent-attachments.js";
 
 export type DesktopEventMessageWorkerIdentity = {
   displayName?: string | null;
@@ -28,6 +29,7 @@ export function summarizeDesktopEventMessage(
     `Timestamp: ${message.timestamp}`,
     message.replyTo ? `Reply to: ${message.replyTo.id} from ${message.replyTo.sender}` : null,
     ...describeThreadContext(message, worker),
+    ...describeDesktopEventMessageAttachments(message),
     "",
     "Text:",
     message.text || "(empty)",

@@ -1,4 +1,8 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
+import {
+  describeAgentMessageAttachments,
+  type AgentMessageAttachmentDescriptor,
+} from "./managed-agent-attachments.js";
 import { apiFetch } from "../auth.js";
 import {
   cloudRoomIdentifierForStorage,
@@ -59,6 +63,7 @@ type CompactMessage = {
     timestamp: string;
   } | null;
   attachments: number;
+  imageAttachments?: AgentMessageAttachmentDescriptor[];
 };
 
 type CompactTask = {
@@ -171,7 +176,16 @@ function compactMessage(message: RoomMessagePayload): CompactMessage {
         }
       : null,
     attachments: message.attachments?.length || 0,
+    ...compactImageAttachments(message),
   };
+}
+
+function compactImageAttachments(
+  message: RoomMessagePayload,
+): Pick<CompactMessage, "imageAttachments"> {
+  const imageAttachments = describeAgentMessageAttachments(message.id, message.attachments)
+    .filter((descriptor) => descriptor.image);
+  return imageAttachments.length ? { imageAttachments } : {};
 }
 
 function compactTask(task: DesktopTaskSummary): CompactTask {
