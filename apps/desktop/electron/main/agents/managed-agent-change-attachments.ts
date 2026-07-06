@@ -69,7 +69,7 @@ export function managedAgentChangeSummaryLocalAttachmentPayload(
 ): RoomMessageAttachmentPayload {
   return {
     id: "managed-agent-change-summary",
-    name: "Agent changes",
+    name: "Worktree changes",
     file_name: draft.fileName,
     mime_type: draft.mimeType,
     size_bytes: draft.sizeBytes,

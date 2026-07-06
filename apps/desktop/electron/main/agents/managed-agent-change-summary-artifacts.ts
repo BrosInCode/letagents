@@ -31,9 +31,11 @@ export function buildManagedAgentChangeSummaryWorkflowArtifact(input: {
     provider: "git",
     kind: "change_summary",
     id: `managed-agent:${agentIdentity}:branch:${branch}`,
+    // Titles claim worktree state, not per-agent authorship: the summary
+    // describes the whole working tree, which can include pre-existing edits.
     title: isClean
-      ? `${agentLabel} clean on ${branch}`
-      : `${agentLabel} changes on ${branch} (${fileLabel})`,
+      ? `${agentLabel} worktree clean on ${branch}`
+      : `${agentLabel} worktree on ${branch} (${fileLabel} changed)`,
     ref: input.summary.repoBranch?.trim() || null,
     state: isClean ? "clean" : "updated",
   };

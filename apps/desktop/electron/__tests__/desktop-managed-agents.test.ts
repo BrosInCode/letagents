@@ -2036,7 +2036,7 @@ test("desktop managed agent change summaries publish stable local workflow artif
   assert.equal(artifacts.artifacts?.length, 1);
   assert.equal(artifacts.artifacts?.[0]?.kind, "change_summary");
   assert.equal(artifacts.artifacts?.[0]?.source, "task_workflow_artifact");
-  assert.equal(artifacts.artifacts?.[0]?.title, "StoneForge changes on feature/artifacts (3 files)");
+  assert.equal(artifacts.artifacts?.[0]?.title, "StoneForge worktree on feature/artifacts (3 files changed)");
   assert.equal(artifacts.artifacts?.[0]?.ref, "feature/artifacts");
   assert.equal(artifacts.artifacts?.[0]?.state, "updated");
   assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_8"]);
@@ -2059,7 +2059,7 @@ test("desktop managed agent change summaries publish stable local workflow artif
   });
   const cleanArtifacts = await getLocalRoomArtifacts(room.roomIdentifier);
   assert.equal(cleanArtifacts.artifacts?.length, 1);
-  assert.equal(cleanArtifacts.artifacts?.[0]?.title, "StoneForge clean on feature/artifacts");
+  assert.equal(cleanArtifacts.artifacts?.[0]?.title, "StoneForge worktree clean on feature/artifacts");
   assert.equal(cleanArtifacts.artifacts?.[0]?.state, "clean");
   assert.deepEqual(cleanArtifacts.artifacts?.[0]?.linked_task_ids, []);
 

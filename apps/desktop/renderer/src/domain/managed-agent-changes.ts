@@ -59,7 +59,7 @@ export function managedAgentChangeSummarySubtitle(
   options: { unavailable?: boolean } = {},
 ): string {
   if (!summary && options.unavailable && !loading) return "Attachment could not be loaded.";
-  if (!summary) return loading ? "Reading the Codex working tree..." : "Codex working tree";
+  if (!summary) return loading ? "Reading the agent's working tree..." : "Agent working tree";
   if (summary.error) return "Git summary could not be loaded.";
   const totals = [
     summary.additions ? `tracked +${summary.additions}` : null,
@@ -67,7 +67,7 @@ export function managedAgentChangeSummarySubtitle(
     summary.untrackedFileCount ? `${summary.untrackedFileCount} untracked` : null,
     summary.stagedFileCount ? `${summary.stagedFileCount} staged` : null,
   ].filter(Boolean);
-  return totals.length ? totals.join("  ") : "Codex working tree is clean.";
+  return totals.length ? totals.join("  ") : "The agent's working tree is clean.";
 }
 
 export function visibleManagedAgentChangedFiles(
