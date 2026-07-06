@@ -11,6 +11,7 @@ import {
   buildLocalGitRoomInfo,
   buildRepoStatus,
   parseGitStatusPorcelainV2,
+  parseGitShortStat,
   parseGitWorktreePorcelain,
   resolveRoomIdentifierFromPath,
   resolveWorkspaceRoom,
@@ -92,6 +93,23 @@ test("parseGitStatusPorcelainV2 treats detached HEAD as a non-branch state", () 
   assert.equal(status.branch, null);
   assert.equal(status.detached, true);
   assert.equal(status.dirty, false);
+});
+
+test("parseGitShortStat extracts branch code delta", () => {
+  assert.deepEqual(parseGitShortStat(" 3 files changed, 12 insertions(+), 5 deletions(-)\n", "main"), {
+    branch: null,
+    filesChanged: 3,
+    additions: 12,
+    deletions: 5,
+    baseBranch: "main",
+  });
+  assert.deepEqual(parseGitShortStat("", "main"), {
+    branch: null,
+    filesChanged: 0,
+    additions: 0,
+    deletions: 0,
+    baseBranch: "main",
+  });
 });
 
 test("local Git room ids are deterministic from repo root and active ref", () => {
@@ -233,6 +251,150 @@ test("buildRepoStatus exposes local Git room routing for no-remote repositories"
     assert.equal(status.changes?.staged, 1);
     assert.equal(status.dirty, true);
     assert.ok(status.gitHeadPath?.endsWith(".git/HEAD"));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("buildRepoStatus uses local default branches for no-remote branch deltas", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-local-branch-delta-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    execFileSync("git", ["add", "tracked.txt"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test User",
+      "commit",
+      "-m",
+      "Initial commit",
+    ], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/delta"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\nworld\n");
+    execFileSync("git", ["add", "tracked.txt"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test User",
+      "commit",
+      "-m",
+      "Feature commit",
+    ], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+
+    const status = await buildRepoStatus(tempDir);
+
+    assert.equal(status.defaultBranch, "main");
+    assert.equal(status.branchDelta?.branch, "feature/delta");
+    assert.equal(status.branchDelta?.baseBranch, "main");
+    assert.equal(status.branchDelta?.additions, 1);
+    assert.equal(status.branchDelta?.deletions, 0);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveRoomIdentifierFromPath does not use fallback default branches for room routing", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-routing-default-fallback-"));
+  try {
+    execFileSync("git", ["init", "-b", "master"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    execFileSync("git", ["add", "tracked.txt"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test User",
+      "commit",
+      "-m",
+      "Initial commit",
+    ], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["branch", "main"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/BrosInCode/letagents.git"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+
+    const resolved = await resolveRoomIdentifierFromPath(tempDir);
+
+    assert.equal(resolved.source, "git_remote");
+    assert.equal(resolved.roomIdentifier, "github.com/BrosInCode/letagents");
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("buildRepoStatus limits branch deltas to open worktree branches", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-limited-branch-deltas-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    execFileSync("git", ["add", "tracked.txt"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test User",
+      "commit",
+      "-m",
+      "Initial commit",
+    ], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["checkout", "-b", "feature/current"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["branch", "feature/dormant"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+
+    const status = await buildRepoStatus(tempDir);
+    const deltaBranches = (status.branchDeltas || []).map((delta) => delta.branch);
+
+    assert.ok(deltaBranches.includes("main"));
+    assert.ok(deltaBranches.includes("feature/current"));
+    assert.equal(deltaBranches.includes("feature/dormant"), false);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

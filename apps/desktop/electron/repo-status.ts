@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type {
   DesktopGitRoomInfo,
   DesktopGitRoomRefType,
+  RepoBranchDelta,
   DesktopRepoRoomSelection,
   RepoChangeSummary,
   RepoStatus,
@@ -76,7 +77,29 @@ async function getRoutingBranch(workspaceRoot: string): Promise<string | null> {
   return (await getCurrentBranch(workspaceRoot)) || await getRebaseHeadBranch(workspaceRoot);
 }
 
-async function getDefaultBranch(workspaceRoot: string): Promise<string | null> {
+async function getLocalBranches(workspaceRoot: string): Promise<string[]> {
+  try {
+    const stdout = await runGit(workspaceRoot, [
+      "for-each-ref",
+      "--format=%(refname:short)",
+      "refs/heads",
+    ]);
+    return stdout.split(/\r?\n/)
+      .map((branch) => branch.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function fallbackDefaultBranch(localBranches: string[]): string | null {
+  for (const candidate of ["main", "master", "trunk", "develop"]) {
+    if (localBranches.includes(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function getRemoteDefaultBranch(workspaceRoot: string): Promise<string | null> {
   try {
     const stdout = await runGit(workspaceRoot, [
       "symbolic-ref",
@@ -88,6 +111,13 @@ async function getDefaultBranch(workspaceRoot: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function getDefaultBranch(
+  workspaceRoot: string,
+  localBranches: string[] = [],
+): Promise<string | null> {
+  return await getRemoteDefaultBranch(workspaceRoot) || fallbackDefaultBranch(localBranches);
 }
 
 export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string): RepoWorktreeEntry[] {
@@ -158,6 +188,62 @@ function emptyChangeSummary(): RepoChangeSummary {
     untracked: 0,
     conflicted: 0,
   };
+}
+
+export function parseGitShortStat(
+  stdout: string,
+  baseBranch: string | null,
+  branch: string | null = null,
+): RepoBranchDelta {
+  const text = stdout.trim();
+  const filesMatch = /(\d+)\s+files?\s+changed/.exec(text);
+  const insertionsMatch = /(\d+)\s+insertions?\(\+\)/.exec(text);
+  const deletionsMatch = /(\d+)\s+deletions?\(-\)/.exec(text);
+  return {
+    branch,
+    filesChanged: filesMatch ? Number(filesMatch[1]) : 0,
+    additions: insertionsMatch ? Number(insertionsMatch[1]) : 0,
+    deletions: deletionsMatch ? Number(deletionsMatch[1]) : 0,
+    baseBranch,
+  };
+}
+
+async function getBranchDelta(
+  workspaceRoot: string,
+  branch: string | null,
+  defaultBranch: string | null,
+): Promise<RepoBranchDelta | null> {
+  if (!branch || !defaultBranch) return null;
+  if (branch === defaultBranch) {
+    return { branch, filesChanged: 0, additions: 0, deletions: 0, baseBranch: defaultBranch };
+  }
+  try {
+    const stdout = await runGit(workspaceRoot, [
+      "--no-optional-locks",
+      "diff",
+      "--shortstat",
+      "--merge-base",
+      defaultBranch,
+      branch,
+      "--",
+    ]);
+    return parseGitShortStat(stdout, defaultBranch, branch);
+  } catch {
+    return null;
+  }
+}
+
+async function getKnownBranchDeltas(
+  workspaceRoot: string,
+  branches: Array<string | null | undefined>,
+  defaultBranch: string | null,
+): Promise<RepoBranchDelta[]> {
+  const uniqueBranches = [...new Set(branches.map((branch) => branch?.trim()).filter(Boolean) as string[])];
+  const deltas: Array<RepoBranchDelta | null> = [];
+  for (const branch of uniqueBranches) {
+    deltas.push(await getBranchDelta(workspaceRoot, branch, defaultBranch));
+  }
+  return deltas.filter((delta): delta is RepoBranchDelta => Boolean(delta));
 }
 
 export function parseGitStatusPorcelainV2(stdout: string): ParsedGitStatus {
@@ -264,6 +350,8 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
       ahead: 0,
       behind: 0,
       changes: emptyChangeSummary(),
+      branchDelta: null,
+      branchDeltas: [],
       dirty: false,
       roomIdentifier: null,
       roomSource: "local_folder",
@@ -271,13 +359,21 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
     };
   }
 
-  const [worktrees, gitStatus, defaultBranch, headPath, resolvedRoom] = await Promise.all([
+  const [worktrees, gitStatus, localBranches, headPath, resolvedRoom] = await Promise.all([
     getWorktrees(repoRoot),
     getStatusPorcelain(repoRoot),
-    getDefaultBranch(repoRoot),
+    getLocalBranches(repoRoot),
     getGitHeadPath(repoRoot),
     resolveRoomIdentifierFromPath(repoRoot),
   ]);
+  const defaultBranch = await getDefaultBranch(repoRoot, localBranches);
+
+  const branchDeltas = await getKnownBranchDeltas(
+    repoRoot,
+    [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
+    defaultBranch,
+  );
+  const branchDelta = branchDeltas.find((delta) => delta.branch === gitStatus.branch) ?? null;
 
   return {
     rootPath: repoRoot,
@@ -292,6 +388,8 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
     ahead: gitStatus.ahead,
     behind: gitStatus.behind,
     changes: gitStatus.changes,
+    branchDelta,
+    branchDeltas,
     dirty: gitStatus.dirty,
     roomIdentifier: resolvedRoom.roomIdentifier,
     roomSource: resolvedRoom.source,
@@ -505,10 +603,12 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
     };
   }
 
-  const [currentBranch, defaultBranch] = await Promise.all([
+  const [currentBranch, localBranches, routingDefaultBranch] = await Promise.all([
     getRoutingBranch(repoRoot),
-    getDefaultBranch(repoRoot),
+    getLocalBranches(repoRoot),
+    getRemoteDefaultBranch(repoRoot),
   ]);
+  const defaultBranch = await getDefaultBranch(repoRoot, localBranches);
 
   const configured = readConfiguredRoomIdentifierAt(repoRoot);
   if (configured) {
@@ -517,7 +617,7 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
       roomIdentifier: activeGitHubRoomIdentifier({
         repoRoom: configured,
         currentBranch,
-        defaultBranch,
+        defaultBranch: routingDefaultBranch,
       }) || configured,
       source: "configured",
       gitRoom: null,
@@ -534,7 +634,7 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
         roomIdentifier: activeGitHubRoomIdentifier({
           repoRoom,
           currentBranch,
-          defaultBranch,
+          defaultBranch: routingDefaultBranch,
         }) || repoRoom,
         source: "git_remote",
         gitRoom: null,

@@ -24,7 +24,7 @@
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M4.5 3.25v8M4.5 11.75a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM11.5 4.25H9.75A2.75 2.75 0 0 0 7 7v2.75" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
           </svg>
-          {{ currentBranch }}
+          <span>{{ currentBranch }}</span>
         </span>
 
         <div class="desktop-events-overflow" @pointerdown.stop @keydown.escape.stop="overflowOpen = false">

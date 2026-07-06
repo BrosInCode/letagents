@@ -13,6 +13,9 @@ const api: DesktopApi = {
   },
   app: {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
+    openGitHubUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-github-url", url),
+    getGitHubPullRequestStats: (url: string) =>
+      ipcRenderer.invoke("desktop:app:get-github-pull-request-stats", url),
   },
   appAgent: {
     getSettingsStatus: () =>

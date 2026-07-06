@@ -59,6 +59,11 @@
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
+    <RoomComposerEventChips
+      :event-previews="eventPreviews"
+      @open-event-preview="openEventPreview"
+      @dismiss-event-preview="emit('dismiss-event-preview', $event)"
+    />
     <div class="desktop-composer-input-row">
       <button
         class="desktop-composer-add-agent"
@@ -146,6 +151,7 @@ import type {
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
+import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 
 export interface RoomComposerReplyTarget {
@@ -160,6 +166,7 @@ const props = defineProps<{
   attaching: boolean;
   attachmentDrafts: DesktopStagedAttachment[];
   attachmentError: string | null;
+  eventPreviews: ComposerEventPreview[];
   initialDraft?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
@@ -185,6 +192,8 @@ const emit = defineEmits<{
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
+  "open-event-preview": [event: ComposerEventPreview];
+  "dismiss-event-preview": [messageId: string];
 }>();
 
 const maxComposerInputHeight = 156;
@@ -337,5 +346,9 @@ function syncTextareaHeight(): void {
   const nextHeight = Math.min(input.scrollHeight, maxComposerInputHeight);
   input.style.height = `${Math.max(nextHeight, 34)}px`;
   input.style.overflowY = input.scrollHeight > maxComposerInputHeight ? "auto" : "hidden";
+}
+
+function openEventPreview(event: ComposerEventPreview): void {
+  emit("open-event-preview", event);
 }
 </script>

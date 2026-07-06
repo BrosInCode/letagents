@@ -19,6 +19,8 @@ export function repoStatusWatchFingerprint(status: RepoStatus): string {
     ahead: status.ahead || 0,
     behind: status.behind || 0,
     changes: status.changes || null,
+    branchDelta: status.branchDelta || null,
+    branchDeltas: status.branchDeltas || [],
     dirty: Boolean(status.dirty),
     roomIdentifier: status.roomIdentifier || null,
     roomSource: status.roomSource || null,

@@ -16,79 +16,9 @@
         </svg>
       </button>
       <div class="desktop-room-heading">
-        <h3 class="desktop-room-title">
-          <span class="desktop-room-title-text">{{ room.displayName }}</span>
+        <h3 class="desktop-room-title" :title="room.displayName">
+          <span class="desktop-room-title-text">{{ headerDisplayName }}</span>
         </h3>
-        <div
-          v-if="room.gitRoom"
-          ref="gitMenuRoot"
-          class="desktop-room-git-meta"
-          :aria-label="gitRoomHeaderLabel"
-          @pointerdown.stop
-          @keydown.escape.stop="closeGitMenu"
-        >
-          <button
-            class="desktop-room-git-item desktop-room-git-ref"
-            type="button"
-            :title="gitRoomRefTitle"
-            :aria-expanded="gitMenuOpen"
-            aria-haspopup="dialog"
-            data-testid="desktop-room-git-control"
-            @click.stop="toggleGitMenu"
-          >
-            <GitPullRequest v-if="room.gitRoom.ref.type === 'pull_request'" :size="13" aria-hidden="true" />
-            <Tag v-else-if="room.gitRoom.ref.type === 'tag'" :size="13" aria-hidden="true" />
-            <GitBranch v-else :size="13" aria-hidden="true" />
-            <span>{{ gitRoomRefLabel }}</span>
-            <small v-if="repoSignalLabel">{{ repoSignalLabel }}</small>
-          </button>
-          <Transition name="desktop-room-overflow-pop">
-            <div
-              v-if="gitMenuOpen"
-              ref="gitMenuPanel"
-              class="desktop-room-git-menu"
-              role="dialog"
-              tabindex="-1"
-              aria-label="Git Room workspace details"
-              data-testid="desktop-room-git-menu"
-              @keydown.escape.stop="closeGitMenu"
-            >
-              <div class="desktop-room-git-menu-section">
-                <p class="desktop-room-git-menu-label">Room ref</p>
-                <strong>{{ gitRoomRefLabel }}</strong>
-                <span>{{ gitRoomScopeLabel }}</span>
-              </div>
-              <div class="desktop-room-git-menu-section">
-                <p class="desktop-room-git-menu-label">Workspace</p>
-                <strong>{{ workspaceRefLabel }}</strong>
-                <span>{{ repoStatusSummary }}</span>
-              </div>
-              <button
-                v-if="canOpenWorkspaceGitRoom"
-                class="desktop-room-menu-item"
-                type="button"
-                @click.stop="openWorkspaceGitRoom"
-              >
-                <GitBranch :size="14" aria-hidden="true" />
-                <span>Open matching Git Room</span>
-              </button>
-              <div v-if="repoStatus.worktrees.length" class="desktop-room-git-menu-section">
-                <p class="desktop-room-git-menu-label">Worktrees</p>
-                <button
-                  v-for="worktree in repoStatus.worktrees"
-                  :key="worktree.path"
-                  class="desktop-room-git-worktree"
-                  type="button"
-                  :data-current="worktree.isCurrent"
-                  @click.stop="openRepoRoot(worktree.path)"
-                >
-                  <span>{{ worktree.branch || "Detached worktree" }}</span>
-                  <small>{{ worktree.isCurrent ? "current" : worktree.path }}</small>
-                </button>
-              </div>
-            </div>
-          </Transition>
-        </div>
         <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
           <span
             v-if="storage.effectiveMode === 'local'"
@@ -249,10 +179,8 @@
 </template>
 
 <script setup lang="ts">
-import { GitBranch, GitPullRequest, Tag } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import type { DesktopGitRoomInfo, DesktopRoomInfo, DesktopRoomStorageState, RepoStatus } from "../../../../../../electron/ipc-types";
-import { repoBranchLabel, repoChangedFileCount, repoWorkspaceSummary } from "../../../../domain/repo-status";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
@@ -261,8 +189,6 @@ const props = defineProps<{
   sidebarMode: SidebarMode;
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;
-  repoStatus: RepoStatus;
-  gitRoomMatchesActiveRepo: boolean;
   tabs: RoomTab[];
   activeTab: RoomTabId;
   searchOpen: boolean;
@@ -271,8 +197,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   cycleSidebar: [];
-  "open-workspace-git-room": [];
-  "open-repo-root": [rootPath: string];
   toggleSearch: [];
   toggleActionPanel: [];
   selectTab: [tabId: RoomTabId];
@@ -280,74 +204,11 @@ const emit = defineEmits<{
 
 const overflowMenuOpen = ref(false);
 const overflowMenuRoot = ref<HTMLElement | null>(null);
-const gitMenuOpen = ref(false);
-const gitMenuRoot = ref<HTMLElement | null>(null);
-const gitMenuPanel = ref<HTMLElement | null>(null);
 const pendingOverflowAction = ref<"find" | "settings" | null>(null);
 
-const gitRoomRefLabel = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  return gitRoom ? gitRoomRefDisplayLabel(gitRoom) : "";
-});
-
-const gitRoomRefTitle = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  if (!gitRoom) return "";
-  const type = gitRoom.ref.type.replace("_", " ");
-  if (gitRoom.ref.name && gitRoom.ref.headRepository?.fullName) {
-    return `${type}: ${gitRoom.ref.headRepository.fullName}:${gitRoom.ref.name}`;
-  }
-  return gitRoom.ref.name ? `${type}: ${gitRoom.ref.name}` : type;
-});
-
-const gitRoomHeaderLabel = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  if (!gitRoom) return "";
-  const branch = gitRoomRefLabel.value;
-  const type = gitRoom.ref.type.replace("_", " ");
-  return branch ? `Git ${type} ${branch}` : `Git ${type}`;
-});
-
-const gitRoomScopeLabel = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  if (!gitRoom) return "";
-  if (gitRoom.accessMode === "local") return "Local Git Room";
-  if (gitRoom.accessMode === "private") return "Private Git Room";
-  return "Git Room";
-});
-
-const workspaceRefLabel = computed(() => repoBranchLabel(props.repoStatus));
-
-const repoSignalLabel = computed(() => {
-  const parts: string[] = [];
-  const changedCount = repoChangedFileCount(props.repoStatus);
-  if (changedCount > 0) parts.push(String(changedCount));
-  if ((props.repoStatus.ahead || 0) > 0) parts.push(`+${props.repoStatus.ahead}`);
-  if ((props.repoStatus.behind || 0) > 0) parts.push(`-${props.repoStatus.behind}`);
-  return parts.join(" ");
-});
-
-const repoStatusSummary = computed(() => repoWorkspaceSummary(props.repoStatus));
-
-const canOpenWorkspaceGitRoom = computed(() => {
-  if (!props.gitRoomMatchesActiveRepo || !props.room.gitRoom || !props.repoStatus.isGitRepo || props.repoStatus.detached) return false;
-  return Boolean(props.repoStatus.rootPath && props.repoStatus.roomIdentifier);
-});
-
-function gitRoomRefDisplayLabel(gitRoom: DesktopGitRoomInfo): string {
-  const ref = gitRoom.ref;
-  if (
-    ref.name
-    && ref.headRepository?.fullName
-    && ref.headRepository.fullName !== gitRoom.repository.fullName
-  ) {
-    return `${ref.headRepository.owner}:${ref.name}`;
-  }
-  if (ref.name) return ref.name;
-  if (ref.defaultBranch) return ref.defaultBranch;
-  if (ref.type === "default_branch") return "default";
-  return ref.type.replace("_", " ");
-}
+const headerDisplayName = computed(() =>
+  compactRoomDisplayName(props.room.displayName)
+);
 
 onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown);
@@ -358,36 +219,12 @@ onBeforeUnmount(() => {
 });
 
 function toggleOverflowMenu(): void {
-  gitMenuOpen.value = false;
   pendingOverflowAction.value = null;
   overflowMenuOpen.value = !overflowMenuOpen.value;
 }
 
 function closeOverflowMenu(): void {
   overflowMenuOpen.value = false;
-}
-
-async function toggleGitMenu(): Promise<void> {
-  overflowMenuOpen.value = false;
-  gitMenuOpen.value = !gitMenuOpen.value;
-  if (gitMenuOpen.value) {
-    await nextTick();
-    gitMenuPanel.value?.focus({ preventScroll: true });
-  }
-}
-
-function closeGitMenu(): void {
-  gitMenuOpen.value = false;
-}
-
-function openWorkspaceGitRoom(): void {
-  closeGitMenu();
-  emit("open-workspace-git-room");
-}
-
-function openRepoRoot(rootPath: string): void {
-  closeGitMenu();
-  emit("open-repo-root", rootPath);
 }
 
 function selectOverflowAction(action: "find" | "settings"): void {
@@ -419,14 +256,42 @@ function tabAriaLabel(tab: RoomTab): string {
   return parts.join(", ");
 }
 
+function compactRoomDisplayName(displayName: string): string {
+  const normalized = displayName.trim();
+  const branchPrefix = "Branch: ";
+  if (normalized.startsWith(branchPrefix)) {
+    return `${branchPrefix}${compactBranchName(normalized.slice(branchPrefix.length), 28)}`;
+  }
+  return compactMiddle(normalized, 36);
+}
+
+function compactBranchName(branchName: string, maxLength: number): string {
+  const normalized = branchName.trim();
+  if (normalized.length <= maxLength) return normalized;
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex > 0) {
+    const namespace = normalized.slice(0, slashIndex);
+    const suffixBudget = maxLength - namespace.length - 4;
+    if (suffixBudget > 8) {
+      return `${namespace}/${normalized.slice(slashIndex + 1, slashIndex + 1 + suffixBudget)}...`;
+    }
+  }
+  return compactMiddle(normalized, maxLength);
+}
+
+function compactMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 3) return value.slice(0, maxLength);
+  const leftLength = Math.ceil((maxLength - 3) / 2);
+  const rightLength = Math.floor((maxLength - 3) / 2);
+  return `${value.slice(0, leftLength)}...${value.slice(-rightLength)}`;
+}
+
 function handleDocumentPointerDown(event: PointerEvent): void {
   const target = event.target;
   if (!(target instanceof Node)) return;
   if (overflowMenuOpen.value && !overflowMenuRoot.value?.contains(target)) {
     closeOverflowMenu();
-  }
-  if (gitMenuOpen.value && !gitMenuRoot.value?.contains(target)) {
-    closeGitMenu();
   }
 }
 </script>

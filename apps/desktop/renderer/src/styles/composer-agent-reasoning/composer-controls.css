@@ -5,6 +5,212 @@
   gap: 8px;
 }
 
+.desktop-composer-events {
+  z-index: 1;
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+}
+
+.desktop-composer-event {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.035);
+  border-radius: 11px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--composer-event-accent) 6%, rgba(255, 255, 255, 0.02)),
+      rgba(255, 255, 255, 0.035)
+    );
+  color: var(--text);
+  --composer-event-accent: #8ec7ff;
+}
+
+.desktop-composer-event-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.desktop-composer-event[data-tone="emerald"] {
+  --composer-event-accent: #73d49d;
+}
+
+.desktop-composer-event[data-tone="rose"] {
+  --composer-event-accent: #ff8fa3;
+}
+
+.desktop-composer-event[data-tone="amber"] {
+  --composer-event-accent: #ffbd75;
+}
+
+.desktop-composer-event[data-tone="violet"] {
+  --composer-event-accent: #b9a7ff;
+}
+
+.desktop-composer-event[data-tone="sky"] {
+  --composer-event-accent: #8ec7ff;
+}
+
+.desktop-composer-event[data-tone="slate"] {
+  --composer-event-accent: #a8abb8;
+}
+
+.desktop-composer-event:hover {
+  border-color: color-mix(in srgb, var(--composer-event-accent) 20%, rgba(255, 255, 255, 0.08));
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--composer-event-accent) 8%, rgba(255, 255, 255, 0.025)),
+      rgba(255, 255, 255, 0.045)
+    );
+}
+
+.desktop-composer-event-main:focus-visible,
+.desktop-composer-event-view:focus-visible,
+.desktop-composer-event-dismiss:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--composer-event-accent) 62%, transparent);
+  outline-offset: 2px;
+}
+
+.desktop-composer-event-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  color: var(--composer-event-accent);
+}
+
+.desktop-composer-event-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  text-align: left;
+}
+
+.desktop-composer-event-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-event-copy strong {
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 0.78rem;
+  font-weight: 720;
+  line-height: 1.15;
+}
+
+.desktop-composer-event-muted {
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 0.78rem;
+  font-weight: 620;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.desktop-composer-event-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.64);
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-event-added {
+  color: #66ec80;
+}
+
+.desktop-composer-event-deleted {
+  color: #ff5f7d;
+}
+
+.desktop-composer-event-view,
+.desktop-composer-event-dismiss {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.48);
+  cursor: pointer;
+}
+
+.desktop-composer-event-view {
+  display: inline-flex;
+  gap: 6px;
+  height: 27px;
+  padding: 0 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.72rem;
+  font-weight: 720;
+  line-height: 1;
+}
+
+.desktop-composer-event-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--composer-event-accent);
+}
+
+.desktop-composer-event-dismiss {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.desktop-composer-event-view:hover,
+.desktop-composer-event-dismiss:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.desktop-composer-event-enter-active,
+.desktop-composer-event-leave-active {
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
+}
+
+.desktop-composer-event-enter-from,
+.desktop-composer-event-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
 .desktop-composer-input {
   width: 100%;
   min-height: 34px;

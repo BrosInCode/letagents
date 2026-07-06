@@ -21,7 +21,7 @@ export function repoWorkspaceSummary(
   const parts: string[] = [];
   const changedCount = repoChangedFileCount(repoStatus);
   if (options.includeCleanState !== false) {
-    parts.push(changedCount > 0 ? `${changedCount} changed` : "clean");
+    parts.push(changedCount > 0 ? `${changedCount} ${changedCount === 1 ? "file" : "files"} changed` : "clean");
   }
   if ((repoStatus.ahead || 0) > 0) parts.push(`${repoStatus.ahead} ahead`);
   if ((repoStatus.behind || 0) > 0) parts.push(`${repoStatus.behind} behind`);

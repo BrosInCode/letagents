@@ -180,8 +180,8 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Events tab</strong>
-              <small>{{ githubEventsVisible ? "Show GitHub activity in its own tab." : "Keep GitHub activity out of the tab bar." }}</small>
+              <strong>Events in chat</strong>
+              <small>{{ githubEventsVisible ? "GitHub events also appear in Chat." : "Keep GitHub events in the Events tab." }}</small>
             </span>
             <span class="desktop-room-toggle" :data-active="githubEventsVisible">
               <span />
