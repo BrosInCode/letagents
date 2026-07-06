@@ -84,6 +84,7 @@ const {
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
+const { listDesktopAgentProviders } = await import("../main/agents/provider-registry.js");
 const {
   buildCodexManagedAgentLaunchContext,
   dispatchRoomStreamEventToManagedAgents,
@@ -3667,4 +3668,12 @@ test("agent provider setup confirmation copy covers install actions", () => {
   assert.equal(bridgeInstall.action, "install_mcp_bridge");
   assert.match(bridgeInstall.message, /requires confirmation/i);
   assert.match(bridgeInstall.detail || "", /agent app configuration/i);
+});
+
+test("listDesktopAgentProviders excludes antigravity", () => {
+  const providers = listDesktopAgentProviders();
+  assert.ok(
+    !providers.some((p) => p.id === "antigravity"),
+    "antigravity should not appear in the Add Agent UI provider list",
+  );
 });

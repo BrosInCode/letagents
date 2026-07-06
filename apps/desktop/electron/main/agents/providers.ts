@@ -28,10 +28,6 @@ import { codexInstallCommand } from "./codex-install.js";
 import { getOpenModelSettingsStatus } from "./open-model-settings.js";
 import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
 import {
-  defaultManagedAgentPermissionProfileId,
-  listManagedAgentPermissionProfiles,
-} from "./managed-agent-permission-profiles.js";
-import {
   normalizeManagedAgentModel,
   validateDesktopManagedAgentModel,
 } from "./managed-agent-models.js";
@@ -40,7 +36,13 @@ import {
   branchScopedGitRoomName,
   gitRoomFromBranchRoomIdentifier,
 } from "./managed-agent-branch-scope.js";
+import {
+  getDesktopAgentProvider,
+  isDesktopAgentProviderId,
+} from "./provider-registry.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
+
+export { listDesktopAgentProviders } from "./provider-registry.js";
 
 type ExecResult = {
   ok: boolean;
@@ -57,98 +59,14 @@ type ExecOptions = {
 
 const COMMAND_TIMEOUT_MS = 8_000;
 
-const agentProviders: DesktopAgentProvider[] = [
-  {
-    id: "claude-code",
-    name: "Claude Code",
-    description: "Start a Claude Code agent here.",
-    capabilities: [
-      "external_mcp",
-      "desktop_managed_runtime",
-      "auth_preflight",
-      "turn_control",
-    ],
-    runtimeCommand: "claude",
-    mcpTargetId: "claude-code",
-    permissionProfiles: listManagedAgentPermissionProfiles("claude-code"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("claude-code"),
-  },
-  {
-    id: "antigravity",
-    name: "Antigravity",
-    description: "Join from Antigravity.",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
-    mcpTargetId: "antigravity",
-    permissionProfiles: [],
-    defaultPermissionProfileId: null,
-  },
-  {
-    id: "cursor",
-    name: "Cursor",
-    description: "Start a local Cursor agent here.",
-    capabilities: [
-      "external_mcp",
-      "desktop_managed_runtime",
-      "auth_preflight",
-      "turn_control",
-    ],
-    runtimeCommand: "cursor-agent",
-    mcpTargetId: "cursor",
-    permissionProfiles: listManagedAgentPermissionProfiles("cursor"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("cursor"),
-  },
-  {
-    id: "codex",
-    name: "Codex",
-    description: "Start a Codex agent here.",
-    capabilities: [
-      "external_mcp",
-      "desktop_managed_runtime",
-      "installable_runtime",
-      "auth_preflight",
-      "turn_control",
-      "reasoning_stream",
-    ],
-    runtimeCommand: "codex",
-    mcpTargetId: "codex",
-    permissionProfiles: listManagedAgentPermissionProfiles("codex"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("codex"),
-  },
-  {
-    id: "open-model",
-    name: "Open Model",
-    description: "Bring your own key for any OpenAI Responses-compatible endpoint.",
-    capabilities: [
-      "desktop_managed_runtime",
-      "installable_runtime",
-      "auth_preflight",
-      "turn_control",
-      "reasoning_stream",
-    ],
-    runtimeCommand: "codex",
-    mcpTargetId: "codex",
-    permissionProfiles: listManagedAgentPermissionProfiles("open-model"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("open-model"),
-  },
-];
-
-export function listDesktopAgentProviders(): DesktopAgentProvider[] {
-  return agentProviders.map((provider) => ({
-    ...provider,
-    capabilities: [...provider.capabilities],
-    permissionProfiles: provider.permissionProfiles.map((profile) => ({ ...profile })),
-  }));
-}
-
 function assertAgentProviderId(providerId: string): asserts providerId is DesktopAgentProviderId {
-  if (!agentProviders.some((provider) => provider.id === providerId)) {
+  if (!isDesktopAgentProviderId(providerId)) {
     throw new Error(`Unknown agent provider: ${providerId}`);
   }
 }
 
 function findAgentProvider(providerId: DesktopAgentProviderId): DesktopAgentProvider {
-  const provider = agentProviders.find((candidate) => candidate.id === providerId);
+  const provider = getDesktopAgentProvider(providerId);
   if (!provider) {
     throw new Error(`Unknown agent provider: ${providerId}`);
   }
