@@ -194,7 +194,6 @@ const changeStats = computed(() => {
 });
 const branchChangesDescription = computed(() => {
   const delta = primaryDelta.value;
-  if (pullRequestSummary.value && delta?.baseBranch) return `PR compared with ${delta.baseBranch}`;
   if (delta?.baseBranch) return `Compared with ${delta.baseBranch}`;
   if (!currentBranchMatchesRoom.value) {
     return matchingRoomWorktree.value
