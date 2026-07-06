@@ -53,6 +53,7 @@ import {
   shouldUseCloudDesktopManagedAgentWorkerSession,
   resolveDesktopManagedAgentWorkerRegistration,
 } from "./managed-agent-local-worker-session.js";
+import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
   buildDesktopManagedAgentReplyChangeContext,
   clearDesktopManagedAgentReplyChangeState,
@@ -307,6 +308,7 @@ export function createDesktopCursorRuntime(
       activeTurn.abortController.abort();
     }
     clearDesktopManagedAgentReplyChangeState(cursorReplyChangeSessionKey(session.session_id));
+    cleanupAgentSessionAttachments(session.session_id);
     const updated = updateCursorLiveSession(session.session_id, (current) => ({
       ...current,
       status: "interrupted",

@@ -34,7 +34,7 @@ type LocalMessageRow = {
   sync_started_at: string | null;
 };
 
-type LocalAttachmentRow = {
+export type LocalAttachmentRow = {
   attachment_id: string;
   file_name: string | null;
   mime_type: string | null;
@@ -1345,4 +1345,24 @@ export async function getSyncedCloudMessageId(input: {
     `)
     .get(input.roomId, localNumber);
   return typeof row?.synced_cloud_id === "string" ? row.synced_cloud_id : null;
+}
+
+export async function getLocalChatMessageAttachment(
+  roomId: string,
+  messageId: string,
+  attachmentId: string,
+): Promise<LocalAttachmentRow | null> {
+  const messageNumber = parseMessageNumber(messageId);
+  const trimmedAttachmentId = attachmentId.trim();
+  if (!messageNumber || !trimmedAttachmentId) {
+    return null;
+  }
+  const database = await getDb();
+  const row = database
+    .prepare(`
+      SELECT * FROM local_chat_attachments
+      WHERE room_id = ? AND message_number = ? AND attachment_id = ?
+    `)
+    .get(roomId, messageNumber, trimmedAttachmentId) as Record<string, unknown> | undefined;
+  return row ? mapAttachmentRow(row) : null;
 }
