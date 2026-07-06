@@ -218,7 +218,9 @@ async function getBranchDelta(
       "--no-optional-locks",
       "diff",
       "--shortstat",
-      `${defaultBranch}...${branch}`,
+      "--merge-base",
+      defaultBranch,
+      branch,
       "--",
     ]);
     return parseGitShortStat(stdout, defaultBranch, branch);

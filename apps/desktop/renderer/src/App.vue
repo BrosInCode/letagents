@@ -150,8 +150,6 @@
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
           :repo-status="repoStatusValue"
-          :git-room-branch-prompt="gitRoomBranchPrompt"
-          :git-room-open-error="gitRoomOpenError"
           :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
@@ -165,10 +163,7 @@
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
           @choose-worktree="openWorktreeForAgent"
-          @open-workspace-git-room="openWorkspaceGitRoom"
           @open-repo-root="openWorkspaceGitRoom"
-          @dismiss-git-room-branch-prompt="dismissGitRoomBranchPrompt"
-          @dismiss-git-room-open-error="gitRoomOpenError = null"
           @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
         />
       </KeepAlive>
@@ -402,8 +397,6 @@ let repoStatusRefreshInFlight = false;
 let repoStatusRefreshTimer: number | null = null;
 let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
-const dismissedGitRoomBranchPromptKey = ref<string | null>(null);
-const gitRoomOpenError = ref<string | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const sidebarPeekOpen = ref(false);
@@ -414,47 +407,6 @@ const desktopShellStyle = computed(() => ({
   "--sidebar-min-width": `${sidebarMinWidth}px`,
   "--sidebar-max-width": `${sidebarMaxWidth}px`,
 }));
-
-const gitRoomBranchPrompt = computed(() => {
-  const gitRoom = selectedRoomInfo.value.gitRoom;
-  const status = repoStatus.value;
-  if (!gitRoom || !status?.isGitRepo) return null;
-  if (!selectedGitRoomMatchesActiveRepo.value) return null;
-  if (gitRoom.ref.type !== "branch" && gitRoom.ref.type !== "default_branch") return null;
-  const roomRef = gitRoom.ref.type === "default_branch"
-    ? gitRoom.ref.defaultBranch || status.defaultBranch || gitRoom.ref.name
-    : gitRoom.ref.name;
-  if (!roomRef) return null;
-  const selectedRoomMatchesRoutedWorkspace = Boolean(
-    status.roomIdentifier
-    && normalizeRoomIdentifier(selectedRoomInfo.value.identifier) === normalizeRoomIdentifier(status.roomIdentifier)
-  );
-
-  if (status.detached) {
-    if (selectedRoomMatchesRoutedWorkspace) return null;
-    const key = `${selectedRoomInfo.value.identifier}:${status.rootPath}:detached:${roomRef}`;
-    if (dismissedGitRoomBranchPromptKey.value === key) return null;
-    return {
-      key,
-      state: "detached" as const,
-      workspaceBranch: null,
-      roomRef,
-      targetRoomIdentifier: null,
-    };
-  }
-
-  const workspaceBranch = status.branch?.trim() || null;
-  if (!workspaceBranch || workspaceBranch === roomRef) return null;
-  const key = `${selectedRoomInfo.value.identifier}:${status.rootPath}:${workspaceBranch}:${roomRef}`;
-  if (dismissedGitRoomBranchPromptKey.value === key) return null;
-  return {
-    key,
-    state: "branch_mismatch" as const,
-    workspaceBranch,
-    roomRef,
-    targetRoomIdentifier: status.roomIdentifier || null,
-  };
-});
 
 const selectedGitRoomMatchesActiveRepo = computed(() => {
   const gitRoom = selectedRoomInfo.value.gitRoom;
@@ -639,9 +591,6 @@ async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
 function handleRepoStatusChanged(nextStatus: RepoStatus): void {
   const rootPath = activeProjectRootPath();
   if (rootPath && nextStatus.rootPath !== rootPath) return;
-  if (repoStatus.value?.branch !== nextStatus.branch || repoStatus.value?.detached !== nextStatus.detached) {
-    dismissedGitRoomBranchPromptKey.value = null;
-  }
   repoStatus.value = nextStatus;
 }
 
@@ -660,19 +609,13 @@ function refreshForegroundData(): void {
   void refreshSidebarRoomMetadata();
 }
 
-function dismissGitRoomBranchPrompt(key: string): void {
-  dismissedGitRoomBranchPromptKey.value = key;
-}
-
 async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean> {
   const rootPath = rootPathOverride || repoStatus.value?.rootPath || activeProjectRootPath();
   if (!rootPath) return false;
   loading.value = true;
-  gitRoomOpenError.value = null;
   try {
     const selection = await window.letagentsDesktop.repos.openRoom(rootPath);
     if (selection.error || !selection.snapshot) {
-      gitRoomOpenError.value = selection.error || "Could not open the matching Git Room.";
       return false;
     }
     if (selection.repoStatus) {
@@ -686,9 +629,7 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
     });
     return true;
   } catch (error) {
-    gitRoomOpenError.value = error instanceof Error
-      ? error.message
-      : "Could not open the matching Git Room.";
+    console.warn("Could not open the matching Git Room.", error);
     return false;
   } finally {
     loading.value = false;

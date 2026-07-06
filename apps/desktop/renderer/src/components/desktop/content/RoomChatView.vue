@@ -87,6 +87,7 @@
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @open-event-preview="openEventPreview"
+          @dismiss-event-preview="emit('dismiss-event-preview', $event)"
           @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @send-message="handleComposerSend"
         />
@@ -238,6 +239,7 @@ const emit = defineEmits<{
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
   "open-events": [];
+  "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,

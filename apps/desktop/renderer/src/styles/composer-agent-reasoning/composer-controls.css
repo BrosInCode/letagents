@@ -6,39 +6,42 @@
 }
 
 .desktop-composer-event-chips {
-  position: absolute;
-  right: 70px;
-  bottom: calc(100% - 6px);
-  z-index: 4;
+  z-index: 1;
   display: flex;
-  flex-wrap: wrap-reverse;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 7px;
-  max-width: min(620px, calc(100% - 96px));
-  pointer-events: none;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
 }
 
 .desktop-composer-event-chip {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  max-width: min(310px, 100%);
-  min-height: 30px;
-  padding: 4px 9px 4px 7px;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 2px 3px 2px 5px;
   border: 1px solid color-mix(in srgb, var(--composer-event-accent) 25%, rgba(255, 255, 255, 0.1));
-  border-radius: 999px;
-  appearance: none;
+  border-radius: 11px;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--composer-event-accent) 13%, transparent), rgba(255, 255, 255, 0.035)),
-    rgba(18, 18, 18, 0.97);
+    linear-gradient(135deg, color-mix(in srgb, var(--composer-event-accent) 10%, transparent), rgba(255, 255, 255, 0.025)),
+    rgba(255, 255, 255, 0.035);
   color: var(--text);
-  box-shadow:
-    0 10px 28px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  pointer-events: auto;
-  backdrop-filter: blur(14px);
   --composer-event-accent: #8ec7ff;
+}
+
+.desktop-composer-event-chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 2px 4px 2px 2px;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
 
 .desktop-composer-event-chip[data-tone="emerald"] {
@@ -65,13 +68,12 @@
   --composer-event-accent: #a8abb8;
 }
 
-.desktop-composer-event-chip:hover,
-.desktop-composer-event-chip:focus-visible {
-  transform: translateY(-1px);
+.desktop-composer-event-chip:hover {
   border-color: color-mix(in srgb, var(--composer-event-accent) 42%, rgba(255, 255, 255, 0.16));
 }
 
-.desktop-composer-event-chip:focus-visible {
+.desktop-composer-event-chip-main:focus-visible,
+.desktop-composer-event-chip-dismiss:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--composer-event-accent) 62%, transparent);
   outline-offset: 2px;
 }
@@ -90,6 +92,7 @@
 .desktop-composer-event-chip-copy {
   display: grid;
   min-width: 0;
+  max-width: min(420px, calc(100vw - 210px));
   text-align: left;
 }
 
@@ -112,6 +115,26 @@
   font-size: 0.62rem;
   font-weight: 760;
   line-height: 1.1;
+}
+
+.desktop-composer-event-chip-dismiss {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  appearance: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.desktop-composer-event-chip-dismiss:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 
 .desktop-composer-event-chip-enter-active,

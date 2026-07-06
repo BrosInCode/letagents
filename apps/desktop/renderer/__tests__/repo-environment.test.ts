@@ -150,6 +150,29 @@ test("repo environment falls back to active branch delta when the room branch is
   });
 });
 
+test("repo environment can show active branch delta even when repo matching is unresolved", () => {
+  const room = roomInfo();
+  const status = repoStatus({
+    branch: "feature/git-rooms",
+    branchDelta: {
+      branch: "feature/git-rooms",
+      filesChanged: 7,
+      additions: 131,
+      deletions: 138,
+      baseBranch: "main",
+    },
+    branchDeltas: [],
+  });
+
+  assert.deepEqual(repoEnvironmentBranchDeltaForRoom(room, status, false), {
+    branch: "feature/git-rooms",
+    filesChanged: 7,
+    additions: 131,
+    deletions: 138,
+    baseBranch: "main",
+  });
+});
+
 test("repo environment knows when the current branch is the room branch", () => {
   const room = roomInfo();
 
@@ -209,6 +232,51 @@ test("repo environment surfaces a matching pull request artifact", () => {
     tone: "positive",
     delta: null,
     url: "https://github.com/BrosInCode/letagents/pull/647",
+  });
+});
+
+test("repo environment enriches pull request artifacts with matching event code stats", () => {
+  const room = roomInfo();
+
+  assert.deepEqual(repoEnvironmentPullRequestForRoom(room, [{
+    roomId: "room_1",
+    identityKey: "github:pull_request:number:647",
+    provider: "github",
+    kind: "pull_request",
+    artifactId: "647",
+    artifactNumber: 647,
+    title: "Productize Git Room environment panel",
+    url: "https://github.com/BrosInCode/letagents/pull/647",
+    ref: "feature/git-rooms",
+    state: "open",
+    source: "github_event",
+    firstSeenAt: "2026-07-06T00:00:00.000Z",
+    updatedAt: "2026-07-06T00:00:00.000Z",
+    linkedTaskIds: [],
+  }], [{
+    id: "evt_1",
+    eventType: "pull_request",
+    action: "synchronize",
+    githubObjectId: "647",
+    githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/647",
+    title: "Productize Git Room environment panel",
+    state: "open",
+    actorLogin: "EmmyMay",
+    metadata: {
+      head_ref: "feature/git-rooms",
+      base_ref: "staging",
+      changed_files: 31,
+      additions: 1988,
+      deletions: 768,
+    },
+    linkedTaskId: null,
+    createdAt: "2026-07-06T00:01:00.000Z",
+  }])?.delta, {
+    branch: "feature/git-rooms",
+    filesChanged: 31,
+    additions: 1988,
+    deletions: 768,
+    baseBranch: "staging",
   });
 });
 

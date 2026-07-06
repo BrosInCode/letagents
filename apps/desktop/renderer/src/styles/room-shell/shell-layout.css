@@ -22,10 +22,6 @@
   overflow: hidden;
 }
 
-.desktop-room-shell[data-git-notice="true"] {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
-}
-
 .desktop-room-shell > .desktop-room-header {
   grid-row: 1;
 }
@@ -37,14 +33,6 @@
 .desktop-room-shell > .room-tab-page {
   grid-row: 3;
   min-height: 0;
-}
-
-.desktop-room-shell[data-git-notice="true"] > .desktop-room-control-rail {
-  grid-row: 3;
-}
-
-.desktop-room-shell[data-git-notice="true"] > .room-tab-page {
-  grid-row: 4;
 }
 
 .desktop-room-header {
@@ -136,35 +124,6 @@
   box-shadow:
     0 18px 42px rgba(0, 0, 0, 0.42),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.desktop-room-git-prompt {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  padding: 7px 16px 7px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(38, 31, 18, 0.92);
-  color: rgba(255, 255, 255, 0.84);
-  font-size: 0.78rem;
-  font-weight: 760;
-}
-
-.desktop-room-git-prompt[data-state="detached"] {
-  background: rgba(31, 31, 35, 0.94);
-}
-
-.desktop-room-git-prompt[data-state="error"] {
-  background: rgba(46, 21, 25, 0.94);
-}
-
-.desktop-room-git-prompt span {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .inline-action-button {
@@ -471,10 +430,6 @@
   transition:
     opacity 160ms var(--ease-out),
     transform 160ms var(--ease-out);
-}
-
-.desktop-room-shell[data-git-notice="true"] .desktop-room-environment-popover {
-  top: 112px;
 }
 
 .desktop-room-shell:has(.room-chat-layout[data-thread-open="true"]) .desktop-room-environment-popover {

@@ -93,11 +93,15 @@ export function repoEnvironmentBranchDeltaForRoom(
   repoStatus: Pick<RepoStatus, "branch" | "branchDelta" | "branchDeltas">,
   gitRoomMatchesActiveRepo = true,
 ): RepoBranchDelta | null {
-  if (!gitRoomMatchesActiveRepo) return null;
   const roomRef = repoEnvironmentRoomRefLabel(room);
   if (!roomRef) return null;
   const deltas = repoStatus.branchDeltas || [];
   const activeDelta = repoStatus.branchDelta ?? null;
+  if (!gitRoomMatchesActiveRepo) {
+    return activeDelta && (activeDelta.branch === roomRef || repoStatus.branch === roomRef)
+      ? activeDelta
+      : null;
+  }
   return deltas.find((delta) => delta.branch === roomRef) ??
     (activeDelta && (activeDelta.branch === roomRef || repoStatus.branch === roomRef) ? activeDelta : null);
 }
@@ -118,6 +122,7 @@ export function repoEnvironmentPullRequestForRoom(
 ): RepoEnvironmentPullRequest | null {
   const roomRef = repoEnvironmentRoomRefLabel(room);
   if (!roomRef) return null;
+  const event = latestPullRequestEventForRef(events, roomRef);
 
   const artifact = artifacts
     .filter((candidate) =>
@@ -131,17 +136,11 @@ export function repoEnvironmentPullRequestForRoom(
       description: artifact.title,
       value: artifactStateLabel(artifact.state),
       tone: pullRequestTone(artifact.state),
-      delta: null,
+      delta: event ? pullRequestDeltaFromEvent(event, roomRef) : null,
       url: artifact.url,
     };
   }
 
-  const event = events
-    .filter((candidate) =>
-      candidate.eventType === "pull_request" &&
-      (!eventBranchRef(candidate) || refsMatch(eventBranchRef(candidate) || "", roomRef))
-    )
-    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
   if (!event) return null;
   const number = event.githubObjectId || metadataNumber(event.metadata, ["number"]) ||
     metadataNumber(event.metadata, ["pull_request", "number"]);
@@ -153,6 +152,18 @@ export function repoEnvironmentPullRequestForRoom(
     delta: pullRequestDeltaFromEvent(event, roomRef),
     url: event.githubObjectUrl,
   };
+}
+
+function latestPullRequestEventForRef(
+  events: readonly DesktopGitHubRoomEvent[],
+  roomRef: string,
+): DesktopGitHubRoomEvent | null {
+  return events
+    .filter((candidate) =>
+      candidate.eventType === "pull_request" &&
+      (!eventBranchRef(candidate) || refsMatch(eventBranchRef(candidate) || "", roomRef))
+    )
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] || null;
 }
 
 function refsMatch(candidate: string, roomRef: string): boolean {

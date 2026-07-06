@@ -2,7 +2,6 @@
   <section
     class="desktop-room-shell"
     :data-liquid-glass="liquidGlassEnabled"
-    :data-git-notice="Boolean(gitRoomBranchPrompt || gitRoomOpenError)"
     data-testid="desktop-room-shell"
   >
     <DesktopRoomHeader
@@ -18,50 +17,6 @@
       @toggle-action-panel="toggleActionPanel"
       @select-tab="selectTab"
     />
-
-    <div
-      v-if="gitRoomBranchPrompt || gitRoomOpenError"
-      class="desktop-room-git-prompt"
-      :data-state="gitRoomOpenError ? 'error' : gitRoomBranchPrompt?.state"
-      :role="gitRoomOpenError ? 'alert' : undefined"
-      data-testid="desktop-room-git-branch-prompt"
-    >
-      <template v-if="gitRoomOpenError">
-        <span>{{ gitRoomOpenError }}</span>
-        <button
-          class="inline-action-button muted"
-          type="button"
-          aria-label="Dismiss Git Room open error"
-          @click="emit('dismiss-git-room-open-error')"
-        >
-          Dismiss
-        </button>
-      </template>
-      <template v-else-if="gitRoomBranchPrompt">
-        <span v-if="gitRoomBranchPrompt.state === 'detached'">
-          Your local worktree is not on a branch. This room is for {{ gitRoomBranchPrompt.roomRef }}.
-        </span>
-        <span v-else>
-          This local worktree is on {{ gitRoomBranchPrompt.workspaceBranch }}, but this room is for {{ gitRoomBranchPrompt.roomRef }}.
-        </span>
-        <button
-          v-if="gitRoomBranchPrompt.state === 'branch_mismatch'"
-          class="inline-action-button"
-          type="button"
-          @click="emit('open-workspace-git-room')"
-        >
-          Open {{ gitRoomBranchPrompt.workspaceBranch }} room
-        </button>
-        <button
-          class="inline-action-button muted"
-          type="button"
-          aria-label="Dismiss Git Room branch notice"
-          @click="emit('dismiss-git-room-branch-prompt', gitRoomBranchPrompt.key)"
-        >
-          Dismiss
-        </button>
-      </template>
-    </div>
 
     <DesktopRoomControlRail
       v-model:search-query="searchQuery"
@@ -172,6 +127,7 @@
       @draft-change="chatDraftText = $event"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
+      @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
       @thread-read="handleThreadRead"
     />
@@ -434,14 +390,6 @@ const props = defineProps<{
   githubEvents: DesktopGitHubEventsPage | null;
   repoStatus: RepoStatus;
   gitRoomMatchesActiveRepo: boolean;
-  gitRoomOpenError: string | null;
-  gitRoomBranchPrompt: {
-    key: string;
-    state: "branch_mismatch" | "detached";
-    workspaceBranch: string | null;
-    roomRef: string;
-    targetRoomIdentifier: string | null;
-  } | null;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
@@ -457,10 +405,7 @@ const emit = defineEmits<{
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
   "choose-worktree": [rootPath: string];
-  "open-workspace-git-room": [];
   "open-repo-root": [rootPath: string];
-  "dismiss-git-room-branch-prompt": [key: string];
-  "dismiss-git-room-open-error": [];
   "add-agent-open-request-consumed": [];
 }>();
 
@@ -1349,6 +1294,13 @@ function clearComposerGitHubEventPreviews(): void {
   }
   composerGitHubEventTimers.clear();
   composerGitHubEventPreviews.value = [];
+}
+
+function dismissComposerGitHubEventPreview(messageId: string): void {
+  const timer = composerGitHubEventTimers.get(messageId);
+  if (timer !== undefined) window.clearTimeout(timer);
+  composerGitHubEventTimers.delete(messageId);
+  composerGitHubEventPreviews.value = composerGitHubEventPreviews.value.filter((item) => item.id !== messageId);
 }
 
 function resetEventsIndicator(): void {

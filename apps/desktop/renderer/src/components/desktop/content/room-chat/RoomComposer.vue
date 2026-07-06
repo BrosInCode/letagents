@@ -62,6 +62,7 @@
     <RoomComposerEventChips
       :event-previews="eventPreviews"
       @open-event-preview="openEventPreview"
+      @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
     <div class="desktop-composer-input-row">
       <button
@@ -192,6 +193,7 @@ const emit = defineEmits<{
   ];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
   "open-event-preview": [event: ComposerEventPreview];
+  "dismiss-event-preview": [messageId: string];
 }>();
 
 const maxComposerInputHeight = 156;
