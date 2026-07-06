@@ -5,149 +5,162 @@
   gap: 8px;
 }
 
-.desktop-composer-event-chips {
+.desktop-composer-events {
   z-index: 1;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
   gap: 6px;
   width: 100%;
   min-width: 0;
 }
 
-.desktop-composer-event-chip {
-  display: inline-flex;
+.desktop-composer-event {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  min-height: 28px;
-  padding: 2px 3px 2px 5px;
-  border: 1px solid color-mix(in srgb, var(--composer-event-accent) 25%, rgba(255, 255, 255, 0.1));
-  border-radius: 11px;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--composer-event-accent) 10%, transparent), rgba(255, 255, 255, 0.025)),
-    rgba(255, 255, 255, 0.035);
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 5px 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--composer-event-accent) 16%, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--composer-event-accent) 6%, rgba(255, 255, 255, 0.025));
   color: var(--text);
   --composer-event-accent: #8ec7ff;
 }
 
-.desktop-composer-event-chip-main {
+.desktop-composer-event-main {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
-  padding: 2px 4px 2px 2px;
+  padding: 0;
   border: 0;
   appearance: none;
   background: transparent;
   color: inherit;
   cursor: pointer;
-}
-
-.desktop-composer-event-chip[data-tone="emerald"] {
+.desktop-composer-event[data-tone="emerald"] {
   --composer-event-accent: #73d49d;
 }
 
-.desktop-composer-event-chip[data-tone="rose"] {
+.desktop-composer-event[data-tone="rose"] {
   --composer-event-accent: #ff8fa3;
 }
 
-.desktop-composer-event-chip[data-tone="amber"] {
+.desktop-composer-event[data-tone="amber"] {
   --composer-event-accent: #ffbd75;
 }
 
-.desktop-composer-event-chip[data-tone="violet"] {
+.desktop-composer-event[data-tone="violet"] {
   --composer-event-accent: #b9a7ff;
 }
 
-.desktop-composer-event-chip[data-tone="sky"] {
+.desktop-composer-event[data-tone="sky"] {
   --composer-event-accent: #8ec7ff;
 }
 
-.desktop-composer-event-chip[data-tone="slate"] {
+.desktop-composer-event[data-tone="slate"] {
   --composer-event-accent: #a8abb8;
 }
 
-.desktop-composer-event-chip:hover {
-  border-color: color-mix(in srgb, var(--composer-event-accent) 42%, rgba(255, 255, 255, 0.16));
+.desktop-composer-event:hover {
+  border-color: color-mix(in srgb, var(--composer-event-accent) 28%, rgba(255, 255, 255, 0.12));
+  background: color-mix(in srgb, var(--composer-event-accent) 9%, rgba(255, 255, 255, 0.03));
 }
 
-.desktop-composer-event-chip-main:focus-visible,
-.desktop-composer-event-chip-dismiss:focus-visible {
+.desktop-composer-event-main:focus-visible,
+.desktop-composer-event-view:focus-visible,
+.desktop-composer-event-dismiss:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--composer-event-accent) 62%, transparent);
   outline-offset: 2px;
 }
 
-.desktop-composer-event-chip-icon {
+.desktop-composer-event-icon {
   display: inline-grid;
   place-items: center;
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--composer-event-accent) 16%, transparent);
   color: var(--composer-event-accent);
 }
 
-.desktop-composer-event-chip-copy {
-  display: grid;
+.desktop-composer-event-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
-  max-width: min(420px, calc(100vw - 210px));
   text-align: left;
 }
 
-.desktop-composer-event-chip-copy strong,
-.desktop-composer-event-chip-copy small {
+.desktop-composer-event-copy strong,
+.desktop-composer-event-copy small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.desktop-composer-event-chip-copy strong {
-  font-size: 0.72rem;
-  font-weight: 840;
-  line-height: 1.1;
+.desktop-composer-event-copy strong {
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 0.75rem;
+  font-weight: 780;
+  line-height: 1.15;
 }
 
-.desktop-composer-event-chip-copy small {
-  color: var(--text-tertiary);
+.desktop-composer-event-copy small {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--composer-event-accent) 72%, rgba(255, 255, 255, 0.42));
   font-size: 0.62rem;
-  font-weight: 760;
+  font-weight: 820;
+  letter-spacing: 0;
   line-height: 1.1;
+  text-transform: uppercase;
 }
 
-.desktop-composer-event-chip-dismiss {
+.desktop-composer-event-view,
+.desktop-composer-event-dismiss {
   display: inline-grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
   flex: 0 0 auto;
-  padding: 0;
   border: 0;
-  border-radius: 8px;
   appearance: none;
   background: transparent;
-  color: var(--text-tertiary);
+  color: rgba(255, 255, 255, 0.48);
   cursor: pointer;
 }
 
-.desktop-composer-event-chip-dismiss:hover {
+.desktop-composer-event-view {
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 7px;
+  font-size: 0.68rem;
+  font-weight: 760;
+}
+
+.desktop-composer-event-dismiss {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.desktop-composer-event-view:hover,
+.desktop-composer-event-dismiss:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
 }
 
-.desktop-composer-event-chip-enter-active,
-.desktop-composer-event-chip-leave-active {
+.desktop-composer-event-enter-active,
+.desktop-composer-event-leave-active {
   transition:
     opacity 180ms var(--ease-out),
     transform 180ms var(--ease-out);
 }
 
-.desktop-composer-event-chip-enter-from,
-.desktop-composer-event-chip-leave-to {
+.desktop-composer-event-enter-from,
+.desktop-composer-event-leave-to {
   opacity: 0;
-  transform: translateY(8px) scale(0.96);
+  transform: translateY(4px);
 }
 
 .desktop-composer-input {

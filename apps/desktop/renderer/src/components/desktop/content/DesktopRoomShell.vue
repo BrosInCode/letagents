@@ -1252,7 +1252,7 @@ function addComposerGitHubEventPreview(messageId: string, event: GitHubEventPres
   composerGitHubEventPreviews.value = [
     ...composerGitHubEventPreviews.value.filter((item) => item.id !== messageId),
     preview,
-  ].slice(-2);
+  ].slice(-1);
   for (const staleId of [...composerGitHubEventTimers.keys()]) {
     if (composerGitHubEventPreviews.value.some((item) => item.id === staleId)) continue;
     const timer = composerGitHubEventTimers.get(staleId);
