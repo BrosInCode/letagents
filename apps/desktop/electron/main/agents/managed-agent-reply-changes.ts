@@ -13,7 +13,7 @@ import {
   toPublicManagedAgentChangeSummary,
   type ManagedAgentChangeSummaryAttachmentDraft,
 } from "./managed-agent-change-attachments.js";
-import { publishManagedAgentLocalChangeSummaryArtifact } from "./managed-agent-change-summary-artifacts.js";
+import { publishManagedAgentChangeSummaryArtifact } from "./managed-agent-change-summary-artifacts.js";
 import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
 import type { StoredAgentSessionState } from "./state.js";
 
@@ -137,7 +137,7 @@ export async function publishDesktopManagedAgentReplyChangeSummaryArtifact(input
     return;
   }
   try {
-    await publishManagedAgentLocalChangeSummaryArtifact({
+    await publishManagedAgentChangeSummaryArtifact({
       roomIdentifier: input.roomIdentifier,
       storage: input.storage,
       workerSession: input.workerSession,

@@ -1659,6 +1659,14 @@ async function publishDesktopManagedAgentReply(input: {
   if (changeContext.attachmentDraft && attachments.length > 0) {
     rememberDesktopManagedAgentReplyChangeAttachment(sessionKey, changeContext.attachmentDraft);
   }
+  await publishDesktopManagedAgentReplyChangeSummaryArtifact({
+    sessionKey,
+    roomIdentifier,
+    storage: input.storage,
+    workerSession,
+    event: input.event,
+    context: changeContext,
+  });
 }
 
 async function startDesktopEventCodexTurn(input: {

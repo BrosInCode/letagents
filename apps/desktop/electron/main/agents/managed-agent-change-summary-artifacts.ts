@@ -2,7 +2,11 @@ import type {
   DesktopManagedAgentPublicChangeSummary,
   DesktopRoomStorageState,
 } from "../../ipc-types.js";
-import { localRoomIdentifierForStorage } from "../rooms/local-store.js";
+import { apiFetch } from "../auth.js";
+import {
+  cloudRoomIdentifierForStorage,
+  localRoomIdentifierForStorage,
+} from "../rooms/local-store.js";
 import { publishLocalRoomWorkflowArtifact } from "../rooms/artifacts/local-store.js";
 import type { StoredAgentSessionState } from "./state.js";
 
@@ -35,13 +39,26 @@ export function buildManagedAgentChangeSummaryWorkflowArtifact(input: {
   };
 }
 
-export async function publishManagedAgentLocalChangeSummaryArtifact(input: {
+export interface PublishManagedAgentChangeSummaryArtifactInput {
   roomIdentifier: string;
   storage: DesktopRoomStorageState;
   workerSession: StoredAgentSessionState;
   summary: DesktopManagedAgentPublicChangeSummary;
   taskId?: string | null;
-}): Promise<{ artifactIdentityKey: string } | null> {
+}
+
+export async function publishManagedAgentChangeSummaryArtifact(
+  input: PublishManagedAgentChangeSummaryArtifactInput,
+): Promise<{ artifactIdentityKey: string } | null> {
+  if (input.storage.effectiveMode === "local") {
+    return publishManagedAgentLocalChangeSummaryArtifact(input);
+  }
+  return publishManagedAgentCloudChangeSummaryArtifact(input);
+}
+
+export async function publishManagedAgentLocalChangeSummaryArtifact(
+  input: PublishManagedAgentChangeSummaryArtifactInput,
+): Promise<{ artifactIdentityKey: string } | null> {
   if (input.storage.effectiveMode !== "local") {
     return null;
   }
@@ -60,6 +77,36 @@ export async function publishManagedAgentLocalChangeSummaryArtifact(input: {
     replaceLinkedTaskIds: true,
   });
   const artifactIdentityKey = result.artifact.identity_key;
+  if (!artifactIdentityKey) {
+    throw new Error("Managed-agent change summary artifact was published without an identity key.");
+  }
+  return { artifactIdentityKey };
+}
+
+async function publishManagedAgentCloudChangeSummaryArtifact(
+  input: PublishManagedAgentChangeSummaryArtifactInput,
+): Promise<{ artifactIdentityKey: string } | null> {
+  const artifact = buildManagedAgentChangeSummaryWorkflowArtifact({
+    summary: input.summary,
+    workerSession: input.workerSession,
+  });
+  if (!artifact) {
+    return null;
+  }
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(input.storage, input.roomIdentifier);
+  const result = await apiFetch<{
+    artifact?: { identity_key?: string | null } | null;
+  }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/artifacts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      artifact,
+      task_id: input.taskId ?? null,
+      agent_session_id: input.workerSession.session_id,
+      agent_session_token: input.workerSession.session_token,
+    }),
+  });
+  const artifactIdentityKey = result.artifact?.identity_key?.trim();
   if (!artifactIdentityKey) {
     throw new Error("Managed-agent change summary artifact was published without an identity key.");
   }
