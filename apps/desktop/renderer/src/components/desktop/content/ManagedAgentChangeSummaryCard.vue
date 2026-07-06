@@ -106,7 +106,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   loading: false,
   expanded: false,
-  fallbackText: "No working tree changes in this Codex working tree.",
+  fallbackText: "No changes in this agent's working tree.",
   openHref: null,
   retryVisible: false,
   unavailable: false,

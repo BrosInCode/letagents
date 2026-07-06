@@ -41,6 +41,7 @@ import {
   formatFocusRoomConclusionMessage,
   toRoomResponse,
 } from "../rooms/formatting.js";
+import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
 import {
@@ -322,6 +323,7 @@ export function registerApiRoutes(app: Express): void {
     getRoomSharedArtifactByIdentityKey,
     getRoomSharedArtifacts,
     linkRoomSharedArtifactToTask,
+    requireWorkerRequestAgentIdentity,
     upsertRoomSharedArtifact,
   } satisfies RoomArtifactRouteDeps;
 

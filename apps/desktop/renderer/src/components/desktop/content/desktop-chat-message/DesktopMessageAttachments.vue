@@ -96,7 +96,7 @@ function changeSummaryFallbackText(attachment: DesktopRoomMessageAttachment): st
   const key = attachmentKey(attachment);
   const summary = changeSummary(attachment);
   if (summary?.error) return summary.error;
-  if (summary) return "No working tree changes in this Codex working tree.";
+  if (summary) return "No changes in this agent's working tree.";
   if (loadingChangeSummaryKeys.value[key]) return "Loading file changes...";
   return "The attached change summary could not be loaded.";
 }
