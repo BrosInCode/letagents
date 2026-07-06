@@ -39,6 +39,8 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
 .desktop-composer-event[data-tone="emerald"] {
   --composer-event-accent: #73d49d;
 }
