@@ -127,16 +127,17 @@ export function repoEnvironmentPullRequestForRoom(
   const artifact = artifacts
     .filter((candidate) =>
       candidate.kind === "pull_request" &&
-      (!candidate.ref || refsMatch(candidate.ref, roomRef))
+      Boolean(candidate.ref && refsMatch(candidate.ref, roomRef))
     )
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
   if (artifact) {
+    const artifactEvent = event && pullRequestIdentityMatchesArtifact(event, artifact) ? event : null;
     return {
       label: artifact.artifactNumber ? `PR #${artifact.artifactNumber}` : "Pull request",
       description: artifact.title,
       value: artifactStateLabel(artifact.state),
       tone: pullRequestTone(artifact.state),
-      delta: event ? pullRequestDeltaFromEvent(event, roomRef) : null,
+      delta: artifactEvent ? pullRequestDeltaFromEvent(artifactEvent, roomRef) : null,
       url: artifact.url,
     };
   }
@@ -161,9 +162,26 @@ function latestPullRequestEventForRef(
   return events
     .filter((candidate) =>
       candidate.eventType === "pull_request" &&
-      (!eventBranchRef(candidate) || refsMatch(eventBranchRef(candidate) || "", roomRef))
+      Boolean(eventBranchRef(candidate) && refsMatch(eventBranchRef(candidate) || "", roomRef))
     )
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] || null;
+}
+
+function pullRequestIdentityMatchesArtifact(
+  event: DesktopGitHubRoomEvent,
+  artifact: DesktopRoomSharedArtifact,
+): boolean {
+  const eventNumber = event.githubObjectId || metadataNumber(event.metadata, ["number"]) ||
+    metadataNumber(event.metadata, ["pull_request", "number"]);
+  if (artifact.artifactNumber && eventNumber) return String(artifact.artifactNumber) === eventNumber;
+  if (artifact.url && event.githubObjectUrl) {
+    return normalizeUrl(artifact.url) === normalizeUrl(event.githubObjectUrl);
+  }
+  return false;
+}
+
+function normalizeUrl(value: string): string {
+  return value.trim().replace(/\/$/, "").toLowerCase();
 }
 
 function refsMatch(candidate: string, roomRef: string): boolean {

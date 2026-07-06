@@ -146,9 +146,14 @@ const livePullRequestDelta = computed<RepoBranchDelta | null>(() => {
     baseBranch: stats.baseRefName,
   };
 });
-const primaryDelta = computed(() =>
-  livePullRequestDelta.value || pullRequestSummary.value?.delta || roomBranchDelta.value
-);
+const primaryDelta = computed(() => {
+  const pullRequestDelta = livePullRequestDelta.value || pullRequestSummary.value?.delta || null;
+  if (pullRequestDelta) return pullRequestDelta;
+  const delta = roomBranchDelta.value;
+  if (!delta) return null;
+  if (currentBranchMatchesRoom.value && changedCount.value > 0 && isEmptyDelta(delta)) return null;
+  return delta;
+});
 const pullRequestLabel = computed(() =>
   livePullRequestStats.value
     ? `PR #${livePullRequestStats.value.number}`
@@ -253,6 +258,10 @@ function pullRequestStatsTone(
   if (state === "closed") return "danger";
   if (state === "draft") return "attention";
   return "positive";
+}
+
+function isEmptyDelta(delta: RepoBranchDelta): boolean {
+  return delta.filesChanged === 0 && delta.additions === 0 && delta.deletions === 0;
 }
 </script>
 

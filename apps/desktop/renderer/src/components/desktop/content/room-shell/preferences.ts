@@ -22,7 +22,7 @@ export function readLiquidGlassEnabled(): boolean {
   }
 }
 
-const githubEventsVisibilityStorageKey = "letagents-desktop:github-events-visible";
+const githubEventsVisibilityStorageKey = "letagents-desktop:github-events-inline-visible";
 const environmentPanelOpenStorageKey = "letagents-desktop:environment-panel-open";
 
 export function readGitHubEventsVisible(roomIdentifier: string | null | undefined): boolean {

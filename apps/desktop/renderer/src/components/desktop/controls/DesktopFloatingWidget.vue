@@ -4,6 +4,7 @@
     class="desktop-floating-widget"
     :data-open="open"
     :data-anchor="anchor"
+    :data-tone="tone"
     :data-testid="testId"
     @keydown.escape.stop="closeWidget"
   >
@@ -39,10 +40,12 @@ const props = withDefaults(defineProps<{
   label: string;
   summary?: string | null;
   anchor?: "right" | "left";
+  tone?: "neutral" | "attention";
   testId?: string;
 }>(), {
   summary: null,
   anchor: "right",
+  tone: "neutral",
   testId: "desktop-floating-widget",
 });
 
@@ -122,6 +125,17 @@ function handleDocumentPointerDown(event: PointerEvent): void {
     0 18px 42px rgba(0, 0, 0, 0.38),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.94);
+}
+
+.desktop-floating-widget[data-tone="attention"][data-open="false"] .desktop-floating-widget-trigger {
+  border-color: rgba(245, 158, 11, 0.34);
+  background:
+    linear-gradient(135deg, rgba(245, 158, 11, 0.13), rgba(255, 255, 255, 0.035)),
+    rgba(22, 18, 12, 0.96);
+}
+
+.desktop-floating-widget[data-tone="attention"][data-open="false"] .desktop-floating-widget-trigger-icon {
+  color: rgba(251, 191, 36, 0.86);
 }
 
 .desktop-floating-widget-trigger:hover,

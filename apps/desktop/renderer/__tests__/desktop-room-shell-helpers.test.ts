@@ -488,6 +488,9 @@ describe("desktop room shell preferences", () => {
       "letagents-desktop:notifications": "on",
       "letagents-desktop:liquid-glass": "off",
       "letagents-desktop:github-events-visible": JSON.stringify({
+        "github.com/brosincode/letagents": true,
+      }),
+      "letagents-desktop:github-events-inline-visible": JSON.stringify({
         "github.com/brosincode/letagents": false,
       }),
     }, () => {
@@ -513,7 +516,7 @@ describe("desktop room shell preferences", () => {
     withMutableLocalStorage(entries, () => {
       rememberGitHubEventsVisible("GitHub.com/BrosInCode/LetAgents", false);
       assert.equal(readGitHubEventsVisible("github.com/brosincode/letagents"), false);
-      assert.deepEqual(JSON.parse(entries["letagents-desktop:github-events-visible"]), {
+      assert.deepEqual(JSON.parse(entries["letagents-desktop:github-events-inline-visible"]), {
         "github.com/brosincode/letagents": false,
       });
 

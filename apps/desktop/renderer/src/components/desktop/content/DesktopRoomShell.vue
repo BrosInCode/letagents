@@ -67,6 +67,7 @@
       <DesktopFloatingWidget
         :open="environmentPanelOpen"
         label="Environment"
+        :tone="environmentWidgetTone"
         test-id="desktop-room-environment-widget"
         @update:open="setEnvironmentPanelOpen"
       >
@@ -302,6 +303,7 @@ import {
   isLocalGitRoom,
   roomSupportsGitHubIntegration,
 } from "../../../domain/git-rooms";
+import { repoEnvironmentCurrentBranchMatchesRoom } from "../../../domain/repo-environment";
 import {
   activeManagedAgentWorkIndicators,
   managedAgentSessionDisplayName,
@@ -562,6 +564,13 @@ const showEventsTab = computed(() => githubEventsAvailable.value);
 const showEnvironmentPanelWidget = computed(() =>
   activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
 );
+const environmentWidgetTone = computed<"neutral" | "attention">(() => {
+  if (!props.room.gitRoom || !props.repoStatus.isGitRepo || !props.gitRoomMatchesActiveRepo) return "neutral";
+  if (props.repoStatus.detached) return "attention";
+  return repoEnvironmentCurrentBranchMatchesRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
+    ? "neutral"
+    : "attention";
+});
 const effectiveEnvironmentRepoStatus = computed(() => {
   const refreshed = refreshedEnvironmentRepoStatus.value;
   if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;
@@ -647,6 +656,10 @@ watch(() => props.room.identifier, () => {
   restartManagedAgentSessionsRefreshTimer();
 }, { immediate: true });
 
+watch(() => props.repoStatus, () => {
+  refreshedEnvironmentRepoStatus.value = null;
+});
+
 watch(messageNamespace, () => {
   inboxDismissals.value = readInboxDismissals(messageNamespace.value);
   clearInboxUndoState();
@@ -667,7 +680,7 @@ watch(addAgentModalOpen, (open) => {
 
 watch(() => actionPanelOpen.value || searchOpen.value, (toolSurfaceOpen) => {
   if (toolSurfaceOpen && environmentPanelOpen.value) {
-    setEnvironmentPanelOpen(false);
+    environmentPanelOpen.value = false;
   }
 });
 
@@ -741,6 +754,10 @@ watch(() => props.messages.at(-1)?.id || null, () => {
     scheduleInboxRefresh(activeTab.value === "inbox" ? 200 : 700);
   }
   if (!showEventsTab.value || !shouldRefreshEventsForMessage(latestMessage)) return;
+  if (!shouldPreviewComposerEvent(latestMessage)) {
+    scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
+    return;
+  }
   ingestComposerGitHubEvent(latestMessage);
   scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
 });
@@ -1358,6 +1375,12 @@ function shouldRefreshEventsForMessage(message: DesktopRoomMessage): boolean {
   const source = (message.source || "").toLowerCase();
   const sender = (message.sender || "").toLowerCase();
   return source === "github" || sender === "github";
+}
+
+function shouldPreviewComposerEvent(message: DesktopRoomMessage): boolean {
+  const timestamp = Date.parse(message.timestamp);
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp < 30_000;
 }
 
 function repoRepositoryFromRoomIdentifier(identifier: string): string | null {

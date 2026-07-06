@@ -280,6 +280,84 @@ test("repo environment enriches pull request artifacts with matching event code 
   });
 });
 
+test("repo environment does not match ref-less pull request artifacts to branch rooms", () => {
+  const room = roomInfo();
+
+  assert.equal(repoEnvironmentPullRequestForRoom(room, [{
+    roomId: "room_1",
+    identityKey: "github:pull_request:number:648",
+    provider: "github",
+    kind: "pull_request",
+    artifactId: "648",
+    artifactNumber: 648,
+    title: "Different branch work",
+    url: "https://github.com/BrosInCode/letagents/pull/648",
+    ref: null,
+    state: "open",
+    source: "github_event",
+    firstSeenAt: "2026-07-06T00:00:00.000Z",
+    updatedAt: "2026-07-06T00:00:00.000Z",
+    linkedTaskIds: [],
+  }]), null);
+});
+
+test("repo environment only enriches a pull request artifact from the same PR event", () => {
+  const room = roomInfo();
+
+  assert.equal(repoEnvironmentPullRequestForRoom(room, [{
+    roomId: "room_1",
+    identityKey: "github:pull_request:number:647",
+    provider: "github",
+    kind: "pull_request",
+    artifactId: "647",
+    artifactNumber: 647,
+    title: "Productize Git Room environment panel",
+    url: "https://github.com/BrosInCode/letagents/pull/647",
+    ref: "feature/git-rooms",
+    state: "open",
+    source: "github_event",
+    firstSeenAt: "2026-07-06T00:00:00.000Z",
+    updatedAt: "2026-07-06T00:00:00.000Z",
+    linkedTaskIds: [],
+  }], [{
+    id: "evt_1",
+    eventType: "pull_request",
+    action: "synchronize",
+    githubObjectId: "648",
+    githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/648",
+    title: "Different branch work",
+    state: "open",
+    actorLogin: "EmmyMay",
+    metadata: {
+      head_ref: "feature/git-rooms",
+      base_ref: "staging",
+      changed_files: 31,
+      additions: 1988,
+      deletions: 768,
+    },
+    linkedTaskId: null,
+    createdAt: "2026-07-06T00:01:00.000Z",
+  }])?.delta, null);
+});
+
+test("repo environment ignores ref-less pull request events for branch rooms", () => {
+  const room = roomInfo();
+
+  assert.equal(repoEnvironmentPullRequestForRoom(room, [], [{
+    id: "evt_1",
+    eventType: "pull_request",
+    action: "opened",
+    githubObjectId: "648",
+    githubObjectUrl: "https://github.com/BrosInCode/letagents/pull/648",
+    title: "Different branch work",
+    state: "open",
+    actorLogin: "EmmyMay",
+    metadata: {},
+    linkedTaskId: null,
+    createdAt: "2026-07-06T00:01:00.000Z",
+  }]), null);
+});
+
 test("repo environment surfaces a matching pull request event", () => {
   const room = roomInfo();
 
