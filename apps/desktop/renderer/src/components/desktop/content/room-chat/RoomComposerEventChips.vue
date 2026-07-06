@@ -20,22 +20,32 @@
         @click="emit('open-event-preview', event)"
       >
         <span class="desktop-composer-event-icon" aria-hidden="true">
-          <GitPullRequest v-if="event.kind === 'pull-request'" :size="13" />
-          <CircleAlert v-else-if="event.kind === 'check'" :size="13" />
-          <MessageSquare v-else-if="event.kind === 'review' || event.kind === 'comment'" :size="13" />
-          <GitBranch v-else :size="13" />
+          <GitPullRequest v-if="event.kind === 'pull-request'" :size="16" />
+          <CircleAlert v-else-if="event.kind === 'check'" :size="16" />
+          <MessageSquare v-else-if="event.kind === 'review' || event.kind === 'comment'" :size="16" />
+          <GitBranch v-else :size="16" />
         </span>
         <span class="desktop-composer-event-copy">
-          <small>{{ event.statusLabel || event.kindLabel }}</small>
-          <strong>{{ event.headline }}</strong>
+          <span v-if="event.numberLabel" class="desktop-composer-event-muted">{{ event.numberLabel }}</span>
+          <span v-if="event.repositoryLabel" class="desktop-composer-event-muted">{{ event.repositoryLabel }}</span>
+          <strong>{{ event.refLabel || event.headline }}</strong>
         </span>
       </button>
+      <span
+        v-if="event.stats"
+        class="desktop-composer-event-stats"
+        aria-label="Event code changes"
+      >
+        <span class="desktop-composer-event-added">+{{ event.stats.additions }}</span>
+        <span class="desktop-composer-event-deleted">-{{ event.stats.deletions }}</span>
+      </span>
       <button
         class="desktop-composer-event-view"
         type="button"
         @click="emit('open-event-preview', event)"
       >
-        View
+        <span v-if="event.statusLabel" class="desktop-composer-event-status-dot" aria-hidden="true"></span>
+        <span>{{ event.actionLabel || event.statusLabel || event.kindLabel }}</span>
       </button>
       <button
         class="desktop-composer-event-dismiss"
@@ -59,6 +69,11 @@ export interface ComposerEventPreview {
   kindLabel: string;
   statusLabel: string | null;
   headline: string;
+  repositoryLabel: string | null;
+  refLabel: string | null;
+  numberLabel: string | null;
+  stats: { additions: string; deletions: string } | null;
+  actionLabel: string | null;
   url: string | null;
 }
 

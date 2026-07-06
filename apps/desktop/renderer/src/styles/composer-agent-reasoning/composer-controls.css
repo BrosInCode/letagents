@@ -8,22 +8,27 @@
 .desktop-composer-events {
   z-index: 1;
   display: grid;
-  gap: 6px;
+  gap: 7px;
   width: 100%;
   min-width: 0;
 }
 
 .desktop-composer-event {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  min-height: 34px;
-  padding: 5px 5px 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--composer-event-accent) 16%, rgba(255, 255, 255, 0.08));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--composer-event-accent) 6%, rgba(255, 255, 255, 0.025));
+  min-height: 38px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.035);
+  border-radius: 11px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--composer-event-accent) 6%, rgba(255, 255, 255, 0.02)),
+      rgba(255, 255, 255, 0.035)
+    );
   color: var(--text);
   --composer-event-accent: #8ec7ff;
 }
@@ -66,8 +71,13 @@
 }
 
 .desktop-composer-event:hover {
-  border-color: color-mix(in srgb, var(--composer-event-accent) 28%, rgba(255, 255, 255, 0.12));
-  background: color-mix(in srgb, var(--composer-event-accent) 9%, rgba(255, 255, 255, 0.03));
+  border-color: color-mix(in srgb, var(--composer-event-accent) 20%, rgba(255, 255, 255, 0.08));
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--composer-event-accent) 8%, rgba(255, 255, 255, 0.025)),
+      rgba(255, 255, 255, 0.045)
+    );
 }
 
 .desktop-composer-event-main:focus-visible,
@@ -80,8 +90,8 @@
 .desktop-composer-event-icon {
   display: inline-grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   flex: 0 0 auto;
   color: var(--composer-event-accent);
 }
@@ -89,13 +99,12 @@
 .desktop-composer-event-copy {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
   text-align: left;
 }
 
-.desktop-composer-event-copy strong,
-.desktop-composer-event-copy small {
+.desktop-composer-event-copy strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -104,19 +113,44 @@
 
 .desktop-composer-event-copy strong {
   color: rgba(255, 255, 255, 0.86);
-  font-size: 0.75rem;
-  font-weight: 780;
+  font-size: 0.78rem;
+  font-weight: 720;
   line-height: 1.15;
 }
 
-.desktop-composer-event-copy small {
+.desktop-composer-event-muted {
   flex: 0 0 auto;
-  color: color-mix(in srgb, var(--composer-event-accent) 72%, rgba(255, 255, 255, 0.42));
-  font-size: 0.62rem;
-  font-weight: 820;
-  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 0.78rem;
+  font-weight: 620;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.desktop-composer-event-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.64);
+  font-size: 0.74rem;
+  font-weight: 800;
   line-height: 1.1;
-  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-composer-event-added {
+  color: #66ec80;
+}
+
+.desktop-composer-event-deleted {
+  color: #ff5f7d;
 }
 
 .desktop-composer-event-view,
@@ -132,16 +166,28 @@
 }
 
 .desktop-composer-event-view {
-  height: 24px;
-  padding: 0 7px;
-  border-radius: 7px;
-  font-size: 0.68rem;
-  font-weight: 760;
+  display: inline-flex;
+  gap: 6px;
+  height: 27px;
+  padding: 0 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.72rem;
+  font-weight: 720;
+  line-height: 1;
+}
+
+.desktop-composer-event-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--composer-event-accent);
 }
 
 .desktop-composer-event-dismiss {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   border-radius: 8px;
 }

@@ -342,6 +342,7 @@ import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
+import { buildComposerEventPreview } from "./room-chat/composer-event-preview";
 import type { AgentModalTarget, GitHubEventPresentation } from "./desktop-chat-message/types";
 import {
   isLowSignalGitHubCheckMessage,
@@ -1238,15 +1239,7 @@ function ingestComposerGitHubEvent(message: DesktopRoomMessage): void {
 }
 
 function addComposerGitHubEventPreview(messageId: string, event: GitHubEventPresentation): void {
-  const preview: ComposerEventPreview = {
-    id: messageId,
-    kind: event.kind,
-    tone: event.tone,
-    kindLabel: event.kindLabel,
-    statusLabel: event.statusLabel,
-    headline: event.headline,
-    url: event.url,
-  };
+  const preview = buildComposerEventPreview(messageId, event, props.room, eventsPage.value?.events || []);
   const existingTimer = composerGitHubEventTimers.get(messageId);
   if (existingTimer !== undefined) window.clearTimeout(existingTimer);
   composerGitHubEventPreviews.value = [
