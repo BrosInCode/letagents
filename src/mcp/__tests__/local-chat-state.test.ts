@@ -15,6 +15,7 @@ process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
 const {
   addLocalChatMessage,
   addLocalTask,
+  getLatestLocalChatMessages,
   getLocalChatMessages,
   getLocalTask,
   isLocalChatStorageEnabled,
@@ -92,6 +93,24 @@ test("MCP local chat state follows setting and supports message wait", async () 
     timeoutMs: 1,
   });
   assert.deepEqual(emptyPoll.messages, []);
+});
+
+test("MCP local chat serves the most recent messages without walking history", async () => {
+  for (let index = 1; index <= 4; index += 1) {
+    await addLocalChatMessage("recent_room", {
+      sender: "Agent",
+      text: `message ${index}`,
+      source: "agent",
+    });
+  }
+
+  const page = await getLatestLocalChatMessages("recent_room", { limit: 2 });
+  assert.deepEqual(page.messages.map((entry) => entry.text), ["message 3", "message 4"]);
+  assert.equal(page.has_more, true);
+
+  const fullPage = await getLatestLocalChatMessages("recent_room", { limit: 10 });
+  assert.equal(fullPage.messages.length, 4);
+  assert.equal(fullPage.has_more, false);
 });
 
 test("MCP local chat keeps quote-replies top-level and only threads with an explicit thread root", async () => {

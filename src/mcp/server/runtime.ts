@@ -113,6 +113,7 @@ export {
   addLocalChatMessage,
   addLocalTask,
   claimLocalTaskReviewLease,
+  getLatestLocalChatMessages,
   getLocalChatMessages,
   getLocalTask,
   listLocalTasks,

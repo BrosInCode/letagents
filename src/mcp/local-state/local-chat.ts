@@ -698,6 +698,34 @@ export async function getLocalChatMessages(
   };
 }
 
+export async function getLatestLocalChatMessages(
+  roomId: string,
+  options?: {
+    limit?: number;
+    include_prompt_only?: boolean;
+  },
+): Promise<LocalChatMessagePage> {
+  const limit = clampLimit(options?.limit);
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+      ORDER BY number DESC
+      LIMIT ?
+    `)
+    .all(roomId, limit + 1)
+    .map(mapRow);
+  const hasMore = rows.length > limit;
+  const bounded = (hasMore ? rows.slice(0, limit) : rows).reverse();
+  return {
+    room_id: roomId,
+    messages: await hydrateRows(database, bounded),
+    has_more: hasMore,
+  };
+}
+
 export async function waitForLocalChatMessages(
   roomId: string,
   options: {

@@ -1,5 +1,4 @@
 import { encodeRoomIdPath } from "./room-id.js";
-import { buildRoomAgentPrompt, normalizeAgentPromptKind } from "../shared/room-agent-prompts.js";
 
 export interface Message {
   id: string;
@@ -205,21 +204,12 @@ export class SseClient {
       return;
     }
 
-    onMessage(this.enrichPromptMetadata(JSON.parse(dataLines.join("\n")) as Message));
-  }
-
-  private enrichPromptMetadata(message: Message): Message {
-    const kind = normalizeAgentPromptKind(message.agent_prompt_kind);
-    if (!kind) {
-      return message;
-    }
-
-    return {
-      ...message,
-      visible_text: message.text,
-      agent_prompt: buildRoomAgentPrompt(kind),
-      prompt_injected: kind === "inline",
-    };
+    // No prompt enrichment here: the only SSE subscriber (room-state.ts) discards
+    // the message body, and expanding the room-agent prompt on this background
+    // path would consume the once-per-session full-prompt delivery before the
+    // agent ever sees it. Prompt expansion happens only on visible tool
+    // responses (runtime/messages.ts).
+    onMessage(JSON.parse(dataLines.join("\n")) as Message);
   }
 
   private isMissingRouteError(error: unknown): boolean {

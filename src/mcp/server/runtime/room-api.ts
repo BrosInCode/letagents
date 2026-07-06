@@ -17,6 +17,10 @@ export async function roomScopedApiCall<T>(input: {
   room_path: (roomId: string) => string;
   project_path: (projectId: string) => string;
   options?: RequestInit;
+  // Backward-history fetches return pages whose last message is OLDER than the
+  // session cursor; setting this keeps the liveness touch but leaves
+  // last_message_id alone so the cursor never moves backwards.
+  preserve_session_cursor?: boolean;
 }): Promise<T> {
   const headers = {
     ...(input.options?.headers as Record<string, string> | undefined),
@@ -39,7 +43,7 @@ export async function roomScopedApiCall<T>(input: {
     const apiRoomId = cloudRoomId || input.room_id;
     try {
       const result = await apiCall<T>(input.room_path(apiRoomId), options);
-      touchRoomSession(input.room_id, getLastMessageId(result));
+      touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
       return result;
     } catch (error) {
       await maybeHandleRepoRoomAuthRequired(error, apiRoomId);
@@ -55,7 +59,7 @@ export async function roomScopedApiCall<T>(input: {
 
   const result = await apiCall<T>(input.project_path(input.project_id), options);
   if (input.room_id) {
-    touchRoomSession(input.room_id, getLastMessageId(result));
+    touchRoomSession(input.room_id, input.preserve_session_cursor ? undefined : getLastMessageId(result));
   }
   return result;
 }
