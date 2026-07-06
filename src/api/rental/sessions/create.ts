@@ -12,6 +12,28 @@ function generateSessionId(): string {
   return `rsess_${timestamp}_${random}`;
 }
 
+/**
+ * Resolve the effective LRT limit for a new session, preferring the
+ * renter-supplied value over the listing default.
+ *
+ * A session without an LRT limit can never pass the Budget Sentinel
+ * (effectiveLrtCeiling(null) → 0 denies every step), so it would sit
+ * active-but-unusable. Reject at creation instead.
+ */
+export function resolveSessionLrtLimit(
+  inputLimit: number | undefined,
+  listingDefault: number | null,
+): number {
+  const lrtLimit = inputLimit ?? listingDefault;
+  if (lrtLimit === null || lrtLimit === undefined) {
+    throw new Error("lrt_limit_required");
+  }
+  if (!Number.isInteger(lrtLimit) || lrtLimit <= 0) {
+    throw new Error("lrt_limit_invalid");
+  }
+  return lrtLimit;
+}
+
 export async function createSession(
   input: CreateSessionInput,
 ): Promise<typeof rental_sessions.$inferSelect> {
@@ -33,6 +55,11 @@ export async function createSession(
     throw new Error("mode_not_supported");
   }
 
+  const lrtLimit = resolveSessionLrtLimit(
+    input.lrtLimit,
+    listing.default_lrt_limit,
+  );
+
   const id = generateSessionId();
 
   const [session] = await db
@@ -53,7 +80,7 @@ export async function createSession(
       approved_scope: input.approvedScope ?? null,
       policy: input.policy ?? null,
       status: "requested",
-      lrt_limit: input.lrtLimit ?? listing.default_lrt_limit,
+      lrt_limit: lrtLimit,
       time_limit_minutes:
         input.timeLimitMinutes ?? listing.default_time_limit_minutes,
       start_trigger: input.startTrigger,

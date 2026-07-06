@@ -8,6 +8,7 @@ import {
   SESSION_CANCELLED,
 } from "../activity-event-types.js";
 import { isValidTransition } from "../session-state-machine.js";
+import { countCapacityConsumingSessions } from "./queries.js";
 import {
   acquireQuotaLeaseForSession,
   releaseQuotaLeaseForSession,
@@ -41,6 +42,15 @@ export async function acceptSession(
     .where(eq(rental_listings.id, session.listing_id));
   if (!listing) {
     throw new Error("listing_not_found");
+  }
+
+  // Capacity check before taking the quota lease so a rejected accept
+  // leaves no lease to unwind. Concurrent accepts on the same quota lane
+  // are still serialized by the lane advisory lock inside the lease
+  // acquisition, which remains the hard one-per-lane guarantee.
+  const occupied = await countCapacityConsumingSessions(listing.id);
+  if (occupied >= listing.max_concurrent_sessions) {
+    throw new Error("listing_at_capacity");
   }
 
   const lease = await acquireQuotaLeaseForSession(session, listing);

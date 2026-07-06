@@ -286,6 +286,7 @@ export function registerRentalProviderRoutes(
         if (
           message.startsWith("invalid_transition")
           || message.startsWith("quota_lease_")
+          || message === "listing_at_capacity"
         ) {
           res.status(409).json({ error: message });
           return;

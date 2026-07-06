@@ -17,6 +17,10 @@ export const VALID_TRANSITIONS: Record<string, string[]> = {
     "patch_review",
     "budget_exhausted",
     "cancelled",
+    // Sessions that finish without a patch cycle (advisory work, read-only
+    // investigations) complete directly; rental_complete allows either party
+    // to end an active session.
+    "completed",
     "expired",
     "stale",
   ],

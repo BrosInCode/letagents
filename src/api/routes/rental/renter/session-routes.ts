@@ -94,7 +94,11 @@ export function registerSessionRoutes(
         ) {
           return res.status(404).json({ error: message });
         }
-        if (message === "mode_not_supported") {
+        if (
+          message === "mode_not_supported" ||
+          message === "lrt_limit_required" ||
+          message === "lrt_limit_invalid"
+        ) {
           return res.status(400).json({ error: message });
         }
         return res.status(500).json({ error: message });
