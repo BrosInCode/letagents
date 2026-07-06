@@ -67,7 +67,6 @@
       <DesktopFloatingWidget
         :open="environmentPanelOpen"
         label="Environment"
-        :summary="environmentWidgetSummary"
         test-id="desktop-room-environment-widget"
         @update:open="setEnvironmentPanelOpen"
       >
@@ -315,13 +314,6 @@ import {
   preferredManagedAgentRepoRootPath,
   type ManagedAgentPermissionApproval,
 } from "../../../domain/managed-agents";
-import {
-  repoEnvironmentBranchDeltaForRoom,
-  repoEnvironmentBranchDeltaLabel,
-  repoEnvironmentChangeLabel,
-  repoEnvironmentCurrentBranchMatchesRoom,
-  repoEnvironmentRoomRefLabel,
-} from "../../../domain/repo-environment";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
@@ -573,21 +565,6 @@ const effectiveEnvironmentRepoStatus = computed(() => {
   const refreshed = refreshedEnvironmentRepoStatus.value;
   if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;
   return refreshed;
-});
-const environmentWidgetSummary = computed(() => {
-  const roomBranch = repoEnvironmentRoomRefLabel(props.room);
-  if (!roomBranch) return "Git Room";
-  const repoStatus = effectiveEnvironmentRepoStatus.value;
-  if (!props.gitRoomMatchesActiveRepo) return roomBranch;
-  if (!repoEnvironmentCurrentBranchMatchesRoom(props.room, repoStatus, props.gitRoomMatchesActiveRepo)) {
-    return repoEnvironmentBranchDeltaLabel(
-      repoEnvironmentBranchDeltaForRoom(props.room, repoStatus, props.gitRoomMatchesActiveRepo),
-    ) || roomBranch;
-  }
-  const roomDelta = repoEnvironmentBranchDeltaForRoom(props.room, repoStatus, props.gitRoomMatchesActiveRepo);
-  return repoEnvironmentBranchDeltaLabel(
-    roomDelta,
-  ) || roomBranch;
 });
 const roomManagedAgentSessions = computed(() =>
   managedAgentSessions.value.filter((session) =>
