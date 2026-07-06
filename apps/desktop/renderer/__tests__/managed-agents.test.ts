@@ -55,6 +55,7 @@ import {
   shouldShowCursorMcpPolicySelector,
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
+  visibleDesktopAgentProviders,
 } from "../src/domain/managed-agents";
 import { isMentionableRoomParticipant } from "../src/domain/participants";
 
@@ -625,6 +626,33 @@ test("isExternalMcpProviderReady distinguishes bridge-only providers from deskto
     status: "bridge_required",
     mcpStatus: "not_installed",
   })), false);
+});
+
+test("visibleDesktopAgentProviders excludes Antigravity from Add Agent choices", () => {
+  const providers = visibleDesktopAgentProviders([
+    provider({
+      id: "claude-code",
+      name: "Claude Code",
+      mcpTargetId: "claude-code",
+    }),
+    provider({
+      id: "antigravity",
+      name: "Antigravity",
+      capabilities: ["external_mcp"],
+      runtimeCommand: null,
+      mcpTargetId: "antigravity",
+    }),
+    provider({
+      id: "codex",
+      name: "Codex",
+      mcpTargetId: "codex",
+    }),
+  ]);
+
+  assert.deepEqual(
+    providers.map((provider) => provider.id),
+    ["claude-code", "codex"],
+  );
 });
 
 test("agentProviderNeedsDesktopRepo only requires a repo for desktop-supervised providers", () => {

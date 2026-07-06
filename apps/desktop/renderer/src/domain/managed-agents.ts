@@ -29,6 +29,12 @@ export function hasDesktopManagedRuntime(
   return Boolean(provider?.capabilities.includes("desktop_managed_runtime"));
 }
 
+export function visibleDesktopAgentProviders(
+  providers: DesktopAgentProvider[],
+): DesktopAgentProvider[] {
+  return providers.filter((provider) => provider.id !== "antigravity");
+}
+
 export function preferredManagedAgentRepoRootPath(
   repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath" | "worktrees" | "defaultBranch"> | null | undefined,
   gitRoom?: Pick<DesktopGitRoomInfo, "ref" | "isDefault"> | null,
