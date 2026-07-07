@@ -1,11 +1,12 @@
 import type { Express } from "express";
 
 import {
-  respondWithBadRequest,
+  respondWithValidationOrInternalError,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { normalizeMessageAttachmentReferences } from "../../../messages/attachments.js";
+import { parseCreateMessageBody } from "../../../messages/inputs.js";
 import {
   hasAgentSessionCredentials,
   isAgentLikeSender,
@@ -22,43 +23,24 @@ export function registerCreateMessageRoute(
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
 
-    const {
-      sender,
-      text,
-      agent_prompt_kind,
-      reply_to,
-      thread_root_id,
-      attachments: rawAttachments,
-      agent_session_id,
-      agent_session_token,
-      client_message_id,
-    } = req.body as {
-      sender?: string;
-      text?: string;
-      agent_prompt_kind?: string;
-      reply_to?: string;
-      thread_root_id?: string;
-      attachments?: unknown;
-      agent_session_id?: string;
-      agent_session_token?: string;
-      client_message_id?: string;
-    };
     try {
-      const promptKind = deps.parseOptionalAgentPromptKind(agent_prompt_kind);
-      const replyToMessageId = deps.parseOptionalReplyToMessageId(reply_to);
-      const threadRootMessageId = deps.parseOptionalThreadRootMessageId(thread_root_id);
-      const attachments = normalizeMessageAttachmentReferences(rawAttachments);
-      const desktopHumanWrite = isDesktopHumanWrite(req, {
-        agent_session_id,
-        agent_session_token,
-      });
+      const body = parseCreateMessageBody(req.body);
+      const sessionCredentials = {
+        agent_session_id: body.agent_session_id ?? undefined,
+        agent_session_token: body.agent_session_token ?? undefined,
+      };
+      const promptKind = deps.parseOptionalAgentPromptKind(body.agent_prompt_kind);
+      const replyToMessageId = deps.parseOptionalReplyToMessageId(body.reply_to);
+      const threadRootMessageId = deps.parseOptionalThreadRootMessageId(body.thread_root_id);
+      const attachments = normalizeMessageAttachmentReferences(body.attachments);
+      const desktopHumanWrite = isDesktopHumanWrite(req, sessionCredentials);
       const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
-        || hasAgentSessionCredentials({ agent_session_id, agent_session_token })
-        || isAgentLikeSender(sender));
+        || hasAgentSessionCredentials(sessionCredentials)
+        || isAgentLikeSender(body.sender));
       const agentSessionIdentity = requiresWorkerSession
         ? await requireWorkerRequestAgentIdentity({
           req,
-          body: { agent_session_id, agent_session_token },
+          body: sessionCredentials,
           room_id: project.id,
         })
         : null;
@@ -67,8 +49,8 @@ export function registerCreateMessageRoute(
         return;
       }
       const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
-      const normalizedSender = workerIdentity?.actor_label
-        || (typeof sender === "string" ? sender.trim() : "");
+      const normalizedSender = workerIdentity?.actor_label || body.sender?.trim() || "";
+      const text = body.text;
       if (
         !normalizedSender ||
         typeof text !== "string" ||
@@ -92,7 +74,7 @@ export function registerCreateMessageRoute(
         reply_to: replyToMessageId,
         thread_root_id: threadRootMessageId,
         attachments,
-        ...(typeof client_message_id === "string" ? { client_message_id } : {}),
+        ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
         account_id: req.sessionAccount?.account_id ?? null,
       });
       await deps.rememberRoomParticipantFromMessage({
@@ -115,7 +97,7 @@ export function registerCreateMessageRoute(
         room_id: project.id,
       });
     } catch (error) {
-      respondWithBadRequest(
+      respondWithValidationOrInternalError(
         res,
         "POST /rooms/:room_id/messages",
         error,

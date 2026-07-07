@@ -25,6 +25,7 @@ import {
   type StoredAgentSessionState,
 } from "../../runtime.js";
 import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
+import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { jsonToolResponse } from "./response.js";
 
 const DEFAULT_POLL_TIMEOUT_MS = 30000;
@@ -216,57 +217,10 @@ async function attachLocalActivationMetadata(
   }, activationContext);
 }
 
-async function findLocalMessageById(roomId: string, targetMessageId: string): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const result = await getLocalChatMessages(roomId, {
-      after: afterCursor,
-      include_prompt_only: true,
-    });
-    const messages = (result.messages ?? []).filter(isRecord);
-    const match = messages.find((message) => message.id === targetMessageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = messageId(lastMessage) ?? undefined;
-    if (!afterCursor) return null;
-  }
-}
-
-async function findRemoteMessageById(input: {
-  roomId: string | null;
-  projectId: string | null;
-  targetMessageId: string;
-}): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const params = new URLSearchParams();
-    if (afterCursor) params.set("after", afterCursor);
-    const queryString = params.toString();
-    const result = await roomScopedApiCall<{
-      messages?: MessageRecord[];
-      has_more?: boolean;
-    }>({
-      room_id: input.roomId,
-      project_id: input.projectId,
-      room_path: (roomId) =>
-        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(roomId)}/messages${queryString ? `?${queryString}` : ""}`),
-      project_path: (projectId) =>
-        appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages${queryString ? `?${queryString}` : ""}`),
-    });
-    const messages = (result.messages ?? []).filter(isRecord);
-    const match = messages.find((message) => message.id === input.targetMessageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = messageId(lastMessage) ?? undefined;
-    if (!afterCursor) return null;
-  }
-}
-
-// Resolving an out-of-window parent walks the room history page by page, so
-// resolved (and observed) messages are cached per process to keep repeat polls
-// from re-walking history for the same thread roots. Message ids are
+// Resolving an out-of-window parent costs a lookup (a by-id fetch, or a
+// page-by-page history scan against older APIs), so resolved (and observed)
+// messages are cached per process to keep repeat polls from re-resolving the
+// same thread roots. Message ids are
 // room-scoped, so the key includes the room scope. Message records are treated
 // as immutable once posted; a bounded insertion-ordered map keeps memory flat
 // for long-running workers.
@@ -336,7 +290,7 @@ export async function collectThreadContextMessages(input: {
         : await findRemoteMessageById({
           roomId: input.roomId,
           projectId: input.projectId,
-          targetMessageId: nextId,
+          messageId: nextId,
         }));
     if (!message) continue;
     if (!cached) {

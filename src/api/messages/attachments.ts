@@ -1,3 +1,5 @@
+import { RequestValidationError } from "../validation-error.js";
+
 export const MAX_MESSAGE_ATTACHMENTS = 4;
 export const MAX_MESSAGE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_MESSAGE_ATTACHMENT_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -39,17 +41,17 @@ function normalizeContentType(value: unknown): string {
 function normalizeByteSize(value: unknown): number {
   const size = typeof value === "number" ? value : Number(value);
   if (!Number.isInteger(size) || size <= 0) {
-    throw new Error("attachment byte_size must be a positive integer");
+    throw new RequestValidationError("attachment byte_size must be a positive integer");
   }
   if (size > MAX_MESSAGE_ATTACHMENT_BYTES) {
-    throw new Error(`attachment exceeds the ${MAX_MESSAGE_ATTACHMENT_BYTES} byte limit`);
+    throw new RequestValidationError(`attachment exceeds the ${MAX_MESSAGE_ATTACHMENT_BYTES} byte limit`);
   }
   return size;
 }
 
 export function normalizeAttachmentUploadRequest(value: unknown): NormalizedAttachmentUploadRequest {
   if (!value || typeof value !== "object") {
-    throw new Error("attachment upload metadata is required");
+    throw new RequestValidationError("attachment upload metadata is required");
   }
   const input = value as Record<string, unknown>;
   return {
@@ -70,10 +72,10 @@ export function normalizeMessageAttachmentReferences(value: unknown): Normalized
     return [];
   }
   if (!Array.isArray(value)) {
-    throw new Error("attachments must be an array");
+    throw new RequestValidationError("attachments must be an array");
   }
   if (value.length > MAX_MESSAGE_ATTACHMENTS) {
-    throw new Error(`messages can include at most ${MAX_MESSAGE_ATTACHMENTS} attachments`);
+    throw new RequestValidationError(`messages can include at most ${MAX_MESSAGE_ATTACHMENTS} attachments`);
   }
 
   const seen = new Set<string>();
@@ -85,10 +87,10 @@ export function normalizeMessageAttachmentReferences(value: unknown): Normalized
         : "";
     const normalized = uploadId.trim();
     if (!/^upl_[A-Za-z0-9_-]{16,}$/.test(normalized)) {
-      throw new Error("attachments must reference valid upload_id values");
+      throw new RequestValidationError("attachments must reference valid upload_id values");
     }
     if (seen.has(normalized)) {
-      throw new Error("duplicate attachment upload_id values are not allowed");
+      throw new RequestValidationError("duplicate attachment upload_id values are not allowed");
     }
     seen.add(normalized);
     return { upload_id: normalized };
@@ -98,7 +100,7 @@ export function normalizeMessageAttachmentReferences(value: unknown): Normalized
 export function assertAttachmentTotalByteSize(attachments: readonly { byte_size: number }[]): void {
   const total = attachments.reduce((sum, attachment) => sum + attachment.byte_size, 0);
   if (total > MAX_MESSAGE_ATTACHMENT_TOTAL_BYTES) {
-    throw new Error(`message attachments exceed the ${MAX_MESSAGE_ATTACHMENT_TOTAL_BYTES} byte total limit`);
+    throw new RequestValidationError(`message attachments exceed the ${MAX_MESSAGE_ATTACHMENT_TOTAL_BYTES} byte total limit`);
   }
 }
 

@@ -6,6 +6,7 @@ import {
   type Message,
 } from "../db.js";
 import { parseScopedId } from "../db/utils.js";
+import { publishRoomMessageCreated } from "./event-bridge.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
 import type { AgentPromptKind } from "../../shared/room-agent-prompts.js";
 
@@ -48,6 +49,8 @@ export async function emitProjectMessage(
       projectId,
       message: await hydrateMessageForSharedEvent(projectId, message),
     } satisfies MessageCreatedEvent);
+    // Best-effort relay so subscribers on other API instances wake up too.
+    void publishRoomMessageCreated(projectId, message.id);
   }
   return message;
 }

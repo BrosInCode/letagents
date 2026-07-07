@@ -1,6 +1,7 @@
 import type { Express } from "express";
 
 import {
+  createSseWriter,
   startSseStream,
   stopSseStream,
 } from "../../../http/sse.js";
@@ -72,6 +73,7 @@ export function registerMessageStreamRoute(
     }
 
     const heartbeat = startSseStream(res);
+    const writeEvent = createSseWriter(res, `room messages stream ${projectId}`);
     let streamClosed = false;
     let messageWriteQueue = Promise.resolve();
 
@@ -85,7 +87,7 @@ export function registerMessageStreamRoute(
         const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
         const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
         if (streamClosed) return;
-        res.write(`data: ${JSON.stringify({
+        writeEvent(`data: ${JSON.stringify({
           ...(activationIdentity ? attachAgentMessageActivation(streamMessage, activationIdentity, activationContext) : streamMessage),
           room_id: project.id,
         })}\n\n`);
@@ -93,7 +95,7 @@ export function registerMessageStreamRoute(
         console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
         const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
         if (streamClosed) return;
-        res.write(`data: ${JSON.stringify({
+        writeEvent(`data: ${JSON.stringify({
           ...(activationIdentity ? attachAgentMessageActivation(message, activationIdentity, activationContext) : message),
           room_id: project.id,
         })}\n\n`);
@@ -110,12 +112,12 @@ export function registerMessageStreamRoute(
 
     const onTaskUpdated = (event: TaskUpdatedEvent) => {
       if (event.projectId !== projectId) return;
-      res.write(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
+      writeEvent(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
     };
 
     const onGitHubEventUpdated = (event: GitHubRoomEventUpdatedEvent) => {
       if (event.projectId !== projectId) return;
-      res.write(`event: github_event\ndata: ${JSON.stringify({
+      writeEvent(`event: github_event\ndata: ${JSON.stringify({
         ...toPublicGitHubRoomEvent(event.event),
         room_id: project.id,
       })}\n\n`);
@@ -123,7 +125,7 @@ export function registerMessageStreamRoute(
 
     const onReasoningUpdated = (event: ReasoningSessionUpdatedEvent) => {
       if (event.projectId !== projectId) return;
-      res.write(
+      writeEvent(
         `event: reasoning_update\ndata: ${JSON.stringify({
           room_id: project.id,
           session: event.session,
@@ -134,12 +136,12 @@ export function registerMessageStreamRoute(
 
     const onReasoningRemoved = (event: ReasoningSessionRemovedEvent) => {
       if (event.projectId !== projectId) return;
-      res.write(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
+      writeEvent(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
     };
 
     const onArtifactUpdated = (event: RoomArtifactUpdatedEvent) => {
       if (event.projectId !== projectId) return;
-      res.write(`event: artifact_update\ndata: ${JSON.stringify({
+      writeEvent(`event: artifact_update\ndata: ${JSON.stringify({
         room_id: project.id,
         artifact_identity_key: event.artifact?.identity_key ?? null,
       })}\n\n`);
@@ -153,7 +155,7 @@ export function registerMessageStreamRoute(
       if (activity.visibility !== "rental_visible") return;
       const payload = rentalActivityPayload(project.id, activity);
       for (const streamName of rentalActivityStreamNames(activity)) {
-        res.write(`event: ${streamName}\ndata: ${JSON.stringify(payload)}\n\n`);
+        writeEvent(`event: ${streamName}\ndata: ${JSON.stringify(payload)}\n\n`);
       }
     };
 

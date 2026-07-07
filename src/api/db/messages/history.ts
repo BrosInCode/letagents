@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
+import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
 import { message_attachments, message_thread_reads, messages } from "../schema.js";
 import {
@@ -131,6 +132,30 @@ export async function getMessagesBefore(
   };
 }
 
+export async function getMessageById(
+  roomId: string,
+  messageId: string,
+  options?: { include_prompt_only?: boolean; account_id?: string | null },
+): Promise<Message | null> {
+  const messageNumber = parseScopedId(messageId, "msg");
+  if (!messageNumber) {
+    return null;
+  }
+  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+
+  const rows = await db
+    .select(messageRowSelection)
+    .from(messages)
+    .where(and(eq(messages.room_id, roomId), eq(messages.number, messageNumber), visibilityCondition))
+    .limit(1);
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const [hydrated] = await hydrateMessageReplies(roomId, rows, { accountId: options?.account_id });
+  return hydrated ?? null;
+}
+
 export async function hydrateMessageReplies(
   roomId: string,
   bounded: MessageRow[],
@@ -208,7 +233,7 @@ export async function getMessageThread(
 ): Promise<MessageThreadPage | null> {
   const requestedRootNumber = parseScopedId(rootMessageId, "msg");
   if (!requestedRootNumber) {
-    throw new Error("thread root must be a valid message id");
+    throw new RequestValidationError("thread root must be a valid message id");
   }
 
   const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
@@ -227,7 +252,7 @@ export async function getMessageThread(
 
   const beforeNumber = options?.before ? parseScopedId(options.before, "msg") : null;
   if (options?.before && !beforeNumber) {
-    throw new Error("before must be a valid message id");
+    throw new RequestValidationError("before must be a valid message id");
   }
 
   const limit = clampLimit(options?.limit);
@@ -279,7 +304,7 @@ export async function getMessageThreads(
   const filter = options?.filter ?? "all";
   const beforeNumber = options?.before ? parseScopedId(options.before, "msg") : null;
   if (options?.before && !beforeNumber) {
-    throw new Error("before must be a valid message id");
+    throw new RequestValidationError("before must be a valid message id");
   }
 
   const limit = clampLimit(options?.limit);
@@ -370,7 +395,7 @@ export async function markMessageThreadRead(
 ): Promise<MessageThreadSummary | null> {
   const requestedRootNumber = parseScopedId(rootMessageId, "msg");
   if (!requestedRootNumber) {
-    throw new Error("thread root must be a valid message id");
+    throw new RequestValidationError("thread root must be a valid message id");
   }
 
   const requestedRoot = await getVisibleMessageRow(roomId, requestedRootNumber, false);
@@ -386,11 +411,11 @@ export async function markMessageThreadRead(
   if (options?.message_id) {
     lastReadNumber = parseScopedId(options.message_id, "msg");
     if (!lastReadNumber) {
-      throw new Error("message_id must be a valid message id");
+      throw new RequestValidationError("message_id must be a valid message id");
     }
     const target = await getVisibleMessageRow(roomId, lastReadNumber, false);
     if (!target || (target.number !== rootNumber && target.thread_root_number !== rootNumber)) {
-      throw new Error("message_id must belong to the requested thread");
+      throw new RequestValidationError("message_id must belong to the requested thread");
     }
   } else {
     const [latestReply] = await db

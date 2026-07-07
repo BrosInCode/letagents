@@ -1,6 +1,7 @@
 export { addMessage, addMessageWithCreateStatus } from "./messages/create.js";
 export {
   getLatestMessages,
+  getMessageById,
   getMessageThread,
   getMessageThreads,
   getMessages,
