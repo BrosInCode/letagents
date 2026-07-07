@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { DesktopAgentProvider } from "../ipc-types.js";
+import type { DesktopAgentProvider, DesktopAgentProviderPreflightInput } from "../ipc-types.js";
 
 const tempDir = mkdtempSync(join(tmpdir(), "letagents-cursor-provider-preflight-"));
 const statePath = join(tempDir, "mcp-state.json");
@@ -68,6 +68,16 @@ const cursorProvider: DesktopAgentProvider = {
   defaultPermissionProfileId: null,
 };
 
+// The electron suite runs test files as parallel node processes, so spawning the
+// fake cursor-agent child can take arbitrarily long under load. Disable the
+// per-command wall-clock timeout: the fake binary always exits on its own, and
+// the timeout itself is not the behavior under test.
+function runPreflight(input: DesktopAgentProviderPreflightInput) {
+  return runDesktopCursorProviderPreflight(cursorProvider, input, "installed", {
+    commandTimeoutMs: 0,
+  });
+}
+
 test.after(() => {
   delete process.env.LETAGENTS_STATE_PATH;
   delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
@@ -79,7 +89,7 @@ test.after(() => {
 test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
   const workspace = workspaceFixture("default-filter");
 
-  const result = await runDesktopCursorProviderPreflight(cursorProvider, { repoRootPath: workspace }, "installed");
+  const result = await runPreflight({ repoRootPath: workspace });
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
@@ -98,15 +108,11 @@ test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
 test("Cursor preflight validates write-capable permission profile flags", async () => {
   const workspace = workspaceFixture("full-access");
 
-  const result = await runDesktopCursorProviderPreflight(
-    cursorProvider,
-    {
-      repoRootPath: workspace,
-      permissionProfileId: "full_access",
-      cursorMcpPolicy: "filter_letagents",
-    },
-    "installed",
-  );
+  const result = await runPreflight({
+    repoRootPath: workspace,
+    permissionProfileId: "full_access",
+    cursorMcpPolicy: "filter_letagents",
+  });
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
@@ -117,14 +123,10 @@ test("Cursor preflight validates write-capable permission profile flags", async 
 test("Cursor preflight blocks gated permission profiles", async () => {
   const workspace = workspaceFixture("gated-permission-profile");
 
-  const result = await runDesktopCursorProviderPreflight(
-    cursorProvider,
-    {
-      repoRootPath: workspace,
-      permissionProfileId: "ask_before_write",
-    },
-    "installed",
-  );
+  const result = await runPreflight({
+    repoRootPath: workspace,
+    permissionProfileId: "ask_before_write",
+  });
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
@@ -134,14 +136,10 @@ test("Cursor preflight blocks gated permission profiles", async () => {
 test("Cursor preflight blocks unknown permission profiles", async () => {
   const workspace = workspaceFixture("unknown-permission-profile");
 
-  const result = await runDesktopCursorProviderPreflight(
-    cursorProvider,
-    {
-      repoRootPath: workspace,
-      permissionProfileId: "unknown_profile" as never,
-    },
-    "installed",
-  );
+  const result = await runPreflight({
+    repoRootPath: workspace,
+    permissionProfileId: "unknown_profile" as never,
+  });
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
@@ -154,14 +152,10 @@ test("Cursor preflight blocks visible LetAgents MCP for managed MCP policies", a
     const workspace = workspaceFixture(`blocked-${policy}`);
     writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "letagents\n");
 
-    const result = await runDesktopCursorProviderPreflight(
-      cursorProvider,
-      {
-        repoRootPath: workspace,
-        cursorMcpPolicy: policy,
-      },
-      "installed",
-    );
+    const result = await runPreflight({
+      repoRootPath: workspace,
+      cursorMcpPolicy: policy,
+    });
 
     assert.equal(result.status, "error");
     assert.equal(result.canStart, false);
@@ -173,14 +167,10 @@ test("Cursor preflight blocks any visible MCP server for none policy", async () 
   const workspace = workspaceFixture("none-visible-non-letagents");
   writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "filesystem\n");
 
-  const result = await runDesktopCursorProviderPreflight(
-    cursorProvider,
-    {
-      repoRootPath: workspace,
-      cursorMcpPolicy: "none",
-    },
-    "installed",
-  );
+  const result = await runPreflight({
+    repoRootPath: workspace,
+    cursorMcpPolicy: "none",
+  });
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
@@ -193,14 +183,10 @@ test("Cursor preflight allows normal MCP policy even when LetAgents is configure
   writeFileSync(join(workspace, ".cursor", "mcp.json"), '{"mcpServers":{"letagents":{"command":"npx"}}}\n');
   writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "letagents\n");
 
-  const result = await runDesktopCursorProviderPreflight(
-    cursorProvider,
-    {
-      repoRootPath: workspace,
-      cursorMcpPolicy: "normal",
-    },
-    "installed",
-  );
+  const result = await runPreflight({
+    repoRootPath: workspace,
+    cursorMcpPolicy: "normal",
+  });
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
