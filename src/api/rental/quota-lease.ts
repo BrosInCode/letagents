@@ -47,15 +47,22 @@ import type { QuotaConfidence } from "../../shared/rental/meter-types.js";
 // ---------------------------------------------------------------------------
 
 /**
- * The lane the lease holds. provider + model uniquely identify a
- * quota source on the provider's account; `quotaLaneId` is the
- * provider's own label (e.g. Antigravity's `lane_id`) and lets us
- * disambiguate two models under the same vendor that share a quota.
+ * The lane the lease holds. A quota source belongs to ONE provider
+ * account: providerAccountId + provider + model identify it.
+ * `quotaLaneId` is the provider's own label (e.g. Antigravity's
+ * `lane_id`); it is carried for display/diagnostics but does not
+ * currently participate in conflict decisions.
+ *
+ * `providerAccountId` is optional because leases persisted before it
+ * existed lack the field. Legacy account-less lanes are treated as
+ * GLOBAL (they conflict with every account on the same provider+model)
+ * — fail-closed until those sessions release.
  */
 export interface QuotaLane {
   provider: string;
   model: string | null;
   quotaLaneId: string | null;
+  providerAccountId?: string | null;
 }
 
 export interface QuotaLeaseSnapshot {
@@ -86,10 +93,12 @@ export interface QuotaLease {
 // ---------------------------------------------------------------------------
 
 /**
- * Canonical key used to index active leases. Mirrors the same
- * shape the desktop renter trigger classifier uses to scope
- * failure buffers, so the two layers can talk about "the same
- * lane" without ambiguity.
+ * Coarse lane key: provider + model, WITHOUT the provider account.
+ * Used for the advisory lock and the active-lease DB scan so that
+ * decisions across accounts — including legacy account-less leases —
+ * are serialized under one lock. Ownership scoping happens in
+ * {@link lanesConflict}, not here. Mirrors the shape the desktop
+ * renter trigger classifier uses to scope failure buffers.
  */
 export function laneKey(provider: string, model: string | null): string {
   return `${provider}::${model ?? ""}`;
@@ -97,6 +106,35 @@ export function laneKey(provider: string, model: string | null): string {
 
 export function laneKeyOf(lane: QuotaLane): string {
   return laneKey(lane.provider, lane.model);
+}
+
+/**
+ * Whether two lanes contend for the same quota source.
+ *
+ * Same provider+model is required; then ownership decides:
+ *   • both lanes carry a providerAccountId → conflict only when equal
+ *     (different providers' quotas are independent);
+ *   • either side lacks an account (legacy persisted lease, or a
+ *     caller that didn't scope) → conflict — fail-closed, preserving
+ *     the pre-scoping global invariant until such leases drain.
+ */
+export function lanesConflict(a: QuotaLane, b: QuotaLane): boolean {
+  if (laneKeyOf(a) !== laneKeyOf(b)) return false;
+  const accountA = normalizedAccountId(a);
+  const accountB = normalizedAccountId(b);
+  if (accountA === null || accountB === null) return true;
+  return accountA === accountB;
+}
+
+/**
+ * Anything that is not a non-empty string degrades to null — i.e. to
+ * the fail-closed global lane. The lease jsonb is persisted data;
+ * a malformed value (number, object, empty string) must never take
+ * the "scoped" branch, where it would conflict with nothing.
+ */
+function normalizedAccountId(lane: QuotaLane): string | null {
+  const value = lane.providerAccountId;
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,11 +258,10 @@ export function canCreateLease(
     };
   }
 
-  const key = laneKeyOf(lane);
   const holders: string[] = [];
   for (const lease of active) {
     if (lease.releasedAt) continue;
-    if (laneKeyOf(lease.lane) !== key) continue;
+    if (!lanesConflict(lease.lane, lane)) continue;
     if (lease.sessionId === sessionId) {
       return {
         allowed: true,

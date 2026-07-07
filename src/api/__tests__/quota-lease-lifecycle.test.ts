@@ -28,6 +28,7 @@ function makeLane(overrides: Partial<QuotaLane> = {}): QuotaLane {
     provider: "codex",
     model: "gpt-5",
     quotaLaneId: "lane-primary",
+    providerAccountId: "acct_provider",
     ...overrides,
   };
 }
@@ -55,6 +56,7 @@ function makeSession(overrides: Record<string, unknown> = {}) {
 
 function makeListing(overrides: Record<string, unknown> = {}) {
   return {
+    provider_account_id: "acct_provider",
     ide_kind: "codex",
     model_label: "gpt-5",
     quota_lane_id: "lane-primary",
