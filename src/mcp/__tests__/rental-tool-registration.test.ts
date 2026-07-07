@@ -36,6 +36,7 @@ test("registerRentalTools preserves the public rental tool surface", () => {
     "rental_request_budget_extension",
     "rental_read_file",
     "rental_search",
+    "rental_request_context",
     "rental_propose_edit",
     "rental_propose_patch",
     "rental_run_command",

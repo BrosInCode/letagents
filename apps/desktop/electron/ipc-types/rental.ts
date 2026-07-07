@@ -420,6 +420,12 @@ export interface DesktopRentalContextApproval {
   decidedBy: string | null;
   createdAt: string | null;
   decidedAt: string | null;
+  /**
+   * Whether an approval physically delivered the file into the session
+   * workspace. Only present on decision responses; null when unknown
+   * (list rows) or not applicable (denials).
+   */
+  materialized: boolean | null;
 }
 
 export interface DesktopRentalContinuityReceiptSource {
@@ -460,6 +466,7 @@ export interface DesktopRentalApi {
   declineRequest: (id: string, reason?: string) => Promise<DesktopRentalRequest>;
   getActivity: (sessionId: string) => Promise<DesktopRentalActivityEvent[]>;
   getExposures: (sessionId: string) => Promise<DesktopRentalExposure[]>;
+  getContextRequests: (sessionId: string) => Promise<DesktopRentalContextApproval[]>;
   getPatches: (sessionId: string) => Promise<DesktopRentalPatch[]>;
   getUsage: (sessionId: string) => Promise<DesktopRentalUsageSnapshot>;
   getOwnQuotaStatus: () => Promise<DesktopRentalOwnQuotaStatus>;

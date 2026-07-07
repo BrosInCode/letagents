@@ -5,6 +5,7 @@
  * still execute the full mapper suite through this aggregator.
  */
 
+import "./rental-api-mapper/context-exposure-scenarios.js";
 import "./rental-api-mapper/quota-listing-session-scenarios.js";
 import "./rental-api-mapper/request-activity-patch-scenarios.js";
 import "./rental-api-mapper/usage-readiness-scenarios.js";

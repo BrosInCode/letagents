@@ -10,10 +10,16 @@ export {
 } from "./api-mapper/activity.js";
 export {
   mapApiActivityEventArray,
+  mapApiContextApprovalArray,
+  mapApiExposureArray,
   mapApiListingArray,
   mapApiPatchArray,
   mapApiRequestArray,
 } from "./api-mapper/arrays.js";
+export {
+  mapApiContextApproval,
+  mapApiExposure,
+} from "./api-mapper/context.js";
 export {
   mapApiListing,
 } from "./api-mapper/listing.js";

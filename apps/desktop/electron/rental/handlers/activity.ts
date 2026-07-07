@@ -1,17 +1,20 @@
 import type {
   DesktopRentalActivityEvent,
+  DesktopRentalContextApproval,
   DesktopRentalExposure,
   DesktopRentalPatch,
 } from "../../ipc-types.js";
 import {
   mapApiActivityEventArray,
+  mapApiContextApproval,
+  mapApiContextApprovalArray,
+  mapApiExposureArray,
   mapApiPatch,
   mapApiPatchArray,
   mapApiUsageSnapshot,
 } from "../api-mapper.js";
 import {
   buildEmptyUsageSnapshot,
-  buildStubContextApproval,
   buildStubPatch,
 } from "./stubs.js";
 import type {
@@ -33,9 +36,25 @@ export function registerActivityHandlers(
     return [] satisfies DesktopRentalActivityEvent[];
   });
 
-  register("desktop:rental:get-exposures", () =>
-    [] satisfies DesktopRentalExposure[],
-  );
+  register("desktop:rental:get-exposures", async (_event, sessionId) => {
+    const id = String(sessionId ?? "");
+    if (!id) return [] satisfies DesktopRentalExposure[];
+    if (apiClient) {
+      const result = await apiClient.getExposures(id);
+      if (result.ok) return mapApiExposureArray(result.body);
+    }
+    return [] satisfies DesktopRentalExposure[];
+  });
+
+  register("desktop:rental:get-context-requests", async (_event, sessionId) => {
+    const id = String(sessionId ?? "");
+    if (!id) return [] satisfies DesktopRentalContextApproval[];
+    if (apiClient) {
+      const result = await apiClient.getContextRequests(id);
+      if (result.ok) return mapApiContextApprovalArray(result.body);
+    }
+    return [] satisfies DesktopRentalContextApproval[];
+  });
 
   register("desktop:rental:get-patches", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
@@ -90,11 +109,45 @@ export function registerActivityHandlers(
     return buildStubPatch(id, patch, "needs_revision");
   });
 
-  register("desktop:rental:approve-context-request", (_event, sessionId, approvalId) =>
-    buildStubContextApproval(String(sessionId), String(approvalId), "approved"),
-  );
+  // Context request decisions must never pretend to succeed — a failed
+  // API call throws so the renderer surfaces the error instead of
+  // rendering a fabricated decision.
+  register("desktop:rental:approve-context-request", (
+    _event,
+    sessionId,
+    approvalId,
+  ) => decideContextRequest(apiClient, sessionId, approvalId, "approve"));
 
-  register("desktop:rental:deny-context-request", (_event, sessionId, approvalId) =>
-    buildStubContextApproval(String(sessionId), String(approvalId), "denied"),
-  );
+  register("desktop:rental:deny-context-request", (
+    _event,
+    sessionId,
+    approvalId,
+  ) => decideContextRequest(apiClient, sessionId, approvalId, "deny"));
+}
+
+async function decideContextRequest(
+  apiClient: RentalIpcRegistrationContext["apiClient"],
+  sessionId: unknown,
+  approvalId: unknown,
+  decision: "approve" | "deny",
+): Promise<DesktopRentalContextApproval> {
+  const id = String(sessionId ?? "");
+  const requestId = String(approvalId ?? "");
+  if (!apiClient || !id || !requestId) {
+    throw new Error(`Could not ${decision} the access request: rental API unavailable.`);
+  }
+  const result =
+    decision === "approve"
+      ? await apiClient.approveContextRequest(id, requestId)
+      : await apiClient.denyContextRequest(id, requestId);
+  if (!result.ok) {
+    throw new Error(
+      `Could not ${decision} the access request: ${result.error}`,
+    );
+  }
+  const mapped = mapApiContextApproval(result.body);
+  if (!mapped) {
+    throw new Error(`Could not ${decision} the access request: bad API response.`);
+  }
+  return mapped;
 }
