@@ -2,6 +2,7 @@ import type express from "express";
 import type { Response } from "express";
 
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
+import { RequestValidationError } from "../validation-error.js";
 import type { OwnerTokenAccount, SessionAccount } from "../db.js";
 
 export interface AuthenticatedRequest extends express.Request {
@@ -106,6 +107,9 @@ function logServerError(context: string, error: unknown): void {
 }
 
 function isSafeBadRequestError(error: unknown): error is Error {
+  if (error instanceof RequestValidationError) {
+    return true;
+  }
   return (
     error instanceof Error &&
     SAFE_BAD_REQUEST_PATTERNS.some((pattern) => pattern.test(error.message))
@@ -119,6 +123,20 @@ export function respondWithInternalError(
   message: string
 ): void {
   return respondWithError(res, 500, context, message, error);
+}
+
+export function respondWithValidationOrInternalError(
+  res: Response,
+  context: string,
+  error: unknown,
+  fallbackMessage: string
+): void {
+  if (error instanceof RequestValidationError) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+
+  respondWithInternalError(res, context, error, fallbackMessage);
 }
 
 export function respondWithBadRequest(

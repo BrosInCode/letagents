@@ -70,6 +70,7 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     { method: "post", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads$/" },
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads\\/([^/]+)$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/poll$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/threads$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/thread$/" },

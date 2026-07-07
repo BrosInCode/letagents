@@ -1,6 +1,12 @@
 import { createApiApp } from "./server/app.js";
+import { startRoomEventBridge } from "./server/event-bridge.js";
+import { messageEvents } from "./server/events.js";
 
 const app = createApiApp();
+
+// Relays room events across API instances (Postgres LISTEN/NOTIFY). Started
+// from the server entry point only, so tests and embedders opt in explicitly.
+startRoomEventBridge({ messageEvents });
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST;

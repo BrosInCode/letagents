@@ -2,6 +2,7 @@ import type { Express } from "express";
 
 import {
   getLatestMessages,
+  getMessageById,
   getMessageThread,
   getMessageThreads,
   getMessages,
@@ -13,8 +14,8 @@ import {
 import {
   parseLimit,
   parsePollTimeout,
-  respondWithBadRequest,
   respondWithInternalError,
+  respondWithValidationOrInternalError,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import {
@@ -73,6 +74,42 @@ export function registerMessageHistoryRoutes(
     });
   });
 
+  app.get(/^\/rooms\/(.+)\/messages\/(msg_\d+)$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await resolveParticipantRoom(req, res, deps);
+      if (!project) return;
+
+      const messageId = req.params[1];
+      const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+      const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
+      const message = await getMessageById(project.id, messageId, {
+        include_prompt_only: includePromptOnly,
+        account_id: req.sessionAccount?.account_id ?? null,
+      });
+      if (!message) {
+        // Body deliberately avoids the phrase "not found" so MCP clients can
+        // tell a missing message apart from a missing route (isMissingRouteError).
+        res.status(404).json({ error: "message does not exist in this room" });
+        return;
+      }
+      const activationContext = await resolveMessageActivationContext(project.id, activationIdentity, {
+        includeTaskOwnerLeases: false,
+      });
+      const [attached] = attachAgentMessageActivations([message], activationIdentity, activationContext);
+      res.json({
+        room_id: project.id,
+        message: attached ?? message,
+      });
+    } catch (error) {
+      respondWithInternalError(
+        res,
+        "GET /rooms/:room_id/messages/:message_id",
+        error,
+        "Message could not be fetched.",
+      );
+    }
+  });
+
   app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res) => {
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
@@ -105,31 +142,6 @@ export function registerMessageHistoryRoutes(
         throw error;
       }
     }
-    const existing = await getMessagesAfter(projectId, after, {
-      limit,
-      include_prompt_only: includePromptOnly,
-      account_id: accountId,
-    });
-
-    if (settled) {
-      return;
-    }
-
-    if (existing.messages.length > 0) {
-      await endDelivery?.().catch((error: unknown) => {
-        console.error(`[room messages poll] failed to end agent delivery for ${project.id}`, error);
-      });
-      const activationContext = await resolveMessageActivationContext(project.id, activationIdentity, {
-        includeTaskOwnerLeases: false,
-      });
-      res.json({
-        room_id: project.id,
-        messages: attachAgentMessageActivations(existing.messages, activationIdentity, activationContext),
-        has_more: existing.has_more,
-      });
-      return;
-    }
-
     function cleanup() {
       if (timeout) {
         clearTimeout(timeout);
@@ -143,8 +155,12 @@ export function registerMessageHistoryRoutes(
       }
     }
 
-    function resolveRequest(msgs: Message[], hasMore = false) {
-      void resolveRequestAsync(msgs, hasMore).catch((error: unknown) => {
+    function resolveRequest(
+      msgs: Message[],
+      hasMore = false,
+      options?: { includeTaskOwnerLeases?: boolean }
+    ) {
+      void resolveRequestAsync(msgs, hasMore, options).catch((error: unknown) => {
         console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
         if (!res.headersSent) {
           res.status(500).json({ error: "Messages could not be fetched." });
@@ -152,11 +168,15 @@ export function registerMessageHistoryRoutes(
       });
     }
 
-    async function resolveRequestAsync(msgs: Message[], hasMore = false) {
+    async function resolveRequestAsync(
+      msgs: Message[],
+      hasMore = false,
+      options?: { includeTaskOwnerLeases?: boolean }
+    ) {
       if (settled) return;
       settled = true;
       cleanup();
-      const activationContext = await resolveMessageActivationContext(projectId, activationIdentity);
+      const activationContext = await resolveMessageActivationContext(projectId, activationIdentity, options);
       res.json({
         room_id: projectId,
         messages: attachAgentMessageActivations(msgs, activationIdentity, activationContext),
@@ -182,11 +202,35 @@ export function registerMessageHistoryRoutes(
       cleanup();
     }
 
+    // Subscribe before the initial fetch so a message created while the fetch
+    // is in flight wakes this poll instead of waiting out the full timeout.
     timeout = setTimeout(() => {
       resolveRequest([]);
     }, timeoutMs);
     deps.messageEvents.on("message:created", onMessageCreated);
     req.on("close", onClientClose);
+
+    try {
+      const existing = await getMessagesAfter(projectId, after, {
+        limit,
+        include_prompt_only: includePromptOnly,
+        account_id: accountId,
+      });
+      if (!settled && existing.messages.length > 0) {
+        resolveRequest(existing.messages, existing.has_more, { includeTaskOwnerLeases: false });
+      }
+    } catch (error) {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        respondWithInternalError(
+          res,
+          "GET /rooms/:room_id/messages/poll",
+          error,
+          "Messages could not be fetched.",
+        );
+      }
+    }
   });
 
   app.get(/^\/rooms\/(.+)\/messages\/threads$/, async (req: AuthenticatedRequest, res) => {
@@ -259,7 +303,7 @@ export function registerMessageHistoryRoutes(
         ...page,
       });
     } catch (error) {
-      respondWithBadRequest(
+      respondWithValidationOrInternalError(
         res,
         "GET /rooms/:room_id/messages/:message_id/thread",
         error,
@@ -298,7 +342,7 @@ export function registerMessageHistoryRoutes(
         thread: summary,
       });
     } catch (error) {
-      respondWithBadRequest(
+      respondWithValidationOrInternalError(
         res,
         "PUT /rooms/:room_id/messages/:message_id/thread/read",
         error,

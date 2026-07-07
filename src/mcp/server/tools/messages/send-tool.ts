@@ -18,6 +18,7 @@ import {
   toPublicAgentIdentity,
   touchCurrentRoom,
 } from "../../runtime.js";
+import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { jsonToolResponse } from "./response.js";
 
 type MessageRecord = Record<string, unknown>;
@@ -62,54 +63,6 @@ function explicitThreadRootId(message: MessageRecord | null): string | null {
     return root;
   }
   return null;
-}
-
-async function findLocalMessageById(roomId: string, messageId: string): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const result = await getLocalChatMessages(roomId, {
-      after: afterCursor,
-      include_prompt_only: true,
-    });
-    const messages = (result.messages ?? []) as MessageRecord[];
-    const match = messages.find((message) => message.id === messageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = typeof lastMessage?.id === "string" ? lastMessage.id : undefined;
-    if (!afterCursor) return null;
-  }
-}
-
-async function findRemoteMessageById(input: {
-  roomId: string | null;
-  projectId: string | null;
-  messageId: string;
-}): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const query = new URLSearchParams();
-    if (afterCursor) query.set("after", afterCursor);
-    const qs = query.toString();
-    const result = await roomScopedApiCall<{
-      messages?: MessageRecord[];
-      has_more?: boolean;
-    }>({
-      room_id: input.roomId,
-      project_id: input.projectId,
-      room_path: (roomId) =>
-        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(roomId)}/messages${qs ? `?${qs}` : ""}`),
-      project_path: (projectId) =>
-        appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages${qs ? `?${qs}` : ""}`),
-    });
-    const messages = result.messages ?? [];
-    const match = messages.find((message) => message.id === input.messageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = typeof lastMessage?.id === "string" ? lastMessage.id : undefined;
-    if (!afterCursor) return null;
-  }
 }
 
 async function findMessageById(input: {

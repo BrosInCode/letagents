@@ -9,6 +9,7 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../../../shared/room-agent-prompts.js";
+import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
 import { message_attachment_uploads, message_attachments, messages } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
@@ -85,10 +86,10 @@ export async function addMessageWithCreateStatus(
     }
 
     if (options?.reply_to_message_id && !replyToNumber) {
-      throw new Error("reply_to must be a valid message id");
+      throw new RequestValidationError("reply_to must be a valid message id");
     }
     if (options?.thread_root_message_id && !explicitThreadRootNumber) {
-      throw new Error("thread_root_id must be a valid message id");
+      throw new RequestValidationError("thread_root_id must be a valid message id");
     }
 
     let replyTargetRootNumber: number | null = null;
@@ -100,11 +101,11 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (!replyTarget) {
-        throw new Error("reply_to must reference an existing message in this room");
+        throw new RequestValidationError("reply_to must reference an existing message in this room");
       }
 
       if (isPromptOnlyAgentMessage(replyTarget.text, normalizeAgentPromptKind(replyTarget.agent_prompt_kind))) {
-        throw new Error("reply_to must reference a visible message");
+        throw new RequestValidationError("reply_to must reference a visible message");
       }
 
       replyTargetRootNumber = replyTarget.thread_root_number ?? replyTarget.number;
@@ -119,16 +120,16 @@ export async function addMessageWithCreateStatus(
         .limit(1);
 
       if (!threadRoot) {
-        throw new Error("thread_root_id must reference an existing message in this room");
+        throw new RequestValidationError("thread_root_id must reference an existing message in this room");
       }
 
       if (isPromptOnlyAgentMessage(threadRoot.text, normalizeAgentPromptKind(threadRoot.agent_prompt_kind))) {
-        throw new Error("thread_root_id must reference a visible message");
+        throw new RequestValidationError("thread_root_id must reference a visible message");
       }
 
       threadRootNumber = threadRoot.thread_root_number ?? threadRoot.number;
       if (replyTargetRootNumber && replyTargetRootNumber !== threadRootNumber) {
-        throw new Error("reply_to must belong to the requested thread");
+        throw new RequestValidationError("reply_to must belong to the requested thread");
       }
     }
 
@@ -193,7 +194,7 @@ export async function addMessageWithCreateStatus(
       const orderedUploads = uploadIds.map((uploadId) => {
         const upload = uploadsById.get(uploadId);
         if (!upload) {
-          throw new Error("attachment upload not found or expired");
+          throw new RequestValidationError("attachment upload not found or expired");
         }
         return upload;
       });
