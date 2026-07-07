@@ -150,7 +150,17 @@
       <section class="rent-provider-section">
         <header class="rent-provider-section-header">
           <p class="surface-title">My listings</p>
-          <span class="rent-provider-count">{{ dashboard.listings.length }}</span>
+          <div class="rent-provider-header-actions">
+            <span class="rent-provider-count">{{ dashboard.listings.length }}</span>
+            <button
+              type="button"
+              class="rent-refresh-button rent-action-accept"
+              data-testid="rent-provider-new-listing"
+              @click="openListingForm(null)"
+            >
+              New listing
+            </button>
+          </div>
         </header>
 
         <article
@@ -160,7 +170,7 @@
         >
           <p class="surface-title">No listings yet.</p>
           <p class="surface-subtitle">
-            Your rentable agents will appear here after listings are created.
+            Create a listing to make this machine's agent rentable.
           </p>
         </article>
 
@@ -176,16 +186,118 @@
               {{ listing.ideKind }}
               <span v-if="listing.modelLabel"> · {{ listing.modelLabel }}</span>
               · {{ listing.activeSessionCount }}/{{ listing.maxConcurrentSessions }} active
+              <span v-if="listing.manualAcceptRequired"> · manual accept</span>
             </p>
           </div>
           <div class="surface-meta">
             <span class="state-pill" :data-state="listingState(listing.status)">
               {{ humanizeToken(listing.status) }}
             </span>
+            <button
+              type="button"
+              class="rent-refresh-button"
+              :data-testid="`rent-provider-edit-listing-${listing.id}`"
+              :disabled="listingBusyFor === listing.id"
+              @click="openListingForm(listing)"
+            >
+              Edit
+            </button>
+            <button
+              v-if="canPauseListing(listing.status)"
+              type="button"
+              class="rent-refresh-button"
+              :data-testid="`rent-provider-pause-listing-${listing.id}`"
+              :disabled="listingBusyFor === listing.id"
+              @click="pauseListing(listing.id)"
+            >
+              {{ listingBusyFor === listing.id ? "Working..." : "Pause" }}
+            </button>
+            <button
+              v-else-if="canResumeListing(listing.status)"
+              type="button"
+              class="rent-refresh-button"
+              :class="{ 'rent-action-accept': listing.status === 'setup_required' }"
+              :data-testid="`rent-provider-resume-listing-${listing.id}`"
+              :disabled="listingBusyFor === listing.id"
+              @click="resumeListing(listing.id)"
+            >
+              {{ listingBusyFor === listing.id ? "Working..." : resumeListingLabel(listing.status) }}
+            </button>
           </div>
         </article>
       </section>
+
+      <section class="rent-provider-section" data-testid="rent-provider-readiness">
+        <header class="rent-provider-section-header">
+          <p class="surface-title">Readiness</p>
+          <button
+            type="button"
+            class="rent-refresh-button"
+            data-testid="rent-provider-run-preflight"
+            :disabled="preflightBusy"
+            @click="runPreflight"
+          >
+            {{ preflightBusy ? "Checking..." : "Run checks" }}
+          </button>
+        </header>
+
+        <article class="surface-row">
+          <div>
+            <p class="surface-title">
+              {{ readiness.summary || readinessSummaryFallback(readiness.status) }}
+            </p>
+            <p v-if="readiness.lastCheckedAt" class="surface-subtitle">
+              Last checked {{ formatTime(readiness.lastCheckedAt) }}
+            </p>
+          </div>
+          <div class="surface-meta">
+            <span class="state-pill" :data-state="readinessState(readiness.status)">
+              {{ humanizeToken(readiness.status) }}
+            </span>
+          </div>
+        </article>
+
+        <article
+          v-for="blocker in readiness.blockers"
+          :key="`blocker-${blocker}`"
+          class="surface-row single-line rent-provider-blocker"
+        >
+          <p class="surface-title">{{ blocker }}</p>
+          <span class="state-pill" data-state="failed">blocker</span>
+        </article>
+
+        <article
+          v-for="warning in readiness.warnings"
+          :key="`warning-${warning}`"
+          class="surface-row single-line"
+        >
+          <p class="surface-title">{{ warning }}</p>
+          <span class="state-pill" data-state="starting">warning</span>
+        </article>
+
+        <article
+          v-for="check in readiness.checks"
+          :key="check.id"
+          class="surface-row single-line"
+          :data-testid="`rent-provider-readiness-check-${check.id}`"
+        >
+          <div>
+            <p class="surface-title">{{ check.label }}</p>
+            <p v-if="check.detail" class="surface-subtitle">{{ check.detail }}</p>
+          </div>
+          <span class="state-pill" :data-state="readinessCheckState(check.status)">
+            {{ humanizeToken(check.status) }}
+          </span>
+        </article>
+      </section>
     </template>
+
+    <RentListingFormModal
+      :open="listingFormOpen"
+      :listing="listingBeingEdited"
+      @close="listingFormOpen = false"
+      @saved="onListingSaved"
+    />
 
     <p v-if="actionError" class="rent-provider-action-error" role="alert" data-testid="rent-provider-action-error">
       {{ actionError }}
@@ -196,10 +308,23 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import type {
+  DesktopRentalListing,
   DesktopRentalProviderDashboard,
+  DesktopRentalProviderReadiness,
   DesktopRentalSession,
 } from "../../../../../electron/ipc-types";
-import { humanizeToken, rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
+import RentListingFormModal from "./RentListingFormModal.vue";
+import {
+  canPauseListing,
+  canResumeListing,
+  resumeListingLabel,
+} from "./rent-listing-form";
+import {
+  formatTime,
+  humanizeToken,
+  rentalContinuityLabel,
+  rentalModeLabel,
+} from "./rent-session-detail/presentation";
 
 const emit = defineEmits<{
   "open-session": [session: DesktopRentalSession];
@@ -213,6 +338,15 @@ const dashboard = ref<DesktopRentalProviderDashboard>(emptyDashboard());
 const actionBusyFor = ref<string | null>(null);
 const actionKind = ref<"accept" | "decline" | null>(null);
 const actionError = ref<string | null>(null);
+const listingFormOpen = ref(false);
+const listingBeingEdited = ref<DesktopRentalListing | null>(null);
+const listingBusyFor = ref<string | null>(null);
+const preflightBusy = ref(false);
+const preflightReadiness = ref<DesktopRentalProviderReadiness | null>(null);
+
+const readiness = computed<DesktopRentalProviderReadiness>(
+  () => preflightReadiness.value ?? dashboard.value.readiness,
+);
 
 const summaryLine = computed(() => {
   if (state.value === "loading") return "Loading dashboard...";
@@ -336,6 +470,90 @@ function isDisabledResult(value: unknown): boolean {
   );
 }
 
+function openListingForm(listing: DesktopRentalListing | null): void {
+  listingBeingEdited.value = listing;
+  listingFormOpen.value = true;
+}
+
+function onListingSaved(): void {
+  listingFormOpen.value = false;
+  listingBeingEdited.value = null;
+  void refresh();
+}
+
+async function pauseListing(listingId: string): Promise<void> {
+  await runListingAction(listingId, (bridge) => bridge.pauseListing(listingId), "Could not pause the listing.");
+}
+
+async function resumeListing(listingId: string): Promise<void> {
+  await runListingAction(listingId, (bridge) => bridge.resumeListing(listingId), "Could not resume the listing.");
+}
+
+type RentalBridge = NonNullable<NonNullable<typeof window.letagentsDesktop>["rental"]>;
+
+async function runListingAction(
+  listingId: string,
+  action: (bridge: RentalBridge) => Promise<unknown>,
+  failureMessage: string,
+): Promise<void> {
+  const bridge = window.letagentsDesktop?.rental;
+  if (!bridge) return;
+  listingBusyFor.value = listingId;
+  actionError.value = null;
+  try {
+    const result = await action(bridge);
+    if (isDisabledResult(result)) {
+      actionError.value = "Rent an Agent is disabled.";
+      return;
+    }
+    await refresh();
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : failureMessage;
+  } finally {
+    listingBusyFor.value = null;
+  }
+}
+
+async function runPreflight(): Promise<void> {
+  const bridge = window.letagentsDesktop?.rental;
+  if (!bridge?.runPreflight) return;
+  preflightBusy.value = true;
+  actionError.value = null;
+  try {
+    const result = await bridge.runPreflight();
+    if (isDisabledResult(result)) {
+      actionError.value = "Rent an Agent is disabled.";
+      return;
+    }
+    preflightReadiness.value = result.readiness;
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : "Could not run readiness checks.";
+  } finally {
+    preflightBusy.value = false;
+  }
+}
+
+function readinessState(status: string): string {
+  if (status === "ready") return "active";
+  if (status === "degraded") return "starting";
+  if (status === "blocked") return "failed";
+  return "offline";
+}
+
+function readinessCheckState(status: string): string {
+  if (status === "passed") return "connected";
+  if (status === "warning") return "starting";
+  if (status === "failed") return "failed";
+  return "offline";
+}
+
+function readinessSummaryFallback(status: string): string {
+  if (status === "ready") return "This machine is ready to serve rentals.";
+  if (status === "degraded") return "Rentals can run, but some checks need attention.";
+  if (status === "blocked") return "Rentals are blocked until the issues below are fixed.";
+  return "Run checks to see whether this machine can serve rentals.";
+}
+
 function listingState(status: string): string {
   if (status === "active") return "active";
   if (status === "paused") return "away";
@@ -372,6 +590,14 @@ function requestState(status: string): string {
   align-items: center;
   justify-content: space-between;
   padding: 0.4rem 0.2rem 0;
+}
+.rent-provider-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.rent-provider-blocker .surface-title {
+  color: var(--color-danger, #ff8a80);
 }
 .rent-provider-count {
   font-variant-numeric: tabular-nums;

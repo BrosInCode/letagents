@@ -267,6 +267,39 @@ describe("rental provider route handlers", () => {
     assert.strictEqual(capturedInput!.providerAccountId, FAKE_ACCOUNT_ID);
   });
 
+  it("create rejects non-positive maxConcurrentSessions with 400", async () => {
+    for (const bad of [0, -1, 1.5, "two"]) {
+      const res = await req("POST", "/api/rental/provider/listings", {
+        displayName: "My Agent",
+        ideKind: "claude_code",
+        maxConcurrentSessions: bad,
+      });
+      assert.strictEqual(res.status, 400, `expected 400 for ${JSON.stringify(bad)}`);
+    }
+  });
+
+  it("create passes maxConcurrentSessions to the service", async () => {
+    let capturedInput: Record<string, unknown> | null = null;
+    deps.createListing = async (input: unknown) => {
+      capturedInput = input as Record<string, unknown>;
+      return LISTING_FIXTURE;
+    };
+    const res = await req("POST", "/api/rental/provider/listings", {
+      displayName: "My Agent",
+      ideKind: "claude_code",
+      maxConcurrentSessions: 3,
+    });
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(capturedInput!.maxConcurrentSessions, 3);
+  });
+
+  it("patch rejects non-positive maxConcurrentSessions with 400", async () => {
+    const res = await req("PATCH", "/api/rental/provider/listings/listing_1", {
+      maxConcurrentSessions: 0,
+    });
+    assert.strictEqual(res.status, 400);
+  });
+
   it("list returns listings from service", async () => {
     const res = await req("GET", "/api/rental/provider/listings");
     assert.strictEqual(res.status, 200);

@@ -97,7 +97,7 @@ export function registerRentalProviderRoutes(
     const accountId = requireProviderAccountId(req, res);
     if (!accountId) return;
 
-    const { displayName, ideKind, modelLabel, quotaLaneId, quotaLaneLabel, supportedModes, defaultLrtLimit, defaultTimeLimitMinutes, manualAcceptRequired } = req.body as {
+    const { displayName, ideKind, modelLabel, quotaLaneId, quotaLaneLabel, supportedModes, defaultLrtLimit, defaultTimeLimitMinutes, manualAcceptRequired, maxConcurrentSessions } = req.body as {
       displayName?: string;
       ideKind?: string;
       modelLabel?: string | null;
@@ -107,6 +107,7 @@ export function registerRentalProviderRoutes(
       defaultLrtLimit?: number | null;
       defaultTimeLimitMinutes?: number | null;
       manualAcceptRequired?: boolean;
+      maxConcurrentSessions?: number | null;
     };
 
     if (!displayName || typeof displayName !== "string" || !displayName.trim()) {
@@ -115,6 +116,14 @@ export function registerRentalProviderRoutes(
     }
     if (!ideKind || typeof ideKind !== "string" || !ideKind.trim()) {
       res.status(400).json({ error: "ideKind is required" });
+      return;
+    }
+    if (
+      maxConcurrentSessions !== undefined
+      && maxConcurrentSessions !== null
+      && (!Number.isInteger(maxConcurrentSessions) || maxConcurrentSessions < 1)
+    ) {
+      res.status(400).json({ error: "maxConcurrentSessions must be a positive integer" });
       return;
     }
 
@@ -130,6 +139,7 @@ export function registerRentalProviderRoutes(
         defaultLrtLimit,
         defaultTimeLimitMinutes,
         manualAcceptRequired,
+        maxConcurrentSessions,
       });
       res.status(201).json(listing);
     } catch (error) {
@@ -167,6 +177,7 @@ export function registerRentalProviderRoutes(
       defaultLrtLimit?: number | null;
       defaultTimeLimitMinutes?: number | null;
       manualAcceptRequired?: boolean;
+      maxConcurrentSessions?: number | null;
     };
 
     try {
@@ -177,6 +188,14 @@ export function registerRentalProviderRoutes(
           return;
         }
         input.displayName = input.displayName.trim();
+      }
+      if (
+        input.maxConcurrentSessions !== undefined
+        && input.maxConcurrentSessions !== null
+        && (!Number.isInteger(input.maxConcurrentSessions) || input.maxConcurrentSessions < 1)
+      ) {
+        res.status(400).json({ error: "maxConcurrentSessions must be a positive integer" });
+        return;
       }
 
       const listing = await deps.updateListing(listingId, accountId, input);

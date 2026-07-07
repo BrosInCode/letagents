@@ -206,6 +206,7 @@ export interface DesktopRentalListingInput {
   defaultLrtLimit?: number | null;
   defaultTimeLimitMinutes?: number | null;
   manualAcceptRequired?: boolean;
+  maxConcurrentSessions?: number | null;
 }
 
 export interface DesktopRentalListingPatch {
@@ -218,6 +219,7 @@ export interface DesktopRentalListingPatch {
   defaultLrtLimit?: number | null;
   defaultTimeLimitMinutes?: number | null;
   manualAcceptRequired?: boolean;
+  maxConcurrentSessions?: number | null;
 }
 
 export interface DesktopRentalAgentAvailability {
