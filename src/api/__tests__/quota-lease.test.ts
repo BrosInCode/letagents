@@ -24,6 +24,7 @@ import {
   canCreateLease,
   createLease,
   laneCapacity,
+  lanesConflict,
   MAX_LANE_CAPACITY,
   laneKey,
   laneKeyOf,
@@ -448,5 +449,128 @@ describe("canCreateLease with capacity above 1", () => {
     assert.equal(decision.allowed, false);
     assert.equal(decision.reason, QUOTA_LEASE_REASONS.LANE_LOCKED);
     assert.equal(decision.capacity, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Provider-account lane scoping
+// ---------------------------------------------------------------------------
+
+describe("lanesConflict", () => {
+  const base = { provider: "claude_code", model: "sonnet-5", quotaLaneId: null };
+
+  it("different provider accounts on the same provider+model do not conflict", () => {
+    assert.equal(
+      lanesConflict(
+        { ...base, providerAccountId: "acct_a" },
+        { ...base, providerAccountId: "acct_b" },
+      ),
+      false,
+    );
+  });
+
+  it("the same account conflicts with itself", () => {
+    assert.equal(
+      lanesConflict(
+        { ...base, providerAccountId: "acct_a" },
+        { ...base, providerAccountId: "acct_a" },
+      ),
+      true,
+    );
+  });
+
+  it("legacy account-less lanes conflict with every account (fail-closed)", () => {
+    assert.equal(lanesConflict(base, { ...base, providerAccountId: "acct_a" }), true);
+    assert.equal(lanesConflict({ ...base, providerAccountId: "acct_a" }, base), true);
+    assert.equal(lanesConflict(base, base), true);
+  });
+
+  it("different provider or model never conflicts regardless of account", () => {
+    assert.equal(
+      lanesConflict(
+        { ...base, providerAccountId: "acct_a" },
+        { ...base, model: "haiku", providerAccountId: "acct_a" },
+      ),
+      false,
+    );
+  });
+});
+
+describe("canCreateLease with provider-account scoping", () => {
+  const laneFor = (account: string | null) => ({
+    provider: "claude_code",
+    model: "sonnet-5",
+    quotaLaneId: null,
+    providerAccountId: account,
+  });
+
+  it("two providers listing the same provider+model are independent lanes", () => {
+    const heldByA = makeLease({ sessionId: "rsess_a", lane: laneFor("acct_a") });
+    const decision = canCreateLease([heldByA], laneFor("acct_b"), "rsess_b");
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.reason, QUOTA_LEASE_REASONS.AVAILABLE);
+    assert.equal(decision.activeCount, 0);
+  });
+
+  it("the same provider account still locks its own lane", () => {
+    const heldByA = makeLease({ sessionId: "rsess_a", lane: laneFor("acct_a") });
+    const decision = canCreateLease([heldByA], laneFor("acct_a"), "rsess_b");
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.reason, QUOTA_LEASE_REASONS.LANE_LOCKED);
+    assert.equal(decision.heldBy, "rsess_a");
+  });
+
+  it("a legacy account-less lease blocks every account until it drains", () => {
+    const legacy = makeLease({
+      sessionId: "rsess_legacy",
+      lane: { provider: "claude_code", model: "sonnet-5", quotaLaneId: null },
+    });
+    for (const account of ["acct_a", "acct_b"]) {
+      const decision = canCreateLease([legacy], laneFor(account), "rsess_new");
+      assert.equal(decision.allowed, false, account);
+      assert.equal(decision.heldBy, "rsess_legacy");
+    }
+  });
+
+  it("capacity slots count only same-account holders", () => {
+    const heldByA = makeLease({ sessionId: "rsess_a", lane: laneFor("acct_a") });
+    const heldByB = makeLease({ sessionId: "rsess_b", lane: laneFor("acct_b") });
+    const decision = canCreateLease(
+      [heldByA, heldByB],
+      laneFor("acct_a"),
+      "rsess_c",
+      2,
+    );
+    assert.equal(decision.allowed, true, "B's lease must not consume A's capacity");
+    assert.equal(decision.activeCount, 1);
+  });
+});
+
+describe("lanesConflict — malformed persisted account ids fail closed", () => {
+  const base = { provider: "claude_code", model: "sonnet-5", quotaLaneId: null };
+
+  it("non-string and empty-string account ids degrade to the global lane", () => {
+    for (const malformed of [42, {}, "", "   ", true]) {
+      const corrupt = {
+        ...base,
+        providerAccountId: malformed as never,
+      };
+      assert.equal(
+        lanesConflict(corrupt, { ...base, providerAccountId: "acct_a" }),
+        true,
+        `expected fail-closed conflict for ${JSON.stringify(malformed)}`,
+      );
+    }
+  });
+
+  it("a null-account requester conflicts with a held scoped lease (canCreateLease level)", () => {
+    const heldScoped = makeLease({
+      sessionId: "rsess_a",
+      lane: { ...base, providerAccountId: "acct_a" },
+    });
+    const decision = canCreateLease([heldScoped], base, "rsess_b");
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.reason, QUOTA_LEASE_REASONS.LANE_LOCKED);
+    assert.equal(decision.heldBy, "rsess_a");
   });
 });

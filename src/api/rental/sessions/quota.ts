@@ -45,6 +45,7 @@ type SessionLeaseInput = Pick<RentalSessionRow, "id" | "room_id">;
 
 type ListingLeaseInput = Pick<
   RentalListingRow,
+  | "provider_account_id"
   | "ide_kind"
   | "model_label"
   | "quota_lane_id"
@@ -107,6 +108,10 @@ export function buildQuotaLeaseInput(
       provider: listing.ide_kind,
       model: listing.model_label ?? null,
       quotaLaneId: listing.quota_lane_id ?? null,
+      // Scope the lane to its owner: different providers listing the
+      // same ide_kind/model draw on independent quotas and must not
+      // contend for one global lane.
+      providerAccountId: listing.provider_account_id ?? null,
     },
     snapshot: {
       nativeUnit: unitOrUnknown(rawSnapshot?.nativeUnit ?? listing.native_quota_unit),
