@@ -153,6 +153,23 @@ async function buildCommandEnvironment(workspaceRoot: string): Promise<NodeJS.Pr
     npm_config_audit: "false",
     npm_config_fund: "false",
     npm_config_update_notifier: "false",
+    // Supply-chain rails: install commands are blocked by the argv
+    // allowlist, but `npm exec <tool>` can fetch a missing package from
+    // the registry on the fly. Offline mode pins execution to the
+    // (workspace-local, empty-by-default) cache, so nothing is ever
+    // DOWNLOADED and run — host-globally installed binaries still
+    // resolve (host-admin-controlled, acceptable). Corepack/yarn-berry
+    // get the equivalent network switches; note this means pnpm/yarn on
+    // corepack-provisioned hosts fail deterministically instead of
+    // downloading a package manager — provision real binaries on the
+    // host image if those allowlist entries should work. Test scripts
+    // themselves can still perform network I/O — that is
+    // renter-committed code, reviewed via the exposure ledger, not a
+    // package-manager side effect.
+    npm_config_offline: "true",
+    npm_config_yes: "false",
+    COREPACK_ENABLE_NETWORK: "0",
+    YARN_ENABLE_NETWORK: "false",
   };
 }
 

@@ -206,6 +206,33 @@ export interface WorkspaceMaterializerDeps {
 }
 
 // ---------------------------------------------------------------------------
+// Git environment
+// ---------------------------------------------------------------------------
+
+/**
+ * Environment for every git invocation the materializer makes.
+ *
+ * - GIT_CONFIG_NOSYSTEM / GIT_CONFIG_GLOBAL=devNull: the server user's
+ *   gitconfig must not apply — url.insteadOf rewrites or credential
+ *   helpers there could redirect fetches or attach credentials to a
+ *   renter-controlled URL.
+ * - GIT_ALLOW_PROTOCOL: https for real repos, file for test fixtures;
+ *   ssh/git/ext are refused even if a URL smuggles them in.
+ * - GIT_TERMINAL_PROMPT=0: never hang the server waiting for
+ *   credentials (e.g. a remote or submodule pointing at a private host).
+ */
+export function materializerGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_PROTOCOL_FROM_USER: "0",
+    GIT_ALLOW_PROTOCOL: "https:file",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Default workspace root
 // ---------------------------------------------------------------------------
 
@@ -246,30 +273,38 @@ export async function materializeWorkspace(
   // 1. Bare clone (or reuse cached) — using execFileSync for safety
   const repoHash = hashString(repoUrl);
   const barePath = path.join(workspaceRoot, ".bare-cache", repoHash);
-  const gitEnv = {
-    ...process.env,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_PROTOCOL_FROM_USER: "0",
-    GIT_ALLOW_PROTOCOL: "https:file",
-  };
+  const gitEnv = materializerGitEnv();
 
   if (!fs.existsSync(barePath)) {
     log(`Cloning bare repo: ${repoUrl}`);
     fs.mkdirSync(path.dirname(barePath), { recursive: true });
-    execFileSync("git", ["clone", "--bare", repoUrl, barePath], {
-      timeout: 120_000,
-      stdio: "pipe",
-      env: gitEnv,
-    });
+    // Submodules are inert throughout materialization: a bare clone
+    // performs no checkout and no `submodule update`, and `git archive`
+    // exports gitlinks as empty entries without contacting their URLs.
+    // The explicit recurse=false is belt-and-braces against future git
+    // defaults; GIT_ALLOW_PROTOCOL bounds anything that slips through.
+    execFileSync(
+      "git",
+      ["-c", "submodule.recurse=false", "clone", "--bare", repoUrl, barePath],
+      {
+        timeout: 120_000,
+        stdio: "pipe",
+        env: gitEnv,
+      },
+    );
   } else {
     log(`Reusing cached bare clone: ${barePath}`);
     try {
-      execFileSync("git", ["fetch", "--all", "--prune"], {
-        cwd: barePath,
-        timeout: 60_000,
-        stdio: "pipe",
-        env: gitEnv,
-      });
+      execFileSync(
+        "git",
+        ["-c", "submodule.recurse=false", "fetch", "--all", "--prune"],
+        {
+          cwd: barePath,
+          timeout: 60_000,
+          stdio: "pipe",
+          env: gitEnv,
+        },
+      );
     } catch {
       log("Warning: fetch failed on cached bare, continuing with stale clone");
     }
