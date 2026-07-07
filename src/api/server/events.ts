@@ -1,12 +1,10 @@
-import { EventEmitter } from "events";
-
 import {
   addMessageWithCreateStatus,
   hydrateMessageReplies,
   type Message,
 } from "../db.js";
 import { parseScopedId } from "../db/utils.js";
-import { publishRoomMessageCreated } from "./event-bridge.js";
+import { createBridgedEmitter } from "./event-bridge.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
 import type { AgentPromptKind } from "../../shared/room-agent-prompts.js";
 
@@ -15,11 +13,11 @@ export interface MessageCreatedEvent {
   message: Message;
 }
 
-export const messageEvents = new EventEmitter();
-export const taskEvents = new EventEmitter();
-export const githubRoomEvents = new EventEmitter();
-export const reasoningEvents = new EventEmitter();
-export const artifactEvents = new EventEmitter();
+export const messageEvents = createBridgedEmitter("messages");
+export const taskEvents = createBridgedEmitter("tasks");
+export const githubRoomEvents = createBridgedEmitter("github");
+export const reasoningEvents = createBridgedEmitter("reasoning");
+export const artifactEvents = createBridgedEmitter("artifacts");
 
 export async function emitProjectMessage(
   projectId: string,
@@ -49,8 +47,6 @@ export async function emitProjectMessage(
       projectId,
       message: await hydrateMessageForSharedEvent(projectId, message),
     } satisfies MessageCreatedEvent);
-    // Best-effort relay so subscribers on other API instances wake up too.
-    void publishRoomMessageCreated(projectId, message.id);
   }
   return message;
 }

@@ -1,69 +1,226 @@
 import { randomUUID } from "crypto";
-import type { EventEmitter } from "events";
+import { EventEmitter } from "events";
 import type { PoolClient } from "pg";
 
-import { getMessageById } from "../db.js";
+import {
+  getMessageById,
+  getReasoningSessionById,
+  getRoomSharedArtifactByIdentityKey,
+  getTaskById,
+} from "../db.js";
 import { pool } from "../db/client.js";
 import { formatMessageId, parseScopedId } from "../db/utils.js";
-import type { MessageCreatedEvent } from "./events.js";
+import { attachTaskDetails } from "../routes/rooms/tasks/task-details.js";
 
 // Fans room events out across API instances. Local subscribers are served by
-// the in-process EventEmitters; this bridge relays a compact reference over
-// Postgres NOTIFY so pollers and SSE streams connected to *other* instances
-// wake up too. Receivers refetch the message by id, which keeps the payload
-// far below the 8000-byte NOTIFY limit.
+// the in-process emitters; when the bridge is started (server entry point
+// only), every emit on a bridged emitter is also relayed over Postgres NOTIFY
+// so pollers and SSE streams connected to *other* instances wake up too.
+//
+// Events that fit are inlined into the NOTIFY payload (hard 8000-byte limit);
+// oversize events fall back to a compact reference that receivers rehydrate
+// from the database. Lanes without a reference form log and drop oversize
+// events instead of relaying them truncated.
 const ROOM_EVENT_CHANNEL = "letagents_room_events";
 const LISTEN_RECONNECT_DELAY_MS = 5_000;
+// Leaves headroom under the 8000-byte NOTIFY limit for the envelope fields.
+const MAX_INLINE_DATA_BYTES = 7_000;
 
 const instanceId = randomUUID();
 
-interface RoomEventNotification {
-  kind: "message:created";
-  room_id: string;
-  message_number: number;
+interface InlineBridgeEnvelope {
+  v: 1;
+  lane: string;
+  event: string;
+  mode: "inline";
+  data: unknown;
   origin: string;
 }
 
-export async function publishRoomMessageCreated(roomId: string, messageId: string): Promise<void> {
-  const messageNumber = parseScopedId(messageId, "msg");
-  if (!messageNumber) {
+interface RefBridgeEnvelope {
+  v: 1;
+  lane: string;
+  event: string;
+  mode: "ref";
+  ref: Record<string, unknown>;
+  origin: string;
+}
+
+export type BridgeEnvelope = InlineBridgeEnvelope | RefBridgeEnvelope;
+
+type RefBuilder = (data: unknown) => Record<string, unknown> | null;
+type RefHydrator = (ref: Record<string, unknown>) => Promise<unknown | null>;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function stringField(record: Record<string, unknown> | null, field: string): string | null {
+  const value = record?.[field];
+  return typeof value === "string" && value ? value : null;
+}
+
+const REF_BUILDERS: Record<string, RefBuilder> = {
+  "messages:message:created": (data) => {
+    const event = asRecord(data);
+    const message = asRecord(event?.message);
+    const roomId = stringField(event, "projectId");
+    const number = parseScopedId(stringField(message, "id") ?? "", "msg");
+    return roomId && number ? { room_id: roomId, number } : null;
+  },
+  "tasks:task:updated": (data) => {
+    const event = asRecord(data);
+    const roomId = stringField(event, "projectId");
+    const taskId = stringField(asRecord(event?.task), "id");
+    return roomId && taskId ? { room_id: roomId, task_id: taskId } : null;
+  },
+  "reasoning:reasoning:updated": (data) => {
+    const event = asRecord(data);
+    const roomId = stringField(event, "projectId");
+    const sessionId = stringField(asRecord(event?.session), "id");
+    return roomId && sessionId ? { room_id: roomId, session_id: sessionId } : null;
+  },
+  "artifacts:artifact:updated": (data) => {
+    const event = asRecord(data);
+    const roomId = stringField(event, "projectId");
+    const identityKey = stringField(asRecord(event?.artifact), "identity_key");
+    return roomId && identityKey ? { room_id: roomId, identity_key: identityKey } : null;
+  },
+};
+
+const REF_HYDRATORS: Record<string, RefHydrator> = {
+  "messages:message:created": async (ref) => {
+    const roomId = stringField(ref, "room_id");
+    const number = typeof ref.number === "number" ? ref.number : null;
+    if (!roomId || !number) return null;
+    const message = await getMessageById(roomId, formatMessageId(number), {
+      include_prompt_only: true,
+    });
+    return message ? { projectId: roomId, message } : null;
+  },
+  "tasks:task:updated": async (ref) => {
+    const roomId = stringField(ref, "room_id");
+    const taskId = stringField(ref, "task_id");
+    if (!roomId || !taskId) return null;
+    const task = await getTaskById(roomId, taskId);
+    if (!task) return null;
+    return { projectId: roomId, task: await attachTaskDetails(roomId, task) };
+  },
+  "reasoning:reasoning:updated": async (ref) => {
+    const roomId = stringField(ref, "room_id");
+    const sessionId = stringField(ref, "session_id");
+    if (!roomId || !sessionId) return null;
+    const session = await getReasoningSessionById(roomId, sessionId);
+    // The streamed delta is too large to relay; remote subscribers get the
+    // session snapshot instead.
+    return session ? { projectId: roomId, session, update: null } : null;
+  },
+  "artifacts:artifact:updated": async (ref) => {
+    const roomId = stringField(ref, "room_id");
+    const identityKey = stringField(ref, "identity_key");
+    if (!roomId || !identityKey) return null;
+    const artifact = await getRoomSharedArtifactByIdentityKey({
+      room_id: roomId,
+      identity_key: identityKey,
+    });
+    return artifact ? { projectId: roomId, artifact } : null;
+  },
+};
+
+export function buildBridgeEnvelope(
+  lane: string,
+  event: string,
+  data: unknown,
+  origin: string = instanceId,
+): BridgeEnvelope | null {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(data);
+  } catch {
+    console.error(`[room event bridge] ${lane}/${event} is not serializable; not relayed`);
+    return null;
+  }
+  if (serialized === undefined) {
+    return null;
+  }
+  if (Buffer.byteLength(serialized) <= MAX_INLINE_DATA_BYTES) {
+    return { v: 1, lane, event, mode: "inline", data, origin };
+  }
+  const ref = REF_BUILDERS[`${lane}:${event}`]?.(data) ?? null;
+  if (!ref) {
+    console.error(
+      `[room event bridge] ${lane}/${event} exceeds the relay size limit and has no reference form; not relayed`
+    );
+    return null;
+  }
+  return { v: 1, lane, event, mode: "ref", ref, origin };
+}
+
+/**
+ * EventEmitter whose emits are also relayed to other API instances once the
+ * bridge is started. Events received from other instances are dispatched via
+ * emitLocal so they are never re-published.
+ */
+export class BridgedEventEmitter extends EventEmitter {
+  constructor(readonly lane: string) {
+    super();
+  }
+
+  override emit(event: string | symbol, ...args: unknown[]): boolean {
+    const dispatched = super.emit(event, ...args);
+    if (bridgeActive && typeof event === "string") {
+      void publishBridgedEvent(this.lane, event, args[0]);
+    }
+    return dispatched;
+  }
+
+  emitLocal(event: string, data: unknown): boolean {
+    return super.emit(event, data);
+  }
+}
+
+const laneRegistry = new Map<string, BridgedEventEmitter>();
+
+export function createBridgedEmitter(lane: string): BridgedEventEmitter {
+  const existing = laneRegistry.get(lane);
+  if (existing) {
+    return existing;
+  }
+  const emitter = new BridgedEventEmitter(lane);
+  laneRegistry.set(lane, emitter);
+  return emitter;
+}
+
+async function publishBridgedEvent(lane: string, event: string, data: unknown): Promise<void> {
+  const envelope = buildBridgeEnvelope(lane, event, data);
+  if (!envelope) {
     return;
   }
-  const notification: RoomEventNotification = {
-    kind: "message:created",
-    room_id: roomId,
-    message_number: messageNumber,
-    origin: instanceId,
-  };
   try {
-    await pool.query("SELECT pg_notify($1, $2)", [ROOM_EVENT_CHANNEL, JSON.stringify(notification)]);
+    await pool.query("SELECT pg_notify($1, $2)", [ROOM_EVENT_CHANNEL, JSON.stringify(envelope)]);
   } catch (error) {
     // Cross-instance delivery is best-effort; local delivery already happened.
-    console.error(`[room event bridge] failed to publish message:created for ${roomId}`, error);
+    console.error(`[room event bridge] failed to publish ${lane}/${event}`, error);
   }
 }
 
-interface RoomEventBridgeDeps {
-  messageEvents: EventEmitter;
-}
-
-let bridgeDeps: RoomEventBridgeDeps | null = null;
+let bridgeActive = false;
 let listenerClient: PoolClient | null = null;
 let reconnectTimer: NodeJS.Timeout | null = null;
 let stopped = false;
 
-export function startRoomEventBridge(deps: RoomEventBridgeDeps): void {
-  if (bridgeDeps) {
+export function startRoomEventBridge(): void {
+  if (bridgeActive) {
     return;
   }
-  bridgeDeps = deps;
+  bridgeActive = true;
   stopped = false;
   void connectListener();
 }
 
 export async function stopRoomEventBridge(): Promise<void> {
   stopped = true;
-  bridgeDeps = null;
+  bridgeActive = false;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -129,33 +286,46 @@ function scheduleReconnect(): void {
 }
 
 async function handleNotification(payload: string | undefined): Promise<void> {
-  const deps = bridgeDeps;
-  if (!payload || !deps) {
+  if (!payload) {
     return;
   }
-  let parsed: Partial<RoomEventNotification>;
+  let envelope: Partial<BridgeEnvelope>;
   try {
-    parsed = JSON.parse(payload) as Partial<RoomEventNotification>;
+    envelope = JSON.parse(payload) as Partial<BridgeEnvelope>;
   } catch {
     console.error("[room event bridge] received malformed notification payload");
     return;
   }
   if (
-    parsed.kind !== "message:created" ||
-    typeof parsed.room_id !== "string" ||
-    typeof parsed.message_number !== "number" ||
-    parsed.origin === instanceId
+    envelope.v !== 1 ||
+    typeof envelope.lane !== "string" ||
+    typeof envelope.event !== "string" ||
+    envelope.origin === instanceId
   ) {
     return;
   }
-  const message = await getMessageById(parsed.room_id, formatMessageId(parsed.message_number), {
-    include_prompt_only: true,
-  });
-  if (!message) {
+  const emitter = laneRegistry.get(envelope.lane);
+  if (!emitter) {
     return;
   }
-  deps.messageEvents.emit("message:created", {
-    projectId: parsed.room_id,
-    message,
-  } satisfies MessageCreatedEvent);
+  if (envelope.mode === "inline") {
+    emitter.emitLocal(envelope.event, envelope.data);
+    return;
+  }
+  if (envelope.mode !== "ref") {
+    return;
+  }
+  const ref = asRecord(envelope.ref);
+  if (!ref) {
+    return;
+  }
+  const hydrator = REF_HYDRATORS[`${envelope.lane}:${envelope.event}`];
+  if (!hydrator) {
+    return;
+  }
+  const data = await hydrator(ref);
+  if (data === null) {
+    return;
+  }
+  emitter.emitLocal(envelope.event, data);
 }
