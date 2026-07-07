@@ -124,6 +124,12 @@ export interface AcquireLeaseInput {
   roomId?: string | null;
   lane: QuotaLane;
   snapshot: QuotaLeaseSnapshot;
+  /**
+   * How many concurrent leases this lane admits (see laneCapacity in
+   * quota-lease.ts — capped to 1 for non-exact meters). Defaults to
+   * the v1 one-per-lane invariant.
+   */
+  laneCapacity?: number;
 }
 
 export interface AcquireLeaseSuccess {
@@ -159,7 +165,12 @@ async function acquireLeaseLocked(
   deps: QuotaLeaseOrchestratorDeps,
 ): Promise<AcquireLeaseResult> {
   const active = await deps.loadActiveLeasesForLane(input.lane);
-  const decision = canCreateLease(active, input.lane, input.sessionId);
+  const decision = canCreateLease(
+    active,
+    input.lane,
+    input.sessionId,
+    input.laneCapacity ?? 1,
+  );
 
   if (!decision.allowed) {
     return {
