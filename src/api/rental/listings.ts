@@ -25,6 +25,7 @@ export interface CreateListingInput {
   defaultLrtLimit?: number | null;
   defaultTimeLimitMinutes?: number | null;
   manualAcceptRequired?: boolean;
+  maxConcurrentSessions?: number | null;
 }
 
 export interface UpdateListingInput {
@@ -36,6 +37,7 @@ export interface UpdateListingInput {
   defaultLrtLimit?: number | null;
   defaultTimeLimitMinutes?: number | null;
   manualAcceptRequired?: boolean;
+  maxConcurrentSessions?: number | null;
 }
 
 export type RentalListing = typeof rental_listings.$inferSelect;
@@ -68,6 +70,7 @@ export async function createListing(
       default_lrt_limit: input.defaultLrtLimit ?? null,
       default_time_limit_minutes: input.defaultTimeLimitMinutes ?? null,
       manual_accept_required: input.manualAcceptRequired ?? true,
+      max_concurrent_sessions: input.maxConcurrentSessions ?? 1,
       created_at: now,
       updated_at: now,
     })
@@ -93,6 +96,8 @@ export async function updateListing(
   if (input.defaultLrtLimit !== undefined) updates.default_lrt_limit = input.defaultLrtLimit;
   if (input.defaultTimeLimitMinutes !== undefined)
     updates.default_time_limit_minutes = input.defaultTimeLimitMinutes;
+  if (input.maxConcurrentSessions !== undefined && input.maxConcurrentSessions !== null)
+    updates.max_concurrent_sessions = input.maxConcurrentSessions;
   if (input.manualAcceptRequired !== undefined)
     updates.manual_accept_required = input.manualAcceptRequired;
 

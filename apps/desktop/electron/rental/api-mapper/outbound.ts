@@ -135,6 +135,7 @@ export function toApiListingCreateBody(
     "defaultLrtLimit",
     "defaultTimeLimitMinutes",
     "manualAcceptRequired",
+    "maxConcurrentSessions",
   ];
   for (const key of passThrough) {
     const value = input[key];
@@ -165,6 +166,7 @@ export function toApiListingPatchBody(
     "defaultLrtLimit",
     "defaultTimeLimitMinutes",
     "manualAcceptRequired",
+    "maxConcurrentSessions",
   ];
   for (const key of passThrough) {
     const value = input[key];

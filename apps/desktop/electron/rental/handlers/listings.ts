@@ -113,7 +113,22 @@ export function registerListingHandlers(
     buildEmptyQuotaSnapshot(String(id)),
   );
 
-  register("desktop:rental:run-preflight", (_event, id) =>
-    buildPreflightResult(typeof id === "string" ? id : null),
-  );
+  register("desktop:rental:run-preflight", async (_event, id) => {
+    const listingId = typeof id === "string" ? id : null;
+    if (apiClient) {
+      const result = await apiClient.getProviderReadiness();
+      if (result.ok) {
+        const readiness = mapApiProviderReadiness(result.body);
+        return {
+          listingId,
+          provider: "unknown",
+          readiness,
+          quotaSnapshot: null,
+          canPublish: readiness.status === "ready" || readiness.status === "degraded",
+          ranAt: now(),
+        };
+      }
+    }
+    return buildPreflightResult(listingId);
+  });
 }
