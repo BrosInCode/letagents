@@ -159,6 +159,57 @@ jobs:
           --test
           src/api/__tests__/focus-lineage-repair.test.ts
 
+  # ── Publish the letagents package to npm when the version bumps ──
+  # No-op unless package.json holds a version that npm doesn't have yet, so a
+  # release is just a version-bump commit landing on staging. Auth: either the
+  # NPM_TOKEN repo secret, or npm Trusted Publishing (OIDC via id-token) once
+  # this workflow is registered as a trusted publisher for the package.
+  npm-publish:
+    needs: [build, integration-tests]
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Trusted Publishing needs npm >= 11.5; node 22 bundles npm 10.
+      - name: Update npm for Trusted Publishing support
+        run: npm install -g npm@latest
+
+      - name: Check whether this version is already published
+        id: version
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          echo "local=${LOCAL_VERSION}" >> "$GITHUB_OUTPUT"
+          if npm view "letagents@${LOCAL_VERSION}" version >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "letagents@${LOCAL_VERSION} already on npm — skipping publish."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "letagents@${LOCAL_VERSION} not on npm — will publish."
+          fi
+
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: npm ci
+
+      - name: Publish to npm
+        if: steps.version.outputs.publish == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NPM_TOKEN}" ]; then
+            echo "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}" > ~/.npmrc
+          fi
+          npm publish
+
   # ── Build and push Docker images to GHCR ──
   docker:
     needs: [build, integration-tests]
