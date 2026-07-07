@@ -10,6 +10,7 @@ import {
   type AcquireLeaseFailure,
   type QuotaLeaseOrchestratorDeps,
 } from "../quota-lease-orchestrator.js";
+import { laneCapacity } from "../quota-lease.js";
 import type {
   QuotaLane,
   QuotaLease,
@@ -51,6 +52,7 @@ type ListingLeaseInput = Pick<
   | "last_native_quota_snapshot"
   | "last_quota_reset_at"
   | "meter_confidence"
+  | "max_concurrent_sessions"
 >;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -86,6 +88,7 @@ export function buildQuotaLeaseInput(
   roomId: string | null;
   lane: QuotaLane;
   snapshot: QuotaLeaseSnapshot;
+  laneCapacity: number;
 } {
   const rawSnapshot = isRecord(listing.last_native_quota_snapshot)
     ? listing.last_native_quota_snapshot as Partial<NativeQuotaSnapshot>
@@ -93,6 +96,9 @@ export function buildQuotaLeaseInput(
   const rawResetAt = stringOrNull(rawSnapshot?.nativeResetAt)
     ?? listing.last_quota_reset_at?.toISOString()
     ?? null;
+  const confidence = confidenceOrUnknown(
+    rawSnapshot?.confidence ?? listing.meter_confidence,
+  );
 
   return {
     sessionId: session.id,
@@ -106,9 +112,17 @@ export function buildQuotaLeaseInput(
       nativeUnit: unitOrUnknown(rawSnapshot?.nativeUnit ?? listing.native_quota_unit),
       nativeRemaining: finiteNumberOrNull(rawSnapshot?.nativeRemaining),
       nativeResetAt: rawResetAt,
-      confidence: confidenceOrUnknown(rawSnapshot?.confidence ?? listing.meter_confidence),
+      confidence,
       observedAt: stringOrNull(rawSnapshot?.observedAt) ?? nowIso,
     },
+    // Capacity is unlocked only when BOTH the vetted listing enum
+    // column and the (provider-attested) snapshot confidence are exact
+    // — the snapshot alone cannot raise concurrency.
+    laneCapacity: laneCapacity(
+      listing.max_concurrent_sessions,
+      confidenceOrUnknown(listing.meter_confidence),
+      confidence,
+    ),
   };
 }
 

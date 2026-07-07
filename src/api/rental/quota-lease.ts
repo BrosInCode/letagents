@@ -39,6 +39,7 @@
  * Plan: docs/RENT_AN_AGENT_TASK_BREAKDOWN.md PR p2.9 (decision slice).
  */
 
+import { isExactConfidence } from "../../shared/rental/lrt.js";
 import type { QuotaConfidence } from "../../shared/rental/meter-types.js";
 
 // ---------------------------------------------------------------------------
@@ -141,26 +142,71 @@ export type QuotaLeaseReason =
 export interface CanCreateLeaseDecision {
   allowed: boolean;
   reason: QuotaLeaseReason;
-  /** The session id currently holding the lane, if locked. */
+  /** A session id currently holding the lane, if locked. */
   heldBy: string | null;
+  /** Unreleased leases other sessions hold on this lane. */
+  activeCount: number;
+  /** The capacity the decision was made against. */
+  capacity: number;
+}
+
+/** Sanity ceiling on lane concurrency, whatever the listing says. */
+export const MAX_LANE_CAPACITY = 16;
+
+/**
+ * How many concurrent leases a lane admits for a listing.
+ *
+ * Above-1 concurrency is only safe when usage can be attributed to a
+ * specific session — i.e. the meter emits exact per-session token logs
+ * (official_exact / local_exact). Percent-window and estimated meters
+ * only observe lane-level consumption, so concurrent sessions would
+ * double-count each other's spend; those lanes stay at capacity 1
+ * regardless of the listing's max_concurrent_sessions.
+ *
+ * Callers must pass EVERY confidence signal they have (the vetted
+ * listing enum column AND the latest snapshot's self-reported value) —
+ * the weakest one governs, so a provider-attested snapshot claiming
+ * `official_exact` cannot unlock concurrency past what the
+ * server-controlled column allows.
+ */
+export function laneCapacity(
+  maxConcurrentSessions: number | null | undefined,
+  ...confidences: QuotaConfidence[]
+): number {
+  const requested =
+    typeof maxConcurrentSessions === "number"
+    && Number.isInteger(maxConcurrentSessions)
+    && maxConcurrentSessions >= 1
+      ? Math.min(maxConcurrentSessions, MAX_LANE_CAPACITY)
+      : 1;
+  if (requested === 1) return 1;
+  if (confidences.length === 0) return 1;
+  return confidences.every((confidence) => isExactConfidence(confidence))
+    ? requested
+    : 1;
 }
 
 /**
  * Decide whether a new lease can be created for `lane` given the
- * currently-active leases. A lane with an active (not-released)
- * lease is locked. The caller passes an array because the
- * DB-orchestrating layer reads ALL active rental_sessions for
- * that lane in one query and feeds them in.
+ * currently-active leases and the lane's capacity (§17.8; capacity
+ * above 1 per {@link laneCapacity}). The caller passes an array
+ * because the DB-orchestrating layer reads ALL active rental_sessions
+ * for that lane in one query and feeds them in.
  *
  * Re-entry guard: if the lane is already held by `sessionId`,
  * returns `same_session` rather than `lane_locked` so a retry
- * after a transient failure can be idempotent.
+ * after a transient failure can be idempotent (and does not consume
+ * an extra capacity slot).
  */
 export function canCreateLease(
   active: ReadonlyArray<QuotaLease>,
   lane: QuotaLane,
   sessionId: string,
+  capacity: number = 1,
 ): CanCreateLeaseDecision {
+  const effectiveCapacity =
+    Number.isInteger(capacity) && capacity >= 1 ? capacity : 1;
+
   if (
     typeof lane.provider !== "string"
     || !lane.provider.trim()
@@ -169,10 +215,13 @@ export function canCreateLease(
       allowed: false,
       reason: QUOTA_LEASE_REASONS.INVALID_LANE,
       heldBy: null,
+      activeCount: 0,
+      capacity: effectiveCapacity,
     };
   }
 
   const key = laneKeyOf(lane);
+  const holders: string[] = [];
   for (const lease of active) {
     if (lease.releasedAt) continue;
     if (laneKeyOf(lease.lane) !== key) continue;
@@ -181,12 +230,20 @@ export function canCreateLease(
         allowed: true,
         reason: QUOTA_LEASE_REASONS.SAME_SESSION,
         heldBy: lease.sessionId,
+        activeCount: holders.length,
+        capacity: effectiveCapacity,
       };
     }
+    holders.push(lease.sessionId);
+  }
+
+  if (holders.length >= effectiveCapacity) {
     return {
       allowed: false,
       reason: QUOTA_LEASE_REASONS.LANE_LOCKED,
-      heldBy: lease.sessionId,
+      heldBy: holders[0] ?? null,
+      activeCount: holders.length,
+      capacity: effectiveCapacity,
     };
   }
 
@@ -194,6 +251,8 @@ export function canCreateLease(
     allowed: true,
     reason: QUOTA_LEASE_REASONS.AVAILABLE,
     heldBy: null,
+    activeCount: holders.length,
+    capacity: effectiveCapacity,
   };
 }
 
