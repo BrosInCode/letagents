@@ -26,19 +26,30 @@ type ExecResult = {
 type ExecOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 };
 
 const COMMAND_TIMEOUT_MS = 8_000;
+
+export type DesktopCursorPreflightOptions = {
+  /**
+   * Wall-clock cap per cursor-agent command. Defaults to COMMAND_TIMEOUT_MS;
+   * pass 0 to disable (tests use this so results never depend on host load).
+   */
+  commandTimeoutMs?: number;
+};
 
 export async function runDesktopCursorProviderPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  options: DesktopCursorPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
+  const timeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
   const command = process.env.LETAGENTS_CURSOR_AGENT_BIN ||
     provider.runtimeCommand ||
     "cursor-agent";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -95,7 +106,7 @@ export async function runDesktopCursorProviderPreflight(
   }
   const launchOptions = cursorLaunchOptionsForPermissionProfile(permissionProfile.id);
   if (launchOptions.force || launchOptions.sandbox) {
-    const flagResult = await execFileWithTimeout(command, ["--help"]);
+    const flagResult = await execFileWithTimeout(command, ["--help"], { timeoutMs });
     if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions)) {
       return {
         providerId: provider.id,
@@ -128,7 +139,7 @@ export async function runDesktopCursorProviderPreflight(
     };
   }
   const managedEnv = buildCursorChildEnv(managedProfile.env);
-  const authResult = await execFileWithTimeout(command, ["status"], { env: managedEnv });
+  const authResult = await execFileWithTimeout(command, ["status"], { env: managedEnv, timeoutMs });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -159,6 +170,7 @@ export async function runDesktopCursorProviderPreflight(
     const mcpResult = await execFileWithTimeout(command, ["mcp", "list"], {
       cwd: workspaceRoot,
       env: managedEnv,
+      timeoutMs,
     });
     if (!mcpResult.ok) {
       return {
@@ -220,7 +232,7 @@ function execFileWithTimeout(
       command,
       args,
       {
-        timeout: COMMAND_TIMEOUT_MS,
+        timeout: options.timeoutMs ?? COMMAND_TIMEOUT_MS,
         cwd: options.cwd,
         env: options.env,
       },
