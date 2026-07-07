@@ -140,11 +140,19 @@ test("Open Model preflight accepts a per-agent model when no saved default exist
   process.env.LETAGENTS_OPEN_MODEL_SETTINGS_PATH = settingsPath;
   process.env.LETAGENTS_CODEX_BIN = bin;
   try {
-    const result = await runDesktopAgentProviderPreflight("open-model", {
-      repoRootPath: tmpdir(),
-      model: "qwen/custom-session-model",
-      modelSource: "custom",
-    });
+    // The electron suite runs test files as parallel node processes, so
+    // spawning the fake codex child can take arbitrarily long under load.
+    // Disable the per-command wall-clock timeout: the fake binary always exits
+    // on its own, and the timeout itself is not the behavior under test.
+    const result = await runDesktopAgentProviderPreflight(
+      "open-model",
+      {
+        repoRootPath: tmpdir(),
+        model: "qwen/custom-session-model",
+        modelSource: "custom",
+      },
+      { commandTimeoutMs: 0 },
+    );
     assert.equal(result.canStart, true);
     assert.match(result.detail ?? "", /qwen\/custom-session-model/);
     assert.match(result.version ?? "", /qwen\/custom-session-model/);
