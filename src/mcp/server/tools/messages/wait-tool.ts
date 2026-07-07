@@ -264,7 +264,40 @@ async function findRemoteMessageById(input: {
   }
 }
 
-async function collectThreadContextMessages(input: {
+// Resolving an out-of-window parent walks the room history page by page, so
+// resolved (and observed) messages are cached per process to keep repeat polls
+// from re-walking history for the same thread roots. Message ids are
+// room-scoped, so the key includes the room scope. Message records are treated
+// as immutable once posted; a bounded insertion-ordered map keeps memory flat
+// for long-running workers.
+const THREAD_CONTEXT_CACHE_MAX = 500;
+const threadContextCache = new Map<string, MessageRecord>();
+
+function threadContextCacheKey(scopeId: string, targetMessageId: string): string {
+  return `${scopeId}:${targetMessageId}`;
+}
+
+export function rememberThreadContextMessages(scopeId: string, records: readonly unknown[]): void {
+  for (const record of records) {
+    if (!isRecord(record)) continue;
+    const id = messageId(record);
+    if (!id) continue;
+    const key = threadContextCacheKey(scopeId, id);
+    threadContextCache.delete(key);
+    threadContextCache.set(key, record);
+  }
+  while (threadContextCache.size > THREAD_CONTEXT_CACHE_MAX) {
+    const oldest = threadContextCache.keys().next().value;
+    if (oldest === undefined) break;
+    threadContextCache.delete(oldest);
+  }
+}
+
+export function resetThreadContextCacheForTests(): void {
+  threadContextCache.clear();
+}
+
+export async function collectThreadContextMessages(input: {
   messages: unknown[];
   localRoomId: string | null;
   roomId: string | null;
@@ -276,6 +309,13 @@ async function collectThreadContextMessages(input: {
   const pendingIds = records
     .map(replyReferenceId)
     .filter((id): id is string => Boolean(id && !knownIds.has(id)));
+  const scopeId = input.roomId ?? input.localRoomId ?? input.projectId ?? "";
+  rememberThreadContextMessages(scopeId, records);
+  if (pendingIds.length === 0) {
+    // Nothing quotes an out-of-window message (idle polls land here), so skip
+    // storage-mode resolution entirely.
+    return [];
+  }
   const contextMessages: MessageRecord[] = [];
   const useLocalStorage = Boolean(
     input.localRoomId && await isLocalRoomStorageEnabled(input.localRoomId)
@@ -289,14 +329,19 @@ async function collectThreadContextMessages(input: {
     const nextId = pendingIds.shift();
     if (!nextId || seenIds.has(nextId)) continue;
     seenIds.add(nextId);
-    const message = useLocalStorage && input.localRoomId
-      ? await findLocalMessageById(sqliteRoomId || input.localRoomId, nextId)
-      : await findRemoteMessageById({
-        roomId: input.roomId,
-        projectId: input.projectId,
-        targetMessageId: nextId,
-      });
+    const cached = threadContextCache.get(threadContextCacheKey(scopeId, nextId));
+    const message = cached
+      ?? (useLocalStorage && input.localRoomId
+        ? await findLocalMessageById(sqliteRoomId || input.localRoomId, nextId)
+        : await findRemoteMessageById({
+          roomId: input.roomId,
+          projectId: input.projectId,
+          targetMessageId: nextId,
+        }));
     if (!message) continue;
+    if (!cached) {
+      rememberThreadContextMessages(scopeId, [message]);
+    }
     contextMessages.push(message);
     const parentId = replyReferenceId(message);
     if (parentId && !seenIds.has(parentId)) {
