@@ -28,6 +28,7 @@ test("rental IPC registers the preload channel surface", () => {
     "desktop:rental:decline-request",
     "desktop:rental:get-activity",
     "desktop:rental:get-exposures",
+    "desktop:rental:get-context-requests",
     "desktop:rental:get-patches",
     "desktop:rental:get-usage",
     "desktop:rental:get-own-quota-status",

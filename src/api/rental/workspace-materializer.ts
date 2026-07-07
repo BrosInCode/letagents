@@ -23,6 +23,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { rental_workspace_manifests } from "../db/schema.js";
+import { scanFile } from "./secret-firewall.js";
 
 // ---------------------------------------------------------------------------
 // Simple glob matching (avoids external dependency)
@@ -421,6 +422,144 @@ export async function getActiveManifest(
     (r) => r.retention_status === "active",
   );
   return active ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Single-file materialization (approved context requests)
+// ---------------------------------------------------------------------------
+
+export interface MaterializeApprovedFileInput {
+  /** Manifest of the active workspace the file should land in. */
+  manifest: {
+    session_id: string;
+    base_commit_sha: string;
+    workspace_path: string | null;
+  };
+  /** Repo URL — must match the URL used at initial materialization so the
+   * cached bare clone resolves to the same directory. */
+  repoUrl: string;
+  /** Repo-relative path approved by the renter. */
+  filePath: string;
+  /** Optional override matching the one passed to materializeWorkspace. */
+  workspaceRoot?: string;
+}
+
+export interface MaterializeApprovedFileResult {
+  materialized: boolean;
+  /** Set when materialized=false. */
+  reason?:
+    | "workspace_unavailable"
+    | "bare_clone_missing"
+    | "path_blocked"
+    | "invalid_path"
+    | "file_not_in_base_commit";
+  bytes?: number;
+}
+
+/**
+ * Copy one renter-approved file from the cached bare clone into an
+ * existing session workspace, so the Context Broker can serve (and
+ * ledger) it like any in-scope file.
+ *
+ * Always-blocked secret paths stay blocked regardless of approval.
+ * Failures are reported, not thrown — the approval record is the source
+ * of truth and materialization is retried on the next read attempt path.
+ */
+export function materializeApprovedFile(
+  input: MaterializeApprovedFileInput,
+): MaterializeApprovedFileResult {
+  const relPath = normalizeApprovedPath(input.filePath);
+  if (!relPath) return { materialized: false, reason: "invalid_path" };
+  // Gate on BOTH the materializer denylist and the Secret Firewall's
+  // path scan: the workspace is also the command-execution root, and
+  // command output is not firewalled, so anything physically written
+  // here must pass the strictest path denylist we have.
+  if (isAlwaysBlocked(relPath) || scanFile(relPath, "").verdict === "blocked") {
+    return { materialized: false, reason: "path_blocked" };
+  }
+
+  const workspacePath = input.manifest.workspace_path;
+  if (!workspacePath || !fs.existsSync(workspacePath)) {
+    return { materialized: false, reason: "workspace_unavailable" };
+  }
+
+  validateCommitSha(input.manifest.base_commit_sha);
+  const repoUrl = validateRepoUrl(input.repoUrl);
+  const workspaceRoot = input.workspaceRoot ?? DEFAULT_WORKSPACE_ROOT;
+  const barePath = path.join(workspaceRoot, ".bare-cache", hashString(repoUrl));
+  if (!fs.existsSync(barePath)) {
+    return { materialized: false, reason: "bare_clone_missing" };
+  }
+
+  let content: Buffer;
+  try {
+    content = execFileSync(
+      "git",
+      ["show", `${input.manifest.base_commit_sha}:${relPath}`],
+      {
+        cwd: barePath,
+        timeout: 10_000,
+        stdio: "pipe",
+        maxBuffer: 16 * 1024 * 1024,
+        env: materializerGitEnv(),
+      },
+    );
+  } catch {
+    return { materialized: false, reason: "file_not_in_base_commit" };
+  }
+
+  const target = path.join(workspacePath, relPath);
+  // Defense in depth: normalizeApprovedPath already strips traversal.
+  const rel = path.relative(workspacePath, target);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { materialized: false, reason: "invalid_path" };
+  }
+
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // The extracted repo can contain symlinked directories; mkdir/write
+  // would follow them outside the workspace. Verify the real parent is
+  // still inside the real workspace root, and never write through a
+  // symlink at the target itself (mirrors the broker's read-side checks).
+  const workspaceReal = fs.realpathSync(workspacePath);
+  const parentReal = fs.realpathSync(path.dirname(target));
+  if (
+    parentReal !== workspaceReal
+    && !parentReal.startsWith(workspaceReal + path.sep)
+  ) {
+    return { materialized: false, reason: "invalid_path" };
+  }
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) {
+      return { materialized: false, reason: "invalid_path" };
+    }
+  } catch {
+    // Target does not exist yet — expected for a fresh materialization.
+  }
+  fs.writeFileSync(target, content);
+  return { materialized: true, bytes: content.byteLength };
+}
+
+/**
+ * Repo-relative path normalization for approved files: rejects absolute
+ * paths, null bytes, and traversal; returns null when unusable.
+ */
+function normalizeApprovedPath(filePath: string): string | null {
+  if (typeof filePath !== "string" || filePath.includes("\0")) return null;
+  const normalized = filePath.trim().replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) {
+    return null;
+  }
+  const resolved: string[] = [];
+  for (const segment of normalized.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (resolved.length === 0) return null;
+      resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved.length ? resolved.join("/") : null;
 }
 
 // ---------------------------------------------------------------------------

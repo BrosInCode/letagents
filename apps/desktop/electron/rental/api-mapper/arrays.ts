@@ -1,11 +1,14 @@
 import type {
   DesktopRentalActivityEvent,
+  DesktopRentalContextApproval,
+  DesktopRentalExposure,
   DesktopRentalListing,
   DesktopRentalPatch,
   DesktopRentalRequest,
 } from "../../ipc-types.js";
 
 import { mapApiActivityEvent } from "./activity.js";
+import { mapApiContextApproval, mapApiExposure } from "./context.js";
 import { mapApiListing } from "./listing.js";
 import { mapApiPatch } from "./patch.js";
 import { isObject } from "./primitives.js";
@@ -49,6 +52,22 @@ export function mapApiPatchArray(raw: unknown): DesktopRentalPatch[] {
   return rows
     .map((row) => mapApiPatch(row))
     .filter((x): x is DesktopRentalPatch => x !== null);
+}
+
+export function mapApiExposureArray(raw: unknown): DesktopRentalExposure[] {
+  const rows = unwrapArray(raw, "exposures");
+  return rows
+    .map((row) => mapApiExposure(row))
+    .filter((x): x is DesktopRentalExposure => x !== null);
+}
+
+export function mapApiContextApprovalArray(
+  raw: unknown,
+): DesktopRentalContextApproval[] {
+  const rows = unwrapArray(raw, "requests", "context_requests");
+  return rows
+    .map((row) => mapApiContextApproval(row))
+    .filter((x): x is DesktopRentalContextApproval => x !== null);
 }
 
 function unwrapArray(raw: unknown, ...keys: string[]): unknown[] {

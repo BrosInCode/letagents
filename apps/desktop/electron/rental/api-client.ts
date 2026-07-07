@@ -327,6 +327,46 @@ export class RentalApiClient {
   }
 
   // -------------------------------------------------------------------------
+  // Context access requests + exposure ledger — renter trust surfaces
+  // -------------------------------------------------------------------------
+
+  getExposures(sessionId: string): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/exposures`,
+    );
+  }
+
+  getContextRequests(sessionId: string): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/context-requests`,
+    );
+  }
+
+  approveContextRequest(
+    sessionId: string,
+    requestId: string,
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/context-requests/${encodeURIComponent(requestId)}/approve`,
+      {},
+    );
+  }
+
+  denyContextRequest(
+    sessionId: string,
+    requestId: string,
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/context-requests/${encodeURIComponent(requestId)}/deny`,
+      {},
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Internal (provider liveness + adapter snapshot ingest)
   // -------------------------------------------------------------------------
 

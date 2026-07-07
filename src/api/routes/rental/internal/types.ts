@@ -40,6 +40,12 @@ import type {
   RunWorkspaceCommandInput,
   RunWorkspaceCommandResult,
 } from "../../../rental/command-broker.js";
+import type {
+  ContextRequestRecord,
+  ContextRequestType,
+  DecideContextRequestResult,
+} from "../../../rental/context-requests.js";
+import type { ExposureRecord } from "../../../rental/exposure-ledger.js";
 
 export interface RentalInternalRouteDeps {
   ingestUsage: (
@@ -122,4 +128,23 @@ export interface RentalInternalRouteDeps {
     sessionId: string,
     input: Omit<RunWorkspaceCommandInput, "sessionId">,
   ) => Promise<RunWorkspaceCommandResult>;
+  createContextRequest: (
+    sessionId: string,
+    input: {
+      path: string;
+      reason?: string;
+      requestType?: ContextRequestType;
+      requestedBy?: string;
+    },
+  ) => Promise<ContextRequestRecord>;
+  listContextRequests: (sessionId: string) => Promise<ContextRequestRecord[]>;
+  decideContextRequest: (
+    sessionId: string,
+    input: {
+      requestId: string;
+      decision: "approved" | "denied";
+      decidedBy: string;
+    },
+  ) => Promise<DecideContextRequestResult>;
+  listSessionExposures: (sessionId: string) => Promise<ExposureRecord[]>;
 }

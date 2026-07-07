@@ -150,6 +150,7 @@ const api: DesktopApi = {
     declineRequest: (id, reason?: string) => ipcRenderer.invoke("desktop:rental:decline-request", id, reason ?? null),
     getActivity: (sessionId) => ipcRenderer.invoke("desktop:rental:get-activity", sessionId),
     getExposures: (sessionId) => ipcRenderer.invoke("desktop:rental:get-exposures", sessionId),
+    getContextRequests: (sessionId) => ipcRenderer.invoke("desktop:rental:get-context-requests", sessionId),
     getPatches: (sessionId) => ipcRenderer.invoke("desktop:rental:get-patches", sessionId),
     getUsage: (sessionId) => ipcRenderer.invoke("desktop:rental:get-usage", sessionId),
     getOwnQuotaStatus: () => ipcRenderer.invoke("desktop:rental:get-own-quota-status"),

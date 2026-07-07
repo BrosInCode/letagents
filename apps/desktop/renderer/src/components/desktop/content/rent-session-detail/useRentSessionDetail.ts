@@ -1,12 +1,14 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type {
   DesktopRentalActivityEvent,
+  DesktopRentalContextApproval,
+  DesktopRentalExposure,
   DesktopRentalPatch,
   DesktopRentalSession,
   DesktopRentalUsageSnapshot,
 } from "../../../../../../electron/ipc-types";
 import type { RentSessionDetailTab } from "./tabs";
-import { canCancelSessionStatus } from "./presentation";
+import { canCancelSessionStatus, countPendingContextRequests } from "./presentation";
 
 type RentalBridge = NonNullable<typeof window.letagentsDesktop.rental>;
 
@@ -22,16 +24,30 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
   const usage = ref<DesktopRentalUsageSnapshot | null>(null);
   const activity = ref<DesktopRentalActivityEvent[]>([]);
   const patches = ref<DesktopRentalPatch[]>([]);
+  const contextRequests = ref<DesktopRentalContextApproval[]>([]);
+  const exposures = ref<DesktopRentalExposure[]>([]);
   const loadingUsage = ref(false);
   const loadingActivity = ref(false);
   const loadingPatches = ref(false);
+  const loadingContextRequests = ref(false);
+  const loadingExposures = ref(false);
   const cancelBusy = ref(false);
   const patchActionBusyFor = ref<string | null>(null);
   const patchActionKind = ref<"approve" | "changes" | null>(null);
+  const contextActionBusyFor = ref<string | null>(null);
+  const contextNotice = ref<string | null>(null);
   const errorMessage = ref<string | null>(null);
 
   const anyLoading = computed(
-    () => loadingUsage.value || loadingActivity.value || loadingPatches.value,
+    () =>
+      loadingUsage.value
+      || loadingActivity.value
+      || loadingPatches.value
+      || loadingContextRequests.value
+      || loadingExposures.value,
+  );
+  const pendingContextRequestCount = computed(() =>
+    countPendingContextRequests(contextRequests.value),
   );
   const canCancel = computed(() => {
     const status = options.session.value?.status;
@@ -46,6 +62,8 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
       usage.value = null;
       activity.value = [];
       patches.value = [];
+      contextRequests.value = [];
+      exposures.value = [];
       errorMessage.value = null;
       void refresh();
     },
@@ -63,7 +81,58 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
       loadUsage(session.id, bridge),
       loadActivity(session.id, bridge),
       loadPatches(session.id, bridge),
+      loadContextRequests(session.id, bridge),
+      loadExposures(session.id, bridge),
     ]);
+  }
+
+  async function approveContextRequest(requestId: string): Promise<void> {
+    await decideContextRequest(requestId, "approve");
+  }
+
+  async function denyContextRequest(requestId: string): Promise<void> {
+    await decideContextRequest(requestId, "deny");
+  }
+
+  async function decideContextRequest(
+    requestId: string,
+    decision: "approve" | "deny",
+  ): Promise<void> {
+    const session = options.session.value;
+    if (!session) return;
+
+    const bridge = getRentalBridge();
+    if (!bridge) return;
+
+    contextActionBusyFor.value = requestId;
+    contextNotice.value = null;
+    errorMessage.value = null;
+    try {
+      const result =
+        decision === "approve"
+          ? await bridge.approveContextRequest(session.id, requestId)
+          : await bridge.denyContextRequest(session.id, requestId);
+      if (isDisabledResult(result)) {
+        errorMessage.value = "Rent an Agent is disabled.";
+        return;
+      }
+      if (decision === "approve" && result.materialized === false) {
+        contextNotice.value =
+          "Access approved, but the file could not be delivered to the agent workspace yet. The agent may need to retry once the workspace is available.";
+      }
+      await Promise.all([
+        loadContextRequests(session.id, bridge),
+        // Approvals can expose a new file — keep the audit trail fresh.
+        loadExposures(session.id, bridge),
+      ]);
+    } catch (error) {
+      errorMessage.value =
+        error instanceof Error
+          ? error.message
+          : `Could not ${decision} the access request.`;
+    } finally {
+      contextActionBusyFor.value = null;
+    }
   }
 
   async function approvePatch(patchId: string): Promise<void> {
@@ -188,6 +257,32 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
     }
   }
 
+  async function loadContextRequests(sessionId: string, bridge: RentalBridge): Promise<void> {
+    loadingContextRequests.value = true;
+    try {
+      const result = await bridge.getContextRequests(sessionId);
+      if (isDisabledResult(result)) return;
+      contextRequests.value = Array.isArray(result) ? result : [];
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "Could not load access requests.";
+    } finally {
+      loadingContextRequests.value = false;
+    }
+  }
+
+  async function loadExposures(sessionId: string, bridge: RentalBridge): Promise<void> {
+    loadingExposures.value = true;
+    try {
+      const result = await bridge.getExposures(sessionId);
+      if (isDisabledResult(result)) return;
+      exposures.value = Array.isArray(result) ? result : [];
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : "Could not load exposures.";
+    } finally {
+      loadingExposures.value = false;
+    }
+  }
+
   function getRentalBridge(): RentalBridge | null {
     const bridge = window.letagentsDesktop?.rental;
     if (!bridge) {
@@ -201,16 +296,25 @@ export function useRentSessionDetail(options: UseRentSessionDetailOptions) {
     activeTab,
     activity,
     anyLoading,
+    approveContextRequest,
     approvePatch,
     canCancel,
     cancelBusy,
     cancelSession,
+    contextActionBusyFor,
+    contextNotice,
+    contextRequests,
+    denyContextRequest,
     errorMessage,
+    exposures,
     loadingActivity,
+    loadingContextRequests,
+    loadingExposures,
     loadingPatches,
     patchActionBusyFor,
     patchActionKind,
     patches,
+    pendingContextRequestCount,
     refresh,
     requestPatchChanges,
     usage,

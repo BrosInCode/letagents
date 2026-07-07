@@ -1,5 +1,4 @@
 import type {
-  DesktopRentalContextApproval,
   DesktopRentalIdeKind,
   DesktopRentalListing,
   DesktopRentalListingInput,
@@ -245,25 +244,5 @@ export function buildStubPatch(
     prUrl: null,
     createdAt: null,
     updatedAt: now(),
-  };
-}
-
-export function buildStubContextApproval(
-  sessionId: string,
-  id: string,
-  status: DesktopRentalContextApproval["status"],
-): DesktopRentalContextApproval {
-  return {
-    id,
-    sessionId,
-    requestType: "read_file",
-    status,
-    path: null,
-    reason: null,
-    redactionCount: 0,
-    requestedBy: null,
-    decidedBy: null,
-    createdAt: null,
-    decidedAt: status === "pending" ? null : now(),
   };
 }

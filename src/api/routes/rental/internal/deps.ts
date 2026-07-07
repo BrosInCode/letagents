@@ -26,6 +26,13 @@ import {
   createDefaultCommandBrokerDeps,
   runWorkspaceCommand as runCommandThroughBroker,
 } from "../../../rental/command-broker.js";
+import {
+  createContextRequest,
+  createDefaultContextRequestsDeps,
+  decideContextRequest,
+  listContextRequests,
+} from "../../../rental/context-requests.js";
+import { listExposures, type ExposureLedgerDeps } from "../../../rental/exposure-ledger.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 
 let cachedHeartbeatDeps: HeartbeatDeps | null = null;
@@ -123,5 +130,26 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
       sessionId,
       ...input,
     });
+  },
+  async createContextRequest(sessionId, input) {
+    return createContextRequest(createDefaultContextRequestsDeps(), {
+      sessionId,
+      ...input,
+    });
+  },
+  async listContextRequests(sessionId) {
+    return listContextRequests(createDefaultContextRequestsDeps(), sessionId);
+  },
+  async decideContextRequest(sessionId, input) {
+    return decideContextRequest(createDefaultContextRequestsDeps(), {
+      sessionId,
+      ...input,
+    });
+  },
+  async listSessionExposures(sessionId) {
+    return listExposures(
+      { db: db as unknown as ExposureLedgerDeps["db"], generateId: () => "" },
+      sessionId,
+    );
   },
 };
