@@ -55,9 +55,18 @@ type ExecResult = {
 type ExecOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 };
 
 const COMMAND_TIMEOUT_MS = 8_000;
+
+export type DesktopAgentProviderPreflightOptions = {
+  /**
+   * Wall-clock cap per provider CLI command. Defaults to COMMAND_TIMEOUT_MS;
+   * pass 0 to disable (tests use this so results never depend on host load).
+   */
+  commandTimeoutMs?: number;
+};
 
 function assertAgentProviderId(providerId: string): asserts providerId is DesktopAgentProviderId {
   if (!isDesktopAgentProviderId(providerId)) {
@@ -84,7 +93,7 @@ async function execFileWithTimeout(
       command,
       args,
       {
-        timeout: COMMAND_TIMEOUT_MS,
+        timeout: options.timeoutMs ?? COMMAND_TIMEOUT_MS,
         cwd: options.cwd,
         env,
       },
@@ -155,9 +164,10 @@ async function codexPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -184,7 +194,7 @@ async function codexPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(command, ["login", "status"]);
+  const authResult = await execFileWithTimeout(command, ["login", "status"], { timeoutMs });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -240,12 +250,13 @@ async function claudeCodePreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const command = process.env.LETAGENTS_CLAUDE_CODE_BIN ||
     process.env.LETAGENTS_CLAUDE_BIN ||
     provider.runtimeCommand ||
     "claude";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -272,7 +283,7 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(command, ["auth", "status"]);
+  const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -317,9 +328,10 @@ async function openModelPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -346,7 +358,7 @@ async function openModelPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const appServerResult = await execFileWithTimeout(command, ["app-server", "--help"]);
+  const appServerResult = await execFileWithTimeout(command, ["app-server", "--help"], { timeoutMs });
   if (!appServerResult.ok) {
     return {
       providerId: provider.id,
@@ -416,6 +428,7 @@ async function openModelPreflight(
 export async function runDesktopAgentProviderPreflight(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
+  options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   assertAgentProviderId(providerId);
   const provider = findAgentProvider(providerId);
@@ -497,16 +510,18 @@ export async function runDesktopAgentProviderPreflight(
   const mcpStatus = await getProviderMcpStatus(provider);
 
   if (provider.id === "codex") {
-    return withManagedRuntimeValidation(await codexPreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await codexPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
   if (provider.id === "claude-code") {
-    return withManagedRuntimeValidation(await claudeCodePreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await claudeCodePreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
   if (provider.id === "cursor") {
-    return withManagedRuntimeValidation(await runDesktopCursorProviderPreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await runDesktopCursorProviderPreflight(provider, input, mcpStatus, {
+      commandTimeoutMs: options.commandTimeoutMs,
+    }));
   }
   if (provider.id === "open-model") {
-    return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus));
+    return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
 
   return bridgePreflight(provider, mcpStatus);
