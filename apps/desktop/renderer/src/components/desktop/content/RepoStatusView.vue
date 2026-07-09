@@ -80,3 +80,26 @@ const workspaceStateLabel = computed(() => repoWorkspaceSummary(props.repoStatus
   plainFolderLabel: "Plain local folder",
 }));
 </script>
+
+<style scoped>
+/* RepoStatusView is embedded inside a detail pane, not shown as a full page,
+   so the shared full-width hero sizing is scaled down to pane proportions. */
+.surface-page {
+  gap: 10px;
+}
+
+.surface-intro {
+  padding: 0;
+}
+
+.surface-intro h3 {
+  font-size: 1.05rem;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  max-width: none;
+}
+
+.surface-intro p {
+  max-width: none;
+}
+</style>

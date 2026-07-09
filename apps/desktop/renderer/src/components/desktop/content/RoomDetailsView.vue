@@ -1484,7 +1484,13 @@ onBeforeUnmount(() => {
 .focus-room-current {
   border: 1px solid var(--border);
   border-radius: 22px;
-  background: rgba(16, 16, 16, 0.72);
+  /* Opaque, with an isolated stacking context, so sibling sections such as the
+     embedded RepoStatusView can never bleed through this pane during renders or
+     transitions. */
+  background: rgb(16, 16, 16);
+  position: relative;
+  isolation: isolate;
+  z-index: 1;
   animation: focus-room-surface-in 280ms var(--ease-out) 65ms both;
   transition:
     border-color 180ms var(--ease-out),
@@ -1496,7 +1502,7 @@ onBeforeUnmount(() => {
 .focus-room-detail:hover,
 .focus-room-current:hover {
   border-color: rgba(255, 255, 255, 0.14);
-  background: rgba(18, 18, 18, 0.78);
+  background: rgb(20, 20, 20);
 }
 
 .focus-room-list-pane {
