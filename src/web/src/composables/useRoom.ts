@@ -184,6 +184,13 @@ const roomStream = createRoomStream({
   upsertTask,
   upsertReasoningSession,
   removeReasoningSession,
+  getMessageCursor: () => messages.value[messages.value.length - 1]?.id ?? null,
+  resyncMessages: async (roomIdentifier, after) => {
+    if (room.value?.identifier !== roomIdentifier) {
+      return { success: false, cursor: after }
+    }
+    return refreshRoomMessages(after)
+  },
 })
 
 function startStreaming(roomIdentifier: string) {

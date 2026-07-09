@@ -62,6 +62,23 @@ export async function fetchMessages(
   }
 }
 
+export async function fetchMessagesAfter(
+  roomIdentifier: string,
+  after: string,
+): Promise<{ messages: RoomMessage[]; hasMore: boolean }> {
+  const params = new URLSearchParams({
+    limit: String(MESSAGE_HISTORY_PAGE_SIZE),
+    after,
+  })
+  const data = await apiFetch(
+    `${roomPath(roomIdentifier)}/messages?${params.toString()}`,
+  )
+  return {
+    messages: data.messages || [],
+    hasMore: Boolean(data.has_more),
+  }
+}
+
 export function mergeMessages(
   current: readonly RoomMessage[],
   incoming: readonly RoomMessage[],
