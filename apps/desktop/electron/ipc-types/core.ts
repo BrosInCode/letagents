@@ -66,6 +66,12 @@ export interface RepoStatus {
   worktrees: RepoWorktreeEntry[];
 }
 
+export interface DesktopRepoWorktreeResult {
+  worktreePath: string | null;
+  branch: string | null;
+  error: string | null;
+}
+
 export interface WorkerSnapshot {
   id: string;
   runtime: string;

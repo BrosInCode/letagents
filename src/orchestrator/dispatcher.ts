@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import type { Plan, Task, TaskResult, WorkerConfig } from "./types.js";
+import { ensureWorktree, removeWorktreeIfClean } from "./worktrees.js";
 
 function spawnAgent(command: string, args: string[], cwd: string): Promise<{ stdout: string; code: number }> {
   return new Promise((resolve, reject) => {
@@ -76,39 +77,6 @@ async function postAuditLog(projectId: string, text: string): Promise<void> {
   });
 }
 
-function sanitizeBranchName(branch: string): string {
-  return branch.replace(/[^a-zA-Z0-9._-]+/g, "-");
-}
-
-function getWorktreePath(task: Task): string {
-  return path.resolve(process.cwd(), "..", `letagents-${sanitizeBranchName(task.branch)}`);
-}
-
-async function ensureWorktree(task: Task): Promise<string> {
-  const worktreePath = getWorktreePath(task);
-
-  if (fs.existsSync(path.join(worktreePath, ".git"))) {
-    return worktreePath;
-  }
-
-  const branchExists = await gitRefExists(`refs/heads/${task.branch}`);
-  const args = branchExists
-    ? ["worktree", "add", worktreePath, task.branch]
-    : ["worktree", "add", worktreePath, "-b", task.branch, DEFAULT_BASE_BRANCH];
-
-  await spawnAgent("git", args, process.cwd());
-  return worktreePath;
-}
-
-async function gitRefExists(ref: string): Promise<boolean> {
-  try {
-    const { code } = await spawnAgent("git", ["rev-parse", "--verify", ref], process.cwd());
-    return code === 0;
-  } catch {
-    return false;
-  }
-}
-
 async function getBranchCommit(branch: string): Promise<string | null> {
   try {
     const { stdout, code } = await spawnAgent("git", ["rev-parse", "--verify", branch], process.cwd());
@@ -116,6 +84,20 @@ async function getBranchCommit(branch: string): Promise<string | null> {
     return stdout.trim();
   } catch {
     return null;
+  }
+}
+
+async function cleanupTaskWorktree(task: Task, worktreePath: string): Promise<void> {
+  try {
+    const outcome = await removeWorktreeIfClean({ repoRoot: process.cwd(), worktreePath });
+    if (outcome === "removed") {
+      console.log(`🧹 Removed worktree for ${task.id} at ${worktreePath}`);
+    } else if (outcome === "dirty") {
+      console.log(`🧹 Kept worktree for ${task.id} at ${worktreePath} (uncommitted changes present)`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`🧹 Could not remove worktree for ${task.id} at ${worktreePath}: ${message}`);
   }
 }
 
@@ -265,7 +247,12 @@ export async function dispatchTask(projectId: string, plan: Plan, task: Task): P
   const worker = getWorkerConfig(plan, task.assignee);
 
   if (worker.mode !== "chat" && (worker.mode === "cli" || task.assignee === "codex" || task.assignee === "claude")) {
-    const worktreePath = await ensureWorktree(task);
+    const worktree = await ensureWorktree({
+      repoRoot: process.cwd(),
+      branch: task.branch,
+      baseBranch: DEFAULT_BASE_BRANCH,
+    });
+    const worktreePath = worktree.worktreePath;
     const beforeCommit = await getBranchCommit(task.branch);
 
     await postAuditLog(
@@ -284,6 +271,15 @@ export async function dispatchTask(projectId: string, plan: Plan, task: Task): P
         `✅ ${task.id} ${verifiedResult.status} on \`${verifiedResult.branch}\`${verifiedResult.commit ? ` at \`${verifiedResult.commit}\`` : ""}`
       );
       console.log(`📤 Dispatched task ${task.id} (${task.name}) to ${task.assignee} via CLI`);
+
+      // The task's commit lives on its branch, so the transient worktree can be
+      // reclaimed once the task finishes cleanly. Only worktrees this dispatch
+      // created are reclaimed — a reused pre-existing checkout (e.g. a
+      // developer's own) is never removed. Uncommitted work is also preserved:
+      // removeWorktreeIfClean skips removal when the working tree is dirty.
+      if (verifiedResult.status === "done" && worktree.created) {
+        await cleanupTaskWorktree(task, worktreePath);
+      }
       return verifiedResult;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

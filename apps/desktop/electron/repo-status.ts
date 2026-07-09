@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import type {
@@ -168,6 +168,39 @@ async function getWorktrees(workspaceRoot: string): Promise<RepoWorktreeEntry[]>
   } catch {
     return [];
   }
+}
+
+/**
+ * Resolve the stable repository root shared by every worktree of a repo.
+ *
+ * `git rev-parse --show-toplevel` returns the *current* worktree's root, so a
+ * linked worktree (`git worktree add`) reports a different path than the main
+ * checkout. Keying a local room off that path would split one repository into N
+ * rooms. `--git-common-dir` points every worktree at the same `.git` directory,
+ * whose parent is the main worktree root; we fall back to the worktree list's
+ * main entry, then to the passed-in root for bare/unusual layouts.
+ */
+async function getMainWorktreeRoot(worktreeRoot: string): Promise<string> {
+  try {
+    const stdout = await runGitInPath(worktreeRoot, ["rev-parse", "--git-common-dir"]);
+    const commonDir = stdout.trim();
+    if (commonDir) {
+      const absoluteCommonDir = resolve(worktreeRoot, commonDir);
+      if (basename(absoluteCommonDir) === ".git") {
+        return dirname(absoluteCommonDir);
+      }
+    }
+  } catch {
+    // Fall back to the worktree list below.
+  }
+  try {
+    const stdout = await runGitInPath(worktreeRoot, ["worktree", "list", "--porcelain"]);
+    const main = parseGitWorktreePorcelain(stdout, worktreeRoot).find((entry) => entry.isMain);
+    if (main?.path) return resolve(main.path);
+  } catch {
+    // Fall back to the worktree root.
+  }
+  return resolve(worktreeRoot);
 }
 
 export type ParsedGitStatus = {
@@ -396,19 +429,40 @@ export async function buildRepoStatus(workspaceRoot: string): Promise<RepoStatus
     worktrees,
   };
 }
+/**
+ * Normalize the casing of a `host/owner/repo` room identifier derived from a git
+ * remote. Hostnames are always case-insensitive, so they are safe to lowercase.
+ * GitHub owner/repo names are also case-insensitive, so we lowercase the path for
+ * github.com to keep two differently-cased clones in the same repo-level room
+ * (branch rooms are already lowercased downstream). Other hosts may be
+ * case-sensitive, so their path casing is preserved.
+ */
+function normalizeDerivedRoomIdentifierCasing(identifier: string): string {
+  const trimmed = identifier.trim().replace(/\/+$/, "");
+  const slashIndex = trimmed.indexOf("/");
+  if (slashIndex < 0) return trimmed.toLowerCase();
+  const host = trimmed.slice(0, slashIndex).toLowerCase();
+  const rest = trimmed.slice(slashIndex + 1);
+  return host === "github.com" ? `${host}/${rest.toLowerCase()}` : `${host}/${rest}`;
+}
+
 export function normalizeGitRemoteToRoomIdentifier(remote: string): string | null {
   const value = remote.trim();
   if (!value) return null;
 
   const sshMatch = /^git@([^:]+):(.+?)(?:\.git)?$/.exec(value);
   if (sshMatch) {
-    return `${sshMatch[1]}/${sshMatch[2]}`.replace(/\.git$/, "");
+    return normalizeDerivedRoomIdentifierCasing(
+      `${sshMatch[1]}/${sshMatch[2]}`.replace(/\.git$/, ""),
+    );
   }
 
   try {
     const url = new URL(value);
     if (!url.hostname) return null;
-    return `${url.hostname}${url.pathname}`.replace(/\.git$/, "").replace(/\/+$/, "");
+    return normalizeDerivedRoomIdentifierCasing(
+      `${url.hostname}${url.pathname}`.replace(/\.git$/, "").replace(/\/+$/, ""),
+    );
   } catch {
     return null;
   }
@@ -645,11 +699,15 @@ export async function resolveRoomIdentifierFromPath(folderPath: string): Promise
     // Fall through to the local Git room below.
   }
 
+  // Local-only repos are keyed by a hash of the repository root. Normalize to the
+  // main worktree root so a linked worktree resolves to the same room as the main
+  // checkout. The returned `repoRoot` stays the actually-opened worktree root.
+  const identityRoot = await getMainWorktreeRoot(repoRoot);
   return {
     repoRoot,
-    roomIdentifier: buildLocalGitRoomIdentifier(repoRoot, currentBranch),
+    roomIdentifier: buildLocalGitRoomIdentifier(identityRoot, currentBranch),
     source: "local_git",
-    gitRoom: buildLocalGitRoomInfo({ repoRoot, currentBranch, defaultBranch }),
+    gitRoom: buildLocalGitRoomInfo({ repoRoot: identityRoot, currentBranch, defaultBranch }),
     warning: null,
   };
 }

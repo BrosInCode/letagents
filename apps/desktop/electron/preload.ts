@@ -193,6 +193,8 @@ const api: DesktopApi = {
     },
     openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
+    createWorktree: (repoRoot, branch) =>
+      ipcRenderer.invoke("desktop:repos:create-worktree", repoRoot, branch),
   },
   workers: {
     list: () => ipcRenderer.invoke("desktop:workers:list"),
