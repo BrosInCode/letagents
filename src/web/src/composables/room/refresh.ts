@@ -6,6 +6,7 @@ import {
   fetchFocusRooms,
   fetchGitHubEvents,
   fetchMessages,
+  fetchMessagesAfter,
   fetchParticipants,
   fetchPresence,
   fetchRoomArtifacts,
@@ -146,14 +147,48 @@ export function createRoomRefreshController(
     }
   }
 
-  async function refreshRoomMessages(): Promise<boolean> {
-    if (!room.value) return false
+  async function refreshRoomMessages(
+    after: string | null = null,
+  ): Promise<{ success: boolean; cursor: string | null }> {
+    if (!room.value) return { success: false, cursor: after }
     const roomIdentifier = room.value.identifier
-    const page = await fetchMessages(roomIdentifier)
-    if (room.value?.identifier !== roomIdentifier) return false
-    messages.value = mergeMessages(messages.value, page.messages)
-    messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
-    return true
+    if (!after) {
+      const page = await fetchMessages(roomIdentifier)
+      if (room.value?.identifier !== roomIdentifier) {
+        return { success: false, cursor: after }
+      }
+      messages.value = mergeMessages(messages.value, page.messages)
+      messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
+      return {
+        success: true,
+        cursor: page.messages[page.messages.length - 1]?.id ?? null,
+      }
+    }
+
+    try {
+      let cursor = after
+      let hasMore = false
+      do {
+        const page = await fetchMessagesAfter(roomIdentifier, cursor)
+        if (room.value?.identifier !== roomIdentifier) {
+          return { success: false, cursor: after }
+        }
+        hasMore = page.hasMore
+        if (page.messages.length === 0) {
+          return { success: !hasMore, cursor }
+        }
+        messages.value = mergeMessages(messages.value, page.messages)
+        const nextCursor = page.messages[page.messages.length - 1]?.id
+        if (!nextCursor || nextCursor === cursor) {
+          return { success: false, cursor: after }
+        }
+        cursor = nextCursor
+      } while (hasMore)
+      return { success: true, cursor }
+    } catch {
+      // The live stream remains connected; its next reconciliation tick will retry.
+      return { success: false, cursor: after }
+    }
   }
 
   async function refreshGitHubEvents(

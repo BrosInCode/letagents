@@ -24,25 +24,66 @@ interface RoomStreamHandlers {
     update?: RoomReasoningUpdate | null,
   ) => void
   removeReasoningSession: (sessionId: string) => void
+  getMessageCursor: () => string | null
+  resyncMessages: (
+    roomIdentifier: string,
+    after: string | null,
+  ) => Promise<{ success: boolean; cursor: string | null }>
 }
 
-export function createRoomStream(handlers: RoomStreamHandlers) {
+const MESSAGE_RESYNC_INTERVAL_MS = 15_000
+
+export function createRoomStream(
+  handlers: RoomStreamHandlers,
+  options?: { resyncIntervalMs?: number },
+) {
   let eventSource: EventSource | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let resyncTimer: ReturnType<typeof setInterval> | null = null
+  let resyncRoomInFlight: string | null = null
+  let activeRoomIdentifier: string | null = null
+  let historyCursor: string | null = null
   let reconnectDelay = 1200
+
+  function resync(roomIdentifier: string) {
+    if (resyncRoomInFlight === roomIdentifier) return
+    resyncRoomInFlight = roomIdentifier
+    void handlers.resyncMessages(roomIdentifier, historyCursor)
+      .then((result) => {
+        if (result.success && activeRoomIdentifier === roomIdentifier) {
+          historyCursor = result.cursor
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (resyncRoomInFlight === roomIdentifier) {
+          resyncRoomInFlight = null
+        }
+      })
+  }
 
   function stop() {
     eventSource?.close()
     eventSource = null
+    activeRoomIdentifier = null
     handlers.setStreaming(false)
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
     }
+    if (resyncTimer) {
+      clearInterval(resyncTimer)
+      resyncTimer = null
+    }
   }
 
   function start(roomIdentifier: string) {
+    const previousRoomIdentifier = activeRoomIdentifier
     stop()
+    activeRoomIdentifier = roomIdentifier
+    if (previousRoomIdentifier !== roomIdentifier) {
+      historyCursor = handlers.getMessageCursor()
+    }
     handlers.setConnectionState('connecting')
 
     eventSource = new EventSource(`${roomPath(roomIdentifier)}/messages/stream`)
@@ -51,6 +92,14 @@ export function createRoomStream(handlers: RoomStreamHandlers) {
       handlers.setConnectionState('live')
       handlers.setStreaming(true)
       reconnectDelay = 1200
+      // SSE is a best-effort wake-up channel; history is the durable source
+      // of truth. Reconcile immediately and periodically so both reconnect
+      // gaps and silently dropped cross-instance reference events recover.
+      resync(roomIdentifier)
+      resyncTimer = setInterval(
+        () => resync(roomIdentifier),
+        options?.resyncIntervalMs ?? MESSAGE_RESYNC_INTERVAL_MS,
+      )
     }
 
     eventSource.addEventListener('message', (event) => {
